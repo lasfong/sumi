@@ -1,5 +1,9 @@
 # PRODUCT SPEC — VN Replay Trading Lab
 
+> Trạng thái tài liệu: **Canonical MVP specification**.
+>
+> Đây là nguồn sự thật chính cho giai đoạn hiện tại của Sumi. Dự án đang đi theo hướng local-first, SQLite, CafeF manual import, manual replay, journal và analytics trước. Các hạng mục như algorithmic strategy engine, Celery/Redis worker, PostgreSQL/TimescaleDB nằm ở roadmap tương lai trừ khi `docs/DECISIONS.md` có quyết định mới.
+
 ## 1. Tên dự án
 
 Tên sản phẩm:
@@ -536,14 +540,16 @@ vn-replay-trading-lab/
 │   ├── imports/
 │   ├── raw/
 │   ├── processed/
-│   └── market.db
+│   └── market.db              # target path sau khi chuẩn hóa; hiện code local có thể dùng backend/sumi.db
 │
 ├── docs/
+│   ├── INDEX.md
 │   ├── PRODUCT_SPEC.md
-│   ├── DATA_FORMAT.md
-│   ├── API_SPEC.md
-│   ├── ROADMAP.md
-│   └── DECISIONS.md
+│   ├── DECISIONS.md
+│   ├── IMPLEMENTATION_PLAYBOOK.md
+│   ├── PROJECT_AUDIT_2026-06-26.md
+│   ├── FUTURE_ROADMAP.md
+│   └── SPEC.md
 │
 ├── AGENTS.md
 ├── README.md
@@ -1982,7 +1988,8 @@ Database:
 
 ```text
 Default database path:
-data/market.db
+backend/sumi.db hiện là đường dẫn mặc định trong code hiện tại.
+Mục tiêu sau khi chuẩn hóa cấu hình là data/market.db.
 ```
 
 ## 24. Documentation requirements
@@ -1991,10 +1998,12 @@ Cần có:
 
 ```text
 README.md
+docs/INDEX.md
 docs/PRODUCT_SPEC.md
-docs/DATA_FORMAT.md
-docs/API_SPEC.md
-docs/ROADMAP.md
+docs/DECISIONS.md
+docs/IMPLEMENTATION_PLAYBOOK.md
+docs/PROJECT_AUDIT_2026-06-26.md
+docs/FUTURE_ROADMAP.md
 AGENTS.md
 ```
 

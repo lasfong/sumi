@@ -1,9 +1,12 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api import health
+from app.api import health, import_data, replay, decisions, analytics, symbols, journal
 from app.db import Base, engine
 
-# Create database tables
+import app.models  # ensure models are registered
+
+# Database tables are managed by alembic migrations for production
+# But for local SQLite testing, create them automatically:
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
@@ -21,3 +24,13 @@ app.add_middleware(
 )
 
 app.include_router(health.router, prefix="/api")
+app.include_router(import_data.router, prefix="/api/import", tags=["import"])
+app.include_router(replay.router, prefix="/api/replay", tags=["replay"])
+app.include_router(decisions.router, prefix="/api/replay", tags=["decisions"])
+app.include_router(analytics.router, prefix="/api/replay", tags=["analytics"])
+app.include_router(symbols.router, prefix="/api", tags=["symbols"])
+app.include_router(journal.router, prefix="/api/replay", tags=["journal"])
+
+from app.api import indicators, ws_replay
+app.include_router(indicators.router, prefix="/api/indicators", tags=["indicators"])
+app.include_router(ws_replay.router, prefix="/api", tags=["websocket"])

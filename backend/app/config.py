@@ -6,12 +6,7 @@ class Settings(BaseSettings):
     VERSION: str = "0.1.0"
     API_V1_STR: str = "/api/v1"
     
-    # Use absolute path for SQLite to avoid issues when running from different directories
-    BASE_DIR: str = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    DATA_DIR: str = os.path.join(BASE_DIR, "data")
-    SQLITE_URL: str = f"sqlite:///{os.path.join(DATA_DIR, 'market.db')}"
+    # SQLite Connection URL for local testing without installing Postgres
+    DATABASE_URL: str = "sqlite:///./sumi.db"
 
 settings = Settings()
-
-# Ensure data directory exists
-os.makedirs(settings.DATA_DIR, exist_ok=True)
