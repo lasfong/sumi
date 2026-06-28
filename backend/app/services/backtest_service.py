@@ -8,6 +8,7 @@ from app.services.analytics_service import AnalyticsService
 from app.models.replay_session import ReplaySession
 from app.models.candle import Candle
 from app.models.trade import Trade
+from app.domain.regime.regime_classifier import RegimeClassifier
 import uuid
 from app.domain.strategy.rule_evaluator import (
     RuleEvaluationError,
@@ -102,6 +103,7 @@ class BacktestService:
         start_date = config["start_date"]
         end_date = config["end_date"]
         initial_cash = config.get("initial_cash", 100000000)
+        benchmark_symbol = config.get("benchmark_symbol", "VNINDEX")
         
         # 1. Load ALL candles for symbol
         candles = db.query(Candle).filter(
@@ -229,7 +231,13 @@ class BacktestService:
         
         # 5. Return analytics
         analytics = AnalyticsService.get_analytics(db, session.id)
-        slices = self._build_result_slices(db, session.id)
+        slices = self._build_result_slices(
+            db=db,
+            session_id=session.id,
+            benchmark_symbol=benchmark_symbol,
+            start_date=start_date,
+            end_date=end_date,
+        )
         
         return {
             "session_id": session.id,
@@ -307,11 +315,19 @@ class BacktestService:
         key = inline_keys[0]
         return {key: rule[key]}
 
-    def _build_result_slices(self, db: Session, session_id: int) -> list[dict]:
+    def _build_result_slices(
+        self,
+        db: Session,
+        session_id: int,
+        benchmark_symbol: str | None = "VNINDEX",
+        start_date=None,
+        end_date=None,
+    ) -> list[dict]:
         trades = db.query(Trade).filter(
             Trade.session_id == session_id,
             Trade.exit_date.isnot(None)
         ).all()
+        regime_map = self._build_regime_map(db, benchmark_symbol, start_date, end_date)
         return [
             *self._slice_trades(trades, "symbol", lambda trade: trade.symbol),
             *self._slice_trades(
@@ -319,7 +335,31 @@ class BacktestService:
                 "period",
                 lambda trade: str(trade.exit_date.year) if trade.exit_date else "Unknown",
             ),
+            *self._slice_trades(
+                trades,
+                "regime",
+                lambda trade: self._lookup_trade_regime(trade, regime_map),
+            ),
         ]
+
+    def _build_regime_map(self, db: Session, benchmark_symbol: str | None, start_date, end_date) -> dict:
+        if not benchmark_symbol:
+            return {}
+
+        query = db.query(Candle).filter(Candle.symbol == benchmark_symbol)
+        if start_date:
+            query = query.filter(Candle.timestamp >= start_date)
+        if end_date:
+            query = query.filter(Candle.timestamp <= end_date)
+
+        benchmark_candles = query.order_by(Candle.timestamp).all()
+        return RegimeClassifier.build_regime_map(benchmark_candles) if benchmark_candles else {}
+
+    def _lookup_trade_regime(self, trade: Trade, regime_map: dict) -> str:
+        if not regime_map or not trade.exit_date:
+            return "Unknown"
+        trade_date = trade.exit_date.date() if hasattr(trade.exit_date, "date") else trade.exit_date
+        return regime_map.get(trade_date, "Unknown")
 
     def _slice_trades(self, trades: list[Trade], group_type: str, key_fn) -> list[dict]:
         grouped = {}

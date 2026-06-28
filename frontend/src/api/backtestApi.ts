@@ -18,6 +18,7 @@ export interface BacktestRequest {
   start_date: string;
   end_date: string;
   initial_cash?: number;
+  benchmark_symbol?: string;
   strategy: StrategyConfig | Record<string, unknown>;
 }
 

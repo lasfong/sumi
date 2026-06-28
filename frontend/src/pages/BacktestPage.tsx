@@ -188,6 +188,7 @@ export const BacktestPage: React.FC = () => {
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '16px' }}>
               {renderSliceTable('Symbol Slices', sliceRows.filter(row => row.group_type === 'symbol'))}
               {renderSliceTable('Period Slices', sliceRows.filter(row => row.group_type === 'period'))}
+              {renderSliceTable('Regime Slices', sliceRows.filter(row => row.group_type === 'regime'))}
             </div>
           </div>
         ) : (
@@ -274,6 +275,7 @@ export const BacktestPage: React.FC = () => {
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '16px', marginTop: '24px' }}>
             {renderSliceTable('Symbol Slices', sliceRows.filter(row => row.group_type === 'symbol'))}
             {renderSliceTable('Period Slices', sliceRows.filter(row => row.group_type === 'period'))}
+            {renderSliceTable('Regime Slices', sliceRows.filter(row => row.group_type === 'regime'))}
           </div>
         </div>
       )}

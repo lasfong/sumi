@@ -25,6 +25,16 @@ async def test_backtest_ma_crossover_e2e(db_session):
             volume=1000000
         )
         candles_to_insert.append(c)
+        candles_to_insert.append(Candle(
+            symbol="VNINDEX",
+            timeframe="1D",
+            timestamp=base_date + timedelta(days=i),
+            open=1000 + i,
+            high=1001 + i,
+            low=999 + i,
+            close=1000 + i,
+            volume=1000000,
+        ))
     db_session.add_all(candles_to_insert)
     db_session.commit()
     
@@ -60,6 +70,7 @@ async def test_backtest_ma_crossover_e2e(db_session):
     assert result["analytics"] is not None
     assert any(row["group_type"] == "symbol" and row["key"] == symbol for row in result["slices"])
     assert any(row["group_type"] == "period" and row["key"] == "2024" for row in result["slices"])
+    assert any(row["group_type"] == "regime" for row in result["slices"])
     
     # Check trades
     session_id = result["session_id"]
