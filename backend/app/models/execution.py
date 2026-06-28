@@ -7,6 +7,7 @@ class Execution(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     order_id = Column(Integer, ForeignKey("orders.id"), nullable=False)
+    trade_id = Column(Integer, ForeignKey("trades.id"), nullable=True)
     session_id = Column(Integer, ForeignKey("replay_sessions.id"), nullable=False)
     symbol = Column(String, nullable=False)
     execution_date = Column(DateTime(timezone=True), nullable=False)

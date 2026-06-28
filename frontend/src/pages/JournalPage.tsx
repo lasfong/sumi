@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getJournalEntries } from '../api/journalApi';
 import { useReplayStore } from '../store/replayStore';
@@ -8,14 +8,6 @@ export const JournalPage: React.FC = () => {
   const store = useReplayStore();
   const [inputVal, setInputVal] = useState<string>(store.sessionId?.toString() || '1');
   const [sessionId, setSessionId] = useState<number>(store.sessionId || 1);
-
-  // Sync when store.sessionId changes
-  useEffect(() => {
-    if (store.sessionId) {
-      setSessionId(store.sessionId);
-      setInputVal(store.sessionId.toString());
-    }
-  }, [store.sessionId]);
 
   const { data: entries, isLoading, isError } = useQuery({
     queryKey: ['journal', sessionId],

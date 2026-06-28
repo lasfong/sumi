@@ -37,3 +37,17 @@ export interface Trade {
   setup_type?: string;
   mistake_tag?: string;
 }
+
+export interface Order {
+  id: number;
+  session_id: number;
+  decision_id: number;
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  order_type: 'MARKET_AT_CLOSE' | 'MARKET_NEXT_OPEN' | 'LIMIT' | 'CUSTOM_PRICE';
+  requested_price?: number | null;
+  quantity: number;
+  capital_percent?: number | null;
+  status: 'created' | 'pending' | 'executed' | 'cancelled' | 'rejected';
+  created_at: string;
+}

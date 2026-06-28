@@ -6,10 +6,11 @@ import type { SeriesMarker, Time, SeriesMarkerPosition, SeriesMarkerShape } from
 import { TradeControls } from '../components/replay/TradeControls';
 import { PositionPanel } from '../components/replay/PositionPanel';
 import { DecisionJournal } from '../components/replay/DecisionJournal';
+import { PendingOrdersPanel } from '../components/replay/PendingOrdersPanel';
 import { SessionSetup } from '../components/replay/SessionSetup';
 import { DrawingToolbar } from '../components/chart/DrawingToolbar';
 import { createReplaySession, getSessionCandles, nextCandle, previousCandle, getDrawings, updateDrawings } from '../api/replayApi';
-import { submitDecision, getPositions, getDecisions } from '../api/decisionApi';
+import { submitDecision, getPositions, getDecisions, getOrders } from '../api/decisionApi';
 import { getSessionIndicatorData } from '../api/indicatorsApi';
 import { MultiChartLayout } from '../components/layout/MultiChartLayout';
 import { useReplayStore } from '../store/replayStore';
@@ -21,6 +22,40 @@ import type { IndicatorSeriesData } from '../components/chart/CandleChart';
 import { useWebSocket } from '../hooks/useWebSocket';
 import type { WebSocketMessage } from '../hooks/useWebSocket';
 import { useQueryClient } from '@tanstack/react-query';
+import type { IndicatorDataPoint } from '../api/indicatorsApi';
+
+interface ApiError {
+  response?: {
+    data?: {
+      detail?: string;
+    };
+  };
+}
+
+interface WebSocketCandle {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+const parseDrawings = (stateData?: string): DrawingLine[] => {
+  if (!stateData) return [];
+  try {
+    const parsed = JSON.parse(stateData) as unknown;
+    return Array.isArray(parsed) ? parsed as DrawingLine[] : [];
+  } catch {
+    return [];
+  }
+};
+
+const isWebSocketCandle = (data: unknown): data is WebSocketCandle => {
+  if (!data || typeof data !== 'object') return false;
+  const candidate = data as Record<string, unknown>;
+  return ['time', 'open', 'high', 'low', 'close', 'volume'].every(key => typeof candidate[key] === 'number');
+};
 
 export const ReplayPage: React.FC = () => {
   const store = useReplayStore();
@@ -32,7 +67,7 @@ export const ReplayPage: React.FC = () => {
   const [activeIndicators, setActiveIndicators] = useState<IndicatorConfig[]>([]);
 
   const [activeTool, setActiveTool] = useState<DrawingType>('cursor');
-  const [drawings, setDrawings] = useState<any[]>([]);
+  const [localDrawings, setLocalDrawings] = useState<DrawingLine[] | null>(null);
 
   const createMutation = useMutation({
     mutationFn: createReplaySession,
@@ -40,7 +75,7 @@ export const ReplayPage: React.FC = () => {
       store.setSession(data.id);
       toast.success(`Session #${data.id} created!`);
     },
-    onError: (err: any) => {
+    onError: (err: ApiError) => {
       toast.error(err?.response?.data?.detail || 'Failed to create session');
     }
   });
@@ -64,6 +99,12 @@ export const ReplayPage: React.FC = () => {
     enabled: !!store.sessionId,
   });
 
+  const { data: ordersData, refetch: refetchOrders } = useQuery({
+    queryKey: ['orders', store.sessionId],
+    queryFn: () => getOrders(store.sessionId!),
+    enabled: !!store.sessionId,
+  });
+
   const { data: drawingsData } = useQuery({
     queryKey: ['drawings', store.sessionId],
     queryFn: () => getDrawings(store.sessionId!),
@@ -74,25 +115,20 @@ export const ReplayPage: React.FC = () => {
     mutationFn: (newDrawings: DrawingLine[]) => updateDrawings(store.sessionId!, JSON.stringify(newDrawings)),
   });
 
-  useEffect(() => {
-    if (drawingsData && drawingsData.state_data) {
-      try {
-        const parsed = JSON.parse(drawingsData.state_data);
-        setDrawings(parsed);
-      } catch(e) {}
-    }
-  }, [drawingsData]);
+  const persistedDrawings = parseDrawings(drawingsData?.state_data);
+  const drawings = localDrawings ?? persistedDrawings;
 
   const handleDrawingComplete = (d: DrawingLine) => {
-    setDrawings(prev => {
-      const next = [...prev, d];
+    setLocalDrawings(prev => {
+      const base = prev ?? persistedDrawings;
+      const next = [...base, d];
       saveDrawingsMutation.mutate(next);
       return next;
     });
   };
 
   const handleClearDrawings = () => {
-    setDrawings([]);
+    setLocalDrawings([]);
     saveDrawingsMutation.mutate([]);
   };
 
@@ -101,8 +137,12 @@ export const ReplayPage: React.FC = () => {
     onSuccess: () => {
       refetchCandles();
       refetchPosition();
+      refetchOrders();
     },
-    onError: () => toast.error('End of data or error'),
+    onError: () => {
+      setIsPlaying(false);
+      toast.error('End of data or error');
+    },
   });
 
   const prevMutation = useMutation({
@@ -110,6 +150,7 @@ export const ReplayPage: React.FC = () => {
     onSuccess: () => {
       refetchCandles();
       refetchPosition();
+      refetchOrders();
     },
     onError: () => toast.error('Start of data or error'),
   });
@@ -124,6 +165,7 @@ export const ReplayPage: React.FC = () => {
       await submitDecision(store.sessionId, decision);
       refetchPosition();
       refetchDecisions();
+      refetchOrders();
       
       if (decision.action === 'BUY' || decision.action === 'ADD') toast.success(`Bought ${decision.quantity || 0} shares`);
       else if (decision.action === 'SELL' || decision.action === 'REDUCE') toast.success(`Sold ${decision.quantity || 0} shares`);
@@ -131,10 +173,11 @@ export const ReplayPage: React.FC = () => {
       else if (decision.action === 'CUT_LOSS') toast.error(`Cut loss executed`);
       else if (decision.action === 'TAKE_PROFIT') toast.success(`Take profit executed`);
       else toast.success(`Decision logged: ${decision.action}`);
-    } catch (err: any) {
-      toast.error(err?.response?.data?.detail || 'Failed to submit decision');
+    } catch (err: unknown) {
+      const apiError = err as ApiError;
+      toast.error(apiError?.response?.data?.detail || 'Failed to submit decision');
     }
-  }, [store.sessionId, refetchPosition, refetchDecisions]);
+  }, [store.sessionId, refetchPosition, refetchDecisions, refetchOrders]);
 
 
   const symbolName = candlesData?.[0]?.symbol || '—';
@@ -145,11 +188,19 @@ export const ReplayPage: React.FC = () => {
   const handleWebSocketMessage = useCallback((msg: WebSocketMessage) => {
     if (msg.type === 'new_candle') {
       const newCandle = msg.data;
+      if (!isWebSocketCandle(newCandle)) return;
       
       // Update chart directly for smoothness
       if (chartRef.current) {
-        chartRef.current.updateCandle(newCandle, {
-          time: newCandle.time,
+        const chartCandle = {
+          time: newCandle.time as Time,
+          open: newCandle.open,
+          high: newCandle.high,
+          low: newCandle.low,
+          close: newCandle.close,
+        };
+        chartRef.current.updateCandle(chartCandle, {
+          time: newCandle.time as Time,
           value: newCandle.volume,
           color: newCandle.close >= newCandle.open ? 'rgba(0, 230, 118, 0.5)' : 'rgba(255, 23, 68, 0.5)'
         });
@@ -176,6 +227,7 @@ export const ReplayPage: React.FC = () => {
       
       // Sync positions silently
       queryClient.invalidateQueries({ queryKey: ['position', store.sessionId] });
+      queryClient.invalidateQueries({ queryKey: ['orders', store.sessionId] });
     }
   }, [store.sessionId, queryClient, symbolName]);
 
@@ -258,13 +310,6 @@ export const ReplayPage: React.FC = () => {
     }
   }, [isPlaying, playSpeed, isConnected, sendCommand]);
 
-  // Stop auto-play on mutation error
-  useEffect(() => {
-    if (nextMutation.isError && isPlaying) {
-      setIsPlaying(false);
-    }
-  }, [nextMutation.isError, isPlaying]);
-
   const loadIndicator = async (config: IndicatorConfig) => {
     if (!store.sessionId) return;
     setIsLoadingIndicator(true);
@@ -293,17 +338,17 @@ export const ReplayPage: React.FC = () => {
       for (const config of activeIndicators) {
         try {
           // Fetch session-scoped indicator data (no future leak)
-          const data = await getSessionIndicatorData(store.sessionId!, config.name, config.params);
+        const data = await getSessionIndicatorData(store.sessionId!, config.name, config.params);
           if (data.length === 0) continue;
 
           const seriesList: IndicatorSeriesData[] = [];
           const keys = Object.keys(data[0]).filter(k => k !== 'timestamp');
 
       keys.forEach(k => {
-        const lineData = data.map((d: any) => ({
+        const lineData = data.map((d: IndicatorDataPoint) => ({
           time: d.timestamp.split('T')[0] as Time,
           value: Number(d[k]) || 0
-        })).filter((d: any) => !isNaN(d.value));
+        })).filter((d) => !isNaN(d.value));
 
         let color = config.color || '#2962FF';
         let type: 'line' | 'histogram' = 'line';
@@ -351,7 +396,7 @@ export const ReplayPage: React.FC = () => {
 };
 
 fetchActiveIndicators();
-}, [activeIndicators, candlesData, store.sessionId]);
+}, [activeIndicators, candlesData, currentCandle, store.sessionId]);
 
   if (!store.sessionId) {
     return <SessionSetup onCreateSession={handleCreateSession} isLoading={createMutation.isPending} />;
@@ -461,6 +506,7 @@ fetchActiveIndicators();
             sessionId={store.sessionId}
             onSubmitDecision={handleSubmitDecision}
           />
+          <PendingOrdersPanel orders={ordersData || []} />
           <PositionPanel positions={positionData || []} />
           <DecisionJournal decisions={decisionsData || []} />
         </aside>

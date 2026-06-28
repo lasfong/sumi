@@ -11,3 +11,6 @@ pandas-ta
 vnstock
 httpx
 python-multipart
+PyYAML
+pytest-asyncio
+alembic

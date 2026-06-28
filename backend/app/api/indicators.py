@@ -9,6 +9,10 @@ from app.domain.engine.indicator_engine import IndicatorEngine
 
 router = APIRouter()
 
+@router.get("/registry")
+def list_indicator_registry():
+    return {"indicators": IndicatorEngine.list_definitions()}
+
 @router.get("/{symbol}")
 def calculate_indicator(
     request: Request,

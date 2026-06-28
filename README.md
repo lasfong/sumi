@@ -85,3 +85,41 @@ python scripts/import_batch.py ../data/raw/cafef_sample
 - **Frontend:** React, TypeScript, Vite, TanStack Query, Zustand, TradingView Lightweight Charts
 
 *Dự án tuân thủ nghiêm ngặt nguyên tắc Domain-Driven Design (DDD) tách biệt hoàn toàn Decision, Order, Execution, Position và Trade.*
+
+---
+
+## Trạng thái hiện tại
+
+Dự án đang trong giai đoạn hoàn thiện MVP core:
+- ✅ Import CafeF CSV/TXT/ZIP
+- ✅ Replay Engine (no-future-leak)
+- ✅ Trade Lifecycle (Decision → Order → Execution → Position → Trade)
+- ✅ T+2 settlement rule
+- ✅ Fee/Tax calculation
+- ✅ Basic Analytics
+- ✅ Limit Orders (đã implement)
+- ✅ Advanced Analytics (đã chuẩn hóa)
+- ❌ Algorithmic Backtest Engine
+
+## Cách chạy test
+
+### Backend
+```bash
+cd backend
+.\.venv\Scripts\activate
+python -m pytest -v app/tests
+```
+
+### Frontend
+```bash
+cd frontend
+npm run build
+```
+
+## Giới hạn hiện tại
+
+- Database: SQLite (local-first, chưa hỗ trợ PostgreSQL)
+- Chỉ hỗ trợ timeframe 1D
+- Chưa có multi-user authentication
+- Chưa có real-time market data
+- Strategy backtest engine chưa hoàn thiện

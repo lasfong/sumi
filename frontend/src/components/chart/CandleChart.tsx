@@ -1,6 +1,6 @@
 import { useEffect, useRef, useImperativeHandle, forwardRef } from 'react';
 import { createChart } from 'lightweight-charts';
-import type { IChartApi, ISeriesApi, Time, LineData, SeriesMarker } from 'lightweight-charts';
+import type { IChartApi, IPriceLine, ISeriesApi, Time, LineData, SeriesMarker } from 'lightweight-charts';
 
 export type DrawingType = 'cursor' | 'line' | 'trendline' | 'ray' | 'horizontal' | 'fibonacci';
 
@@ -48,6 +48,18 @@ export interface CandleChartRef {
   updateCandle: (candle: CandleData, volume?: VolumeData) => void;
 }
 
+type IndicatorSeriesApi = ISeriesApi<'Line'> | ISeriesApi<'Histogram'>;
+type DrawingSeriesRef =
+  | { type: 'horizontal'; ref: IPriceLine }
+  | { type: 'trendline'; ref: ISeriesApi<'Line'> }
+  | { type: 'fibonacci'; ref: ISeriesApi<'Line'>[] };
+type ChartMouseParam = Parameters<Parameters<IChartApi['subscribeClick']>[0]>[0];
+type OhlcPoint = { open?: number; high?: number; low?: number; close?: number };
+
+const toTimeNumber = (time: Time): number => (
+  typeof time === 'string' ? new Date(time).getTime() : Number(time)
+);
+
 export const CandleChart = forwardRef<CandleChartRef, CandleChartProps>(({ data, volumeData, markers, drawings = [], activeTool = null, onDrawingComplete }, ref) => {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -55,7 +67,7 @@ export const CandleChart = forwardRef<CandleChartRef, CandleChartProps>(({ data,
   const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
 
   // Store multiple series per indicator key
-  const indicatorSeriesRef = useRef<{ [key: string]: ISeriesApi<any>[] }>({});
+  const indicatorSeriesRef = useRef<Record<string, IndicatorSeriesApi[]>>({});
   
   // Track how many oscillators we have to adjust margins
   const numOscillators = useRef<number>(0);
@@ -92,7 +104,7 @@ export const CandleChart = forwardRef<CandleChartRef, CandleChartProps>(({ data,
         return;
       }
       
-      const newSeries: ISeriesApi<any>[] = [];
+      const newSeries: IndicatorSeriesApi[] = [];
       let priceScaleId = 'right'; // Default main pane
       
       if (pane === 'oscillator') {
@@ -244,22 +256,22 @@ export const CandleChart = forwardRef<CandleChartRef, CandleChartProps>(({ data,
 
   // Handle Drawing Tools Input
   const pendingDrawingRef = useRef<{ type: DrawingType; points: {time: Time, price: number}[]; series?: ISeriesApi<"Line"> } | null>(null);
-  const drawingsSeriesRef = useRef<{ [id: string]: any }>({});
+  const drawingsSeriesRef = useRef<Record<string, DrawingSeriesRef>>({});
 
   useEffect(() => {
     if (!chartRef.current || !candlestickSeriesRef.current) return;
     const chart = chartRef.current;
     const mainSeries = candlestickSeriesRef.current;
 
-    const getSnappedPrice = (param: any, fallbackPrice: number): number => {
+    const getSnappedPrice = (param: ChartMouseParam, fallbackPrice: number): number => {
       if (!param.point || !param.seriesData) return fallbackPrice;
-      const data = param.seriesData.get(mainSeries) as any;
+      const data = param.seriesData.get(mainSeries) as OhlcPoint | undefined;
       if (!data) return fallbackPrice;
 
       const threshold = 10; // Magnet threshold in pixels
       const mouseY = param.point.y;
       
-      const prices = [data.open, data.high, data.low, data.close].filter(p => p !== undefined);
+      const prices = [data.open, data.high, data.low, data.close].filter((p): p is number => p !== undefined);
       if (prices.length === 0) return fallbackPrice;
       
       let closestPrice = fallbackPrice;
@@ -279,7 +291,7 @@ export const CandleChart = forwardRef<CandleChartRef, CandleChartProps>(({ data,
       return closestPrice;
     };
 
-    const handleClick = (param: any) => {
+    const handleClick = (param: ChartMouseParam) => {
       if (!param.point || !param.time || !activeTool || activeTool === 'cursor') return;
       
       let price = mainSeries.coordinateToPrice(param.point.y) as number | null;
@@ -322,7 +334,7 @@ export const CandleChart = forwardRef<CandleChartRef, CandleChartProps>(({ data,
       }
     };
 
-    const handleMouseMove = (param: any) => {
+    const handleMouseMove = (param: ChartMouseParam) => {
       if (!param.point || !param.time || !pendingDrawingRef.current || (pendingDrawingRef.current.type !== 'trendline' && pendingDrawingRef.current.type !== 'fibonacci')) return;
       
       let price = mainSeries.coordinateToPrice(param.point.y) as number | null;
@@ -334,18 +346,17 @@ export const CandleChart = forwardRef<CandleChartRef, CandleChartProps>(({ data,
         const start = pendingDrawingRef.current.points[0];
         const current = { time: param.time, value: price };
         
-        const startTimestamp = typeof start.time === 'string' ? new Date(start.time).getTime() : start.time as number;
-        const currentTimestamp = typeof param.time === 'string' ? new Date(param.time).getTime() : param.time as number;
-        
-        let data = [];
+        const startTimestamp = toTimeNumber(start.time);
+        const currentTimestamp = toTimeNumber(param.time);
+        let previewData: LineData[];
         if (startTimestamp < currentTimestamp) {
-          data = [{ time: start.time, value: start.price }, current];
+          previewData = [{ time: start.time, value: start.price }, current];
         } else if (startTimestamp > currentTimestamp) {
-          data = [current, { time: start.time, value: start.price }];
+          previewData = [current, { time: start.time, value: start.price }];
         } else {
-           data = [{ time: start.time, value: start.price }];
+          previewData = [{ time: start.time, value: start.price }];
         }
-        series.setData(data);
+        series.setData(previewData);
       }
     };
 
@@ -356,7 +367,11 @@ export const CandleChart = forwardRef<CandleChartRef, CandleChartProps>(({ data,
       chart.unsubscribeClick(handleClick);
       chart.unsubscribeCrosshairMove(handleMouseMove);
       if (pendingDrawingRef.current?.series && chartRef.current) {
-        try { chartRef.current.removeSeries(pendingDrawingRef.current.series); } catch(e){}
+        try {
+          chartRef.current.removeSeries(pendingDrawingRef.current.series);
+        } catch {
+          pendingDrawingRef.current = null;
+        }
       }
     };
   }, [activeTool, onDrawingComplete]);
@@ -369,12 +384,26 @@ export const CandleChart = forwardRef<CandleChartRef, CandleChartProps>(({ data,
 
     Object.values(drawingsSeriesRef.current).forEach(item => {
       if (item.type === 'horizontal') {
-        try { mainSeries.removePriceLine(item.ref); } catch(e){}
+        try {
+          mainSeries.removePriceLine(item.ref);
+        } catch {
+          drawingsSeriesRef.current = {};
+        }
       } else if (item.type === 'trendline') {
-        try { chart.removeSeries(item.ref); } catch(e){}
+        try {
+          chart.removeSeries(item.ref);
+        } catch {
+          drawingsSeriesRef.current = {};
+        }
       } else if (item.type === 'fibonacci') {
         if (Array.isArray(item.ref)) {
-          item.ref.forEach((r: any) => { try { chart.removeSeries(r); } catch(e){} });
+          item.ref.forEach((r) => {
+            try {
+              chart.removeSeries(r);
+            } catch {
+              drawingsSeriesRef.current = {};
+            }
+          });
         }
       }
     });
@@ -399,8 +428,8 @@ export const CandleChart = forwardRef<CandleChartRef, CandleChartProps>(({ data,
           priceLineVisible: false
         });
         const sorted = [...d.points].sort((a, b) => {
-           const ta = typeof a.time === 'string' ? new Date(a.time).getTime() : a.time as number;
-           const tb = typeof b.time === 'string' ? new Date(b.time).getTime() : b.time as number;
+           const ta = toTimeNumber(a.time);
+           const tb = toTimeNumber(b.time);
            return ta - tb;
         });
         series.setData(sorted.map(pt => ({ time: pt.time, value: pt.price })));
@@ -409,8 +438,8 @@ export const CandleChart = forwardRef<CandleChartRef, CandleChartProps>(({ data,
         // Draw the anchor trendline
         const anchorSeries = chart.addLineSeries({ color: 'rgba(224, 86, 253, 0.3)', lineStyle: 2, lineWidth: 1, crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false });
         const sorted = [...d.points].sort((a, b) => {
-           const ta = typeof a.time === 'string' ? new Date(a.time).getTime() : a.time as number;
-           const tb = typeof b.time === 'string' ? new Date(b.time).getTime() : b.time as number;
+           const ta = toTimeNumber(a.time);
+           const tb = toTimeNumber(b.time);
            return ta - tb;
         });
         anchorSeries.setData(sorted.map(pt => ({ time: pt.time, value: pt.price })));
@@ -421,7 +450,7 @@ export const CandleChart = forwardRef<CandleChartRef, CandleChartProps>(({ data,
         const diff = p1 - p2;
         const levels = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
         
-        const refs: any[] = [anchorSeries];
+        const refs: ISeriesApi<'Line'>[] = [anchorSeries];
         levels.forEach(lvl => {
           const lvlPrice = p1 - diff * lvl;
           const series = chart.addLineSeries({

@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom';
-import { Activity, LayoutDashboard, Database, LineChart, BookOpen, Settings } from 'lucide-react';
+import { Activity, LayoutDashboard, Database, LineChart, BookOpen, Settings, Cpu } from 'lucide-react';
 import './Sidebar.css';
 
 export function Sidebar() {
@@ -7,6 +7,7 @@ export function Sidebar() {
     { path: '/', label: 'Dashboard', icon: LayoutDashboard },
     { path: '/import', label: 'Data Feeds', icon: Database },
     { path: '/replay', label: 'Trading Lab', icon: Activity },
+    { path: '/backtest', label: 'Backtest Engine', icon: Cpu },
     { path: '/analytics', label: 'Analytics', icon: LineChart },
     { path: '/journal', label: 'Journal', icon: BookOpen },
   ];

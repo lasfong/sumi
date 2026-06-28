@@ -44,6 +44,7 @@ class OrderType(str, Enum):
 
 class OrderStatus(str, Enum):
     CREATED = "created"
+    PENDING = "pending"
     EXECUTED = "executed"
     CANCELLED = "cancelled"
     REJECTED = "rejected"

@@ -4,15 +4,25 @@ from app.models.trade import Trade
 from app.services.analytics_service import AnalyticsService
 
 def test_analytics_calculations(db_session):
+    from app.models.replay_session import ReplaySession
+    from datetime import date
+
+    # Create a session
+    s = ReplaySession(id=1, symbol="TEST", timeframe="1D", adjustment_type="split",
+                      start_date=date(2024,1,1), end_date=date(2024,1,10),
+                      current_index=0, initial_cash=100000, current_cash=100000,
+                      status="active", mode="normal")
+    db_session.add(s)
+
     # Add some mock trades
     t1 = Trade(session_id=1, symbol="TEST", entry_date=datetime.now(), entry_price=100, quantity=100, exit_date=datetime.now(), exit_price=110, net_pnl=1000)
     t2 = Trade(session_id=1, symbol="TEST", entry_date=datetime.now(), entry_price=100, quantity=100, exit_date=datetime.now(), exit_price=95, net_pnl=-500)
-    
+
     db_session.add_all([t1, t2])
     db_session.commit()
-    
+
     analytics = AnalyticsService.get_analytics(db_session, 1)
-    
+
     assert analytics.total_trades == 2
     assert analytics.win_rate == 0.5
     assert analytics.total_net_pnl == 500

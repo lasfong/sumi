@@ -3,7 +3,7 @@ import React, { useState } from 'react';
 export interface IndicatorConfig {
   name: string;
   pane: 'main' | 'oscillator';
-  params: Record<string, any>;
+  params: Record<string, string | number | boolean>;
   color?: string;
 }
 
@@ -36,6 +36,9 @@ export const IndicatorSelector: React.FC<IndicatorSelectorProps> = ({ onAddIndic
       { label: 'Bollinger Bands', config: { name: 'bbands', pane: 'main', params: { length: 20, std: 2.0 } } },
       { label: 'ATR (14)', config: { name: 'atr', pane: 'oscillator', params: { length: 14 }, color: '#7ed6df' } },
       { label: 'Keltner Channels', config: { name: 'kc', pane: 'main', params: { length: 20, scalar: 2.0 } } },
+    ],
+    'Volume': [
+      { label: 'Volume MA (20)', config: { name: 'volume_sma', pane: 'oscillator', params: { length: 20 }, color: '#58a6ff' } },
     ]
   };
 

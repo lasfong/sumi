@@ -48,6 +48,26 @@ def test_macd_calculation():
     # Check if MACD columns were added (MACD, MACDh, MACDs)
     macd_cols = [col for col in result_df.columns if 'MACD' in col]
     assert len(macd_cols) == 3
+
+def test_indicator_registry_contains_v2_core_indicators():
+    definitions = IndicatorEngine.list_definitions()
+    ids = {definition["id"] for definition in definitions}
+
+    assert {"macd", "rsi", "ichimoku", "bbands", "atr", "adx", "stoch", "volume_sma"}.issubset(ids)
+
+def test_volume_sma_calculation():
+    df = create_sample_data(30)
+
+    result_df = IndicatorEngine.compute(df, 'vma', length=5)
+
+    assert 'VOLUME_SMA_5' in result_df.columns
+    assert result_df['VOLUME_SMA_5'].iloc[-1] == pytest.approx(df['volume'].tail(5).mean())
+
+def test_reject_unknown_indicator_param():
+    df = create_sample_data()
+
+    with pytest.raises(ValueError, match="Unsupported parameter"):
+        IndicatorEngine.compute(df, 'rsi', length=14, unsafe=True)
     
 def test_invalid_indicator():
     df = create_sample_data()

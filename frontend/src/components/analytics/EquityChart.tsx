@@ -5,7 +5,10 @@ import type { IChartApi, Time } from 'lightweight-charts';
 interface EquityPoint {
   timestamp: string;
   equity: number;
+  cash: number;
+  holdings_value: number;
   drawdown: number;
+  drawdown_pct: number;
 }
 
 interface EquityChartProps {

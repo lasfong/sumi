@@ -1,12 +1,22 @@
 import React, { useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { importCafefData } from '../api/importApi';
+import type { ImportResult } from '../api/importApi';
 import toast from 'react-hot-toast';
+
+interface ApiError {
+  response?: {
+    data?: {
+      detail?: string;
+    };
+  };
+}
 
 export const ImportPage: React.FC = () => {
   const [file, setFile] = useState<File | null>(null);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<ImportResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const warnings = result?.warnings ?? [];
 
   const mutation = useMutation({
     mutationFn: (fileObj: File) => importCafefData(fileObj),
@@ -15,7 +25,7 @@ export const ImportPage: React.FC = () => {
       setError(null);
       toast.success('Data imported successfully!');
     },
-    onError: (err: any) => {
+    onError: (err: ApiError) => {
       const errMsg = err?.response?.data?.detail || 'Import failed. Please check the file format.';
       setError(errMsg);
       setResult(null);
@@ -97,17 +107,17 @@ export const ImportPage: React.FC = () => {
               <p style={{ fontSize: '14px' }}>{result.start_date || '—'}<br/>to {result.end_date || '—'}</p>
             </div>
           </div>
-          {result.warnings?.length > 0 && (
+          {warnings.length > 0 && (
             <div style={{ marginTop: '1rem' }}>
-              <h4 style={{ color: 'var(--color-close)' }}>⚠️ Warnings ({result.warnings.length})</h4>
+              <h4 style={{ color: 'var(--color-close)' }}>⚠️ Warnings ({warnings.length})</h4>
               <div style={{ maxHeight: '200px', overflowY: 'auto', fontSize: '13px' }}>
-                {result.warnings.slice(0, 20).map((w: any, i: number) => (
+                {warnings.slice(0, 20).map((w, i: number) => (
                   <div key={i} style={{ padding: '4px 0', borderBottom: '1px solid var(--border-color)' }}>
                     <span style={{ color: 'var(--text-muted)' }}>Row {w.row_index}:</span> {w.message}
                   </div>
                 ))}
-                {result.warnings.length > 20 && (
-                  <p style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>...and {result.warnings.length - 20} more</p>
+                {warnings.length > 20 && (
+                  <p style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>...and {warnings.length - 20} more</p>
                 )}
               </div>
             </div>

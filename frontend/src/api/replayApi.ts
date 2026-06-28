@@ -1,6 +1,13 @@
 import { apiClient } from './client';
 import type { ReplaySession, CreateSessionRequest, Candle } from '../types';
 
+export interface DrawingStateResponse {
+  id: number;
+  session_id: number;
+  symbol: string;
+  state_data: string;
+}
+
 export const createReplaySession = async (data: CreateSessionRequest): Promise<ReplaySession> => {
   const response = await apiClient.post('/replay/sessions', data);
   return response.data;
@@ -21,12 +28,12 @@ export const previousCandle = async (sessionId: number, steps: number = 1): Prom
   return response.data;
 };
 
-export const getDrawings = async (sessionId: number): Promise<any> => {
+export const getDrawings = async (sessionId: number): Promise<DrawingStateResponse> => {
   const response = await apiClient.get(`/replay/sessions/${sessionId}/drawings`);
   return response.data;
 };
 
-export const updateDrawings = async (sessionId: number, stateData: string): Promise<any> => {
+export const updateDrawings = async (sessionId: number, stateData: string): Promise<DrawingStateResponse> => {
   const response = await apiClient.put(`/replay/sessions/${sessionId}/drawings`, { state_data: stateData });
   return response.data;
 };

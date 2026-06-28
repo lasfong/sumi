@@ -1,0 +1,30 @@
+name: "MA Crossover Simple"
+version: "1.0"
+description: |
+  Strategy giao dịch đơn giản dựa trên MA crossover:
+  - BUY: SMA(10) cắt lên SMA(50)
+  - SELL: SMA(10) cắt xuống SMA(50)
+  - Position sizing: fixed 1000 cổ
+  - Không dùng stop loss / take profit
+
+indicators:
+  - name: sma_short
+    type: sma
+    length: 10
+  - name: sma_long
+    type: sma
+    length: 50
+
+entry_rules:
+  - condition: "sma_short > sma_long"
+    description: "SMA 10 > SMA 50"
+  - condition: "previous_sma_short <= previous_sma_long"
+    description: "Crossover xảy ra ở candle này"
+
+exit_rules:
+  - condition: "sma_short < sma_long"
+    description: "SMA 10 < SMA 50 (death cross)"
+
+position_sizing:
+  method: fixed_quantity
+  quantity: 1000

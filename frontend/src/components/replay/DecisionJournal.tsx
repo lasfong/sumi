@@ -57,9 +57,24 @@ export const DecisionJournal: React.FC<DecisionJournalProps> = ({ decisions }) =
               Setup: {j.setup_type} {j.confidence_score ? `(${j.confidence_score}/5)` : ''}
             </div>
           )}
+          {j.market_context && (
+            <div style={{ fontSize: '12px', marginTop: '4px', color: 'var(--text-muted)' }}>
+              Context: {j.market_context}
+            </div>
+          )}
+          {j.mistake_tag && (
+            <div style={{ fontSize: '12px', marginTop: '4px', color: 'var(--color-sell)' }}>
+              Mistake: {j.mistake_tag}
+            </div>
+          )}
           {j.reason && (
             <div style={{ fontSize: '13px', marginTop: '4px', color: 'var(--text-muted)' }}>
-              📝 {j.reason}
+              {j.reason}
+            </div>
+          )}
+          {j.note && (
+            <div style={{ fontSize: '12px', marginTop: '4px', color: 'var(--text-muted)', fontStyle: 'italic' }}>
+              {j.note}
             </div>
           )}
         </div>

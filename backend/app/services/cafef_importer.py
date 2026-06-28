@@ -20,7 +20,7 @@ class CafeFImporter:
         except Exception:
             # Fallback for malformed CSVs (e.g. trailing commas, extra columns like <OI> without header)
             df = pd.read_csv(BytesIO(file_content), on_bad_lines='skip', engine='python')
-        
+
         # Standardize columns
         col_map = {}
         for col in df.columns:
@@ -39,9 +39,9 @@ class CafeFImporter:
                 col_map[col] = 'close'
             elif 'volume' in lower_col or 'vol' in lower_col:
                 col_map[col] = 'volume'
-                
+
         df.rename(columns=col_map, inplace=True)
-        
+
         # Parse date
         if 'timestamp' in df.columns:
             # CafeF format is usually YYYYMMDD
@@ -52,7 +52,7 @@ class CafeFImporter:
                     df['timestamp'] = pd.to_datetime(df['timestamp']).dt.date
                 except Exception:
                     pass # Data quality service will catch it
-        
+
         return df
 
     @staticmethod
@@ -71,6 +71,18 @@ class CafeFImporter:
         return pd.concat(frames, ignore_index=True)
 
     @staticmethod
+    def _detect_exchange_from_filename(filename: str) -> str:
+        """Detect exchange from CafeF filename."""
+        filename_upper = filename.upper()
+        if "HSX" in filename_upper or "HOSE" in filename_upper:
+            return "HOSE"
+        elif "HNX" in filename_upper:
+            return "HNX"
+        elif "UPCOM" in filename_upper:
+            return "UPCOM"
+        return None
+
+    @staticmethod
     def import_data(db: Session, file_content: bytes, filename: str, adjustment_type: str = 'unadjusted') -> ImportResponse:
         try:
             if filename.lower().endswith('.zip'):
@@ -80,41 +92,49 @@ class CafeFImporter:
         except Exception as e:
             return ImportResponse(
                 imported_rows=0, skipped_rows=0, duplicate_rows=0, symbols_count=0,
-                warnings=[ImportWarning(row_index=0, message=f"Failed to parse CSV: {str(e)}")]
+                warnings=[ImportWarning(row_index=0, message=f"Failed to parse file: {str(e)}")]
             )
-            
+
         warnings = DataQualityService.validate_dataframe(df)
-        
+
         # Drop rows with critical errors to continue
         error_rows = set([w.row_index - 1 for w in warnings if w.row_index > 0])
         valid_df = df.drop(index=list(error_rows)).copy()
-        
+
         # Filter duplicates (keep last)
         duplicates_count = len(valid_df) - len(valid_df.drop_duplicates(subset=['symbol', 'timestamp']))
         valid_df.drop_duplicates(subset=['symbol', 'timestamp'], keep='last', inplace=True)
-        
+
         imported = 0
         symbols_found = set()
         start_date = None
         end_date = None
-        
+
         if not valid_df.empty:
             symbols_found = set(valid_df['symbol'].unique())
             start_date = str(valid_df['timestamp'].min())
             end_date = str(valid_df['timestamp'].max())
-            
+
+            exchange = CafeFImporter._detect_exchange_from_filename(filename)
+
             # Upsert Symbols
             for sym in symbols_found:
-                stmt = insert(Symbol).values(symbol=sym).on_conflict_do_nothing(index_elements=['symbol'])
-                db.execute(stmt)
-                
+                symbol_record = db.query(Symbol).filter(Symbol.symbol == sym).first()
+                if symbol_record:
+                    if exchange and not symbol_record.exchange:
+                        symbol_record.exchange = exchange
+                else:
+                    symbol_record = Symbol(symbol=sym, exchange=exchange)
+                    db.add(symbol_record)
+            db.flush()
+
             # Upsert Candles
             records = valid_df.to_dict(orient='records')
             for rec in records:
                 rec['timeframe'] = '1D'
                 rec['source'] = 'cafef'
                 rec['adjustment_type'] = adjustment_type
-                
+
             # SQLite upsert chunking (max 32766 variables / 8 columns ~ 4000 rows)
             chunk_size = 2000
             for i in range(0, len(records), chunk_size):
@@ -133,7 +153,7 @@ class CafeFImporter:
                 db.execute(stmt)
             db.commit()
             imported = len(records)
-            
+
         return ImportResponse(
             imported_rows=imported,
             skipped_rows=len(error_rows),

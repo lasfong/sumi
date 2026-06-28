@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 
 export interface WebSocketMessage {
   type: string;
-  data: any;
+  data: Record<string, unknown>;
 }
 
 export function useWebSocket(sessionId: number | null, onMessage: (msg: WebSocketMessage) => void) {
@@ -52,7 +52,7 @@ export function useWebSocket(sessionId: number | null, onMessage: (msg: WebSocke
     };
   }, [sessionId]);
 
-  const sendCommand = useCallback((action: string, payload: any = {}) => {
+  const sendCommand = useCallback((action: string, payload: Record<string, unknown> = {}) => {
     if (ws.current && ws.current.readyState === WebSocket.OPEN) {
       ws.current.send(JSON.stringify({ action, ...payload }));
     }

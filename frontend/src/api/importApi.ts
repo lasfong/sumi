@@ -1,6 +1,20 @@
 import { apiClient } from './client';
 
-export const importCafefData = async (file: File, adjustmentType: string = 'unadjusted') => {
+export interface ImportWarning {
+  row_index: number;
+  message: string;
+}
+
+export interface ImportResult {
+  imported_rows: number;
+  symbols_count: number;
+  skipped_rows: number;
+  start_date?: string | null;
+  end_date?: string | null;
+  warnings?: ImportWarning[];
+}
+
+export const importCafefData = async (file: File, adjustmentType: string = 'unadjusted'): Promise<ImportResult> => {
   const formData = new FormData();
   formData.append('file', file);
   formData.append('adjustment_type', adjustmentType);

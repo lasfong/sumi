@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ImportPage } from './pages/ImportPage';
 import { ReplayPage } from './pages/ReplayPage';
 import { AnalyticsPage } from './pages/AnalyticsPage';
+import { BacktestPage } from './pages/BacktestPage';
 import { JournalPage } from './pages/JournalPage';
 import { Toaster } from 'react-hot-toast';
 import { Sidebar } from './components/layout/Sidebar';
@@ -20,6 +21,7 @@ function App() {
               <Route path="/" element={<div className="glass-panel" style={{padding: '2rem'}}><h2>Welcome to Sumi Replay Lab</h2><p>Select an option from the menu.</p></div>} />
               <Route path="/import" element={<ImportPage />} />
               <Route path="/replay" element={<ReplayPage />} />
+              <Route path="/backtest" element={<BacktestPage />} />
               <Route path="/journal" element={<JournalPage />} />
               <Route path="/analytics" element={<AnalyticsPage />} />
             </Routes>

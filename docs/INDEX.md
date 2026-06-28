@@ -1,75 +1,73 @@
 # Documentation Index
 
-This file is the starting point for anyone working on Sumi.
+This is the starting point for Sumi development after the V2 cleanup.
 
-## Canonical Documents
+## Canonical V2 Documents
 
 Read these in order:
 
-1. `docs/PRODUCT_SPEC.md`
-   - Canonical product specification for the current MVP.
-   - The project currently follows the local-first SQLite/manual replay direction in this document.
+1. `docs/PRODUCT_STRATEGY_V2.md`
+   - Product thesis, priority tiers, current repo reality, and product decisions.
 
-2. `docs/DECISIONS.md`
-   - Records current architecture decisions.
-   - If implementation conflicts with old specs, follow this file and `PRODUCT_SPEC.md`.
+2. `docs/SPEC_V2.md`
+   - Umbrella product/technical spec separating Manual Replay and Automated Backtest.
 
-3. `docs/IMPLEMENTATION_PLAYBOOK.md`
-   - Step-by-step execution plan for junior developers.
-   - Follow the phases in order. Do not jump to later phases before the previous phase passes its Definition of Done.
+3. `docs/MANUAL_REPLAY_SPEC.md`
+   - Manual replay UX, no-future-leak rules, indicators, drawings, trading simulation, journal, and manual analytics.
 
-4. `docs/PROJECT_AUDIT_2026-06-26.md`
-   - Current-state audit of the project as of 2026-06-26.
-   - Use this to understand what is real, what is incomplete, and what needs hardening.
+4. `docs/BACKTEST_ENGINE_SPEC.md`
+   - Safe automated backtest engine, strategy model, result slicing, analytics outputs, and security rules.
 
-## Vision / Future Documents
+5. `docs/ACCEPTANCE_CRITERIA_V2.md`
+   - P0/P1 release gates, command gates, manual replay UAT, backtest UAT, and analytics acceptance.
 
-5. `docs/SPEC.md`
-   - Long-term vision and full PRD.
-   - Not the implementation contract for the immediate MVP.
-   - Features such as PostgreSQL/TimescaleDB, Celery/Redis workers, and full algorithmic strategy execution are future scope unless explicitly promoted in `DECISIONS.md`.
+6. `docs/ROADMAP_TO_COMPLETION.md`
+   - Phase-by-phase developer execution plan.
 
-6. `docs/FUTURE_ROADMAP.md`
-   - Clean summary of future phases after the MVP is stable.
+7. `docs/FEATURE_MATRIX_RESEARCH.md`
+   - Research matrix and links for comparable professional platforms.
+
+8. `docs/DECISIONS.md`
+   - Architecture and product decisions. If implementation conflicts with V2 specs, update this file explicitly.
+
+## Supporting Materials
+
+- `docs/BacktestSample/Sample.md`
+  - Example output shape for symbol/period/regime-oriented backtest analytics.
+
+- `docs/AGENTS.md`
+  - Agent/developer operating guidance.
+
+## Archived Pre-V2 Documents
+
+Historical documents were moved to:
+
+```text
+docs/archive/pre_v2/
+```
+
+They are useful for context but are no longer the implementation contract. Do not follow archived sprint plans or old specs if they conflict with V2 documents.
+
+## Current Development Priority
+
+Do not add broad new product surface until P0/P1 blockers from `ACCEPTANCE_CRITERIA_V2.md` pass.
+
+Required order:
+
+```text
+Fix P0/P1 blockers
+-> Lock manual replay MVP
+-> Standardize analytics
+-> Build indicator/signal registry
+-> Build safe backtest MVP
+-> Add regime slicing
+-> Add scanner
+-> Add strategy comparison
+```
 
 ## Operational Notes
 
-- CafeF sample/raw data should live under `data/raw/`, not under `docs/`.
+- Raw CafeF files belong under `data/raw/`, not `docs/`.
 - Local databases such as `backend/sumi.db` are runtime artifacts and should not be committed.
-- Research clones and POC repositories should live under `research_repos/` locally only and should not be committed.
+- Research clones and POC repositories belong under `research_repos/` locally only.
 - Generated folders such as `__pycache__`, `.pytest_cache`, `node_modules`, and build outputs are ignored.
-
-## Sprint Plans
-
-7. `docs/sprints/sprint_plan_overview.md`
-   - Tổng quan 9 sprints (0–8) với dependency graph, quy trình bắt buộc.
-   - Đây là entry point cho toàn bộ sprint plans chi tiết.
-
-Sprint plans chi tiết nằm trong `docs/sprints/`:
-- Sprint 0: Environment Setup
-- Sprint 1: Frontend Build Green
-- Sprint 2: Backend Tests Green
-- Sprint 3: No-Future-Leak Lock
-- Sprint 4: Trade Lifecycle Hardening
-- Sprint 5: Limit Order & Market Constraints
-- Sprint 6: Analytics Standardization
-- Sprint 7: Schema & Migration Cleanup
-- Sprint 8: Algorithmic Backtest Engine MVP
-
-## Current Priority
-
-The current priority is not new feature development.
-
-The current priority is:
-
-```text
-Frontend build green
--> Backend tests green
--> No future leak for candles and indicators
--> Correct T+2 trade lifecycle
--> Limit orders and market constraints
--> Correct analytics
--> Clean migration/schema
--> Algorithmic engine
-```
-

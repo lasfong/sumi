@@ -1,23 +1,15 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getSessionAnalytics } from '../api/analyticsApi';
 import { getTrades } from '../api/decisionApi';
 import { useReplayStore } from '../store/replayStore';
-import type { Trade } from '../types';
+import type { Trade, GroupPerformance } from '../types';
 import { EquityChart } from '../components/analytics/EquityChart';
 
 export const AnalyticsPage: React.FC = () => {
   const store = useReplayStore();
   const [inputVal, setInputVal] = useState<string>(store.sessionId?.toString() || '1');
   const [sessionId, setSessionId] = useState<number>(store.sessionId || 1);
-
-  // Sync when store.sessionId changes
-  useEffect(() => {
-    if (store.sessionId) {
-      setSessionId(store.sessionId);
-      setInputVal(store.sessionId.toString());
-    }
-  }, [store.sessionId]);
 
   const { data: analytics, isLoading, isError } = useQuery({
     queryKey: ['analytics', sessionId],
@@ -40,6 +32,46 @@ export const AnalyticsPage: React.FC = () => {
 
   const formatMoney = (val?: number) => val ? val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '0.00';
   const formatPercent = (val?: number) => val ? `${(val * 100).toFixed(2)}%` : '0.00%';
+
+  const renderGroupPerformanceTable = (title: string, rows?: GroupPerformance[], emptyText = 'No data available.') => (
+    <div className="glass-panel" style={{ padding: '20px' }}>
+      <h3 style={{ marginTop: 0, marginBottom: '16px', fontSize: '16px' }}>{title}</h3>
+      {rows && rows.length > 0 ? (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', textAlign: 'left', color: 'var(--text-muted)' }}>
+                <th style={{ padding: '8px 0', fontWeight: '500' }}>Group</th>
+                <th style={{ padding: '8px 0', fontWeight: '500', textAlign: 'right' }}>Trades</th>
+                <th style={{ padding: '8px 0', fontWeight: '500', textAlign: 'right' }}>Win %</th>
+                <th style={{ padding: '8px 0', fontWeight: '500', textAlign: 'right' }}>Avg</th>
+                <th style={{ padding: '8px 0', fontWeight: '500', textAlign: 'right' }}>Net</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr key={row.key} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                  <td style={{ padding: '12px 0', fontWeight: '600' }}>{row.key}</td>
+                  <td style={{ padding: '12px 0', textAlign: 'right' }}>{row.trades}</td>
+                  <td style={{ padding: '12px 0', textAlign: 'right', color: row.win_rate > 0.5 ? 'var(--color-buy)' : 'var(--color-sell)' }}>
+                    {formatPercent(row.win_rate)}
+                  </td>
+                  <td style={{ padding: '12px 0', textAlign: 'right', color: row.average_pnl >= 0 ? 'var(--color-buy)' : 'var(--color-sell)' }}>
+                    {formatMoney(row.average_pnl)}
+                  </td>
+                  <td style={{ padding: '12px 0', textAlign: 'right', fontWeight: '600', color: row.net_pnl >= 0 ? 'var(--color-buy)' : 'var(--color-sell)' }}>
+                    {formatMoney(row.net_pnl)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>{emptyText}</p>
+      )}
+    </div>
+  );
 
   return (
     <div className="animate-fade-in" style={{ maxWidth: '1200px', margin: '0 auto' }}>
@@ -137,6 +169,38 @@ export const AnalyticsPage: React.FC = () => {
               <p style={{ margin: 0, fontSize: '20px', fontWeight: '600', color: (analytics.sortino_ratio || 0) > 1 ? 'var(--color-primary)' : 'var(--text-main)' }}>
                 {analytics.sortino_ratio?.toFixed(2) || 'N/A'}
               </p>
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '16px', marginBottom: '24px' }}>
+            {renderGroupPerformanceTable('Symbol Performance', analytics.symbol_performance, 'No symbol breakdown available.')}
+            {renderGroupPerformanceTable('Mistake Analysis', analytics.mistake_performance, 'No mistake tags recorded yet.')}
+            <div className="glass-panel" style={{ padding: '20px' }}>
+              <h3 style={{ marginTop: 0, marginBottom: '16px', fontSize: '16px' }}>Outlier Impact</h3>
+              {analytics.outlier_impact ? (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '12px' }}>
+                  <div>
+                    <h4 style={{ color: 'var(--text-muted)', margin: '0 0 6px 0', fontSize: '12px' }}>Top Winners</h4>
+                    <p style={{ margin: 0, fontSize: '18px', fontWeight: '600', color: 'var(--color-buy)' }}>{formatMoney(analytics.outlier_impact.top_winners_pnl)}</p>
+                    <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>{formatPercent(analytics.outlier_impact.top_winners_share)} of movement</span>
+                  </div>
+                  <div>
+                    <h4 style={{ color: 'var(--text-muted)', margin: '0 0 6px 0', fontSize: '12px' }}>Top Losers</h4>
+                    <p style={{ margin: 0, fontSize: '18px', fontWeight: '600', color: 'var(--color-sell)' }}>{formatMoney(analytics.outlier_impact.top_losers_pnl)}</p>
+                    <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>{formatPercent(analytics.outlier_impact.top_losers_share)} of movement</span>
+                  </div>
+                  <div>
+                    <h4 style={{ color: 'var(--text-muted)', margin: '0 0 6px 0', fontSize: '12px' }}>Median Trade</h4>
+                    <p style={{ margin: 0, fontSize: '18px', fontWeight: '600' }}>{formatMoney(analytics.outlier_impact.median_trade_pnl)}</p>
+                  </div>
+                  <div>
+                    <h4 style={{ color: 'var(--text-muted)', margin: '0 0 6px 0', fontSize: '12px' }}>Trimmed Expectancy</h4>
+                    <p style={{ margin: 0, fontSize: '18px', fontWeight: '600' }}>{formatMoney(analytics.outlier_impact.trimmed_expectancy)}</p>
+                  </div>
+                </div>
+              ) : (
+                <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>No outlier analysis available.</p>
+              )}
             </div>
           </div>
 
