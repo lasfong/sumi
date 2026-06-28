@@ -14,6 +14,7 @@ class BacktestRequest(BaseModel):
     start_date: str
     end_date: str
     initial_cash: float = 100000000
+    benchmark_symbol: Optional[str] = "VNINDEX"
     strategy: Dict[str, Any]
 
 @router.post("/run")

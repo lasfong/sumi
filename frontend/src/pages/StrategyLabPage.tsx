@@ -2,6 +2,8 @@ import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getAvailableStrategies, runBacktest } from '../api/backtestApi';
 import type { BacktestRequest, BacktestResponse, AvailableStrategy } from '../api/backtestApi';
+import { runParameterSweep } from '../api/strategyLabApi';
+import type { SweepVariant } from '../api/strategyLabApi';
 
 interface LabResult {
   filename: string;
@@ -17,7 +19,12 @@ export const StrategyLabPage: React.FC = () => {
   const [benchmarkSymbol, setBenchmarkSymbol] = useState('VNINDEX');
   const [selectedFilenames, setSelectedFilenames] = useState<string[]>([]);
   const [isRunning, setIsRunning] = useState(false);
+  const [isSweeping, setIsSweeping] = useState(false);
   const [results, setResults] = useState<LabResult[]>([]);
+  const [sweepPath, setSweepPath] = useState('indicators[0].length');
+  const [sweepValues, setSweepValues] = useState('5, 10, 20');
+  const [maxVariants, setMaxVariants] = useState(12);
+  const [sweepResults, setSweepResults] = useState<SweepVariant[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const { data: strategies, isLoading: isLoadingStrategies } = useQuery({
@@ -80,6 +87,49 @@ export const StrategyLabPage: React.FC = () => {
     }
   };
 
+  const handleSweep = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!strategies) return;
+
+    const strategy = strategies.find(item => item.filename === selectedFilenames[0]);
+    if (!strategy) {
+      setError('Select one strategy as the sweep base.');
+      return;
+    }
+
+    const symbols = symbolsInput.split(',').map(item => item.trim().toUpperCase()).filter(Boolean);
+    const values = sweepValues.split(',').map(item => parseSweepValue(item.trim())).filter(item => item !== '');
+    if (symbols.length === 0 || values.length === 0) {
+      setError('Enter symbols and sweep values.');
+      return;
+    }
+
+    setIsSweeping(true);
+    setError(null);
+    try {
+      const request = {
+        start_date: startDate,
+        end_date: endDate,
+        initial_cash: initialCash,
+        benchmark_symbol: benchmarkSymbol.trim().toUpperCase() || undefined,
+        strategy: strategy.config,
+        sweep: [{ path: sweepPath.trim(), values }],
+        max_variants: maxVariants,
+      };
+      const response = await runParameterSweep(symbols.length > 1 ? { ...request, symbols } : { ...request, symbol: symbols[0] });
+      if (response.status === 'failed') {
+        setError(response.message || 'Parameter sweep failed.');
+        setSweepResults([]);
+      } else {
+        setSweepResults(response.variants);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Parameter sweep failed.');
+    } finally {
+      setIsSweeping(false);
+    }
+  };
+
   const selectAll = () => {
     setSelectedFilenames((strategies || []).map(strategy => strategy.filename));
   };
@@ -95,6 +145,13 @@ export const StrategyLabPage: React.FC = () => {
   const getExpectancy = (response: BacktestResponse) => response.analytics?.expectancy ?? null;
   const formatMoney = (value?: number | null) => value ? value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '0.00';
   const formatPercent = (value?: number) => value ? `${(value * 100).toFixed(2)}%` : '0.00%';
+  const parseSweepValue = (value: string) => {
+    if (value === '') return '';
+    if (value.toLowerCase() === 'true') return true;
+    if (value.toLowerCase() === 'false') return false;
+    const numeric = Number(value);
+    return Number.isNaN(numeric) ? value : numeric;
+  };
 
   const sortedResults = [...results].sort((left, right) => getNetPnl(right.response) - getNetPnl(left.response));
   const bestFilename = sortedResults[0]?.filename;
@@ -166,6 +223,27 @@ export const StrategyLabPage: React.FC = () => {
         </div>
       )}
 
+      <div className="glass-panel" style={{ padding: '20px', marginBottom: '24px' }}>
+        <h3 style={{ marginTop: 0, marginBottom: '16px', fontSize: '16px' }}>Parameter Sweep</h3>
+        <form onSubmit={handleSweep} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px', alignItems: 'end' }}>
+          <div>
+            <label htmlFor="sweep-path" style={{ display: 'block', marginBottom: '8px', color: 'var(--text-muted)', fontSize: '14px' }}>Parameter Path</label>
+            <input id="sweep-path" type="text" value={sweepPath} onChange={event => setSweepPath(event.target.value)} style={{ width: '100%', padding: '10px' }} required />
+          </div>
+          <div>
+            <label htmlFor="sweep-values" style={{ display: 'block', marginBottom: '8px', color: 'var(--text-muted)', fontSize: '14px' }}>Values</label>
+            <input id="sweep-values" type="text" value={sweepValues} onChange={event => setSweepValues(event.target.value)} style={{ width: '100%', padding: '10px' }} required />
+          </div>
+          <div>
+            <label htmlFor="sweep-max" style={{ display: 'block', marginBottom: '8px', color: 'var(--text-muted)', fontSize: '14px' }}>Max Variants</label>
+            <input id="sweep-max" type="number" min={1} max={30} value={maxVariants} onChange={event => setMaxVariants(Number(event.target.value))} style={{ width: '100%', padding: '10px' }} required />
+          </div>
+          <button type="submit" className="btn-primary" style={{ height: '42px' }} disabled={isSweeping || isLoadingStrategies}>
+            {isSweeping ? 'Sweeping...' : 'Run Sweep'}
+          </button>
+        </form>
+      </div>
+
       {sortedResults.length > 0 && (
         <div className="glass-panel" style={{ padding: '20px' }}>
           <h3 style={{ marginTop: 0, marginBottom: '16px', fontSize: '16px' }}>Comparison</h3>
@@ -201,6 +279,40 @@ export const StrategyLabPage: React.FC = () => {
                     </tr>
                   );
                 })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {sweepResults.length > 0 && (
+        <div className="glass-panel" style={{ padding: '20px', marginTop: '24px' }}>
+          <h3 style={{ marginTop: 0, marginBottom: '16px', fontSize: '16px' }}>Sweep Results</h3>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+              <thead>
+                <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', color: 'var(--text-muted)', textAlign: 'left' }}>
+                  <th style={{ padding: '8px', fontWeight: 500 }}>Variant</th>
+                  <th style={{ padding: '8px', fontWeight: 500 }}>Status</th>
+                  <th style={{ padding: '8px', fontWeight: 500, textAlign: 'right' }}>Trades</th>
+                  <th style={{ padding: '8px', fontWeight: 500, textAlign: 'right' }}>Win %</th>
+                  <th style={{ padding: '8px', fontWeight: 500, textAlign: 'right' }}>Net PnL</th>
+                  <th style={{ padding: '8px', fontWeight: 500, textAlign: 'right' }}>Profit Factor</th>
+                  <th style={{ padding: '8px', fontWeight: 500, textAlign: 'right' }}>Expectancy</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sweepResults.map((item) => (
+                  <tr key={item.label} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                    <td style={{ padding: '12px 8px', fontWeight: 600 }}>{item.label}</td>
+                    <td style={{ padding: '12px 8px', textTransform: 'uppercase' }}>{item.metrics.status}</td>
+                    <td style={{ padding: '12px 8px', textAlign: 'right' }}>{item.metrics.total_trades}</td>
+                    <td style={{ padding: '12px 8px', textAlign: 'right' }}>{formatPercent(item.metrics.win_rate)}</td>
+                    <td style={{ padding: '12px 8px', textAlign: 'right', color: item.metrics.net_pnl >= 0 ? 'var(--color-buy)' : 'var(--color-sell)', fontWeight: 600 }}>{formatMoney(item.metrics.net_pnl)}</td>
+                    <td style={{ padding: '12px 8px', textAlign: 'right' }}>{item.metrics.profit_factor?.toFixed(2) || 'N/A'}</td>
+                    <td style={{ padding: '12px 8px', textAlign: 'right' }}>{formatMoney(item.metrics.expectancy)}</td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
