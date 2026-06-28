@@ -4,6 +4,7 @@ import { ImportPage } from './pages/ImportPage';
 import { ReplayPage } from './pages/ReplayPage';
 import { AnalyticsPage } from './pages/AnalyticsPage';
 import { BacktestPage } from './pages/BacktestPage';
+import { ScannerPage } from './pages/ScannerPage';
 import { JournalPage } from './pages/JournalPage';
 import { Toaster } from 'react-hot-toast';
 import { Sidebar } from './components/layout/Sidebar';
@@ -22,6 +23,7 @@ function App() {
               <Route path="/import" element={<ImportPage />} />
               <Route path="/replay" element={<ReplayPage />} />
               <Route path="/backtest" element={<BacktestPage />} />
+              <Route path="/scanner" element={<ScannerPage />} />
               <Route path="/journal" element={<JournalPage />} />
               <Route path="/analytics" element={<AnalyticsPage />} />
             </Routes>
