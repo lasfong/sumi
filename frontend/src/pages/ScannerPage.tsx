@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { getAvailableStrategies } from '../api/backtestApi';
-import { createReplaySessionFromSignal, runScanner } from '../api/scannerApi';
-import type { ScannerRequest, ScannerResult } from '../api/scannerApi';
+import { createReplaySessionFromSignal, listScannerRuns, runScanner } from '../api/scannerApi';
+import type { ScannerRequest, ScannerResult, ScannerRun } from '../api/scannerApi';
 import { useReplayStore } from '../store/replayStore';
 
 export const ScannerPage: React.FC = () => {
@@ -14,7 +14,9 @@ export const ScannerPage: React.FC = () => {
   const [maxResults, setMaxResults] = useState(200);
   const [selectedStrategyFilename, setSelectedStrategyFilename] = useState('');
   const [replayError, setReplayError] = useState<string | null>(null);
+  const [selectedHistoryRun, setSelectedHistoryRun] = useState<ScannerRun | null>(null);
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const setSession = useReplayStore(state => state.setSession);
 
   const { data: strategies, isLoading: isLoadingStrategies } = useQuery({
@@ -24,10 +26,19 @@ export const ScannerPage: React.FC = () => {
 
   const mutation = useMutation({
     mutationFn: runScanner,
+    onSuccess: () => {
+      setSelectedHistoryRun(null);
+      queryClient.invalidateQueries({ queryKey: ['scanner-runs'] });
+    },
   });
 
   const replayMutation = useMutation({
     mutationFn: createReplaySessionFromSignal,
+  });
+
+  const { data: scannerRuns } = useQuery({
+    queryKey: ['scanner-runs'],
+    queryFn: () => listScannerRuns(8),
   });
 
   const handleSubmit = (event: React.FormEvent) => {
@@ -54,7 +65,7 @@ export const ScannerPage: React.FC = () => {
   };
 
   const formatMoney = (value?: number) => value ? value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '0.00';
-  const result = mutation.data;
+  const result = mutation.data || selectedHistoryRun?.result_payload;
 
   const handleReplaySignal = async (item: ScannerResult) => {
     setReplayError(null);
@@ -82,6 +93,40 @@ export const ScannerPage: React.FC = () => {
         <h2 style={{ margin: 0, fontSize: '28px', background: 'linear-gradient(90deg, #fff, #8B949E)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
           Signal Scanner
         </h2>
+      </div>
+
+      <div className="glass-panel" style={{ padding: '18px', marginBottom: '24px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'center', marginBottom: '12px' }}>
+          <h3 style={{ margin: 0, fontSize: '16px' }}>Scan History</h3>
+          <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>{scannerRuns?.length || 0} saved</span>
+        </div>
+        {!scannerRuns?.length ? (
+          <p style={{ color: 'var(--text-muted)', fontSize: '14px', margin: 0 }}>No saved scan runs yet.</p>
+        ) : (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '10px' }}>
+            {scannerRuns.map((run) => (
+              <button
+                key={run.id}
+                type="button"
+                onClick={() => setSelectedHistoryRun(run)}
+                style={{
+                  textAlign: 'left',
+                  padding: '10px',
+                  border: selectedHistoryRun?.id === run.id ? '1px solid var(--color-primary)' : '1px solid var(--border-color)',
+                  background: selectedHistoryRun?.id === run.id ? 'rgba(41, 98, 255, 0.12)' : 'rgba(255,255,255,0.02)',
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', marginBottom: '6px' }}>
+                  <strong style={{ fontSize: '13px' }}>{run.label}</strong>
+                  <span style={{ color: run.status === 'failed' ? 'var(--color-sell)' : 'var(--color-buy)', fontSize: '11px', textTransform: 'uppercase' }}>{run.status}</span>
+                </div>
+                <div style={{ color: 'var(--text-muted)', fontSize: '12px' }}>
+                  {run.total_results} results - {new Date(run.created_at).toLocaleString()}
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="glass-panel" style={{ padding: '24px', marginBottom: '32px' }}>
@@ -138,7 +183,9 @@ export const ScannerPage: React.FC = () => {
       {result?.status === 'succeeded' && (
         <div className="glass-panel" style={{ padding: '20px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-            <h3 style={{ margin: 0, fontSize: '16px' }}>Signals</h3>
+            <h3 style={{ margin: 0, fontSize: '16px' }}>
+              Signals{selectedHistoryRun ? ` from Run #${selectedHistoryRun.id}` : ''}
+            </h3>
             <span style={{ color: 'var(--text-muted)', fontSize: '13px' }}>{result.total_results || 0} results{result.truncated ? ' (truncated)' : ''}</span>
           </div>
           {result.results.length > 0 ? (

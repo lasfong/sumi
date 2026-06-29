@@ -22,6 +22,7 @@ export interface ScannerResult {
 
 export interface ScannerResponse {
   status: 'succeeded' | 'failed';
+  run_id?: number;
   total_results?: number;
   truncated?: boolean;
   results: ScannerResult[];
@@ -51,6 +52,16 @@ export interface ScannerReplaySessionResponse {
   window_end: string;
 }
 
+export interface ScannerRun {
+  id: number;
+  label: string;
+  status: string;
+  total_results: number;
+  request_config: ScannerRequest | Record<string, unknown>;
+  result_payload: ScannerResponse;
+  created_at: string;
+}
+
 export async function runScanner(config: ScannerRequest): Promise<ScannerResponse> {
   const response = await apiClient.post('/scanner/run', config);
   return response.data;
@@ -58,5 +69,10 @@ export async function runScanner(config: ScannerRequest): Promise<ScannerRespons
 
 export async function createReplaySessionFromSignal(config: ScannerReplaySessionRequest): Promise<ScannerReplaySessionResponse> {
   const response = await apiClient.post('/scanner/replay-session', config);
+  return response.data;
+}
+
+export async function listScannerRuns(limit: number = 20): Promise<ScannerRun[]> {
+  const response = await apiClient.get('/scanner/runs', { params: { limit } });
   return response.data;
 }

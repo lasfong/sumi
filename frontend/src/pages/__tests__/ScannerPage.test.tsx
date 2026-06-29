@@ -15,6 +15,7 @@ vi.mock('../../api/backtestApi', () => ({
 vi.mock('../../api/scannerApi', () => ({
   runScanner: vi.fn(),
   createReplaySessionFromSignal: vi.fn(),
+  listScannerRuns: vi.fn(),
 }));
 
 const renderWithClient = (ui: React.ReactElement) => {
@@ -35,6 +36,7 @@ const renderWithClient = (ui: React.ReactElement) => {
 describe('ScannerPage', () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    vi.mocked(scannerApi.listScannerRuns).mockResolvedValue([]);
     vi.mocked(backtestApi.getAvailableStrategies).mockResolvedValue([
       { filename: 'strategy.yaml', name: 'Scanner Strategy', description: 'Scanner', config: { name: 'Scanner Strategy' } },
     ]);

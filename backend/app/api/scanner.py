@@ -1,10 +1,11 @@
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.dependencies import get_db
+from app.services.scanner_history_service import ScannerHistoryService
 from app.services.scanner_service import ScannerService
 
 
@@ -37,7 +38,23 @@ class ScannerReplaySessionRequest(BaseModel):
 
 @router.post("/run")
 def run_scanner(config: ScannerRequest, db: Session = Depends(get_db)):
-    return scanner_service.run_scan(db, config.model_dump())
+    request_config = config.model_dump()
+    result = scanner_service.run_scan(db, request_config)
+    saved_run = ScannerHistoryService.create_run(db, request_config, result)
+    return {**result, "run_id": saved_run["id"]}
+
+
+@router.get("/runs")
+def list_scanner_runs(limit: int = 30, db: Session = Depends(get_db)):
+    return ScannerHistoryService.list_runs(db, limit)
+
+
+@router.get("/runs/{run_id}")
+def get_scanner_run(run_id: int, db: Session = Depends(get_db)):
+    run = ScannerHistoryService.get_run(db, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Scanner run not found")
+    return run
 
 
 @router.post("/replay-session")

@@ -3,6 +3,7 @@ import json
 
 from app.models.candle import Candle
 from app.models.replay_session import ReplaySession
+from app.services.scanner_history_service import ScannerHistoryService
 from app.services.scanner_service import ScannerService
 
 
@@ -100,3 +101,26 @@ def test_scanner_signal_can_create_replay_session(db_session):
     assert source_payload["lookback_days"] == 10
     assert source_payload["forward_days"] == 10
     assert db_session.query(ReplaySession).filter_by(id=session.id).first() is not None
+
+
+def test_scanner_history_persists_and_lists_runs(db_session):
+    request_config = {
+        "symbols": ["FPT", "SSI"],
+        "start_date": "2024-01-01",
+        "end_date": "2024-02-01",
+        "strategy": {"name": "Scanner Strategy"},
+    }
+    result_payload = {
+        "status": "succeeded",
+        "total_results": 1,
+        "results": [{"symbol": "FPT", "timestamp": "2024-01-10T00:00:00"}],
+        "warnings": [],
+    }
+
+    saved = ScannerHistoryService.create_run(db_session, request_config, result_payload)
+    runs = ScannerHistoryService.list_runs(db_session)
+
+    assert saved["id"] == runs[0]["id"]
+    assert runs[0]["label"] == "Scanner Strategy on 2 symbol(s)"
+    assert runs[0]["request_config"]["symbols"] == ["FPT", "SSI"]
+    assert runs[0]["result_payload"]["total_results"] == 1
