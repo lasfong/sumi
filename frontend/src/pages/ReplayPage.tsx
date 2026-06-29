@@ -9,7 +9,7 @@ import { DecisionJournal } from '../components/replay/DecisionJournal';
 import { PendingOrdersPanel } from '../components/replay/PendingOrdersPanel';
 import { SessionSetup } from '../components/replay/SessionSetup';
 import { DrawingToolbar } from '../components/chart/DrawingToolbar';
-import { createReplaySession, getSessionCandles, nextCandle, previousCandle, getDrawings, updateDrawings } from '../api/replayApi';
+import { createReplaySession, getReplaySession, getSessionCandles, nextCandle, previousCandle, getDrawings, updateDrawings } from '../api/replayApi';
 import { submitDecision, getPositions, getDecisions, getOrders } from '../api/decisionApi';
 import { getSessionIndicatorData } from '../api/indicatorsApi';
 import { MultiChartLayout } from '../components/layout/MultiChartLayout';
@@ -40,6 +40,32 @@ interface WebSocketCandle {
   close: number;
   volume: number;
 }
+
+interface SignalSourcePayload {
+  symbol?: string;
+  signal_timestamp?: string;
+  signal_type?: string | null;
+  strategy?: string | null;
+  price?: number | null;
+  regime?: string | null;
+  lookback_days?: number;
+  forward_days?: number;
+}
+
+const parseSignalSourcePayload = (sourceType?: string | null, sourcePayload?: string | null): SignalSourcePayload | null => {
+  if (sourceType !== 'scanner_signal' || !sourcePayload) return null;
+  try {
+    const parsed = JSON.parse(sourcePayload) as unknown;
+    return parsed && typeof parsed === 'object' ? parsed as SignalSourcePayload : null;
+  } catch {
+    return null;
+  }
+};
+
+const toDateKey = (value?: string | null): string | null => {
+  if (!value) return null;
+  return value.includes('T') ? value.split('T')[0] : value;
+};
 
 const parseDrawings = (stateData?: string): DrawingLine[] => {
   if (!stateData) return [];
@@ -84,6 +110,12 @@ export const ReplayPage: React.FC = () => {
   const { data: candlesData, refetch: refetchCandles } = useQuery({
     queryKey: ['candles', store.sessionId],
     queryFn: () => getSessionCandles(store.sessionId!),
+    enabled: !!store.sessionId,
+  });
+
+  const { data: sessionData } = useQuery({
+    queryKey: ['replay-session', store.sessionId],
+    queryFn: () => getReplaySession(store.sessionId!),
     enabled: !!store.sessionId,
   });
 
@@ -182,6 +214,9 @@ export const ReplayPage: React.FC = () => {
 
   const symbolName = candlesData?.[0]?.symbol || '—';
   const currentCandle = candlesData?.length ? candlesData[candlesData.length - 1] : null;
+  const signalSource = parseSignalSourcePayload(sessionData?.source_type, sessionData?.source_payload);
+  const signalDate = toDateKey(signalSource?.signal_timestamp);
+  const currentDate = toDateKey(currentCandle?.timestamp);
 
   const queryClient = useQueryClient();
 
@@ -283,7 +318,7 @@ export const ReplayPage: React.FC = () => {
     color: c.close >= c.open ? 'rgba(0, 230, 118, 0.5)' : 'rgba(255, 23, 68, 0.5)',
   }));
 
-  const markers: SeriesMarker<Time>[] = (decisionsData || [])
+  const decisionMarkers: SeriesMarker<Time>[] = (decisionsData || [])
     .filter((d: Decision) => ['BUY', 'ADD', 'SELL', 'REDUCE', 'CLOSE', 'CUT_LOSS', 'TAKE_PROFIT'].includes(d.action))
     .map((d: Decision) => {
       const isBuy = d.action === 'BUY' || d.action === 'ADD';
@@ -296,6 +331,17 @@ export const ReplayPage: React.FC = () => {
         text: d.action,
       };
     })
+    .sort((a, b) => (a.time as string).localeCompare(b.time as string));
+
+  const signalMarker: SeriesMarker<Time>[] = signalDate && currentDate && signalDate <= currentDate ? [{
+    time: signalDate as Time,
+    position: 'aboveBar',
+    color: '#FFD166',
+    shape: 'circle',
+    text: signalSource?.signal_type ? `Signal: ${signalSource.signal_type}` : 'Signal',
+  }] : [];
+
+  const markers: SeriesMarker<Time>[] = [...decisionMarkers, ...signalMarker]
     .sort((a, b) => (a.time as string).localeCompare(b.time as string));
 
   const [isLoadingIndicator, setIsLoadingIndicator] = useState(false);
@@ -416,6 +462,11 @@ fetchActiveIndicators();
             {symbolName}
           </span>
           <span style={{ color: 'var(--text-muted)', fontSize: '13px' }}>Session #{store.sessionId}</span>
+          {signalSource && (
+            <span style={{ padding: '4px 8px', background: 'rgba(255, 209, 102, 0.12)', color: '#FFD166', borderRadius: '4px', fontWeight: 600, fontSize: '12px', border: '1px solid rgba(255, 209, 102, 0.35)' }}>
+              Scanner Signal
+            </span>
+          )}
           
           {currentCandle && (
             <div style={{ display: 'flex', gap: '12px', marginLeft: '16px', fontSize: '13px', fontFamily: 'monospace' }}>
@@ -502,6 +553,32 @@ fetchActiveIndicators();
         </main>
 
         <aside style={{ flex: 1, padding: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem', borderLeft: '1px solid var(--border-color)', minWidth: '280px', maxWidth: '360px' }}>
+          {signalSource && (
+            <div className="panel" style={{ padding: '12px', borderColor: 'rgba(255, 209, 102, 0.35)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', alignItems: 'center', marginBottom: '8px' }}>
+                <h3 style={{ margin: 0, fontSize: '14px', color: '#FFD166' }}>Scanner Signal</h3>
+                <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>{signalDate}</span>
+              </div>
+              <div style={{ display: 'grid', gap: '6px', fontSize: '12px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
+                  <span style={{ color: 'var(--text-muted)' }}>Strategy</span>
+                  <span style={{ textAlign: 'right' }}>{signalSource.strategy || 'n/a'}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
+                  <span style={{ color: 'var(--text-muted)' }}>Signal</span>
+                  <span style={{ textTransform: 'uppercase' }}>{signalSource.signal_type || 'n/a'}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
+                  <span style={{ color: 'var(--text-muted)' }}>Regime</span>
+                  <span>{signalSource.regime || 'n/a'}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
+                  <span style={{ color: 'var(--text-muted)' }}>Signal Price</span>
+                  <span style={{ fontFamily: 'monospace' }}>{signalSource.price?.toLocaleString() || 'n/a'}</span>
+                </div>
+              </div>
+            </div>
+          )}
           <TradeControls
             sessionId={store.sessionId}
             onSubmitDecision={handleSubmitDecision}

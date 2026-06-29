@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Float, Integer, Date, DateTime
+from sqlalchemy import Column, String, Float, Integer, Date, DateTime, Text
 from sqlalchemy.sql import func
 from app.db import Base
 
@@ -18,6 +18,8 @@ class ReplaySession(Base):
     mode = Column(String, default="normal") # uses SessionMode
     hide_symbol = Column(Integer, default=0) # SQLite doesn't natively support bools consistently across frameworks sometimes, but boolean is fine, here integer for simplicity (0/1) or boolean
     hide_date = Column(Integer, default=0)
+    source_type = Column(String, nullable=True)
+    source_payload = Column(Text, nullable=True)
     
     created_at = Column(DateTime(timezone=True), default=func.now())
     updated_at = Column(DateTime(timezone=True), default=func.now(), onupdate=func.now())

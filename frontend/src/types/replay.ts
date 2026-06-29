@@ -13,6 +13,8 @@ export interface ReplaySession {
   mode: SessionMode;
   hide_symbol: number;
   hide_date: number;
+  source_type?: string | null;
+  source_payload?: string | null;
   created_at: string;
   updated_at: string;
 }

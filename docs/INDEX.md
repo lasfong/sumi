@@ -24,10 +24,13 @@ Read these in order:
 6. `docs/ROADMAP_TO_COMPLETION.md`
    - Phase-by-phase developer execution plan.
 
-7. `docs/FEATURE_MATRIX_RESEARCH.md`
+7. `docs/PROGRESS_V2.md`
+   - Active execution tracker: completed batches, phase status, and remaining large batches.
+
+8. `docs/FEATURE_MATRIX_RESEARCH.md`
    - Research matrix and links for comparable professional platforms.
 
-8. `docs/DECISIONS.md`
+9. `docs/DECISIONS.md`
    - Architecture and product decisions. If implementation conflicts with V2 specs, update this file explicitly.
 
 ## Supporting Materials

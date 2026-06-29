@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import json
 
 import pandas as pd
 from fastapi import HTTPException
@@ -145,6 +146,17 @@ class ScannerService:
             start_date=candles[0].timestamp.date() if hasattr(candles[0].timestamp, "date") else candles[0].timestamp,
             end_date=candles[-1].timestamp.date() if hasattr(candles[-1].timestamp, "date") else candles[-1].timestamp,
             initial_cash=float(config.get("initial_cash", 100000000)),
+            source_type="scanner_signal",
+            source_payload=json.dumps({
+                "symbol": symbol,
+                "signal_timestamp": signal_timestamp.isoformat(),
+                "signal_type": config.get("signal_type"),
+                "strategy": config.get("strategy"),
+                "price": config.get("price"),
+                "regime": config.get("regime"),
+                "lookback_days": lookback_days,
+                "forward_days": forward_days,
+            }),
         )
         session = ReplayService.create_session(db, session_in)
         return {

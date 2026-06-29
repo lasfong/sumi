@@ -33,6 +33,10 @@ export interface ScannerResponse {
 export interface ScannerReplaySessionRequest {
   symbol: string;
   signal_timestamp: string;
+  signal_type?: string;
+  strategy?: string;
+  price?: number;
+  regime?: string;
   timeframe?: string;
   adjustment_type?: string;
   lookback_days?: number;

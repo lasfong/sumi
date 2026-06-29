@@ -13,6 +13,8 @@ class ReplaySessionBase(BaseModel):
     mode: SessionMode = SessionMode.NORMAL
     hide_symbol: int = 0
     hide_date: int = 0
+    source_type: Optional[str] = None
+    source_payload: Optional[str] = None
 
 class ReplaySessionCreate(ReplaySessionBase):
     pass

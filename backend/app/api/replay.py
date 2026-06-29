@@ -12,6 +12,10 @@ router = APIRouter()
 def create_session(session_in: ReplaySessionCreate, db: Session = Depends(get_db)):
     return ReplayService.create_session(db, session_in)
 
+@router.get("/sessions/{session_id}", response_model=ReplaySessionResponse)
+def get_session(session_id: int, db: Session = Depends(get_db)):
+    return ReplayService.get_session(db, session_id)
+
 @router.get("/sessions/{session_id}/candles", response_model=List[CandleResponse])
 def get_session_candles(session_id: int, target_timeframe: str = None, db: Session = Depends(get_db)):
     return ReplayService.get_candles(db, session_id, target_timeframe)

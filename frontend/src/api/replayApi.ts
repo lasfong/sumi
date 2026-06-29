@@ -13,6 +13,11 @@ export const createReplaySession = async (data: CreateSessionRequest): Promise<R
   return response.data;
 };
 
+export const getReplaySession = async (sessionId: number): Promise<ReplaySession> => {
+  const response = await apiClient.get(`/replay/sessions/${sessionId}`);
+  return response.data;
+};
+
 export const getSessionCandles = async (sessionId: number): Promise<Candle[]> => {
   const response = await apiClient.get(`/replay/sessions/${sessionId}/candles`);
   return response.data;

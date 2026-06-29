@@ -82,6 +82,10 @@ def test_full_replay_lifecycle(client):
     assert session_data["current_index"] == 0
     assert session_data["status"] == "active"
 
+    response = client.get(f"/api/replay/sessions/{session_id}")
+    assert response.status_code == 200
+    assert response.json()["id"] == session_id
+
     # 2. Get Candles (Index 0 should return 1 candle)
     response = client.get(f"/api/replay/sessions/{session_id}/candles")
     assert response.status_code == 200

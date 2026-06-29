@@ -40,7 +40,9 @@ class ReplayService:
             status=SessionStatus.ACTIVE.value,
             mode=session_in.mode.value,
             hide_symbol=session_in.hide_symbol,
-            hide_date=session_in.hide_date
+            hide_date=session_in.hide_date,
+            source_type=session_in.source_type,
+            source_payload=session_in.source_payload,
         )
         db.add(new_session)
         db.commit()

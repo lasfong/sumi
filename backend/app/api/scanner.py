@@ -24,6 +24,10 @@ class ScannerRequest(BaseModel):
 class ScannerReplaySessionRequest(BaseModel):
     symbol: str
     signal_timestamp: str
+    signal_type: str | None = None
+    strategy: str | None = None
+    price: float | None = None
+    regime: str | None = None
     timeframe: str = "1D"
     adjustment_type: str = "unadjusted"
     lookback_days: int = 120

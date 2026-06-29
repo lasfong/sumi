@@ -62,6 +62,10 @@ export const ScannerPage: React.FC = () => {
       const response = await replayMutation.mutateAsync({
         symbol: item.symbol,
         signal_timestamp: item.timestamp,
+        signal_type: item.signal_type,
+        strategy: item.strategy,
+        price: item.price,
+        regime: item.regime,
         lookback_days: 120,
         forward_days: 90,
       });
