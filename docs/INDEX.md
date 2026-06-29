@@ -30,10 +30,13 @@ Read these in order:
 8. `docs/RELEASE_CHECKLIST_V2.md`
    - Final automated gate, manual UAT checklist, known limits, and release definition.
 
-9. `docs/FEATURE_MATRIX_RESEARCH.md`
+9. `docs/UAT_BROWSER_REVIEW_2026-06-29.md`
+   - Local browser UAT evidence, bugs found during real UI testing, and fixed flows.
+
+10. `docs/FEATURE_MATRIX_RESEARCH.md`
    - Research matrix and links for comparable professional platforms.
 
-10. `docs/DECISIONS.md`
+11. `docs/DECISIONS.md`
    - Architecture and product decisions. If implementation conflicts with V2 specs, update this file explicitly.
 
 ## Supporting Materials

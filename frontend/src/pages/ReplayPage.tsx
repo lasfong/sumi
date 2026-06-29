@@ -235,11 +235,12 @@ export const ReplayPage: React.FC = () => {
     if (msg.type === 'new_candle') {
       const newCandle = msg.data;
       if (!isWebSocketCandle(newCandle)) return;
+      const wsDateKey = new Date(newCandle.time * 1000).toISOString().split('T')[0];
       
       // Update chart directly for smoothness
       if (chartRef.current) {
         const chartCandle = {
-          time: newCandle.time as Time,
+          time: wsDateKey as Time,
           open: newCandle.open,
           high: newCandle.high,
           low: newCandle.low,
@@ -261,7 +262,7 @@ export const ReplayPage: React.FC = () => {
           symbol: symbolName,
           timeframe: 'D',
           adjustment_type: 'split',
-          timestamp: new Date(newCandle.time * 1000).toISOString(),
+          timestamp: wsDateKey,
           open: newCandle.open,
           high: newCandle.high,
           low: newCandle.low,
@@ -322,16 +323,20 @@ export const ReplayPage: React.FC = () => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [handleNext, handlePrev, store.sessionId]);
 
-  const formattedCandles: ChartCandle[] = (candlesData || []).map((c: Candle) => ({
-    time: c.timestamp,
+  const chartCandleRows = Array.from(
+    new Map((candlesData || []).map((c: Candle) => [toDateKey(c.timestamp) || c.timestamp, c] as const)).entries()
+  ).sort(([a], [b]) => a.localeCompare(b));
+
+  const formattedCandles: ChartCandle[] = chartCandleRows.map(([time, c]) => ({
+    time,
     open: c.open,
     high: c.high,
     low: c.low,
     close: c.close,
   }));
 
-  const volumeData: ChartVolume[] = (candlesData || []).map((c: Candle) => ({
-    time: c.timestamp,
+  const volumeData: ChartVolume[] = chartCandleRows.map(([time, c]) => ({
+    time,
     value: c.volume,
     color: c.close >= c.open ? 'rgba(0, 230, 118, 0.5)' : 'rgba(255, 23, 68, 0.5)',
   }));
@@ -407,12 +412,18 @@ export const ReplayPage: React.FC = () => {
 
           const seriesList: IndicatorSeriesData[] = [];
           const keys = Object.keys(data[0]).filter(k => k !== 'timestamp');
+          if (keys.length === 0) continue;
 
       keys.forEach(k => {
-        const lineData = data.map((d: IndicatorDataPoint) => ({
-          time: d.timestamp.split('T')[0] as Time,
-          value: Number(d[k]) || 0
-        })).filter((d) => !isNaN(d.value));
+        const lineData = data
+          .map((d: IndicatorDataPoint) => {
+            const rawValue = d[k];
+            const value = typeof rawValue === 'number' ? rawValue : Number(rawValue);
+            return Number.isFinite(value)
+              ? { time: d.timestamp.split('T')[0] as Time, value }
+              : null;
+          })
+          .filter((d): d is { time: Time; value: number } => d !== null);
 
         let color = config.color || '#2962FF';
         let type: 'line' | 'histogram' = 'line';
@@ -450,6 +461,7 @@ export const ReplayPage: React.FC = () => {
 
         seriesList.push({ name: k, data: lineData, color, type });
       });
+      if (seriesList.length === 0) continue;
 
       const key = `${config.name}_${JSON.stringify(config.params)}`;
       chartRef.current?.addIndicator(key, seriesList, config.pane);

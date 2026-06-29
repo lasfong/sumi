@@ -136,6 +136,10 @@ def test_full_replay_lifecycle(client):
     )
     assert response.status_code == 200
 
+    response = client.get(f"/api/replay/sessions/{session_id}/position")
+    assert response.status_code == 200
+    assert response.json() == []
+
     # 7. Check Trades
     response = client.get(f"/api/replay/sessions/{session_id}/trades")
     assert response.status_code == 200
@@ -191,3 +195,33 @@ def test_no_future_leak_indicators(client):
     
     # Check that data grew by 1
     assert len(indicator_data_new) == 4
+
+def test_session_indicators_allow_warmup_without_error(client):
+    response = client.post(
+        "/api/replay/sessions",
+        json={
+            "symbol": "API_TEST",
+            "timeframe": "1D",
+            "adjustment_type": "unadjusted",
+            "start_date": "2023-11-01",
+            "end_date": "2023-11-05",
+            "initial_cash": 100000.0,
+            "mode": SessionMode.NORMAL.value,
+            "hide_symbol": False,
+            "hide_date": False
+        }
+    )
+    assert response.status_code == 200
+    session_id = response.json()["id"]
+
+    for params in (
+        {"indicator": "ema", "length": 20},
+        {"indicator": "rsi", "length": 14},
+        {"indicator": "macd", "fast": 12, "slow": 26, "signal": 9},
+    ):
+        response = client.get(f"/api/replay/sessions/{session_id}/indicators", params=params)
+
+        assert response.status_code == 200, response.text
+        data = response.json()["data"]
+        assert len(data) == 1
+        assert list(data[0].keys()) == ["timestamp"]

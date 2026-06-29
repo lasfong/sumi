@@ -80,9 +80,6 @@ def calculate_indicator(
     original_cols = set(df.columns)
     new_cols = set(result_df.columns) - original_cols
     
-    if not new_cols:
-        raise HTTPException(status_code=400, detail=f"Indicator '{indicator}' did not generate any data.")
-        
     # Prepare response
     response_data = []
     # Reset index to include timestamp in response

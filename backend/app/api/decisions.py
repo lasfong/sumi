@@ -12,6 +12,7 @@ from app.models.position import Position
 from app.models.order import Order
 from app.models.trade import Trade
 from app.services.replay_service import ReplayService
+from app.domain.enums import PositionStatus
 
 router = APIRouter()
 
@@ -25,7 +26,10 @@ def get_decisions(session_id: int, db: Session = Depends(get_db)):
 
 @router.get("/sessions/{session_id}/position", response_model=List[PositionResponse])
 def get_positions(session_id: int, db: Session = Depends(get_db)):
-    positions = db.query(Position).filter(Position.session_id == session_id).all()
+    positions = db.query(Position).filter(
+        Position.session_id == session_id,
+        Position.status == PositionStatus.OPEN.value,
+    ).all()
     
     # Calculate unrealized PnL dynamically based on the current candle
     if positions:

@@ -129,9 +129,6 @@ def get_session_indicators(
     original_cols = set(df.columns)
     new_cols = set(result_df.columns) - original_cols
     
-    if not new_cols:
-        raise HTTPException(status_code=400, detail=f"Indicator '{indicator}' did not generate any data.")
-        
     # Prepare response
     response_data = []
     result_df.reset_index(inplace=True)
