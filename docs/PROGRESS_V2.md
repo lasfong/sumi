@@ -16,13 +16,14 @@ Last updated: 2026-06-29.
 9. Persisted Strategy Lab runs with Alembic migration.
 10. Scanner signal to Replay workflow.
 11. Replay session signal provenance and Replay signal context.
+12. Replay session resume UX: recent sessions, persisted active session, session status, and new-session escape hatch.
 
 ## Phase Progress
 
 | Roadmap phase | Status | Notes |
 | --- | --- | --- |
 | Phase 0 - Stabilize QA blockers | Mostly complete | Current gates pass: backend pytest, frontend lint/test/build, Alembic upgrade. |
-| Phase 1 - Manual Replay MVP Lock | In progress | Core replay, no-future-leak tests, order lifecycle, drawings and scanner-launched sessions exist. Needs final UAT polish. |
+| Phase 1 - Manual Replay MVP Lock | Mostly complete | Core replay, no-future-leak tests, order lifecycle, drawings, scanner-launched sessions and resume UX exist. Needs final smoke/UAT review. |
 | Phase 2 - Analytics Professional Baseline | Partial | Core metrics, benchmark/outlier concepts exist. Needs UI polish and deterministic acceptance review. |
 | Phase 3 - Indicator And Signal Registry | Mostly complete | Registry includes SMA/EMA/MACD/RSI/BB/ATR/ADX/Ichimoku/Stochastic and additional indicators. Signal taxonomy can still be formalized. |
 | Phase 4 - Backtest MVP Safe Runner | Mostly complete | Safe declarative rules and multi-symbol runs exist. Needs persisted backtest runs/export if required for product polish. |
@@ -33,13 +34,12 @@ Last updated: 2026-06-29.
 
 ## Remaining Large Batches
 
-Estimated remaining after the current batch: 5 large batches.
+Estimated remaining after the current batch: 4 large batches.
 
-1. Replay UAT polish and session resume: session detail/resume UX, clearer replay status/errors, final manual workflow smoke.
-2. Scanner V1 completion: saved scan results, scan history, richer filters by signal/regime/setup, replay links from saved rows.
-3. Analytics acceptance polish: setup/symbol/regime views, outlier contribution UI, drawdown period table, benchmark review.
-4. Backtest/Strategy Lab product polish: saved backtest runs if separate from Strategy Lab, export/comparison ergonomics, sample MACD+RSI strategy pack.
-5. Release hardening: sample data flow, end-to-end smoke script, docs handoff, final UAT checklist and clean git release point.
+1. Scanner V1 completion: saved scan results, scan history, richer filters by signal/regime/setup, replay links from saved rows.
+2. Analytics acceptance polish: setup/symbol/regime views, outlier contribution UI, drawdown period table, benchmark review.
+3. Backtest/Strategy Lab product polish: saved backtest runs if separate from Strategy Lab, export/comparison ergonomics, sample MACD+RSI strategy pack.
+4. Release hardening: final manual replay smoke, sample data flow, end-to-end smoke script, docs handoff, final UAT checklist and clean git release point.
 
 ## Current Gate
 

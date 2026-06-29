@@ -18,6 +18,11 @@ export const getReplaySession = async (sessionId: number): Promise<ReplaySession
   return response.data;
 };
 
+export const listReplaySessions = async (limit: number = 10): Promise<ReplaySession[]> => {
+  const response = await apiClient.get('/replay/sessions', { params: { limit } });
+  return response.data;
+};
+
 export const getSessionCandles = async (sessionId: number): Promise<Candle[]> => {
   const response = await apiClient.get(`/replay/sessions/${sessionId}/candles`);
   return response.data;

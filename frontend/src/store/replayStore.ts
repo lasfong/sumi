@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
 import type { Candle, Position, Trade } from '../types';
 
 interface ReplayState {
@@ -14,15 +15,23 @@ interface ReplayState {
   setTrades: (trades: Trade[]) => void;
 }
 
-export const useReplayStore = create<ReplayState>((set) => ({
-  sessionId: null,
-  candles: [],
-  currentCandleIndex: 0,
-  positions: [],
-  trades: [],
-  setSession: (id) => set({ sessionId: id }),
-  clearSession: () => set({ sessionId: null, candles: [], currentCandleIndex: 0, positions: [], trades: [] }),
-  setCandles: (candles) => set({ candles }),
-  setPositions: (positions) => set({ positions }),
-  setTrades: (trades) => set({ trades }),
-}));
+export const useReplayStore = create<ReplayState>()(
+  persist(
+    (set) => ({
+      sessionId: null,
+      candles: [],
+      currentCandleIndex: 0,
+      positions: [],
+      trades: [],
+      setSession: (id) => set({ sessionId: id }),
+      clearSession: () => set({ sessionId: null, candles: [], currentCandleIndex: 0, positions: [], trades: [] }),
+      setCandles: (candles) => set({ candles }),
+      setPositions: (positions) => set({ positions }),
+      setTrades: (trades) => set({ trades }),
+    }),
+    {
+      name: 'sumi-replay-store',
+      partialize: (state) => ({ sessionId: state.sessionId }),
+    }
+  )
+);

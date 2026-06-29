@@ -85,3 +85,33 @@ def test_previous_candle_keeps_existing_decisions_without_future_candles(db_sess
     decisions = db_session.query(Decision).filter_by(session_id=session.id).all()
     assert len(decisions) == 1
     assert decisions[0].candle_index == 2
+
+
+def test_list_sessions_returns_recent_sessions_first(db_session):
+    base_date = date(2024, 4, 1)
+    for i in range(3):
+        db_session.add(Candle(
+            symbol="RESUME",
+            timeframe="1D",
+            timestamp=base_date.replace(day=base_date.day + i),
+            open=30 + i,
+            high=32 + i,
+            low=29 + i,
+            close=31 + i,
+            volume=1000,
+        ))
+    db_session.commit()
+
+    first = ReplayService.create_session(
+        db_session,
+        ReplaySessionCreate(symbol="RESUME", start_date=date(2024, 4, 1), end_date=date(2024, 4, 3)),
+    )
+    second = ReplayService.create_session(
+        db_session,
+        ReplaySessionCreate(symbol="RESUME", start_date=date(2024, 4, 1), end_date=date(2024, 4, 3)),
+    )
+
+    sessions = ReplayService.list_sessions(db_session, limit=1)
+
+    assert [session.id for session in sessions] == [second.id]
+    assert first.id != second.id

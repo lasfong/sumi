@@ -86,6 +86,7 @@ const isWebSocketCandle = (data: unknown): data is WebSocketCandle => {
 export const ReplayPage: React.FC = () => {
   const store = useReplayStore();
   const chartRef = useRef<CandleChartRef>(null);
+  const queryClient = useQueryClient();
   
   const [isPlaying, setIsPlaying] = useState(false);
   const [playSpeed, setPlaySpeed] = useState(500); // ms per candle
@@ -113,7 +114,7 @@ export const ReplayPage: React.FC = () => {
     enabled: !!store.sessionId,
   });
 
-  const { data: sessionData } = useQuery({
+  const { data: sessionData, isError: isSessionError } = useQuery({
     queryKey: ['replay-session', store.sessionId],
     queryFn: () => getReplaySession(store.sessionId!),
     enabled: !!store.sessionId,
@@ -170,6 +171,7 @@ export const ReplayPage: React.FC = () => {
       refetchCandles();
       refetchPosition();
       refetchOrders();
+      queryClient.invalidateQueries({ queryKey: ['replay-session', store.sessionId] });
     },
     onError: () => {
       setIsPlaying(false);
@@ -183,6 +185,7 @@ export const ReplayPage: React.FC = () => {
       refetchCandles();
       refetchPosition();
       refetchOrders();
+      queryClient.invalidateQueries({ queryKey: ['replay-session', store.sessionId] });
     },
     onError: () => toast.error('Start of data or error'),
   });
@@ -190,6 +193,16 @@ export const ReplayPage: React.FC = () => {
   const handleCreateSession = useCallback((data: CreateSessionRequest) => {
     createMutation.mutate(data);
   }, [createMutation]);
+
+  const handleResumeSession = useCallback((sessionId: number) => {
+    store.setSession(sessionId);
+    toast.success(`Session #${sessionId} resumed`);
+  }, [store]);
+
+  const handleClearSession = useCallback(() => {
+    setIsPlaying(false);
+    store.clearSession();
+  }, [store]);
 
   const handleSubmitDecision = useCallback(async (decision: DecisionCreate) => {
     if (!store.sessionId) return;
@@ -217,8 +230,6 @@ export const ReplayPage: React.FC = () => {
   const signalSource = parseSignalSourcePayload(sessionData?.source_type, sessionData?.source_payload);
   const signalDate = toDateKey(signalSource?.signal_timestamp);
   const currentDate = toDateKey(currentCandle?.timestamp);
-
-  const queryClient = useQueryClient();
 
   const handleWebSocketMessage = useCallback((msg: WebSocketMessage) => {
     if (msg.type === 'new_candle') {
@@ -282,6 +293,13 @@ export const ReplayPage: React.FC = () => {
       prevMutation.mutate(steps);
     }
   }, [store.sessionId, prevMutation]);
+
+  useEffect(() => {
+    if (isSessionError) {
+      toast.error('Saved replay session was not found');
+      store.clearSession();
+    }
+  }, [isSessionError, store]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -445,7 +463,7 @@ fetchActiveIndicators();
 }, [activeIndicators, candlesData, currentCandle, store.sessionId]);
 
   if (!store.sessionId) {
-    return <SessionSetup onCreateSession={handleCreateSession} isLoading={createMutation.isPending} />;
+    return <SessionSetup onCreateSession={handleCreateSession} onResumeSession={handleResumeSession} isLoading={createMutation.isPending} />;
   }
 
   return (
@@ -462,6 +480,11 @@ fetchActiveIndicators();
             {symbolName}
           </span>
           <span style={{ color: 'var(--text-muted)', fontSize: '13px' }}>Session #{store.sessionId}</span>
+          {sessionData && (
+            <span style={{ padding: '4px 8px', background: 'rgba(255, 255, 255, 0.05)', color: 'var(--text-muted)', borderRadius: '4px', fontSize: '12px', textTransform: 'uppercase', border: '1px solid var(--border-color)' }}>
+              {sessionData.status}
+            </span>
+          )}
           {signalSource && (
             <span style={{ padding: '4px 8px', background: 'rgba(255, 209, 102, 0.12)', color: '#FFD166', borderRadius: '4px', fontWeight: 600, fontSize: '12px', border: '1px solid rgba(255, 209, 102, 0.35)' }}>
               Scanner Signal
@@ -517,6 +540,13 @@ fetchActiveIndicators();
           </div>
 
           <div style={{ width: '1px', height: '24px', background: 'var(--border-color)' }}></div>
+
+          <button
+            onClick={handleClearSession}
+            style={{ background: 'var(--bg-panel)', color: 'var(--text-muted)', border: '1px solid var(--border-color)', fontSize: '12px', padding: '6px 10px' }}
+          >
+            New Session
+          </button>
 
           <div style={{ display: 'flex', border: '1px solid var(--border-color)', borderRadius: '6px', overflow: 'hidden' }}>
             <button onClick={() => handlePrev(5)} disabled={prevMutation.isPending || isPlaying} style={{ background: 'var(--bg-panel)', color: 'white', fontSize: '13px', padding: '6px 12px', border: 'none', borderRight: '1px solid var(--border-color)', borderRadius: 0 }}>-5</button>
