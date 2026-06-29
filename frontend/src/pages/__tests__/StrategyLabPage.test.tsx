@@ -32,6 +32,7 @@ const renderWithClient = (ui: React.ReactElement) => {
 describe('StrategyLabPage', () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    window.localStorage.clear();
     vi.mocked(backtestApi.getAvailableStrategies).mockResolvedValue([
       { filename: 'trend.yaml', name: 'Trend Strategy', description: 'Trend', config: { name: 'Trend Strategy' } },
       { filename: 'mean.yaml', name: 'Mean Strategy', description: 'Mean', config: { name: 'Mean Strategy' } },
@@ -83,6 +84,8 @@ describe('StrategyLabPage', () => {
     expect(backtestApi.runBacktest).toHaveBeenCalledTimes(2);
     expect(screen.getByText('2,000.00')).toBeInTheDocument();
     expect(screen.getByText('Best')).toBeInTheDocument();
+    expect(screen.getByText('Run History')).toBeInTheDocument();
+    expect(screen.getByText('2 strategy comparison')).toBeInTheDocument();
   });
 
   it('runs a parameter sweep and renders sweep results', async () => {
@@ -136,5 +139,6 @@ describe('StrategyLabPage', () => {
     expect(strategyLabApi.runParameterSweep).toHaveBeenCalledTimes(1);
     expect(screen.getByText('indicators[0].length=20')).toBeInTheDocument();
     expect(screen.getByText('2,000.00')).toBeInTheDocument();
+    expect(screen.getByText(/Trend Strategy sweep/i)).toBeInTheDocument();
   });
 });

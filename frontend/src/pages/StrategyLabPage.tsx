@@ -11,6 +11,33 @@ interface LabResult {
   response: BacktestResponse;
 }
 
+interface LabHistoryEntry {
+  id: string;
+  type: 'comparison' | 'sweep';
+  createdAt: string;
+  label: string;
+  results?: LabResult[];
+  sweepResults?: SweepVariant[];
+}
+
+const HISTORY_KEY = 'sumi.strategyLab.history.v1';
+
+const loadHistory = (): LabHistoryEntry[] => {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.localStorage.getItem(HISTORY_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+};
+
+const saveHistory = (entries: LabHistoryEntry[]) => {
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem(HISTORY_KEY, JSON.stringify(entries.slice(0, 20)));
+  }
+};
+
 export const StrategyLabPage: React.FC = () => {
   const [symbolsInput, setSymbolsInput] = useState('FPT, SSI, VCI');
   const [startDate, setStartDate] = useState('2020-01-01');
@@ -25,6 +52,7 @@ export const StrategyLabPage: React.FC = () => {
   const [sweepValues, setSweepValues] = useState('5, 10, 20');
   const [maxVariants, setMaxVariants] = useState(12);
   const [sweepResults, setSweepResults] = useState<SweepVariant[]>([]);
+  const [history, setHistory] = useState<LabHistoryEntry[]>(loadHistory);
   const [error, setError] = useState<string | null>(null);
 
   const { data: strategies, isLoading: isLoadingStrategies } = useQuery({
@@ -80,6 +108,11 @@ export const StrategyLabPage: React.FC = () => {
         };
       }));
       setResults(nextResults);
+      addHistory({
+        type: 'comparison',
+        label: `${selected.length} strategy comparison`,
+        results: nextResults,
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Strategy comparison failed.');
     } finally {
@@ -122,6 +155,11 @@ export const StrategyLabPage: React.FC = () => {
         setSweepResults([]);
       } else {
         setSweepResults(response.variants);
+        addHistory({
+          type: 'sweep',
+          label: `${strategy.name} sweep: ${sweepPath.trim()}`,
+          sweepResults: response.variants,
+        });
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Parameter sweep failed.');
@@ -136,6 +174,29 @@ export const StrategyLabPage: React.FC = () => {
 
   const clearSelection = () => {
     setSelectedFilenames([]);
+  };
+
+  const addHistory = (entry: Omit<LabHistoryEntry, 'id' | 'createdAt'>) => {
+    setHistory((current) => {
+      const next = [{
+        ...entry,
+        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        createdAt: new Date().toISOString(),
+      }, ...current].slice(0, 20);
+      saveHistory(next);
+      return next;
+    });
+  };
+
+  const restoreHistory = (entry: LabHistoryEntry) => {
+    if (entry.results) setResults(entry.results);
+    if (entry.sweepResults) setSweepResults(entry.sweepResults);
+    setError(null);
+  };
+
+  const clearHistory = () => {
+    setHistory([]);
+    saveHistory([]);
   };
 
   const getTrades = (response: BacktestResponse) => response.summary?.total_trades ?? response.analytics?.total_trades ?? 0;
@@ -220,6 +281,25 @@ export const StrategyLabPage: React.FC = () => {
       {error && (
         <div className="glass-panel" style={{ borderColor: 'var(--color-sell)', padding: '16px', marginBottom: '24px' }}>
           <p style={{ color: 'var(--color-sell)', margin: 0 }}>{error}</p>
+        </div>
+      )}
+
+      {history.length > 0 && (
+        <div className="glass-panel" style={{ padding: '20px', marginBottom: '24px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+            <h3 style={{ margin: 0, fontSize: '16px' }}>Run History</h3>
+            <button type="button" onClick={clearHistory} style={{ padding: '6px 10px', fontSize: '12px' }}>Clear History</button>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '12px' }}>
+            {history.map((entry) => (
+              <button key={entry.id} type="button" onClick={() => restoreHistory(entry)} className="glass-panel" style={{ padding: '12px', textAlign: 'left', cursor: 'pointer' }}>
+                <strong style={{ display: 'block', marginBottom: '4px' }}>{entry.label}</strong>
+                <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>
+                  {entry.type} - {new Date(entry.createdAt).toLocaleString()}
+                </span>
+              </button>
+            ))}
+          </div>
         </div>
       )}
 
