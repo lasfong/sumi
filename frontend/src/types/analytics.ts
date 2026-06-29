@@ -33,6 +33,26 @@ export interface OutlierImpact {
   trimmed_expectancy?: number;
 }
 
+export interface DrawdownPeriod {
+  start: string;
+  end: string;
+  max_drawdown_pct: number;
+}
+
+export interface BenchmarkPoint {
+  time: string;
+  value: number;
+}
+
+export interface TradeDistribution {
+  trade_id: number;
+  symbol: string;
+  net_pnl: number;
+  pnl_percent: number;
+  r_multiple?: number | null;
+  result: string;
+}
+
 /** Analytics report for a replay session */
 export interface AnalyticsReport {
   total_trades: number;
@@ -40,7 +60,7 @@ export interface AnalyticsReport {
   total_net_pnl: number;
   average_win: number;
   average_loss: number;
-  profit_factor: number;
+  profit_factor: number | null;
   average_r?: number;
   expectancy?: number;
   largest_win?: number;
@@ -54,5 +74,8 @@ export interface AnalyticsReport {
   setup_performance?: SetupPerformance[];
   symbol_performance?: GroupPerformance[];
   mistake_performance?: GroupPerformance[];
+  drawdown_periods?: DrawdownPeriod[];
+  benchmark_curve?: BenchmarkPoint[];
+  trade_distribution?: TradeDistribution[];
   outlier_impact?: OutlierImpact;
 }

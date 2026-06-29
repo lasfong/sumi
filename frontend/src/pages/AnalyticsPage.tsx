@@ -32,6 +32,10 @@ export const AnalyticsPage: React.FC = () => {
 
   const formatMoney = (val?: number) => val ? val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '0.00';
   const formatPercent = (val?: number) => val ? `${(val * 100).toFixed(2)}%` : '0.00%';
+  const formatPctValue = (val?: number) => val ? `${val.toFixed(2)}%` : '0.00%';
+  const benchmarkStart = analytics?.benchmark_curve?.[0]?.value;
+  const benchmarkEnd = analytics?.benchmark_curve?.[analytics.benchmark_curve.length - 1]?.value;
+  const benchmarkReturn = benchmarkStart && benchmarkEnd ? (benchmarkEnd / benchmarkStart - 1) : undefined;
 
   const renderGroupPerformanceTable = (title: string, rows?: GroupPerformance[], emptyText = 'No data available.') => (
     <div className="glass-panel" style={{ padding: '20px' }}>
@@ -129,6 +133,13 @@ export const AnalyticsPage: React.FC = () => {
               <p style={{ margin: 0, fontSize: '28px', fontWeight: 'bold', color: 'var(--color-sell)' }}>
                 {formatMoney(analytics.max_drawdown)}
               </p>
+              <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>{formatPctValue(analytics.max_drawdown_pct)}</span>
+            </div>
+            <div className="glass-panel" style={{ padding: '20px' }}>
+              <h4 style={{ color: 'var(--text-muted)', margin: '0 0 8px 0', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>VNINDEX</h4>
+              <p style={{ margin: 0, fontSize: '28px', fontWeight: 'bold', color: (benchmarkReturn || 0) >= 0 ? 'var(--color-buy)' : 'var(--color-sell)' }}>
+                {benchmarkReturn === undefined ? 'N/A' : formatPercent(benchmarkReturn)}
+              </p>
             </div>
           </div>
 
@@ -200,6 +211,68 @@ export const AnalyticsPage: React.FC = () => {
                 </div>
               ) : (
                 <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>No outlier analysis available.</p>
+              )}
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '16px', marginBottom: '24px' }}>
+            <div className="glass-panel" style={{ padding: '20px' }}>
+              <h3 style={{ marginTop: 0, marginBottom: '16px', fontSize: '16px' }}>Drawdown Periods</h3>
+              {analytics.drawdown_periods && analytics.drawdown_periods.length > 0 ? (
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                    <thead>
+                      <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', textAlign: 'left', color: 'var(--text-muted)' }}>
+                        <th style={{ padding: '8px 0', fontWeight: 500 }}>Start</th>
+                        <th style={{ padding: '8px 0', fontWeight: 500 }}>End</th>
+                        <th style={{ padding: '8px 0', fontWeight: 500, textAlign: 'right' }}>Max DD</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {analytics.drawdown_periods.map((period) => (
+                        <tr key={`${period.start}-${period.end}`} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                          <td style={{ padding: '10px 0' }}>{new Date(period.start).toLocaleDateString()}</td>
+                          <td style={{ padding: '10px 0' }}>{new Date(period.end).toLocaleDateString()}</td>
+                          <td style={{ padding: '10px 0', textAlign: 'right', color: 'var(--color-sell)', fontWeight: 600 }}>{formatPctValue(period.max_drawdown_pct)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>No drawdown periods detected.</p>
+              )}
+            </div>
+
+            <div className="glass-panel" style={{ padding: '20px' }}>
+              <h3 style={{ marginTop: 0, marginBottom: '16px', fontSize: '16px' }}>Trade Distribution</h3>
+              {analytics.trade_distribution && analytics.trade_distribution.length > 0 ? (
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                    <thead>
+                      <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', textAlign: 'left', color: 'var(--text-muted)' }}>
+                        <th style={{ padding: '8px 0', fontWeight: 500 }}>Trade</th>
+                        <th style={{ padding: '8px 0', fontWeight: 500 }}>Symbol</th>
+                        <th style={{ padding: '8px 0', fontWeight: 500, textAlign: 'right' }}>R</th>
+                        <th style={{ padding: '8px 0', fontWeight: 500, textAlign: 'right' }}>PnL %</th>
+                        <th style={{ padding: '8px 0', fontWeight: 500, textAlign: 'right' }}>Net</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {analytics.trade_distribution.map((trade) => (
+                        <tr key={trade.trade_id} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                          <td style={{ padding: '10px 0' }}>#{trade.trade_id}</td>
+                          <td style={{ padding: '10px 0', fontWeight: 600 }}>{trade.symbol}</td>
+                          <td style={{ padding: '10px 0', textAlign: 'right' }}>{trade.r_multiple == null ? 'N/A' : trade.r_multiple.toFixed(2)}</td>
+                          <td style={{ padding: '10px 0', textAlign: 'right', color: trade.pnl_percent >= 0 ? 'var(--color-buy)' : 'var(--color-sell)' }}>{formatPercent(trade.pnl_percent)}</td>
+                          <td style={{ padding: '10px 0', textAlign: 'right', color: trade.net_pnl >= 0 ? 'var(--color-buy)' : 'var(--color-sell)', fontWeight: 600 }}>{formatMoney(trade.net_pnl)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>No trade distribution available.</p>
               )}
             </div>
           </div>
