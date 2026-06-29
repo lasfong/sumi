@@ -14,6 +14,9 @@ vi.mock('../../api/backtestApi', () => ({
 
 vi.mock('../../api/strategyLabApi', () => ({
   runParameterSweep: vi.fn(),
+  listStrategyLabRuns: vi.fn(),
+  saveStrategyLabRun: vi.fn(),
+  deleteStrategyLabRun: vi.fn(),
 }));
 
 const renderWithClient = (ui: React.ReactElement) => {
@@ -33,6 +36,17 @@ describe('StrategyLabPage', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     window.localStorage.clear();
+    vi.mocked(strategyLabApi.listStrategyLabRuns).mockResolvedValue([]);
+    vi.mocked(strategyLabApi.saveStrategyLabRun).mockResolvedValue({
+      id: 1,
+      run_type: 'comparison',
+      label: 'Saved',
+      request_config: {},
+      result_payload: {},
+      metrics: {},
+      created_at: new Date().toISOString(),
+    });
+    vi.mocked(strategyLabApi.deleteStrategyLabRun).mockResolvedValue({ status: 'succeeded', deleted: true });
     vi.mocked(backtestApi.getAvailableStrategies).mockResolvedValue([
       { filename: 'trend.yaml', name: 'Trend Strategy', description: 'Trend', config: { name: 'Trend Strategy' } },
       { filename: 'mean.yaml', name: 'Mean Strategy', description: 'Mean', config: { name: 'Mean Strategy' } },
@@ -86,6 +100,7 @@ describe('StrategyLabPage', () => {
     expect(screen.getByText('Best')).toBeInTheDocument();
     expect(screen.getByText('Run History')).toBeInTheDocument();
     expect(screen.getByText('2 strategy comparison')).toBeInTheDocument();
+    expect(strategyLabApi.saveStrategyLabRun).toHaveBeenCalledTimes(1);
   });
 
   it('runs a parameter sweep and renders sweep results', async () => {

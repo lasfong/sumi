@@ -9,6 +9,7 @@ from app.models.trade import Trade
 from app.models.journal_entry import JournalEntry
 from app.models.event_log import EventLog
 from app.models.drawing import DrawingState
+from app.models.strategy_lab_run import StrategyLabRun
 
 __all__ = [
     "Symbol",
@@ -20,5 +21,7 @@ __all__ = [
     "Position",
     "Trade",
     "JournalEntry",
-    "EventLog"
+    "EventLog",
+    "DrawingState",
+    "StrategyLabRun",
 ]

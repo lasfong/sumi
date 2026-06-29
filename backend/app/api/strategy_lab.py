@@ -1,10 +1,11 @@
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.dependencies import get_db
+from app.services.strategy_lab_history_service import StrategyLabHistoryService
 from app.services.strategy_lab_service import StrategyLabService
 
 
@@ -29,6 +30,14 @@ class ParameterSweepRequest(BaseModel):
     max_variants: int = 30
 
 
+class StrategyLabRunCreate(BaseModel):
+    run_type: str
+    label: str
+    request_config: Dict[str, Any] = Field(default_factory=dict)
+    result_payload: Dict[str, Any] = Field(default_factory=dict)
+    metrics: Dict[str, Any] = Field(default_factory=dict)
+
+
 @router.post("/sweep")
 async def run_parameter_sweep(config: ParameterSweepRequest, db: Session = Depends(get_db)):
     try:
@@ -40,3 +49,27 @@ async def run_parameter_sweep(config: ParameterSweepRequest, db: Session = Depen
             "message": str(exc),
             "variants": [],
         }
+
+
+@router.post("/runs")
+def create_strategy_lab_run(payload: StrategyLabRunCreate, db: Session = Depends(get_db)):
+    return StrategyLabHistoryService.create_run(db, payload.model_dump())
+
+
+@router.get("/runs")
+def list_strategy_lab_runs(limit: int = 50, db: Session = Depends(get_db)):
+    return StrategyLabHistoryService.list_runs(db, limit=limit)
+
+
+@router.get("/runs/{run_id}")
+def get_strategy_lab_run(run_id: int, db: Session = Depends(get_db)):
+    run = StrategyLabHistoryService.get_run(db, run_id)
+    if not run:
+        return {"status": "failed", "error_code": "NOT_FOUND", "message": "Strategy Lab run not found."}
+    return run
+
+
+@router.delete("/runs/{run_id}")
+def delete_strategy_lab_run(run_id: int, db: Session = Depends(get_db)):
+    deleted = StrategyLabHistoryService.delete_run(db, run_id)
+    return {"status": "succeeded" if deleted else "failed", "deleted": deleted}

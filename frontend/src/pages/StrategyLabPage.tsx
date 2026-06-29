@@ -2,8 +2,8 @@ import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getAvailableStrategies, runBacktest } from '../api/backtestApi';
 import type { BacktestRequest, BacktestResponse, AvailableStrategy } from '../api/backtestApi';
-import { runParameterSweep } from '../api/strategyLabApi';
-import type { SweepVariant } from '../api/strategyLabApi';
+import { deleteStrategyLabRun, listStrategyLabRuns, runParameterSweep, saveStrategyLabRun } from '../api/strategyLabApi';
+import type { StrategyLabRun, SweepVariant } from '../api/strategyLabApi';
 
 interface LabResult {
   filename: string;
@@ -53,11 +53,17 @@ export const StrategyLabPage: React.FC = () => {
   const [maxVariants, setMaxVariants] = useState(12);
   const [sweepResults, setSweepResults] = useState<SweepVariant[]>([]);
   const [history, setHistory] = useState<LabHistoryEntry[]>(loadHistory);
+  const [hiddenSavedRunIds, setHiddenSavedRunIds] = useState<number[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const { data: strategies, isLoading: isLoadingStrategies } = useQuery({
     queryKey: ['strategies'],
     queryFn: getAvailableStrategies,
+  });
+
+  const { data: savedRuns } = useQuery({
+    queryKey: ['strategy-lab-runs'],
+    queryFn: () => listStrategyLabRuns(50),
   });
 
   const toggleStrategy = (filename: string) => {
@@ -112,6 +118,12 @@ export const StrategyLabPage: React.FC = () => {
         type: 'comparison',
         label: `${selected.length} strategy comparison`,
         results: nextResults,
+      }, {
+        symbols,
+        start_date: startDate,
+        end_date: endDate,
+        initial_cash: initialCash,
+        benchmark_symbol: benchmarkSymbol,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Strategy comparison failed.');
@@ -159,6 +171,14 @@ export const StrategyLabPage: React.FC = () => {
           type: 'sweep',
           label: `${strategy.name} sweep: ${sweepPath.trim()}`,
           sweepResults: response.variants,
+        }, {
+          symbols,
+          start_date: startDate,
+          end_date: endDate,
+          initial_cash: initialCash,
+          benchmark_symbol: benchmarkSymbol,
+          sweep_path: sweepPath.trim(),
+          sweep_values: values,
         });
       }
     } catch (err) {
@@ -176,7 +196,7 @@ export const StrategyLabPage: React.FC = () => {
     setSelectedFilenames([]);
   };
 
-  const addHistory = (entry: Omit<LabHistoryEntry, 'id' | 'createdAt'>) => {
+  const addHistory = (entry: Omit<LabHistoryEntry, 'id' | 'createdAt'>, requestConfig: Record<string, unknown> = {}) => {
     setHistory((current) => {
       const next = [{
         ...entry,
@@ -185,6 +205,16 @@ export const StrategyLabPage: React.FC = () => {
       }, ...current].slice(0, 20);
       saveHistory(next);
       return next;
+    });
+    void saveStrategyLabRun({
+      run_type: entry.type,
+      label: entry.label,
+      request_config: requestConfig,
+      result_payload: {
+        results: entry.results,
+        sweepResults: entry.sweepResults,
+      },
+      metrics: {},
     });
   };
 
@@ -197,6 +227,8 @@ export const StrategyLabPage: React.FC = () => {
   const clearHistory = () => {
     setHistory([]);
     saveHistory([]);
+    setHiddenSavedRunIds((savedRuns || []).map(run => run.id));
+    void Promise.all((savedRuns || []).map(run => deleteStrategyLabRun(run.id)));
   };
 
   const getTrades = (response: BacktestResponse) => response.summary?.total_trades ?? response.analytics?.total_trades ?? 0;
@@ -216,6 +248,17 @@ export const StrategyLabPage: React.FC = () => {
 
   const sortedResults = [...results].sort((left, right) => getNetPnl(right.response) - getNetPnl(left.response));
   const bestFilename = sortedResults[0]?.filename;
+  const savedHistory = (savedRuns || [])
+    .filter(run => !hiddenSavedRunIds.includes(run.id))
+    .map((run: StrategyLabRun): LabHistoryEntry => ({
+      id: `server-${run.id}`,
+      type: run.run_type,
+      createdAt: run.created_at,
+      label: run.label,
+      results: run.result_payload.results as LabResult[] | undefined,
+      sweepResults: run.result_payload.sweepResults as SweepVariant[] | undefined,
+    }));
+  const displayHistory = [...history, ...savedHistory];
 
   return (
     <div className="animate-fade-in" style={{ maxWidth: '1200px', margin: '0 auto', paddingBottom: '40px' }}>
@@ -284,14 +327,14 @@ export const StrategyLabPage: React.FC = () => {
         </div>
       )}
 
-      {history.length > 0 && (
+      {displayHistory.length > 0 && (
         <div className="glass-panel" style={{ padding: '20px', marginBottom: '24px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
             <h3 style={{ margin: 0, fontSize: '16px' }}>Run History</h3>
             <button type="button" onClick={clearHistory} style={{ padding: '6px 10px', fontSize: '12px' }}>Clear History</button>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '12px' }}>
-            {history.map((entry) => (
+            {displayHistory.map((entry) => (
               <button key={entry.id} type="button" onClick={() => restoreHistory(entry)} className="glass-panel" style={{ padding: '12px', textAlign: 'left', cursor: 'pointer' }}>
                 <strong style={{ display: 'block', marginBottom: '4px' }}>{entry.label}</strong>
                 <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>

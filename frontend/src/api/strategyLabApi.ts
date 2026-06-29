@@ -43,7 +43,40 @@ export interface ParameterSweepResponse {
   message?: string;
 }
 
+export interface StrategyLabRunCreate {
+  run_type: 'comparison' | 'sweep';
+  label: string;
+  request_config?: Record<string, unknown>;
+  result_payload?: Record<string, unknown>;
+  metrics?: Record<string, unknown>;
+}
+
+export interface StrategyLabRun {
+  id: number;
+  run_type: 'comparison' | 'sweep';
+  label: string;
+  request_config: Record<string, unknown>;
+  result_payload: Record<string, unknown>;
+  metrics: Record<string, unknown>;
+  created_at: string;
+}
+
 export async function runParameterSweep(config: ParameterSweepRequest): Promise<ParameterSweepResponse> {
   const response = await apiClient.post('/strategy-lab/sweep', config);
+  return response.data;
+}
+
+export async function saveStrategyLabRun(payload: StrategyLabRunCreate): Promise<StrategyLabRun> {
+  const response = await apiClient.post('/strategy-lab/runs', payload);
+  return response.data;
+}
+
+export async function listStrategyLabRuns(limit = 50): Promise<StrategyLabRun[]> {
+  const response = await apiClient.get('/strategy-lab/runs', { params: { limit } });
+  return response.data;
+}
+
+export async function deleteStrategyLabRun(runId: number): Promise<{ status: string; deleted: boolean }> {
+  const response = await apiClient.delete(`/strategy-lab/runs/${runId}`);
   return response.data;
 }
