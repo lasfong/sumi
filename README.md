@@ -1,125 +1,76 @@
-# VN Replay Trading Lab (Sumi)
+# Sumi Replay Trading Lab
 
-Sumi là một Web-app Local-first được thiết kế dành riêng cho Nhà đầu tư cá nhân tại Việt Nam. Nó cho phép bạn nạp dữ liệu lịch sử từ CafeF và luyện tập ra quyết định giao dịch (Mua/Bán) trên biểu đồ nến mà không sợ lộ trước tương lai (No Future Leak). Quan trọng hơn, Sumi tích hợp sẵn một hệ thống **Trading Journal** (Nhật ký giao dịch) và **Analytics** (Phân tích hiệu suất) giúp bạn hiểu rõ bản thân đang sai ở đâu và setup nào đem lại lợi nhuận cao nhất.
+Sumi is a local-first trading practice and research platform for manual replay, journaling, analytics, scanner workflows and automated backtesting.
 
-## Tính năng nổi bật
+## What Sumi V2 Supports
 
-1. **Replay Engine không gian lận**: Dữ liệu tương lai bị cắt đứt hoàn toàn ở tầng Backend, đảm bảo bạn không thể "nhìn trộm" nến ngày mai.
-2. **Trading Journal Tích hợp**: Mỗi quyết định Buy/Sell đều yêu cầu (tuỳ chọn) bạn nhập Lý do, Loại Setup (Breakout, Pullback...) và Độ tự tin (1-5 sao).
-3. **Analytics Dashboard**: Tự động tính toán Win Rate, Profit Factor, R-Multiple, Expectancy, Average Win/Loss.
-4. **Phím tắt nhanh (Shortcuts)**: Giao dịch không cần dùng chuột (`Space` để Next, `B` để Buy, `S` để Sell, `C` để Close).
-5. **Giao diện Dark Mode**: Tích hợp TradingView Lightweight Charts tối ưu và đẹp mắt.
+- Manual bar replay with no-future-leak candles and session-scoped indicators.
+- Trading decisions, order lifecycle, T+2 constraints, pending limit orders, positions and trades.
+- Drawing persistence, journal fields and replay session resume.
+- Analytics for equity, drawdown, benchmark, setup/symbol/mistake grouping, trade distribution and outlier impact.
+- Safe declarative backtesting without API-controlled `eval()`.
+- Sample MA Crossover and MACD RSI Momentum strategies.
+- Historical signal scanner with saved scan runs and replay links.
+- Strategy Lab comparison, parameter sweep and persisted run history.
 
-## Hướng dẫn cài đặt (Installation)
+## Tech Stack
 
-Sumi chạy hoàn toàn trên máy tính cá nhân của bạn (Local-first). Database sử dụng SQLite nên không cần cài đặt thêm CSDL phức tạp.
+- Backend: FastAPI, SQLAlchemy, SQLite, Alembic, pandas.
+- Frontend: React, TypeScript, Vite, TanStack Query, Zustand, Lightweight Charts.
+- Default database: local SQLite.
 
-### Yêu cầu
-- Python 3.10+
-- Node.js 18+
+## Run Locally
 
-### 1. Cài đặt Backend
-Mở Terminal / Command Prompt và chạy các lệnh sau:
+Backend:
 
-```bash
+```powershell
 cd backend
-python -m venv venv
-
-# Windows
-.\venv\Scripts\activate
-# Mac/Linux
-source venv/bin/activate
-
-pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
 ```
 
-Khởi chạy Server Backend:
-```bash
-uvicorn app.main:app --reload --port 8000
-```
+Frontend:
 
-### 2. Cài đặt Frontend
-Mở một Terminal mới:
-
-```bash
+```powershell
 cd frontend
-npm install
+npm.cmd install
+npm.cmd run dev
 ```
 
-Khởi chạy Server Frontend:
-```bash
-npm run dev
-```
+Open the Vite URL shown by the frontend dev server.
 
-Mở trình duyệt tại địa chỉ `http://localhost:5173` để sử dụng.
+## Import Data
 
----
+CafeF batch import:
 
-## Hướng dẫn sử dụng
-
-### Bước 1: Nạp dữ liệu (Import Data)
-1. Tải dữ liệu lịch sử chứng khoán (File CSV nến) từ [CafeF](https://cafef.vn/du-lieu/du-lieu-download.chn).
-2. Xả nén thư mục tải về (Ví dụ: `CafeF.SolieuGD...`) vào thư mục `data/raw/cafef_sample/` của dự án.
-3. Chạy lệnh siêu tốc để nạp dữ liệu vào Database:
-```bash
+```powershell
 cd backend
-python scripts/import_batch.py ../data/raw/cafef_sample
+.\.venv\Scripts\python.exe scripts\import_batch.py ..\data\raw\cafef_sample
 ```
 
-### Bước 2: Bắt đầu luyện tập
-1. Vào mục **Replay Lab** trên giao diện web.
-2. Gõ mã chứng khoán (Ví dụ: `VNINDEX`, `FPT`) và bấm `Start Session`.
-3. Bấm `Space` (Phím cách) để tiến từng ngày.
-4. Khi thấy cơ hội, bấm `B` (Buy) hoặc `S` (Sell).
-5. Một hộp thoại sẽ hiện ra yêu cầu bạn điền **Lý do (Reason)** và chấm điểm **Độ tự tin**. Bấm Confirm để khớp lệnh.
-6. Khi muốn chốt lời/cắt lỗ, bấm `C` (Close).
+Raw data should live under `data/raw/`. Local databases such as `backend/sumi.db` are runtime artifacts and should not be committed.
 
-### Bước 3: Đánh giá bản thân
-1. Chuyển sang mục **Analytics**.
-2. Nhập Session ID (Số ID sẽ hiện trên thanh tiêu đề lúc bạn Replay) và xem các báo cáo tổng quan về năng lực giao dịch của bạn trong phiên đó.
+## Verify Release Gates
 
----
+Run all V2 gates from the repository root:
 
-## Kiến trúc công nghệ (Tech Stack)
-- **Backend:** FastAPI, SQLAlchemy, SQLite, Pandas (Fast calculation)
-- **Frontend:** React, TypeScript, Vite, TanStack Query, Zustand, TradingView Lightweight Charts
-
-*Dự án tuân thủ nghiêm ngặt nguyên tắc Domain-Driven Design (DDD) tách biệt hoàn toàn Decision, Order, Execution, Position và Trade.*
-
----
-
-## Trạng thái hiện tại
-
-Dự án đang trong giai đoạn hoàn thiện MVP core:
-- ✅ Import CafeF CSV/TXT/ZIP
-- ✅ Replay Engine (no-future-leak)
-- ✅ Trade Lifecycle (Decision → Order → Execution → Position → Trade)
-- ✅ T+2 settlement rule
-- ✅ Fee/Tax calculation
-- ✅ Basic Analytics
-- ✅ Limit Orders (đã implement)
-- ✅ Advanced Analytics (đã chuẩn hóa)
-- ❌ Algorithmic Backtest Engine
-
-## Cách chạy test
-
-### Backend
-```bash
-cd backend
-.\.venv\Scripts\activate
-python -m pytest -v app/tests
+```powershell
+.\scripts\verify-v2.ps1
 ```
 
-### Frontend
-```bash
-cd frontend
-npm run build
-```
+The script runs backend tests, Alembic upgrade, frontend lint, frontend tests and frontend production build.
 
-## Giới hạn hiện tại
+## Canonical Docs
 
-- Database: SQLite (local-first, chưa hỗ trợ PostgreSQL)
-- Chỉ hỗ trợ timeframe 1D
-- Chưa có multi-user authentication
-- Chưa có real-time market data
-- Strategy backtest engine chưa hoàn thiện
+Start with:
+
+- `docs/INDEX.md`
+- `docs/PROGRESS_V2.md`
+- `docs/RELEASE_CHECKLIST_V2.md`
+- `docs/ACCEPTANCE_CRITERIA_V2.md`
+
+## Known V2 Limits
+
+- Daily candles are the supported happy path.
+- SQLite is the supported V2 database.
+- Sector strength and advanced scanner filters remain future scope unless sector metadata is available.
+- No multi-user authentication; Sumi is intentionally local-first.

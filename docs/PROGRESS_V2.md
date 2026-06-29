@@ -20,26 +20,40 @@ Last updated: 2026-06-29.
 13. Scanner V1 persistence: saved scan runs, scan history UI, and reloadable historical signals.
 14. Analytics acceptance UI: benchmark summary, drawdown periods, trade distribution, and typed analytics contract.
 15. Backtest strategy polish: MACD+RSI sample strategy, RSI/MACD backtest indicators, clean MA sample, and selected-strategy context UI.
+16. Release hardening: verification script, release checklist, README refresh, and final automated gate pass.
 
 ## Phase Progress
 
 | Roadmap phase | Status | Notes |
 | --- | --- | --- |
-| Phase 0 - Stabilize QA blockers | Mostly complete | Current gates pass: backend pytest, frontend lint/test/build, Alembic upgrade. |
-| Phase 1 - Manual Replay MVP Lock | Mostly complete | Core replay, no-future-leak tests, order lifecycle, drawings, scanner-launched sessions and resume UX exist. Needs final smoke/UAT review. |
-| Phase 2 - Analytics Professional Baseline | Mostly complete | Core metrics, benchmark, outlier impact, drawdown periods, symbol/mistake/setup views and trade distribution are visible. Needs final UAT review. |
+| Phase 0 - Stabilize QA blockers | Complete | Final gate passes: backend pytest, Alembic upgrade, frontend lint/test/build. |
+| Phase 1 - Manual Replay MVP Lock | Complete | Core replay, no-future-leak tests, order lifecycle, drawings, scanner-launched sessions and resume UX exist. |
+| Phase 2 - Analytics Professional Baseline | Complete | Core metrics, benchmark, outlier impact, drawdown periods, symbol/mistake/setup views and trade distribution are visible. |
 | Phase 3 - Indicator And Signal Registry | Mostly complete | Registry includes SMA/EMA/MACD/RSI/BB/ATR/ADX/Ichimoku/Stochastic and additional indicators. Signal taxonomy can still be formalized. |
-| Phase 4 - Backtest MVP Safe Runner | Mostly complete | Safe declarative rules, multi-symbol runs, MA and MACD+RSI samples, and symbol/period/regime slices exist. Needs final release smoke. |
-| Phase 5 - Regime Classifier And Research Slices | Partial | Regime classifier and slices exist. Sector strength remains future unless sector data is complete. |
-| Phase 6 - Scanner V1 | Mostly complete | Historical scanner, replay links, saved scan runs and scan history UI exist. Richer filters can be added after analytics polish. |
-| Phase 7 - Strategy Lab Professional V1 | Mostly complete | Comparison, sweep, persisted run history, and reusable sample strategies exist. Export can remain future unless requested. |
-| Phase 8 - Optional Infrastructure | Not started | Defer unless sync SQLite workflow becomes too slow. |
+| Phase 4 - Backtest MVP Safe Runner | Complete | Safe declarative rules, multi-symbol runs, MA and MACD+RSI samples, and symbol/period/regime slices exist. |
+| Phase 5 - Regime Classifier And Research Slices | Complete for V2 | Regime classifier and slices exist. Sector strength remains future unless sector metadata is complete. |
+| Phase 6 - Scanner V1 | Complete | Historical scanner, replay links, saved scan runs and scan history UI exist. Advanced filters remain future scope. |
+| Phase 7 - Strategy Lab Professional V1 | Complete for V2 | Comparison, sweep, persisted run history, and reusable sample strategies exist. Export can remain future scope. |
+| Phase 8 - Optional Infrastructure | Deferred | Defer unless sync SQLite workflow becomes too slow. |
 
 ## Remaining Large Batches
 
-Estimated remaining after the current batch: 1 large batch.
+Estimated remaining after the current batch: 0 large batches.
 
-1. Release hardening: final manual replay smoke, sample data flow, end-to-end smoke script, docs handoff, final UAT checklist and clean git release point.
+Release hardening is complete. Future work should be tracked as post-V2 enhancements.
+
+## Final Verification
+
+Last automated release gate: 2026-06-29.
+
+```text
+scripts/verify-v2.ps1
+Backend pytest: 44 passed, 1 warning.
+Alembic upgrade head: passed.
+Frontend lint: passed.
+Frontend tests: 5 files / 7 tests passed.
+Frontend build: passed.
+```
 
 ## Current Gate
 
