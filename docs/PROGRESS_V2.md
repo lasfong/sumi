@@ -29,7 +29,7 @@ Last updated: 2026-06-29.
 | Phase 0 - Stabilize QA blockers | Complete | Final gate passes: backend pytest, Alembic upgrade, frontend lint/test/build. |
 | Phase 1 - Manual Replay MVP Lock | Complete | Core replay, no-future-leak tests, order lifecycle, drawings, scanner-launched sessions and resume UX exist. |
 | Phase 2 - Analytics Professional Baseline | Complete | Core metrics, benchmark, outlier impact, drawdown periods, symbol/mistake/setup views and trade distribution are visible. |
-| Phase 3 - Indicator And Signal Registry | Mostly complete | Registry includes SMA/EMA/MACD/RSI/BB/ATR/ADX/Ichimoku/Stochastic and additional indicators. Signal taxonomy can still be formalized. |
+| Phase 3 - Indicator And Signal Registry | Complete for V2 | Registry includes SMA/EMA/MACD/RSI/BB/ATR/ADX/Ichimoku/Stochastic and additional indicators. Advanced signal taxonomy extensions remain future scope. |
 | Phase 4 - Backtest MVP Safe Runner | Complete | Safe declarative rules, multi-symbol runs, MA and MACD+RSI samples, and symbol/period/regime slices exist. |
 | Phase 5 - Regime Classifier And Research Slices | Complete for V2 | Regime classifier and slices exist. Sector strength remains future unless sector metadata is complete. |
 | Phase 6 - Scanner V1 | Complete | Historical scanner, replay links, saved scan runs and scan history UI exist. Advanced filters remain future scope. |
