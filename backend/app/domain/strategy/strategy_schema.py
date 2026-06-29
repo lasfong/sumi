@@ -4,7 +4,10 @@ from typing import Optional, List, Dict, Any
 class IndicatorConfig(BaseModel):
     name: str
     type: str  # sma, ema, rsi, etc.
-    length: int
+    length: Optional[int] = None
+    fast: Optional[int] = None
+    slow: Optional[int] = None
+    signal: Optional[int] = None
 
 class PositionSizing(BaseModel):
     method: str = "fixed_quantity"

@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { getAvailableStrategies, runBacktest } from '../api/backtestApi';
-import type { BacktestRequest, BacktestResultSlice } from '../api/backtestApi';
+import type { BacktestRequest, BacktestResultSlice, StrategyConfig } from '../api/backtestApi';
 import { EquityChart } from '../components/analytics/EquityChart';
 
 export const BacktestPage: React.FC = () => {
@@ -15,6 +15,8 @@ export const BacktestPage: React.FC = () => {
     queryKey: ['strategies'],
     queryFn: getAvailableStrategies,
   });
+  const selectedStrategy = strategies?.find(s => s.filename === selectedStrategyFilename);
+  const selectedStrategyConfig = selectedStrategy?.config as StrategyConfig | undefined;
 
   const mutation = useMutation({
     mutationFn: runBacktest,
@@ -163,6 +165,25 @@ export const BacktestPage: React.FC = () => {
           </div>
         </form>
       </div>
+
+      {selectedStrategy && (
+        <div className="glass-panel" style={{ padding: '18px', marginBottom: '24px', borderColor: 'rgba(41, 98, 255, 0.35)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '16px', alignItems: 'flex-start' }}>
+            <div>
+              <h3 style={{ margin: '0 0 8px 0', fontSize: '16px' }}>{selectedStrategy.name}</h3>
+              <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: '13px', whiteSpace: 'pre-line' }}>{selectedStrategy.description || 'No description available.'}</p>
+            </div>
+            <div style={{ display: 'flex', gap: '8px', flexShrink: 0 }}>
+              <span style={{ padding: '4px 8px', background: 'rgba(255,255,255,0.05)', borderRadius: '4px', color: 'var(--text-muted)', fontSize: '12px' }}>
+                {(selectedStrategyConfig?.indicators || []).length} indicators
+              </span>
+              <span style={{ padding: '4px 8px', background: 'rgba(255,255,255,0.05)', borderRadius: '4px', color: 'var(--text-muted)', fontSize: '12px' }}>
+                {(selectedStrategyConfig?.entry_rules || []).length} entry rules
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
 
       {result && !analytics && (
         result.summary ? (

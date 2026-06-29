@@ -1,0 +1,34 @@
+name: "MACD RSI Momentum"
+version: "1.0"
+description: |
+  Momentum confirmation strategy:
+  - Entry when MACD line crosses above signal line.
+  - RSI must confirm positive momentum but avoid overbought entries.
+  - Exit when MACD crosses down or RSI weakens.
+
+indicators:
+  - name: macd
+    type: macd
+    fast: 12
+    slow: 26
+    signal: 9
+  - name: rsi
+    type: rsi
+    length: 14
+
+entry_rules:
+  - dsl:
+      all:
+        - cross_up: ["macd_line", "macd_signal"]
+        - gt: ["rsi", 50]
+        - lt: ["rsi", 70]
+
+exit_rules:
+  - dsl:
+      any:
+        - cross_down: ["macd_line", "macd_signal"]
+        - lt: ["rsi", 45]
+
+position_sizing:
+  method: fixed_quantity
+  quantity: 1000

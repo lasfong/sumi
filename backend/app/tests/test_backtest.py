@@ -1,9 +1,28 @@
 import pytest
 import math
+import pandas as pd
 from datetime import date, timedelta
 from app.models.candle import Candle
 from app.models.trade import Trade
+from app.domain.strategy.strategy_loader import list_available_strategies, load_strategy_from_dict
 from app.services.backtest_service import BacktestService
+
+
+def test_backtest_supports_macd_rsi_strategy_indicators():
+    strategies = list_available_strategies()
+    sample = next(item for item in strategies if item["filename"] == "macd_rsi_momentum.yaml")
+    strategy = load_strategy_from_dict(sample["config"])
+    df = pd.DataFrame({
+        "close": [100 + math.sin(i / 3) * 5 + i * 0.2 for i in range(80)],
+    })
+
+    values = BacktestService()._compute_indicators(df, strategy.indicators)
+
+    assert "macd_line" in values
+    assert "macd_signal" in values
+    assert "macd_hist" in values
+    assert "rsi" in values
+    BacktestService()._validate_strategy_rules(strategy, set(values.keys()))
 
 @pytest.mark.asyncio
 async def test_backtest_ma_crossover_e2e(db_session):
