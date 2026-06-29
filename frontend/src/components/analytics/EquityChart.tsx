@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { createChart } from 'lightweight-charts';
 import type { IChartApi, Time } from 'lightweight-charts';
+import { toDateKey } from '../../utils/date';
 
 interface EquityPoint {
   timestamp: string;
@@ -14,12 +15,6 @@ interface EquityPoint {
 interface EquityChartProps {
   data: EquityPoint[];
 }
-
-const toChartDate = (timestamp: string): string => {
-  if (timestamp.includes('T')) return timestamp.split('T')[0];
-  if (timestamp.includes(' ')) return timestamp.split(' ')[0];
-  return timestamp;
-};
 
 export const EquityChart: React.FC<EquityChartProps> = ({ data }) => {
   const chartContainerRef = useRef<HTMLDivElement>(null);
@@ -76,7 +71,7 @@ export const EquityChart: React.FC<EquityChartProps> = ({ data }) => {
     
     // Add base line
     const chartData = sortedData.map(d => ({
-      time: toChartDate(d.timestamp) as Time,
+      time: (toDateKey(d.timestamp) || d.timestamp) as Time,
       value: d.equity
     }));
     
@@ -91,7 +86,7 @@ export const EquityChart: React.FC<EquityChartProps> = ({ data }) => {
     }
 
     const ddData = sortedData.map(d => ({
-      time: toChartDate(d.timestamp) as Time,
+      time: (toDateKey(d.timestamp) || d.timestamp) as Time,
       value: d.drawdown,
       color: 'rgba(255, 23, 68, 0.5)'
     }));

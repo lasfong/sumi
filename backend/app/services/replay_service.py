@@ -4,9 +4,8 @@ from fastapi import HTTPException
 from app.models.replay_session import ReplaySession
 from app.models.candle import Candle
 from app.schemas.replay_schema import ReplaySessionCreate
-from app.domain.enums import SessionStatus
+from app.domain.enums import SessionMode, SessionStatus
 from app.services.event_logging_service import EventLoggingService
-from app.domain.enums import SessionStatus
 from typing import List
 
 class ReplayService:
@@ -73,7 +72,9 @@ class ReplayService:
     @staticmethod
     def list_sessions(db: Session, limit: int = 20) -> List[ReplaySession]:
         clean_limit = max(1, min(int(limit), 100))
+        replay_modes = [mode.value for mode in SessionMode]
         return db.query(ReplaySession)\
+            .filter(ReplaySession.mode.in_(replay_modes))\
             .order_by(ReplaySession.updated_at.desc(), ReplaySession.id.desc())\
             .limit(clean_limit)\
             .all()

@@ -31,6 +31,31 @@ This runs:
 - Frontend tests.
 - Frontend production build.
 
+## Browser Regression Gate
+
+Run this after starting backend and frontend locally:
+
+```powershell
+cd frontend
+npm.cmd run smoke:browser
+```
+
+Or from repository root after both local services are already running:
+
+```powershell
+.\scripts\verify-v2.ps1 -BrowserSmoke
+```
+
+This browser smoke covers:
+
+- Replay session creation.
+- EMA/RSI/MACD indicator warm-up.
+- BUY, T+1 SELL rejection and T+2 SELL success.
+- Backtest MACD RSI Momentum.
+- Strategy Lab comparison and sweep.
+- Scanner run and scanner-to-replay launch.
+- Analytics render for the smoke replay session.
+
 ## Manual UAT Checklist
 
 1. Start backend and frontend locally.

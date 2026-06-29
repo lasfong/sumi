@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'react-hot-toast';
 import { Sidebar } from './components/layout/Sidebar';
+import { ErrorBoundary } from './components/common/ErrorBoundary';
 
 const queryClient = new QueryClient();
 const ImportPage = lazy(() => import('./pages/ImportPage').then(module => ({ default: module.ImportPage })));
@@ -26,18 +27,20 @@ function App() {
         <div style={{ display: 'flex', height: '100vh', width: '100vw', overflow: 'hidden' }}>
           <Sidebar />
           <main style={{ flex: 1, marginLeft: '292px', padding: '24px', overflowY: 'auto' }}>
-            <Suspense fallback={<PageFallback />}>
-              <Routes>
-                <Route path="/" element={<div className="glass-panel" style={{padding: '2rem'}}><h2>Welcome to Sumi Replay Lab</h2><p>Select an option from the menu.</p></div>} />
-                <Route path="/import" element={<ImportPage />} />
-                <Route path="/replay" element={<ReplayPage />} />
-                <Route path="/backtest" element={<BacktestPage />} />
-                <Route path="/strategy-lab" element={<StrategyLabPage />} />
-                <Route path="/scanner" element={<ScannerPage />} />
-                <Route path="/journal" element={<JournalPage />} />
-                <Route path="/analytics" element={<AnalyticsPage />} />
-              </Routes>
-            </Suspense>
+            <ErrorBoundary>
+              <Suspense fallback={<PageFallback />}>
+                <Routes>
+                  <Route path="/" element={<div className="glass-panel" style={{padding: '2rem'}}><h2>Welcome to Sumi Replay Lab</h2><p>Select an option from the menu.</p></div>} />
+                  <Route path="/import" element={<ImportPage />} />
+                  <Route path="/replay" element={<ReplayPage />} />
+                  <Route path="/backtest" element={<BacktestPage />} />
+                  <Route path="/strategy-lab" element={<StrategyLabPage />} />
+                  <Route path="/scanner" element={<ScannerPage />} />
+                  <Route path="/journal" element={<JournalPage />} />
+                  <Route path="/analytics" element={<AnalyticsPage />} />
+                </Routes>
+              </Suspense>
+            </ErrorBoundary>
           </main>
         </div>
       </BrowserRouter>

@@ -23,6 +23,7 @@ import { useWebSocket } from '../hooks/useWebSocket';
 import type { WebSocketMessage } from '../hooks/useWebSocket';
 import { useQueryClient } from '@tanstack/react-query';
 import type { IndicatorDataPoint } from '../api/indicatorsApi';
+import { sortDateKeys, toDateKey, unixSecondsToDateKey } from '../utils/date';
 
 interface ApiError {
   response?: {
@@ -60,11 +61,6 @@ const parseSignalSourcePayload = (sourceType?: string | null, sourcePayload?: st
   } catch {
     return null;
   }
-};
-
-const toDateKey = (value?: string | null): string | null => {
-  if (!value) return null;
-  return value.includes('T') ? value.split('T')[0] : value;
 };
 
 const parseDrawings = (stateData?: string): DrawingLine[] => {
@@ -235,7 +231,7 @@ export const ReplayPage: React.FC = () => {
     if (msg.type === 'new_candle') {
       const newCandle = msg.data;
       if (!isWebSocketCandle(newCandle)) return;
-      const wsDateKey = new Date(newCandle.time * 1000).toISOString().split('T')[0];
+      const wsDateKey = unixSecondsToDateKey(newCandle.time);
       
       // Update chart directly for smoothness
       if (chartRef.current) {
@@ -325,7 +321,7 @@ export const ReplayPage: React.FC = () => {
 
   const chartCandleRows = Array.from(
     new Map((candlesData || []).map((c: Candle) => [toDateKey(c.timestamp) || c.timestamp, c] as const)).entries()
-  ).sort(([a], [b]) => a.localeCompare(b));
+  ).sort(([a], [b]) => sortDateKeys(a, b));
 
   const formattedCandles: ChartCandle[] = chartCandleRows.map(([time, c]) => ({
     time,
@@ -345,7 +341,9 @@ export const ReplayPage: React.FC = () => {
     .filter((d: Decision) => ['BUY', 'ADD', 'SELL', 'REDUCE', 'CLOSE', 'CUT_LOSS', 'TAKE_PROFIT'].includes(d.action))
     .map((d: Decision) => {
       const isBuy = d.action === 'BUY' || d.action === 'ADD';
-      const dateStr = typeof d.decision_date === 'string' ? d.decision_date.split('T')[0] : String(d.decision_date);
+      const dateStr = typeof d.decision_date === 'string'
+        ? toDateKey(d.decision_date) || d.decision_date
+        : String(d.decision_date);
       return {
         time: dateStr as Time,
         position: (isBuy ? 'belowBar' : 'aboveBar') as SeriesMarkerPosition,
@@ -420,7 +418,7 @@ export const ReplayPage: React.FC = () => {
             const rawValue = d[k];
             const value = typeof rawValue === 'number' ? rawValue : Number(rawValue);
             return Number.isFinite(value)
-              ? { time: d.timestamp.split('T')[0] as Time, value }
+              ? { time: (toDateKey(d.timestamp) || d.timestamp) as Time, value }
               : null;
           })
           .filter((d): d is { time: Time; value: number } => d !== null);

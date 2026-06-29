@@ -24,6 +24,7 @@ Browser UAT was executed against local FastAPI (`127.0.0.1:8000`) and Vite (`127
 - Existing local SQLite databases could miss `executions.trade_id`, causing trade execution `500` errors despite models expecting the column.
 - Open positions API returned closed positions, causing the UI to show `SHORT 0`.
 - Equity charts crashed on SQL datetime strings such as `2020-01-02 00:00:00`.
+- Recent Replay Sessions could include automated backtest sessions with `mode=backtest`, causing response validation errors.
 
 ## Evidence Sessions
 
@@ -36,3 +37,4 @@ Browser UAT was executed against local FastAPI (`127.0.0.1:8000`) and Vite (`127
 
 - Browser console history retained older errors from pre-fix tabs; backend logs and fresh page state were used to verify fixed requests.
 - Drawing requires clicking on a chart time coordinate. Clicking whitespace does not create a drawing because `lightweight-charts` does not provide a `param.time` there.
+- `npm.cmd run smoke:browser` was added as a repeatable browser regression gate. It requires local backend/frontend services and a Playwright-compatible browser.

@@ -8,6 +8,7 @@ from app.main import app
 from app.db import Base
 from app.dependencies import get_db
 from app.models.candle import Candle
+from app.models.replay_session import ReplaySession
 from app.domain.enums import SessionMode, DecisionAction
 
 # Use StaticPool so all connections share the same in-memory database
@@ -59,6 +60,29 @@ def test_health_check(client):
     response = client.get("/api/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "message": "Sumi API is running"}
+
+def test_list_replay_sessions_excludes_backtest_sessions(client):
+    db = TestingSessionLocal()
+    backtest_session = ReplaySession(
+        symbol="API_TEST",
+        timeframe="1D",
+        adjustment_type="unadjusted",
+        start_date=date(2023, 11, 1),
+        end_date=date(2023, 11, 5),
+        initial_cash=100000.0,
+        current_cash=100000.0,
+        current_index=0,
+        status="completed",
+        mode="backtest",
+    )
+    db.add(backtest_session)
+    db.commit()
+    db.close()
+
+    response = client.get("/api/replay/sessions")
+
+    assert response.status_code == 200
+    assert all(session["mode"] != "backtest" for session in response.json())
 
 def test_full_replay_lifecycle(client):
     # 1. Create Session (use high initial_cash to cover fees)

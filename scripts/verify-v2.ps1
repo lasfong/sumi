@@ -1,3 +1,7 @@
+param(
+  [switch]$BrowserSmoke
+)
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
@@ -21,6 +25,10 @@ try {
   npm.cmd run lint
   npm.cmd run test
   npm.cmd run build
+  if ($BrowserSmoke) {
+    Write-Host "== Sumi V2 browser smoke =="
+    npm.cmd run smoke:browser
+  }
 }
 finally {
   Pop-Location
