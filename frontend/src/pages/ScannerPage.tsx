@@ -1,8 +1,10 @@
 import React, { useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
 import { getAvailableStrategies } from '../api/backtestApi';
-import { runScanner } from '../api/scannerApi';
-import type { ScannerRequest } from '../api/scannerApi';
+import { createReplaySessionFromSignal, runScanner } from '../api/scannerApi';
+import type { ScannerRequest, ScannerResult } from '../api/scannerApi';
+import { useReplayStore } from '../store/replayStore';
 
 export const ScannerPage: React.FC = () => {
   const [symbolsInput, setSymbolsInput] = useState('FPT, SSI, VCI');
@@ -11,6 +13,9 @@ export const ScannerPage: React.FC = () => {
   const [benchmarkSymbol, setBenchmarkSymbol] = useState('VNINDEX');
   const [maxResults, setMaxResults] = useState(200);
   const [selectedStrategyFilename, setSelectedStrategyFilename] = useState('');
+  const [replayError, setReplayError] = useState<string | null>(null);
+  const navigate = useNavigate();
+  const setSession = useReplayStore(state => state.setSession);
 
   const { data: strategies, isLoading: isLoadingStrategies } = useQuery({
     queryKey: ['strategies'],
@@ -19,6 +24,10 @@ export const ScannerPage: React.FC = () => {
 
   const mutation = useMutation({
     mutationFn: runScanner,
+  });
+
+  const replayMutation = useMutation({
+    mutationFn: createReplaySessionFromSignal,
   });
 
   const handleSubmit = (event: React.FormEvent) => {
@@ -46,6 +55,22 @@ export const ScannerPage: React.FC = () => {
 
   const formatMoney = (value?: number) => value ? value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '0.00';
   const result = mutation.data;
+
+  const handleReplaySignal = async (item: ScannerResult) => {
+    setReplayError(null);
+    try {
+      const response = await replayMutation.mutateAsync({
+        symbol: item.symbol,
+        signal_timestamp: item.timestamp,
+        lookback_days: 120,
+        forward_days: 90,
+      });
+      setSession(response.session.id);
+      navigate('/replay');
+    } catch (error) {
+      setReplayError(error instanceof Error ? error.message : 'Could not create replay session.');
+    }
+  };
 
   return (
     <div className="animate-fade-in" style={{ maxWidth: '1200px', margin: '0 auto', paddingBottom: '40px' }}>
@@ -100,6 +125,12 @@ export const ScannerPage: React.FC = () => {
         </div>
       )}
 
+      {replayError && (
+        <div className="glass-panel" style={{ borderColor: 'var(--color-sell)', padding: '16px', marginBottom: '24px' }}>
+          <p style={{ color: 'var(--color-sell)', margin: 0 }}>{replayError}</p>
+        </div>
+      )}
+
       {result?.status === 'succeeded' && (
         <div className="glass-panel" style={{ padding: '20px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
@@ -116,6 +147,7 @@ export const ScannerPage: React.FC = () => {
                     <th style={{ padding: '8px', fontWeight: 500 }}>Signal</th>
                     <th style={{ padding: '8px', fontWeight: 500 }}>Regime</th>
                     <th style={{ padding: '8px', fontWeight: 500, textAlign: 'right' }}>Price</th>
+                    <th style={{ padding: '8px', fontWeight: 500, textAlign: 'right' }}>Replay</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -126,6 +158,11 @@ export const ScannerPage: React.FC = () => {
                       <td style={{ padding: '12px 8px', textTransform: 'uppercase' }}>{item.signal_type}</td>
                       <td style={{ padding: '12px 8px' }}>{item.regime}</td>
                       <td style={{ padding: '12px 8px', textAlign: 'right', fontFamily: 'monospace' }}>{formatMoney(item.price)}</td>
+                      <td style={{ padding: '12px 8px', textAlign: 'right' }}>
+                        <button type="button" onClick={() => handleReplaySignal(item)} disabled={replayMutation.isPending} style={{ padding: '6px 10px', fontSize: '12px' }}>
+                          Replay
+                        </button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>

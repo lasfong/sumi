@@ -1,11 +1,16 @@
+from datetime import datetime, timedelta
+
 import pandas as pd
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.domain.regime.regime_classifier import RegimeClassifier
 from app.domain.strategy.rule_evaluator import RuleEvaluationError
 from app.domain.strategy.strategy_loader import load_strategy_from_dict
 from app.models.candle import Candle
+from app.schemas.replay_schema import ReplaySessionCreate
 from app.services.backtest_service import BacktestService
+from app.services.replay_service import ReplayService
 
 
 class ScannerService:
@@ -108,3 +113,48 @@ class ScannerService:
             "close": candle.close,
             "volume": candle.volume,
         } for candle in candles])
+
+    def create_replay_session_from_signal(self, db: Session, config: dict):
+        symbol = config["symbol"].strip().upper()
+        signal_timestamp = self._parse_timestamp(config["signal_timestamp"])
+        timeframe = config.get("timeframe", "1D")
+        adjustment_type = config.get("adjustment_type", "unadjusted")
+        lookback_days = int(config.get("lookback_days", 120))
+        forward_days = int(config.get("forward_days", 90))
+
+        window_start = (signal_timestamp - timedelta(days=lookback_days)).date()
+        window_end = (signal_timestamp + timedelta(days=forward_days)).date()
+        window_start_at = datetime.combine(window_start, datetime.min.time())
+        window_end_exclusive = datetime.combine(window_end + timedelta(days=1), datetime.min.time())
+
+        candles = db.query(Candle).filter(
+            Candle.symbol == symbol,
+            Candle.timeframe == timeframe,
+            Candle.adjustment_type == adjustment_type,
+            Candle.timestamp >= window_start_at,
+            Candle.timestamp < window_end_exclusive,
+        ).order_by(Candle.timestamp.asc()).all()
+
+        if not candles:
+            raise HTTPException(status_code=400, detail="No candles found around the selected signal")
+
+        session_in = ReplaySessionCreate(
+            symbol=symbol,
+            timeframe=timeframe,
+            adjustment_type=adjustment_type,
+            start_date=candles[0].timestamp.date() if hasattr(candles[0].timestamp, "date") else candles[0].timestamp,
+            end_date=candles[-1].timestamp.date() if hasattr(candles[-1].timestamp, "date") else candles[-1].timestamp,
+            initial_cash=float(config.get("initial_cash", 100000000)),
+        )
+        session = ReplayService.create_session(db, session_in)
+        return {
+            "session": session,
+            "signal_timestamp": signal_timestamp.isoformat(),
+            "window_start": str(session.start_date),
+            "window_end": str(session.end_date),
+        }
+
+    def _parse_timestamp(self, value: str) -> datetime:
+        normalized = value.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+        return parsed.replace(tzinfo=None)

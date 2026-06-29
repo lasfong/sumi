@@ -21,6 +21,21 @@ class ScannerRequest(BaseModel):
     max_results: int = 500
 
 
+class ScannerReplaySessionRequest(BaseModel):
+    symbol: str
+    signal_timestamp: str
+    timeframe: str = "1D"
+    adjustment_type: str = "unadjusted"
+    lookback_days: int = 120
+    forward_days: int = 90
+    initial_cash: float = 100000000
+
+
 @router.post("/run")
 def run_scanner(config: ScannerRequest, db: Session = Depends(get_db)):
     return scanner_service.run_scan(db, config.model_dump())
+
+
+@router.post("/replay-session")
+def create_replay_session_from_signal(config: ScannerReplaySessionRequest, db: Session = Depends(get_db)):
+    return scanner_service.create_replay_session_from_signal(db, config.model_dump())

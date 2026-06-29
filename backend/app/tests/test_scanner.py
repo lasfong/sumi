@@ -1,6 +1,7 @@
 from datetime import date, timedelta
 
 from app.models.candle import Candle
+from app.models.replay_session import ReplaySession
 from app.services.scanner_service import ScannerService
 
 
@@ -70,3 +71,25 @@ def test_scanner_rejects_unknown_rule_identifier(db_session):
     assert result["status"] == "failed"
     assert result["error_code"] == "INVALID_RULE"
     assert "missing_indicator" in result["message"]
+
+
+def test_scanner_signal_can_create_replay_session(db_session):
+    base_date = date(2024, 1, 1)
+    seed_trending_candles(db_session, "SCAN_REPLAY", base_date, count=60)
+    db_session.commit()
+
+    result = ScannerService().create_replay_session_from_signal(db_session, {
+        "symbol": "SCAN_REPLAY",
+        "signal_timestamp": str(base_date + timedelta(days=30)),
+        "lookback_days": 10,
+        "forward_days": 10,
+        "initial_cash": 50_000_000,
+    })
+
+    session = result["session"]
+    assert session.id is not None
+    assert session.symbol == "SCAN_REPLAY"
+    assert session.initial_cash == 50_000_000
+    assert session.start_date == base_date + timedelta(days=20)
+    assert session.end_date == base_date + timedelta(days=40)
+    assert db_session.query(ReplaySession).filter_by(id=session.id).first() is not None

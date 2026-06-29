@@ -1,5 +1,6 @@
 import { apiClient } from './client';
 import type { StrategyConfig } from './backtestApi';
+import type { ReplaySession } from '../types';
 
 export interface ScannerRequest {
   symbols: string[];
@@ -29,7 +30,29 @@ export interface ScannerResponse {
   message?: string;
 }
 
+export interface ScannerReplaySessionRequest {
+  symbol: string;
+  signal_timestamp: string;
+  timeframe?: string;
+  adjustment_type?: string;
+  lookback_days?: number;
+  forward_days?: number;
+  initial_cash?: number;
+}
+
+export interface ScannerReplaySessionResponse {
+  session: ReplaySession;
+  signal_timestamp: string;
+  window_start: string;
+  window_end: string;
+}
+
 export async function runScanner(config: ScannerRequest): Promise<ScannerResponse> {
   const response = await apiClient.post('/scanner/run', config);
+  return response.data;
+}
+
+export async function createReplaySessionFromSignal(config: ScannerReplaySessionRequest): Promise<ScannerReplaySessionResponse> {
+  const response = await apiClient.post('/scanner/replay-session', config);
   return response.data;
 }
