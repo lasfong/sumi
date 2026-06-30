@@ -1,7 +1,19 @@
 # Sumi V2 Release Checklist
 
 Status: release hardening checklist.
-Date: 2026-06-29.
+Date: 2026-06-30.
+
+## Latest Gate Evidence
+
+Run date: 2026-06-30.
+
+- Backend pytest: passed, `46 passed, 1 warning`.
+- Alembic upgrade head: passed on SQLite.
+- Frontend lint: passed.
+- Frontend tests: passed, `7 test files / 12 tests`.
+- Frontend production build: passed.
+- Browser smoke: passed with `npm.cmd run smoke:browser`.
+- Verification script hardening: `scripts/verify-v2.ps1` now checks external command status after each gate step so backend, Alembic, frontend, or browser failures cannot be reported as a completed gate.
 
 ## Product Scope
 
