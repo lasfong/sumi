@@ -1,490 +1,162 @@
-import { useEffect, useRef, useImperativeHandle, forwardRef } from 'react';
-import { createChart } from 'lightweight-charts';
-import type { IChartApi, IPriceLine, ISeriesApi, Time, LineData, SeriesMarker } from 'lightweight-charts';
+import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
+import { createChart, type IChartApi, type ISeriesApi, type Time } from 'lightweight-charts';
+import { DrawingToolRegistry } from './DrawingToolRegistry';
+import { IndicatorRenderRegistry } from './IndicatorRenderRegistry';
+import { PaneManager } from './PaneManager';
+import { SeriesManager } from './SeriesManager';
+import type {
+  ChartWorkspaceProps,
+  ChartWorkspaceRef,
+  DrawingLine,
+  DrawingPoint,
+} from './workspaceTypes';
 
-export type DrawingType = 'cursor' | 'line' | 'trendline' | 'ray' | 'horizontal' | 'fibonacci';
-
-export interface DrawingLine {
-  id: string;
-  type: DrawingType;
-  points: { time: Time, price: number }[];
-  color: string;
-}
-
-interface CandleData {
-  time: Time;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-}
-
-interface VolumeData {
-  time: Time;
-  value: number;
-  color: string;
-}
-
-interface CandleChartProps {
-  data: CandleData[];
-  volumeData?: VolumeData[];
-  markers?: SeriesMarker<Time>[];
-  drawings?: DrawingLine[];
-  activeTool?: DrawingType | null;
-  onDrawingComplete?: (drawing: DrawingLine) => void;
-}
-
-export interface IndicatorSeriesData {
-  name: string;
-  data: LineData[];
-  color?: string;
-  type?: 'line' | 'histogram';
-}
-
-export interface CandleChartRef {
-  addIndicator: (key: string, seriesList: IndicatorSeriesData[], pane?: 'main' | 'oscillator') => void;
-  removeIndicator: (key: string) => void;
-  clearIndicators: () => void;
-  updateCandle: (candle: CandleData, volume?: VolumeData) => void;
-}
-
-type IndicatorSeriesApi = ISeriesApi<'Line'> | ISeriesApi<'Histogram'>;
-type DrawingSeriesRef =
-  | { type: 'horizontal'; ref: IPriceLine }
-  | { type: 'trendline'; ref: ISeriesApi<'Line'> }
-  | { type: 'fibonacci'; ref: ISeriesApi<'Line'>[] };
 type ChartMouseParam = Parameters<Parameters<IChartApi['subscribeClick']>[0]>[0];
 type OhlcPoint = { open?: number; high?: number; low?: number; close?: number };
+type PendingDrawing = { points: DrawingPoint[]; preview: ISeriesApi<'Line'> };
 
-const toTimeNumber = (time: Time): number => (
-  typeof time === 'string' ? new Date(time).getTime() : Number(time)
-);
+export type {
+  ChartWorkspaceRef as CandleChartRef,
+  DrawingLine,
+  DrawingType,
+  IndicatorSeriesData,
+} from './workspaceTypes';
 
-export const CandleChart = forwardRef<CandleChartRef, CandleChartProps>(({ data, volumeData, markers, drawings = [], activeTool = null, onDrawingComplete }, ref) => {
-  const chartContainerRef = useRef<HTMLDivElement>(null);
+export const ChartWorkspace = forwardRef<ChartWorkspaceRef, ChartWorkspaceProps>(({
+  data,
+  volumeData = [],
+  markers = [],
+  drawings = [],
+  activeTool = 'cursor',
+  onDrawingComplete,
+}, ref) => {
+  const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
-  const candlestickSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
-  const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
-
-  // Store multiple series per indicator key
-  const indicatorSeriesRef = useRef<Record<string, IndicatorSeriesApi[]>>({});
-  
-  // Track how many oscillators we have to adjust margins
-  const numOscillators = useRef<number>(0);
-
-  const updateMargins = () => {
-    if (!chartRef.current) return;
-    const oscCount = numOscillators.current;
-    
-    // Main chart margin
-    const mainBottom = oscCount > 0 ? (oscCount * 0.2) + 0.1 : 0.15;
-    chartRef.current.priceScale('right').applyOptions({
-      scaleMargins: { top: 0.1, bottom: mainBottom },
-    });
-    
-    // Volume margin (always below main chart)
-    if (volumeSeriesRef.current) {
-      volumeSeriesRef.current.priceScale().applyOptions({
-        scaleMargins: { top: 1 - mainBottom, bottom: mainBottom - 0.15 },
-      });
-    }
-  };
+  const panesRef = useRef<PaneManager | null>(null);
+  const seriesRef = useRef<SeriesManager | null>(null);
+  const drawingRegistryRef = useRef<DrawingToolRegistry | null>(null);
+  const pendingRef = useRef<PendingDrawing | null>(null);
 
   useImperativeHandle(ref, () => ({
-    addIndicator: (key: string, seriesList: IndicatorSeriesData[], pane: 'main' | 'oscillator' = 'main') => {
-      if (!chartRef.current) return;
-      
-      // Update if exists
-      if (indicatorSeriesRef.current[key]) {
-        indicatorSeriesRef.current[key].forEach((s, idx) => {
-          if (seriesList[idx]) {
-            s.setData(seriesList[idx].data);
-          }
-        });
-        return;
-      }
-      
-      const newSeries: IndicatorSeriesApi[] = [];
-      let priceScaleId = 'right'; // Default main pane
-      
-      if (pane === 'oscillator') {
-        numOscillators.current += 1;
-        priceScaleId = key; // Use the key as unique priceScaleId for this oscillator
-        
-        // Calculate position based on how many oscillators exist
-        const index = numOscillators.current - 1;
-        const height = 0.2; // 20% of screen per oscillator
-        const top = 1 - (index + 1) * height;
-        const bottom = index * height;
-        
-        chartRef.current.priceScale(priceScaleId).applyOptions({
-          scaleMargins: { top, bottom },
-        });
-        
-        updateMargins();
-      }
-      
-      seriesList.forEach(sData => {
-        let series;
-        if (sData.type === 'histogram') {
-          series = chartRef.current!.addHistogramSeries({
-            color: sData.color || '#2962FF',
-            priceScaleId,
-          });
-        } else {
-          series = chartRef.current!.addLineSeries({
-            color: sData.color || '#2962FF',
-            lineWidth: 2,
-            crosshairMarkerVisible: false,
-            priceScaleId,
-          });
-        }
-        series.setData(sData.data);
-        newSeries.push(series);
-      });
-      
-      indicatorSeriesRef.current[key] = newSeries;
+    addIndicator: input => {
+      const paneId = IndicatorRenderRegistry.paneFor(input.id, input.pane);
+      seriesRef.current?.setIndicator(input.key, paneId, input.series);
     },
-    removeIndicator: (key: string) => {
-      if (chartRef.current && indicatorSeriesRef.current[key]) {
-        indicatorSeriesRef.current[key].forEach(s => chartRef.current?.removeSeries(s));
-        
-        // Check if it was an oscillator by checking if its priceScaleId was added
-        // Simplification: if we have oscillators, and we remove one, just decrement
-        // For a robust app we'd track the pane of each key.
-        if (chartRef.current.priceScale(key)) {
-           numOscillators.current = Math.max(0, numOscillators.current - 1);
-           updateMargins();
-        }
-        
-        delete indicatorSeriesRef.current[key];
-      }
-    },
-    clearIndicators: () => {
-      if (!chartRef.current) return;
-      Object.values(indicatorSeriesRef.current).forEach(seriesList => {
-        seriesList.forEach(s => chartRef.current?.removeSeries(s));
-      });
-      indicatorSeriesRef.current = {};
-      numOscillators.current = 0;
-      updateMargins();
-    },
-    updateCandle: (candle: CandleData, volume?: VolumeData) => {
-      if (candlestickSeriesRef.current) {
-        candlestickSeriesRef.current.update(candle);
-      }
-      if (volumeSeriesRef.current && volume) {
-        volumeSeriesRef.current.update(volume);
-      }
-    }
-  }));
+    removeIndicator: key => seriesRef.current?.removeIndicator(key),
+    clearIndicators: () => seriesRef.current?.clearIndicators(),
+    updateCandle: (candle, volume) => seriesRef.current?.updateCandle(candle, volume),
+  }), []);
 
   useEffect(() => {
-    if (!chartContainerRef.current) return;
-
-    const chart = createChart(chartContainerRef.current, {
-      layout: {
-        background: { color: 'transparent' },
-        textColor: '#F0F6FC',
-      },
+    if (!containerRef.current) return;
+    const chart = createChart(containerRef.current, {
+      autoSize: true,
+      layout: { background: { color: '#0D1117' }, textColor: '#F0F6FC', attributionLogo: true },
       grid: {
         vertLines: { color: 'rgba(255,255,255,0.05)' },
         horzLines: { color: 'rgba(255,255,255,0.05)' },
       },
-      crosshair: {
-        mode: 1, // Magnet
-      },
-      rightPriceScale: {
-        borderColor: 'rgba(255,255,255,0.1)',
-      },
-      timeScale: {
-        borderColor: 'rgba(255,255,255,0.1)',
-        timeVisible: false,
-        shiftVisibleRangeOnNewBar: true,
-      },
-      width: chartContainerRef.current.clientWidth,
-      height: chartContainerRef.current.clientHeight || 500,
+      crosshair: { mode: 1 },
+      rightPriceScale: { borderColor: 'rgba(255,255,255,0.12)' },
+      timeScale: { borderColor: 'rgba(255,255,255,0.12)', timeVisible: false, shiftVisibleRangeOnNewBar: true },
+      height: containerRef.current.clientHeight || 500,
     });
-
+    const panes = new PaneManager(chart);
+    const series = new SeriesManager(chart, panes);
+    const drawingRegistry = new DrawingToolRegistry(chart, series.candles, panes.index('price'));
     chartRef.current = chart;
-
-    const candlestickSeries = chart.addCandlestickSeries({
-      upColor: '#00E676',
-      downColor: '#FF1744',
-      borderVisible: false,
-      wickUpColor: '#00E676',
-      wickDownColor: '#FF1744',
-    });
-    
-    candlestickSeriesRef.current = candlestickSeries;
-
-    // Always create volume series as overlay on the main pane
-    const volumeSeries = chart.addHistogramSeries({
-      color: 'rgba(0, 230, 118, 0.5)',
-      priceFormat: {
-        type: 'volume',
-      },
-      priceScaleId: '', // overlay on main chart
-    });
-    volumeSeries.priceScale().applyOptions({
-      scaleMargins: {
-        top: 0.8,
-        bottom: 0,
-      },
-    });
-    volumeSeriesRef.current = volumeSeries;
-
-    const handleResize = () => {
-      if (chartContainerRef.current) {
-        chart.applyOptions({
-          width: chartContainerRef.current.clientWidth,
-          height: chartContainerRef.current.clientHeight,
-        });
-      }
-    };
-
-    const resizeObserver = new ResizeObserver(handleResize);
-    resizeObserver.observe(chartContainerRef.current);
-    window.addEventListener('resize', handleResize);
+    panesRef.current = panes;
+    seriesRef.current = series;
+    drawingRegistryRef.current = drawingRegistry;
 
     return () => {
-      window.removeEventListener('resize', handleResize);
-      resizeObserver.disconnect();
+      pendingRef.current = null;
+      drawingRegistry.clear();
       chart.remove();
+      chartRef.current = null;
+      panesRef.current = null;
+      seriesRef.current = null;
+      drawingRegistryRef.current = null;
     };
   }, []);
 
-  // Handle Drawing Tools Input
-  const pendingDrawingRef = useRef<{ type: DrawingType; points: {time: Time, price: number}[]; series?: ISeriesApi<"Line"> } | null>(null);
-  const drawingsSeriesRef = useRef<Record<string, DrawingSeriesRef>>({});
+  useEffect(() => { seriesRef.current?.setCandles(data, markers); }, [data, markers]);
+  useEffect(() => { seriesRef.current?.setVolume(volumeData); }, [volumeData]);
+  useEffect(() => { drawingRegistryRef.current?.render(drawings); }, [drawings]);
 
   useEffect(() => {
-    if (!chartRef.current || !candlestickSeriesRef.current) return;
     const chart = chartRef.current;
-    const mainSeries = candlestickSeriesRef.current;
+    const series = seriesRef.current?.candles;
+    const registry = drawingRegistryRef.current;
+    if (!chart || !series || !registry) return;
 
-    const getSnappedPrice = (param: ChartMouseParam, fallbackPrice: number): number => {
-      if (!param.point || !param.seriesData) return fallbackPrice;
-      const data = param.seriesData.get(mainSeries) as OhlcPoint | undefined;
-      if (!data) return fallbackPrice;
-
-      const threshold = 10; // Magnet threshold in pixels
-      const mouseY = param.point.y;
-      
-      const prices = [data.open, data.high, data.low, data.close].filter((p): p is number => p !== undefined);
-      if (prices.length === 0) return fallbackPrice;
-      
-      let closestPrice = fallbackPrice;
-      let minDistance = Infinity;
-
-      for (const p of prices) {
-        const y = mainSeries.priceToCoordinate(p);
-        if (y !== null) {
-          const dist = Math.abs(y - mouseY);
-          if (dist < minDistance && dist <= threshold) {
-            minDistance = dist;
-            closestPrice = p;
-          }
-        }
-      }
-
-      return closestPrice;
+    const snappedPrice = (param: ChartMouseParam, fallback: number): number => {
+      if (!param.point || !param.seriesData) return fallback;
+      const candle = param.seriesData.get(series) as OhlcPoint | undefined;
+      if (!candle) return fallback;
+      return [candle.open, candle.high, candle.low, candle.close]
+        .filter((price): price is number => typeof price === 'number')
+        .reduce((best, price) => {
+          const coordinate = series.priceToCoordinate(price);
+          return coordinate !== null && Math.abs(coordinate - param.point!.y) <= 10
+            && Math.abs(coordinate - param.point!.y) < Math.abs((series.priceToCoordinate(best) ?? Infinity) - param.point!.y)
+            ? price : best;
+        }, fallback);
     };
 
-    const handleClick = (param: ChartMouseParam) => {
+    const click = (param: ChartMouseParam) => {
       if (!param.point || !param.time || !activeTool || activeTool === 'cursor') return;
-      
-      let price = mainSeries.coordinateToPrice(param.point.y) as number | null;
-      if (price === null) return;
-      price = getSnappedPrice(param, price);
-
+      const rawPrice = series.coordinateToPrice(param.point.y);
+      if (rawPrice === null) return;
+      const point = { time: param.time, price: snappedPrice(param, rawPrice) };
       if (activeTool === 'horizontal') {
-        const id = Math.random().toString(36).substr(2, 9);
-        const newDrawing: DrawingLine = {
-          id,
-          type: 'horizontal',
-          points: [{ time: param.time, price }],
-          color: '#e056fd'
-        };
-        onDrawingComplete?.(newDrawing);
+        onDrawingComplete?.(newDrawing('horizontal', [point]));
         return;
       }
-
-      if (activeTool === 'trendline' || activeTool === 'fibonacci') {
-        if (!pendingDrawingRef.current) {
-          const series = chart.addLineSeries({ color: '#e056fd', lineWidth: 2, lastValueVisible: false, priceLineVisible: false });
-          pendingDrawingRef.current = {
-            type: activeTool,
-            points: [{ time: param.time, price }],
-            series
-          };
-        } else {
-          const startPt = pendingDrawingRef.current.points[0];
-          const id = Math.random().toString(36).substr(2, 9);
-          const newDrawing: DrawingLine = {
-            id,
-            type: activeTool,
-            points: [startPt, { time: param.time, price }],
-            color: '#e056fd'
-          };
-          if (pendingDrawingRef.current.series) chart.removeSeries(pendingDrawingRef.current.series);
-          pendingDrawingRef.current = null;
-          onDrawingComplete?.(newDrawing);
-        }
+      if (!pendingRef.current) {
+        pendingRef.current = { points: [point], preview: registry.createPreview() };
+        return;
       }
+      const pending = pendingRef.current;
+      registry.removePreview(pending.preview);
+      pendingRef.current = null;
+      onDrawingComplete?.(newDrawing(activeTool, [pending.points[0], point]));
     };
 
-    const handleMouseMove = (param: ChartMouseParam) => {
-      if (!param.point || !param.time || !pendingDrawingRef.current || (pendingDrawingRef.current.type !== 'trendline' && pendingDrawingRef.current.type !== 'fibonacci')) return;
-      
-      let price = mainSeries.coordinateToPrice(param.point.y) as number | null;
-      if (price === null) return;
-      price = getSnappedPrice(param, price);
-      
-      const series = pendingDrawingRef.current.series;
-      if (series) {
-        const start = pendingDrawingRef.current.points[0];
-        const current = { time: param.time, value: price };
-        
-        const startTimestamp = toTimeNumber(start.time);
-        const currentTimestamp = toTimeNumber(param.time);
-        let previewData: LineData[];
-        if (startTimestamp < currentTimestamp) {
-          previewData = [{ time: start.time, value: start.price }, current];
-        } else if (startTimestamp > currentTimestamp) {
-          previewData = [current, { time: start.time, value: start.price }];
-        } else {
-          previewData = [{ time: start.time, value: start.price }];
-        }
-        series.setData(previewData);
-      }
+    const move = (param: ChartMouseParam) => {
+      if (!param.point || !param.time || !pendingRef.current) return;
+      const rawPrice = series.coordinateToPrice(param.point.y);
+      if (rawPrice === null) return;
+      const start = pendingRef.current.points[0];
+      const end = { time: param.time, value: snappedPrice(param, rawPrice) };
+      const points = [{ time: start.time, value: start.price }, end]
+        .sort((a, b) => timeValue(a.time) - timeValue(b.time));
+      pendingRef.current.preview.setData(points);
     };
 
-    chart.subscribeClick(handleClick);
-    chart.subscribeCrosshairMove(handleMouseMove);
-
+    chart.subscribeClick(click);
+    chart.subscribeCrosshairMove(move);
     return () => {
-      chart.unsubscribeClick(handleClick);
-      chart.unsubscribeCrosshairMove(handleMouseMove);
-      if (pendingDrawingRef.current?.series && chartRef.current) {
-        try {
-          chartRef.current.removeSeries(pendingDrawingRef.current.series);
-        } catch {
-          pendingDrawingRef.current = null;
-        }
+      chart.unsubscribeClick(click);
+      chart.unsubscribeCrosshairMove(move);
+      if (pendingRef.current) {
+        registry.removePreview(pendingRef.current.preview);
+        pendingRef.current = null;
       }
     };
   }, [activeTool, onDrawingComplete]);
 
-  // Render Drawings from Props
-  useEffect(() => {
-    if (!chartRef.current || !candlestickSeriesRef.current || !drawings) return;
-    const chart = chartRef.current;
-    const mainSeries = candlestickSeriesRef.current;
-
-    Object.values(drawingsSeriesRef.current).forEach(item => {
-      if (item.type === 'horizontal') {
-        try {
-          mainSeries.removePriceLine(item.ref);
-        } catch {
-          drawingsSeriesRef.current = {};
-        }
-      } else if (item.type === 'trendline') {
-        try {
-          chart.removeSeries(item.ref);
-        } catch {
-          drawingsSeriesRef.current = {};
-        }
-      } else if (item.type === 'fibonacci') {
-        if (Array.isArray(item.ref)) {
-          item.ref.forEach((r) => {
-            try {
-              chart.removeSeries(r);
-            } catch {
-              drawingsSeriesRef.current = {};
-            }
-          });
-        }
-      }
-    });
-    drawingsSeriesRef.current = {};
-
-    drawings.forEach(d => {
-      if (d.type === 'horizontal') {
-        const line = mainSeries.createPriceLine({
-          price: d.points[0].price,
-          color: d.color,
-          lineStyle: 0,
-          lineWidth: 2,
-          axisLabelVisible: true,
-        });
-        drawingsSeriesRef.current[d.id] = { type: 'horizontal', ref: line };
-      } else if (d.type === 'trendline') {
-        const series = chart.addLineSeries({
-          color: d.color,
-          lineWidth: 2,
-          crosshairMarkerVisible: false,
-          lastValueVisible: false,
-          priceLineVisible: false
-        });
-        const sorted = [...d.points].sort((a, b) => {
-           const ta = toTimeNumber(a.time);
-           const tb = toTimeNumber(b.time);
-           return ta - tb;
-        });
-        series.setData(sorted.map(pt => ({ time: pt.time, value: pt.price })));
-        drawingsSeriesRef.current[d.id] = { type: 'trendline', ref: series };
-      } else if (d.type === 'fibonacci' && d.points.length >= 2) {
-        // Draw the anchor trendline
-        const anchorSeries = chart.addLineSeries({ color: 'rgba(224, 86, 253, 0.3)', lineStyle: 2, lineWidth: 1, crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false });
-        const sorted = [...d.points].sort((a, b) => {
-           const ta = toTimeNumber(a.time);
-           const tb = toTimeNumber(b.time);
-           return ta - tb;
-        });
-        anchorSeries.setData(sorted.map(pt => ({ time: pt.time, value: pt.price })));
-        
-        // Draw the levels
-        const p1 = d.points[0].price;
-        const p2 = d.points[1].price;
-        const diff = p1 - p2;
-        const levels = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
-        
-        const refs: ISeriesApi<'Line'>[] = [anchorSeries];
-        levels.forEach(lvl => {
-          const lvlPrice = p1 - diff * lvl;
-          const series = chart.addLineSeries({
-            color: d.color,
-            lineWidth: 1,
-            crosshairMarkerVisible: false,
-            lastValueVisible: false,
-            priceLineVisible: false
-          });
-          series.setData([
-            { time: sorted[0].time, value: lvlPrice },
-            { time: sorted[1].time, value: lvlPrice }
-          ]);
-          refs.push(series);
-        });
-        drawingsSeriesRef.current[d.id] = { type: 'fibonacci', ref: refs };
-      }
-    });
-  }, [drawings]);
-
-  useEffect(() => {
-    if (candlestickSeriesRef.current && data.length > 0) {
-      candlestickSeriesRef.current.setData(data);
-      if (markers) {
-        candlestickSeriesRef.current.setMarkers(markers);
-      }
-    }
-  }, [data, markers]);
-
-  useEffect(() => {
-    if (volumeSeriesRef.current && volumeData && volumeData.length > 0) {
-      volumeSeriesRef.current.setData(volumeData);
-    }
-  }, [volumeData]);
-
-  return <div ref={chartContainerRef} style={{ width: '100%', height: '100%' }} />;
+  return <div ref={containerRef} data-testid="chart-workspace" style={{ width: '100%', height: '100%', minHeight: 360 }} />;
 });
+
+ChartWorkspace.displayName = 'ChartWorkspace';
+export const CandleChart = ChartWorkspace;
+
+const newDrawing = (type: DrawingLine['type'], points: DrawingPoint[]): DrawingLine => ({
+  id: globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2),
+  type,
+  points,
+  color: '#E056FD',
+});
+
+const timeValue = (time: Time): number => typeof time === 'string' ? new Date(time).getTime() : Number(time);

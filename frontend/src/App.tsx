@@ -26,7 +26,7 @@ function App() {
       <BrowserRouter>
         <div style={{ display: 'flex', height: '100vh', width: '100vw', overflow: 'hidden' }}>
           <Sidebar />
-          <main style={{ flex: 1, marginLeft: '292px', padding: '24px', overflowY: 'auto' }}>
+          <main style={{ flex: 1, minWidth: 0, marginLeft: '292px', padding: '24px', overflowY: 'auto' }}>
             <ErrorBoundary>
               <Suspense fallback={<PageFallback />}>
                 <Routes>

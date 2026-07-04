@@ -75,9 +75,9 @@ async function run() {
     const sessionId = sessionMatch?.[1];
     if (!sessionId) throw new Error('Replay session id was not visible');
 
-    await selectIndicator(page, 'EMA (20)');
-    await selectIndicator(page, 'RSI (14)');
-    await selectIndicator(page, 'MACD (12, 26, 9)');
+    await selectIndicator(page, 'Exponential Moving Average');
+    await selectIndicator(page, 'Relative Strength Index');
+    await selectIndicator(page, 'MACD');
 
     await submitOrder(page, 'button.btn-buy');
     await page.getByText(/LONG 100/).waitFor();

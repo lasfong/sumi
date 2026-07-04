@@ -17,6 +17,7 @@ from app.domain.strategy.rule_evaluator import (
     validate_condition,
     validate_rule_dsl,
 )
+from app.utils.date_range import end_before, start_at
 
 class BacktestService:
     def __init__(self):
@@ -108,8 +109,8 @@ class BacktestService:
         # 1. Load ALL candles for symbol
         candles = db.query(Candle).filter(
             Candle.symbol == symbol,
-            Candle.timestamp >= start_date,
-            Candle.timestamp <= end_date
+            Candle.timestamp >= start_at(start_date),
+            Candle.timestamp < end_before(end_date)
         ).order_by(Candle.timestamp).all()
         
         if len(candles) == 0:
@@ -369,9 +370,9 @@ class BacktestService:
 
         query = db.query(Candle).filter(Candle.symbol == benchmark_symbol)
         if start_date:
-            query = query.filter(Candle.timestamp >= start_date)
+            query = query.filter(Candle.timestamp >= start_at(start_date))
         if end_date:
-            query = query.filter(Candle.timestamp <= end_date)
+            query = query.filter(Candle.timestamp < end_before(end_date))
 
         benchmark_candles = query.order_by(Candle.timestamp).all()
         return RegimeClassifier.build_regime_map(benchmark_candles) if benchmark_candles else {}

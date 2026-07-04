@@ -93,7 +93,8 @@ export const StrategyLabPage: React.FC = () => {
     setIsRunning(true);
     setError(null);
     try {
-      const nextResults = await Promise.all(selected.map(async (strategy) => {
+      const nextResults: LabResult[] = [];
+      for (const strategy of selected) {
         const request: BacktestRequest = {
           start_date: startDate,
           end_date: endDate,
@@ -107,12 +108,12 @@ export const StrategyLabPage: React.FC = () => {
           request.symbol = symbols[0];
         }
         const response = await runBacktest(request);
-        return {
+        nextResults.push({
           filename: strategy.filename,
           name: strategy.name,
           response,
-        };
-      }));
+        });
+      }
       setResults(nextResults);
       addHistory({
         type: 'comparison',

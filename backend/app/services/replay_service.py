@@ -6,6 +6,7 @@ from app.models.candle import Candle
 from app.schemas.replay_schema import ReplaySessionCreate
 from app.domain.enums import SessionMode, SessionStatus
 from app.services.event_logging_service import EventLoggingService
+from app.utils.date_range import end_before, start_at
 from typing import List
 
 class ReplayService:
@@ -18,8 +19,8 @@ class ReplayService:
                     Candle.symbol == session_in.symbol,
                     Candle.timeframe == session_in.timeframe,
                     Candle.adjustment_type == session_in.adjustment_type,
-                    Candle.timestamp >= session_in.start_date,
-                    Candle.timestamp <= session_in.end_date
+                    Candle.timestamp >= start_at(session_in.start_date),
+                    Candle.timestamp < end_before(session_in.end_date)
                 )
             ).limit(1)
         ).scalar()
@@ -91,8 +92,8 @@ class ReplayService:
                 Candle.symbol == session.symbol,
                 Candle.timeframe == session.timeframe,
                 Candle.adjustment_type == session.adjustment_type,
-                Candle.timestamp >= session.start_date,
-                Candle.timestamp <= session.end_date
+                Candle.timestamp >= start_at(session.start_date),
+                Candle.timestamp < end_before(session.end_date)
             )
         ).order_by(Candle.timestamp.asc()).limit(limit).all()
 
@@ -112,7 +113,7 @@ class ReplayService:
                 Candle.symbol == session.symbol,
                 Candle.timeframe == target_timeframe,
                 Candle.adjustment_type == session.adjustment_type,
-                Candle.timestamp >= session.start_date,
+                Candle.timestamp >= start_at(session.start_date),
                 Candle.timestamp <= current_timestamp
             )
         ).order_by(Candle.timestamp.asc()).all()
@@ -132,8 +133,8 @@ class ReplayService:
                 Candle.symbol == session.symbol,
                 Candle.timeframe == session.timeframe,
                 Candle.adjustment_type == session.adjustment_type,
-                Candle.timestamp >= session.start_date,
-                Candle.timestamp <= session.end_date
+                Candle.timestamp >= start_at(session.start_date),
+                Candle.timestamp < end_before(session.end_date)
             )
         ).count()
 

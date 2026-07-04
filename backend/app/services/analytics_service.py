@@ -7,6 +7,7 @@ from app.models.replay_session import ReplaySession
 from app.models.execution import Execution
 from app.models.order import Order
 from app.models.candle import Candle
+from app.utils.date_range import end_before, start_at
 from app.schemas.analytics_schema import (
     AnalyticsResponse, SetupPerformance, DrawdownPeriod,
     BenchmarkPoint, TradeDistribution, GroupPerformance, OutlierImpact
@@ -171,8 +172,8 @@ class AnalyticsService:
 
         vnindex_candles = db.query(Candle).filter(
             Candle.symbol == "VNINDEX",
-            Candle.timestamp >= session.start_date,
-            Candle.timestamp <= session.end_date
+            Candle.timestamp >= start_at(session.start_date),
+            Candle.timestamp < end_before(session.end_date)
         ).order_by(Candle.timestamp).all()
 
         if not vnindex_candles:

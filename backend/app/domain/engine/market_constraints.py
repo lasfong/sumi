@@ -16,3 +16,7 @@ class MarketConstraints:
     def is_price_within_limits(cls, price: float, exchange: str, reference_price: float) -> bool:
         floor, ceiling = cls.get_price_limits(reference_price, exchange)
         return floor <= price <= ceiling
+
+    @staticmethod
+    def calculate_t_plus_2_ready(current_bar_index: int, buy_bar_index: int) -> bool:
+        return current_bar_index - buy_bar_index >= 2

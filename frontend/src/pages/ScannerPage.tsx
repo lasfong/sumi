@@ -41,11 +41,13 @@ export const ScannerPage: React.FC = () => {
     queryFn: () => listScannerRuns(8),
   });
 
+  const effectiveStrategyFilename = selectedStrategyFilename || strategies?.[0]?.filename || '';
+
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
     if (!strategies) return;
 
-    const strategy = strategies.find(item => item.filename === selectedStrategyFilename);
+    const strategy = strategies.find(item => item.filename === effectiveStrategyFilename);
     if (!strategy) {
       alert('Please select a strategy.');
       return;
@@ -153,7 +155,7 @@ export const ScannerPage: React.FC = () => {
           </div>
           <div>
             <label htmlFor="scanner-strategy" style={{ display: 'block', marginBottom: '8px', color: 'var(--text-muted)', fontSize: '14px' }}>Strategy</label>
-            <select id="scanner-strategy" value={selectedStrategyFilename} onChange={event => setSelectedStrategyFilename(event.target.value)} style={{ width: '100%', padding: '10px' }} required>
+            <select id="scanner-strategy" value={effectiveStrategyFilename} onChange={event => setSelectedStrategyFilename(event.target.value)} style={{ width: '100%', padding: '10px' }} required>
               <option value="" disabled>Select a strategy</option>
               {strategies?.map(strategy => (
                 <option key={strategy.filename} value={strategy.filename}>{strategy.name} ({strategy.filename})</option>

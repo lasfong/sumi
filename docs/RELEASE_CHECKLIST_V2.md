@@ -1,18 +1,19 @@
 # Sumi V2 Release Checklist
 
 Status: release hardening checklist.
-Date: 2026-06-30.
+Date: 2026-07-04.
 
 ## Latest Gate Evidence
 
-Run date: 2026-06-30.
+Run date: 2026-07-04.
 
-- Backend pytest: passed, `46 passed, 1 warning`.
+- Backend pytest: passed, `55 passed, 1 skipped, 1 warning`.
 - Alembic upgrade head: passed on SQLite.
 - Frontend lint: passed.
-- Frontend tests: passed, `7 test files / 12 tests`.
+- Frontend tests: passed, `9 test files / 18 tests`.
 - Frontend production build: passed.
-- Browser smoke: passed with `npm.cmd run smoke:browser`.
+- Browser smoke: passed with `npm run smoke:browser` after fixing concurrent
+  Strategy Lab writes that locked SQLite.
 - Verification script hardening: `scripts/verify-v2.ps1` now checks external command status after each gate step so backend, Alembic, frontend, or browser failures cannot be reported as a completed gate.
 
 ## Product Scope
@@ -98,6 +99,13 @@ This browser smoke covers:
 The release is ready when:
 
 - `scripts/verify-v2.ps1` passes.
+- Analytics output reconciles with the known-ledger fixture.
+- Browser smoke is run against a session containing a completed trade.
 - Git workspace is clean.
-- Latest commit is pushed to `origin/master`.
+- Reviewed release commit is merged and tagged; do not treat an uncommitted
+  working tree as a release.
 - Any remaining issue is documented as future scope rather than hidden as a broken feature.
+
+Current disposition: **not yet releasable**. Automated and happy-path browser
+gates are green, but known-ledger analytics reconciliation, clean release commit
+and final go/no-go review remain open.

@@ -150,6 +150,216 @@ def test_full_trade_lifecycle_e2e(db_session):
     assert session.current_cash == expected_cash
 
 
+def test_buy_rejects_when_cash_is_insufficient(db_session):
+    symbol = "CASH_LIMIT_TEST"
+    initial_cash = 10_000.0
+    db_session.add(Candle(
+        symbol=symbol,
+        timeframe="1D",
+        timestamp=date(2024, 1, 1),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.0,
+        volume=1000000,
+        adjustment_type="unadjusted",
+    ))
+    db_session.commit()
+
+    session = ReplayService.create_session(
+        db_session,
+        ReplaySessionCreate(
+            symbol=symbol,
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 1),
+            initial_cash=initial_cash,
+        ),
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        TradeLifecycleService.process_decision(
+            db_session,
+            session.id,
+            DecisionCreate(action=DecisionAction.BUY, quantity=200),
+        )
+
+    assert excinfo.value.status_code == 400
+    assert "insufficient cash" in excinfo.value.detail.lower()
+    assert db_session.query(Order).filter_by(session_id=session.id).count() == 0
+    assert db_session.query(Position).filter_by(session_id=session.id).count() == 0
+    db_session.refresh(session)
+    assert session.current_cash == initial_cash
+
+
+def test_close_without_open_position_is_rejected(db_session):
+    symbol = "EMPTY_CLOSE_TEST"
+    db_session.add(Candle(
+        symbol=symbol,
+        timeframe="1D",
+        timestamp=date(2024, 1, 1),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.0,
+        volume=1000000,
+        adjustment_type="unadjusted",
+    ))
+    db_session.commit()
+
+    session = ReplayService.create_session(
+        db_session,
+        ReplaySessionCreate(
+            symbol=symbol,
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 1),
+        ),
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        TradeLifecycleService.process_decision(
+            db_session,
+            session.id,
+            DecisionCreate(action=DecisionAction.CLOSE),
+        )
+
+    assert excinfo.value.status_code == 400
+    assert "no open position" in excinfo.value.detail.lower()
+    assert db_session.query(Order).filter_by(session_id=session.id).count() == 0
+    assert db_session.query(Trade).filter_by(session_id=session.id).count() == 0
+
+
+def test_partial_reduce_keeps_trade_open_and_updates_cash(db_session):
+    symbol = "PARTIAL_REDUCE_TEST"
+    initial_cash = 100_000_000.0
+    closes = [100.0, 101.0, 110.0, 111.0]
+
+    for i, close in enumerate(closes):
+        db_session.add(Candle(
+            symbol=symbol,
+            timeframe="1D",
+            timestamp=date(2024, 3, 1) + timedelta(days=i),
+            open=close,
+            high=close + 1,
+            low=close - 1,
+            close=close,
+            volume=1000000,
+            adjustment_type="unadjusted",
+        ))
+    db_session.commit()
+
+    session = ReplayService.create_session(
+        db_session,
+        ReplaySessionCreate(
+            symbol=symbol,
+            start_date=date(2024, 3, 1),
+            end_date=date(2024, 3, 4),
+            initial_cash=initial_cash,
+        ),
+    )
+
+    TradeLifecycleService.process_decision(
+        db_session,
+        session.id,
+        DecisionCreate(action=DecisionAction.BUY, quantity=100),
+    )
+    ReplayService.next_candle(db_session, session.id)
+    ReplayService.next_candle(db_session, session.id)
+    TradeLifecycleService.process_decision(
+        db_session,
+        session.id,
+        DecisionCreate(action=DecisionAction.REDUCE, quantity=40),
+    )
+
+    position = db_session.query(Position).filter_by(session_id=session.id).first()
+    assert position.status == "open"
+    assert position.quantity == 60
+    assert position.realized_pnl == pytest.approx((110.0 - 100.0) * 40)
+
+    trade = db_session.query(Trade).filter_by(session_id=session.id).first()
+    assert trade.status == "open"
+    assert trade.exit_date is None
+    assert trade.quantity == 100
+
+    buy_execution = db_session.query(Execution).join(Order).filter(
+        Execution.session_id == session.id,
+        Order.side == "BUY",
+    ).first()
+    sell_execution = db_session.query(Execution).join(Order).filter(
+        Execution.session_id == session.id,
+        Order.side == "SELL",
+    ).first()
+    db_session.refresh(session)
+    assert session.current_cash == pytest.approx(
+        initial_cash - buy_execution.net_amount + sell_execution.net_amount
+    )
+
+
+def test_force_liquidation_closes_trade_with_fee_tax_net_pnl(db_session):
+    symbol = "FORCE_LIQUIDATE_TEST"
+    initial_cash = 100_000_000.0
+    db_session.add(Candle(
+        symbol=symbol,
+        timeframe="1D",
+        timestamp=date(2024, 4, 1),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.0,
+        volume=1000000,
+        adjustment_type="unadjusted",
+    ))
+    liquidation_candle = Candle(
+        symbol=symbol,
+        timeframe="1D",
+        timestamp=date(2024, 4, 2),
+        open=80.0,
+        high=81.0,
+        low=79.0,
+        close=80.0,
+        volume=1000000,
+        adjustment_type="unadjusted",
+    )
+    db_session.add(liquidation_candle)
+    db_session.commit()
+
+    session = ReplayService.create_session(
+        db_session,
+        ReplaySessionCreate(
+            symbol=symbol,
+            start_date=date(2024, 4, 1),
+            end_date=date(2024, 4, 2),
+            initial_cash=initial_cash,
+        ),
+    )
+    TradeLifecycleService.process_decision(
+        db_session,
+        session.id,
+        DecisionCreate(action=DecisionAction.BUY, quantity=1000),
+    )
+    buy_execution = db_session.query(Execution).join(Order).filter(
+        Execution.session_id == session.id,
+        Order.side == "BUY",
+    ).first()
+
+    session.current_index = 1
+    TradeLifecycleService.force_liquidate_all(db_session, session, liquidation_candle)
+
+    sell_execution = db_session.query(Execution).join(Order).filter(
+        Execution.session_id == session.id,
+        Order.side == "SELL",
+    ).first()
+    trade = db_session.query(Trade).filter(Trade.session_id == session.id).first()
+    position = db_session.query(Position).filter(Position.session_id == session.id).first()
+
+    assert sell_execution.trade_id == trade.id
+    assert trade.status == "closed"
+    assert trade.result == "loss"
+    assert trade.net_pnl == pytest.approx(sell_execution.net_amount - buy_execution.net_amount)
+    assert trade.gross_pnl == pytest.approx((80.0 - 100.0) * 1000)
+    assert position.status == "closed"
+    assert position.quantity == 0
+
+
 def test_multiple_round_trips_same_session_symbol_have_independent_net_pnl(db_session):
     symbol = "ROUNDTRIP_TEST"
     initial_cash = 100_000_000.0

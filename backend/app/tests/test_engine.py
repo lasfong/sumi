@@ -102,3 +102,62 @@ def test_long_position_unrealized_pnl():
     # Check unrealized PnL: quantity is 10. Current price 200.0. Average price 150.15.
     # PnL = 10 * (200.0 - 150.15) = 10 * 49.85 = +498.5
     assert abs(position.unrealized_pnl - 498.5) < 0.01
+
+
+def test_rejected_buy_does_not_remain_active_when_cash_is_insufficient():
+    dispatcher = EventDispatcher()
+    broker = BrokerSimulation(dispatcher, initial_capital=100.0)
+
+    dispatcher.dispatch(OrderEvent(symbol="AAPL", order_type="MKT", quantity=10, direction="BUY"))
+    dispatcher.dispatch(MarketEvent(symbol="AAPL", data={
+        "timestamp": datetime.now(),
+        "open": 150.0,
+        "high": 155.0,
+        "low": 149.0,
+        "close": 154.0,
+        "volume": 1000,
+    }))
+
+    assert broker.active_orders == []
+    assert broker.portfolio.get_position("AAPL").quantity == 0
+    assert broker.portfolio.cash == 100.0
+
+
+def test_engine_sell_before_t_plus_2_is_rejected_then_allowed():
+    dispatcher = EventDispatcher()
+    broker = BrokerSimulation(dispatcher, initial_capital=10000.0)
+
+    dispatcher.dispatch(OrderEvent(symbol="FPT", order_type="MKT", quantity=10, direction="BUY"))
+    dispatcher.dispatch(MarketEvent(symbol="FPT", data={
+        "timestamp": datetime.now(),
+        "open": 100.0,
+        "high": 101.0,
+        "low": 99.0,
+        "close": 100.0,
+        "volume": 1000,
+    }))
+
+    dispatcher.dispatch(OrderEvent(symbol="FPT", order_type="MKT", quantity=10, direction="SELL"))
+    assert broker.active_orders == []
+    assert broker.portfolio.get_position("FPT").quantity == 10
+
+    dispatcher.dispatch(MarketEvent(symbol="FPT", data={
+        "timestamp": datetime.now(),
+        "open": 101.0,
+        "high": 102.0,
+        "low": 100.0,
+        "close": 101.0,
+        "volume": 1000,
+    }))
+    dispatcher.dispatch(MarketEvent(symbol="FPT", data={
+        "timestamp": datetime.now(),
+        "open": 102.0,
+        "high": 103.0,
+        "low": 101.0,
+        "close": 102.0,
+        "volume": 1000,
+    }))
+
+    dispatcher.dispatch(OrderEvent(symbol="FPT", order_type="MKT", quantity=10, direction="SELL"))
+    assert broker.active_orders == []
+    assert broker.portfolio.get_position("FPT").quantity == 0

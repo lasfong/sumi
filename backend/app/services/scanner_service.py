@@ -11,6 +11,7 @@ from app.domain.strategy.strategy_loader import load_strategy_from_dict
 from app.models.candle import Candle
 from app.schemas.replay_schema import ReplaySessionCreate
 from app.services.backtest_service import BacktestService
+from app.utils.date_range import end_before, start_at
 from app.services.replay_service import ReplayService
 
 
@@ -88,8 +89,8 @@ class ScannerService:
     def _load_candles(self, db: Session, symbol: str, start_date: str, end_date: str) -> list[Candle]:
         return db.query(Candle).filter(
             Candle.symbol == symbol,
-            Candle.timestamp >= start_date,
-            Candle.timestamp <= end_date,
+            Candle.timestamp >= start_at(start_date),
+            Candle.timestamp < end_before(end_date),
         ).order_by(Candle.timestamp).all()
 
     def _build_regime_map(self, db: Session, benchmark_symbol: str | None, start_date: str, end_date: str) -> dict:
