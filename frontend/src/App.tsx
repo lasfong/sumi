@@ -24,9 +24,9 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <div style={{ display: 'flex', height: '100vh', width: '100vw', overflow: 'hidden' }}>
+        <div className="app-shell">
           <Sidebar />
-          <main style={{ flex: 1, minWidth: 0, marginLeft: '292px', padding: '24px', overflowY: 'auto' }}>
+          <main className="app-main">
             <ErrorBoundary>
               <Suspense fallback={<PageFallback />}>
                 <Routes>

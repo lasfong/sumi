@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from sqlalchemy.orm import Session
+from app.domain.engine.strategy_indicator_adapter import StrategyIndicatorAdapter
 from app.domain.strategy.strategy_loader import load_strategy_from_dict
 from app.services.trade_lifecycle_service import TradeLifecycleService
 from app.services.analytics_service import AnalyticsService
@@ -148,7 +149,7 @@ class BacktestService:
             "volume": c.volume
         } for c in candles])
         
-        indicator_values = self._compute_indicators(df, strategy.indicators)
+        indicator_values = StrategyIndicatorAdapter.compute(df, strategy.indicators)
         try:
             self._validate_strategy_rules(strategy, set(indicator_values.keys()))
         except RuleEvaluationError as exc:
@@ -250,41 +251,6 @@ class BacktestService:
             "slices": slices,
         }
     
-    def _compute_indicators(self, df: pd.DataFrame, indicators_config) -> dict:
-        results = {}
-        for ind in indicators_config:
-            name = ind.name
-            itype = ind.type.lower()
-            length = ind.length
-            
-            if itype == "sma":
-                length = length or 20
-                results[name] = df["close"].rolling(window=length).mean().values
-            elif itype == "ema":
-                length = length or 20
-                results[name] = df["close"].ewm(span=length, adjust=False).mean().values
-            elif itype == "rsi":
-                length = length or 14
-                delta = df["close"].diff()
-                gain = delta.clip(lower=0).rolling(window=length).mean()
-                loss = (-delta.clip(upper=0)).rolling(window=length).mean()
-                rs = gain / loss.replace(0, np.nan)
-                rsi = 100 - (100 / (1 + rs))
-                results[name] = rsi.fillna(50).values
-            elif itype == "macd":
-                fast = ind.fast or 12
-                slow = ind.slow or 26
-                signal = ind.signal or 9
-                ema_fast = df["close"].ewm(span=fast, adjust=False).mean()
-                ema_slow = df["close"].ewm(span=slow, adjust=False).mean()
-                macd_line = ema_fast - ema_slow
-                signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-                hist = macd_line - signal_line
-                results[f"{name}_line"] = macd_line.values
-                results[f"{name}_signal"] = signal_line.values
-                results[f"{name}_hist"] = hist.values
-        return results
-
     def _get_indicator_snapshot(self, indicator_values: dict, index: int) -> dict:
         snapshot = {}
         for k, arr in indicator_values.items():

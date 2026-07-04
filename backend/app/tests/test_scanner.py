@@ -101,6 +101,11 @@ def test_scanner_signal_can_create_replay_session(db_session):
     assert source_payload["lookback_days"] == 10
     assert source_payload["forward_days"] == 10
     assert db_session.query(ReplaySession).filter_by(id=session.id).first() is not None
+    from app.services.replay_service import ReplayService
+    revealed = ReplayService.get_candles(db_session, session.id)
+    assert len(revealed) == 1
+    assert revealed[0].timestamp.date() == base_date + timedelta(days=20)
+    assert revealed[-1].timestamp.date() < base_date + timedelta(days=30)
 
 
 def test_scanner_history_persists_and_lists_runs(db_session):

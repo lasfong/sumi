@@ -2,6 +2,8 @@ import pytest
 import math
 import pandas as pd
 from datetime import date, timedelta
+from app.domain.engine.indicator_engine import IndicatorEngine
+from app.domain.engine.strategy_indicator_adapter import StrategyIndicatorAdapter
 from app.models.candle import Candle
 from app.models.trade import Trade
 from app.domain.strategy.strategy_loader import list_available_strategies, load_strategy_from_dict
@@ -13,16 +15,44 @@ def test_backtest_supports_macd_rsi_strategy_indicators():
     sample = next(item for item in strategies if item["filename"] == "macd_rsi_momentum.yaml")
     strategy = load_strategy_from_dict(sample["config"])
     df = pd.DataFrame({
+        "open": [100 + math.sin(i / 3) * 5 + i * 0.2 for i in range(80)],
+        "high": [101 + math.sin(i / 3) * 5 + i * 0.2 for i in range(80)],
+        "low": [99 + math.sin(i / 3) * 5 + i * 0.2 for i in range(80)],
         "close": [100 + math.sin(i / 3) * 5 + i * 0.2 for i in range(80)],
+        "volume": [1_000_000 + i for i in range(80)],
     })
 
-    values = BacktestService()._compute_indicators(df, strategy.indicators)
+    values = StrategyIndicatorAdapter.compute(df, strategy.indicators)
 
     assert "macd_line" in values
     assert "macd_signal" in values
     assert "macd_hist" in values
     assert "rsi" in values
     BacktestService()._validate_strategy_rules(strategy, set(values.keys()))
+    assert not hasattr(BacktestService(), "_compute_indicators")
+
+
+def test_strategy_indicator_adapter_uses_shared_indicator_engine_outputs():
+    strategies = list_available_strategies()
+    sample = next(item for item in strategies if item["filename"] == "macd_rsi_momentum.yaml")
+    strategy = load_strategy_from_dict(sample["config"])
+    df = pd.DataFrame({
+        "open": [100 + math.sin(i / 3) * 5 + i * 0.2 for i in range(80)],
+        "high": [101 + math.sin(i / 3) * 5 + i * 0.2 for i in range(80)],
+        "low": [99 + math.sin(i / 3) * 5 + i * 0.2 for i in range(80)],
+        "close": [100 + math.sin(i / 3) * 5 + i * 0.2 for i in range(80)],
+        "volume": [1_000_000 + i for i in range(80)],
+    })
+
+    values = StrategyIndicatorAdapter.compute(df, strategy.indicators)
+    macd_df = IndicatorEngine.compute(df, "macd", fast=12, slow=26, signal=9)
+    rsi_df = IndicatorEngine.compute(df, "rsi", length=14)
+
+    assert values["macd_line"][-1] == pytest.approx(macd_df["MACD_12_26_9"].iloc[-1])
+    assert values["macd_signal"][-1] == pytest.approx(macd_df["MACDs_12_26_9"].iloc[-1])
+    assert values["macd_hist"][-1] == pytest.approx(macd_df["MACDh_12_26_9"].iloc[-1])
+    assert values["rsi"][-1] == pytest.approx(rsi_df["RSI_14"].iloc[-1])
+    assert math.isnan(values["rsi"][0])
 
 @pytest.mark.asyncio
 async def test_backtest_ma_crossover_e2e(db_session):

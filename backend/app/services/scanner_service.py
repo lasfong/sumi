@@ -5,6 +5,7 @@ import pandas as pd
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from app.domain.engine.strategy_indicator_adapter import StrategyIndicatorAdapter
 from app.domain.regime.regime_classifier import RegimeClassifier
 from app.domain.strategy.rule_evaluator import RuleEvaluationError
 from app.domain.strategy.strategy_loader import load_strategy_from_dict
@@ -47,7 +48,7 @@ class ScannerService:
                 continue
 
             df = self._to_dataframe(candles)
-            indicator_values = self.backtest_service._compute_indicators(df, strategy.indicators)
+            indicator_values = StrategyIndicatorAdapter.compute(df, strategy.indicators)
             try:
                 self.backtest_service._validate_strategy_rules(strategy, set(indicator_values.keys()))
             except RuleEvaluationError as exc:

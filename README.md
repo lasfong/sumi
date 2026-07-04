@@ -60,6 +60,18 @@ Raw data should live under `data/raw/`. Local databases such as `backend/sumi.db
 
 ## Verify Release Gates
 
+macOS/Linux full automated gate:
+
+```bash
+./scripts/verify-v2.sh
+```
+
+With backend and frontend already running, include browser smoke:
+
+```bash
+SUMI_BROWSER_SMOKE=1 ./scripts/verify-v2.sh
+```
+
 Run all V2 gates from the repository root:
 
 ```powershell

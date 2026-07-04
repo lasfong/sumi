@@ -54,8 +54,15 @@ class TradeLifecycleService:
             return decision
 
         # Execute logic if it's a trading action
-        exec_price = decision_in.price if decision_in.price else current_candle.close
-        qty = decision_in.quantity if decision_in.quantity else 100.0
+        exec_price = decision_in.price if decision_in.price is not None else current_candle.close
+        qty = decision_in.quantity if decision_in.quantity is not None else 100.0
+
+        if exec_price <= 0:
+            db.rollback()
+            raise HTTPException(status_code=400, detail="Execution price must be greater than zero")
+        if qty <= 0:
+            db.rollback()
+            raise HTTPException(status_code=400, detail="Execution quantity must be greater than zero")
 
         try:
             if decision_in.order_type == OrderType.LIMIT.value:

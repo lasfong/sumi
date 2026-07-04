@@ -1,7 +1,7 @@
 # Sumi Product Completion Plan
 
 Date: 2026-07-04  
-Status: Active product roadmap  
+Status: Completed for V2 RC2
 Target: A trustworthy local-first trading replay and research product
 
 ## 1. Executive Direction
@@ -25,8 +25,13 @@ take priority over new indicators, drawing tools or scanner features.
 - Price overlays: MA, EMA, Ichimoku, Bollinger Bands and PSAR.
 - Separate Volume, RSI, MACD and CCI panes.
 - Backend indicator results remain the source of truth.
+- Backtest and Scanner strategy indicators now use the shared
+  `StrategyIndicatorAdapter` over `IndicatorEngine`.
 - Indicator and drawing workspace persistence.
 - Replay, Backtest, Strategy Lab, Scanner to Replay and Analytics browser smoke.
+- Browser smoke covers EMA, RSI, MACD and CCI through the Replay UI.
+- Strategy Lab sweep returns compact variant payloads and no longer stores full
+  equity curves in UI history.
 - Deterministic demo data for `FPT`, `SSI`, `VCI` and `VNINDEX`.
 - Shared fee/tax constants and canonical execution amount calculations.
 - Insufficient-cash, invalid-close, T+2, partial-close and force-liquidation
@@ -101,7 +106,7 @@ Acceptance:
 
 Estimate: 0.5-1 engineering day.  
 Priority: P0.  
-Status: documentation updated; commit/review artifact pending.
+Status: completed; baseline commit `36cf982`.
 
 ### Milestone 1 - Accounting and Trade Ledger Hardening
 
@@ -133,8 +138,7 @@ Acceptance:
 
 Estimate: 3-5 engineering days.  
 Priority: P0.  
-Status: core calculations and first regression set done; invariant matrix and
-known-ledger fixture pending.
+Status: completed for supported long-only scope.
 
 ### Milestone 2 - Analytics Reconciliation
 
@@ -162,7 +166,7 @@ Acceptance:
 
 Estimate: 3-4 engineering days.  
 Priority: P0.  
-Status: pending.
+Status: completed with known-ledger analytics fixtures.
 
 ### Milestone 3 - Data Integrity and Determinism
 
@@ -187,7 +191,7 @@ Acceptance:
 
 Estimate: 2-4 engineering days.  
 Priority: P1.  
-Status: partial; deterministic seed and several date/no-leak protections exist.
+Status: completed for supported daily-candle/import/replay scope.
 
 ### Milestone 4 - User Workflow and UX Completion
 
@@ -215,7 +219,7 @@ Acceptance:
 
 Estimate: 3-5 engineering days.  
 Priority: P1.  
-Status: happy-path browser smoke passed; systematic UX/error-state review pending.
+Status: completed; desktop/mobile UAT found and fixed responsive defects.
 
 ### Milestone 5 - Release Engineering and Operations
 
@@ -239,7 +243,7 @@ Acceptance:
 
 Estimate: 2-3 engineering days.  
 Priority: P1.  
-Status: partial; individual commands and Windows verification exist.
+Status: completed with portable Unix runner and fresh migration gate.
 
 ### Milestone 6 - Release Review and Go/No-Go
 
@@ -266,7 +270,7 @@ No-go criteria:
 
 Estimate: 1-2 engineering days.  
 Priority: P0 release gate.  
-Status: pending.
+Status: completed; see `docs/RELEASE_EVIDENCE_2026-07-04.md`.
 
 ## 5. Recommended Sequence and Capacity
 

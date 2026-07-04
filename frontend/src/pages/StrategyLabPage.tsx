@@ -34,7 +34,15 @@ const loadHistory = (): LabHistoryEntry[] => {
 
 const saveHistory = (entries: LabHistoryEntry[]) => {
   if (typeof window !== 'undefined') {
-    window.localStorage.setItem(HISTORY_KEY, JSON.stringify(entries.slice(0, 20)));
+    try {
+      window.localStorage.setItem(HISTORY_KEY, JSON.stringify(entries.slice(0, 20)));
+    } catch {
+      try {
+        window.localStorage.setItem(HISTORY_KEY, JSON.stringify(entries.slice(0, 5)));
+      } catch {
+        window.localStorage.removeItem(HISTORY_KEY);
+      }
+    }
   }
 };
 
@@ -48,7 +56,7 @@ export const StrategyLabPage: React.FC = () => {
   const [isRunning, setIsRunning] = useState(false);
   const [isSweeping, setIsSweeping] = useState(false);
   const [results, setResults] = useState<LabResult[]>([]);
-  const [sweepPath, setSweepPath] = useState('indicators[0].length');
+  const [sweepPath, setSweepPath] = useState('indicators[1].length');
   const [sweepValues, setSweepValues] = useState('5, 10, 20');
   const [maxVariants, setMaxVariants] = useState(12);
   const [sweepResults, setSweepResults] = useState<SweepVariant[]>([]);

@@ -12,6 +12,33 @@ Tag hien tai: `v2.0.0-rc1`
 > ngay 2026-07-04. Cac muc `1-14` la audit snapshot luc tiep nhan; mot so blocker
 > trong snapshot da duoc xu ly va duoc ghi lai o muc `0.x`.
 
+## 0.12 Cap Nhat Release Verification Lan 2 - 2026-07-04
+
+Sau independent release review, co 2 P1 con lai:
+
+1. RC2 chua co provenance sach vi thay doi con nam o working tree.
+2. Backtest/Scanner con dung duong tinh indicator rieng, co nguy co lech voi Replay.
+
+Trang thai sau dot fix nay:
+
+- Da them `backend/app/domain/engine/strategy_indicator_adapter.py` de Backtest va Scanner dung chung `IndicatorEngine`.
+- Da loai bo `BacktestService._compute_indicators()` cu.
+- `ScannerService` khong con goi private indicator method cua Backtest.
+- Da them regression test doi chieu output strategy MACD/RSI voi `IndicatorEngine`.
+- Browser smoke da them CCI qua UI, khong chi verify bang source/unit test.
+- Da sua Strategy Lab sweep:
+  - response sweep khong con day ca `equity_curve` lon vao UI/history;
+  - localStorage history khong duoc lam crash UI neu qua quota;
+  - default sweep path dung duoc voi bundled MACD+RSI va MA strategies.
+- Gate moi nhat:
+  - `./scripts/verify-v2.sh`: pass, backend `72 passed, 1 skipped, 1 warning`; frontend lint/test/build pass; fresh migration pass.
+  - `SUMI_BROWSER_CHANNEL=chrome npm run smoke:browser`: pass voi CCI, Replay, Backtest, Strategy Lab, Scanner, Analytics va mobile overflow checks.
+
+Danh gia hien tai:
+
+- Khong con P0/P1 ky thuat dang mo trong pham vi local-first SQLite daily-candle RC2.
+- Con viec release process: commit, tag `v2.0.0-rc2`, push branch/tag, va neu can thi rerun verification tu tag de co provenance hoan toan sach.
+
 ## Cap Nhat Sau Dot Thuc Thi 2026-07-04
 
 ### 0.1. Pham Vi Da Lam Sau Report Ban Dau
@@ -387,6 +414,43 @@ Danh gia rewrite:
   acceptance tests chung minh chi phi sua cao hon thay moi.
 - Multi-user SaaS, realtime/intraday va real broker integration nam ngoai release
   hien tai va can mot chuong trinh kien truc rieng neu tro thanh muc tieu san pham.
+
+### 0.11. Ket Qua Hoan Thanh 7 Milestone 2026-07-04
+
+Toan bo milestone M0-M6 da duoc thuc thi. Bang chung release chi tiet nam tai:
+
+- `docs/RELEASE_EVIDENCE_2026-07-04.md`
+
+Ket qua chinh:
+
+- M0: baseline chart-v5/product-RC da duoc commit rieng tai `36cf982`.
+- M1: accounting reject price/quantity khong duong; known ledger khoa fee, tax,
+  cash, partial/full close va net PnL.
+- M2: analytics doi soat closed-trade fixture cho equity, cash, holdings,
+  drawdown, expectancy va VNINDEX benchmark; no-trade session co output xac dinh.
+- M3: import idempotent/update, invalid timestamp va scanner-to-replay
+  no-future-leak da co regression tests.
+- M4: browser UAT phat hien va sua sidebar mobile che noi dung cung replay chart
+  bi ep hep; desktop va viewport 390x844 da duoc kiem tra lai.
+- M5: `scripts/verify-v2.sh` chay backend, fresh Alembic migration, frontend
+  lint/tests/build va tuy chon browser smoke.
+- M6: final automated gate va browser smoke pass; version RC la `2.0.0-rc2`.
+
+Final evidence:
+
+- Backend: 71 passed, 1 skipped, 1 dependency warning.
+- Fresh SQLite migration: Alembic head `20260629_0004` pass.
+- Frontend: lint pass; 9 files/18 tests pass; production build pass.
+- Browser product smoke: pass.
+
+Quyet dinh:
+
+> GO cho release candidate local-first/SQLite/daily-candle trong pham vi V2.
+> NO-GO cho SaaS, real-money trading, intraday/realtime va broker integration.
+
+Khong con P0/P1 da biet trong acceptance matrix duoc ho tro. Cac warning con lai
+la Starlette/httpx deprecation, Node experimental localStorage trong test va
+gioi han concurrent write cua SQLite; tat ca da duoc ghi trong release evidence.
 
 ## 1. Tom Tat Dieu Hanh
 

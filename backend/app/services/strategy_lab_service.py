@@ -38,7 +38,7 @@ class StrategyLabService:
             results.append({
                 "label": variant["label"],
                 "parameters": variant["parameters"],
-                "response": response,
+                "response": self._compact_response(response),
                 "metrics": self._extract_metrics(response),
             })
 
@@ -109,3 +109,23 @@ class StrategyLabService:
             "profit_factor": analytics.get("profit_factor"),
             "expectancy": analytics.get("expectancy"),
         }
+
+    def _compact_response(self, response: dict) -> dict:
+        analytics = response.get("analytics") or {}
+        summary = response.get("summary") or {}
+        compact = {
+            "status": response.get("status", "succeeded"),
+            "symbol": response.get("symbol"),
+            "symbols": response.get("symbols"),
+            "total_candles": response.get("total_candles"),
+            "analytics": {
+                "total_trades": summary.get("total_trades", analytics.get("total_trades", 0)),
+                "win_rate": summary.get("win_rate", analytics.get("win_rate", 0.0)),
+                "total_net_pnl": summary.get("total_net_pnl", analytics.get("total_net_pnl", 0.0)),
+                "profit_factor": analytics.get("profit_factor"),
+                "expectancy": analytics.get("expectancy"),
+            },
+        }
+        if response.get("message"):
+            compact["message"] = response["message"]
+        return compact

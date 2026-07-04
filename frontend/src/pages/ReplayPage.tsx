@@ -439,7 +439,7 @@ return () => { cancelled = true; };
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%', minHeight: 0, overflow: 'hidden', background: 'var(--bg-dark)' }}>
+    <div className="replay-workspace" style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%', minHeight: 0, overflow: 'hidden', background: 'var(--bg-dark)' }}>
       <header style={{
         padding: '10px 12px', background: 'var(--bg-header)', backdropFilter: 'var(--backdrop-blur)',
         display: 'flex', flexWrap: 'wrap', gap: '8px 16px', justifyContent: 'space-between', alignItems: 'center',
@@ -531,14 +531,14 @@ return () => { cancelled = true; };
         </div>
       </header>
 
-      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+      <div className="replay-workspace-body" style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         <DrawingToolbar 
           activeTool={activeTool} 
           onSelectTool={setActiveTool} 
           onClearAll={handleClearDrawings} 
         />
         
-        <main style={{ flex: 3, minWidth: 0, padding: '0.5rem', display: 'flex', flexDirection: 'column' }}>
+        <main className="replay-chart-region" style={{ flex: 3, minWidth: 0, padding: '0.5rem', display: 'flex', flexDirection: 'column' }}>
           <div className="panel" style={{ flex: 1, padding: 0, overflow: 'hidden' }}>
             <MultiChartLayout layoutType="1x1">
               <CandleChart 
@@ -554,7 +554,7 @@ return () => { cancelled = true; };
           </div>
         </main>
 
-        <aside style={{ flex: '0 0 clamp(240px, 26%, 320px)', padding: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem', borderLeft: '1px solid var(--border-color)', minWidth: 0, overflowY: 'auto' }}>
+        <aside className="replay-details-region" style={{ flex: '0 0 clamp(240px, 26%, 320px)', padding: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem', borderLeft: '1px solid var(--border-color)', minWidth: 0, overflowY: 'auto' }}>
           {signalSource && (
             <div className="panel" style={{ padding: '12px', borderColor: 'rgba(255, 209, 102, 0.35)' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', alignItems: 'center', marginBottom: '8px' }}>

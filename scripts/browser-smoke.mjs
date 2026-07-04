@@ -39,6 +39,18 @@ async function assertNoBlankPage(page, label) {
   }
 }
 
+async function assertNoHorizontalPageOverflow(page, label) {
+  const dimensions = await page.evaluate(() => ({
+    viewportWidth: document.documentElement.clientWidth,
+    pageWidth: document.documentElement.scrollWidth,
+  }));
+  if (dimensions.pageWidth > dimensions.viewportWidth + 1) {
+    throw new Error(
+      `${label}: horizontal overflow ${dimensions.pageWidth}px > ${dimensions.viewportWidth}px`,
+    );
+  }
+}
+
 async function run() {
   await waitForHealth();
 
@@ -49,18 +61,18 @@ async function run() {
   page.on('console', (message) => {
     if (message.type() === 'error') {
       const text = message.text();
-      if (
-        text.includes('Invalid date string') ||
-        text.includes('Assertion failed') ||
-        text.includes('Sumi UI runtime error') ||
-        text.includes('status code 500')
-      ) {
+      const isExpectedRejectedRequest =
+        text.includes('Failed to load resource') && text.includes('400 (Bad Request)');
+      if (!isExpectedRejectedRequest) {
         pageErrors.push(text);
       }
     }
   });
 
   try {
+    await page.goto(baseUrl);
+    await page.evaluate(() => window.localStorage.clear());
+
     await page.goto(`${baseUrl}/replay`);
     await page.waitForLoadState('domcontentloaded');
     await page.waitForTimeout(1000);
@@ -78,6 +90,7 @@ async function run() {
     await selectIndicator(page, 'Exponential Moving Average');
     await selectIndicator(page, 'Relative Strength Index');
     await selectIndicator(page, 'MACD');
+    await selectIndicator(page, 'Commodity Channel Index');
 
     await submitOrder(page, 'button.btn-buy');
     await page.getByText(/LONG 100/).waitFor();
@@ -103,8 +116,18 @@ async function run() {
     await page.getByText('SUCCEEDED').first().waitFor();
     await page.getByRole('button', { name: 'Clear', exact: true }).click();
     await page.locator('input[type="checkbox"]').first().check();
+    await page.waitForTimeout(250);
+    const sweepResponsePromise = page.waitForResponse(
+      response => response.url().includes('/api/strategy-lab/sweep') && response.status() === 200,
+      { timeout: 60000 },
+    );
     await page.getByRole('button', { name: 'Run Sweep' }).click();
-    await page.getByText('Sweep Results').waitFor();
+    const sweepResponse = await sweepResponsePromise;
+    const sweepPayload = await sweepResponse.json();
+    if (!Array.isArray(sweepPayload.variants) || sweepPayload.variants.length === 0) {
+      throw new Error(`Strategy Lab sweep returned no variants: ${JSON.stringify(sweepPayload).slice(0, 500)}`);
+    }
+    await page.getByText('Sweep Results').waitFor({ timeout: 30000 });
     await assertNoBlankPage(page, 'Strategy Lab');
 
     await page.goto(`${baseUrl}/scanner`);
@@ -121,6 +144,14 @@ async function run() {
     await page.getByText('Trade History').waitFor();
     await page.getByText('Equity Curve & Drawdown').waitFor();
     await assertNoBlankPage(page, 'Analytics');
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    for (const route of ['/replay', '/backtest', '/strategy-lab', '/scanner', '/analytics', '/journal', '/import']) {
+      await page.goto(`${baseUrl}${route}`);
+      await page.waitForLoadState('domcontentloaded');
+      await assertNoBlankPage(page, `Mobile ${route}`);
+      await assertNoHorizontalPageOverflow(page, `Mobile ${route}`);
+    }
 
     if (pageErrors.length > 0) {
       throw new Error(`Browser runtime errors:\n${pageErrors.join('\n---\n')}`);

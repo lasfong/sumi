@@ -7,13 +7,14 @@ Date: 2026-07-04.
 
 Run date: 2026-07-04.
 
-- Backend pytest: passed, `55 passed, 1 skipped, 1 warning`.
+- Backend pytest: passed, `72 passed, 1 skipped, 1 warning`.
 - Alembic upgrade head: passed on SQLite.
 - Frontend lint: passed.
 - Frontend tests: passed, `9 test files / 18 tests`.
 - Frontend production build: passed.
-- Browser smoke: passed with `npm run smoke:browser` after fixing concurrent
-  Strategy Lab writes that locked SQLite.
+- Browser smoke: passed with `SUMI_BROWSER_CHANNEL=chrome npm run smoke:browser`,
+  including CCI, compact Strategy Lab sweep, scanner-to-replay and mobile route
+  overflow checks.
 - Verification script hardening: `scripts/verify-v2.ps1` now checks external command status after each gate step so backend, Alembic, frontend, or browser failures cannot be reported as a completed gate.
 
 ## Product Scope
@@ -62,7 +63,7 @@ Or from repository root after both local services are already running:
 This browser smoke covers:
 
 - Replay session creation.
-- EMA/RSI/MACD indicator warm-up.
+- EMA/RSI/MACD/CCI indicator warm-up.
 - BUY, T+1 SELL rejection and T+2 SELL success.
 - Backtest MACD RSI Momentum.
 - Strategy Lab comparison and sweep.
@@ -75,7 +76,7 @@ This browser smoke covers:
 2. Import CafeF data or use an existing local SQLite dataset.
 3. Create or resume a replay session.
 4. Confirm Replay shows only revealed candles.
-5. Add EMA/RSI/MACD indicators and confirm no future timestamps appear in session-scoped indicator output.
+5. Add EMA/RSI/MACD/CCI indicators and confirm no future timestamps appear in session-scoped indicator output.
 6. Submit BUY, HOLD and SELL decisions.
 7. Confirm T+1 sell rejection and T+2 sell success.
 8. Place invalid and valid limit orders, then advance replay to verify pending/fill behavior.
@@ -106,6 +107,8 @@ The release is ready when:
   working tree as a release.
 - Any remaining issue is documented as future scope rather than hidden as a broken feature.
 
-Current disposition: **not yet releasable**. Automated and happy-path browser
-gates are green, but known-ledger analytics reconciliation, clean release commit
-and final go/no-go review remain open.
+Current disposition: **GO for V2 RC2 within the local-first/SQLite/daily-candle
+scope**. Known-ledger reconciliation, fresh migration, automated gates,
+desktop/mobile UAT and browser smoke pass. See
+`docs/RELEASE_EVIDENCE_2026-07-04.md`. This is explicitly not approval for SaaS,
+real-money, broker-connected or realtime use.

@@ -13,6 +13,58 @@ from app.models.order import Order
 
 from fastapi import HTTPException
 
+
+@pytest.mark.parametrize(
+    ("price", "quantity", "expected_detail"),
+    [
+        (-100.0, 100.0, "price"),
+        (100.0, -100.0, "quantity"),
+        (100.0, 0.0, "quantity"),
+    ],
+)
+def test_buy_rejects_non_positive_execution_inputs(
+    db_session, price, quantity, expected_detail
+):
+    candle = Candle(
+        symbol="INVALID",
+        timeframe="1D",
+        timestamp=date(2024, 1, 2),
+        open=100,
+        high=101,
+        low=99,
+        close=100,
+        volume=1000,
+    )
+    db_session.add(candle)
+    db_session.commit()
+    session = ReplayService.create_session(
+        db_session,
+        ReplaySessionCreate(
+            symbol="INVALID",
+            start_date=date(2024, 1, 2),
+            end_date=date(2024, 1, 2),
+            initial_cash=100_000,
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        TradeLifecycleService.process_decision(
+            db_session,
+            session.id,
+            DecisionCreate(
+                action=DecisionAction.BUY,
+                price=price,
+                quantity=quantity,
+            ),
+        )
+
+    assert exc_info.value.status_code == 400
+    assert expected_detail in exc_info.value.detail.lower()
+    db_session.refresh(session)
+    assert session.current_cash == pytest.approx(100_000)
+    assert db_session.query(Order).filter_by(session_id=session.id).count() == 0
+    assert db_session.query(Execution).filter_by(session_id=session.id).count() == 0
+
 def test_sell_t_plus_1_is_rejected(db_session):
     # Setup session
     for i in range(5):

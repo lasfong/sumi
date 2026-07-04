@@ -50,6 +50,7 @@ async def test_parameter_sweep_runs_variants(db_session):
     assert result["total_variants"] == 2
     assert {row["parameters"]["indicators[0].length"] for row in result["variants"]} == {5, 10}
     assert all("net_pnl" in row["metrics"] for row in result["variants"])
+    assert all("equity_curve" not in row["response"].get("analytics", {}) for row in result["variants"])
 
 
 @pytest.mark.asyncio

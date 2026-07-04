@@ -1,5 +1,7 @@
 from typing import List, Dict, Any
 import pandas as pd
+import math
+from numbers import Real
 from app.schemas.import_schema import ImportWarning
 
 class DataQualityService:
@@ -22,18 +24,25 @@ class DataQualityService:
             # Missing checks
             if pd.isna(row['symbol']) or not str(row['symbol']).strip():
                 warnings.append(ImportWarning(row_index=row_num, message="Missing symbol"))
-            if pd.isna(row['timestamp']):
+            if pd.isna(row['timestamp']) or not hasattr(row['timestamp'], "year"):
                 warnings.append(ImportWarning(row_index=row_num, message="Missing timestamp"))
             
             # Price <= 0 checks
             prices = [row['open'], row['high'], row['low'], row['close']]
             if any(pd.isna(p) for p in prices):
                 warnings.append(ImportWarning(row_index=row_num, message="Missing price values"))
+            elif any(not isinstance(p, Real) or not math.isfinite(float(p)) for p in prices):
+                warnings.append(ImportWarning(row_index=row_num, message="Invalid price values"))
             elif any(p <= 0 for p in prices):
                 warnings.append(ImportWarning(row_index=row_num, message="Negative or zero price values"))
                 
             # Volume < 0
-            if pd.isna(row['volume']) or row['volume'] < 0:
+            if (
+                pd.isna(row['volume'])
+                or not isinstance(row['volume'], Real)
+                or not math.isfinite(float(row['volume']))
+                or row['volume'] < 0
+            ):
                 warnings.append(ImportWarning(row_index=row_num, message="Negative volume"))
                 
             # High < Low (skip if any NaN)
