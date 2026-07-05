@@ -9,17 +9,14 @@ from app.domain.engine.strategy_indicator_adapter import StrategyIndicatorAdapte
 from app.domain.regime.regime_classifier import RegimeClassifier
 from app.domain.strategy.rule_evaluator import RuleEvaluationError
 from app.domain.strategy.strategy_loader import load_strategy_from_dict
+from app.domain.strategy.strategy_rule_evaluator import StrategyRuleEvaluator
 from app.models.candle import Candle
 from app.schemas.replay_schema import ReplaySessionCreate
-from app.services.backtest_service import BacktestService
 from app.utils.date_range import end_before, start_at
 from app.services.replay_service import ReplayService
 
 
 class ScannerService:
-    def __init__(self):
-        self.backtest_service = BacktestService()
-
     def run_scan(self, db: Session, config: dict) -> dict:
         symbols = config.get("symbols") or []
         symbols = [symbol.strip().upper() for symbol in symbols if symbol and symbol.strip()]
@@ -50,7 +47,7 @@ class ScannerService:
             df = self._to_dataframe(candles)
             indicator_values = StrategyIndicatorAdapter.compute(df, strategy.indicators)
             try:
-                self.backtest_service._validate_strategy_rules(strategy, set(indicator_values.keys()))
+                StrategyRuleEvaluator.validate_strategy_rules(strategy, set(indicator_values.keys()))
             except RuleEvaluationError as exc:
                 return {
                     "status": "failed",
@@ -61,9 +58,9 @@ class ScannerService:
                 }
 
             for index in range(1, len(df)):
-                current = self.backtest_service._get_indicator_snapshot(indicator_values, index)
-                previous = self.backtest_service._get_indicator_snapshot(indicator_values, index - 1)
-                if self.backtest_service._evaluate_rules(strategy.entry_rules, current, previous):
+                current = StrategyRuleEvaluator.indicator_snapshot(indicator_values, index)
+                previous = StrategyRuleEvaluator.indicator_snapshot(indicator_values, index - 1)
+                if StrategyRuleEvaluator.evaluate_rules(strategy.entry_rules, current, previous):
                     timestamp = df.iloc[index]["timestamp"]
                     results.append({
                         "symbol": symbol,

@@ -1,4 +1,6 @@
 import { createRequire } from 'node:module';
+import { mkdir, rm } from 'node:fs/promises';
+import path from 'node:path';
 
 const require = createRequire(new URL('../frontend/package.json', import.meta.url));
 const { chromium } = require('playwright');
@@ -6,6 +8,8 @@ const { chromium } = require('playwright');
 const baseUrl = process.env.SUMI_FRONTEND_URL || 'http://127.0.0.1:5173';
 const backendUrl = process.env.SUMI_BACKEND_URL || 'http://127.0.0.1:8000';
 const headless = process.env.SUMI_BROWSER_HEADLESS !== 'false';
+const artifactRoot = process.env.SUMI_BROWSER_ARTIFACT_DIR || path.resolve('..', 'test-results', 'browser-smoke');
+const artifactRunDir = path.join(artifactRoot, new Date().toISOString().replace(/[:.]/g, '-'));
 
 const pageErrors = [];
 
@@ -55,7 +59,13 @@ async function run() {
   await waitForHealth();
 
   const browser = await launchBrowser();
-  const page = await browser.newPage({ viewport: { width: 1366, height: 768 } });
+  await mkdir(artifactRunDir, { recursive: true });
+  const context = await browser.newContext({
+    viewport: { width: 1366, height: 768 },
+    recordVideo: { dir: artifactRunDir, size: { width: 1366, height: 768 } },
+  });
+  await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
+  const page = await context.newPage();
   page.setDefaultTimeout(20000);
   page.on('pageerror', (error) => pageErrors.push(error.message));
   page.on('console', (message) => {
@@ -69,6 +79,7 @@ async function run() {
     }
   });
 
+  let failed = false;
   try {
     await page.goto(baseUrl);
     await page.evaluate(() => window.localStorage.clear());
@@ -156,7 +167,21 @@ async function run() {
     if (pageErrors.length > 0) {
       throw new Error(`Browser runtime errors:\n${pageErrors.join('\n---\n')}`);
     }
+    await context.tracing.stop();
+  } catch (error) {
+    failed = true;
+    const screenshotPath = path.join(artifactRunDir, 'failure.png');
+    const tracePath = path.join(artifactRunDir, 'trace.zip');
+    await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+    await context.tracing.stop({ path: tracePath }).catch(() => {});
+    await context.close();
+    console.error(`Browser smoke artifacts saved to ${artifactRunDir}`);
+    throw error;
   } finally {
+    if (!failed) {
+      await context.close();
+      await rm(artifactRunDir, { recursive: true, force: true });
+    }
     await browser.close();
   }
 }

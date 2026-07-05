@@ -4,6 +4,7 @@ import pandas as pd
 from datetime import date, timedelta
 from app.domain.engine.indicator_engine import IndicatorEngine
 from app.domain.engine.strategy_indicator_adapter import StrategyIndicatorAdapter
+from app.domain.strategy.strategy_rule_evaluator import StrategyRuleEvaluator
 from app.models.candle import Candle
 from app.models.trade import Trade
 from app.domain.strategy.strategy_loader import list_available_strategies, load_strategy_from_dict
@@ -28,8 +29,10 @@ def test_backtest_supports_macd_rsi_strategy_indicators():
     assert "macd_signal" in values
     assert "macd_hist" in values
     assert "rsi" in values
-    BacktestService()._validate_strategy_rules(strategy, set(values.keys()))
+    StrategyRuleEvaluator.validate_strategy_rules(strategy, set(values.keys()))
     assert not hasattr(BacktestService(), "_compute_indicators")
+    assert not hasattr(BacktestService(), "_validate_strategy_rules")
+    assert not hasattr(BacktestService(), "_evaluate_rules")
 
 
 def test_strategy_indicator_adapter_uses_shared_indicator_engine_outputs():

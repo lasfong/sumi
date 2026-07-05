@@ -1,5 +1,179 @@
 # Sumi v2.0.0-rc2 Release Verification Log
 
+## Canonical Provenance Reverification - 2026-07-05
+
+Classification: **VERIFIED**
+
+This section supersedes the earlier provisional provenance statements below.
+No product code was changed and no new tag was created.
+
+### Source Worktree And Tag
+
+Commands:
+
+```bash
+git status --porcelain
+git log --oneline -5
+git tag --points-at HEAD
+git show-ref --tags -d v2.0.0-rc2
+git rev-parse HEAD
+git rev-list -n 1 v2.0.0-rc2
+```
+
+Exact output (`git status --porcelain` produced no lines):
+
+```text
+812675c release: complete Sumi v2 RC2 hardening
+36cf982 feat: establish Sumi v2 release candidate baseline
+3c6b4ca test: harden v2 release gate
+d59390c test: add browser smoke hardening
+328b3b6 fix: harden browser uat flows
+v2.0.0-rc2
+66acf862a10c850185d4993237191fba879da7ca refs/tags/v2.0.0-rc2
+812675ce37d30ddfafc11c6eeca299b5cd8a3c9e refs/tags/v2.0.0-rc2^{}
+812675ce37d30ddfafc11c6eeca299b5cd8a3c9e
+812675ce37d30ddfafc11c6eeca299b5cd8a3c9e
+```
+
+The annotated tag object is `66acf862a10c850185d4993237191fba879da7ca` and
+peels to the expected RC2 commit
+`812675ce37d30ddfafc11c6eeca299b5cd8a3c9e`.
+
+### Clean Checkout And Dependency Installation
+
+Checkout directory:
+
+```text
+/tmp/sumi-rc2-provenance.lp6iyc/repo
+```
+
+Commands:
+
+```bash
+git clone --branch v2.0.0-rc2 --single-branch /Users/mizuhara/workspace/sumi /tmp/sumi-rc2-provenance.lp6iyc/repo
+python3.12 --version
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -r backend/requirements.txt
+cd frontend && npm install
+```
+
+Exact completion output:
+
+```text
+812675ce37d30ddfafc11c6eeca299b5cd8a3c9e
+v2.0.0-rc2
+Python 3.12.13
+
+Successfully installed Mako-1.3.12 MarkupSafe-3.0.3 PyYAML-6.0.3 alembic-1.18.5 annotated-doc-0.0.4 annotated-types-0.7.0 anyio-4.14.1 beautifulsoup4-4.15.0 certifi-2026.6.17 cffi-2.0.0 charset_normalizer-3.4.7 click-8.4.2 contourpy-1.3.3 curl_cffi-0.15.0 cycler-0.12.1 et-xmlfile-2.0.0 fastapi-0.139.0 fonttools-4.63.0 h11-0.16.0 httpcore-1.0.9 httpx-0.28.1 idna-3.18 importlib-metadata-9.0.0 iniconfig-2.3.0 kiwisolver-1.5.0 llvmlite-0.44.0 markdown-it-py-4.2.0 matplotlib-3.11.0 mdurl-0.1.2 mplfinance-0.12.10b0 multitasking-0.0.13 numba-0.61.2 numpy-2.2.6 openpyxl-3.1.5 packaging-26.2 pandas-2.3.3 pandas-ta-0.4.71b0 peewee-4.1.1 pillow-12.3.0 platformdirs-4.10.0 pluggy-1.6.0 protobuf-7.35.1 psutil-7.2.2 pycparser-3.0 pydantic-2.13.4 pydantic-core-2.46.4 pydantic-settings-2.14.2 pygments-2.20.0 pyparsing-3.3.2 pytest-9.1.1 pytest-asyncio-1.4.0 python-dateutil-2.9.0.post0 python-dotenv-1.2.2 python-multipart-0.0.32 pytz-2026.2 requests-2.34.2 rich-15.0.0 seaborn-0.13.2 six-1.17.0 soupsieve-2.8.4 sqlalchemy-2.0.51 starlette-1.3.1 tenacity-9.1.4 tqdm-4.68.3 typing-extensions-4.16.0 typing-inspection-0.4.2 tzdata-2026.2 urllib3-2.7.0 uvicorn-0.50.0 vnai-2.4.9 vnstock-4.0.4 vnstock_ezchart-1.0.2 websockets-16.0 yfinance-1.5.1 zipp-4.1.0
+
+added 277 packages, and audited 278 packages in 2s
+
+69 packages are looking for funding
+  run `npm fund` for details
+
+found 0 vulnerabilities
+```
+
+### Fresh Migration And Deterministic Seed
+
+Commands:
+
+```bash
+DATABASE_URL=sqlite:////tmp/sumi-rc2-provenance.lp6iyc/verify.db ../.venv/bin/python -m alembic upgrade head
+DATABASE_URL=sqlite:////tmp/sumi-rc2-provenance.lp6iyc/verify.db ../.venv/bin/python scripts/seed_demo.py
+```
+
+Exact output:
+
+```text
+INFO  [alembic.runtime.migration] Context impl SQLiteImpl.
+INFO  [alembic.runtime.migration] Will assume non-transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade  -> cdf80254e9dc, initial_schema
+INFO  [alembic.runtime.migration] Running upgrade cdf80254e9dc -> 20260629_0001, strategy_lab_runs
+INFO  [alembic.runtime.migration] Running upgrade 20260629_0001 -> 20260629_0002, replay_session_source
+INFO  [alembic.runtime.migration] Running upgrade 20260629_0002 -> 20260629_0003, scanner_runs
+INFO  [alembic.runtime.migration] Running upgrade 20260629_0003 -> 20260629_0004, execution_trade_id_drift
+Seeded 2080 deterministic daily candles (FPT=520, SSI=520, VCI=520, VNINDEX=520).
+```
+
+### Verification Gate
+
+Command:
+
+```bash
+./scripts/verify-v2.sh
+```
+
+Exact result output:
+
+```text
+72 passed, 1 skipped, 1 warning in 24.26s
+[2/6] Fresh database migration
+[3/6] Frontend lint
+[4/6] Frontend tests
+Test Files  9 passed (9)
+Tests  18 passed (18)
+[5/6] Frontend production build
+✓ 1901 modules transformed.
+✓ built in 601ms
+[6/6] Browser smoke skipped (set SUMI_BROWSER_SMOKE=1 to enable)
+Sumi V2 verification passed.
+```
+
+The accepted warnings remain the Starlette/httpx deprecation warning and the
+Node localStorage experimental warning already classified later in this log.
+
+### Browser Product Smoke On The Clean Database
+
+Services were started from the detached-tag checkout with the seeded database:
+
+```bash
+DATABASE_URL=sqlite:////tmp/sumi-rc2-provenance.lp6iyc/verify.db ../.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+npm run dev -- --host 127.0.0.1 --port 5173
+SUMI_BROWSER_CHANNEL=chrome npm run smoke:browser
+```
+
+Exact final output:
+
+```text
+> frontend@0.0.0 smoke:browser
+> node ../scripts/browser-smoke.mjs
+
+Sumi browser smoke passed
+```
+
+An earlier harness attempt used backend port `8012`. Vite still proxied `/api`
+to the release-default port `8000`, so that attempt timed out waiting for a
+Replay Session and Vite reported `ECONNREFUSED`. Repeating the exact release
+configuration above passed; no product-code change was required.
+
+### Required Grep Verification
+
+Commands and exact output:
+
+```text
+--- Backtest private indicator usage ---
+backend/app/tests/test_backtest.py:32:    assert not hasattr(BacktestService(), "_compute_indicators")
+--- Scanner indicator computation ---
+51:            indicator_values = StrategyIndicatorAdapter.compute(df, strategy.indicators)
+--- Lightweight Charts package lock ---
+3182-    },
+3183:    "node_modules/lightweight-charts": {
+3184-      "version": "5.2.0",
+3185-      "resolved": "https://registry.npmjs.org/lightweight-charts/-/lightweight-charts-5.2.0.tgz",
+17:    "lightweight-charts": "^5.2.0",
+--- Clean checkout status after verification ---
+--- HEAD and tag after verification ---
+812675ce37d30ddfafc11c6eeca299b5cd8a3c9e
+v2.0.0-rc2
+```
+
+The sole `_compute_indicators` match is a regression assertion proving that the
+method is absent. There is no product-code usage. Scanner indicator computation
+does not call a Backtest private indicator method.
+
+Final provenance decision: **VERIFIED**.
+
 Date: 2026-07-04  
 Reviewer mode: independent release reviewer  
 Candidate workspace: `/Users/mizuhara/workspace/sumi-v2-rc2-verify-20260704`  

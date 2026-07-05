@@ -1,9 +1,9 @@
 import pandas as pd
-import numpy as np
 from datetime import datetime
 from sqlalchemy.orm import Session
 from app.domain.engine.strategy_indicator_adapter import StrategyIndicatorAdapter
 from app.domain.strategy.strategy_loader import load_strategy_from_dict
+from app.domain.strategy.strategy_rule_evaluator import StrategyRuleEvaluator
 from app.services.trade_lifecycle_service import TradeLifecycleService
 from app.services.analytics_service import AnalyticsService
 from app.models.replay_session import ReplaySession
@@ -11,13 +11,7 @@ from app.models.candle import Candle
 from app.models.trade import Trade
 from app.domain.regime.regime_classifier import RegimeClassifier
 import uuid
-from app.domain.strategy.rule_evaluator import (
-    RuleEvaluationError,
-    evaluate_condition,
-    evaluate_rule_dsl,
-    validate_condition,
-    validate_rule_dsl,
-)
+from app.domain.strategy.rule_evaluator import RuleEvaluationError
 from app.utils.date_range import end_before, start_at
 
 class BacktestService:
@@ -151,7 +145,7 @@ class BacktestService:
         
         indicator_values = StrategyIndicatorAdapter.compute(df, strategy.indicators)
         try:
-            self._validate_strategy_rules(strategy, set(indicator_values.keys()))
+            StrategyRuleEvaluator.validate_strategy_rules(strategy, set(indicator_values.keys()))
         except RuleEvaluationError as exc:
             return {
                 "status": "failed",
@@ -167,14 +161,14 @@ class BacktestService:
         for i in range(1, len(df)):  # Start from 1 to have previous values
             session.current_index = i
             
-            current = self._get_indicator_snapshot(indicator_values, i)
-            previous = self._get_indicator_snapshot(indicator_values, i - 1)
+            current = StrategyRuleEvaluator.indicator_snapshot(indicator_values, i)
+            previous = StrategyRuleEvaluator.indicator_snapshot(indicator_values, i - 1)
             
             close_price = float(df.iloc[i]["close"])
             
             if not has_position:
                 # Check entry signals
-                if self._evaluate_rules(strategy.entry_rules, current, previous):
+                if StrategyRuleEvaluator.evaluate_rules(strategy.entry_rules, current, previous):
                     # BUY
                     try:
                         quantity = self._calculate_quantity(
@@ -208,7 +202,7 @@ class BacktestService:
                     continue  # Can't sell yet
                 
                 # Check exit signals
-                if self._evaluate_rules(strategy.exit_rules, current, previous):
+                if StrategyRuleEvaluator.evaluate_rules(strategy.exit_rules, current, previous):
                     # SELL
                     try:
                         from app.schemas.decision_schema import DecisionCreate
@@ -251,58 +245,6 @@ class BacktestService:
             "slices": slices,
         }
     
-    def _get_indicator_snapshot(self, indicator_values: dict, index: int) -> dict:
-        snapshot = {}
-        for k, arr in indicator_values.items():
-            val = arr[index]
-            snapshot[k] = float(val) if not np.isnan(val) else None
-        return snapshot
-
-    def _validate_strategy_rules(self, strategy, indicator_names: set[str]) -> None:
-        allowed_names = set(indicator_names)
-        allowed_names.update(f"previous_{name}" for name in indicator_names)
-        for rule in [*strategy.entry_rules, *strategy.exit_rules]:
-            condition = rule.get("condition")
-            if condition:
-                validate_condition(condition, allowed_names)
-            dsl_rule = rule.get("dsl") or self._extract_inline_dsl(rule)
-            if dsl_rule:
-                validate_rule_dsl(dsl_rule, allowed_names)
-        
-    def _evaluate_rules(self, rules, current, previous) -> bool:
-        """
-        Evaluate rule conditions.
-        Tất cả rules phải TRUE → signal TRUE.
-        """
-        if not rules:
-            return False
-            
-        for rule in rules:
-            condition = rule.get("condition")
-            dsl_rule = rule.get("dsl") or self._extract_inline_dsl(rule)
-            
-            values = dict(current)
-            values.update({f"previous_{key}": val for key, val in previous.items()})
-            if condition and not evaluate_condition(condition, values):
-                return False
-            if dsl_rule and not evaluate_rule_dsl(dsl_rule, values):
-                return False
-        
-        return True
-
-    def _extract_inline_dsl(self, rule: dict) -> dict | None:
-        operators = {
-            "all", "any", "not", "gt", "gte", "lt", "lte", "eq",
-            "cross_up", "cross_down", "between", "rising", "falling",
-        }
-        inline_keys = [key for key in rule.keys() if key in operators]
-        if not inline_keys:
-            return None
-        if len(inline_keys) > 1:
-            raise RuleEvaluationError("Rule must contain only one inline DSL operator.")
-        key = inline_keys[0]
-        return {key: rule[key]}
-
     def _build_result_slices(
         self,
         db: Session,
