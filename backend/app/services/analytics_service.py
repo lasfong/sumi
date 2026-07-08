@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from fastapi import HTTPException
 import numpy as np
 import math
 from app.models.trade import Trade
@@ -7,6 +7,7 @@ from app.models.replay_session import ReplaySession
 from app.models.execution import Execution
 from app.models.order import Order
 from app.models.candle import Candle
+from app.utils.date_range import end_before, start_at
 from app.schemas.analytics_schema import (
     AnalyticsResponse, SetupPerformance, DrawdownPeriod,
     BenchmarkPoint, TradeDistribution, GroupPerformance, OutlierImpact
@@ -17,8 +18,15 @@ class AnalyticsService:
     def _build_equity_curve(db: Session, session: ReplaySession, candles: list) -> list:
         initial_cash = float(session.initial_cash)
 
-        executions = db.query(Execution).filter_by(session_id=session.id)\
-            .order_by(Execution.execution_date).all()
+        executions = db.query(Execution).filter_by(
+            session_id=session.id,
+            symbol=session.symbol,
+        ).order_by(Execution.execution_date, Execution.id).all()
+        order_ids = [execution.order_id for execution in executions]
+        orders = {
+            order.id: order
+            for order in db.query(Order).filter(Order.id.in_(order_ids)).all()
+        } if order_ids else {}
 
         cash = initial_cash
         holdings = {}
@@ -34,10 +42,12 @@ class AnalyticsService:
             # Apply executions up to this candle
             while exec_index < len(executions):
                 ex = executions[exec_index]
-                if str(ex.execution_date) > str(candle_date):
+                if ex.execution_date > candle_date:
                     break
 
-                order = db.query(Order).filter_by(id=ex.order_id).first()
+                order = orders.get(ex.order_id)
+                if order is None:
+                    raise ValueError(f"Execution {ex.id} references missing order {ex.order_id}")
                 if order.side == "BUY":
                     cash -= float(ex.net_amount)
                     sym = ex.symbol
@@ -171,8 +181,8 @@ class AnalyticsService:
 
         vnindex_candles = db.query(Candle).filter(
             Candle.symbol == "VNINDEX",
-            Candle.timestamp >= session.start_date,
-            Candle.timestamp <= session.end_date
+            Candle.timestamp >= start_at(session.start_date),
+            Candle.timestamp < end_before(session.end_date)
         ).order_by(Candle.timestamp).all()
 
         if not vnindex_candles:
@@ -242,13 +252,36 @@ class AnalyticsService:
     @staticmethod
     def get_analytics(db: Session, session_id: int) -> AnalyticsResponse:
         session = db.query(ReplaySession).filter(ReplaySession.id == session_id).first()
+        if session is None:
+            raise HTTPException(status_code=404, detail="Session not found")
         trades = db.query(Trade).filter(Trade.session_id == session_id, Trade.exit_date.isnot(None)).order_by(Trade.exit_date).all()
+
+        from app.services.replay_service import ReplayService
+        candles = ReplayService.get_candles(db, session_id)
+        equity_curve = AnalyticsService._build_equity_curve(db, session, candles)
+        dd_stats = AnalyticsService._calculate_max_drawdown(equity_curve)
+        drawdown_periods = AnalyticsService._calculate_drawdown_periods(equity_curve)
+        benchmark_curve = AnalyticsService._get_benchmark_curve(db, session)
 
         total_trades = len(trades)
         if total_trades == 0:
             return AnalyticsResponse(
                 total_trades=0, win_rate=0.0, total_net_pnl=0.0,
-                average_win=0.0, average_loss=0.0, profit_factor=0.0
+                average_win=0.0, average_loss=0.0, profit_factor=None,
+                expectancy=0.0,
+                largest_win=0.0,
+                largest_loss=0.0,
+                max_drawdown=dd_stats["max_drawdown_amount"],
+                max_drawdown_pct=dd_stats["max_drawdown_pct"],
+                sharpe_ratio=AnalyticsService._calculate_sharpe_ratio(equity_curve),
+                setup_performance=[],
+                equity_curve=equity_curve,
+                drawdown_periods=drawdown_periods,
+                benchmark_curve=benchmark_curve,
+                trade_distribution=[],
+                symbol_performance=[],
+                mistake_performance=[],
+                outlier_impact=AnalyticsService._calculate_outlier_impact([]),
             )
 
         winning_trades = [t for t in trades if t.net_pnl and t.net_pnl > 0]
@@ -313,18 +346,10 @@ class AnalyticsService:
         downside_std_dev = math.sqrt(downside_variance) if downside_variance > 0 else 1.0
         sortino_ratio = avg_pnl / downside_std_dev if downside_std_dev > 0 else 0
 
-        # Get session candles to build curve
-        from app.services.replay_service import ReplayService
-        candles = ReplayService.get_candles(db, session_id)
-
         # Equity Curve and related
-        equity_curve = AnalyticsService._build_equity_curve(db, session, candles)
-        dd_stats = AnalyticsService._calculate_max_drawdown(equity_curve)
         max_drawdown = dd_stats["max_drawdown_amount"]
         max_drawdown_pct = dd_stats["max_drawdown_pct"]
-        drawdown_periods = AnalyticsService._calculate_drawdown_periods(equity_curve)
         sharpe_ratio = AnalyticsService._calculate_sharpe_ratio(equity_curve)
-        benchmark_curve = AnalyticsService._get_benchmark_curve(db, session)
         symbol_performance = AnalyticsService._build_group_performance(trades, "symbol", "Unknown")
         mistake_performance = AnalyticsService._build_group_performance(trades, "mistake_tag", "No mistake tag")
         outlier_impact = AnalyticsService._calculate_outlier_impact(trades)

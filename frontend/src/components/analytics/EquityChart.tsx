@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { createChart } from 'lightweight-charts';
+import { AreaSeries, HistogramSeries, createChart } from 'lightweight-charts';
 import type { IChartApi, Time } from 'lightweight-charts';
 import { toDateKey } from '../../utils/date';
 
@@ -45,14 +45,14 @@ export const EquityChart: React.FC<EquityChartProps> = ({ data }) => {
 
     chartRef.current = chart;
 
-    const equitySeries = chart.addAreaSeries({
+    const equitySeries = chart.addSeries(AreaSeries, {
       lineColor: '#2962FF',
       topColor: 'rgba(41, 98, 255, 0.4)',
       bottomColor: 'rgba(41, 98, 255, 0.0)',
       lineWidth: 2,
     });
 
-    const drawdownSeries = chart.addHistogramSeries({
+    const drawdownSeries = chart.addSeries(HistogramSeries, {
       color: 'rgba(255, 23, 68, 0.5)',
       priceFormat: {
         type: 'volume',

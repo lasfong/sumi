@@ -59,7 +59,11 @@ def client():
 def test_health_check(client):
     response = client.get("/api/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "message": "Sumi API is running"}
+    assert response.json() == {
+        "status": "ok",
+        "message": "Sumi API is running",
+        "version": "2.0.0-rc2",
+    }
 
 def test_list_replay_sessions_excludes_backtest_sessions(client):
     db = TestingSessionLocal()

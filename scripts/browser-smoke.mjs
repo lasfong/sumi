@@ -1,4 +1,6 @@
 import { createRequire } from 'node:module';
+import { mkdir, rm } from 'node:fs/promises';
+import path from 'node:path';
 
 const require = createRequire(new URL('../frontend/package.json', import.meta.url));
 const { chromium } = require('playwright');
@@ -6,6 +8,8 @@ const { chromium } = require('playwright');
 const baseUrl = process.env.SUMI_FRONTEND_URL || 'http://127.0.0.1:5173';
 const backendUrl = process.env.SUMI_BACKEND_URL || 'http://127.0.0.1:8000';
 const headless = process.env.SUMI_BROWSER_HEADLESS !== 'false';
+const artifactRoot = process.env.SUMI_BROWSER_ARTIFACT_DIR || path.resolve('..', 'test-results', 'browser-smoke');
+const artifactRunDir = path.join(artifactRoot, new Date().toISOString().replace(/[:.]/g, '-'));
 
 const pageErrors = [];
 
@@ -39,28 +43,47 @@ async function assertNoBlankPage(page, label) {
   }
 }
 
+async function assertNoHorizontalPageOverflow(page, label) {
+  const dimensions = await page.evaluate(() => ({
+    viewportWidth: document.documentElement.clientWidth,
+    pageWidth: document.documentElement.scrollWidth,
+  }));
+  if (dimensions.pageWidth > dimensions.viewportWidth + 1) {
+    throw new Error(
+      `${label}: horizontal overflow ${dimensions.pageWidth}px > ${dimensions.viewportWidth}px`,
+    );
+  }
+}
+
 async function run() {
   await waitForHealth();
 
   const browser = await launchBrowser();
-  const page = await browser.newPage({ viewport: { width: 1366, height: 768 } });
+  await mkdir(artifactRunDir, { recursive: true });
+  const context = await browser.newContext({
+    viewport: { width: 1366, height: 768 },
+    recordVideo: { dir: artifactRunDir, size: { width: 1366, height: 768 } },
+  });
+  await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
+  const page = await context.newPage();
   page.setDefaultTimeout(20000);
   page.on('pageerror', (error) => pageErrors.push(error.message));
   page.on('console', (message) => {
     if (message.type() === 'error') {
       const text = message.text();
-      if (
-        text.includes('Invalid date string') ||
-        text.includes('Assertion failed') ||
-        text.includes('Sumi UI runtime error') ||
-        text.includes('status code 500')
-      ) {
+      const isExpectedRejectedRequest =
+        text.includes('Failed to load resource') && text.includes('400 (Bad Request)');
+      if (!isExpectedRejectedRequest) {
         pageErrors.push(text);
       }
     }
   });
 
+  let failed = false;
   try {
+    await page.goto(baseUrl);
+    await page.evaluate(() => window.localStorage.clear());
+
     await page.goto(`${baseUrl}/replay`);
     await page.waitForLoadState('domcontentloaded');
     await page.waitForTimeout(1000);
@@ -75,9 +98,10 @@ async function run() {
     const sessionId = sessionMatch?.[1];
     if (!sessionId) throw new Error('Replay session id was not visible');
 
-    await selectIndicator(page, 'EMA (20)');
-    await selectIndicator(page, 'RSI (14)');
-    await selectIndicator(page, 'MACD (12, 26, 9)');
+    await selectIndicator(page, 'Exponential Moving Average');
+    await selectIndicator(page, 'Relative Strength Index');
+    await selectIndicator(page, 'MACD');
+    await selectIndicator(page, 'Commodity Channel Index');
 
     await submitOrder(page, 'button.btn-buy');
     await page.getByText(/LONG 100/).waitFor();
@@ -103,8 +127,18 @@ async function run() {
     await page.getByText('SUCCEEDED').first().waitFor();
     await page.getByRole('button', { name: 'Clear', exact: true }).click();
     await page.locator('input[type="checkbox"]').first().check();
+    await page.waitForTimeout(250);
+    const sweepResponsePromise = page.waitForResponse(
+      response => response.url().includes('/api/strategy-lab/sweep') && response.status() === 200,
+      { timeout: 60000 },
+    );
     await page.getByRole('button', { name: 'Run Sweep' }).click();
-    await page.getByText('Sweep Results').waitFor();
+    const sweepResponse = await sweepResponsePromise;
+    const sweepPayload = await sweepResponse.json();
+    if (!Array.isArray(sweepPayload.variants) || sweepPayload.variants.length === 0) {
+      throw new Error(`Strategy Lab sweep returned no variants: ${JSON.stringify(sweepPayload).slice(0, 500)}`);
+    }
+    await page.getByText('Sweep Results').waitFor({ timeout: 30000 });
     await assertNoBlankPage(page, 'Strategy Lab');
 
     await page.goto(`${baseUrl}/scanner`);
@@ -122,10 +156,32 @@ async function run() {
     await page.getByText('Equity Curve & Drawdown').waitFor();
     await assertNoBlankPage(page, 'Analytics');
 
+    await page.setViewportSize({ width: 390, height: 844 });
+    for (const route of ['/replay', '/backtest', '/strategy-lab', '/scanner', '/analytics', '/journal', '/import']) {
+      await page.goto(`${baseUrl}${route}`);
+      await page.waitForLoadState('domcontentloaded');
+      await assertNoBlankPage(page, `Mobile ${route}`);
+      await assertNoHorizontalPageOverflow(page, `Mobile ${route}`);
+    }
+
     if (pageErrors.length > 0) {
       throw new Error(`Browser runtime errors:\n${pageErrors.join('\n---\n')}`);
     }
+    await context.tracing.stop();
+  } catch (error) {
+    failed = true;
+    const screenshotPath = path.join(artifactRunDir, 'failure.png');
+    const tracePath = path.join(artifactRunDir, 'trace.zip');
+    await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+    await context.tracing.stop({ path: tracePath }).catch(() => {});
+    await context.close();
+    console.error(`Browser smoke artifacts saved to ${artifactRunDir}`);
+    throw error;
   } finally {
+    if (!failed) {
+      await context.close();
+      await rm(artifactRunDir, { recursive: true, force: true });
+    }
     await browser.close();
   }
 }

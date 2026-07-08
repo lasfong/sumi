@@ -1,7 +1,12 @@
 import re
+import os
 import pytest
-from playwright.sync_api import Page, expect
 
+playwright = pytest.importorskip("playwright.sync_api", reason="Install Playwright to run browser E2E tests")
+Page = playwright.Page
+expect = playwright.expect
+
+@pytest.mark.skipif(os.getenv("SUMI_E2E") != "1", reason="Set SUMI_E2E=1 with the local stack running")
 def test_session_setup_and_replay(page: Page):
     # TC-01: Khởi tạo Phiên Giao dịch
     page.goto("http://localhost:5173/replay")

@@ -3,6 +3,7 @@ from datetime import datetime
 from app.domain.engine.events import EventDispatcher, EventType, OrderEvent, FillEvent, MarketEvent
 from app.domain.engine.models import EngineOrder, Portfolio
 from app.domain.engine.market_constraints import MarketConstraints
+from app.domain.market_rules import BUY_FEE_RATE, SELL_TOTAL_COST_RATE
 
 class SlippageModel:
     def __init__(self, pct: float = 0.0):
@@ -29,8 +30,8 @@ class BrokerSimulation:
         self.active_orders: List[EngineOrder] = []
         self.slippage_model = SlippageModel(pct=0.001) 
         # Cập nhật phí theo chuẩn VN: Mua 0.15%, Bán 0.15% + Thuế 0.1% = 0.25%
-        self.buy_commission = CommissionModel(pct=0.0015) 
-        self.sell_commission = CommissionModel(pct=0.0025) 
+        self.buy_commission = CommissionModel(pct=BUY_FEE_RATE)
+        self.sell_commission = CommissionModel(pct=SELL_TOTAL_COST_RATE)
         self.exchange = exchange
         
         # Subscribe to events
@@ -133,6 +134,8 @@ class BrokerSimulation:
         cost = (executed_price * order.quantity) + commission
         if order.direction == 'BUY' and cost > self.portfolio.cash:
             order.status = 'REJECTED'
+            if order in self.active_orders:
+                self.active_orders.remove(order)
             print(f"Order Rejected: Insufficient funds for {order.symbol}")
             return
             

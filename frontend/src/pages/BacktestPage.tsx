@@ -15,7 +15,9 @@ export const BacktestPage: React.FC = () => {
     queryKey: ['strategies'],
     queryFn: getAvailableStrategies,
   });
-  const selectedStrategy = strategies?.find(s => s.filename === selectedStrategyFilename);
+
+  const effectiveStrategyFilename = selectedStrategyFilename || strategies?.[0]?.filename || '';
+  const selectedStrategy = strategies?.find(s => s.filename === effectiveStrategyFilename);
   const selectedStrategyConfig = selectedStrategy?.config as StrategyConfig | undefined;
 
   const mutation = useMutation({
@@ -26,7 +28,7 @@ export const BacktestPage: React.FC = () => {
     e.preventDefault();
     if (!strategies) return;
     
-    const strategy = strategies.find(s => s.filename === selectedStrategyFilename);
+    const strategy = strategies.find(s => s.filename === effectiveStrategyFilename);
     if (!strategy) {
       alert("Vui lòng chọn một chiến lược (Strategy)!");
       return;
@@ -147,7 +149,7 @@ export const BacktestPage: React.FC = () => {
             <label htmlFor="strategy" style={{ display: 'block', marginBottom: '8px', color: 'var(--text-muted)', fontSize: '14px' }}>Strategy</label>
             <select 
               id="strategy"
-              value={selectedStrategyFilename}
+              value={effectiveStrategyFilename}
               onChange={e => setSelectedStrategyFilename(e.target.value)}
               style={{ width: '100%', padding: '10px' }}
               required

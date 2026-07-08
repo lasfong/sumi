@@ -19,6 +19,7 @@ export function Sidebar() {
       <div className="sidebar-header">
         <div className="logo-glow"></div>
         <h2>Sumi</h2>
+        <span className="version-badge">v2.0.0-rc2</span>
       </div>
       
       <nav className="sidebar-nav">

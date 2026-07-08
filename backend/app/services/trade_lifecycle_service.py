@@ -11,12 +11,13 @@ from app.models.trade import Trade
 from app.services.replay_service import ReplayService
 from app.schemas.decision_schema import DecisionCreate
 from app.domain.enums import DecisionAction, OrderSide, OrderType, OrderStatus, PositionStatus
+from app.domain.accounting import (
+    calculate_buy_amounts,
+    calculate_net_pnl,
+    calculate_pnl_percent,
+    calculate_sell_amounts,
+)
 from app.services.event_logging_service import EventLoggingService
-
-# Vietnamese stock market fee/tax rates
-BUY_FEE_RATE = 0.0015   # 0.15% broker fee on buy
-SELL_FEE_RATE = 0.0015   # 0.15% broker fee on sell
-SELL_TAX_RATE = 0.001    # 0.1% tax on sell
 
 class TradeLifecycleService:
     @staticmethod
@@ -53,23 +54,35 @@ class TradeLifecycleService:
             return decision
 
         # Execute logic if it's a trading action
-        exec_price = decision_in.price if decision_in.price else current_candle.close
-        qty = decision_in.quantity if decision_in.quantity else 100.0
+        exec_price = decision_in.price if decision_in.price is not None else current_candle.close
+        qty = decision_in.quantity if decision_in.quantity is not None else 100.0
 
-        if decision_in.order_type == OrderType.LIMIT.value:
-            TradeLifecycleService._create_limit_order(db, session, decision.id, decision_in, session.symbol, exec_price, qty, candles)
-        else:
-            if decision_in.action in [DecisionAction.BUY, DecisionAction.ADD]:
-                TradeLifecycleService._execute_buy(db, session, decision.id, decision_in, session.symbol, current_candle.timestamp, exec_price, qty)
+        if exec_price <= 0:
+            db.rollback()
+            raise HTTPException(status_code=400, detail="Execution price must be greater than zero")
+        if qty <= 0:
+            db.rollback()
+            raise HTTPException(status_code=400, detail="Execution quantity must be greater than zero")
 
-            elif decision_in.action in [DecisionAction.SELL, DecisionAction.REDUCE]:
-                TradeLifecycleService._execute_sell(db, session, decision.id, decision_in, session.symbol, current_candle.timestamp, exec_price, qty)
+        try:
+            if decision_in.order_type == OrderType.LIMIT.value:
+                TradeLifecycleService._create_limit_order(db, session, decision.id, decision_in, session.symbol, exec_price, qty, candles)
+            else:
+                if decision_in.action in [DecisionAction.BUY, DecisionAction.ADD]:
+                    TradeLifecycleService._execute_buy(db, session, decision.id, decision_in, session.symbol, current_candle.timestamp, exec_price, qty)
 
-            elif decision_in.action in [DecisionAction.CLOSE, DecisionAction.CUT_LOSS, DecisionAction.TAKE_PROFIT]:
-                position = db.query(Position).filter(Position.session_id == session_id, Position.status == PositionStatus.OPEN.value).first()
-                if position:
+                elif decision_in.action in [DecisionAction.SELL, DecisionAction.REDUCE]:
+                    TradeLifecycleService._execute_sell(db, session, decision.id, decision_in, session.symbol, current_candle.timestamp, exec_price, qty)
+
+                elif decision_in.action in [DecisionAction.CLOSE, DecisionAction.CUT_LOSS, DecisionAction.TAKE_PROFIT]:
+                    position = db.query(Position).filter(Position.session_id == session_id, Position.status == PositionStatus.OPEN.value).first()
+                    if not position or position.quantity <= 0:
+                        raise HTTPException(status_code=400, detail="Cannot close: no open position")
                     qty = position.quantity
                     TradeLifecycleService._execute_sell(db, session, decision.id, decision_in, session.symbol, current_candle.timestamp, exec_price, qty)
+        except HTTPException:
+            db.rollback()
+            raise
 
         EventLoggingService.log_event(
             db=db,
@@ -90,10 +103,13 @@ class TradeLifecycleService:
 
     @staticmethod
     def _execute_buy(db: Session, session, decision_id: int, decision_in: DecisionCreate, symbol: str, date: datetime, price: float, qty: float, pending_order=None):
-        # Fee calculation
-        gross_amount = price * qty
-        fee = price * qty * BUY_FEE_RATE
-        net_amount = gross_amount + fee
+        amounts = calculate_buy_amounts(price, qty)
+
+        if amounts.net_amount > session.current_cash:
+            if pending_order:
+                pending_order.status = OrderStatus.REJECTED.value
+                db.add(pending_order)
+            raise HTTPException(status_code=400, detail=f"Cannot buy: insufficient cash. Required: {amounts.net_amount}, Available: {session.current_cash}")
 
         if pending_order:
             order = pending_order
@@ -106,7 +122,7 @@ class TradeLifecycleService:
 
         position = db.query(Position).filter(Position.session_id == session.id, Position.status == PositionStatus.OPEN.value).first()
         if not position:
-            position = Position(session_id=session.id, symbol=symbol, quantity=qty, average_price=price, total_cost=gross_amount, opened_at=date)
+            position = Position(session_id=session.id, symbol=symbol, quantity=qty, average_price=price, total_cost=amounts.gross_amount, opened_at=date)
             db.add(position)
 
             # Calculate initial risk if stop_loss provided
@@ -127,7 +143,7 @@ class TradeLifecycleService:
             db.add(trade)
             db.flush()
         else:
-            new_cost = position.total_cost + gross_amount
+            new_cost = position.total_cost + amounts.gross_amount
             position.quantity += qty
             position.average_price = new_cost / position.quantity
             position.total_cost = new_cost
@@ -137,11 +153,11 @@ class TradeLifecycleService:
                 trade.quantity += qty
                 trade.entry_price = position.average_price
 
-        execution = Execution(order_id=order.id, trade_id=trade.id if trade else None, session_id=session.id, symbol=symbol, execution_date=date, execution_price=price, quantity=qty, gross_amount=gross_amount, net_amount=net_amount, fee=fee, tax=0.0)
+        execution = Execution(order_id=order.id, trade_id=trade.id if trade else None, session_id=session.id, symbol=symbol, execution_date=date, execution_price=price, quantity=qty, gross_amount=amounts.gross_amount, net_amount=amounts.net_amount, fee=amounts.fee, tax=amounts.tax)
         db.add(execution)
 
         # Update cash on session
-        session.current_cash -= net_amount
+        session.current_cash -= amounts.net_amount
 
     @staticmethod
     def _execute_sell(db: Session, session, decision_id: int, decision_in: DecisionCreate, symbol: str, date: datetime, price: float, qty: float, pending_order=None):
@@ -181,11 +197,7 @@ class TradeLifecycleService:
             raise HTTPException(status_code=400, detail=f"Cannot sell: T+2 constraint. Available: {available_qty}, Requested: {qty}")
 
 
-        # Fee/tax calculation
-        gross_amount = price * qty
-        fee = price * qty * SELL_FEE_RATE
-        tax = price * qty * SELL_TAX_RATE
-        net_amount = gross_amount - fee - tax
+        amounts = calculate_sell_amounts(price, qty)
 
         trade = db.query(Trade).filter(Trade.session_id == session.id, Trade.exit_date == None).first()
 
@@ -198,12 +210,12 @@ class TradeLifecycleService:
             db.add(order)
             db.flush()
 
-        execution = Execution(order_id=order.id, trade_id=trade.id if trade else None, session_id=session.id, symbol=symbol, execution_date=date, execution_price=price, quantity=qty, gross_amount=gross_amount, net_amount=net_amount, fee=fee, tax=tax)
+        execution = Execution(order_id=order.id, trade_id=trade.id if trade else None, session_id=session.id, symbol=symbol, execution_date=date, execution_price=price, quantity=qty, gross_amount=amounts.gross_amount, net_amount=amounts.net_amount, fee=amounts.fee, tax=amounts.tax)
         db.add(execution)
         db.flush()
 
         # Update cash on session
-        session.current_cash += net_amount
+        session.current_cash += amounts.net_amount
 
         # Calculate PnL for this chunk
         realized_pnl_chunk = (price - position.average_price) * qty
@@ -236,8 +248,8 @@ class TradeLifecycleService:
                 buy_cash_out = sum(e.net_amount for e in buy_executions)
                 sell_cash_in = sum(e.net_amount for e in sell_executions)
 
-                trade.net_pnl = sell_cash_in - buy_cash_out
-                trade.pnl_percent = (trade.net_pnl / buy_cash_out * 100) if buy_cash_out > 0 else 0
+                trade.net_pnl = calculate_net_pnl(buy_cash_out, sell_cash_in)
+                trade.pnl_percent = calculate_pnl_percent(trade.net_pnl, buy_cash_out)
 
                 # Determine result based on net_pnl
                 if trade.net_pnl > 0:
@@ -290,21 +302,19 @@ class TradeLifecycleService:
         db.add(decision)
         db.flush()
 
-        # Fee/tax
-        gross_amount = price * qty
-        fee = price * qty * SELL_FEE_RATE
-        tax = price * qty * SELL_TAX_RATE
-        net_amount = gross_amount - fee - tax
+        amounts = calculate_sell_amounts(price, qty)
 
         order = Order(session_id=session.id, decision_id=decision.id, symbol=session.symbol, side=OrderSide.SELL.value, order_type=OrderType.MARKET_AT_CLOSE.value, requested_price=price, quantity=qty, status=OrderStatus.EXECUTED.value)
         db.add(order)
         db.flush()
 
-        execution = Execution(order_id=order.id, session_id=session.id, symbol=session.symbol, execution_date=current_candle.timestamp, execution_price=price, quantity=qty, gross_amount=gross_amount, net_amount=net_amount, fee=fee, tax=tax)
+        trade = db.query(Trade).filter(Trade.session_id == session.id, Trade.exit_date == None).first()
+
+        execution = Execution(order_id=order.id, trade_id=trade.id if trade else None, session_id=session.id, symbol=session.symbol, execution_date=current_candle.timestamp, execution_price=price, quantity=qty, gross_amount=amounts.gross_amount, net_amount=amounts.net_amount, fee=amounts.fee, tax=amounts.tax)
         db.add(execution)
 
         # Update session
-        session.current_cash += net_amount
+        session.current_cash += amounts.net_amount
 
         # Close position
         realized_pnl = (price - position.average_price) * qty
@@ -315,13 +325,19 @@ class TradeLifecycleService:
         position.closed_at = current_candle.timestamp
 
         # Close trade
-        trade = db.query(Trade).filter(Trade.session_id == session.id, Trade.exit_date == None).first()
         if trade:
             trade.exit_date = current_candle.timestamp
             trade.exit_price = price
             trade.gross_pnl = position.realized_pnl
-            trade.net_pnl = position.realized_pnl
-            trade.pnl_percent = (trade.net_pnl / (trade.entry_price * trade.quantity)) if trade.quantity > 0 and trade.entry_price > 0 else 0
+            buy_executions = db.query(Execution).join(Order).filter(
+                Execution.session_id == session.id,
+                Execution.symbol == session.symbol,
+                Execution.trade_id == trade.id,
+                Order.side == OrderSide.BUY.value
+            ).all()
+            buy_cash_out = sum(e.net_amount for e in buy_executions)
+            trade.net_pnl = calculate_net_pnl(buy_cash_out, amounts.net_amount)
+            trade.pnl_percent = calculate_pnl_percent(trade.net_pnl, buy_cash_out)
             if trade.net_pnl > 0:
                 trade.result = 'win'
             elif trade.net_pnl < 0:

@@ -5,19 +5,18 @@ import pandas as pd
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from app.domain.engine.strategy_indicator_adapter import StrategyIndicatorAdapter
 from app.domain.regime.regime_classifier import RegimeClassifier
 from app.domain.strategy.rule_evaluator import RuleEvaluationError
 from app.domain.strategy.strategy_loader import load_strategy_from_dict
+from app.domain.strategy.strategy_rule_evaluator import StrategyRuleEvaluator
 from app.models.candle import Candle
 from app.schemas.replay_schema import ReplaySessionCreate
-from app.services.backtest_service import BacktestService
+from app.utils.date_range import end_before, start_at
 from app.services.replay_service import ReplayService
 
 
 class ScannerService:
-    def __init__(self):
-        self.backtest_service = BacktestService()
-
     def run_scan(self, db: Session, config: dict) -> dict:
         symbols = config.get("symbols") or []
         symbols = [symbol.strip().upper() for symbol in symbols if symbol and symbol.strip()]
@@ -46,9 +45,9 @@ class ScannerService:
                 continue
 
             df = self._to_dataframe(candles)
-            indicator_values = self.backtest_service._compute_indicators(df, strategy.indicators)
+            indicator_values = StrategyIndicatorAdapter.compute(df, strategy.indicators)
             try:
-                self.backtest_service._validate_strategy_rules(strategy, set(indicator_values.keys()))
+                StrategyRuleEvaluator.validate_strategy_rules(strategy, set(indicator_values.keys()))
             except RuleEvaluationError as exc:
                 return {
                     "status": "failed",
@@ -59,9 +58,9 @@ class ScannerService:
                 }
 
             for index in range(1, len(df)):
-                current = self.backtest_service._get_indicator_snapshot(indicator_values, index)
-                previous = self.backtest_service._get_indicator_snapshot(indicator_values, index - 1)
-                if self.backtest_service._evaluate_rules(strategy.entry_rules, current, previous):
+                current = StrategyRuleEvaluator.indicator_snapshot(indicator_values, index)
+                previous = StrategyRuleEvaluator.indicator_snapshot(indicator_values, index - 1)
+                if StrategyRuleEvaluator.evaluate_rules(strategy.entry_rules, current, previous):
                     timestamp = df.iloc[index]["timestamp"]
                     results.append({
                         "symbol": symbol,
@@ -88,8 +87,8 @@ class ScannerService:
     def _load_candles(self, db: Session, symbol: str, start_date: str, end_date: str) -> list[Candle]:
         return db.query(Candle).filter(
             Candle.symbol == symbol,
-            Candle.timestamp >= start_date,
-            Candle.timestamp <= end_date,
+            Candle.timestamp >= start_at(start_date),
+            Candle.timestamp < end_before(end_date),
         ).order_by(Candle.timestamp).all()
 
     def _build_regime_map(self, db: Session, benchmark_symbol: str | None, start_date: str, end_date: str) -> dict:

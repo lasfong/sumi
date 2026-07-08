@@ -32,7 +32,7 @@ export const DrawingToolbar: React.FC<DrawingToolbarProps> = ({ activeTool, onSe
   ];
 
   return (
-    <div style={{
+    <div className="drawing-toolbar" style={{
       display: 'flex',
       flexDirection: 'column',
       gap: '8px',
@@ -66,7 +66,7 @@ export const DrawingToolbar: React.FC<DrawingToolbarProps> = ({ activeTool, onSe
         </button>
       ))}
       
-      <div style={{ flex: 1 }} />
+      <div className="drawing-toolbar-spacer" style={{ flex: 1 }} />
       
       <button
         title="Remove All Drawings"

@@ -18,7 +18,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Sumi - VN Replay Trading Lab API",
     description="API for local-first trading replay and journaling",
-    version="0.1.0",
+    version=settings.VERSION,
     lifespan=lifespan,
 )
 

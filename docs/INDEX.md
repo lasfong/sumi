@@ -39,6 +39,18 @@ Read these in order:
 11. `docs/DECISIONS.md`
    - Architecture and product decisions. If implementation conflicts with V2 specs, update this file explicitly.
 
+12. `docs/HANDOFF_REPORT_2026-07-03.md`
+   - Current architecture, implementation evidence, risks and review conclusion.
+
+13. `docs/PRODUCT_COMPLETION_PLAN_2026-07-04.md`
+   - Active milestone roadmap from release-candidate baseline to product release.
+
+14. `docs/RELEASE_EVIDENCE_2026-07-04.md`
+   - Final RC2 gate evidence, browser UAT findings and go/no-go decision.
+
+15. `docs/RELEASE_VERIFY_LOG_2026-07-04.md`
+   - Independent release verification pack with command evidence, risk table and remediation status.
+
 ## Supporting Materials
 
 - `docs/BacktestSample/Sample.md`
@@ -61,17 +73,16 @@ They are useful for context but are no longer the implementation contract. Do no
 
 Do not add broad new product surface until P0/P1 blockers from `ACCEPTANCE_CRITERIA_V2.md` pass.
 
-Required order:
+Required order from the current release-candidate baseline:
 
 ```text
-Fix P0/P1 blockers
--> Lock manual replay MVP
--> Standardize analytics
--> Build indicator/signal registry
--> Build safe backtest MVP
--> Add regime slicing
--> Add scanner
--> Add strategy comparison
+Freeze reviewed baseline
+-> Harden accounting and trade ledger
+-> Reconcile analytics with a known ledger
+-> Lock data integrity and deterministic results
+-> Complete UX/error-state UAT
+-> Automate release verification
+-> Run final go/no-go review
 ```
 
 ## Operational Notes

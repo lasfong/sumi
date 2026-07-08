@@ -18,11 +18,12 @@ import toast from 'react-hot-toast';
 import type { Candle, ChartCandle, ChartVolume, DecisionCreate, CreateSessionRequest, Decision } from '../types';
 import { IndicatorSelector } from '../components/chart/IndicatorSelector';
 import type { IndicatorConfig } from '../components/chart/IndicatorSelector';
-import type { IndicatorSeriesData } from '../components/chart/CandleChart';
+import { IndicatorRenderRegistry } from '../components/chart/IndicatorRenderRegistry';
+import { SumiDrawingAdapter } from '../components/chart/SumiDrawingAdapter';
+import { WorkspacePersistence } from '../components/chart/WorkspacePersistence';
 import { useWebSocket } from '../hooks/useWebSocket';
 import type { WebSocketMessage } from '../hooks/useWebSocket';
 import { useQueryClient } from '@tanstack/react-query';
-import type { IndicatorDataPoint } from '../api/indicatorsApi';
 import { sortDateKeys, toDateKey, unixSecondsToDateKey } from '../utils/date';
 
 interface ApiError {
@@ -64,13 +65,7 @@ const parseSignalSourcePayload = (sourceType?: string | null, sourcePayload?: st
 };
 
 const parseDrawings = (stateData?: string): DrawingLine[] => {
-  if (!stateData) return [];
-  try {
-    const parsed = JSON.parse(stateData) as unknown;
-    return Array.isArray(parsed) ? parsed as DrawingLine[] : [];
-  } catch {
-    return [];
-  }
+  return SumiDrawingAdapter.deserialize(stateData);
 };
 
 const isWebSocketCandle = (data: unknown): data is WebSocketCandle => {
@@ -87,7 +82,9 @@ export const ReplayPage: React.FC = () => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [playSpeed, setPlaySpeed] = useState(500); // ms per candle
   
-  const [activeIndicators, setActiveIndicators] = useState<IndicatorConfig[]>([]);
+  const [activeIndicators, setActiveIndicators] = useState<IndicatorConfig[]>(
+    () => WorkspacePersistence.load(store.sessionId).indicators,
+  );
 
   const [activeTool, setActiveTool] = useState<DrawingType>('cursor');
   const [localDrawings, setLocalDrawings] = useState<DrawingLine[] | null>(null);
@@ -95,6 +92,9 @@ export const ReplayPage: React.FC = () => {
   const createMutation = useMutation({
     mutationFn: createReplaySession,
     onSuccess: (data) => {
+      setLocalDrawings(null);
+      setActiveIndicators([]);
+      WorkspacePersistence.save(data.id, { drawings: [], indicators: [] });
       store.setSession(data.id);
       toast.success(`Session #${data.id} created!`);
     },
@@ -141,7 +141,7 @@ export const ReplayPage: React.FC = () => {
   });
 
   const saveDrawingsMutation = useMutation({
-    mutationFn: (newDrawings: DrawingLine[]) => updateDrawings(store.sessionId!, JSON.stringify(newDrawings)),
+    mutationFn: (newDrawings: DrawingLine[]) => updateDrawings(store.sessionId!, SumiDrawingAdapter.serialize(newDrawings)),
   });
 
   const persistedDrawings = parseDrawings(drawingsData?.state_data);
@@ -191,12 +191,16 @@ export const ReplayPage: React.FC = () => {
   }, [createMutation]);
 
   const handleResumeSession = useCallback((sessionId: number) => {
+    setLocalDrawings(null);
+    setActiveIndicators(WorkspacePersistence.load(sessionId).indicators);
     store.setSession(sessionId);
     toast.success(`Session #${sessionId} resumed`);
   }, [store]);
 
   const handleClearSession = useCallback(() => {
     setIsPlaying(false);
+    setLocalDrawings(null);
+    setActiveIndicators([]);
     store.clearSession();
   }, [store]);
 
@@ -350,7 +354,7 @@ export const ReplayPage: React.FC = () => {
         color: isBuy ? '#00E676' : '#FF1744',
         shape: (isBuy ? 'arrowUp' : 'arrowDown') as SeriesMarkerShape,
         text: d.action,
-      };
+      } as SeriesMarker<Time>;
     })
     .sort((a, b) => (a.time as string).localeCompare(b.time as string));
 
@@ -381,9 +385,13 @@ export const ReplayPage: React.FC = () => {
     if (!store.sessionId) return;
     setIsLoadingIndicator(true);
     try {
-      if (!activeIndicators.some(i => `${i.name}_${JSON.stringify(i.params)}` === `${config.name}_${JSON.stringify(config.params)}`)) {
-        setActiveIndicators(prev => [...prev, config]);
-      }
+      setActiveIndicators(previous => {
+        const configKey = `${config.name}_${JSON.stringify(config.params)}`;
+        if (previous.some(item => `${item.name}_${JSON.stringify(item.params)}` === configKey)) return previous;
+        const next = [...previous, config];
+        WorkspacePersistence.save(store.sessionId!, { drawings: [], indicators: next });
+        return next;
+      });
     } catch (error) {
       console.error(error);
       toast.error(`Failed to load ${config.name}`);
@@ -394,12 +402,14 @@ export const ReplayPage: React.FC = () => {
 
   const handleClearIndicators = () => {
     setActiveIndicators([]);
+    WorkspacePersistence.save(store.sessionId!, { drawings: [], indicators: [] });
     chartRef.current?.clearIndicators();
   };
 
   // Sync indicators with current candle data
   useEffect(() => {
     if (!currentCandle || !store.sessionId || activeIndicators.length === 0) return;
+    let cancelled = false;
 
     const fetchActiveIndicators = async () => {
       for (const config of activeIndicators) {
@@ -408,61 +418,12 @@ export const ReplayPage: React.FC = () => {
         const data = await getSessionIndicatorData(store.sessionId!, config.name, config.params);
           if (data.length === 0) continue;
 
-          const seriesList: IndicatorSeriesData[] = [];
-          const keys = Object.keys(data[0]).filter(k => k !== 'timestamp');
-          if (keys.length === 0) continue;
-
-      keys.forEach(k => {
-        const lineData = data
-          .map((d: IndicatorDataPoint) => {
-            const rawValue = d[k];
-            const value = typeof rawValue === 'number' ? rawValue : Number(rawValue);
-            return Number.isFinite(value)
-              ? { time: (toDateKey(d.timestamp) || d.timestamp) as Time, value }
-              : null;
-          })
-          .filter((d): d is { time: Time; value: number } => d !== null);
-
-        let color = config.color || '#2962FF';
-        let type: 'line' | 'histogram' = 'line';
-
-        const lk = k.toLowerCase();
-        
-        // MACD
-        if (lk.startsWith('macd') && !lk.includes('h') && !lk.includes('s')) color = '#2962FF';
-        if (lk.startsWith('macds')) color = '#FF6D00';
-        if (lk.startsWith('macdh')) { color = 'rgba(0, 230, 118, 0.5)'; type = 'histogram'; }
-        
-        // BBANDS
-        if (lk.startsWith('bbl') || lk.startsWith('bbu')) color = 'rgba(41, 98, 255, 0.5)';
-        if (lk.startsWith('bbm')) color = '#FF6D00';
-
-        // ICHIMOKU
-        if (lk.startsWith('isa')) color = 'rgba(0, 230, 118, 0.5)';
-        if (lk.startsWith('isb')) color = 'rgba(255, 23, 68, 0.5)';
-        if (lk.startsWith('its')) color = '#2962FF';
-        if (lk.startsWith('iks')) color = '#FF1744';
-        if (lk.startsWith('ics')) color = '#00E676';
-        
-        // ADX
-        if (lk.startsWith('adx')) color = '#F0F6FC';
-        if (lk.startsWith('dmp')) color = '#00E676';
-        if (lk.startsWith('dmn')) color = '#FF1744';
-        
-        // SUPERTREND
-        if (lk.startsWith('supert_')) color = '#00E676'; // actually supertrend changes color, but simple line is ok
-        if (lk.startsWith('supertd') || lk.startsWith('supertl') || lk.startsWith('superts')) return; // skip these
-
-        // STOCH
-        if (lk.startsWith('stochk')) color = '#2962FF';
-        if (lk.startsWith('stochd')) color = '#FF6D00';
-
-        seriesList.push({ name: k, data: lineData, color, type });
-      });
+      const seriesList = IndicatorRenderRegistry.mapBackendData(data, config.color);
       if (seriesList.length === 0) continue;
+      if (cancelled) return;
 
       const key = `${config.name}_${JSON.stringify(config.params)}`;
-      chartRef.current?.addIndicator(key, seriesList, config.pane);
+      chartRef.current?.addIndicator({ id: config.name, key, series: seriesList, pane: config.pane });
     } catch (error) {
       console.error("Failed to fetch indicator:", error);
     }
@@ -470,6 +431,7 @@ export const ReplayPage: React.FC = () => {
 };
 
 fetchActiveIndicators();
+return () => { cancelled = true; };
 }, [activeIndicators, candlesData, currentCandle, store.sessionId]);
 
   if (!store.sessionId) {
@@ -477,14 +439,14 @@ fetchActiveIndicators();
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: 'var(--bg-dark)' }}>
+    <div className="replay-workspace" style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%', minHeight: 0, overflow: 'hidden', background: 'var(--bg-dark)' }}>
       <header style={{
-        padding: '12px 20px', background: 'var(--bg-header)', backdropFilter: 'var(--backdrop-blur)',
-        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        padding: '10px 12px', background: 'var(--bg-header)', backdropFilter: 'var(--backdrop-blur)',
+        display: 'flex', flexWrap: 'wrap', gap: '8px 16px', justifyContent: 'space-between', alignItems: 'center',
         borderBottom: '1px solid var(--border-color)',
         boxShadow: '0 4px 20px rgba(0,0,0,0.5)', zIndex: 10
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px 12px', minWidth: 0 }}>
           <h2 style={{ margin: 0, fontSize: '18px', fontWeight: 600 }}>Sumi Replay</h2>
           <span style={{ padding: '4px 8px', background: 'rgba(41, 98, 255, 0.1)', color: 'var(--color-primary)', borderRadius: '4px', fontWeight: 600, fontSize: '14px', border: '1px solid rgba(41, 98, 255, 0.3)' }}>
             {symbolName}
@@ -502,7 +464,7 @@ fetchActiveIndicators();
           )}
           
           {currentCandle && (
-            <div style={{ display: 'flex', gap: '12px', marginLeft: '16px', fontSize: '13px', fontFamily: 'monospace' }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', fontSize: '12px', fontFamily: 'monospace' }}>
               <span style={{ color: 'var(--text-muted)' }}>Bar: <span style={{ color: 'white' }}>#{candlesData?.length || 0}</span></span>
               <span style={{ color: 'var(--text-muted)' }}>O: <span style={{ color: 'white' }}>{currentCandle.open.toLocaleString()}</span></span>
               <span style={{ color: 'var(--text-muted)' }}>H: <span style={{ color: 'white' }}>{currentCandle.high.toLocaleString()}</span></span>
@@ -512,7 +474,7 @@ fetchActiveIndicators();
           )}
         </div>
 
-        <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center' }}>
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
             <IndicatorSelector onAddIndicator={loadIndicator} onClear={handleClearIndicators} />
             {isLoadingIndicator && <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Loading...</span>}
@@ -569,14 +531,14 @@ fetchActiveIndicators();
         </div>
       </header>
 
-      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+      <div className="replay-workspace-body" style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         <DrawingToolbar 
           activeTool={activeTool} 
           onSelectTool={setActiveTool} 
           onClearAll={handleClearDrawings} 
         />
         
-        <main style={{ flex: 3, padding: '0.5rem', display: 'flex', flexDirection: 'column' }}>
+        <main className="replay-chart-region" style={{ flex: 3, minWidth: 0, padding: '0.5rem', display: 'flex', flexDirection: 'column' }}>
           <div className="panel" style={{ flex: 1, padding: 0, overflow: 'hidden' }}>
             <MultiChartLayout layoutType="1x1">
               <CandleChart 
@@ -592,7 +554,7 @@ fetchActiveIndicators();
           </div>
         </main>
 
-        <aside style={{ flex: 1, padding: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem', borderLeft: '1px solid var(--border-color)', minWidth: '280px', maxWidth: '360px' }}>
+        <aside className="replay-details-region" style={{ flex: '0 0 clamp(240px, 26%, 320px)', padding: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem', borderLeft: '1px solid var(--border-color)', minWidth: 0, overflowY: 'auto' }}>
           {signalSource && (
             <div className="panel" style={{ padding: '12px', borderColor: 'rgba(255, 209, 102, 0.35)' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', alignItems: 'center', marginBottom: '8px' }}>

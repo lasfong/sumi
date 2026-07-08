@@ -46,7 +46,7 @@ describe('BacktestPage UI Test', () => {
     
     // Wait for strategies to load and populate the select
     await waitFor(() => {
-      expect(screen.getByText(/Strategy 1/i)).toBeInTheDocument();
+      expect(screen.getByRole('combobox')).toHaveValue('strategy1.yaml');
     });
 
     expect(screen.getByLabelText(/Symbol/i)).toBeInTheDocument();

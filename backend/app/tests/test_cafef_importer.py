@@ -37,3 +37,28 @@ def test_data_quality_negative_volume(db_session):
     assert response.skipped_rows == 1
     assert len(response.warnings) == 1
     assert "Negative volume" in response.warnings[0].message
+
+
+def test_import_is_idempotent_and_updates_existing_candle(db_session):
+    original = b"<Ticker>,<DTYYYYMMDD>,<Open>,<High>,<Low>,<Close>,<Volume>\nFPT,20231010,95.0,96.5,94.5,96.0,2500000\n"
+    corrected = b"<Ticker>,<DTYYYYMMDD>,<Open>,<High>,<Low>,<Close>,<Volume>\nFPT,20231010,95.0,98.5,94.5,98.0,3000000\n"
+
+    first = CafeFImporter.import_data(db_session, original, "fpt.csv")
+    second = CafeFImporter.import_data(db_session, original, "fpt.csv")
+    third = CafeFImporter.import_data(db_session, corrected, "fpt.csv")
+
+    assert first.imported_rows == second.imported_rows == third.imported_rows == 1
+    assert db_session.query(Candle).filter_by(symbol="FPT").count() == 1
+    candle = db_session.query(Candle).filter_by(symbol="FPT").one()
+    assert candle.close == 98.0
+    assert candle.volume == 3_000_000
+
+
+def test_import_skips_unparseable_timestamp(db_session):
+    csv_data = b"<Ticker>,<DTYYYYMMDD>,<Open>,<High>,<Low>,<Close>,<Volume>\nFPT,not-a-date,95.0,96.5,94.5,96.0,2500000\n"
+
+    response = CafeFImporter.import_data(db_session, csv_data, "bad-date.csv")
+
+    assert response.imported_rows == 0
+    assert response.skipped_rows == 1
+    assert any("timestamp" in warning.message.lower() for warning in response.warnings)

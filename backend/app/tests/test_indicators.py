@@ -63,6 +63,21 @@ def test_volume_sma_calculation():
     assert 'VOLUME_SMA_5' in result_df.columns
     assert result_df['VOLUME_SMA_5'].iloc[-1] == pytest.approx(df['volume'].tail(5).mean())
 
+def test_cci_uses_canonical_centered_formula():
+    df = create_sample_data(60)
+    result_df = IndicatorEngine.compute(df, 'cci', length=20)
+
+    typical_price = (df['high'] + df['low'] + df['close']) / 3
+    mean = typical_price.rolling(20).mean()
+    deviation = typical_price.rolling(20).apply(
+        lambda values: abs(values - values.mean()).mean(),
+        raw=False,
+    )
+    expected = (typical_price - mean) / (0.015 * deviation)
+
+    assert result_df['CCI_20_0.015'].iloc[-1] == pytest.approx(expected.iloc[-1])
+    assert abs(result_df['CCI_20_0.015'].iloc[-1]) < 1000
+
 def test_reject_unknown_indicator_param():
     df = create_sample_data()
 

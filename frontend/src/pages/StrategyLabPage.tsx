@@ -34,7 +34,15 @@ const loadHistory = (): LabHistoryEntry[] => {
 
 const saveHistory = (entries: LabHistoryEntry[]) => {
   if (typeof window !== 'undefined') {
-    window.localStorage.setItem(HISTORY_KEY, JSON.stringify(entries.slice(0, 20)));
+    try {
+      window.localStorage.setItem(HISTORY_KEY, JSON.stringify(entries.slice(0, 20)));
+    } catch {
+      try {
+        window.localStorage.setItem(HISTORY_KEY, JSON.stringify(entries.slice(0, 5)));
+      } catch {
+        window.localStorage.removeItem(HISTORY_KEY);
+      }
+    }
   }
 };
 
@@ -48,7 +56,7 @@ export const StrategyLabPage: React.FC = () => {
   const [isRunning, setIsRunning] = useState(false);
   const [isSweeping, setIsSweeping] = useState(false);
   const [results, setResults] = useState<LabResult[]>([]);
-  const [sweepPath, setSweepPath] = useState('indicators[0].length');
+  const [sweepPath, setSweepPath] = useState('indicators[1].length');
   const [sweepValues, setSweepValues] = useState('5, 10, 20');
   const [maxVariants, setMaxVariants] = useState(12);
   const [sweepResults, setSweepResults] = useState<SweepVariant[]>([]);
@@ -93,7 +101,8 @@ export const StrategyLabPage: React.FC = () => {
     setIsRunning(true);
     setError(null);
     try {
-      const nextResults = await Promise.all(selected.map(async (strategy) => {
+      const nextResults: LabResult[] = [];
+      for (const strategy of selected) {
         const request: BacktestRequest = {
           start_date: startDate,
           end_date: endDate,
@@ -107,12 +116,12 @@ export const StrategyLabPage: React.FC = () => {
           request.symbol = symbols[0];
         }
         const response = await runBacktest(request);
-        return {
+        nextResults.push({
           filename: strategy.filename,
           name: strategy.name,
           response,
-        };
-      }));
+        });
+      }
       setResults(nextResults);
       addHistory({
         type: 'comparison',

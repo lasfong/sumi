@@ -28,6 +28,15 @@ cd backend
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
 ```
 
+The current `pandas-ta` release requires Python 3.12 or newer.
+
+For a deterministic offline demo dataset:
+
+```powershell
+cd backend
+..\.venv\Scripts\python.exe scripts\seed_demo.py
+```
+
 Frontend:
 
 ```powershell
@@ -51,6 +60,18 @@ Raw data should live under `data/raw/`. Local databases such as `backend/sumi.db
 
 ## Verify Release Gates
 
+macOS/Linux full automated gate:
+
+```bash
+./scripts/verify-v2.sh
+```
+
+With backend and frontend already running, include browser smoke:
+
+```bash
+SUMI_BROWSER_SMOKE=1 ./scripts/verify-v2.sh
+```
+
 Run all V2 gates from the repository root:
 
 ```powershell
@@ -59,11 +80,29 @@ Run all V2 gates from the repository root:
 
 The script runs backend tests, Alembic upgrade, frontend lint, frontend tests and frontend production build.
 
+For product-level smoke testing, start the backend and frontend locally, seed
+demo data, then run:
+
+```powershell
+.\scripts\verify-v2.ps1 -BrowserSmoke
+```
+
+Or run only the browser workflow:
+
+```powershell
+cd frontend
+npm.cmd run smoke:browser
+```
+
+The browser smoke covers replay trading, T+2 rejection, close after settlement,
+backtest, Strategy Lab, scanner-to-replay and analytics loading.
+
 ## Canonical Docs
 
 Start with:
 
 - `docs/INDEX.md`
+- `docs/PRODUCT_COMPLETION_PLAN_2026-07-04.md`
 - `docs/PROGRESS_V2.md`
 - `docs/RELEASE_CHECKLIST_V2.md`
 - `docs/ACCEPTANCE_CRITERIA_V2.md`

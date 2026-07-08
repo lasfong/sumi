@@ -257,6 +257,9 @@ class IndicatorEngine:
             df_copy[f"VOLUME_SMA_{length}"] = df_copy["volume"].rolling(window=length).mean()
             return df_copy
 
+        if definition.id == "cci":
+            return IndicatorEngine._compute_cci(df_copy, params)
+
         if definition.method is None:
             raise ValueError(f"Indicator '{definition.id}' does not have a compute method.")
 
@@ -320,3 +323,20 @@ class IndicatorEngine:
 
         if isinstance(result, pd.Series):
             df_copy[result.name] = result
+
+    @staticmethod
+    def _compute_cci(df_copy: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+        """Compute canonical CCI while pandas-ta beta's formula is incorrect."""
+        length = int(params.get("length", 20))
+        offset = int(params.get("offset", 0))
+        typical_price = (df_copy["high"] + df_copy["low"] + df_copy["close"]) / 3
+        mean = typical_price.rolling(length).mean()
+        mean_deviation = typical_price.rolling(length).apply(
+            lambda values: abs(values - values.mean()).mean(),
+            raw=False,
+        )
+        result = (typical_price - mean) / (0.015 * mean_deviation)
+        if offset:
+            result = result.shift(offset)
+        df_copy[f"CCI_{length}_0.015"] = result
+        return df_copy
