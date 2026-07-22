@@ -1,89 +1,50 @@
-import React from 'react';
-import type { DrawingType } from './CandleChart';
+import React, { useCallback, useState } from 'react';
+import type { MagnetMode } from '../../features/drawings/drawingMagnet';
+import { TEXT_MAX_LENGTH, type DrawingTool } from '../../features/drawings/drawingDomain';
+import { useModalFocus } from '../../hooks/useModalFocus';
 
-interface DrawingToolbarProps {
-  activeTool: DrawingType;
-  onSelectTool: (tool: DrawingType) => void;
-  onClearAll: () => void;
+interface Props {
+  activeTool: DrawingTool; onSelectTool: (tool: DrawingTool) => void;
+  onClearAll: () => void; onUndo: () => void; onRedo: () => void; canUndo: boolean; canRedo: boolean;
+  pendingText: boolean; onCommitText: (text: string) => boolean; onCancelText: () => void;
+  magnetMode: MagnetMode; onMagnetMode: (mode: MagnetMode) => void; persistenceStatus: string;
 }
 
-export const DrawingToolbar: React.FC<DrawingToolbarProps> = ({ activeTool, onSelectTool, onClearAll }) => {
-  const tools: { id: DrawingType; label: string; icon: React.ReactNode }[] = [
-    {
-      id: 'cursor',
-      label: 'Cursor',
-      icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/></svg>
-    },
-    {
-      id: 'trendline',
-      label: 'Trendline',
-      icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 3L3 21M21 3v6M21 3h-6"/></svg>
-    },
-    {
-      id: 'horizontal',
-      label: 'Horizontal Line',
-      icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 12h18"/></svg>
-    },
-    {
-      id: 'fibonacci',
-      label: 'Fibonacci Retracement',
-      icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 4h16M4 12h16M4 20h16M4 8h8M4 16h8"/></svg>
-    }
-  ];
+const TOOLS: Array<{ id: DrawingTool; label: string; icon: string; hint: string }> = [
+  { id: 'select', label: 'Cursor / Select', icon: '↖', hint: 'Select topmost drawing; empty click deselects' },
+  { id: 'horizontal', label: 'Horizontal Line', icon: '—', hint: 'Click once to place' },
+  { id: 'trendline', label: 'Trendline', icon: '╱', hint: 'Click two endpoints' },
+  { id: 'ray', label: 'Ray', icon: '↗', hint: 'Click origin and direction' },
+  { id: 'rectangle', label: 'Rectangle', icon: '□', hint: 'Click opposite corners' },
+  { id: 'fibonacci-retracement', label: 'Fibonacci Retracement', icon: '≋', hint: 'Click two directional anchors' },
+  { id: 'text', label: 'Text / Note', icon: 'T', hint: 'Click anchor, then enter text' },
+];
 
-  return (
-    <div className="drawing-toolbar" style={{
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '8px',
-      padding: '8px',
-      background: 'var(--bg-panel)',
-      borderRight: '1px solid var(--border-color)',
-      width: '48px',
-      alignItems: 'center'
-    }}>
-      {tools.map(t => (
-        <button
-          key={t.id}
-          title={t.label}
-          onClick={() => onSelectTool(t.id)}
-          style={{
-            background: activeTool === t.id ? 'rgba(41, 98, 255, 0.2)' : 'transparent',
-            color: activeTool === t.id ? 'var(--color-primary)' : 'var(--text-muted)',
-            border: `1px solid ${activeTool === t.id ? 'var(--color-primary)' : 'transparent'}`,
-            borderRadius: '4px',
-            padding: '8px',
-            cursor: 'pointer',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            transition: 'all 0.2s'
-          }}
-          onMouseEnter={e => { if (activeTool !== t.id) e.currentTarget.style.color = 'white'; }}
-          onMouseLeave={e => { if (activeTool !== t.id) e.currentTarget.style.color = 'var(--text-muted)'; }}
-        >
-          {t.icon}
-        </button>
-      ))}
-      
-      <div className="drawing-toolbar-spacer" style={{ flex: 1 }} />
-      
-      <button
-        title="Remove All Drawings"
-        onClick={onClearAll}
-        style={{
-          background: 'transparent',
-          color: 'var(--color-sell)',
-          border: 'none',
-          padding: '8px',
-          cursor: 'pointer',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-        }}
-      >
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-      </button>
+export const DrawingToolbar: React.FC<Props> = props => {
+  const [confirmClear, setConfirmClear] = useState(false); const [textDraft, setTextDraft] = useState('');
+  const [dialogElement, setDialogElement] = useState<HTMLDivElement | null>(null);
+  const { onCancelText } = props;
+  const cancelText = useCallback(() => { setTextDraft(''); onCancelText(); }, [onCancelText]);
+  useModalFocus(props.pendingText, cancelText, dialogElement);
+  const commitText = () => { if (props.onCommitText(textDraft)) setTextDraft(''); };
+  return <>
+    <div className="drawing-toolbar" data-testid="drawing-toolbar" style={{ display: 'flex', flexDirection: 'column', gap: 2, padding: 4, background: 'var(--bg-panel)', borderRight: '1px solid var(--border-color)', width: 72, alignItems: 'center', overflowY: 'auto' }}>
+      {TOOLS.map(tool => <button key={tool.id} type="button" title={tool.id === 'text' ? 'Text' : tool.label} aria-label={tool.label} aria-description={tool.hint} data-testid={`drawing-tool-${tool.id}`} aria-pressed={props.activeTool === tool.id} onClick={() => props.onSelectTool(tool.id)} style={{ width: 40, height: 28, minHeight: 28, padding: 0, fontSize: 16, background: props.activeTool === tool.id ? 'rgba(41,98,255,.25)' : 'transparent', color: props.activeTool === tool.id ? '#75a7ff' : 'var(--text-muted)', border: `1px solid ${props.activeTool === tool.id ? '#2962ff' : 'transparent'}`, borderRadius: 5 }}>{tool.icon}</button>)}
+      <label title="Drawing magnet mode" style={{ display: 'grid', gap: 2, fontSize: 9, color: 'var(--text-muted)', textAlign: 'center' }}>Magnet
+        <select aria-label="Drawing magnet mode" data-testid="drawing-magnet-mode" value={props.magnetMode} onChange={event => props.onMagnetMode(event.target.value as MagnetMode)} style={{ width: 60, height: 24, padding: 0, fontSize: 10 }}><option value="off">Off</option><option value="ohlc">OHLC</option></select>
+      </label>
+      <button type="button" title="Undo drawing" aria-label="Undo drawing" data-testid="undo-drawing" disabled={!props.canUndo} onClick={props.onUndo} style={{ width: 40, height: 26, padding: 0 }}>↶</button>
+      <button type="button" title="Redo drawing" aria-label="Redo drawing" data-testid="redo-drawing" disabled={!props.canRedo} onClick={props.onRedo} style={{ width: 40, height: 26, padding: 0 }}>↷</button>
+      <div style={{ flex: 1 }} />
+      <span data-testid="drawing-persistence-status" title={`Drawing persistence: ${props.persistenceStatus}`} style={{ fontSize: 8, color: props.persistenceStatus === 'ready' ? '#00E676' : '#FFD166' }}>{props.persistenceStatus}</span>
+      {!confirmClear ? <button type="button" title="Clear All Drawings" aria-label="Clear All Drawings" data-testid="clear-all-drawings" onClick={() => setConfirmClear(true)} style={{ width: 40, height: 28, padding: 0 }}>🗑</button>
+        : <button type="button" data-testid="confirm-clear-drawings" onClick={() => { props.onClearAll(); setConfirmClear(false); }} style={{ height: 28, padding: 0 }}>Confirm</button>}
     </div>
-  );
+    {props.pendingText && <div ref={setDialogElement} role="dialog" aria-modal="true" aria-label="Create Text / Note" data-testid="drawing-text-dialog" style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,.55)', display: 'grid', placeItems: 'center' }}>
+      <div className="panel" style={{ width: 360, padding: 16, display: 'grid', gap: 10 }}><strong>Text / Note</strong>
+        <textarea autoFocus aria-label="Text note content" data-testid="new-drawing-text" value={textDraft} maxLength={TEXT_MAX_LENGTH} onChange={event => setTextDraft(event.target.value)} onKeyDown={event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') commitText(); }} />
+        <small>{textDraft.length}/{TEXT_MAX_LENGTH}</small><div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}><button type="button" onClick={cancelText}>Cancel</button><button type="button" data-testid="commit-drawing-text" disabled={!textDraft.trim()} onClick={commitText}>Add note</button></div>
+      </div>
+    </div>}
+  </>;
 };

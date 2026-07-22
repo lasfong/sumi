@@ -122,10 +122,9 @@ class ReplayService:
 
     @staticmethod
     def next_candle(db: Session, session_id: int, steps: int = 1) -> ReplaySession:
-        from app.models.position import Position
-        from app.services.trade_lifecycle_service import TradeLifecycleService
-
         session = ReplayService.get_session(db, session_id)
+        if steps < 1:
+            raise HTTPException(status_code=400, detail="Replay advance steps must be at least 1")
 
         # Find total possible candles
         total_candles = db.query(Candle).filter(
@@ -137,55 +136,63 @@ class ReplayService:
                 Candle.timestamp < end_before(session.end_date)
             )
         ).count()
+        if total_candles <= 0:
+            raise HTTPException(status_code=400, detail="No candles available in session")
 
         if session.status == SessionStatus.BANKRUPT.value:
             raise HTTPException(status_code=400, detail="Session is bankrupt. Cannot proceed.")
 
-        if session.current_index + steps < total_candles:
-            session.current_index += steps
-            db.commit()
-            db.refresh(session)
-        else:
-            # Mark session as completed and move to the end
-            session.current_index = total_candles - 1
+        final_index = total_candles - 1
+        destination_index = min(session.current_index + steps, final_index)
+        if destination_index == session.current_index:
             session.status = SessionStatus.COMPLETED.value
             db.commit()
             db.refresh(session)
+            return session
 
-        # MTM & Bankrupt logic
-        if session.status in [SessionStatus.ACTIVE.value, SessionStatus.COMPLETED.value]:
-            current_candle = ReplayService.get_candles(db, session_id)[-1]
-            positions = db.query(Position).filter(Position.session_id == session.id, Position.status == "open").all()
-
-            total_stock_value = 0
-            for pos in positions:
-                # Mark-to-Market
-                pos.unrealized_pnl = (current_candle.close - pos.average_price) * pos.quantity
-                total_stock_value += pos.quantity * current_candle.close
-
-            total_equity = session.current_cash + total_stock_value
-
-            # Check Bankrupt TC-005
-            if total_equity <= 0:
-                session.status = SessionStatus.BANKRUPT.value
-                db.commit() # Save status first
-
-                # Force Liquidate All
-                TradeLifecycleService.force_liquidate_all(db, session, current_candle)
-
-                EventLoggingService.log_event(
-                    db=db,
-                    event_type="MARGIN_CALL",
-                    message=f"Session {session.id} bankrupted at equity {total_equity}",
-                    session_id=session.id,
-                    details={"total_equity": total_equity, "cash": session.current_cash}
-                )
-            else:
-                db.commit()
-                # If not bankrupt, match pending limit orders
-                ReplayService._match_pending_orders(db, session)
+        for next_index in range(session.current_index + 1, destination_index + 1):
+            session.current_index = next_index
+            session.status = SessionStatus.COMPLETED.value if next_index == final_index else SessionStatus.ACTIVE.value
+            db.commit()
+            db.refresh(session)
+            ReplayService._process_current_candle_lifecycle(db, session)
+            if session.status == SessionStatus.BANKRUPT.value:
+                break
 
         return session
+
+    @staticmethod
+    def _process_current_candle_lifecycle(db: Session, session: ReplaySession) -> None:
+        from app.models.position import Position
+        from app.services.trade_lifecycle_service import TradeLifecycleService
+
+        current_candles = ReplayService.get_candles(db, session.id)
+        if not current_candles:
+            raise HTTPException(status_code=400, detail="No candles available in session")
+        current_candle = current_candles[-1]
+        positions = db.query(Position).filter(Position.session_id == session.id, Position.status == "open").all()
+
+        total_stock_value = 0.0
+        for position in positions:
+            position.unrealized_pnl = (current_candle.close - position.average_price) * position.quantity
+            total_stock_value += position.quantity * current_candle.close
+
+        total_equity = session.current_cash + total_stock_value
+        if total_equity <= 0:
+            session.status = SessionStatus.BANKRUPT.value
+            db.commit()
+            TradeLifecycleService.force_liquidate_all(db, session, current_candle)
+            EventLoggingService.log_event(
+                db=db,
+                event_type="MARGIN_CALL",
+                message=f"Session {session.id} bankrupted at equity {total_equity}",
+                session_id=session.id,
+                details={"total_equity": total_equity, "cash": session.current_cash},
+            )
+            return
+
+        db.commit()
+        ReplayService._match_pending_orders(db, session)
 
     @staticmethod
     def _match_pending_orders(db: Session, session: ReplaySession):

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "revision": 3,
+  "sessionId": 7,
+  "symbol": "FPT",
+  "drawings": [
+    {"id":"00000000-0000-4000-8000-000000000001","tool":"horizontal","paneId":"price","order":0,"visible":true,"locked":false,"anchors":[{"time":"2026-07-01","price":100}],"style":{"lineColor":"#e056fd","lineWidth":2,"lineStyle":"solid"},"geometry":{"kind":"horizontal"}},
+    {"id":"00000000-0000-4000-8000-000000000002","tool":"trendline","paneId":"price","order":1,"visible":true,"locked":false,"anchors":[{"time":"2026-07-01","price":100},{"time":"2026-07-02","price":110}],"style":{"lineColor":"#58a6ff","lineWidth":2,"lineStyle":"dashed"},"geometry":{"kind":"trendline"}},
+    {"id":"00000000-0000-4000-8000-000000000003","tool":"ray","paneId":"price","order":2,"visible":true,"locked":false,"anchors":[{"time":"2026-07-01","price":100},{"time":"2026-07-03","price":105}],"style":{"lineColor":"#ffd166","lineWidth":1,"lineStyle":"solid"},"geometry":{"kind":"ray"}},
+    {"id":"00000000-0000-4000-8000-000000000004","tool":"rectangle","paneId":"price","order":3,"visible":true,"locked":false,"anchors":[{"time":"2026-07-01","price":115},{"time":"2026-07-04","price":95}],"style":{"lineColor":"#00e676","lineWidth":2,"lineStyle":"dotted","fillColor":"#00e676","fillOpacity":0.15},"geometry":{"kind":"rectangle"}},
+    {"id":"00000000-0000-4000-8000-000000000005","tool":"fibonacci-retracement","paneId":"price","order":4,"visible":true,"locked":false,"anchors":[{"time":"2026-07-01","price":90},{"time":"2026-07-05","price":120}],"style":{"lineColor":"#ff8a00","lineWidth":1,"lineStyle":"solid","textColor":"#f0f6fc","fontSize":12},"geometry":{"kind":"fibonacci-retracement","levels":[{"ratio":0,"visible":true},{"ratio":0.236,"visible":true},{"ratio":0.382,"visible":true},{"ratio":0.5,"visible":true},{"ratio":0.618,"visible":true},{"ratio":0.786,"visible":true},{"ratio":1,"visible":true}],"direction":"start-to-end"}},
+    {"id":"00000000-0000-4000-8000-000000000006","tool":"text","paneId":"price","order":5,"visible":true,"locked":false,"anchors":[{"time":"2026-07-03","price":108}],"style":{"lineColor":"#e056fd","lineWidth":1,"lineStyle":"solid","textColor":"#ffffff","fontSize":14},"geometry":{"kind":"text","text":"Review breakout"}}
+  ]
+}

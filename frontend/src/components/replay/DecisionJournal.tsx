@@ -1,8 +1,8 @@
 import React from 'react';
-import type { Decision } from '../../types';
+import type { PracticeDecision } from '../../types';
 
 interface DecisionJournalProps {
-  decisions: Decision[];
+  decisions: PracticeDecision[];
 }
 
 const actionColor = (action: string): string => {

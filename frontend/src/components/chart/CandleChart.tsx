@@ -1,19 +1,13 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
-import { createChart, type IChartApi, type ISeriesApi, type Time } from 'lightweight-charts';
-import { DrawingToolRegistry } from './DrawingToolRegistry';
-import { IndicatorRenderRegistry } from './IndicatorRenderRegistry';
+import { createChart, type IChartApi } from 'lightweight-charts';
+import { SumiPrimitiveDrawingProvider } from '../../features/drawings/SumiPrimitiveDrawingProvider';
+import type { DrawingProvider } from '../../features/drawings/DrawingProvider';
 import { PaneManager } from './PaneManager';
 import { SeriesManager } from './SeriesManager';
 import type {
   ChartWorkspaceProps,
   ChartWorkspaceRef,
-  DrawingLine,
-  DrawingPoint,
 } from './workspaceTypes';
-
-type ChartMouseParam = Parameters<Parameters<IChartApi['subscribeClick']>[0]>[0];
-type OhlcPoint = { open?: number; high?: number; low?: number; close?: number };
-type PendingDrawing = { points: DrawingPoint[]; preview: ISeriesApi<'Line'> };
 
 export type {
   ChartWorkspaceRef as CandleChartRef,
@@ -26,30 +20,44 @@ export const ChartWorkspace = forwardRef<ChartWorkspaceRef, ChartWorkspaceProps>
   data,
   volumeData = [],
   markers = [],
-  drawings = [],
-  activeTool = 'cursor',
-  onDrawingComplete,
+  drawingDocument,
+  drawingTool = 'select',
+  drawingSelection = [],
+  currentDrawingTime = '1970-01-01',
+  onDrawingProviderEvent,
+  drawingMagnetMode = 'off',
+  minimumHeight = 360,
 }, ref) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const panesRef = useRef<PaneManager | null>(null);
   const seriesRef = useRef<SeriesManager | null>(null);
-  const drawingRegistryRef = useRef<DrawingToolRegistry | null>(null);
-  const pendingRef = useRef<PendingDrawing | null>(null);
+  const providerRef = useRef<DrawingProvider | null>(null);
+  const providerListenerRef = useRef(onDrawingProviderEvent);
+  const currentTimeRef = useRef(currentDrawingTime);
+  const initialDrawingDocumentRef = useRef(drawingDocument);
+  providerListenerRef.current = onDrawingProviderEvent;
+  currentTimeRef.current = currentDrawingTime;
 
   useImperativeHandle(ref, () => ({
     addIndicator: input => {
-      const paneId = IndicatorRenderRegistry.paneFor(input.id, input.pane);
-      seriesRef.current?.setIndicator(input.key, paneId, input.series);
+      if (!seriesRef.current || !containerRef.current) throw new Error('Chart workspace is not mounted');
+      seriesRef.current.setIndicator(input.instanceId, input.paneId, input.series, input.paneOrder, containerRef.current.clientHeight || 500);
+      containerRef.current.dataset.indicatorChartState = JSON.stringify(seriesRef.current.snapshot());
     },
-    removeIndicator: key => seriesRef.current?.removeIndicator(key),
-    clearIndicators: () => seriesRef.current?.clearIndicators(),
+    removeIndicator: key => { seriesRef.current?.removeIndicator(key); if (containerRef.current && seriesRef.current) containerRef.current.dataset.indicatorChartState = JSON.stringify(seriesRef.current.snapshot()); },
+    clearIndicators: () => { seriesRef.current?.clearIndicators(); if (containerRef.current && seriesRef.current) containerRef.current.dataset.indicatorChartState = JSON.stringify(seriesRef.current.snapshot()); },
+    setIndicatorOrder: paneIds => { seriesRef.current?.layout(paneIds, containerRef.current?.clientHeight || 500); if (containerRef.current && seriesRef.current) containerRef.current.dataset.indicatorChartState = JSON.stringify(seriesRef.current.snapshot()); },
+    getIndicatorState: () => seriesRef.current?.snapshot() ?? null,
     updateCandle: (candle, volume) => seriesRef.current?.updateCandle(candle, volume),
+    cancelDrawing: () => providerRef.current?.cancel(),
+    getDrawingInteractionState: () => providerRef.current?.snapshotInteraction() ?? null,
   }), []);
 
   useEffect(() => {
     if (!containerRef.current) return;
-    const chart = createChart(containerRef.current, {
+    const container = containerRef.current;
+    const chart = createChart(container, {
       autoSize: true,
       layout: { background: { color: '#0D1117' }, textColor: '#F0F6FC', attributionLogo: true },
       grid: {
@@ -59,104 +67,60 @@ export const ChartWorkspace = forwardRef<ChartWorkspaceRef, ChartWorkspaceProps>
       crosshair: { mode: 1 },
       rightPriceScale: { borderColor: 'rgba(255,255,255,0.12)' },
       timeScale: { borderColor: 'rgba(255,255,255,0.12)', timeVisible: false, shiftVisibleRangeOnNewBar: true },
-      height: containerRef.current.clientHeight || 500,
+      height: container.clientHeight || 500,
     });
     const panes = new PaneManager(chart);
     const series = new SeriesManager(chart, panes);
-    const drawingRegistry = new DrawingToolRegistry(chart, series.candles, panes.index('price'));
     chartRef.current = chart;
     panesRef.current = panes;
     seriesRef.current = series;
-    drawingRegistryRef.current = drawingRegistry;
+    if (initialDrawingDocumentRef.current) {
+      const provider = new SumiPrimitiveDrawingProvider(
+        chart, series.candles, container, initialDrawingDocumentRef.current,
+        () => currentTimeRef.current, () => panes.get('price').getHTMLElement(),
+      );
+      provider.subscribe(event => providerListenerRef.current?.(event));
+      providerRef.current = provider;
+    }
+    const publishIndicatorSnapshot = () => {
+      container.dataset.indicatorChartState = JSON.stringify(series.snapshot());
+    };
+    container.dataset.indicatorChartState = JSON.stringify(series.snapshot());
+    container.addEventListener('sumi:indicator-snapshot-request', publishIndicatorSnapshot);
+    const resizeObserver = new ResizeObserver(entries => {
+      const height = Math.round(entries[0]?.contentRect.height ?? container.clientHeight);
+      series.resizeLayout(height);
+      publishIndicatorSnapshot();
+    });
+    resizeObserver.observe(container);
 
     return () => {
-      pendingRef.current = null;
-      drawingRegistry.clear();
+      resizeObserver.disconnect();
+      container.removeEventListener('sumi:indicator-snapshot-request', publishIndicatorSnapshot);
+      providerRef.current?.destroy();
+      providerRef.current = null;
       chart.remove();
       chartRef.current = null;
       panesRef.current = null;
       seriesRef.current = null;
-      drawingRegistryRef.current = null;
     };
   }, []);
 
-  useEffect(() => { seriesRef.current?.setCandles(data, markers); }, [data, markers]);
-  useEffect(() => { seriesRef.current?.setVolume(volumeData); }, [volumeData]);
-  useEffect(() => { drawingRegistryRef.current?.render(drawings); }, [drawings]);
-
   useEffect(() => {
-    const chart = chartRef.current;
-    const series = seriesRef.current?.candles;
-    const registry = drawingRegistryRef.current;
-    if (!chart || !series || !registry) return;
+    seriesRef.current?.setCandles(data, markers);
+    if (containerRef.current && seriesRef.current) containerRef.current.dataset.indicatorChartState = JSON.stringify(seriesRef.current.snapshot());
+  }, [data, markers]);
+  useEffect(() => {
+    seriesRef.current?.setVolume(volumeData);
+    if (containerRef.current && seriesRef.current) containerRef.current.dataset.indicatorChartState = JSON.stringify(seriesRef.current.snapshot());
+  }, [volumeData]);
+  useEffect(() => { if (drawingDocument) providerRef.current?.replaceDocument(drawingDocument); }, [drawingDocument]);
+  useEffect(() => { providerRef.current?.setTool(drawingTool); }, [drawingTool]);
+  useEffect(() => { providerRef.current?.select(drawingSelection); }, [drawingSelection]);
+  useEffect(() => { providerRef.current?.setMagnet(drawingMagnetMode, data.map(candle => ({ ...candle, time: String(candle.time) }))); }, [data, drawingMagnetMode]);
 
-    const snappedPrice = (param: ChartMouseParam, fallback: number): number => {
-      if (!param.point || !param.seriesData) return fallback;
-      const candle = param.seriesData.get(series) as OhlcPoint | undefined;
-      if (!candle) return fallback;
-      return [candle.open, candle.high, candle.low, candle.close]
-        .filter((price): price is number => typeof price === 'number')
-        .reduce((best, price) => {
-          const coordinate = series.priceToCoordinate(price);
-          return coordinate !== null && Math.abs(coordinate - param.point!.y) <= 10
-            && Math.abs(coordinate - param.point!.y) < Math.abs((series.priceToCoordinate(best) ?? Infinity) - param.point!.y)
-            ? price : best;
-        }, fallback);
-    };
-
-    const click = (param: ChartMouseParam) => {
-      if (!param.point || !param.time || !activeTool || activeTool === 'cursor') return;
-      const rawPrice = series.coordinateToPrice(param.point.y);
-      if (rawPrice === null) return;
-      const point = { time: param.time, price: snappedPrice(param, rawPrice) };
-      if (activeTool === 'horizontal') {
-        onDrawingComplete?.(newDrawing('horizontal', [point]));
-        return;
-      }
-      if (!pendingRef.current) {
-        pendingRef.current = { points: [point], preview: registry.createPreview() };
-        return;
-      }
-      const pending = pendingRef.current;
-      registry.removePreview(pending.preview);
-      pendingRef.current = null;
-      onDrawingComplete?.(newDrawing(activeTool, [pending.points[0], point]));
-    };
-
-    const move = (param: ChartMouseParam) => {
-      if (!param.point || !param.time || !pendingRef.current) return;
-      const rawPrice = series.coordinateToPrice(param.point.y);
-      if (rawPrice === null) return;
-      const start = pendingRef.current.points[0];
-      const end = { time: param.time, value: snappedPrice(param, rawPrice) };
-      const points = [{ time: start.time, value: start.price }, end]
-        .sort((a, b) => timeValue(a.time) - timeValue(b.time));
-      pendingRef.current.preview.setData(points);
-    };
-
-    chart.subscribeClick(click);
-    chart.subscribeCrosshairMove(move);
-    return () => {
-      chart.unsubscribeClick(click);
-      chart.unsubscribeCrosshairMove(move);
-      if (pendingRef.current) {
-        registry.removePreview(pendingRef.current.preview);
-        pendingRef.current = null;
-      }
-    };
-  }, [activeTool, onDrawingComplete]);
-
-  return <div ref={containerRef} data-testid="chart-workspace" style={{ width: '100%', height: '100%', minHeight: 360 }} />;
+  return <div ref={containerRef} data-testid="chart-workspace" data-minimum-height={minimumHeight} style={{ width: '100%', height: '100%', minHeight: minimumHeight }} />;
 });
 
 ChartWorkspace.displayName = 'ChartWorkspace';
 export const CandleChart = ChartWorkspace;
-
-const newDrawing = (type: DrawingLine['type'], points: DrawingPoint[]): DrawingLine => ({
-  id: globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2),
-  type,
-  points,
-  color: '#E056FD',
-});
-
-const timeValue = (time: Time): number => typeof time === 'string' ? new Date(time).getTime() : Number(time);

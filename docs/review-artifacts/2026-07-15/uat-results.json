@@ -1,0 +1,178 @@
+{
+  "steps": [
+    {
+      "name": "create replay session",
+      "pass": true,
+      "detail": "Sumi Replay\n—\nSession #113\nIndicators\n1x\n2x\n5x\n10x\nAuto-Play\nNew Session\n-5\n← Prev\nNext →\n+5"
+    },
+    {
+      "name": "advance warmup candles",
+      "pass": true,
+      "detail": "Bar: #61"
+    },
+    {
+      "name": "add EMA/RSI/MACD/CCI",
+      "pass": true,
+      "detail": "All four menu actions completed without navigation failure."
+    },
+    {
+      "name": "active indicator list visible",
+      "pass": false,
+      "detail": "Visible active names after menu closes: none"
+    },
+    {
+      "name": "individual indicator removal controls",
+      "pass": false,
+      "detail": "No individual indicator removal buttons found; only menu-level Remove All exists."
+    },
+    {
+      "name": "indicator parameter controls",
+      "pass": false,
+      "detail": "Replay workspace input count after session start: 0."
+    },
+    {
+      "name": "chart panes rendered",
+      "pass": true,
+      "detail": "{\"rect\":{\"x\":372,\"y\":118,\"width\":750,\"height\":850,\"top\":118,\"right\":1122,\"bottom\":968,\"left\":372},\"canvases\":[{\"width\":672,\"height\":397,\"cssWidth\":672,\"cssHeight\":397},{\"width\":672,\"height\":397,\"cssWidth\":672,\"cssHeight\":397},{\"width\":78,\"height\":397,\"cssWidth\":78,\"cssHeight\":397},{\"width\":78,\"height\":397,\"cssWidth\":78,\"cssHeight\":397},{\"width\":672,\"height\":87,\"cssWidth\":672,\"cssHeight\":87},{\"width\":672,\"height\":87,\"cssWidth\":672,\"cssHeight\":87},{\"width\":78,\"height\":87,\"cssWidth\":78,\"cssHeight\":87},{\"width\":78,\"height\":87,\"cssWidth\":78,\"cssHeight\":87},{\"width\":672,\"height\":111,\"cssWidth\":672,\"cssHeight\":111},{\"width\":672,\"height\":111,\"cssWidth\":672,\"cssHeight\":111},{\"width\":78,\"height\":111,\"cssWidth\":78,\"cssHeight\":111},{\"width\":78,\"height\":111,\"cssWidth\":78,\"cssHeight\":111},{\"width\":672,\"height\":111,\"cssWidth\":672,\"cssHeight\":111},{\"width\":672,\"height\":111,\"cssWidth\":672,\"cssHeight\":111},{\"width\":78,\"height\":111,\"cssWidth\":78,\"cssHeight\":111},{\"width\":78,\"height\":111,\"cssWidth\":78,\"cssHeight\":111},{\"width\":672,\"height\":112,\"cssWidth\":672,\"cssHeight\":112},{\"width\":672,\"height\":112,\"cssWidth\":672,\"cssHeight\":112},{\"width\":78,\"height\":112,\"cssWidth\":78,\"cssHeight\":112},{\"width\":78,\"height\":112,\"cssWidth\":78,\"cssHeight\":112},{\"width\":672,\"height\":28,\"cssWidth\":672,\"cssHeight\":28},{\"width\":672,\"height\":28,\"cssWidth\":672,\"cssHeight\":28},{\"width\":78,\"height\":28,\"cssWidth\":78,\"cssHeight\":28}],\"text\":\"a#tv-attr-logo{--fill:#131722;--stroke:#fff;position:absolute;left:10px;bottom:10px;height:19px;width:35px;margin:0;padding:0;border:0;z-index:3;}a#tv-attr-logo[data-dark]{--fill:#D1D4DC;--stroke:#131722;}\"}"
+    },
+    {
+      "name": "active indicators persist after reload",
+      "pass": true,
+      "detail": "Indicator responses after reload: 4"
+    },
+    {
+      "name": "remove all persists",
+      "pass": true,
+      "detail": "New indicator responses after reload: 0"
+    },
+    {
+      "name": "drawing toolbar inventory",
+      "pass": true,
+      "detail": "Cursor, Trendline, Horizontal Line, Fibonacci Retracement, Remove All Drawings"
+    },
+    {
+      "name": "Ray tool exists",
+      "pass": false,
+      "detail": "Cursor, Trendline, Horizontal Line, Fibonacci Retracement, Remove All Drawings"
+    },
+    {
+      "name": "Rectangle tool exists",
+      "pass": false,
+      "detail": "Cursor, Trendline, Horizontal Line, Fibonacci Retracement, Remove All Drawings"
+    },
+    {
+      "name": "Text tool exists",
+      "pass": false,
+      "detail": "Cursor, Trendline, Horizontal Line, Fibonacci Retracement, Remove All Drawings"
+    },
+    {
+      "name": "Note tool exists",
+      "pass": false,
+      "detail": "Cursor, Trendline, Horizontal Line, Fibonacci Retracement, Remove All Drawings"
+    },
+    {
+      "name": "draw trendline/horizontal/fibonacci",
+      "pass": true,
+      "detail": "Canvas clicks completed with no page exception."
+    },
+    {
+      "name": "drawings persisted to backend",
+      "pass": true,
+      "detail": "{\"id\":19,\"session_id\":113,\"symbol\":\"FPT\",\"state_data\":\"[{\\\"id\\\":\\\"f89982e0-a713-4725-a803-4d94d167ea12\\\",\\\"type\\\":\\\"horizontal\\\",\\\"color\\\":\\\"#E056FD\\\",\\\"points\\\":[{\\\"time\\\":\\\"2023-02-17\\\",\\\"price\\\":86628.28814294831}]}]\"}"
+    },
+    {
+      "name": "select/move/edit drawing",
+      "pass": false,
+      "detail": "No selection model or edit handles are exposed by the toolbar or drawing implementation."
+    },
+    {
+      "name": "delete selected drawing",
+      "pass": false,
+      "detail": "Only Remove All Drawings exists."
+    },
+    {
+      "name": "cancel active drawing",
+      "pass": true,
+      "detail": "Cancellation requires switching to Cursor; no Escape/cancel affordance was found."
+    },
+    {
+      "name": "undo drawing",
+      "pass": false,
+      "detail": "No undo control found."
+    },
+    {
+      "name": "drawings remain after reload",
+      "pass": true,
+      "detail": "{\"id\":19,\"session_id\":113,\"symbol\":\"FPT\",\"state_data\":\"[{\\\"id\\\":\\\"f89982e0-a713-4725-a803-4d94d167ea12\\\",\\\"type\\\":\\\"horizontal\\\",\\\"color\\\":\\\"#E056FD\\\",\\\"points\\\":[{\\\"time\\\":\\\"2023-02-17\\\",\\\"price\\\":86628.28814294831}]}]\"}"
+    }
+  ],
+  "errors": [
+    "pageerror: Maximum call stack size exceeded",
+    "pageerror: Maximum call stack size exceeded",
+    "pageerror: Maximum call stack size exceeded",
+    "pageerror: Assertion failed: data must be asc ordered by time, index=1, time=1678752000, prev time=1678752000"
+  ],
+  "indicatorRequests": [
+    {
+      "url": "http://127.0.0.1:5173/api/replay/sessions/113/indicators?indicator=ema&length=20&offset=0",
+      "status": 200
+    },
+    {
+      "url": "http://127.0.0.1:5173/api/replay/sessions/113/indicators?indicator=ema&length=20&offset=0",
+      "status": 200
+    },
+    {
+      "url": "http://127.0.0.1:5173/api/replay/sessions/113/indicators?indicator=rsi&length=14&offset=0",
+      "status": 200
+    },
+    {
+      "url": "http://127.0.0.1:5173/api/replay/sessions/113/indicators?indicator=ema&length=20&offset=0",
+      "status": 200
+    },
+    {
+      "url": "http://127.0.0.1:5173/api/replay/sessions/113/indicators?indicator=rsi&length=14&offset=0",
+      "status": 200
+    },
+    {
+      "url": "http://127.0.0.1:5173/api/replay/sessions/113/indicators?indicator=macd&fast=12&slow=26&signal=9&offset=0",
+      "status": 200
+    },
+    {
+      "url": "http://127.0.0.1:5173/api/replay/sessions/113/indicators?indicator=ema&length=20&offset=0",
+      "status": 200
+    },
+    {
+      "url": "http://127.0.0.1:5173/api/replay/sessions/113/indicators?indicator=rsi&length=14&offset=0",
+      "status": 200
+    },
+    {
+      "url": "http://127.0.0.1:5173/api/replay/sessions/113/indicators?indicator=macd&fast=12&slow=26&signal=9&offset=0",
+      "status": 200
+    },
+    {
+      "url": "http://127.0.0.1:5173/api/replay/sessions/113/indicators?indicator=cci&length=20&offset=0",
+      "status": 200
+    },
+    {
+      "url": "http://127.0.0.1:5173/api/replay/sessions/113/indicators?indicator=ema&length=20&offset=0",
+      "status": 200
+    },
+    {
+      "url": "http://127.0.0.1:5173/api/replay/sessions/113/indicators?indicator=rsi&length=14&offset=0",
+      "status": 200
+    },
+    {
+      "url": "http://127.0.0.1:5173/api/replay/sessions/113/indicators?indicator=macd&fast=12&slow=26&signal=9&offset=0",
+      "status": 200
+    },
+    {
+      "url": "http://127.0.0.1:5173/api/replay/sessions/113/indicators?indicator=cci&length=20&offset=0",
+      "status": 200
+    }
+  ],
+  "screenshots": [
+    "/Users/mizuhara/workspace/sumi/docs/review-artifacts/2026-07-15/indicators-active.png",
+    "/Users/mizuhara/workspace/sumi/docs/review-artifacts/2026-07-15/drawings.png",
+    "/Users/mizuhara/workspace/sumi/docs/review-artifacts/2026-07-15/after-reload.png"
+  ]
+}

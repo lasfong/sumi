@@ -1,0 +1,31 @@
+{
+  "schemaDraft": "2020-12",
+  "semanticInvariants": [
+    "ray-strictly-rightward",
+    "unique-drawing-ids",
+    "contiguous-drawing-order",
+    "workspace-identity"
+  ],
+  "cases": [
+    { "id": "valid-horizontal", "base": "horizontal", "patches": [], "expectedStructural": true, "expectedSemantic": true },
+    { "id": "valid-all-tools", "base": "all-tools", "patches": [], "expectedStructural": true, "expectedSemantic": true },
+    { "id": "future-version", "base": "horizontal", "patches": [{ "op": "replace", "path": "/schemaVersion", "value": 2 }], "expectedStructural": false, "expectedSemantic": false },
+    { "id": "unknown-document-field", "base": "horizontal", "patches": [{ "op": "add", "path": "/providerState", "value": {} }], "expectedStructural": false, "expectedSemantic": false },
+    { "id": "unknown-tool", "base": "horizontal", "patches": [{ "op": "replace", "path": "/drawings/0/tool", "value": "ellipse" }], "expectedStructural": false, "expectedSemantic": false },
+    { "id": "tool-geometry-mismatch", "base": "all-tools", "patches": [{ "op": "replace", "path": "/drawings/1/geometry/kind", "value": "rectangle" }], "expectedStructural": false, "expectedSemantic": false },
+    { "id": "anchor-count", "base": "all-tools", "patches": [{ "op": "remove", "path": "/drawings/1/anchors/1" }], "expectedStructural": false, "expectedSemantic": false },
+    { "id": "pane", "base": "horizontal", "patches": [{ "op": "replace", "path": "/drawings/0/paneId", "value": "volume" }], "expectedStructural": false, "expectedSemantic": false },
+    { "id": "fib-empty-color", "base": "all-tools", "patches": [{ "op": "add", "path": "/drawings/4/geometry/levels/2/color", "value": "" }], "expectedStructural": false, "expectedSemantic": false },
+    { "id": "fib-nonstandard-ratio", "base": "all-tools", "patches": [{ "op": "replace", "path": "/drawings/4/geometry/levels/2/ratio", "value": 0.4 }], "expectedStructural": false, "expectedSemantic": false },
+    { "id": "text-blank", "base": "all-tools", "patches": [{ "op": "replace", "path": "/drawings/5/geometry/text", "value": " \n " }], "expectedStructural": false, "expectedSemantic": false },
+    { "id": "text-too-long", "base": "all-tools", "patches": [{ "op": "replace", "path": "/drawings/5/geometry/text", "repeat": { "value": "x", "count": 2001 } }], "expectedStructural": false, "expectedSemantic": false },
+    { "id": "impossible-calendar-date", "base": "horizontal", "patches": [{ "op": "replace", "path": "/drawings/0/anchors/0/time", "value": "2026-02-30" }], "expectedStructural": false, "expectedSemantic": false },
+    { "id": "valid-leap-date", "base": "horizontal", "patches": [{ "op": "replace", "path": "/drawings/0/anchors/0/time", "value": "2024-02-29" }], "expectedStructural": true, "expectedSemantic": true },
+    { "id": "invalid-century-leap-date", "base": "horizontal", "patches": [{ "op": "replace", "path": "/drawings/0/anchors/0/time", "value": "1900-02-29" }], "expectedStructural": false, "expectedSemantic": false },
+    { "id": "ray-leftward", "base": "all-tools", "patches": [{ "op": "replace", "path": "/drawings/2/anchors/1/time", "valueFrom": "/drawings/2/anchors/0/time" }, { "op": "replace", "path": "/drawings/2/anchors/0/time", "value": "2026-07-16" }], "expectedStructural": true, "expectedSemantic": false },
+    { "id": "ray-equal", "base": "all-tools", "patches": [{ "op": "replace", "path": "/drawings/2/anchors/1/time", "valueFrom": "/drawings/2/anchors/0/time" }], "expectedStructural": true, "expectedSemantic": false },
+    { "id": "duplicate-id", "base": "all-tools", "patches": [{ "op": "replace", "path": "/drawings/1/id", "valueFrom": "/drawings/0/id" }], "expectedStructural": true, "expectedSemantic": false },
+    { "id": "noncontiguous-order", "base": "all-tools", "patches": [{ "op": "replace", "path": "/drawings/2/order", "value": 9 }], "expectedStructural": true, "expectedSemantic": false },
+    { "id": "identity-mismatch", "base": "horizontal", "patches": [], "identity": { "sessionId": 7, "symbol": "SSI" }, "expectedStructural": true, "expectedSemantic": false }
+  ]
+}

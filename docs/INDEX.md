@@ -1,93 +1,73 @@
-# Documentation Index
+# Sumi documentation index
 
-This is the starting point for Sumi development after the V2 cleanup.
+## Canonical V3 documents
 
-## Canonical V2 Documents
+Read these in order for all new development:
 
-Read these in order:
+1. `docs/PRODUCT_V3_PLAN_2026-07-15.md` — product outcome, controlled UI rebuild, batches, risks.
+2. `docs/PRODUCT_ACCEPTANCE_CRITERIA_V3.md` — measurable release contract.
+3. `docs/ARCHITECTURE_DECISION_001_REPLAY_UI_REBUILD.md` — B/C decision and retained boundaries.
+4. `docs/DEVELOPMENT_OPERATING_MODEL.md` — reviewer/DEV roles, worktree and batch workflow.
+5. `docs/PROJECT_REVIEW_REPORT_2026-07-15.md` — evidence-backed current-state baseline.
+6. `AGENTS.md` — durable repository instructions for Codex and developers.
+7. `PLANS.md` — required ExecPlan structure.
 
-1. `docs/PRODUCT_STRATEGY_V2.md`
-   - Product thesis, priority tiers, current repo reality, and product decisions.
+Active batch plans belong in `docs/exec-plans/`. Reviewer gate reports belong in `docs/reviews/`. Prompts handed to the separate DEV task belong in `docs/dev-prompts/`; use the file as the handoff authority instead of pasting a long prompt into task conversation.
 
-2. `docs/SPEC_V2.md`
-   - Umbrella product/technical spec separating Manual Replay and Automated Backtest.
+Reviewer/orchestrator task handoffs belong in `docs/reviewer-prompts/` and must be standalone for a new task with no conversation history.
 
-3. `docs/MANUAL_REPLAY_SPEC.md`
-   - Manual replay UX, no-future-leak rules, indicators, drawings, trading simulation, journal, and manual analytics.
+Current gate:
 
-4. `docs/BACKTEST_ENGINE_SPEC.md`
-   - Safe automated backtest engine, strategy model, result slicing, analytics outputs, and security rules.
+- No development batch remains open under the V3 roadmap. Batch 5 and the V3 acceptance contract were independently approved and closed on 2026-07-22. Any commit, tag, push or release publication is a separate explicitly authorized operation.
 
-5. `docs/ACCEPTANCE_CRITERIA_V2.md`
-   - P0/P1 release gates, command gates, manual replay UAT, backtest UAT, and analytics acceptance.
+- `docs/reviews/BATCH_1_REVIEW_2026-07-16.md` — Batch 1 approved and closed after final independent verification.
+- `docs/dev-prompts/BATCH_1_REVIEW_HARDENING_PROMPT.md` — completed first hardening prompt.
+- `docs/dev-prompts/BATCH_1_FINAL_CLOSURE_PROMPT.md` — completed final closure prompt.
+- `docs/dev-prompts/BATCH_2_INDICATOR_MANAGER_PROMPT.md` — completed initial Batch 2 implementation prompt.
+- `docs/reviews/BATCH_2_REVIEW_2026-07-16.md` — Batch 2 approved and closed after bounded hardening and independent verification.
+- `docs/dev-prompts/BATCH_2_REVIEW_HARDENING_PROMPT.md` — completed Batch 2 hardening prompt.
+- `docs/dev-prompts/BATCH_3_PROFESSIONAL_DRAWING_MVP_PROMPT.md` — completed initial Batch 3 implementation prompt.
+- `docs/dev-prompts/BATCH_3_REVIEW_HARDENING_PROMPT.md` — completed first Batch 3 hardening prompt.
+- `docs/dev-prompts/BATCH_3_SECOND_REVIEW_CLOSURE_PROMPT.md` — completed B3-R07–B3-R10 closure prompt.
+- `docs/reviews/BATCH_3_REVIEW_2026-07-18.md` — Batch 3 Drawing MVP approved and closed after independent second-closure verification.
+- `docs/reviewer-prompts/REVIEWER_ORCHESTRATOR_HANDOFF_BATCH_3_2026-07-18.md` — completed Batch 3 Reviewer/Orchestrator handoff.
+- `docs/dev-prompts/BATCH_4_INTEGRATED_TRADING_PRACTICE_WORKFLOW_PROMPT.md` — completed initial Batch 4 implementation prompt.
+- `docs/reviews/BATCH_4_REVIEW_2026-07-18.md` — Batch 4 approved and closed after B4-R01–B4-R03 and independent 254-ID verification.
+- `docs/dev-prompts/BATCH_4_REVIEW_CLOSURE_PROMPT.md` — completed Batch 4 closure prompt.
+- `docs/dev-prompts/BATCH_5_PRODUCT_HARDENING_V3_RC_PROMPT.md` — completed initial Batch 5 DEV prompt.
+- `docs/reviews/BATCH_5_REVIEW_2026-07-19.md` — Batch 5 and V3 acceptance approved and closed after B5-R01–B5-R07 and independent sealed-evidence verification.
+- `docs/dev-prompts/BATCH_5_REVIEW_CLOSURE_PROMPT.md` — completed first closure authority; DEV stopped correctly at its R04 condition.
+- `docs/dev-prompts/BATCH_5_R04_CONTINUATION_PROMPT.md` — completed B5-R01–B5-R05 continuation; product behavior accepted at Reviewer gate.
+- `docs/dev-prompts/BATCH_5_EVIDENCE_SEALING_PROMPT.md` — completed evidence-only B5-R06–B5-R07 sealing authority.
+- `docs/V3_ACCEPTANCE_MATRIX.md` — independently approved evidence mapping for every V3 acceptance ID.
+- `docs/V3_RELEASE_CANDIDATE_NOTES.md` — bounded changes, measured outcome and Reviewer closure record.
+- `docs/V3_VERIFICATION_AND_RECOVERY.md` — reproducible local verification, backup and restored-copy procedure.
+- `docs/V3_EVIDENCE_INDEX.md` — canonical Batch 5 manifest/results/recovery/screenshot locations.
 
-6. `docs/ROADMAP_TO_COMPLETION.md`
-   - Phase-by-phase developer execution plan.
+## V2 baseline documents
 
-7. `docs/PROGRESS_V2.md`
-   - Active execution tracker: completed batches, phase status, and remaining large batches.
+The V2 specifications, completion plans, checklists, status reports, and release evidence document how `v2.0.0-rc2` was built and technically verified. They are historical baseline evidence, not the acceptance contract for V3 product quality.
 
-8. `docs/RELEASE_CHECKLIST_V2.md`
-   - Final automated gate, manual UAT checklist, known limits, and release definition.
+Important baseline references:
 
-9. `docs/UAT_BROWSER_REVIEW_2026-06-29.md`
-   - Local browser UAT evidence, bugs found during real UI testing, and fixed flows.
+- `docs/SPEC_V2.md`
+- `docs/MANUAL_REPLAY_SPEC.md`
+- `docs/BACKTEST_ENGINE_SPEC.md`
+- `docs/ACCEPTANCE_CRITERIA_V2.md`
+- `docs/PRODUCT_COMPLETION_PLAN_2026-07-04.md`
+- `docs/RELEASE_EVIDENCE_2026-07-04.md`
+- `docs/RELEASE_VERIFY_LOG_2026-07-04.md`
+- `docs/HANDOFF_REPORT_2026-07-03.md`
 
-10. `docs/FEATURE_MATRIX_RESEARCH.md`
-   - Research matrix and links for comparable professional platforms.
+If V2 completion language conflicts with the 2026-07-15 review or V3 acceptance criteria, the V3 documents govern new work.
 
-11. `docs/DECISIONS.md`
-   - Architecture and product decisions. If implementation conflicts with V2 specs, update this file explicitly.
+## Archived material
 
-12. `docs/HANDOFF_REPORT_2026-07-03.md`
-   - Current architecture, implementation evidence, risks and review conclusion.
+Pre-V2 documents live under `docs/archive/pre_v2/` and are historical only.
 
-13. `docs/PRODUCT_COMPLETION_PLAN_2026-07-04.md`
-   - Active milestone roadmap from release-candidate baseline to product release.
+## Operational notes
 
-14. `docs/RELEASE_EVIDENCE_2026-07-04.md`
-   - Final RC2 gate evidence, browser UAT findings and go/no-go decision.
-
-15. `docs/RELEASE_VERIFY_LOG_2026-07-04.md`
-   - Independent release verification pack with command evidence, risk table and remediation status.
-
-## Supporting Materials
-
-- `docs/BacktestSample/Sample.md`
-  - Example output shape for symbol/period/regime-oriented backtest analytics.
-
-- `docs/AGENTS.md`
-  - Agent/developer operating guidance.
-
-## Archived Pre-V2 Documents
-
-Historical documents were moved to:
-
-```text
-docs/archive/pre_v2/
-```
-
-They are useful for context but are no longer the implementation contract. Do not follow archived sprint plans or old specs if they conflict with V2 documents.
-
-## Current Development Priority
-
-Do not add broad new product surface until P0/P1 blockers from `ACCEPTANCE_CRITERIA_V2.md` pass.
-
-Required order from the current release-candidate baseline:
-
-```text
-Freeze reviewed baseline
--> Harden accounting and trade ledger
--> Reconcile analytics with a known ledger
--> Lock data integrity and deterministic results
--> Complete UX/error-state UAT
--> Automate release verification
--> Run final go/no-go review
-```
-
-## Operational Notes
-
-- Raw CafeF files belong under `data/raw/`, not `docs/`.
-- Local databases such as `backend/sumi.db` are runtime artifacts and should not be committed.
-- Research clones and POC repositories belong under `research_repos/` locally only.
-- Generated folders such as `__pycache__`, `.pytest_cache`, `node_modules`, and build outputs are ignored.
+- Raw market files belong under `data/raw/`.
+- Automated tests/UAT must not mutate `backend/sumi.db`.
+- Product UAT artifacts belong under ignored `test-results/`; selected review evidence may be copied to `docs/review-artifacts/`.
+- Local research clones belong under ignored `research_repos/`.

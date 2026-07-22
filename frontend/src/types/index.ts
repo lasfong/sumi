@@ -5,3 +5,7 @@ export type { Position, Trade, Order } from './trade';
 export type { AnalyticsReport, GroupPerformance, OutlierImpact } from './analytics';
 export type { StockSymbol } from './symbol';
 export type { JournalEntry, JournalEntryCreate } from './journal';
+export type {
+  PracticeDecision, PracticeExecution, PracticeOrder, PracticePosition,
+  PracticeTrade, PracticeWorkflowSnapshot,
+} from './practice';

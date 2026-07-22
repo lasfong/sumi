@@ -1,5 +1,5 @@
 import { apiClient } from './client';
-import type { Decision, DecisionCreate, Order, Position, Trade } from '../types';
+import type { Decision, DecisionCreate, Order, Position, PracticeWorkflowSnapshot, Trade } from '../types';
 
 export const submitDecision = async (sessionId: number, data: DecisionCreate): Promise<Decision> => {
   const response = await apiClient.post(`/replay/sessions/${sessionId}/decisions`, data);
@@ -23,5 +23,10 @@ export const getOrders = async (sessionId: number): Promise<Order[]> => {
 
 export const getTrades = async (sessionId: number): Promise<Trade[]> => {
   const response = await apiClient.get(`/replay/sessions/${sessionId}/trades`);
+  return response.data;
+};
+
+export const getPracticeState = async (sessionId: number): Promise<PracticeWorkflowSnapshot> => {
+  const response = await apiClient.get(`/replay/sessions/${sessionId}/practice-state`);
   return response.data;
 };

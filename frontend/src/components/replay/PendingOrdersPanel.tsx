@@ -1,11 +1,11 @@
 import React from 'react';
-import type { Order } from '../../types';
+import type { PracticeOrder } from '../../types';
 
 interface PendingOrdersPanelProps {
-  orders: Order[];
+  orders: PracticeOrder[];
 }
 
-const statusColor = (status: Order['status']): string => {
+const statusColor = (status: PracticeOrder['status']): string => {
   if (status === 'pending') return 'var(--color-primary)';
   if (status === 'executed') return 'var(--color-buy)';
   if (status === 'rejected' || status === 'cancelled') return 'var(--color-sell)';
@@ -13,15 +13,15 @@ const statusColor = (status: Order['status']): string => {
 };
 
 export const PendingOrdersPanel: React.FC<PendingOrdersPanelProps> = ({ orders }) => {
-  const visibleOrders = orders.filter((order) => order.status === 'pending' || order.status === 'rejected').slice(0, 6);
+  const visibleOrders = orders.slice().reverse().slice(0, 8);
 
   return (
     <div className="panel" style={{ padding: '12px' }}>
       <h3 style={{ marginTop: 0, marginBottom: '10px', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--text-muted)' }}>
-        Pending Orders
+        Orders
       </h3>
       {visibleOrders.length === 0 ? (
-        <p style={{ color: 'var(--text-muted)', fontSize: '13px', fontStyle: 'italic', margin: 0 }}>No pending orders.</p>
+        <p style={{ color: 'var(--text-muted)', fontSize: '13px', fontStyle: 'italic', margin: 0 }}>No orders at this replay bar.</p>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
           {visibleOrders.map((order) => (
@@ -38,6 +38,7 @@ export const PendingOrdersPanel: React.FC<PendingOrdersPanelProps> = ({ orders }
                 <span>Qty {order.quantity.toLocaleString()}</span>
                 <span>{order.requested_price ? order.requested_price.toLocaleString() : 'Market'}</span>
               </div>
+              <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 4 }}>{order.explanation}</div>
             </div>
           ))}
         </div>

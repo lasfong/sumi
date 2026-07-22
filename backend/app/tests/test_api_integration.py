@@ -253,3 +253,57 @@ def test_session_indicators_allow_warmup_without_error(client):
         data = response.json()["data"]
         assert len(data) == 1
         assert list(data[0].keys()) == ["timestamp"]
+
+
+def test_checklist_api_rejects_mismatched_date_and_accepts_authoritative_date(client):
+    import json
+
+    response = client.post(
+        "/api/replay/sessions",
+        json={
+            "symbol": "API_TEST",
+            "timeframe": "1D",
+            "adjustment_type": "unadjusted",
+            "start_date": "2023-11-01",
+            "end_date": "2023-11-05",
+            "initial_cash": 100000.0,
+            "mode": SessionMode.NORMAL.value,
+            "hide_symbol": False,
+            "hide_date": False,
+        },
+    )
+    assert response.status_code == 200
+    session = response.json()
+    checks = {
+        "trendIdentified": True,
+        "setupConfirmed": False,
+        "entryTriggerDefined": False,
+        "riskDefined": True,
+        "exitPlanDefined": False,
+        "emotionChecked": True,
+    }
+
+    def entry(date_value):
+        return {
+            "note_type": "practice_checklist",
+            "content": json.dumps({
+                "schemaVersion": 1,
+                "context": {
+                    "sessionId": session["id"],
+                    "symbol": session["symbol"],
+                    "candleIndex": session["current_index"],
+                    "date": date_value,
+                },
+                "checks": checks,
+                "observation": "API exact-date binding",
+            }),
+        }
+
+    rejected = client.post(f"/api/replay/sessions/{session['id']}/journal", json=entry("2099-12-31"))
+    assert rejected.status_code == 409
+    assert client.get(f"/api/replay/sessions/{session['id']}/journal").json() == []
+
+    accepted = client.post(f"/api/replay/sessions/{session['id']}/journal", json=entry("2023-11-01"))
+    assert accepted.status_code == 200, accepted.text
+    visible = client.get(f"/api/replay/sessions/{session['id']}/journal").json()
+    assert [item["id"] for item in visible] == [accepted.json()["id"]]

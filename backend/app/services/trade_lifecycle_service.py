@@ -23,6 +23,8 @@ class TradeLifecycleService:
     @staticmethod
     def process_decision(db: Session, session_id: int, decision_in: DecisionCreate) -> Decision:
         session = ReplayService.get_session(db, session_id)
+        from app.services.practice_workflow_service import PracticeWorkflowService
+        PracticeWorkflowService.assert_writable_tip(db, session_id)
         candles = ReplayService.get_candles(db, session_id)
         if not candles:
             raise HTTPException(status_code=400, detail="No candles available in session")

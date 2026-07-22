@@ -10,7 +10,7 @@ export const apiClient = axios.create({
 apiClient.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (!error.response || error.response.status >= 500) {
+    if (!axios.isCancel(error) && (!error.response || error.response.status >= 500)) {
       console.error('API Error:', error);
     }
     return Promise.reject(error);

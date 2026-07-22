@@ -18,11 +18,10 @@ export function useWebSocket(sessionId: number | null, onMessage: (msg: WebSocke
   useEffect(() => {
     if (!sessionId) return;
 
-    // Determine WebSocket URL based on environment
-    // Assuming backend is on port 8000 for local development
+    // Use the same origin as HTTP API calls so Vite/reverse-proxy routing works
+    // in local, isolated UAT, and deployed environments.
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.hostname;
-    const wsUrl = `${protocol}//${host}:8000/api/ws/replay/${sessionId}`;
+    const wsUrl = `${protocol}//${window.location.host}/api/ws/replay/${sessionId}`;
 
     ws.current = new WebSocket(wsUrl);
 
@@ -55,7 +54,9 @@ export function useWebSocket(sessionId: number | null, onMessage: (msg: WebSocke
   const sendCommand = useCallback((action: string, payload: Record<string, unknown> = {}) => {
     if (ws.current && ws.current.readyState === WebSocket.OPEN) {
       ws.current.send(JSON.stringify({ action, ...payload }));
+      return true;
     }
+    return false;
   }, []);
 
   return { isConnected, sendCommand };

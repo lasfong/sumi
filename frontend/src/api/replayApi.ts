@@ -40,10 +40,12 @@ export const previousCandle = async (sessionId: number, steps: number = 1): Prom
 
 export const getDrawings = async (sessionId: number): Promise<DrawingStateResponse> => {
   const response = await apiClient.get(`/replay/sessions/${sessionId}/drawings`);
+  if (response.headers['x-sumi-uat-reconciliation-unavailable'] === '1') throw new Error('Controlled drawing reconciliation GET unavailable after dispatch');
   return response.data;
 };
 
 export const updateDrawings = async (sessionId: number, stateData: string): Promise<DrawingStateResponse> => {
   const response = await apiClient.put(`/replay/sessions/${sessionId}/drawings`, { state_data: stateData });
+  if (response.headers['x-sumi-uat-commit-then-error'] === '1') throw new Error('Controlled drawing PUT committed before client failure');
   return response.data;
 };

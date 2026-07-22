@@ -5,6 +5,7 @@ from app.services.replay_service import ReplayService
 import asyncio
 import json
 import logging
+from datetime import timezone
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -42,8 +43,14 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 def format_candle(candle):
+    timestamp = candle.timestamp
+    if timestamp.tzinfo is None:
+        # Candle timestamps are stored as timezone-free market dates. Treat them
+        # as UTC before producing the wire epoch so the host timezone cannot
+        # shift a daily candle onto the preceding date in the browser.
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
     return {
-        "time": int(candle.timestamp.timestamp()),
+        "time": int(timestamp.timestamp()),
         "open": candle.open,
         "high": candle.high,
         "low": candle.low,

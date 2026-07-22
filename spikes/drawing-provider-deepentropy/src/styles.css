@@ -1,0 +1,15 @@
+:root { font-family: Inter, system-ui, sans-serif; color: #e5e7eb; background: #030712; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { padding: 16px; }
+header { display: flex; align-items: baseline; justify-content: space-between; }
+h1 { font-size: 20px; margin: 0 0 12px; }
+header span, .status { color: #94a3b8; font: 12px ui-monospace, monospace; }
+.toolbar, .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+button { border: 1px solid #334155; border-radius: 4px; padding: 7px 10px; color: #e2e8f0; background: #111827; cursor: pointer; }
+button.active { border-color: #38bdf8; background: #075985; }
+button:disabled { opacity: .4; cursor: default; }
+.status { margin: 10px 0; }
+.chart { width: 100%; border: 1px solid #334155; }
+.unmounted { height: 200px; display: grid; place-items: center; border: 1px dashed #64748b; }
+pre { max-height: 220px; overflow: auto; padding: 10px; background: #111827; color: #a7f3d0; font-size: 11px; }

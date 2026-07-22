@@ -13,8 +13,14 @@ from app.models.order import Order
 from app.models.trade import Trade
 from app.services.replay_service import ReplayService
 from app.domain.enums import PositionStatus
+from app.schemas.practice_workflow_schema import PracticeWorkflowSnapshot
+from app.services.practice_workflow_service import PracticeWorkflowService
 
 router = APIRouter()
+
+@router.get("/sessions/{session_id}/practice-state", response_model=PracticeWorkflowSnapshot)
+def get_practice_state(session_id: int, db: Session = Depends(get_db)):
+    return PracticeWorkflowService.get_snapshot(db, session_id)
 
 @router.post("/sessions/{session_id}/decisions", response_model=DecisionResponse)
 def submit_decision(session_id: int, decision_in: DecisionCreate, db: Session = Depends(get_db)):

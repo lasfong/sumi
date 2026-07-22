@@ -157,9 +157,16 @@ input, select {
   transition: all var(--transition-fast);
 }
 
-input:focus, select:focus {
+input:focus, select:focus, textarea:focus {
   border-color: var(--color-primary);
   box-shadow: 0 0 0 2px var(--color-primary-glow);
+}
+
+button:focus, button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible {
+  forced-color-adjust: none;
+  outline: 3px solid #75a7ff !important;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 3px #75a7ff !important;
 }
 
 /* Buttons */
@@ -247,4 +254,17 @@ button:disabled {
 
 .table-row-hover:hover {
   background-color: rgba(255, 255, 255, 0.05);
+}
+
+.limited-workstation-warning {
+  display: none;
+  padding: 6px 12px;
+  background: rgba(255, 209, 102, 0.14);
+  color: #ffd166;
+  border-bottom: 1px solid rgba(255, 209, 102, 0.35);
+  font-size: 12px;
+}
+
+@media (max-width: 1179px) {
+  .limited-workstation-warning { display: block; }
 }
