@@ -8,7 +8,10 @@ import { createJournalEntry, getJournalEntries } from '../../api/journalApi';
 import { getIndicatorRegistry, getSessionIndicatorData, type IndicatorDefinition } from '../../api/indicatorsApi';
 import { useReplayStore } from '../../store/replayStore';
 import toast from 'react-hot-toast';
-import type { Candle, ChartCandle, ChartVolume, DecisionCreate, CreateSessionRequest, JournalEntryCreate } from '../../types';
+import type {
+  Candle, ChartCandle, ChartVolume, DecisionCreate, CreateSessionRequest, JournalEntryCreate,
+  ReplaySession, ReplaySourceContext,
+} from '../../types';
 import { IndicatorRenderRegistry } from '../chart/IndicatorRenderRegistry';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import type { WebSocketMessage } from '../../hooks/useWebSocket';
@@ -44,31 +47,25 @@ interface WebSocketCandle {
   volume: number;
 }
 
-interface SignalSourcePayload {
-  symbol?: string;
-  signal_timestamp?: string;
-  signal_type?: string | null;
-  strategy?: string | null;
-  price?: number | null;
-  regime?: string | null;
-  lookback_days?: number;
-  forward_days?: number;
-}
-
-const parseSignalSourcePayload = (sourceType?: string | null, sourcePayload?: string | null): SignalSourcePayload | null => {
-  if (sourceType !== 'scanner_signal' || !sourcePayload) return null;
-  try {
-    const parsed = JSON.parse(sourcePayload) as unknown;
-    return parsed && typeof parsed === 'object' ? parsed as SignalSourcePayload : null;
-  } catch {
-    return null;
-  }
-};
-
 const isWebSocketCandle = (data: unknown): data is WebSocketCandle => {
   if (!data || typeof data !== 'object') return false;
   const candidate = data as Record<string, unknown>;
   return ['time', 'open', 'high', 'low', 'close', 'volume'].every(key => typeof candidate[key] === 'number');
+};
+
+export const buildScannerSignalMarker = (
+  sourceContext: ReplaySourceContext | undefined,
+  currentDate: string | null,
+): SeriesMarker<Time>[] => {
+  const signalDate = toDateKey(sourceContext?.revealed ? sourceContext.signal?.timestamp : null);
+  if (!signalDate || !currentDate || signalDate > currentDate) return [];
+  return [{
+    time: signalDate as Time,
+    position: 'aboveBar',
+    color: '#FFD166',
+    shape: 'circle',
+    text: sourceContext?.signal?.type ? `Signal: ${sourceContext.signal.type}` : 'Signal',
+  }];
 };
 
 /** Application controller boundary for replay queries, commands and workspace state. */
@@ -204,8 +201,7 @@ export const useReplayWorkspaceController = () => {
 
   const symbolName = candlesData?.[0]?.symbol || '—';
   const currentCandle = candlesData?.length ? candlesData[candlesData.length - 1] : null;
-  const signalSource = parseSignalSourcePayload(sessionData?.source_type, sessionData?.source_payload);
-  const signalDate = toDateKey(signalSource?.signal_timestamp);
+  const sourceContext = sessionData?.source_context;
   const currentDate = toDateKey(currentCandle?.timestamp);
   const drawing = useDrawingWorkspaceController(store.sessionId ?? 1, symbolName);
   const selectedDrawing = drawing.document.drawings.find(item => drawing.selection.includes(item.id));
@@ -257,7 +253,14 @@ export const useReplayWorkspaceController = () => {
 
       // Sync positions silently
       queryClient.invalidateQueries({ queryKey: ['practice-state', store.sessionId] });
-      queryClient.invalidateQueries({ queryKey: ['replay-session', store.sessionId] });
+      if (msg.source_context) {
+        queryClient.setQueryData(
+          ['replay-session', store.sessionId],
+          (old: ReplaySession | undefined) => old ? { ...old, source_context: msg.source_context! } : old,
+        );
+      } else {
+        queryClient.invalidateQueries({ queryKey: ['replay-session', store.sessionId] });
+      }
       queryClient.invalidateQueries({ queryKey: ['journal', store.sessionId] });
     }
   }, [store.sessionId, queryClient, symbolName]);
@@ -343,13 +346,7 @@ export const useReplayWorkspaceController = () => {
     })
     .sort((a, b) => (a.time as string).localeCompare(b.time as string));
 
-  const signalMarker: SeriesMarker<Time>[] = signalDate && currentDate && signalDate <= currentDate ? [{
-    time: signalDate as Time,
-    position: 'aboveBar',
-    color: '#FFD166',
-    shape: 'circle',
-    text: signalSource?.signal_type ? `Signal: ${signalSource.signal_type}` : 'Signal',
-  }] : [];
+  const signalMarker = buildScannerSignalMarker(sourceContext, currentDate);
 
   const markers: SeriesMarker<Time>[] = [...decisionMarkers, ...signalMarker]
     .sort((a, b) => (a.time as string).localeCompare(b.time as string));
@@ -489,7 +486,7 @@ export const useReplayWorkspaceController = () => {
 
   useEffect(() => () => indicatorRequests.cancelAll(), [indicatorRequests]);
   return {
-    sessionId: store.sessionId, chartRef, symbolName, sessionStatus: sessionData?.status, signalSource, signalDate, currentDate, currentCandle, candleCount: candlesData?.length ?? 0,
+    sessionId: store.sessionId, chartRef, symbolName, sessionStatus: sessionData?.status, sourceContext, currentDate, currentCandle, candleCount: candlesData?.length ?? 0,
     handleCreateSession, handleResumeSession, isCreatingSession: createMutation.isPending, handleClearSession,
     indicatorDefinitions, indicatorDocument, indicatorRuntime, addIndicatorInstance, updateIndicatorInstance,
     removeIndicatorInstance, toggleIndicatorInstance, moveIndicatorInstance,

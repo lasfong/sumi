@@ -14,9 +14,28 @@ export interface ReplaySession {
   hide_symbol: number;
   hide_date: number;
   source_type?: string | null;
-  source_payload?: string | null;
+  source_context: ReplaySourceContext;
   created_at: string;
   updated_at: string;
+}
+
+export type ReplayIntent = 'blind_practice' | 'signal_review';
+
+export interface ReplaySourceSignal {
+  timestamp: string;
+  type: string;
+  strategy: string;
+  price: number;
+  regime: string | null;
+}
+
+export interface ReplaySourceContext {
+  schema_version: 1;
+  source_type: string | null;
+  replay_intent: ReplayIntent | null;
+  reveal_at_index: number | null;
+  revealed: boolean;
+  signal: ReplaySourceSignal | null;
 }
 
 /** Request payload for creating a new replay session */

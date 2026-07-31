@@ -3,13 +3,93 @@ from sqlalchemy import select, and_
 from fastapi import HTTPException
 from app.models.replay_session import ReplaySession
 from app.models.candle import Candle
-from app.schemas.replay_schema import ReplaySessionCreate
+from app.schemas.replay_schema import (
+    ReplayIntent,
+    ReplaySessionCreate,
+    ReplaySessionResponse,
+    ReplaySourceContext,
+    ReplaySourceSignal,
+    ScannerSourcePayload,
+)
 from app.domain.enums import SessionMode, SessionStatus
 from app.services.event_logging_service import EventLoggingService
 from app.utils.date_range import end_before, start_at
 from typing import List
 
 class ReplayService:
+    @staticmethod
+    def _session_candle_query(db: Session, session: ReplaySession):
+        return db.query(Candle).filter(
+            and_(
+                Candle.symbol == session.symbol,
+                Candle.timeframe == session.timeframe,
+                Candle.adjustment_type == session.adjustment_type,
+                Candle.timestamp >= start_at(session.start_date),
+                Candle.timestamp < end_before(session.end_date)
+            )
+        ).order_by(Candle.timestamp.asc())
+
+    @staticmethod
+    def _scanner_source_context(db: Session, session: ReplaySession) -> ReplaySourceContext:
+        fallback = ReplaySourceContext(
+            source_type=session.source_type,
+            replay_intent=ReplayIntent.BLIND_PRACTICE,
+        )
+        if not session.source_payload:
+            return fallback
+        try:
+            stored = ScannerSourcePayload.model_validate_json(session.source_payload)
+        except Exception:
+            return fallback
+
+        candles = ReplayService._session_candle_query(db, session).all()
+        signal_timestamp = stored.signal_timestamp.replace(tzinfo=None)
+        reveal_at_index = next(
+            (
+                index for index, candle in enumerate(candles)
+                if candle.timestamp.replace(tzinfo=None) == signal_timestamp
+            ),
+            None,
+        )
+        if reveal_at_index is None:
+            return ReplaySourceContext(
+                source_type=session.source_type,
+                replay_intent=stored.replay_intent,
+            )
+
+        revealed = session.current_index >= reveal_at_index
+        return ReplaySourceContext(
+            source_type=session.source_type,
+            replay_intent=stored.replay_intent,
+            reveal_at_index=reveal_at_index,
+            revealed=revealed,
+            signal=ReplaySourceSignal(
+                timestamp=stored.signal_timestamp,
+                type=stored.signal_type,
+                strategy=stored.strategy,
+                price=stored.price,
+                regime=stored.regime,
+            ) if revealed else None,
+        )
+
+    @staticmethod
+    def source_context(db: Session, session: ReplaySession) -> ReplaySourceContext:
+        if session.source_type == "scanner_signal":
+            return ReplayService._scanner_source_context(db, session)
+        return ReplaySourceContext(source_type=session.source_type)
+
+    @staticmethod
+    def serialize_session(db: Session, session: ReplaySession) -> ReplaySessionResponse:
+        values = {
+            column.name: getattr(session, column.name)
+            for column in ReplaySession.__table__.columns
+            if column.name in ReplaySessionResponse.model_fields
+        }
+        if session.source_type == "scanner_signal":
+            values["source_payload"] = None
+        values["source_context"] = ReplayService.source_context(db, session)
+        return ReplaySessionResponse.model_validate(values)
+
     @staticmethod
     def create_session(db: Session, session_in: ReplaySessionCreate) -> ReplaySession:
         # Check if candles exist
@@ -87,15 +167,7 @@ class ReplayService:
         # 1. Get the current timestamp of the main session's timeframe
         # The session's primary candles up to current_index
         limit = session.current_index + 1
-        primary_candles = db.query(Candle).filter(
-            and_(
-                Candle.symbol == session.symbol,
-                Candle.timeframe == session.timeframe,
-                Candle.adjustment_type == session.adjustment_type,
-                Candle.timestamp >= start_at(session.start_date),
-                Candle.timestamp < end_before(session.end_date)
-            )
-        ).order_by(Candle.timestamp.asc()).limit(limit).all()
+        primary_candles = ReplayService._session_candle_query(db, session).limit(limit).all()
 
         if not primary_candles:
             return []

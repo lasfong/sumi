@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 
+import type { ReplaySourceContext } from '../types';
+
 export interface WebSocketMessage {
   type: string;
   data: Record<string, unknown>;
+  source_context?: ReplaySourceContext;
 }
 
 export function useWebSocket(sessionId: number | null, onMessage: (msg: WebSocketMessage) => void) {

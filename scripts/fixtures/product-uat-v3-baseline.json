@@ -1,0 +1,2226 @@
+{
+  "schema_version": 1,
+  "baseline_name": "sumi-v3-accepted-regression-baseline",
+  "acceptance_contract_revision": "2026-07-31",
+  "accepted_baseline_count": 265,
+  "accepted_baseline_ids_sha256": "fb509654fe93da876987649aa63c7606108c836b235ceb6d9106a85fec02284a",
+  "assertions": [
+    {
+      "id": "replay.session-created",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch2.I-13",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "replay.warmup-available",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.replay-navigation",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.autoplay-speed",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch2.I-02",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch2.I-06",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch2.I-05",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch2.I-04",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch2.I-03",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "indicators.active-list-visible",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "indicators.individual-remove",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "indicators.settings",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "indicators.visibility-toggle",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "indicators.pane-legends",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "indicators.reference-lines",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch2.I-01",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch2.I-08",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch2.I-09",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch2.I-10",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch2.I-11",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch2.I-12",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch2.layout-initial-1440x1000",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch2.runtime-initial-no-active-error",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch2.visible-pane-chrome",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch2.pane-chrome-controls",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch2.visible-reference-evidence",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch2.layout-visibility-cycle",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch2.layout-reorder-cycle",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch2.layout-add-remove-cycle",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "indicators.persist-after-reload",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch2.I-07",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch2.layout-after-reload",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch2.runtime-after-reload-no-active-error",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch2.request-lifecycle",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch2.request-outcome-observation",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "drawings.tool-trendline",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "drawings.tool-horizontal",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "drawings.tool-ray",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "drawings.tool-rectangle",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "drawings.tool-fibonacci",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "drawings.tool-text",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "drawings.undo",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "drawings.selection-contract",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "drawings.persist-after-create",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch1.toolbar-subset",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.active-tool-highlight",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.escape-cancel",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.cursor-cancel",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.create-horizontal",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.selected-handle",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.undo-create-exact-id",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.redo-create-same-semantic",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.move-one-command",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.undo-move-exact-price",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.redo-move-exact-price",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.edit-price",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.undo-edit-exact-price",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.redo-edit-exact-price",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.ui-delete",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.undo-ui-delete",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.redo-ui-delete",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.keyboard-delete",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.undo-keyboard-delete",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.redo-keyboard-delete",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.clear-confirm-required",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.clear-confirmed",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.undo-clear",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.redo-clear",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.cancel-drag-transaction",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.native-pointercancel-transaction",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.non-price-pane-isolation",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.pan-zoom-hit-move",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.replay-advance-rewind-interactive",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.resize-1440-alignment",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.no-future-candles",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch1.persist-reload-equality",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch3.trendline.escape-cancel",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.ray.escape-cancel",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.rectangle.escape-cancel",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.fibonacci-retracement.escape-cancel",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.text.escape-cancel",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.trendline.active",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.trendline.create",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.trendline.selected-geometry",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.trendline.undo-create",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.trendline.redo-create",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.trendline.anchor-edit",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.trendline.undo-edit",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.trendline.redo-edit",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.trendline.endpoint-edit",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.trendline.body-move",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.trendline.ui-delete",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.trendline.undo-delete",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.trendline.keyboard-delete",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.trendline.undo-keyboard-delete",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.ray.active",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.ray.create",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.ray.selected-geometry",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.ray.undo-create",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.ray.redo-create",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.ray.anchor-edit",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.ray.undo-edit",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.ray.redo-edit",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.ray.endpoint-edit",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.ray.body-move",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.ray.ui-delete",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.ray.undo-delete",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.ray.keyboard-delete",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.ray.undo-keyboard-delete",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.rectangle.active",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.rectangle.create",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.rectangle.selected-geometry",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.rectangle.undo-create",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.rectangle.redo-create",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.rectangle.anchor-edit",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.rectangle.undo-edit",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.rectangle.redo-edit",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.rectangle.endpoint-edit",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.rectangle.body-move",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.rectangle.ui-delete",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.rectangle.undo-delete",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.rectangle.keyboard-delete",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.rectangle.undo-keyboard-delete",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.fibonacci-retracement.active",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.fibonacci-retracement.create",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.fibonacci-retracement.selected-geometry",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.fibonacci-retracement.undo-create",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.fibonacci-retracement.redo-create",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.fibonacci-retracement.anchor-edit",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.fibonacci-retracement.undo-edit",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.fibonacci-retracement.redo-edit",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.fibonacci-retracement.endpoint-edit",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.fibonacci.levels-direction",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.fibonacci-retracement.body-move",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.fibonacci-retracement.ui-delete",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.fibonacci-retracement.undo-delete",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.fibonacci-retracement.keyboard-delete",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.fibonacci-retracement.undo-keyboard-delete",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.text.active",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.text.create",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.text.selected-geometry",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.text.undo-create",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.text.redo-create",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.text.anchor-edit",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.text.undo-edit",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.text.redo-edit",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.text.edit",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.text.body-move",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.text.ui-delete",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.text.undo-delete",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.text.keyboard-delete",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.text.undo-keyboard-delete",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.canvas-trendline-anchor:0",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.canvas-trendline-anchor:0-one-history",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.canvas-trendline-anchor:1",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.canvas-trendline-anchor:1-one-history",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.canvas-ray-anchor:0",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.canvas-ray-anchor:0-one-history",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.canvas-ray-anchor:1",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.canvas-ray-anchor:1-one-history",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.canvas-fibonacci-retracement-anchor:0",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.canvas-fibonacci-retracement-anchor:0-one-history",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.canvas-fibonacci-retracement-anchor:1",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.canvas-fibonacci-retracement-anchor:1-one-history",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.canvas-rectangle-corner:0",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.canvas-rectangle-corner:0-one-history",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.canvas-rectangle-corner:1",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.canvas-rectangle-corner:1-one-history",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.canvas-rectangle-corner:2",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.canvas-rectangle-corner:2-one-history",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.canvas-rectangle-corner:3",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.canvas-rectangle-corner:3-one-history",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.canvas-text-anchor:0",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.canvas-text-anchor:0-one-history",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.second-closure.partial-body-time-rejected",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.second-closure.partial-body-price-rejected",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.rectangle-four-real-handles",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.tool-switch-mid-drag-rollback",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.tool-switch-mid-preview",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.capture-loss-rollback",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.ray-left-invalid-create",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.ray-equal-invalid-create",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.inspector-style-visibility-lock-one-command",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.inspector-style-undo-redo",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.multiline-text-render-hit-bounds",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.multiline-text-hit-select",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.ray-invalid-inspector-retains-valid",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.inspector-cancel-no-command",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.inspector-keyboard-isolation",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.inspector-contained-readable-1440x1000",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.text.empty-cancel",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.two-immediate-edits-two-durable-revisions",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.rapid-edits-ui-local-backend-equality",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.runtime-canonical-v1-contract",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.second-closure.schema-runtime-corpus",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.horizontal-v1-compatibility",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.second-closure.commit-then-error-intended",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.second-closure.mismatched-echo-intended",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.second-closure.divergent-remote-blocked",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.second-closure.unavailable-remote-blocked",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.second-closure.blocked-recovery-reload",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.magnet.off-unsnapped",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.magnet.ohlc-snap",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.magnet.outside-threshold",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.magnet.visible-only",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.canonical-backend-local-equality",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.clear-all-confirmation",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.clear-all-tools",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.undo-clear-all-tools-exact",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.all-tools-reload-equality-no-duplicates",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.all-tools-zoom-replay-stability",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch3.all-tools-non-price-isolation",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch1.mount-unmount-10",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.ten-remount-one-gesture-response",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch2.mount-unmount-10",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch2.layout-every-remount",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch2.runtime-every-remount-no-active-error",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch4.T-01.integrated-wide-layout",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.R-02.exact-visible-context",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.G-02.validation-before-api",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.G-03.duplicate-submit-deduped",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.T-02.buy-position-pnl",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.T-03.hold-skip-no-order-or-marker",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.T-04.context-checklist-created",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.T-05.pre-t2-backend-rejection",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.G-05.expected-rejection-contained",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.T-06.limit-pending",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.T-07.limit-filled-on-visible-candle",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.closure.R01.plus5-intermediate-fill-earliest",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.closure.R01.plus5-exact-lifecycle",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.T-08.t2-available-later",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.T-09.close-realized-pnl",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.closure.R02.mismatched-date-rejected-no-insert",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.closure.R03.expected-date-rejection-contained",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.closure.R02.authoritative-date-saves-and-reloads",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.R-04.rewind-hides-future-close",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.R-05.rewind-limit-projection",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.T-10.rewind-journal-context",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.R-06.forward-restores-exactly-once",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.closure.R01.rewind-plus5-restores-limit-once",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.T-11.forward-restores-journal",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.G-04.reload-resume-full-state",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.closure.R01.reload-preserves-limit-once",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.closure.R02.authoritative-date-present-after-reload",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch5.accessibility.tab-relations",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "G-04"
+      ]
+    },
+    {
+      "id": "batch5.accessibility.tab-arrow-keyboard",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "G-04"
+      ]
+    },
+    {
+      "id": "batch5.accessibility.trade-dialog-focus",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "G-04"
+      ]
+    },
+    {
+      "id": "batch5.accessibility.journal-dialog-focus",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "G-04"
+      ]
+    },
+    {
+      "id": "batch5.accessibility.indicator-dialog-focus",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "G-04"
+      ]
+    },
+    {
+      "id": "batch5.closure.R01.keyboard-isolation",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01"
+      ]
+    },
+    {
+      "id": "batch5.accessibility.visible-focus",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "G-04"
+      ]
+    },
+    {
+      "id": "batch5.accessibility.core-controls-named",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "G-04"
+      ]
+    },
+    {
+      "id": "batch5.accessibility.zoom-200-core-access",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "G-04"
+      ]
+    },
+    {
+      "id": "batch5.closure.R04.accessibility-evidence",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "G-04"
+      ]
+    },
+    {
+      "id": "batch1.compact-layout",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "R-01"
+      ]
+    },
+    {
+      "id": "batch2.responsive-1280x800",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch2.runtime-1280x800-no-active-error",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch4.T-01.integrated-compact-1280x800",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch3.hardening.inspector-contained-readable-1280x800",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "D-01"
+      ]
+    },
+    {
+      "id": "batch2.compact-pane-chrome-geometry",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "I-01"
+      ]
+    },
+    {
+      "id": "batch4.T-01.compact-full-workstation",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch4.T-01.explicit-limited-mobile",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "T-01"
+      ]
+    },
+    {
+      "id": "batch5.privacy.loopback-only",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "G-05"
+      ]
+    },
+    {
+      "id": "runtime.no-errors",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01"
+      ]
+    },
+    {
+      "id": "pro00.scanner-actions",
+      "blocking": true,
+      "acceptance_ids": [
+        "R-01",
+        "PRO-INT-03",
+        "PRO-INT-06"
+      ]
+    },
+    {
+      "id": "pro00.blind-create-sanitized",
+      "blocking": true,
+      "acceptance_ids": [
+        "R-01",
+        "PRO-INT-02",
+        "PRO-INT-03",
+        "PRO-INT-04",
+        "PRO-INT-07"
+      ]
+    },
+    {
+      "id": "pro00.blind-before-boundary",
+      "blocking": true,
+      "acceptance_ids": [
+        "R-01",
+        "PRO-INT-02",
+        "PRO-INT-04",
+        "PRO-INT-10"
+      ]
+    },
+    {
+      "id": "pro00.blind-boundary-reveal-once",
+      "blocking": true,
+      "acceptance_ids": [
+        "R-01",
+        "PRO-INT-05",
+        "PRO-INT-10"
+      ]
+    },
+    {
+      "id": "pro00.blind-rewind-hides",
+      "blocking": true,
+      "acceptance_ids": [
+        "R-01",
+        "PRO-INT-04",
+        "PRO-INT-09",
+        "PRO-INT-10"
+      ]
+    },
+    {
+      "id": "pro00.blind-reload-resume",
+      "blocking": true,
+      "acceptance_ids": [
+        "R-01",
+        "PRO-INT-08",
+        "PRO-INT-09",
+        "PRO-INT-10"
+      ]
+    },
+    {
+      "id": "pro00.signal-review-start",
+      "blocking": true,
+      "acceptance_ids": [
+        "R-01",
+        "PRO-INT-06",
+        "PRO-INT-10"
+      ]
+    },
+    {
+      "id": "pro00.websocket-sanitized",
+      "blocking": true,
+      "acceptance_ids": [
+        "R-01",
+        "PRO-INT-01",
+        "PRO-INT-04",
+        "PRO-INT-05"
+      ]
+    },
+    {
+      "id": "pro00.accessible-no-hidden-signal",
+      "blocking": true,
+      "acceptance_ids": [
+        "R-01",
+        "PRO-INT-02",
+        "PRO-INT-07",
+        "PRO-INT-10"
+      ]
+    },
+    {
+      "id": "pro00.manifest-fail-closed",
+      "blocking": true,
+      "acceptance_ids": [
+        "G-01",
+        "G-03",
+        "PRO-G-03",
+        "PRO-G-04",
+        "PRO-G-06"
+      ]
+    }
+  ]
+}

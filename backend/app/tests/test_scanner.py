@@ -84,6 +84,9 @@ def test_scanner_signal_can_create_replay_session(db_session):
     result = ScannerService().create_replay_session_from_signal(db_session, {
         "symbol": "SCAN_REPLAY",
         "signal_timestamp": str(base_date + timedelta(days=30)),
+        "signal_type": "entry",
+        "strategy": "Scanner Replay",
+        "price": 130,
         "lookback_days": 10,
         "forward_days": 10,
         "initial_cash": 50_000_000,
@@ -96,12 +99,14 @@ def test_scanner_signal_can_create_replay_session(db_session):
     assert session.start_date == base_date + timedelta(days=20)
     assert session.end_date == base_date + timedelta(days=40)
     assert session.source_type == "scanner_signal"
-    source_payload = json.loads(session.source_payload)
+    persisted_session = db_session.query(ReplaySession).filter_by(id=session.id).one()
+    source_payload = json.loads(persisted_session.source_payload)
     assert source_payload["symbol"] == "SCAN_REPLAY"
     assert source_payload["signal_timestamp"] == "2024-01-31T00:00:00"
+    assert source_payload["replay_intent"] == "blind_practice"
     assert source_payload["lookback_days"] == 10
     assert source_payload["forward_days"] == 10
-    assert db_session.query(ReplaySession).filter_by(id=session.id).first() is not None
+    assert persisted_session is not None
     from app.services.replay_service import ReplayService
     revealed = ReplayService.get_candles(db_session, session.id)
     assert len(revealed) == 1

@@ -10,15 +10,15 @@ router = APIRouter()
 
 @router.post("/sessions", response_model=ReplaySessionResponse)
 def create_session(session_in: ReplaySessionCreate, db: Session = Depends(get_db)):
-    return ReplayService.create_session(db, session_in)
+    return ReplayService.serialize_session(db, ReplayService.create_session(db, session_in))
 
 @router.get("/sessions", response_model=List[ReplaySessionResponse])
 def list_sessions(limit: int = 20, db: Session = Depends(get_db)):
-    return ReplayService.list_sessions(db, limit)
+    return [ReplayService.serialize_session(db, session) for session in ReplayService.list_sessions(db, limit)]
 
 @router.get("/sessions/{session_id}", response_model=ReplaySessionResponse)
 def get_session(session_id: int, db: Session = Depends(get_db)):
-    return ReplayService.get_session(db, session_id)
+    return ReplayService.serialize_session(db, ReplayService.get_session(db, session_id))
 
 @router.get("/sessions/{session_id}/candles", response_model=List[CandleResponse])
 def get_session_candles(session_id: int, target_timeframe: str = None, db: Session = Depends(get_db)):
@@ -26,11 +26,11 @@ def get_session_candles(session_id: int, target_timeframe: str = None, db: Sessi
 
 @router.post("/sessions/{session_id}/next", response_model=ReplaySessionResponse)
 def next_candle(session_id: int, steps: int = 1, db: Session = Depends(get_db)):
-    return ReplayService.next_candle(db, session_id, steps)
+    return ReplayService.serialize_session(db, ReplayService.next_candle(db, session_id, steps))
 
 @router.post("/sessions/{session_id}/previous", response_model=ReplaySessionResponse)
 def previous_candle(session_id: int, steps: int = 1, db: Session = Depends(get_db)):
-    return ReplayService.previous_candle(db, session_id, steps)
+    return ReplayService.serialize_session(db, ReplayService.previous_candle(db, session_id, steps))
 
 from app.schemas.drawing_schema import DrawingStateResponse, DrawingStateUpdate
 from app.models.drawing import DrawingState

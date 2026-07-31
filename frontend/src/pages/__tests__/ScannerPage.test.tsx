@@ -72,10 +72,17 @@ describe('ScannerPage', () => {
         mode: 'normal',
         hide_symbol: 0,
         hide_date: 0,
+        source_context: {
+          schema_version: 1,
+          source_type: 'scanner_signal',
+          replay_intent: 'blind_practice',
+          reveal_at_index: 8,
+          revealed: false,
+          signal: null,
+        },
         created_at: '2024-01-01T00:00:00',
         updated_at: '2024-01-01T00:00:00',
       },
-      signal_timestamp: '2024-01-10T00:00:00',
       window_start: '2024-01-01',
       window_end: '2024-04-01',
     });
@@ -93,7 +100,9 @@ describe('ScannerPage', () => {
       expect(screen.getByText('FPT')).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: /Replay/i }));
+    expect(screen.getByRole('button', { name: /Start blind practice for FPT \(recommended\)/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Review signal for FPT/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Start blind practice for FPT \(recommended\)/i }));
 
     await waitFor(() => {
       expect(scannerApi.createReplaySessionFromSignal).toHaveBeenCalled();
@@ -106,7 +115,69 @@ describe('ScannerPage', () => {
         regime: 'bullish',
         lookback_days: 120,
         forward_days: 90,
+        replay_intent: 'blind_practice',
       });
     });
+  });
+
+  it('sends the explicit signal-review intent', async () => {
+    vi.mocked(scannerApi.runScanner).mockResolvedValue({
+      status: 'succeeded',
+      total_results: 1,
+      truncated: false,
+      warnings: [],
+      results: [{
+        symbol: 'FPT',
+        timestamp: '2024-01-10T00:00:00',
+        signal_type: 'entry',
+        strategy: 'Scanner Strategy',
+        price: 100,
+        regime: 'bullish',
+      }],
+    });
+    vi.mocked(scannerApi.createReplaySessionFromSignal).mockResolvedValue({
+      session: {
+        id: 43,
+        symbol: 'FPT',
+        timeframe: '1D',
+        adjustment_type: 'unadjusted',
+        start_date: '2024-01-01',
+        end_date: '2024-04-01',
+        current_index: 8,
+        initial_cash: 100000000,
+        current_cash: 100000000,
+        status: 'active',
+        mode: 'normal',
+        hide_symbol: 0,
+        hide_date: 0,
+        source_context: {
+          schema_version: 1,
+          source_type: 'scanner_signal',
+          replay_intent: 'signal_review',
+          reveal_at_index: 8,
+          revealed: true,
+          signal: {
+            timestamp: '2024-01-10T00:00:00',
+            type: 'entry',
+            strategy: 'Scanner Strategy',
+            price: 100,
+            regime: 'bullish',
+          },
+        },
+        created_at: '2024-01-01T00:00:00',
+        updated_at: '2024-01-01T00:00:00',
+      },
+      window_start: '2024-01-01',
+      window_end: '2024-04-01',
+    });
+    renderWithClient(<ScannerPage />);
+    await screen.findByText(/Scanner Strategy/i);
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'strategy.yaml' } });
+    fireEvent.click(screen.getByRole('button', { name: /Run Scanner/i }));
+    await screen.findByText('FPT');
+    fireEvent.click(screen.getByRole('button', { name: /Review signal for FPT/i }));
+    await waitFor(() => expect(
+      vi.mocked(scannerApi.createReplaySessionFromSignal).mock.calls[0][0],
+    ).toEqual(expect.objectContaining({ replay_intent: 'signal_review' })));
   });
 });

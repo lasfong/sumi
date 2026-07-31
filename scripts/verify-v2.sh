@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${SUMI_PYTHON:-$ROOT_DIR/.venv/bin/python}"
 RUN_BROWSER_SMOKE="${SUMI_BROWSER_SMOKE:-0}"
+if command -v cygpath >/dev/null 2>&1; then
+  export MSYS2_ENV_CONV_EXCL="DATABASE_URL"
+fi
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "Python environment not found: $PYTHON_BIN" >&2
@@ -17,7 +20,11 @@ echo "[1/6] Backend tests"
 echo "[2/6] Fresh database migration"
 MIGRATION_DB="$(mktemp "${TMPDIR:-/tmp}/sumi-migration.XXXXXX.db")"
 trap 'rm -f "$MIGRATION_DB"' EXIT
-(cd "$ROOT_DIR/backend" && DATABASE_URL="sqlite:///$MIGRATION_DB" "$PYTHON_BIN" -m alembic upgrade head)
+MIGRATION_DB_NATIVE="$MIGRATION_DB"
+if command -v cygpath >/dev/null 2>&1; then
+  MIGRATION_DB_NATIVE="$(cygpath -m "$MIGRATION_DB")"
+fi
+(cd "$ROOT_DIR/backend" && DATABASE_URL="sqlite:///$MIGRATION_DB_NATIVE" "$PYTHON_BIN" -m alembic upgrade head)
 
 echo "[3/6] Frontend lint"
 (cd "$ROOT_DIR/frontend" && npm run lint)

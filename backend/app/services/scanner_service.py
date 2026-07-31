@@ -11,7 +11,7 @@ from app.domain.strategy.rule_evaluator import RuleEvaluationError
 from app.domain.strategy.strategy_loader import load_strategy_from_dict
 from app.domain.strategy.strategy_rule_evaluator import StrategyRuleEvaluator
 from app.models.candle import Candle
-from app.schemas.replay_schema import ReplaySessionCreate
+from app.schemas.replay_schema import ReplayIntent, ReplaySessionCreate
 from app.utils.date_range import end_before, start_at
 from app.services.replay_service import ReplayService
 
@@ -121,6 +121,7 @@ class ScannerService:
         adjustment_type = config.get("adjustment_type", "unadjusted")
         lookback_days = int(config.get("lookback_days", 120))
         forward_days = int(config.get("forward_days", 90))
+        replay_intent = ReplayIntent(config.get("replay_intent", ReplayIntent.BLIND_PRACTICE))
 
         window_start = (signal_timestamp - timedelta(days=lookback_days)).date()
         window_end = (signal_timestamp + timedelta(days=forward_days)).date()
@@ -138,6 +139,16 @@ class ScannerService:
         if not candles:
             raise HTTPException(status_code=400, detail="No candles found around the selected signal")
 
+        reveal_at_index = next(
+            (
+                index for index, candle in enumerate(candles)
+                if candle.timestamp.replace(tzinfo=None) == signal_timestamp.replace(tzinfo=None)
+            ),
+            None,
+        )
+        if reveal_at_index is None:
+            raise HTTPException(status_code=400, detail="Selected signal does not match a candle in the replay window")
+
         session_in = ReplaySessionCreate(
             symbol=symbol,
             timeframe=timeframe,
@@ -153,14 +164,19 @@ class ScannerService:
                 "strategy": config.get("strategy"),
                 "price": config.get("price"),
                 "regime": config.get("regime"),
+                "replay_intent": replay_intent.value,
+                "reveal_at_index": reveal_at_index,
                 "lookback_days": lookback_days,
                 "forward_days": forward_days,
             }),
         )
         session = ReplayService.create_session(db, session_in)
+        if replay_intent == ReplayIntent.SIGNAL_REVIEW:
+            session.current_index = reveal_at_index
+            db.commit()
+            db.refresh(session)
         return {
-            "session": session,
-            "signal_timestamp": signal_timestamp.isoformat(),
+            "session": ReplayService.serialize_session(db, session),
             "window_start": str(session.start_date),
             "window_end": str(session.end_date),
         }

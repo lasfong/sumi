@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.dependencies import get_db
 from app.services.scanner_history_service import ScannerHistoryService
 from app.services.scanner_service import ScannerService
+from app.schemas.replay_schema import ReplayIntent, ReplaySessionResponse
 
 
 router = APIRouter()
@@ -34,6 +35,13 @@ class ScannerReplaySessionRequest(BaseModel):
     lookback_days: int = 120
     forward_days: int = 90
     initial_cash: float = 100000000
+    replay_intent: ReplayIntent = ReplayIntent.BLIND_PRACTICE
+
+
+class ScannerReplaySessionResponse(BaseModel):
+    session: ReplaySessionResponse
+    window_start: str
+    window_end: str
 
 
 @router.post("/run")
@@ -57,6 +65,6 @@ def get_scanner_run(run_id: int, db: Session = Depends(get_db)):
     return run
 
 
-@router.post("/replay-session")
+@router.post("/replay-session", response_model=ScannerReplaySessionResponse)
 def create_replay_session_from_signal(config: ScannerReplaySessionRequest, db: Session = Depends(get_db)):
     return scanner_service.create_replay_session_from_signal(db, config.model_dump())

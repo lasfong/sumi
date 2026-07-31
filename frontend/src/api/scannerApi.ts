@@ -1,6 +1,6 @@
 import { apiClient } from './client';
 import type { StrategyConfig } from './backtestApi';
-import type { ReplaySession } from '../types';
+import type { ReplayIntent, ReplaySession } from '../types';
 
 export interface ScannerRequest {
   symbols: string[];
@@ -43,11 +43,11 @@ export interface ScannerReplaySessionRequest {
   lookback_days?: number;
   forward_days?: number;
   initial_cash?: number;
+  replay_intent?: ReplayIntent;
 }
 
 export interface ScannerReplaySessionResponse {
   session: ReplaySession;
-  signal_timestamp: string;
   window_start: string;
   window_end: string;
 }

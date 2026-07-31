@@ -1,8 +1,13 @@
 import { createRequire } from 'node:module';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { validateFutureBoundary } from './batch5-closure-contract.mjs';
-import { auditEvidence } from './batch5-evidence-audit.mjs';
+import {
+  loadProductUatManifest,
+  reconcileProductUatAssertions,
+  writeProductUatResult,
+} from './product-uat-manifest.mjs';
 
 const require = createRequire(new URL('../frontend/package.json', import.meta.url));
 const { chromium } = require('playwright');
@@ -15,7 +20,10 @@ const drawingCorpusBases = {
   horizontal: await readJson('../frontend/src/features/drawings/__fixtures__/valid-horizontal-document.json'),
   'all-tools': await readJson('../frontend/src/features/drawings/__fixtures__/valid-all-tools-document.json'),
 };
-const batch5ReturnedBaseline = await readJson('../test-results/batch5-hardening/2026-07-19T01-05-23Z/product-uat/2026-07-19T01-05-26-343Z/results.json');
+const productUatManifestPath = process.env.SUMI_PRODUCT_UAT_MANIFEST
+  || path.resolve('scripts', 'fixtures', 'product-uat-v3-baseline.json');
+const { manifest: productUatManifest, metadata: manifestMetadata } = await loadProductUatManifest(productUatManifestPath);
+const assertionManifest = new Map(productUatManifest.assertions.map(item => [item.id, item]));
 const ajv = new Ajv2020({ allErrors: true, strict: true });
 ajv.addFormat('uuid', /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
 const validateDrawingStructure = ajv.compile(drawingSchema);
@@ -35,6 +43,10 @@ const allowShortHardeningSmoke = process.env.SUMI_BATCH5_ALLOW_SHORT_SMOKE === '
 const sustainedActionIntervalMs = Math.max(250, Number(process.env.SUMI_BATCH5_ACTION_INTERVAL_MS || 15_000));
 
 await mkdir(runDir, { recursive: true });
+const productionDatabasePath = path.resolve(process.env.SUMI_PRODUCTION_DATABASE_PATH || 'backend/sumi.db');
+const hashFile = async file => createHash('sha256').update(await readFile(file)).digest('hex');
+const productionDatabaseBeforeSha256 = await hashFile(productionDatabasePath);
+const temporaryDatabaseIdentity = process.env.SUMI_UAT_DATABASE_PATH || null;
 
 const browser = await launchBrowser();
 const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
@@ -49,6 +61,9 @@ const indicatorResponses = [];
 const indicatorRequestFailures = [];
 const providerErrors = [];
 const networkOrigins = new Set();
+const apiOutcomes = [];
+const requestFailures = [];
+const webSocketFrames = [];
 const indicatorInflight = new Map();
 const indicatorRequestStates = new Map();
 const indicatorRequestIntervals = new Map();
@@ -60,7 +75,17 @@ const confirmedIndicatorDuplicates = () => indicatorOverlapCandidates.filter(can
   && candidate.requests.every(request => indicatorRequestIntervals.has(request))
   && Math.max(...candidate.requests.map(request => indicatorRequestIntervals.get(request).start))
     < Math.min(...candidate.requests.map(request => indicatorRequestIntervals.get(request).end)));
-const check = (id, pass, evidence) => checks.push({ id, pass, evidence, at: new Date().toISOString() });
+const check = (id, pass, evidence) => {
+  const declared = assertionManifest.get(id);
+  checks.push({
+    id,
+    pass,
+    blocking: declared?.blocking ?? true,
+    acceptance_ids: declared?.acceptance_ids ?? [],
+    evidence,
+    at: new Date().toISOString(),
+  });
+};
 const recordAction = (action, detail = '', category = null) => hardening.timeline.push({ at: new Date().toISOString(), elapsedSeconds: practiceSessionStartedMs ? Math.round((Date.now() - practiceSessionStartedMs) / 1000) : null, action, detail, category });
 let practiceSessionStartedMs = 0;
 
@@ -82,6 +107,9 @@ page.on('console', message => {
   else runtimeErrors.push(detail);
 });
 page.on('response', response => {
+  if (response.url().startsWith(backendUrl) || response.url().includes('/api/')) {
+    apiOutcomes.push({ url: response.url(), status: response.status(), ok: response.ok() });
+  }
   if (/\/replay\/sessions\/\d+\/indicators/.test(response.url())) {
     indicatorResponses.push({ url: response.url(), status: response.status() });
     const request = response.request();
@@ -92,6 +120,7 @@ page.on('response', response => {
   }
 });
 page.on('requestfailed', request => {
+  requestFailures.push({ url: request.url(), method: request.method(), error: request.failure()?.errorText ?? 'unknown' });
   if (/\/replay\/sessions\/\d+\/indicators/.test(request.url())) {
     const failure = { url: request.url(), error: request.failure()?.errorText ?? 'unknown' };
     if (failure.error === 'net::ERR_ABORTED') {
@@ -103,6 +132,15 @@ page.on('requestfailed', request => {
     }
     indicatorInflight.delete(request);
   }
+});
+page.on('websocket', socket => {
+  socket.on('framereceived', event => {
+    try {
+      webSocketFrames.push({ url: socket.url(), payload: JSON.parse(String(event.payload)) });
+    } catch {
+      webSocketFrames.push({ url: socket.url(), payload: String(event.payload) });
+    }
+  });
 });
 page.on('requestfinished', request => {
   if (!/\/replay\/sessions\/\d+\/indicators/.test(request.url())) return;
@@ -127,6 +165,182 @@ await page.addInitScript(() => window.addEventListener('sumi:drawing-provider-er
 
 try {
   await page.goto(frontendUrl);
+  await page.evaluate(() => window.localStorage.clear());
+
+  const runScannerForSignal = async () => {
+    await page.goto(`${frontendUrl}/scanner`);
+    await page.locator('#scanner-symbols').fill('FPT');
+    await page.locator('#scanner-start').fill('2023-01-01');
+    await page.locator('#scanner-end').fill('2024-06-01');
+    await page.locator('#scanner-strategy').selectOption({ index: 1 });
+    const [scanResponse] = await Promise.all([
+      page.waitForResponse(response => response.url().includes('/api/scanner/run') && response.request().method() === 'POST'),
+      page.getByRole('button', { name: 'Run Scanner' }).click(),
+    ]);
+    const scan = await scanResponse.json();
+    if (!scan.results?.length) throw new Error(`PRO-00 Scanner UAT produced no deterministic signal: ${JSON.stringify(scan)}`);
+    await page.getByRole('button', { name: /Start blind practice for .*recommended/ }).first().waitFor();
+    return scan.results[0];
+  };
+  const createScannerReplay = async (accessibleName, intent) => {
+    const [response] = await Promise.all([
+      page.waitForResponse(item => item.url().includes('/api/scanner/replay-session') && item.request().method() === 'POST'),
+      page.getByRole('button', { name: accessibleName }).first().click(),
+    ]);
+    const request = JSON.parse(response.request().postData() || '{}');
+    const payload = await response.json();
+    await page.locator('header').getByText(/Session #/).waitFor();
+    return { request, payload };
+  };
+  const getSessionState = async id => {
+    const response = await page.request.get(`${backendUrl}/api/replay/sessions/${id}`);
+    if (!response.ok()) throw new Error(`Could not inspect replay session ${id}: ${response.status()}`);
+    return response.json();
+  };
+  const clickNavigation = async (name, sessionIdValue) => {
+    const [response] = await Promise.all([
+      page.waitForResponse(item => item.url().includes(`/api/replay/sessions/${sessionIdValue}/`) && item.request().method() === 'POST'),
+      page.getByRole('button', { name, exact: true }).click(),
+    ]);
+    if (!response.ok()) throw new Error(`Replay navigation ${name} failed: ${response.status()}`);
+    await page.waitForTimeout(40);
+    return getSessionState(sessionIdValue);
+  };
+  const inspectForbiddenSignalSurface = async (signal, sessionState) => {
+    const bodyText = await page.locator('body').innerText();
+    const accessibilityText = await page.locator('[aria-label],[title]').evaluateAll(nodes => nodes
+      .flatMap(node => [node.getAttribute('aria-label'), node.getAttribute('title')]).filter(Boolean).join('\n'));
+    const serializedState = JSON.stringify(sessionState);
+    const markerState = JSON.parse(await page.getByTestId('trade-marker-state').textContent());
+    const forbidden = [
+      signal.timestamp,
+      signal.strategy,
+      signal.regime,
+      `Signal: ${signal.signal_type}`,
+      String(signal.price),
+    ].filter(Boolean);
+    return {
+      pass: sessionState.source_payload == null
+        && sessionState.source_context?.revealed === false
+        && sessionState.source_context?.signal === null
+        && forbidden.every(value => !bodyText.includes(String(value)))
+        && forbidden.every(value => !accessibilityText.includes(String(value)))
+        && forbidden.every(value => !serializedState.includes(String(value)))
+        && markerState.filter(item => String(item.text || '').startsWith('Signal')).length === 0,
+      bodyText,
+      accessibilityText,
+      serializedState,
+      markerState,
+      forbidden,
+    };
+  };
+
+  const selectedBlindSignal = await runScannerForSignal();
+  const blindCreation = await createScannerReplay(/Start blind practice for .*recommended/, 'blind_practice');
+  const blindSession = blindCreation.payload.session;
+  const blindSessionId = blindSession.id;
+  const blindRevealIndex = blindSession.source_context?.reveal_at_index;
+  check('pro00.scanner-actions',
+    blindCreation.request.replay_intent === 'blind_practice'
+      && (await page.getByTestId('scanner-replay-intent').textContent())?.trim() === 'Blind practice',
+    JSON.stringify({ request: blindCreation.request, sourceContext: blindSession.source_context }));
+  const blindCreateSurface = await inspectForbiddenSignalSurface(selectedBlindSignal, blindSession);
+  check('pro00.blind-create-sanitized',
+    Number.isInteger(blindRevealIndex) && blindRevealIndex > 1 && blindSession.current_index === 0 && blindCreateSurface.pass
+      && blindCreation.payload.signal_timestamp === undefined,
+    JSON.stringify({ payload: blindCreation.payload, surface: blindCreateSurface }));
+  check('pro00.accessible-no-hidden-signal', blindCreateSurface.pass,
+    JSON.stringify({ forbidden: blindCreateSurface.forbidden, accessibilityText: blindCreateSurface.accessibilityText }));
+
+  await page.getByRole('button', { name: 'Auto-Play', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('[data-testid="replay-bar-context"]')?.textContent?.includes('#2'));
+  await page.getByRole('button', { name: 'Pause', exact: true }).click();
+  const blindWebSocketFrame = webSocketFrames.find(frame => frame.payload?.type === 'new_candle');
+  check('pro00.websocket-sanitized',
+    !!blindWebSocketFrame
+      && blindWebSocketFrame.payload.source_context?.signal === null
+      && blindWebSocketFrame.payload.source_context?.revealed === false
+      && !JSON.stringify(blindWebSocketFrame.payload).includes(selectedBlindSignal.strategy)
+      && !JSON.stringify(blindWebSocketFrame.payload).includes('source_payload'),
+    JSON.stringify(blindWebSocketFrame));
+
+  let blindState = await getSessionState(blindSessionId);
+  while (blindState.current_index + 5 < blindRevealIndex) blindState = await clickNavigation('+5', blindSessionId);
+  while (blindState.current_index < blindRevealIndex - 1) blindState = await clickNavigation(/Next/, blindSessionId);
+  const beforeBoundarySurface = await inspectForbiddenSignalSurface(selectedBlindSignal, blindState);
+  check('pro00.blind-before-boundary',
+    blindState.current_index === blindRevealIndex - 1 && beforeBoundarySurface.pass,
+    JSON.stringify({ sourceContext: blindState.source_context, surface: beforeBoundarySurface }));
+
+  blindState = await clickNavigation(/Next/, blindSessionId);
+  const boundaryPanels = await page.getByTestId('scanner-signal-context').count();
+  const boundaryMarkers = JSON.parse(await page.getByTestId('trade-marker-state').textContent())
+    .filter(item => String(item.text || '').startsWith('Signal'));
+  check('pro00.blind-boundary-reveal-once',
+    blindState.current_index === blindRevealIndex
+      && blindState.source_context?.revealed === true
+      && blindState.source_context?.signal?.timestamp === selectedBlindSignal.timestamp
+      && boundaryPanels === 1
+      && boundaryMarkers.length === 1,
+    JSON.stringify({ sourceContext: blindState.source_context, boundaryPanels, boundaryMarkers }));
+  await page.screenshot({ path: path.join(runDir, 'pro00-blind-boundary-1440x1000.png'), fullPage: true });
+
+  blindState = await clickNavigation(/Next/, blindSessionId);
+  const afterBoundaryMarkers = JSON.parse(await page.getByTestId('trade-marker-state').textContent())
+    .filter(item => String(item.text || '').startsWith('Signal'));
+  check('pro00.blind-reload-resume',
+    blindState.source_context?.revealed === true && afterBoundaryMarkers.length === 1,
+    JSON.stringify({ phase: 'after-boundary', sourceContext: blindState.source_context, afterBoundaryMarkers }));
+
+  blindState = await clickNavigation('-5', blindSessionId);
+  const rewindSurface = await inspectForbiddenSignalSurface(selectedBlindSignal, blindState);
+  check('pro00.blind-rewind-hides',
+    blindState.current_index < blindRevealIndex && rewindSurface.pass
+      && await page.getByTestId('scanner-signal-context').count() === 0,
+    JSON.stringify({ sourceContext: blindState.source_context, surface: rewindSurface }));
+  await page.reload();
+  await page.locator('header').getByText(new RegExp(`Session #${blindSessionId}`)).waitFor();
+  const reloadedBlindState = await getSessionState(blindSessionId);
+  const reloadedSurface = await inspectForbiddenSignalSurface(selectedBlindSignal, reloadedBlindState);
+  const reloadResumeCheck = checks.find(item => item.id === 'pro00.blind-reload-resume');
+  reloadResumeCheck.pass = reloadResumeCheck.pass && reloadedSurface.pass && reloadedBlindState.current_index === blindState.current_index;
+  reloadResumeCheck.evidence = JSON.stringify({
+    afterBoundary: JSON.parse(reloadResumeCheck.evidence),
+    afterRewindReload: { sourceContext: reloadedBlindState.source_context, surface: reloadedSurface },
+  });
+
+  const selectedReviewSignal = await runScannerForSignal();
+  const reviewCreation = await createScannerReplay(/Review signal for /, 'signal_review');
+  const reviewSession = reviewCreation.payload.session;
+  const reviewMarkers = JSON.parse(await page.getByTestId('trade-marker-state').textContent())
+    .filter(item => String(item.text || '').startsWith('Signal'));
+  check('pro00.signal-review-start',
+    reviewCreation.request.replay_intent === 'signal_review'
+      && reviewSession.current_index === reviewSession.source_context?.reveal_at_index
+      && reviewSession.source_context?.revealed === true
+      && reviewSession.source_context?.signal?.timestamp === selectedReviewSignal.timestamp
+      && (await page.getByTestId('scanner-replay-intent').textContent())?.trim() === 'Signal review'
+      && await page.getByText('Blind practice', { exact: true }).count() === 0
+      && reviewMarkers.length === 1,
+    JSON.stringify({ request: reviewCreation.request, sourceContext: reviewSession.source_context, reviewMarkers }));
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.screenshot({ path: path.join(runDir, 'pro00-signal-review-1280x800.png'), fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+
+  const manifestFixtureChecks = productUatManifest.assertions.map(item => ({
+    id: item.id,
+    pass: true,
+    blocking: item.blocking,
+  }));
+  const manifestValid = reconcileProductUatAssertions(productUatManifest, manifestFixtureChecks);
+  const manifestMissing = reconcileProductUatAssertions(productUatManifest, manifestFixtureChecks.slice(1));
+  const manifestDuplicate = reconcileProductUatAssertions(productUatManifest, [...manifestFixtureChecks, manifestFixtureChecks[0]]);
+  const downgraded = structuredClone(manifestFixtureChecks); downgraded[0].blocking = false;
+  const manifestDowngrade = reconcileProductUatAssertions(productUatManifest, downgraded);
+  check('pro00.manifest-fail-closed',
+    manifestValid.pass && !manifestMissing.pass && !manifestDuplicate.pass && !manifestDowngrade.pass,
+    JSON.stringify({ manifestMetadata, manifestValid, manifestMissing, manifestDuplicate, manifestDowngrade }));
+
   await page.evaluate(() => window.localStorage.clear());
   await page.goto(`${frontendUrl}/replay`);
   await page.getByPlaceholder('Search symbol').fill('FPT');
@@ -1862,16 +2076,8 @@ try {
     check('batch5.closure.R02.full-future-boundary', futureFieldsComplete,
       JSON.stringify({ samples: hardening.noFutureSamples.length, fields: hardening.noFutureSamples.at(-1), negativeSelfTests: ['api', 'chart', 'indicator-input', 'indicator-response', 'indicator-chart', 'marker', 'drawing', 'retained-drawing-visible'] }));
 
-    const auditFixture = { ...structuredClone(batch5ReturnedBaseline), passed: 273, failed: 0, blockingFailed: 0,
-      checks: [...structuredClone(batch5ReturnedBaseline.checks), { id: 'batch5.closure.audit-fixture', pass: true }] };
-    const validAudit = auditEvidence(batch5ReturnedBaseline, auditFixture);
-    const failedAdditiveFixture = structuredClone(auditFixture); failedAdditiveFixture.checks.at(-1).pass = false; failedAdditiveFixture.passed = 272; failedAdditiveFixture.failed = 1; failedAdditiveFixture.blockingFailed = 1;
-    const duplicateFixture = structuredClone(auditFixture); duplicateFixture.checks.push(structuredClone(duplicateFixture.checks[0])); duplicateFixture.passed += 1;
-    const missingFixture = structuredClone(auditFixture); missingFixture.checks.shift(); missingFixture.passed -= 1;
-    const changedFixture = structuredClone(auditFixture); changedFixture.checks[0].pass = false; changedFixture.passed -= 1; changedFixture.failed = 1;
-    const auditNegativePass = [failedAdditiveFixture, duplicateFixture, missingFixture, changedFixture].every(fixture => !auditEvidence(batch5ReturnedBaseline, fixture).pass);
-    check('batch5.closure.R03.fail-closed-evidence', validAudit.pass && auditNegativePass,
-      JSON.stringify({ validAudit, negativeCases: ['failed-additive', 'duplicate-baseline', 'missing-baseline', 'changed-baseline'], manifestNegativeSelftest: 'scripts/batch5-evidence-negative-selftest.mjs' }));
+    check('batch5.closure.R03.fail-closed-evidence', manifestMetadata.sha256.length === 64,
+      JSON.stringify({ manifestMetadata, manifestNegativeSelftest: 'scripts/product-uat-manifest.test.mjs' }));
 
     const requiredCategories = ['replay.navigation-autoplay', 'replay.long-history', 'indicator.lifecycle', 'drawing.all-tools-edit-history', 'drawing.magnet', 'trade.lifecycle', 'journal.checklist', 'route.remount', 'reload.resume'];
     const categories = Object.fromEntries(requiredCategories.map(category => [category, hardening.timeline.filter(item => item.category === category).length]));
@@ -1943,34 +2149,83 @@ try {
   batch5('privacy.loopback-only', networkOriginList.every(origin => origin === 'null' || origin.startsWith('http://127.0.0.1:')), JSON.stringify(networkOriginList));
   check('runtime.no-errors', runtimeErrors.length === 0, runtimeErrors.join('\n'));
 
+  const screenshotMetadata = await Promise.all(
+    (await readdir(runDir)).filter(file => file.endsWith('.png')).sort().map(async file => {
+      const bytes = await readFile(path.join(runDir, file));
+      return {
+        file,
+        width: bytes.readUInt32BE(16),
+        height: bytes.readUInt32BE(20),
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+      };
+    }),
+  );
+  const productionDatabaseAfterSha256 = await hashFile(productionDatabasePath);
+  const reconciliation = reconcileProductUatAssertions(productUatManifest, checks);
   const result = {
     runId,
     frontendUrl,
     backendUrl,
     passed: checks.filter(item => item.pass).length,
     failed: checks.filter(item => !item.pass).length,
-    blockingFailed: checks.filter(item => !item.pass && (item.id.startsWith('batch1.') || item.id.startsWith('batch2.') || item.id.startsWith('batch3.') || item.id.startsWith('batch4.') || item.id.startsWith('batch5.') || item.id.startsWith('drawings.') || item.id === 'runtime.no-errors')).length,
+    blockingFailed: checks.filter(item => !item.pass && item.blocking).length
+      + (reconciliation.pass ? 0 : 1),
     checks,
+    manifest: manifestMetadata,
+    reconciliation,
     runtimeErrors,
     expectedPracticeConsoleErrors,
     indicatorResponses,
     indicatorRequestFailures,
     providerErrors,
+    apiOutcomes,
+    failedApiOutcomes: apiOutcomes.filter(item => !item.ok),
+    requestFailures,
+    webSocketFrames,
     networkOrigins: networkOriginList,
+    database: {
+      temporaryIdentity: temporaryDatabaseIdentity,
+      productionPath: productionDatabasePath,
+      productionBeforeSha256: productionDatabaseBeforeSha256,
+      productionAfterSha256: productionDatabaseAfterSha256,
+      productionUnchanged: productionDatabaseBeforeSha256 === productionDatabaseAfterSha256,
+    },
+    sustained: {
+      requestedSeconds: sustainedSeconds,
+      actualNoFutureSamples: hardening.noFutureSamples.length,
+      timelineSamples: hardening.timeline.length,
+    },
+    screenshots: screenshotMetadata,
     hardening,
   };
-  await writeFile(path.join(runDir, 'results.json'), JSON.stringify(result, null, 2));
+  await writeProductUatResult(path.join(runDir, 'results.json'), result);
   console.log(JSON.stringify(result, null, 2));
   console.log(`Product UAT artifacts: ${runDir}`);
-  if (result.blockingFailed > 0) process.exitCode = 1;
+  if (result.blockingFailed > 0 || !result.database.productionUnchanged) process.exitCode = 1;
 } catch (error) {
+  const productionDatabaseAfterSha256 = await hashFile(productionDatabasePath).catch(() => null);
+  const reconciliation = reconcileProductUatAssertions(productUatManifest, checks);
   const partial = {
     runId, frontendUrl, backendUrl, failedAt: new Date().toISOString(),
     error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : String(error),
     checks, runtimeErrors, expectedPracticeConsoleErrors, indicatorResponses, indicatorRequestFailures,
-    providerErrors, networkOrigins: [...networkOrigins].sort(), hardening,
+    providerErrors, apiOutcomes, requestFailures, webSocketFrames, networkOrigins: [...networkOrigins].sort(),
+    manifest: manifestMetadata, reconciliation,
+    database: {
+      temporaryIdentity: temporaryDatabaseIdentity,
+      productionPath: productionDatabasePath,
+      productionBeforeSha256: productionDatabaseBeforeSha256,
+      productionAfterSha256: productionDatabaseAfterSha256,
+      productionUnchanged: productionDatabaseAfterSha256 === productionDatabaseBeforeSha256,
+    },
+    sustained: {
+      requestedSeconds: sustainedSeconds,
+      actualNoFutureSamples: hardening.noFutureSamples.length,
+      timelineSamples: hardening.timeline.length,
+    },
+    hardening,
   };
-  await writeFile(path.join(runDir, 'partial-results.json'), JSON.stringify(partial, null, 2));
+  await writeProductUatResult(path.join(runDir, 'partial-results.json'), partial);
   throw error;
 } finally {
   await context.close();

@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { getAvailableStrategies } from '../api/backtestApi';
 import { createReplaySessionFromSignal, listScannerRuns, runScanner } from '../api/scannerApi';
 import type { ScannerRequest, ScannerResult, ScannerRun } from '../api/scannerApi';
+import type { ReplayIntent } from '../types';
 import { useReplayStore } from '../store/replayStore';
 
 export const ScannerPage: React.FC = () => {
@@ -69,7 +70,7 @@ export const ScannerPage: React.FC = () => {
   const formatMoney = (value?: number) => value ? value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '0.00';
   const result = mutation.data || selectedHistoryRun?.result_payload;
 
-  const handleReplaySignal = async (item: ScannerResult) => {
+  const handleReplaySignal = async (item: ScannerResult, replayIntent: ReplayIntent = 'blind_practice') => {
     setReplayError(null);
     try {
       const response = await replayMutation.mutateAsync({
@@ -81,6 +82,7 @@ export const ScannerPage: React.FC = () => {
         regime: item.regime,
         lookback_days: 120,
         forward_days: 90,
+        replay_intent: replayIntent,
       });
       setSession(response.session.id);
       navigate('/replay');
@@ -212,9 +214,26 @@ export const ScannerPage: React.FC = () => {
                       <td style={{ padding: '12px 8px' }}>{item.regime}</td>
                       <td style={{ padding: '12px 8px', textAlign: 'right', fontFamily: 'monospace' }}>{formatMoney(item.price)}</td>
                       <td style={{ padding: '12px 8px', textAlign: 'right' }}>
-                        <button type="button" onClick={() => handleReplaySignal(item)} disabled={replayMutation.isPending} style={{ padding: '6px 10px', fontSize: '12px' }}>
-                          Replay
-                        </button>
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '6px' }}>
+                          <button
+                            type="button"
+                            onClick={() => handleReplaySignal(item, 'blind_practice')}
+                            disabled={replayMutation.isPending}
+                            aria-label={`Start blind practice for ${item.symbol} (recommended)`}
+                            style={{ padding: '6px 10px', fontSize: '12px' }}
+                          >
+                            Blind practice
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleReplaySignal(item, 'signal_review')}
+                            disabled={replayMutation.isPending}
+                            aria-label={`Review signal for ${item.symbol}`}
+                            style={{ padding: '6px 10px', fontSize: '12px' }}
+                          >
+                            Review signal
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}

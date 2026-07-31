@@ -29,12 +29,13 @@ class ConnectionManager:
             self.playback_tasks[session_id].cancel()
             del self.playback_tasks[session_id]
 
-    async def send_candle_update(self, session_id: int, candle_data: dict):
+    async def send_candle_update(self, session_id: int, candle_data: dict, source_context: dict):
         if session_id in self.active_connections:
             try:
                 await self.active_connections[session_id].send_json({
                     "type": "new_candle",
-                    "data": candle_data
+                    "data": candle_data,
+                    "source_context": source_context,
                 })
             except Exception as e:
                 logger.error(f"Error sending candle to session {session_id}: {e}")
@@ -73,7 +74,11 @@ async def playback_loop(session_id: int, speed_ms: int):
                 candle_dict = format_candle(latest_candle)
                 
                 # 3. Send via WebSocket
-                await manager.send_candle_update(session_id, candle_dict)
+                await manager.send_candle_update(
+                    session_id,
+                    candle_dict,
+                    ReplayService.source_context(db, session).model_dump(mode="json"),
+                )
             
             # Stop if session is complete
             if session.status == "COMPLETED":
@@ -115,7 +120,11 @@ async def websocket_replay_endpoint(websocket: WebSocket, session_id: int):
                     candles = ReplayService.get_candles(db, session_id)
                     if candles:
                         latest_candle = candles[-1]
-                        await manager.send_candle_update(session_id, format_candle(latest_candle))
+                        await manager.send_candle_update(
+                            session_id,
+                            format_candle(latest_candle),
+                            ReplayService.source_context(db, session).model_dump(mode="json"),
+                        )
                 finally:
                     db.close()
                     

@@ -1,5 +1,8 @@
 export type { Candle, ChartCandle, ChartVolume } from './candle';
-export type { ReplaySession, CreateSessionRequest, SessionStatus, SessionMode } from './replay';
+export type {
+  ReplaySession, CreateSessionRequest, SessionStatus, SessionMode,
+  ReplayIntent, ReplaySourceContext, ReplaySourceSignal,
+} from './replay';
 export type { DecisionAction, DecisionCreate, Decision } from './decision';
 export type { Position, Trade, Order } from './trade';
 export type { AnalyticsReport, GroupPerformance, OutlierImpact } from './analytics';
