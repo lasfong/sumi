@@ -303,6 +303,8 @@ Stop conditions are those in the standalone prompt: destructive migration/data l
 - 2026-07-31: Confirmed deliberate unavailable-port UAT failure retention at `C:\tmp\sumi-pro00-launch-diagnostic\2026-07-31T10-24-27-613Z\partial-results.json` (manifest metadata, 275 missing IDs, error, and unchanged production DB recorded).
 - 2026-07-31: Completed a green real-browser temporary-database UAT at `test-results/product-uat/2026-07-31T10-26-07-044Z/results.json`: 275/275, zero failed/blocking, exact manifest reconciliation, zero missing/unexpected/duplicate/blocking-mismatch IDs, and unchanged production DB. Visually reviewed `pro00-blind-boundary-1440x1000.png` and `pro00-signal-review-1280x800.png`; both show the expected honest intent label and a single authorized signal context/marker. Milestones 2–4 are complete; Milestone 5 full gates/self-review remain.
 - 2026-07-31: User requested a code-first/test-later sequence after a long-running runner invocation. Confirmed no process remains listening on the UAT ports `18000` or `15173`. Froze PRO-00 implementation, deferred further long-running canonical gates to the separate verification phase, and did not start PRO-01.
+- 2026-07-31: Committed and pushed the bounded 27-file PRO-00 implementation/evidence set to `origin/master` as `55ec5f9` (`fix(replay): close PRO-00 integrity and evidence gaps`). Pre-existing planning/research documents remained outside that implementation commit.
+- 2026-08-01: Added the tracked cross-machine handoff and standalone verification-continuation authority. PRO-00 remains implementation-complete but verification/Reviewer-pending; PRO-01 remains unauthorized.
 
 ## Decision log
 
@@ -325,11 +327,20 @@ Stop conditions are those in the standalone prompt: destructive migration/data l
 
 Implementation is complete and frozen; final Reviewer-gate verification is pending by explicit sequencing decision. This section will be finalized during the separate verification phase with:
 
-- exact changed files and contract behavior;
-- focused/full command results and counts;
-- manifest path/hash/count/reconciliation;
-- green and intentional-failure UAT artifact paths;
-- reviewed 1440×1000 and 1280×800 screenshots;
-- exact production DB before/after hashes;
-- deviations, known limitations, and Reviewer checks;
-- explicit confirmation that no acceptance test was weakened.
+- implementation commit: `55ec5f9` on `origin/master`;
+- implemented surface: sanitized backend Scanner/Replay contracts, frontend reveal authorization, strict checked-in UAT manifest/harness, focused tests, and platform runners;
+- retained green browser result: `test-results/product-uat/2026-07-31T10-26-07-044Z/results.json`, 275/275 with zero failed/blocking and exact manifest reconciliation;
+- retained deliberate-failure diagnostic: `C:\tmp\sumi-pro00-launch-diagnostic\2026-07-31T10-24-27-613Z\partial-results.json`;
+- production DB SHA-256 observed unchanged during implementation: `4166D749119B0EBB4B9ADF418EA18442FF6E0C14AE762147CD3D0FBE20F76459`;
+- focused backend: 16 passed; focused frontend: 6 passed; manifest self-tests: 5 passed;
+- full backend: 106 passed, 1 skipped; full frontend: 133 passed; lint and production build passed; `verify-v2.sh` passed;
+- no accepted assertion or acceptance criterion was intentionally weakened in the implementation batch.
+
+Pending before the DEV Reviewer gate:
+
+- clean-machine rerun of the platform-appropriate standalone UAT wrapper and `verify-product`;
+- exact final-run manifest/hash/count/reconciliation and artifact paths;
+- visual review of the final-run 1440×1000 and 1280×800 screenshots;
+- exact final-run production DB before/after hashes and post-run process/listener cleanup evidence;
+- final diff/acceptance self-review, known limitations, and Reviewer checklist;
+- independent Reviewer inspection and decision.

@@ -16,9 +16,26 @@ Active batch plans belong in `docs/exec-plans/`. Reviewer gate reports belong in
 
 Reviewer/orchestrator task handoffs belong in `docs/reviewer-prompts/` and must be standalone for a new task with no conversation history.
 
+## Canonical Post-V3 professionalization program
+
+- `docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md` — canonical product target, verified gap register, Professional acceptance contract, ordered PRO-00 through PRO-12 program, release gates, and deferred backlog.
+- `docs/PROFESSIONALIZATION_HANDOFF_2026-08-01.md` — current cross-machine checkout, status, reading order, continuation command, and Git safety handoff.
+- `docs/dev-prompts/PRO_00_INTEGRITY_AND_EVIDENCE_CLOSURE_PROMPT.md` — completed standalone PRO-00 implementation authority and preserved contract.
+- `docs/exec-plans/PRO_00_INTEGRITY_AND_EVIDENCE_CLOSURE.md` — living implementation/evidence record; implementation is committed, final verification and Reviewer decision remain pending.
+- `docs/dev-prompts/PRO_00_VERIFICATION_CONTINUATION_PROMPT.md` — the only currently authorized continuation prompt; verification and Reviewer handoff only.
+
+The historical V3 Batch 0–5 closure remains recorded below. A later exploratory browser review found that a Scanner-created replay can expose future signal timestamp, price, strategy, regime, and entry metadata before the replay reaches the signal candle. This reopens V3 R-01 for current release eligibility even though future candle slicing may remain correct.
+
+Until PRO-00 is independently approved:
+
+- V3 release acceptance is conditional;
+- no later PRO batch is authorized;
+- Sumi must not be tagged, published, or described as a Professional-complete product;
+- reports under `docs/tester/` remain research inputs rather than canonical release evidence.
+
 Current gate:
 
-- No development batch remains open under the V3 roadmap. Batch 5 and the V3 acceptance contract were independently approved and closed on 2026-07-22. Any commit, tag, push or release publication is a separate explicitly authorized operation.
+- No development batch remains open under the historical V3 roadmap. Batch 5 and the V3 acceptance contract were independently approved and closed on 2026-07-22. PRO-00 implementation is present in commit `55ec5f9`; its final canonical verification and independent Reviewer decision remain pending. No later PRO batch is authorized. Any later commit, tag, push, or release publication is a separate explicitly authorized operation.
 
 - `docs/reviews/BATCH_1_REVIEW_2026-07-16.md` — Batch 1 approved and closed after final independent verification.
 - `docs/dev-prompts/BATCH_1_REVIEW_HARDENING_PROMPT.md` — completed first hardening prompt.
