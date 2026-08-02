@@ -355,3 +355,30 @@ Pending before the DEV Reviewer gate:
 - final green-run production DB before/after hashes remain pending; the failed-run DB before/after hash matched exactly;
 - final acceptance self-review, known limitations, and Reviewer checklist remain pending until the product-UAT blocker is resolved;
 - independent Reviewer inspection and decision.
+
+## Verification continuation addendum — 2026-08-02 (Windows)
+
+The preceding macOS pending entries are historical and are superseded by this bounded Windows continuation. Checkout provenance is `HEAD=origin/master=e3e5d765b8fa204d89927ce9f8de7a30cbdc198f`; the mandated peeled `v2.0.0-rc2` commit identity from `git rev-list -n 1 v2.0.0-rc2` is `812675ce37d30ddfafc11c6eeca299b5cd8a3c9e` (the annotated tag object itself is `66acf862a10c850185d4993237191fba879da7ca`). The initial checkout was clean, `git diff --check` passed, and the production database SHA-256 before verification was `4166D749119B0EBB4B9ADF418EA18442FF6E0C14AE762147CD3D0FBE20F76459`.
+
+Focused commands and counts:
+
+- `& .\.venv\Scripts\python.exe -m pytest app/tests/test_scanner.py app/tests/test_replay_no_future_leak.py app/tests/test_ws_replay.py app/tests/test_scanner_replay_integrity.py -q` (from `backend/`) — 16 passed (one deprecation warning).
+- `npm.cmd test -- --run src/pages/__tests__/ScannerPage.test.tsx src/components/replay/__tests__/ScannerSourceContext.test.tsx` — 5 passed across 2 files.
+- `node --test scripts/product-uat-manifest.test.mjs` — 5 passed.
+- After the reproduced WebSocket defect correction, focused WebSocket tests — 3 passed; final full backend includes the regression and is 107 passed/1 skipped.
+
+The first Windows UAT retained `test-results/product-uat/2026-08-02T04-41-14-352Z/partial-results.json` and reproduced the prior Auto-Play timeout. The defect was an in-scope Replay WebSocket ownership race: a stale overlapping React remount socket unconditionally removed the replacement socket and cancelled playback. `backend/app/api/ws_replay.py` now disconnects only when socket identity matches; `backend/app/tests/test_ws_replay.py` covers this. The PowerShell runner also now propagates a nonzero Node UAT exit. The UAT harness was made deterministic by waiting for the signal marker and synchronizing each warmup `+5` action to its API/state response; no assertion was removed, renamed, weakened, or made non-blocking.
+
+Required full commands:
+
+- `& 'C:\\Program Files\\Git\\bin\\bash.exe' -lc "cd /e/Workspace/sumi && SUMI_PYTHON=/e/Workspace/sumi/backend/.venv/Scripts/python.exe ./scripts/verify-v2.sh"` — passed: backend 106 passed/1 skipped, frontend 133, fresh migration, lint, build.
+- `powershell -ExecutionPolicy Bypass -File scripts/run-product-uat.ps1` — corrected standalone passed 275/275 at `test-results/product-uat/2026-08-02T05-01-57-359Z/results.json`.
+- `& 'C:\\Program Files\\Git\\bin\\bash.exe' -lc "cd /e/Workspace/sumi && SUMI_PYTHON=/e/Workspace/sumi/backend/.venv/Scripts/python.exe ./scripts/verify-product.sh"` — final exit 0; backend 107 passed/1 skipped, frontend 133 across 22 files, lint/build/verify-v2 and final product UAT all passed.
+
+Final UAT evidence is `test-results/product-uat/2026-08-02T05-04-16-234Z/results.json`: manifest `scripts/fixtures/product-uat-v3-baseline.json`, SHA-256 `eafe86a920287b0bddd28148812bd74a8753c87ebae1c830a9e74639bfcdd7c9`, 265 baseline/275 declared/275 actual/275 passed, zero failed/blocking/missing/unexpected/duplicate/blocking-mismatch IDs, zero runtime/provider errors, 4 `new_candle` frames, and loopback-only origin `http://127.0.0.1:15173`. The 17 request failures were local Vite `net::ERR_ABORTED` asset cancellations; non-OK API observations were 56 expected `304` responses plus the two assertion-covered expected workflow responses (400 and 409). Temporary DB identity was `C:/Users/hieup/AppData/Local/Temp/sumi-uat-a3d139db/sumi-uat.db` and was removed after the run.
+
+Final screenshots were visually reviewed: `pro00-blind-boundary-1440x1000.png` is 1440×1000, SHA-256 `69A5844A59DD59A91045E61443C66BC78493673D2DB534F4104718465BF677FD`; `pro00-signal-review-1280x800.png` is 1280×800, SHA-256 `73A838E691C4A1983AFCADE3C65B03D427C60D96FAA75D08C92C0635B399E490`. Both show the honest mode label and exactly one authorized signal context/marker. Post-run inspection found zero listeners on ports 18000/15173, no owned Uvicorn/Vite/Product-UAT processes, and no temporary DB. Production DB before/after remained exactly `4166d749119b0ebb4b9adf418ea18442ff6e0c14ae762147cd3d0fbe20f76459`.
+
+Final DEV self-review: the four bounded code/harness modifications are `backend/app/api/ws_replay.py`, `backend/app/tests/test_ws_replay.py`, `scripts/product-uat.mjs`, and `scripts/run-product-uat.ps1`; the fifth tracked modification is this PRO-00 ExecPlan evidence update. No PRO-01 work started; no accepted test or acceptance criterion was weakened. DEV verification is complete. Stop now for independent Reviewer inspection and approval; do not self-approve or begin PRO-01.
+
+Independent Reviewer approval — 2026-08-02: APPROVED. Reviewer re-inspected the corrected peeled-tag provenance, five-file inventory, bounded WebSocket fix, UAT harness synchronization, final 275/275 evidence, screenshots, DB hashes, and cleanup. No remaining findings; no verification rerun required. PRO-01 is unlocked by acceptance order, but no commit/push was performed.

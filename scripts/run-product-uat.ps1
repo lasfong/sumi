@@ -73,6 +73,9 @@ try {
   $env:SUMI_UAT_DATABASE_PATH = $DatabasePath
   $env:SUMI_PRODUCTION_DATABASE_PATH = Join-Path $Root "backend\sumi.db"
   node scripts/product-uat.mjs
+  if ($LASTEXITCODE -ne 0) {
+    throw "Product UAT failed with exit code $LASTEXITCODE"
+  }
 } finally {
   Write-Host "== Cleaning up background processes =="
   if ($backendProcess -and -not $backendProcess.HasExited) {

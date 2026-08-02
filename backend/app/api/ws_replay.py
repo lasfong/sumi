@@ -19,10 +19,13 @@ class ConnectionManager:
         await websocket.accept()
         self.active_connections[session_id] = websocket
 
-    def disconnect(self, session_id: int):
-        if session_id in self.active_connections:
+    def disconnect(self, session_id: int, websocket: WebSocket):
+        # A React development remount can briefly overlap two connections for
+        # the same session.  Closing the stale socket must not remove the newer
+        # active connection or cancel playback owned by it.
+        if self.active_connections.get(session_id) is websocket:
             del self.active_connections[session_id]
-        self.stop_playback(session_id)
+            self.stop_playback(session_id)
 
     def stop_playback(self, session_id: int):
         if session_id in self.playback_tasks:
@@ -30,16 +33,17 @@ class ConnectionManager:
             del self.playback_tasks[session_id]
 
     async def send_candle_update(self, session_id: int, candle_data: dict, source_context: dict):
-        if session_id in self.active_connections:
+        connection = self.active_connections.get(session_id)
+        if connection is not None:
             try:
-                await self.active_connections[session_id].send_json({
+                await connection.send_json({
                     "type": "new_candle",
                     "data": candle_data,
                     "source_context": source_context,
                 })
             except Exception as e:
                 logger.error(f"Error sending candle to session {session_id}: {e}")
-                self.disconnect(session_id)
+                self.disconnect(session_id, connection)
 
 manager = ConnectionManager()
 
@@ -129,7 +133,7 @@ async def websocket_replay_endpoint(websocket: WebSocket, session_id: int):
                     db.close()
                     
     except WebSocketDisconnect:
-        manager.disconnect(session_id)
+        manager.disconnect(session_id, websocket)
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
-        manager.disconnect(session_id)
+        manager.disconnect(session_id, websocket)

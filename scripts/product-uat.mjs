@@ -312,6 +312,15 @@ try {
   const selectedReviewSignal = await runScannerForSignal();
   const reviewCreation = await createScannerReplay(/Review signal for /, 'signal_review');
   const reviewSession = reviewCreation.payload.session;
+  await page.waitForFunction(() => {
+    const state = document.querySelector('[data-testid="trade-marker-state"]')?.textContent;
+    if (!state) return false;
+    try {
+      return JSON.parse(state).filter(item => String(item.text || '').startsWith('Signal')).length === 1;
+    } catch {
+      return false;
+    }
+  });
   const reviewMarkers = JSON.parse(await page.getByTestId('trade-marker-state').textContent())
     .filter(item => String(item.text || '').startsWith('Signal'));
   check('pro00.signal-review-start',
@@ -408,12 +417,15 @@ try {
   JSON.stringify({ runtime: earlyRuntime[earlyRsi.id], chart: earlyChart.instances.find(instance => instance.id === earlyRsi.id) ?? null }));
   await instanceAction(earlyRsi.id, 'remove').click();
 
-  for (let index = 0; index < 12; index += 1) {
-    await page.getByRole('button', { name: '+5', exact: true }).click();
-    await page.waitForTimeout(150);
-  }
+  let warmedState = await getSessionState(sessionId);
+  for (let index = 0; index < 12; index += 1) warmedState = await clickNavigation('+5', sessionId);
+  const expectedWarmedBar = warmedState.current_index + 1;
+  await page.waitForFunction(expected => {
+    const text = document.querySelector('[data-testid="replay-bar-context"]')?.textContent || '';
+    return text.includes(`#${expected}`);
+  }, expectedWarmedBar);
   const warmedHeader = await page.locator('header').innerText();
-  check('replay.warmup-available', /Bar:\s*#6[01]/.test(warmedHeader), warmedHeader);
+  check('replay.warmup-available', expectedWarmedBar >= 60 && warmedHeader.includes(`#${expectedWarmedBar}`), warmedHeader);
   const warmedBar = Number(warmedHeader.match(/Bar:\s*#(\d+)/)?.[1]);
   await focusWorkspaceBackground(); await page.keyboard.press('ArrowLeft'); await page.waitForTimeout(200);
   const previousBar = Number((await page.locator('header').innerText()).match(/Bar:\s*#(\d+)/)?.[1]);
