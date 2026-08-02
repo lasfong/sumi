@@ -1,6 +1,41 @@
 import { apiClient } from './client';
 import type { AnalyticsReport } from '../types/analytics';
 
+export interface DataCoverage {
+  requested_start: string;
+  requested_end: string;
+  actual_start?: string | null;
+  actual_end?: string | null;
+  symbols_requested: string[];
+  symbols_covered: string[];
+  candle_count: number;
+  warmup_candles: number;
+  gaps: string[];
+  excluded_data: string[];
+}
+
+export interface ExecutionAssumptions {
+  execution_timing: string;
+  price_basis: string;
+  fees: Record<string, number>;
+  taxes: Record<string, number>;
+  slippage: Record<string, unknown>;
+  liquidity: string;
+  position_sizing: Record<string, unknown>;
+  settlement: string;
+}
+
+export interface RunManifest {
+  strategy_name: string;
+  strategy_version: string;
+  strategy_parameters: Record<string, unknown>;
+  data_identity: string;
+  assumptions_identity: string;
+  engine_version: string;
+  run_timestamp: string;
+  input_hash: string;
+}
+
 export interface StrategyConfig {
   name: string;
   version?: string;
@@ -59,6 +94,9 @@ export interface BacktestResponse {
   runs?: BacktestResponse[];
   summary?: BacktestRunSummary;
   slices?: BacktestResultSlice[];
+  data_coverage?: DataCoverage;
+  execution_assumptions?: ExecutionAssumptions;
+  run_manifest?: RunManifest;
 }
 
 export interface AvailableStrategy {

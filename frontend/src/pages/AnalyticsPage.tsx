@@ -5,6 +5,7 @@ import { getTrades } from '../api/decisionApi';
 import { useReplayStore } from '../store/replayStore';
 import type { Trade, GroupPerformance } from '../types';
 import { EquityChart } from '../components/analytics/EquityChart';
+import { MetricResultValue } from '../components/analytics/MetricResultValue';
 
 export const AnalyticsPage: React.FC = () => {
   const store = useReplayStore();
@@ -33,9 +34,6 @@ export const AnalyticsPage: React.FC = () => {
   const formatMoney = (val?: number) => val ? val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '0.00';
   const formatPercent = (val?: number) => val ? `${(val * 100).toFixed(2)}%` : '0.00%';
   const formatPctValue = (val?: number) => val ? `${val.toFixed(2)}%` : '0.00%';
-  const benchmarkStart = analytics?.benchmark_curve?.[0]?.value;
-  const benchmarkEnd = analytics?.benchmark_curve?.[analytics.benchmark_curve.length - 1]?.value;
-  const benchmarkReturn = benchmarkStart && benchmarkEnd ? (benchmarkEnd / benchmarkStart - 1) : undefined;
 
   const renderGroupPerformanceTable = (title: string, rows?: GroupPerformance[], emptyText = 'No data available.') => (
     <div className="glass-panel" style={{ padding: '20px' }}>
@@ -112,21 +110,15 @@ export const AnalyticsPage: React.FC = () => {
             </div>
             <div className="glass-panel" style={{ padding: '20px' }}>
               <h4 style={{ color: 'var(--text-muted)', margin: '0 0 8px 0', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Win Rate</h4>
-              <p style={{ margin: 0, fontSize: '28px', fontWeight: 'bold', color: analytics.win_rate > 0.5 ? 'var(--color-buy)' : 'var(--color-sell)' }}>
-                {formatPercent(analytics.win_rate)}
-              </p>
+              <MetricResultValue metric={analytics.metrics?.win_rate} format={formatPercent} testId="analytics-win-rate" />
             </div>
             <div className="glass-panel" style={{ padding: '20px' }}>
               <h4 style={{ color: 'var(--text-muted)', margin: '0 0 8px 0', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Sharpe Ratio</h4>
-              <p style={{ margin: 0, fontSize: '28px', fontWeight: 'bold', color: (analytics.sharpe_ratio || 0) > 1 ? 'var(--color-primary)' : 'var(--text-main)' }}>
-                {analytics.sharpe_ratio?.toFixed(2) || 'N/A'}
-              </p>
+              <MetricResultValue metric={analytics.metrics?.sharpe_ratio} testId="analytics-sharpe" />
             </div>
             <div className="glass-panel" style={{ padding: '20px' }}>
               <h4 style={{ color: 'var(--text-muted)', margin: '0 0 8px 0', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>SQN</h4>
-              <p style={{ margin: 0, fontSize: '28px', fontWeight: 'bold', color: (analytics.sqn || 0) > 1.6 ? 'var(--color-buy)' : 'var(--text-main)' }}>
-                {analytics.sqn?.toFixed(2) || 'N/A'}
-              </p>
+              <MetricResultValue metric={analytics.metrics?.sqn} testId="analytics-sqn" />
             </div>
             <div className="glass-panel" style={{ padding: '20px' }}>
               <h4 style={{ color: 'var(--text-muted)', margin: '0 0 8px 0', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Max Drawdown</h4>
@@ -136,10 +128,8 @@ export const AnalyticsPage: React.FC = () => {
               <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>{formatPctValue(analytics.max_drawdown_pct)}</span>
             </div>
             <div className="glass-panel" style={{ padding: '20px' }}>
-              <h4 style={{ color: 'var(--text-muted)', margin: '0 0 8px 0', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>VNINDEX</h4>
-              <p style={{ margin: 0, fontSize: '28px', fontWeight: 'bold', color: (benchmarkReturn || 0) >= 0 ? 'var(--color-buy)' : 'var(--color-sell)' }}>
-                {benchmarkReturn === undefined ? 'N/A' : formatPercent(benchmarkReturn)}
-              </p>
+              <h4 style={{ color: 'var(--text-muted)', margin: '0 0 8px 0', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>{analytics.benchmark_symbol || 'Benchmark'} benchmark</h4>
+              <MetricResultValue metric={analytics.metrics?.benchmark} format={formatPercent} testId="analytics-benchmark" />
             </div>
           </div>
 
@@ -171,15 +161,11 @@ export const AnalyticsPage: React.FC = () => {
             </div>
             <div className="glass-panel" style={{ padding: '16px' }}>
               <h4 style={{ color: 'var(--text-muted)', margin: '0 0 8px 0', fontSize: '13px' }}>Profit Factor</h4>
-              <p style={{ margin: 0, fontSize: '20px', fontWeight: '600' }}>
-                {analytics.profit_factor === null ? 'N/A' : (analytics.profit_factor === Infinity ? 'INF' : analytics.profit_factor.toFixed(2))}
-              </p>
+              <MetricResultValue metric={analytics.metrics?.profit_factor} testId="analytics-profit-factor" />
             </div>
             <div className="glass-panel" style={{ padding: '16px' }}>
               <h4 style={{ color: 'var(--text-muted)', margin: '0 0 8px 0', fontSize: '13px' }}>Sortino Ratio</h4>
-              <p style={{ margin: 0, fontSize: '20px', fontWeight: '600', color: (analytics.sortino_ratio || 0) > 1 ? 'var(--color-primary)' : 'var(--text-main)' }}>
-                {analytics.sortino_ratio?.toFixed(2) || 'N/A'}
-              </p>
+              <MetricResultValue metric={analytics.metrics?.sortino_ratio} testId="analytics-sortino" />
             </div>
           </div>
 

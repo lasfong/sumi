@@ -2221,6 +2221,71 @@
         "PRO-G-04",
         "PRO-G-06"
       ]
+    },
+    {
+      "id": "pro01.coverage-contract",
+      "blocking": true,
+      "acceptance_ids": ["PRO-BT-01"]
+    },
+    {
+      "id": "pro01.execution-assumptions",
+      "blocking": true,
+      "acceptance_ids": ["PRO-BT-02"]
+    },
+    {
+      "id": "pro01.metric-validity-contract",
+      "blocking": true,
+      "acceptance_ids": ["PRO-BT-03"]
+    },
+    {
+      "id": "pro01.benchmark-validity-contract",
+      "blocking": true,
+      "acceptance_ids": ["PRO-BT-07", "PRO-BT-08"]
+    },
+    {
+      "id": "pro01.sqn-threshold",
+      "blocking": true,
+      "acceptance_ids": ["PRO-BT-04"]
+    },
+    {
+      "id": "pro01.periodic-risk-metrics",
+      "blocking": true,
+      "acceptance_ids": ["PRO-BT-05"]
+    },
+    {
+      "id": "pro01.sample-size-ui",
+      "blocking": true,
+      "acceptance_ids": ["PRO-BT-06"]
+    },
+    {
+      "id": "pro01.edge-case-honesty",
+      "blocking": true,
+      "acceptance_ids": ["PRO-BT-07", "PRO-BT-08"]
+    },
+    {
+      "id": "pro01.reproducibility-manifest",
+      "blocking": true,
+      "acceptance_ids": ["PRO-BT-10"]
+    },
+    {
+      "id": "pro01.analytics-validity-ui",
+      "blocking": true,
+      "acceptance_ids": ["PRO-BT-03", "PRO-BT-05", "PRO-BT-06"]
+    },
+    {
+      "id": "pro01.analytics-benchmark-authority",
+      "blocking": true,
+      "acceptance_ids": ["PRO-BT-07", "PRO-BT-08"]
+    },
+    {
+      "id": "pro01.strategy-ranking-validity",
+      "blocking": true,
+      "acceptance_ids": ["PRO-BT-09"]
+    },
+    {
+      "id": "pro01.scanner-ranking-validity",
+      "blocking": true,
+      "acceptance_ids": ["PRO-BT-09"]
     }
   ]
 }

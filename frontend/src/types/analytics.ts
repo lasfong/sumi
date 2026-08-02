@@ -53,8 +53,19 @@ export interface TradeDistribution {
   result: string;
 }
 
+export type MetricStatus = 'valid' | 'insufficient_data' | 'not_applicable';
+
+export interface MetricResult {
+  value: number | null;
+  status: MetricStatus;
+  sample_size: number;
+  period?: string | null;
+  reason?: string | null;
+}
+
 /** Analytics report for a replay session */
 export interface AnalyticsReport {
+  benchmark_symbol?: string;
   total_trades: number;
   win_rate: number;
   total_net_pnl: number;
@@ -78,4 +89,5 @@ export interface AnalyticsReport {
   benchmark_curve?: BenchmarkPoint[];
   trade_distribution?: TradeDistribution[];
   outlier_impact?: OutlierImpact;
+  metrics?: Record<string, MetricResult>;
 }

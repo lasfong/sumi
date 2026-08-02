@@ -65,6 +65,7 @@ describe('StrategyLabPage', () => {
           average_loss: 250,
           profit_factor: 2,
           expectancy: 125,
+          metrics: { win_rate: { value: 0.5, status: 'valid', sample_size: 4 }, profit_factor: { value: 2, status: 'valid', sample_size: 4 } },
         },
       })
       .mockResolvedValueOnce({
@@ -77,6 +78,7 @@ describe('StrategyLabPage', () => {
           average_loss: 200,
           profit_factor: 3,
           expectancy: 300,
+          metrics: { win_rate: { value: 0.75, status: 'valid', sample_size: 6 }, profit_factor: { value: 3, status: 'valid', sample_size: 6 } },
         },
       });
 
@@ -97,7 +99,7 @@ describe('StrategyLabPage', () => {
 
     expect(backtestApi.runBacktest).toHaveBeenCalledTimes(2);
     expect(screen.getByText('2,000.00')).toBeInTheDocument();
-    expect(screen.getByText('Best')).toBeInTheDocument();
+    expect(screen.getByText('Best eligible')).toBeInTheDocument();
     expect(screen.getByText('Run History')).toBeInTheDocument();
     expect(screen.getByText('2 strategy comparison')).toBeInTheDocument();
     expect(strategyLabApi.saveStrategyLabRun).toHaveBeenCalledTimes(1);

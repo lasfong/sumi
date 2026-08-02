@@ -50,7 +50,21 @@ async def test_parameter_sweep_runs_variants(db_session):
     assert result["total_variants"] == 2
     assert {row["parameters"]["indicators[0].length"] for row in result["variants"]} == {5, 10}
     assert all("net_pnl" in row["metrics"] for row in result["variants"])
+    assert all("ranking_eligible" in row["metrics"] for row in result["variants"])
+    assert all("metric_results" in row["metrics"] for row in result["variants"])
     assert all("equity_curve" not in row["response"].get("analytics", {}) for row in result["variants"])
+
+
+def test_invalid_variant_cannot_win_ranking():
+    service = StrategyLabService()
+    invalid = {"status": "succeeded", "analytics": {"total_trades": 0, "total_net_pnl": 10_000, "metrics": {"total_net_pnl": {"value": None, "status": "not_applicable", "sample_size": 0}}}}
+    valid = {"status": "succeeded", "analytics": {"total_trades": 2, "total_net_pnl": -100, "metrics": {"total_net_pnl": {"value": -100, "status": "valid", "sample_size": 2}}}}
+
+    invalid_metrics = service._extract_metrics(invalid)
+    valid_metrics = service._extract_metrics(valid)
+
+    assert invalid_metrics["ranking_eligible"] is False
+    assert valid_metrics["ranking_eligible"] is True
 
 
 @pytest.mark.asyncio

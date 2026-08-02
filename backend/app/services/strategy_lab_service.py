@@ -46,7 +46,15 @@ class StrategyLabService:
             "status": "succeeded",
             "total_variants": len(results),
             "truncated": len(results) >= max_variants,
-            "variants": sorted(results, key=lambda row: row["metrics"]["net_pnl"], reverse=True),
+            "ranking_metric": "net_pnl",
+            "variants": sorted(
+                results,
+                key=lambda row: (
+                    1 if row["metrics"]["ranking_eligible"] else 0,
+                    row["metrics"]["net_pnl"] if row["metrics"]["ranking_eligible"] else float("-inf"),
+                ),
+                reverse=True,
+            ),
         }
 
     def _build_variants(self, strategy: dict, sweep: list[dict], max_variants: int) -> list[dict]:
@@ -101,13 +109,21 @@ class StrategyLabService:
     def _extract_metrics(self, response: dict) -> dict:
         analytics = response.get("analytics") or {}
         summary = response.get("summary") or {}
+        metric_results = analytics.get("metrics") or {}
+        trade_count = summary.get("total_trades", analytics.get("total_trades", 0))
+        net_pnl = summary.get("total_net_pnl", analytics.get("total_net_pnl", 0.0))
+        ranking_metric = metric_results.get("total_net_pnl") or {}
+        ranking_eligible = response.get("status") == "succeeded" and ranking_metric.get("status") == "valid"
         return {
             "status": response.get("status", "succeeded"),
-            "total_trades": summary.get("total_trades", analytics.get("total_trades", 0)),
+            "total_trades": trade_count,
             "win_rate": summary.get("win_rate", analytics.get("win_rate", 0.0)),
-            "net_pnl": summary.get("total_net_pnl", analytics.get("total_net_pnl", 0.0)),
+            "net_pnl": net_pnl,
             "profit_factor": analytics.get("profit_factor"),
             "expectancy": analytics.get("expectancy"),
+            "metric_results": metric_results,
+            "ranking_eligible": ranking_eligible,
+            "ranking_reason": None if ranking_eligible else "Variant has no closed trades or did not succeed.",
         }
 
     def _compact_response(self, response: dict) -> dict:
@@ -124,7 +140,11 @@ class StrategyLabService:
                 "total_net_pnl": summary.get("total_net_pnl", analytics.get("total_net_pnl", 0.0)),
                 "profit_factor": analytics.get("profit_factor"),
                 "expectancy": analytics.get("expectancy"),
+                "metrics": analytics.get("metrics", {}),
             },
+            "data_coverage": response.get("data_coverage"),
+            "execution_assumptions": response.get("execution_assumptions"),
+            "run_manifest": response.get("run_manifest"),
         }
         if response.get("message"):
             compact["message"] = response["message"]

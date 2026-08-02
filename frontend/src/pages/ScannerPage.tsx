@@ -192,6 +192,9 @@ export const ScannerPage: React.FC = () => {
             </h3>
             <span style={{ color: 'var(--text-muted)', fontSize: '13px' }}>{result.total_results || 0} results{result.truncated ? ' (truncated)' : ''}</span>
           </div>
+          <p data-testid="scanner-ranking-policy" style={{ margin: '0 0 16px', color: 'var(--text-muted)', fontSize: '12px' }}>
+            Quantitative ranking: unavailable — scanner signals are shown chronologically until outcomes are validated.
+          </p>
           {result.results.length > 0 ? (
             <div style={{ overflowX: 'auto' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
@@ -202,6 +205,7 @@ export const ScannerPage: React.FC = () => {
                     <th style={{ padding: '8px', fontWeight: 500 }}>Signal</th>
                     <th style={{ padding: '8px', fontWeight: 500 }}>Regime</th>
                     <th style={{ padding: '8px', fontWeight: 500, textAlign: 'right' }}>Price</th>
+                    <th style={{ padding: '8px', fontWeight: 500 }}>Ranking</th>
                     <th style={{ padding: '8px', fontWeight: 500, textAlign: 'right' }}>Replay</th>
                   </tr>
                 </thead>
@@ -213,6 +217,7 @@ export const ScannerPage: React.FC = () => {
                       <td style={{ padding: '12px 8px', textTransform: 'uppercase' }}>{item.signal_type}</td>
                       <td style={{ padding: '12px 8px' }}>{item.regime}</td>
                       <td style={{ padding: '12px 8px', textAlign: 'right', fontFamily: 'monospace' }}>{formatMoney(item.price)}</td>
+                      <td style={{ padding: '12px 8px', color: 'var(--text-muted)' }}>Not rankable</td>
                       <td style={{ padding: '12px 8px', textAlign: 'right' }}>
                         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '6px' }}>
                           <button

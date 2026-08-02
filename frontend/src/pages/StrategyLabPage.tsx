@@ -4,6 +4,7 @@ import { getAvailableStrategies, runBacktest } from '../api/backtestApi';
 import type { BacktestRequest, BacktestResponse, AvailableStrategy } from '../api/backtestApi';
 import { deleteStrategyLabRun, listStrategyLabRuns, runParameterSweep, saveStrategyLabRun } from '../api/strategyLabApi';
 import type { StrategyLabRun, SweepVariant } from '../api/strategyLabApi';
+import { MetricResultValue } from '../components/analytics/MetricResultValue';
 
 interface LabResult {
   filename: string;
@@ -241,10 +242,9 @@ export const StrategyLabPage: React.FC = () => {
   };
 
   const getTrades = (response: BacktestResponse) => response.summary?.total_trades ?? response.analytics?.total_trades ?? 0;
-  const getWinRate = (response: BacktestResponse) => response.summary?.win_rate ?? response.analytics?.win_rate ?? 0;
   const getNetPnl = (response: BacktestResponse) => response.summary?.total_net_pnl ?? response.analytics?.total_net_pnl ?? 0;
-  const getProfitFactor = (response: BacktestResponse) => response.analytics?.profit_factor ?? null;
   const getExpectancy = (response: BacktestResponse) => response.analytics?.expectancy ?? null;
+  const isRankingEligible = (response: BacktestResponse) => response.status === 'succeeded' && getTrades(response) > 0;
   const formatMoney = (value?: number | null) => value ? value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '0.00';
   const formatPercent = (value?: number) => value ? `${(value * 100).toFixed(2)}%` : '0.00%';
   const parseSweepValue = (value: string) => {
@@ -255,8 +255,11 @@ export const StrategyLabPage: React.FC = () => {
     return Number.isNaN(numeric) ? value : numeric;
   };
 
-  const sortedResults = [...results].sort((left, right) => getNetPnl(right.response) - getNetPnl(left.response));
-  const bestFilename = sortedResults[0]?.filename;
+  const sortedResults = [...results].sort((left, right) => {
+    const eligibility = Number(isRankingEligible(right.response)) - Number(isRankingEligible(left.response));
+    return eligibility || getNetPnl(right.response) - getNetPnl(left.response);
+  });
+  const bestFilename = sortedResults.find(item => isRankingEligible(item.response))?.filename;
   const savedHistory = (savedRuns || [])
     .filter(run => !hiddenSavedRunIds.includes(run.id))
     .map((run: StrategyLabRun): LabHistoryEntry => ({
@@ -400,13 +403,14 @@ export const StrategyLabPage: React.FC = () => {
                     <tr key={item.filename} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
                       <td style={{ padding: '12px 8px', fontWeight: 600 }}>
                         {item.name}
-                        {isBest && <span style={{ marginLeft: '8px', color: 'var(--color-buy)', fontSize: '12px' }}>Best</span>}
+                        {isBest && <span style={{ marginLeft: '8px', color: 'var(--color-buy)', fontSize: '12px' }}>Best eligible</span>}
+                        {!isRankingEligible(item.response) && <span style={{ marginLeft: '8px', color: 'var(--text-muted)', fontSize: '12px' }}>Not rankable</span>}
                       </td>
                       <td style={{ padding: '12px 8px', textTransform: 'uppercase', color: item.response.status === 'failed' ? 'var(--color-sell)' : 'var(--text-main)' }}>{item.response.status || 'succeeded'}</td>
                       <td style={{ padding: '12px 8px', textAlign: 'right' }}>{getTrades(item.response)}</td>
-                      <td style={{ padding: '12px 8px', textAlign: 'right' }}>{formatPercent(getWinRate(item.response))}</td>
+                      <td style={{ padding: '12px 8px', textAlign: 'right' }}><MetricResultValue metric={item.response.analytics?.metrics?.win_rate} format={formatPercent} /></td>
                       <td style={{ padding: '12px 8px', textAlign: 'right', fontWeight: 600, color: netPnl >= 0 ? 'var(--color-buy)' : 'var(--color-sell)' }}>{formatMoney(netPnl)}</td>
-                      <td style={{ padding: '12px 8px', textAlign: 'right' }}>{getProfitFactor(item.response)?.toFixed(2) || 'N/A'}</td>
+                      <td style={{ padding: '12px 8px', textAlign: 'right' }}><MetricResultValue metric={item.response.analytics?.metrics?.profit_factor} /></td>
                       <td style={{ padding: '12px 8px', textAlign: 'right' }}>{formatMoney(getExpectancy(item.response))}</td>
                     </tr>
                   );
@@ -439,9 +443,12 @@ export const StrategyLabPage: React.FC = () => {
                     <td style={{ padding: '12px 8px', fontWeight: 600 }}>{item.label}</td>
                     <td style={{ padding: '12px 8px', textTransform: 'uppercase' }}>{item.metrics.status}</td>
                     <td style={{ padding: '12px 8px', textAlign: 'right' }}>{item.metrics.total_trades}</td>
-                    <td style={{ padding: '12px 8px', textAlign: 'right' }}>{formatPercent(item.metrics.win_rate)}</td>
+                    <td style={{ padding: '12px 8px', textAlign: 'right' }}><MetricResultValue metric={item.metrics.metric_results?.win_rate} format={formatPercent} /></td>
                     <td style={{ padding: '12px 8px', textAlign: 'right', color: item.metrics.net_pnl >= 0 ? 'var(--color-buy)' : 'var(--color-sell)', fontWeight: 600 }}>{formatMoney(item.metrics.net_pnl)}</td>
-                    <td style={{ padding: '12px 8px', textAlign: 'right' }}>{item.metrics.profit_factor?.toFixed(2) || 'N/A'}</td>
+                    <td style={{ padding: '12px 8px', textAlign: 'right' }}>
+                      <MetricResultValue metric={item.metrics.metric_results?.profit_factor} />
+                      {!item.metrics.ranking_eligible && <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>Not rankable</span>}
+                    </td>
                     <td style={{ padding: '12px 8px', textAlign: 'right' }}>{formatMoney(item.metrics.expectancy)}</td>
                   </tr>
                 ))}

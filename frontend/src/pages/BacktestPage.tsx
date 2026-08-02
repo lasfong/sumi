@@ -3,6 +3,7 @@ import { useQuery, useMutation } from '@tanstack/react-query';
 import { getAvailableStrategies, runBacktest } from '../api/backtestApi';
 import type { BacktestRequest, BacktestResultSlice, StrategyConfig } from '../api/backtestApi';
 import { EquityChart } from '../components/analytics/EquityChart';
+import { MetricResultValue } from '../components/analytics/MetricResultValue';
 
 export const BacktestPage: React.FC = () => {
   const [symbol, setSymbol] = useState('FPT');
@@ -239,15 +240,11 @@ export const BacktestPage: React.FC = () => {
             </div>
             <div className="glass-panel" style={{ padding: '20px' }}>
               <h4 style={{ color: 'var(--text-muted)', margin: '0 0 8px 0', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Win Rate</h4>
-              <p style={{ margin: 0, fontSize: '28px', fontWeight: 'bold', color: analytics.win_rate > 0.5 ? 'var(--color-buy)' : 'var(--color-sell)' }}>
-                {formatPercent(analytics.win_rate)}
-              </p>
+              <MetricResultValue metric={analytics.metrics?.win_rate} format={formatPercent} testId="backtest-win-rate" />
             </div>
             <div className="glass-panel" style={{ padding: '20px' }}>
               <h4 style={{ color: 'var(--text-muted)', margin: '0 0 8px 0', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Sharpe Ratio</h4>
-              <p style={{ margin: 0, fontSize: '28px', fontWeight: 'bold', color: (analytics.sharpe_ratio || 0) > 1 ? 'var(--color-primary)' : 'var(--text-main)' }}>
-                {analytics.sharpe_ratio?.toFixed(2) || 'N/A'}
-              </p>
+              <MetricResultValue metric={analytics.metrics?.sharpe_ratio} testId="backtest-sharpe" />
             </div>
             <div className="glass-panel" style={{ padding: '20px' }}>
               <h4 style={{ color: 'var(--text-muted)', margin: '0 0 8px 0', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Max Drawdown</h4>
@@ -283,17 +280,30 @@ export const BacktestPage: React.FC = () => {
             </div>
             <div className="glass-panel" style={{ padding: '16px' }}>
               <h4 style={{ color: 'var(--text-muted)', margin: '0 0 8px 0', fontSize: '13px' }}>Profit Factor</h4>
-              <p style={{ margin: 0, fontSize: '20px', fontWeight: '600' }}>
-                {analytics.profit_factor === null ? 'N/A' : (analytics.profit_factor === Infinity ? 'INF' : analytics.profit_factor.toFixed(2))}
-              </p>
+              <div style={{ margin: 0 }}>
+                <MetricResultValue metric={analytics.metrics?.profit_factor} testId="backtest-profit-factor" />
+              </div>
             </div>
             <div className="glass-panel" style={{ padding: '16px' }}>
               <h4 style={{ color: 'var(--text-muted)', margin: '0 0 8px 0', fontSize: '13px' }}>SQN</h4>
-              <p style={{ margin: 0, fontSize: '20px', fontWeight: '600', color: (analytics.sqn || 0) > 1.6 ? 'var(--color-buy)' : 'var(--text-main)' }}>
-                {analytics.sqn?.toFixed(2) || 'N/A'}
-              </p>
+              <div style={{ margin: 0 }}>
+                <MetricResultValue metric={analytics.metrics?.sqn} testId="backtest-sqn" />
+              </div>
             </div>
           </div>
+
+          {result.data_coverage && (
+            <div className="glass-panel" style={{ padding: '16px', marginTop: '24px' }} data-testid="backtest-run-contract">
+              <h3 style={{ margin: '0 0 8px', fontSize: '16px' }}>Run coverage and assumptions</h3>
+              <p style={{ margin: '4px 0', color: 'var(--text-muted)', fontSize: '13px' }}>
+                Requested {result.data_coverage.requested_start} → {result.data_coverage.requested_end}; actual {result.data_coverage.actual_start || 'n/a'} → {result.data_coverage.actual_end || 'n/a'}; {result.data_coverage.candle_count} candles; {result.data_coverage.warmup_candles} warm-up.
+              </p>
+              <p style={{ margin: '4px 0', color: 'var(--text-muted)', fontSize: '13px' }}>
+                {result.execution_assumptions?.execution_timing}; {result.execution_assumptions?.price_basis}; settlement: {result.execution_assumptions?.settlement}.
+              </p>
+              <p style={{ margin: '4px 0', color: 'var(--text-muted)', fontSize: '12px' }}>Run manifest: {result.run_manifest?.input_hash?.slice(0, 12) || 'n/a'}</p>
+            </div>
+          )}
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '16px', marginTop: '24px' }}>
             {renderSliceTable('Symbol Slices', sliceRows.filter(row => row.group_type === 'symbol'))}

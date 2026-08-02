@@ -48,6 +48,9 @@ def test_scanner_finds_entry_signals_with_regime(db_session):
     assert result["results"][0]["symbol"] == "SCAN_AAA"
     assert result["results"][0]["signal_type"] == "entry"
     assert result["results"][0]["regime"] != "Unknown"
+    assert result["ranking_policy"] == "chronological_unranked"
+    assert result["results"][0]["ranking"]["eligible"] is False
+    assert result["results"][0]["ranking"]["status"] == "not_applicable"
     assert not hasattr(ScannerService(), "backtest_service")
 
 

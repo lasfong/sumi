@@ -1,4 +1,8 @@
 import pandas as pd
+import hashlib
+import json
+import math
+from datetime import timezone
 from datetime import datetime
 from sqlalchemy.orm import Session
 from app.domain.engine.strategy_indicator_adapter import StrategyIndicatorAdapter
@@ -13,6 +17,8 @@ from app.domain.regime.regime_classifier import RegimeClassifier
 import uuid
 from app.domain.strategy.rule_evaluator import RuleEvaluationError
 from app.utils.date_range import end_before, start_at
+from app.domain.accounting import BUY_FEE_RATE, SELL_FEE_RATE, SELL_TAX_RATE
+from app.schemas.analytics_trust_schema import DataCoverage, ExecutionAssumptions, RunManifest
 
 class BacktestService:
     def __init__(self):
@@ -116,7 +122,19 @@ class BacktestService:
                 "symbol": symbol,
                 "total_candles": 0,
                 "analytics": None,
+                "data_coverage": DataCoverage(
+                    requested_start=str(start_date), requested_end=str(end_date),
+                    symbols_requested=[symbol], excluded_data=[f"No candles found for {symbol}"],
+                ).model_dump(),
             }
+
+        coverage = self._build_coverage(candles, symbol, start_date, end_date, strategy)
+        assumptions = self._build_assumptions(strategy)
+        manifest = self._build_manifest(
+            strategy, symbol, candles, assumptions,
+            initial_cash=initial_cash,
+            benchmark_symbol=benchmark_symbol,
+        )
         
         # 2. Create virtual session
         session = ReplaySession(
@@ -130,6 +148,7 @@ class BacktestService:
             mode="backtest",
             status="active"
         )
+        session.source_payload = json.dumps({"benchmark_symbol": benchmark_symbol})
         db.add(session)
         db.flush()
         
@@ -225,8 +244,15 @@ class BacktestService:
                             "analytics": None,
                         }
         
+        # Persist the final analyzed boundary. Trade lifecycle commits at fills,
+        # but a run can continue beyond its last fill; Analytics must reproduce
+        # the same periodic-return sample after this request/session is reopened.
+        db.add(session)
+        db.commit()
+        db.refresh(session)
+
         # 5. Return analytics
-        analytics = AnalyticsService.get_analytics(db, session.id)
+        analytics = AnalyticsService.get_analytics(db, session.id, benchmark_symbol=benchmark_symbol)
         slices = self._build_result_slices(
             db=db,
             session_id=session.id,
@@ -243,7 +269,94 @@ class BacktestService:
             "total_candles": len(candles),
             "analytics": analytics.model_dump() if analytics else None,
             "slices": slices,
+            "data_coverage": coverage.model_dump(),
+            "execution_assumptions": assumptions.model_dump(),
+            "run_manifest": manifest.model_dump(mode="json"),
         }
+
+    def _build_coverage(self, candles, symbol, start_date, end_date, strategy) -> DataCoverage:
+        timestamps = [c.timestamp for c in candles]
+        warmup = self._estimate_warmup(strategy, candles)
+        gaps = []
+        for previous, current in zip(timestamps, timestamps[1:]):
+            delta = (current - previous).days if hasattr(current - previous, "days") else 0
+            if delta > 4:
+                gaps.append(f"{previous}..{current} ({delta - 1} calendar days not represented)")
+        return DataCoverage(
+            requested_start=str(start_date), requested_end=str(end_date),
+            actual_start=str(timestamps[0]), actual_end=str(timestamps[-1]),
+            symbols_requested=[symbol], symbols_covered=[symbol], candle_count=len(candles),
+            warmup_candles=min(warmup, len(candles)), gaps=gaps,
+            excluded_data=[] if warmup == 0 else [f"{warmup} warm-up candle(s) excluded from signal evaluation"],
+        )
+
+    def _estimate_warmup(self, strategy, candles) -> int:
+        if not strategy.indicators or not candles:
+            return 0
+        frame = pd.DataFrame([{
+            "timestamp": candle.timestamp,
+            "open": candle.open,
+            "high": candle.high,
+            "low": candle.low,
+            "close": candle.close,
+            "volume": candle.volume,
+        } for candle in candles])
+        outputs = StrategyIndicatorAdapter.compute(frame, strategy.indicators)
+        first_finite_indexes = []
+        for values in outputs.values():
+            first_finite = next((
+                index for index, value in enumerate(values)
+                if value is not None and pd.notna(value) and bool(pd.api.types.is_number(value)) and math.isfinite(float(value))
+            ), len(candles))
+            first_finite_indexes.append(first_finite)
+        return max(first_finite_indexes, default=0)
+
+    def _build_assumptions(self, strategy) -> ExecutionAssumptions:
+        return ExecutionAssumptions(
+            fees={"buy_rate": BUY_FEE_RATE, "sell_rate": SELL_FEE_RATE},
+            taxes={"sell_tax_rate": SELL_TAX_RATE},
+            position_sizing=strategy.position_sizing.model_dump(),
+        )
+
+    def _build_manifest(
+        self, strategy, symbol, candles, assumptions,
+        *, initial_cash: float, benchmark_symbol: str | None,
+    ) -> RunManifest:
+        strategy_payload = strategy.model_dump(mode="json")
+        data_hasher = hashlib.sha256(json.dumps({
+            "symbol": symbol,
+            "timeframe": "1D",
+            "adjustment_type": str(candles[0].adjustment_type),
+            "first": str(candles[0].timestamp),
+            "last": str(candles[-1].timestamp),
+            "count": len(candles),
+        }, sort_keys=True).encode())
+        for candle in candles:
+            data_hasher.update(
+                "|".join(str(value) for value in (
+                    candle.timestamp, candle.open, candle.high, candle.low,
+                    candle.close, candle.volume, candle.timeframe, candle.adjustment_type,
+                )).encode()
+            )
+        data_identity = data_hasher.hexdigest()
+        assumptions_payload = assumptions.model_dump(mode="json")
+        assumptions_identity = hashlib.sha256(json.dumps(assumptions_payload, sort_keys=True).encode()).hexdigest()
+        input_hash = hashlib.sha256(json.dumps({
+            "strategy": strategy_payload,
+            "data_identity": data_identity,
+            "assumptions_identity": assumptions_identity,
+            "initial_cash": float(initial_cash),
+            "benchmark_symbol": benchmark_symbol,
+        }, sort_keys=True).encode()).hexdigest()
+        return RunManifest(
+            strategy_name=strategy.name,
+            strategy_version=strategy.version,
+            strategy_parameters=strategy_payload,
+            data_identity=data_identity,
+            assumptions_identity=assumptions_identity,
+            run_timestamp=datetime.now(timezone.utc),
+            input_hash=input_hash,
+        )
     
     def _build_result_slices(
         self,

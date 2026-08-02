@@ -1,14 +1,17 @@
 import pytest
 import math
 import pandas as pd
+from types import SimpleNamespace
 from datetime import date, timedelta
 from app.domain.engine.indicator_engine import IndicatorEngine
 from app.domain.engine.strategy_indicator_adapter import StrategyIndicatorAdapter
 from app.domain.strategy.strategy_rule_evaluator import StrategyRuleEvaluator
 from app.models.candle import Candle
 from app.models.trade import Trade
+from app.models.replay_session import ReplaySession
 from app.domain.strategy.strategy_loader import list_available_strategies, load_strategy_from_dict
 from app.services.backtest_service import BacktestService
+from app.services.analytics_service import AnalyticsService
 
 
 def test_backtest_supports_macd_rsi_strategy_indicators():
@@ -56,6 +59,11 @@ def test_strategy_indicator_adapter_uses_shared_indicator_engine_outputs():
     assert values["macd_hist"][-1] == pytest.approx(macd_df["MACDh_12_26_9"].iloc[-1])
     assert values["rsi"][-1] == pytest.approx(rsi_df["RSI_14"].iloc[-1])
     assert math.isnan(values["rsi"][0])
+    candles = [SimpleNamespace(
+        timestamp=date(2024, 1, 1) + timedelta(days=index),
+        open=row.open, high=row.high, low=row.low, close=row.close, volume=row.volume,
+    ) for index, row in df.iterrows()]
+    assert BacktestService()._estimate_warmup(strategy, candles) == 33
 
 @pytest.mark.asyncio
 async def test_backtest_ma_crossover_e2e(db_session):
@@ -120,6 +128,28 @@ async def test_backtest_ma_crossover_e2e(db_session):
     
     assert result["total_candles"] == 100
     assert result["analytics"] is not None
+    assert result["data_coverage"]["requested_start"] == str(base_date)
+    assert result["data_coverage"]["actual_start"].startswith(str(base_date))
+    assert result["data_coverage"]["candle_count"] == 100
+    assert result["data_coverage"]["warmup_candles"] == 29
+    assert result["execution_assumptions"]["fees"] == {"buy_rate": 0.0015, "sell_rate": 0.0015}
+    assert result["execution_assumptions"]["taxes"] == {"sell_tax_rate": 0.001}
+    assert result["execution_assumptions"]["slippage"] == {"model": "none", "rate": 0.0}
+    assert result["run_manifest"]["strategy_name"] == "MA Crossover Test"
+    assert len(result["run_manifest"]["data_identity"]) == 64
+    assert len(result["run_manifest"]["input_hash"]) == 64
+    strategy = load_strategy_from_dict(config["strategy"])
+    assumptions = backtest_service._build_assumptions(strategy)
+    candles = db_session.query(Candle).filter(Candle.symbol == symbol).order_by(Candle.timestamp).all()
+    same_inputs = backtest_service._build_manifest(strategy, symbol, candles, assumptions, initial_cash=100_000_000, benchmark_symbol="VNINDEX")
+    different_cash = backtest_service._build_manifest(strategy, symbol, candles, assumptions, initial_cash=90_000_000, benchmark_symbol="VNINDEX")
+    different_benchmark = backtest_service._build_manifest(strategy, symbol, candles, assumptions, initial_cash=100_000_000, benchmark_symbol="ALT_BENCH")
+    assert same_inputs.input_hash != different_cash.input_hash
+    assert same_inputs.input_hash != different_benchmark.input_hash
+    persisted_session = db_session.query(ReplaySession).filter_by(id=result["session_id"]).one()
+    assert persisted_session.current_index == result["total_candles"] - 1
+    reopened_analytics = AnalyticsService.get_analytics(db_session, result["session_id"])
+    assert reopened_analytics.metrics["sharpe_ratio"].sample_size == result["analytics"]["metrics"]["sharpe_ratio"]["sample_size"]
     assert any(row["group_type"] == "symbol" and row["key"] == symbol for row in result["slices"])
     assert any(row["group_type"] == "period" and row["key"] == "2024" for row in result["slices"])
     assert any(row["group_type"] == "regime" for row in result["slices"])

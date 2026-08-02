@@ -73,6 +73,13 @@ describe('BacktestPage UI Test', () => {
         average_loss: 5000,
         profit_factor: 3,
         sqn: 2.1,
+        metrics: {
+          win_rate: { value: 0.75, status: 'valid', sample_size: 4, period: 'closed_trades' },
+          profit_factor: { value: 3, status: 'valid', sample_size: 4, period: 'closed_trades' },
+          sharpe_ratio: { value: 1.5, status: 'valid', sample_size: 30, period: 'daily_equity_returns' },
+          sortino_ratio: { value: 1.2, status: 'valid', sample_size: 30, period: 'daily_equity_returns' },
+          sqn: { value: 2.1, status: 'valid', sample_size: 30, period: 'closed_trades' },
+        },
         equity_curve: []
       }
     });

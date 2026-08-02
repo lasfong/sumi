@@ -1,5 +1,7 @@
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Dict, Optional, List
+
+from app.schemas.analytics_trust_schema import MetricResult
 
 class SetupPerformance(BaseModel):
     setup_type: str
@@ -50,6 +52,7 @@ class TradeDistribution(BaseModel):
     result: str
 
 class AnalyticsResponse(BaseModel):
+    benchmark_symbol: str
     total_trades: int
     win_rate: float
     total_net_pnl: float
@@ -73,3 +76,4 @@ class AnalyticsResponse(BaseModel):
     symbol_performance: Optional[List[GroupPerformance]] = None
     mistake_performance: Optional[List[GroupPerformance]] = None
     outlier_impact: Optional[OutlierImpact] = None
+    metrics: Dict[str, MetricResult]

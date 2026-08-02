@@ -41,10 +41,14 @@ def test_advanced_analytics_metrics(db_session):
     assert response.total_net_pnl == 800
 
     # Verify advanced metrics
-    assert response.sharpe_ratio is not None
-    assert response.sortino_ratio is not None
-    assert response.sqn is not None
-    assert isinstance(response.sharpe_ratio, float)
+    assert response.sharpe_ratio is None
+    assert response.sortino_ratio is None
+    assert response.sqn is None
+    assert response.metrics["sharpe_ratio"].status == "insufficient_data"
+    assert response.metrics["sharpe_ratio"].sample_size == 0
+    assert response.metrics["sortino_ratio"].status == "insufficient_data"
+    assert response.metrics["sqn"].status == "insufficient_data"
+    assert response.metrics["sqn"].sample_size == 4
 
     assert response.equity_curve is not None
     assert response.symbol_performance is not None

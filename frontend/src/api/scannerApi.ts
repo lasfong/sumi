@@ -18,6 +18,12 @@ export interface ScannerResult {
   strategy: string;
   price: number;
   regime: string;
+  ranking?: {
+    status: 'valid' | 'insufficient_data' | 'not_applicable';
+    eligible: boolean;
+    metric?: string | null;
+    reason?: string | null;
+  };
 }
 
 export interface ScannerResponse {
@@ -29,6 +35,7 @@ export interface ScannerResponse {
   warnings: string[];
   error_code?: string;
   message?: string;
+  ranking_policy?: string;
 }
 
 export interface ScannerReplaySessionRequest {

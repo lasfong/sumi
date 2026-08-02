@@ -54,6 +54,7 @@ const page = await context.newPage();
 page.setDefaultTimeout(sustainedSeconds > 0 ? 60_000 : 20_000);
 
 const checks = [];
+let pro01ScannerRankingChecked = false;
 const runtimeErrors = [];
 const expectedPracticeConsoleErrors = [];
 let expectingPracticeRejection = false;
@@ -167,6 +168,92 @@ try {
   await page.goto(frontendUrl);
   await page.evaluate(() => window.localStorage.clear());
 
+  // PRO-01: exercise an intentionally small sample through visible product
+  // surfaces and inspect the same typed response contract used by the UI.
+  await page.goto(`${frontendUrl}/backtest`);
+  await page.locator('#symbol').fill('FPT');
+  await page.locator('#start_date').fill('2023-01-01');
+  await page.locator('#end_date').fill('2024-06-01');
+  await page.locator('#strategy').selectOption({ index: 1 });
+  const [pro01BacktestResponse] = await Promise.all([
+    page.waitForResponse(response => response.url().includes('/api/backtest/run') && response.request().method() === 'POST'),
+    page.getByRole('button', { name: 'Run Backtest' }).click(),
+  ]);
+  const pro01Backtest = await pro01BacktestResponse.json();
+  await page.getByTestId('backtest-win-rate').waitFor();
+  const pro01Metrics = pro01Backtest.analytics?.metrics || {};
+  const metricNames = ['total_net_pnl', 'expectancy', 'win_rate', 'profit_factor', 'sqn', 'sharpe_ratio', 'sortino_ratio'];
+  const metricContractPass = metricNames.every(name => {
+    const metric = pro01Metrics[name];
+    return metric && ['valid', 'insufficient_data', 'not_applicable'].includes(metric.status)
+      && Number.isInteger(metric.sample_size)
+      && (metric.status === 'valid' ? typeof metric.value === 'number' : metric.value === null)
+      && (metric.status === 'valid' || typeof metric.reason === 'string');
+  });
+  check('pro01.coverage-contract', pro01Backtest.data_coverage?.requested_start === '2023-01-01'
+    && pro01Backtest.data_coverage?.requested_end === '2024-06-01'
+    && pro01Backtest.data_coverage?.candle_count === pro01Backtest.total_candles
+    && Array.isArray(pro01Backtest.data_coverage?.gaps) && Array.isArray(pro01Backtest.data_coverage?.excluded_data), JSON.stringify(pro01Backtest.data_coverage));
+  check('pro01.execution-assumptions', pro01Backtest.execution_assumptions?.price_basis === 'OHLC close'
+    && pro01Backtest.execution_assumptions?.fees?.buy_rate === .0015
+    && pro01Backtest.execution_assumptions?.taxes?.sell_tax_rate === .001
+    && pro01Backtest.execution_assumptions?.slippage?.rate === 0
+    && /T\+2/.test(pro01Backtest.execution_assumptions?.settlement || ''), JSON.stringify(pro01Backtest.execution_assumptions));
+  check('pro01.metric-validity-contract', metricContractPass, JSON.stringify(pro01Metrics));
+  check('pro01.benchmark-validity-contract', pro01Metrics.benchmark
+    && pro01Metrics.benchmark.sample_size === pro01Backtest.analytics.benchmark_curve.length
+    && pro01Metrics.benchmark.status === 'valid'
+    && pro01Backtest.analytics.benchmark_curve.length > 1, JSON.stringify(pro01Metrics.benchmark));
+  check('pro01.sqn-threshold', pro01Backtest.analytics.total_trades >= 30
+    ? pro01Metrics.sqn.status !== 'insufficient_data'
+    : pro01Metrics.sqn.value === null && pro01Metrics.sqn.status === 'insufficient_data', JSON.stringify(pro01Metrics.sqn));
+  check('pro01.periodic-risk-metrics', pro01Metrics.sharpe_ratio.period === 'daily_equity_returns'
+    && pro01Metrics.sortino_ratio.period === 'daily_equity_returns'
+    && (pro01Metrics.sortino_ratio.status !== 'valid' || pro01Metrics.sortino_ratio.sample_size >= 30), JSON.stringify({ sharpe: pro01Metrics.sharpe_ratio, sortino: pro01Metrics.sortino_ratio }));
+  check('pro01.sample-size-ui', (await page.getByTestId('backtest-win-rate').innerText()).includes(`n=${pro01Backtest.analytics.total_trades}`)
+    && (await page.getByTestId('backtest-profit-factor').innerText()).includes(`n=${pro01Backtest.analytics.total_trades}`), JSON.stringify({ trades: pro01Backtest.analytics.total_trades }));
+  check('pro01.edge-case-honesty', pro01Backtest.analytics.total_trades >= 30
+    || ((await page.getByTestId('backtest-win-rate').getAttribute('data-metric-status')) === 'insufficient_data'
+      && (await page.getByTestId('backtest-win-rate').innerText()).includes('Unavailable')), await page.getByTestId('backtest-win-rate').innerText());
+  check('pro01.reproducibility-manifest', pro01Backtest.run_manifest?.strategy_version
+    && pro01Backtest.run_manifest?.engine_version === 'sumi-backtest-v1'
+    && /^[0-9a-f]{64}$/.test(pro01Backtest.run_manifest?.data_identity || '')
+    && /^[0-9a-f]{64}$/.test(pro01Backtest.run_manifest?.input_hash || '')
+    && !!pro01Backtest.run_manifest?.run_timestamp, JSON.stringify(pro01Backtest.run_manifest));
+  await page.screenshot({ path: path.join(runDir, 'pro01-backtest-trust-1440x1000.png') });
+
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto(`${frontendUrl}/analytics`);
+  await page.getByPlaceholder('Session ID').fill(String(pro01Backtest.session_id));
+  await page.getByRole('button', { name: 'Load Session' }).click();
+  await page.getByTestId('analytics-win-rate').waitFor();
+  check('pro01.analytics-validity-ui', (await page.getByTestId('analytics-win-rate').getAttribute('data-metric-status')) === pro01Metrics.win_rate.status
+    && (await page.getByTestId('analytics-sqn').getAttribute('data-metric-status')) === pro01Metrics.sqn.status
+    && (await page.getByTestId('analytics-sharpe').innerText()).includes(`n=${pro01Metrics.sharpe_ratio.sample_size}`), JSON.stringify(pro01Metrics));
+  check('pro01.analytics-benchmark-authority', await page.getByText(`${pro01Backtest.analytics.benchmark_symbol} benchmark`, { exact: true }).isVisible()
+    && (await page.getByTestId('analytics-benchmark').getAttribute('data-metric-status')) === pro01Metrics.benchmark.status
+    && (await page.getByTestId('analytics-benchmark').innerText()).includes(`n=${pro01Metrics.benchmark.sample_size}`), JSON.stringify({ benchmarkSymbol: pro01Backtest.analytics.benchmark_symbol, metric: pro01Metrics.benchmark }));
+  await page.screenshot({ path: path.join(runDir, 'pro01-analytics-trust-1280x800.png') });
+
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto(`${frontendUrl}/strategy-lab`);
+  await page.locator('#lab-symbols').fill('FPT');
+  await page.locator('#lab-start').fill('2023-01-01');
+  await page.locator('#lab-end').fill('2024-06-01');
+  await page.locator('input[type="checkbox"]').first().check();
+  const pro01LabSaveResponsePromise = page.waitForResponse(response => response.url().includes('/api/strategy-lab/runs') && response.request().method() === 'POST');
+  const [pro01LabResponse] = await Promise.all([
+    page.waitForResponse(response => response.url().includes('/api/backtest/run') && response.request().method() === 'POST'),
+    page.getByRole('button', { name: 'Compare Strategies' }).click(),
+  ]);
+  const pro01LabRun = await pro01LabResponse.json();
+  await page.getByText('Comparison', { exact: true }).waitFor();
+  const pro01LabSaveResponse = await pro01LabSaveResponsePromise;
+  const labEligible = pro01LabRun.status === 'succeeded' && pro01LabRun.analytics?.metrics?.total_net_pnl?.status === 'valid';
+  check('pro01.strategy-ranking-validity', pro01LabSaveResponse.ok() && (labEligible
+    ? await page.getByText('Best eligible').isVisible()
+    : await page.getByText('Not rankable').isVisible()), JSON.stringify({ labEligible, saveStatus: pro01LabSaveResponse.status(), metrics: pro01LabRun.analytics?.metrics }));
+
   const runScannerForSignal = async () => {
     await page.goto(`${frontendUrl}/scanner`);
     await page.locator('#scanner-symbols').fill('FPT');
@@ -180,6 +267,12 @@ try {
     const scan = await scanResponse.json();
     if (!scan.results?.length) throw new Error(`PRO-00 Scanner UAT produced no deterministic signal: ${JSON.stringify(scan)}`);
     await page.getByRole('button', { name: /Start blind practice for .*recommended/ }).first().waitFor();
+    if (!pro01ScannerRankingChecked) {
+      check('pro01.scanner-ranking-validity', scan.ranking_policy === 'chronological_unranked'
+        && scan.results.every(result => result.ranking?.eligible === false)
+        && await page.getByTestId('scanner-ranking-policy').isVisible(), JSON.stringify({ rankingPolicy: scan.ranking_policy, rankings: scan.results.map(result => result.ranking) }));
+      pro01ScannerRankingChecked = true;
+    }
     return scan.results[0];
   };
   const createScannerReplay = async (accessibleName, intent) => {

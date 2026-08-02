@@ -50,10 +50,10 @@ test('invalid fields and blocking downgrade fail closed', async () => {
   assert.deepEqual(reconciliation.blocking_mismatch_ids, [actual[0].id]);
 });
 
-test('additive PRO-00 assertion is valid and actual removal/duplication fails', async () => {
+test('additive later-batch assertion is valid and actual removal/duplication fails', async () => {
   const manifest = await loadFixture();
   const addition = {
-    id: 'pro00.fixture-additive',
+    id: 'pro01.fixture-additive',
     blocking: true,
     acceptance_ids: ['R-01', 'PRO-INT-10'],
   };
@@ -63,6 +63,27 @@ test('additive PRO-00 assertion is valid and actual removal/duplication fails', 
   assert.equal(reconcileProductUatAssertions(manifest, actual).pass, true);
   assert.equal(reconcileProductUatAssertions(manifest, actual.slice(1)).pass, false);
   assert.equal(reconcileProductUatAssertions(manifest, [...actual, actual[0]]).pass, false);
+});
+
+test('later professional batches remain additive to the sealed V3 baseline', async () => {
+  const manifest = await loadFixture();
+  manifest.assertions.push({
+    id: 'pro01.fixture-additive',
+    blocking: true,
+    acceptance_ids: ['PRO-BT-03'],
+  });
+  validateProductUatManifest(manifest);
+});
+
+test('removing or renaming a sealed PRO-00 assertion fails closed', async () => {
+  await rejectsInvalid(manifest => {
+    const index = manifest.assertions.findIndex(item => item.id.startsWith('pro00.'));
+    manifest.assertions.splice(index, 1);
+  });
+  await rejectsInvalid(manifest => {
+    const item = manifest.assertions.find(assertion => assertion.id.startsWith('pro00.'));
+    item.id = `${item.id}-renamed`;
+  });
 });
 
 test('failed UAT results are retained as machine-readable evidence', async () => {

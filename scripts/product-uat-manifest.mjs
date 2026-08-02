@@ -14,6 +14,8 @@ const REQUIRED_MANIFEST_KEYS = [
 
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 const idsHash = ids => sha256([...ids].sort().join('\n'));
+const SEALED_PRO00_COUNT = 10;
+const SEALED_PRO00_IDS_SHA256 = '63ecd633a6b84d60282871745ae5b552e1211dcaff9d22d7d217dd3521bb6408';
 
 export function validateProductUatManifest(manifest) {
   const errors = [];
@@ -59,13 +61,17 @@ export function validateProductUatManifest(manifest) {
   const duplicateIds = [...new Set(ids.filter((id, index) => ids.indexOf(id) !== index))].sort();
   if (duplicateIds.length) errors.push(`duplicate assertion IDs: ${duplicateIds.join(', ')}`);
 
-  const acceptedBaselineIds = ids.filter(id => !id.startsWith('pro00.'));
+  const acceptedBaselineIds = ids.filter(id => !/^pro\d{2}\./.test(id));
   if (acceptedBaselineIds.length !== manifest.accepted_baseline_count) {
     errors.push(`accepted baseline count mismatch: expected ${manifest.accepted_baseline_count}, found ${acceptedBaselineIds.length}`);
   }
   const actualBaselineHash = idsHash(acceptedBaselineIds);
   if (actualBaselineHash !== manifest.accepted_baseline_ids_sha256) {
     errors.push(`accepted baseline ID hash mismatch: expected ${manifest.accepted_baseline_ids_sha256}, found ${actualBaselineHash}`);
+  }
+  const pro00Ids = ids.filter(id => id.startsWith('pro00.'));
+  if (pro00Ids.length !== SEALED_PRO00_COUNT || idsHash(pro00Ids) !== SEALED_PRO00_IDS_SHA256) {
+    errors.push('sealed PRO-00 assertion set was removed, renamed, or changed');
   }
 
   if (errors.length) throw new Error(`Invalid product UAT manifest:\n- ${errors.join('\n- ')}`);

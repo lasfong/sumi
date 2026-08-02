@@ -1,5 +1,6 @@
 import { apiClient } from './client';
 import type { BacktestResponse, StrategyConfig } from './backtestApi';
+import type { MetricResult } from '../types/analytics';
 
 export interface SweepParameter {
   path: string;
@@ -25,6 +26,9 @@ export interface SweepMetrics {
   net_pnl: number;
   profit_factor?: number | null;
   expectancy?: number | null;
+  metric_results?: Record<string, MetricResult>;
+  ranking_eligible?: boolean;
+  ranking_reason?: string | null;
 }
 
 export interface SweepVariant {
@@ -38,6 +42,7 @@ export interface ParameterSweepResponse {
   status: 'succeeded' | 'failed';
   total_variants?: number;
   truncated?: boolean;
+  ranking_metric?: string;
   variants: SweepVariant[];
   error_code?: string;
   message?: string;

@@ -69,6 +69,12 @@ class ScannerService:
                         "strategy": strategy.name,
                         "price": float(df.iloc[index]["close"]),
                         "regime": self._lookup_regime(timestamp, regime_map),
+                        "ranking": {
+                            "status": "not_applicable",
+                            "eligible": False,
+                            "metric": None,
+                            "reason": "Scanner signals are chronological and have no validated outcome metric.",
+                        },
                     })
                     if len(results) >= max_results:
                         return self._build_response(results, warnings, max_results)
@@ -82,6 +88,7 @@ class ScannerService:
             "truncated": len(results) >= max_results,
             "results": results,
             "warnings": warnings,
+            "ranking_policy": "chronological_unranked",
         }
 
     def _load_candles(self, db: Session, symbol: str, start_date: str, end_date: str) -> list[Candle]:
