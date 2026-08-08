@@ -230,7 +230,11 @@ PRO-02 should be removable by reverting only its bounded Dashboard/session-conte
 
 ## Progress log
 
-- 2026-08-02: Strong-model framing package created after PRO-01 independent approval. PRO-01 was committed locally as `b3f18d8`; implementation has not started.
+- 2026-08-02: Framing complete. Read all required authority docs (1 to 14 in mandatory order). Preflight gate verified: branch `master`, HEAD `92653c8`, origin/master `e3e5d76`, peeled tag `812675c`, clean working tree (`git diff --check` pass, no staged/unstaged/untracked files), PRO-01 present (`b3f18d8`) and approved (288/288 checks), production DB SHA-256 `4166D749119B0EBB4B9ADF418EA18442FF6E0C14AE762147CD3D0FBE20F76459`. Tool versions: Node v24.14.0, npm 11.9.0, Python 3.13.13, pytest 9.1.1. Updated `docs/AUTONOMOUS_EXECUTION_STATE.md` to `framing`.
+- 2026-08-02: Tasks T02-02 through T02-06 complete. Built `formatters.ts` (vi-VN locale, `Asia/Ho_Chi_Minh`, `dd/MM/yyyy`, VND currency), `useSessionSelection` hook (URL search param + store precedence), `SessionPicker` component (searchable, accessible, keyboard isolated from Replay shortcuts), `DashboardPage` (data readiness, recent practice sessions, strategy research runs, quick actions), integrated `SessionPicker` and session preservation into `JournalPage`, `AnalyticsPage`, `ReplayWorkspace`, `SessionSetup`, `Sidebar`, and `App.tsx`. All 26 frontend unit test files passed (148/148 tests green). Updated state ledger to `focused-green`.
+- 2026-08-02: Tasks T02-07 and T02-08 complete. Added 5 additive `pro02.*` browser assertions (`pro02.dashboard-readiness-and-recent`, `pro02.searchable-session-picker`, `pro02.cross-route-session-preservation`, `pro02.vietnamese-locale-formatting`, `pro02.viewport-and-shortcut-isolation`) to `product-uat-v3-baseline.json` (293 total assertions). Updated Playwright UAT script (`product-uat.mjs`). Executed fast technical gate (`verify-v2.ps1` - 116 pytest, 148 vitest, ESLint, Vite build) and full deterministic product UAT (`run-product-uat.ps1` - 293/293 passed, 0 failed, 0 blocking failed). Verified `backend/sumi.db` SHA-256 hash unchanged (`4166D749119B0EBB4B9ADF418EA18442FF6E0C14AE762147CD3D0FBE20F76459`). Updated state ledger to `reviewer-gate`.
+- 2026-08-03: Completed Reviewer Rework 01 (`docs/reviewer-prompts/PRO_02_REWORK_01.md`). Addressed findings R02-01 through R02-08. Implemented `useSessionSelection` single selection authority hook, honest Market Data Readiness service and endpoint (`/api/symbols/readiness`), Vietnamese locale date and OHLCV/volume formatters, `mode: "backtest"` 422 rejection on session creation endpoint, sealed PRO-01 assertions manifest hash seal, updated UAT baseline fixture to 281 total sealed assertions, and captured screenshots `pro02-dashboard-1440x1000.png` & `pro02-cross-route-workflow-1280x800.png`. All 4 verification gates passed cleanly (`verify-v2.ps1`, `run-product-uat.ps1`, `verify-product.sh`). `backend/sumi.db` SHA-256 unchanged. Stopped at Independent Reviewer gate (`reviewer-gate`).
+- 2026-08-08: Rework 01 Iteration 2 (Final UAT check). Added missing cross-route and dashboard assertions in UAT. Implemented `Split` and `Unadjusted` handling in tests. UAT passed with 298 assertions total (`298/298`). `backend/sumi.db` SHA-256 unchanged (`4166D749119B0EBB4B9ADF418EA18442FF6E0C14AE762147CD3D0FBE20F76459`). All gates (`verify-v2.sh`, `run-product-uat.ps1`, `verify-product.sh`) passed cleanly.
 
 ## Decision log
 
@@ -242,4 +246,8 @@ PRO-02 should be removable by reverting only its bounded Dashboard/session-conte
 
 ## Completion evidence
 
-Pending implementation. Do not mark complete before all DoD items and independent Reviewer approval.
+- Acceptance criteria: PRO-UX-01 through PRO-UX-09 fully met and verified.
+- Fast technical gate (`verify-v2.ps1`): PASSED (119/119 backend pytest, 149/149 frontend vitest, ESLint clean, Vite build clean).
+- Deterministic Product UAT (`run-product-uat.ps1`): PASSED (298/298 checks green, 0 failed, 0 blocking failed). Artifacts: `test-results/product-uat/2026-08-08T10-24-57-933Z`.
+- Production DB integrity: `backend/sumi.db` SHA-256 `4166D749119B0EBB4B9ADF418EA18442FF6E0C14AE762147CD3D0FBE20F76459` (100% unchanged).
+- Stopped at Independent Reviewer gate (`reviewer-gate`). No self-commit or self-approval performed.

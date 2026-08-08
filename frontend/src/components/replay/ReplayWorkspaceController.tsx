@@ -6,7 +6,6 @@ import { createReplaySession, getReplaySession, getSessionCandles, nextCandle, p
 import { getPracticeState, submitDecision } from '../../api/decisionApi';
 import { createJournalEntry, getJournalEntries } from '../../api/journalApi';
 import { getIndicatorRegistry, getSessionIndicatorData, type IndicatorDefinition } from '../../api/indicatorsApi';
-import { useReplayStore } from '../../store/replayStore';
 import toast from 'react-hot-toast';
 import type {
   Candle, ChartCandle, ChartVolume, DecisionCreate, CreateSessionRequest, JournalEntryCreate,
@@ -25,6 +24,7 @@ import {
 } from '../../features/indicators/indicatorDomain';
 import { IndicatorRepository } from '../../features/indicators/IndicatorRepository';
 import { IndicatorRequestCoordinator } from '../../features/indicators/IndicatorRequestCoordinator';
+import { useSessionSelection } from '../../hooks/useSessionSelection';
 import type { IndicatorDataPoint } from '../../api/indicatorsApi';
 import type { IndicatorRuntimeState } from '../chart/IndicatorManager';
 import type { DrawingTool } from '../../features/drawings/drawingDomain';
@@ -70,7 +70,7 @@ export const buildScannerSignalMarker = (
 
 /** Application controller boundary for replay queries, commands and workspace state. */
 export const useReplayWorkspaceController = () => {
-  const store = useReplayStore();
+  const { sessionId, selectSession, clearSession, isValidating } = useSessionSelection();
   const chartRef = useRef<CandleChartRef>(null);
   const queryClient = useQueryClient();
 
@@ -82,24 +82,24 @@ export const useReplayWorkspaceController = () => {
   const indicatorHydratedSessionRef = useRef<number | null>(null);
   const { data: registry = [] } = useQuery({ queryKey: ['indicator-registry'], queryFn: getIndicatorRegistry, staleTime: Infinity });
   const indicatorDefinitions = useMemo(() => approvedDefinitions(registry), [registry]);
-  const [indicatorDocument, setIndicatorDocument] = useState<IndicatorDocumentV1>(() => emptyIndicatorDocument(store.sessionId ?? 1));
+  const [indicatorDocument, setIndicatorDocument] = useState<IndicatorDocumentV1>(() => emptyIndicatorDocument(sessionId ?? 1));
   const [indicatorRuntime, setIndicatorRuntime] = useState<Record<string, IndicatorRuntimeState>>({});
 
   useEffect(() => {
     // Volume is locally defined, so approvedDefinitions is non-empty before the backend
     // registry arrives. Hydrating against that partial registry would reject valid EMA/RSI state.
-    if (!store.sessionId || !registry.length || indicatorHydratedSessionRef.current === store.sessionId) return;
-    indicatorHydratedSessionRef.current = store.sessionId;
-    setIndicatorDocument(indicatorRepository.load(store.sessionId, indicatorDefinitions));
+    if (!sessionId || !registry.length || indicatorHydratedSessionRef.current === sessionId) return;
+    indicatorHydratedSessionRef.current = sessionId;
+    setIndicatorDocument(indicatorRepository.load(sessionId, indicatorDefinitions));
     setIndicatorRuntime({}); chartRef.current?.clearIndicators();
-  }, [indicatorDefinitions, indicatorRepository, registry.length, store.sessionId]);
+  }, [indicatorDefinitions, indicatorRepository, registry.length, sessionId]);
 
   const createMutation = useMutation({
     mutationFn: createReplaySession,
     onSuccess: (data) => {
       indicatorHydratedSessionRef.current = data.id;
       const empty = emptyIndicatorDocument(data.id); setIndicatorDocument(empty); indicatorRepository.save(empty); setIndicatorRuntime({});
-      store.setSession(data.id);
+      selectSession(data.id);
       toast.success(`Session #${data.id} created!`);
     },
     onError: (err: ApiError) => {
@@ -107,29 +107,28 @@ export const useReplayWorkspaceController = () => {
     }
   });
 
-  // ... (keeping query blocks identical)
   const { data: candlesData, refetch: refetchCandles } = useQuery({
-    queryKey: ['candles', store.sessionId],
-    queryFn: () => getSessionCandles(store.sessionId!),
-    enabled: !!store.sessionId,
+    queryKey: ['candles', sessionId],
+    queryFn: () => getSessionCandles(sessionId!),
+    enabled: !!sessionId,
   });
 
   const { data: sessionData, isError: isSessionError, refetch: refetchSession } = useQuery({
-    queryKey: ['replay-session', store.sessionId],
-    queryFn: () => getReplaySession(store.sessionId!),
-    enabled: !!store.sessionId,
+    queryKey: ['replay-session', sessionId],
+    queryFn: () => getReplaySession(sessionId!),
+    enabled: !!sessionId,
   });
 
   const { data: practiceData, isLoading: practiceLoading, isError: practiceError, refetch: refetchPractice } = useQuery({
-    queryKey: ['practice-state', store.sessionId],
-    queryFn: () => getPracticeState(store.sessionId!),
-    enabled: !!store.sessionId,
+    queryKey: ['practice-state', sessionId],
+    queryFn: () => getPracticeState(sessionId!),
+    enabled: !!sessionId,
   });
 
   const { data: journalData, isLoading: journalLoading, isError: journalError, refetch: refetchJournal } = useQuery({
-    queryKey: ['journal', store.sessionId],
-    queryFn: () => getJournalEntries(store.sessionId!),
-    enabled: !!store.sessionId,
+    queryKey: ['journal', sessionId],
+    queryFn: () => getJournalEntries(sessionId!),
+    enabled: !!sessionId,
   });
 
   const synchronizeNavigation = useCallback(async () => {
@@ -137,7 +136,7 @@ export const useReplayWorkspaceController = () => {
   }, [refetchCandles, refetchJournal, refetchPractice, refetchSession]);
 
   const nextMutation = useMutation({
-    mutationFn: (steps: number) => nextCandle(store.sessionId!, steps),
+    mutationFn: (steps: number) => nextCandle(sessionId!, steps),
     onSuccess: synchronizeNavigation,
     onError: () => {
       setIsPlaying(false);
@@ -146,7 +145,7 @@ export const useReplayWorkspaceController = () => {
   });
 
   const prevMutation = useMutation({
-    mutationFn: (steps: number) => previousCandle(store.sessionId!, steps),
+    mutationFn: (steps: number) => previousCandle(sessionId!, steps),
     onSuccess: synchronizeNavigation,
     onError: () => toast.error('Start of data or error'),
   });
@@ -155,21 +154,21 @@ export const useReplayWorkspaceController = () => {
     createMutation.mutate(data);
   }, [createMutation]);
 
-  const handleResumeSession = useCallback((sessionId: number) => {
-    store.setSession(sessionId);
-    toast.success(`Session #${sessionId} resumed`);
-  }, [store]);
+  const handleResumeSession = useCallback((resumedId: number) => {
+    selectSession(resumedId);
+    toast.success(`Session #${resumedId} resumed`);
+  }, [selectSession]);
 
   const handleClearSession = useCallback(() => {
     setIsPlaying(false);
     setIndicatorDocument(emptyIndicatorDocument(1)); setIndicatorRuntime({}); indicatorRequests.cancelAll(); chartRef.current?.clearIndicators();
-    store.clearSession();
-  }, [indicatorRequests, store]);
+    clearSession();
+  }, [clearSession, indicatorRequests]);
 
   const handleSubmitDecision = useCallback(async (decision: DecisionCreate) => {
-    if (!store.sessionId) return { ok: false, message: 'No replay session is active.' };
+    if (!sessionId) return { ok: false, message: 'No replay session is active.' };
     try {
-      await submitDecision(store.sessionId, decision);
+      await submitDecision(sessionId, decision);
       await Promise.all([refetchPractice(), refetchSession()]);
 
       const message = decision.action === 'HOLD' || decision.action === 'SKIP'
@@ -184,26 +183,26 @@ export const useReplayWorkspaceController = () => {
       await refetchPractice();
       return { ok: false, message };
     }
-  }, [store.sessionId, refetchPractice, refetchSession]);
+  }, [sessionId, refetchPractice, refetchSession]);
 
   const handleSaveJournal = useCallback(async (entry: JournalEntryCreate) => {
-    if (!store.sessionId) return { ok: false, message: 'No replay session is active.' };
+    if (!sessionId) return { ok: false, message: 'No replay session is active.' };
     try {
-      await createJournalEntry(store.sessionId, entry);
+      await createJournalEntry(sessionId, entry);
       await refetchJournal();
       return { ok: true, message: 'Checklist saved for the current replay context.' };
     } catch (err: unknown) {
       const apiError = err as ApiError;
       return { ok: false, message: apiError?.response?.data?.detail || 'Transport error: journal draft was not saved.' };
     }
-  }, [refetchJournal, store.sessionId]);
+  }, [refetchJournal, sessionId]);
 
 
   const symbolName = candlesData?.[0]?.symbol || '—';
   const currentCandle = candlesData?.length ? candlesData[candlesData.length - 1] : null;
   const sourceContext = sessionData?.source_context;
   const currentDate = toDateKey(currentCandle?.timestamp);
-  const drawing = useDrawingWorkspaceController(store.sessionId ?? 1, symbolName);
+  const drawing = useDrawingWorkspaceController(sessionId ?? 1, symbolName);
   const selectedDrawing = drawing.document.drawings.find(item => drawing.selection.includes(item.id));
   const handleDrawingTool = useCallback((tool: DrawingTool) => {
     if (tool === 'select') chartRef.current?.cancelDrawing();
@@ -233,11 +232,11 @@ export const useReplayWorkspaceController = () => {
       }
 
       // Update react-query cache to sync rest of UI
-      queryClient.setQueryData(['candles', store.sessionId], (old: Candle[] | undefined) => {
+      queryClient.setQueryData(['candles', sessionId], (old: Candle[] | undefined) => {
         if (!old) return old;
         const dbCandle = {
           id: 0,
-          session_id: store.sessionId!,
+          session_id: sessionId!,
           symbol: symbolName,
           timeframe: 'D',
           adjustment_type: 'split',
@@ -252,43 +251,43 @@ export const useReplayWorkspaceController = () => {
       });
 
       // Sync positions silently
-      queryClient.invalidateQueries({ queryKey: ['practice-state', store.sessionId] });
+      queryClient.invalidateQueries({ queryKey: ['practice-state', sessionId] });
       if (msg.source_context) {
         queryClient.setQueryData(
-          ['replay-session', store.sessionId],
+          ['replay-session', sessionId],
           (old: ReplaySession | undefined) => old ? { ...old, source_context: msg.source_context! } : old,
         );
       } else {
-        queryClient.invalidateQueries({ queryKey: ['replay-session', store.sessionId] });
+        queryClient.invalidateQueries({ queryKey: ['replay-session', sessionId] });
       }
-      queryClient.invalidateQueries({ queryKey: ['journal', store.sessionId] });
+      queryClient.invalidateQueries({ queryKey: ['journal', sessionId] });
     }
-  }, [store.sessionId, queryClient, symbolName]);
+  }, [sessionId, queryClient, symbolName]);
 
-  const { isConnected, sendCommand } = useWebSocket(store.sessionId, handleWebSocketMessage);
+  const { isConnected, sendCommand } = useWebSocket(sessionId, handleWebSocketMessage);
   const handleNext = useCallback((steps: number = 1) => {
-    if (store.sessionId) {
+    if (sessionId) {
       nextMutation.mutate(steps);
     }
-  }, [store.sessionId, nextMutation]);
+  }, [sessionId, nextMutation]);
 
   const handlePrev = useCallback((steps: number = 1) => {
-    if (store.sessionId) {
+    if (sessionId) {
       prevMutation.mutate(steps);
     }
-  }, [store.sessionId, prevMutation]);
+  }, [sessionId, prevMutation]);
 
   useEffect(() => {
     if (isSessionError) {
       toast.error('Saved replay session was not found');
-      store.clearSession();
+      clearSession();
     }
-  }, [isSessionError, store]);
+  }, [isSessionError, clearSession]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!isGlobalShortcutEligible(e)) return;
-      if (!store.sessionId) return;
+      if (!sessionId) return;
 
       switch (e.code) {
         case 'Escape':
@@ -312,7 +311,7 @@ export const useReplayWorkspaceController = () => {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [drawing, handleNext, handlePrev, store.sessionId]);
+  }, [drawing, handleNext, handlePrev, sessionId]);
 
   const chartCandleRows = useMemo(() => Array.from(
     new Map((candlesData || []).map((c: Candle) => [toDateKey(c.timestamp) || c.timestamp, c] as const)).entries()
@@ -365,12 +364,12 @@ export const useReplayWorkspaceController = () => {
   }, [indicatorRepository]);
 
   const addIndicatorInstance = useCallback((definition: IndicatorDefinition, params: Record<string, unknown>) => {
-    if (!store.sessionId) return;
+    if (!sessionId) return;
     try {
       const instance = createIndicatorInstance(definition, params, indicatorDocument.instances.length);
       commitIndicatorDocument(addIndicator(indicatorDocument, instance));
     } catch (error) { toast.error(error instanceof Error ? error.message : 'Invalid indicator settings'); }
-  }, [commitIndicatorDocument, indicatorDocument, store.sessionId]);
+  }, [commitIndicatorDocument, indicatorDocument, sessionId]);
 
   const updateIndicatorInstance = useCallback((id: string, params: Record<string, unknown>, styles: Record<string, IndicatorSeriesStyle>) => {
     const instance = indicatorDocument.instances.find(item => item.id === id);
@@ -398,7 +397,7 @@ export const useReplayWorkspaceController = () => {
   }, [commitIndicatorDocument, indicatorDocument]);
 
   useEffect(() => {
-    if (!currentCandle || !store.sessionId) return;
+    if (!currentCandle || !sessionId) return;
     let effectActive = true;
     const visible = indicatorDocument.instances.filter(instance => instance.visible);
     indicatorDocument.instances.filter(instance => !instance.visible).forEach(instance => chartRef.current?.removeIndicator(instance.id));
@@ -439,11 +438,11 @@ export const useReplayWorkspaceController = () => {
         ...previous, [instance.id]: { ...previous[instance.id], status: 'loading', values: previous[instance.id]?.values ?? {} },
       })));
       const paramsKey = JSON.stringify(Object.entries(instance.params).sort(([a], [b]) => a.localeCompare(b)));
-      const workKey = `${store.sessionId}:${candlesData?.length ?? 0}:${instance.definitionId}:${paramsKey}`;
+      const workKey = `${sessionId}:${candlesData?.length ?? 0}:${instance.definitionId}:${paramsKey}`;
       void (async () => {
         let result: { stale: boolean; data?: IndicatorDataPoint[] };
         try {
-          result = await indicatorRequests.request(instance.id, workKey, signal => getSessionIndicatorData(store.sessionId!, instance.definitionId, instance.params, signal));
+          result = await indicatorRequests.request(instance.id, workKey, signal => getSessionIndicatorData(sessionId!, instance.definitionId, instance.params, signal));
         } catch (error) {
           if (!effectActive || (error as { code?: string }).code === 'ERR_CANCELED' || (error as { name?: string }).name === 'AbortError') return;
           publishFailure(instance.id, 'transport', 'Data request failed — retry by showing or editing this indicator.');
@@ -482,12 +481,12 @@ export const useReplayWorkspaceController = () => {
       })();
     }
     return () => { effectActive = false; indicatorRequests.cancelAll(); };
-  }, [candlesData?.length, currentCandle, currentDate, indicatorDocument, indicatorRequests, store.sessionId, volumeData]);
+  }, [candlesData?.length, currentCandle, currentDate, indicatorDocument, indicatorRequests, sessionId, volumeData]);
 
   useEffect(() => () => indicatorRequests.cancelAll(), [indicatorRequests]);
   return {
-    sessionId: store.sessionId, chartRef, symbolName, sessionStatus: sessionData?.status, sourceContext, currentDate, currentCandle, candleCount: candlesData?.length ?? 0,
-    handleCreateSession, handleResumeSession, isCreatingSession: createMutation.isPending, handleClearSession,
+    sessionId, chartRef, symbolName, sessionStatus: sessionData?.status, sessionData, sourceContext, currentDate, currentCandle, candleCount: candlesData?.length ?? 0,
+    handleCreateSession, handleResumeSession, isCreatingSession: createMutation.isPending, handleClearSession, isValidating,
     indicatorDefinitions, indicatorDocument, indicatorRuntime, addIndicatorInstance, updateIndicatorInstance,
     removeIndicatorInstance, toggleIndicatorInstance, moveIndicatorInstance,
     playSpeed, setPlaySpeed, isPlaying, setIsPlaying,

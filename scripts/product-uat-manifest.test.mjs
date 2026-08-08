@@ -53,7 +53,7 @@ test('invalid fields and blocking downgrade fail closed', async () => {
 test('additive later-batch assertion is valid and actual removal/duplication fails', async () => {
   const manifest = await loadFixture();
   const addition = {
-    id: 'pro01.fixture-additive',
+    id: 'pro02.fixture-additive',
     blocking: true,
     acceptance_ids: ['R-01', 'PRO-INT-10'],
   };
@@ -68,7 +68,7 @@ test('additive later-batch assertion is valid and actual removal/duplication fai
 test('later professional batches remain additive to the sealed V3 baseline', async () => {
   const manifest = await loadFixture();
   manifest.assertions.push({
-    id: 'pro01.fixture-additive',
+    id: 'pro02.fixture-additive',
     blocking: true,
     acceptance_ids: ['PRO-BT-03'],
   });
@@ -82,6 +82,17 @@ test('removing or renaming a sealed PRO-00 assertion fails closed', async () => 
   });
   await rejectsInvalid(manifest => {
     const item = manifest.assertions.find(assertion => assertion.id.startsWith('pro00.'));
+    item.id = `${item.id}-renamed`;
+  });
+});
+
+test('removing or renaming a sealed PRO-01 assertion fails closed', async () => {
+  await rejectsInvalid(manifest => {
+    const index = manifest.assertions.findIndex(item => item.id.startsWith('pro01.'));
+    manifest.assertions.splice(index, 1);
+  });
+  await rejectsInvalid(manifest => {
+    const item = manifest.assertions.find(assertion => assertion.id.startsWith('pro01.'));
     item.id = `${item.id}-renamed`;
   });
 });

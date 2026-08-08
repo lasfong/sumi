@@ -3,9 +3,17 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from app.dependencies import get_db
 from app.schemas.symbol_schema import SymbolResponse
+from app.schemas.readiness_schema import DataReadinessResponse
 from app.models.symbol import Symbol
+from app.services.readiness_service import ReadinessService
 
 router = APIRouter()
+
+
+@router.get("/symbols/readiness", response_model=DataReadinessResponse)
+def get_data_readiness(db: Session = Depends(get_db)):
+    return ReadinessService.get_readiness(db)
+
 
 @router.get("/symbols", response_model=List[SymbolResponse])
 def list_symbols(

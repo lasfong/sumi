@@ -20,6 +20,7 @@ class SessionMode(str, Enum):
     RANDOM = "random"
     BLIND_SYMBOL = "blind_symbol"
     BLIND_DATE = "blind_date"
+    BACKTEST = "backtest"
 
 class DecisionAction(str, Enum):
     BUY = "BUY"

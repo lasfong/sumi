@@ -153,7 +153,7 @@ class ReplayService:
     @staticmethod
     def list_sessions(db: Session, limit: int = 20) -> List[ReplaySession]:
         clean_limit = max(1, min(int(limit), 100))
-        replay_modes = [mode.value for mode in SessionMode]
+        replay_modes = [mode.value for mode in SessionMode if mode != SessionMode.BACKTEST]
         return db.query(ReplaySession)\
             .filter(ReplaySession.mode.in_(replay_modes))\
             .order_by(ReplaySession.updated_at.desc(), ReplaySession.id.desc())\

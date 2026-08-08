@@ -39,6 +39,13 @@ class ReplaySourceContext(BaseModel):
     signal: ReplaySourceSignal | None = None
 
 
+class CreateSessionMode(str, Enum):
+    NORMAL = "normal"
+    RANDOM = "random"
+    BLIND_SYMBOL = "blind_symbol"
+    BLIND_DATE = "blind_date"
+
+
 class ReplaySessionBase(BaseModel):
     symbol: str
     timeframe: str = "1D"
@@ -53,7 +60,7 @@ class ReplaySessionBase(BaseModel):
     source_payload: Optional[str] = None
 
 class ReplaySessionCreate(ReplaySessionBase):
-    pass
+    mode: CreateSessionMode = CreateSessionMode.NORMAL
 
 class ReplaySessionResponse(ReplaySessionBase):
     id: int

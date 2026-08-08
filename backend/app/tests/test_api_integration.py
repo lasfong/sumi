@@ -88,7 +88,20 @@ def test_list_replay_sessions_excludes_backtest_sessions(client):
     assert response.status_code == 200
     assert all(session["mode"] != "backtest" for session in response.json())
 
-def test_full_replay_lifecycle(client):
+def test_create_session_rejects_backtest_mode(client):
+    response = client.post(
+        "/api/replay/sessions",
+        json={
+            "symbol": "API_TEST",
+            "timeframe": "1D",
+            "adjustment_type": "unadjusted",
+            "start_date": "2023-11-01",
+            "end_date": "2023-11-05",
+            "initial_cash": 100000000.0,
+            "mode": "backtest",
+        }
+    )
+    assert response.status_code == 422
     # 1. Create Session (use high initial_cash to cover fees)
     response = client.post(
         "/api/replay/sessions",

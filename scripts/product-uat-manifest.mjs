@@ -16,6 +16,8 @@ const sha256 = value => createHash('sha256').update(value).digest('hex');
 const idsHash = ids => sha256([...ids].sort().join('\n'));
 const SEALED_PRO00_COUNT = 10;
 const SEALED_PRO00_IDS_SHA256 = '63ecd633a6b84d60282871745ae5b552e1211dcaff9d22d7d217dd3521bb6408';
+const SEALED_PRO01_COUNT = 13;
+const SEALED_PRO01_IDS_SHA256 = '8796968793f79c53cbcb0baad93d2a6f766c89edb36c5bbf2549ca5ee510b6c1';
 
 export function validateProductUatManifest(manifest) {
   const errors = [];
@@ -72,6 +74,10 @@ export function validateProductUatManifest(manifest) {
   const pro00Ids = ids.filter(id => id.startsWith('pro00.'));
   if (pro00Ids.length !== SEALED_PRO00_COUNT || idsHash(pro00Ids) !== SEALED_PRO00_IDS_SHA256) {
     errors.push('sealed PRO-00 assertion set was removed, renamed, or changed');
+  }
+  const pro01Ids = ids.filter(id => id.startsWith('pro01.'));
+  if (pro01Ids.length !== SEALED_PRO01_COUNT || idsHash(pro01Ids) !== SEALED_PRO01_IDS_SHA256) {
+    errors.push('sealed PRO-01 assertion set was removed, renamed, or changed');
   }
 
   if (errors.length) throw new Error(`Invalid product UAT manifest:\n- ${errors.join('\n- ')}`);

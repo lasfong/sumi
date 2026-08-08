@@ -1,8 +1,19 @@
 import { NavLink } from 'react-router-dom';
 import { Activity, LayoutDashboard, Database, LineChart, BookOpen, Settings, Cpu, Search, FlaskConical } from 'lucide-react';
+import { useReplayStore } from '../../store/replayStore';
 import './Sidebar.css';
 
 export function Sidebar() {
+  const sessionId = useReplayStore((state) => state.sessionId);
+
+  const getTargetPath = (basePath: string) => {
+    if (!sessionId) return basePath;
+    if (['/replay', '/journal', '/analytics'].includes(basePath)) {
+      return `${basePath}?session=${sessionId}`;
+    }
+    return basePath;
+  };
+
   const navItems = [
     { path: '/', label: 'Dashboard', icon: LayoutDashboard },
     { path: '/import', label: 'Data Feeds', icon: Database },
@@ -23,16 +34,19 @@ export function Sidebar() {
       </div>
       
       <nav className="sidebar-nav">
-        {navItems.map((item) => (
-          <NavLink 
-            key={item.path} 
-            to={item.path} 
-            className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
-          >
-            <item.icon className="nav-icon" size={20} />
-            <span className="nav-label">{item.label}</span>
-          </NavLink>
-        ))}
+        {navItems.map((item) => {
+          const targetPath = getTargetPath(item.path);
+          return (
+            <NavLink
+              key={item.path}
+              to={targetPath}
+              className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+            >
+              <item.icon className="nav-icon" size={20} />
+              <span className="nav-label">{item.label}</span>
+            </NavLink>
+          );
+        })}
       </nav>
 
       <div className="sidebar-footer">

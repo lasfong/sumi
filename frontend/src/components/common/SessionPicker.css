@@ -1,0 +1,227 @@
+.session-picker-container {
+  position: relative;
+  display: inline-block;
+  min-width: 260px;
+}
+
+.session-picker-container.compact {
+  min-width: 200px;
+}
+
+.session-picker-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--bg-panel, rgba(20, 25, 35, 0.8));
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.12));
+  border-radius: 6px;
+  color: var(--text-main, #e6edf3);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.session-picker-trigger:hover,
+.session-picker-trigger.active {
+  border-color: var(--color-primary, #3898ff);
+  background: rgba(56, 152, 255, 0.1);
+}
+
+.trigger-icon {
+  color: var(--color-primary, #3898ff);
+  flex-shrink: 0;
+}
+
+.trigger-label {
+  flex: 1;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selected-session-info {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.session-id {
+  color: var(--color-primary, #3898ff);
+}
+
+.session-symbol {
+  font-weight: 600;
+}
+
+.session-tf {
+  color: var(--text-muted, #8b949e);
+  font-size: 12px;
+}
+
+.session-mode-tag {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-muted, #8b949e);
+  text-transform: uppercase;
+}
+
+.placeholder {
+  color: var(--text-muted, #8b949e);
+}
+
+.dropdown-arrow {
+  color: var(--text-muted, #8b949e);
+  transition: transform 0.2s ease;
+}
+
+.dropdown-arrow.open {
+  transform: rotate(180deg);
+}
+
+.session-picker-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 1000;
+  min-width: 320px;
+  max-height: 380px;
+  background: #161b22;
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.15));
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.picker-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.search-icon {
+  color: var(--text-muted, #8b949e);
+}
+
+.picker-search-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text-main, #e6edf3);
+  font-size: 13px;
+  outline: none;
+}
+
+.picker-session-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px;
+  max-height: 320px;
+}
+
+.picker-state-msg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 20px;
+  color: var(--text-muted, #8b949e);
+  font-size: 13px;
+}
+
+.picker-state-msg.error {
+  color: var(--color-sell, #ff1744);
+}
+
+.btn-retry {
+  background: rgba(255, 255, 255, 0.1);
+  border: none;
+  color: white;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.picker-session-item {
+  position: relative;
+  padding: 8px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+  margin-bottom: 2px;
+}
+
+.picker-session-item:hover,
+.picker-session-item.focused {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.picker-session-item.selected {
+  background: rgba(56, 152, 255, 0.15);
+  border-left: 3px solid var(--color-primary, #3898ff);
+}
+
+.item-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.item-title {
+  font-size: 13px;
+  color: var(--text-main, #e6edf3);
+}
+
+.item-id {
+  color: var(--color-primary, #3898ff);
+}
+
+.item-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+
+.item-badge.signal_review {
+  background: rgba(255, 209, 102, 0.2);
+  color: #ffd166;
+}
+
+.item-badge.blind_practice {
+  background: rgba(56, 152, 255, 0.2);
+  color: #3898ff;
+}
+
+.item-details {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-muted, #8b949e);
+}
+
+.detail-tag {
+  background: rgba(255, 255, 255, 0.05);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+.check-icon {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--color-primary, #3898ff);
+}

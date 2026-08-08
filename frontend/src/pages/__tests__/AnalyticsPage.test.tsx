@@ -5,6 +5,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { AnalyticsPage } from '../AnalyticsPage';
 import * as analyticsApi from '../../api/analyticsApi';
 import * as decisionApi from '../../api/decisionApi';
+import * as replayApi from '../../api/replayApi';
+import type { ReplaySession } from '../../types';
 import '@testing-library/jest-dom';
 
 vi.mock('../../api/analyticsApi', () => ({
@@ -15,6 +17,13 @@ vi.mock('../../api/decisionApi', () => ({
   getTrades: vi.fn(),
 }));
 
+vi.mock('../../api/replayApi', () => ({
+  getReplaySession: vi.fn(),
+  listReplaySessions: vi.fn().mockResolvedValue([]),
+}));
+
+import { MemoryRouter } from 'react-router-dom';
+
 const renderWithClient = (ui: React.ReactElement) => {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -23,7 +32,9 @@ const renderWithClient = (ui: React.ReactElement) => {
   });
   return render(
     <QueryClientProvider client={queryClient}>
-      {ui}
+      <MemoryRouter initialEntries={['/analytics?session=1']}>
+        {ui}
+      </MemoryRouter>
     </QueryClientProvider>
   );
 };
@@ -31,6 +42,16 @@ const renderWithClient = (ui: React.ReactElement) => {
 describe('AnalyticsPage', () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    vi.mocked(replayApi.getReplaySession).mockResolvedValue({
+      id: 1,
+      symbol: 'FPT',
+      timeframe: '1D',
+      start_date: '2024-01-01',
+      end_date: '2024-06-01',
+      current_index: 0,
+      status: 'active',
+      mode: 'normal',
+    } as ReplaySession);
     vi.mocked(decisionApi.getTrades).mockResolvedValue([]);
     vi.mocked(analyticsApi.getSessionAnalytics).mockResolvedValue({
       benchmark_symbol: 'VNINDEX',
@@ -83,8 +104,8 @@ describe('AnalyticsPage', () => {
     expect(screen.getByText('Trade Distribution')).toBeInTheDocument();
     expect(screen.getByText('VNINDEX benchmark')).toBeInTheDocument();
     expect(screen.getByTestId('analytics-benchmark')).toHaveAttribute('data-metric-status', 'valid');
-    expect(screen.getByText('FPT')).toBeInTheDocument();
-    expect(screen.getByText('1.50')).toBeInTheDocument();
+    expect(screen.getAllByText('FPT').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('1,50')).toBeInTheDocument();
   });
 
   it('renders the configured alternate benchmark identity and authoritative metric', async () => {
@@ -100,7 +121,7 @@ describe('AnalyticsPage', () => {
     renderWithClient(<AnalyticsPage />);
 
     expect(await screen.findByText('HNXINDEX benchmark')).toBeInTheDocument();
-    expect(screen.getByTestId('analytics-benchmark')).toHaveTextContent('20.00%');
+    expect(screen.getByTestId('analytics-benchmark')).toHaveTextContent('20,00%');
     expect(screen.queryByText('VNINDEX benchmark')).not.toBeInTheDocument();
   });
 

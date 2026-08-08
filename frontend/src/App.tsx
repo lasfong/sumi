@@ -6,6 +6,7 @@ import { Sidebar } from './components/layout/Sidebar';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
 
 const queryClient = new QueryClient();
+const DashboardPage = lazy(() => import('./pages/DashboardPage').then(module => ({ default: module.DashboardPage })));
 const ImportPage = lazy(() => import('./pages/ImportPage').then(module => ({ default: module.ImportPage })));
 const ReplayPage = lazy(() => import('./pages/ReplayPage').then(module => ({ default: module.ReplayPage })));
 const AnalyticsPage = lazy(() => import('./pages/AnalyticsPage').then(module => ({ default: module.AnalyticsPage })));
@@ -30,7 +31,7 @@ function App() {
             <ErrorBoundary>
               <Suspense fallback={<PageFallback />}>
                 <Routes>
-                  <Route path="/" element={<div className="glass-panel" style={{padding: '2rem'}}><h2>Welcome to Sumi Replay Lab</h2><p>Select an option from the menu.</p></div>} />
+                  <Route path="/" element={<DashboardPage />} />
                   <Route path="/import" element={<ImportPage />} />
                   <Route path="/replay" element={<ReplayPage />} />
                   <Route path="/backtest" element={<BacktestPage />} />

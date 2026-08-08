@@ -15,6 +15,7 @@ It does not relax `AGENTS.md`, acceptance criteria, architecture decisions, inde
 - Implement continuously through focused tests, full technical gates, browser UAT, evidence retention, self-review, and ExecPlan completion.
 - Make reasonable in-scope decisions from repository evidence without asking routine questions.
 - Never self-approve, commit, push, release, add dependencies, perform migrations, or start the next batch.
+- May report only `IMPLEMENTED — REVIEW PENDING` at the Reviewer gate. The words `DONE`, `COMPLETE`, `VERIFIED`, and `APPROVED` are reserved for an explicit Independent Reviewer verdict when they describe the batch as a whole.
 
 ### Independent Reviewer session
 
@@ -75,6 +76,8 @@ When stopping, write the blocker and exact next action into `docs/AUTONOMOUS_EXE
 
 ## Definition of done for an implementation batch
 
+This heading describes eligibility to enter review, not product approval. Passing every DEV gate produces `IMPLEMENTED — REVIEW PENDING`; only the Independent Reviewer can produce `APPROVE`.
+
 A batch reaches the Reviewer gate only when all are true:
 
 - every assigned acceptance ID has implementation and evidence mapping;
@@ -88,6 +91,7 @@ A batch reaches the Reviewer gate only when all are true:
 - temporary DB and owned listeners/processes are cleaned up;
 - `git diff --check` passes and the diff contains no later-batch work;
 - no accepted assertion was removed, renamed, weakened, duplicated, or made non-blocking;
+- no runtime/page/console/provider/request error was hidden by a global ignore or suppression; expected failures are narrowly scoped and retained;
 - ExecPlan progress, decisions, deviations, rollback, verification, completion evidence, and Reviewer checklist are complete.
 
 ## Rework loop

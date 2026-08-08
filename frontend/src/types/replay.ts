@@ -50,4 +50,4 @@ export interface CreateSessionRequest {
 }
 
 export type SessionStatus = 'created' | 'active' | 'paused' | 'completed' | 'archived';
-export type SessionMode = 'normal' | 'random' | 'blind_symbol' | 'blind_date';
+export type SessionMode = 'normal' | 'random' | 'blind_symbol' | 'blind_date' | 'backtest';

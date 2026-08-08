@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getSymbols } from '../../api/symbolsApi';
 import { listReplaySessions } from '../../api/replayApi';
+import { formatVietnameseDate } from '../../utils/formatters';
 import type { CreateSessionRequest, ReplaySession, StockSymbol } from '../../types';
 
 interface SessionSetupProps {
@@ -46,8 +47,6 @@ export const SessionSetup: React.FC<SessionSetupProps> = ({ onCreateSession, onR
     setSearch(sym);
     setShowDropdown(false);
   };
-
-  const formatSessionDate = (value: string) => new Date(value).toLocaleDateString();
 
   return (
     <div style={{ maxWidth: '980px', margin: '2rem auto', display: 'grid', gridTemplateColumns: 'minmax(320px, 500px) minmax(280px, 1fr)', gap: '1rem', alignItems: 'start' }}>
@@ -152,8 +151,8 @@ export const SessionSetup: React.FC<SessionSetupProps> = ({ onCreateSession, onR
                 </span>
               </div>
               <div style={{ display: 'grid', gap: '4px', color: 'var(--text-muted)', fontSize: '12px', marginBottom: '8px' }}>
-                <span>{session.start_date} to {session.end_date}</span>
-                <span>Updated {formatSessionDate(session.updated_at)}</span>
+                <span>{session.start_date ? formatVietnameseDate(session.start_date) : '—'} to {session.end_date ? formatVietnameseDate(session.end_date) : '—'}</span>
+                <span>Updated {session.updated_at ? formatVietnameseDate(session.updated_at) : '—'}</span>
               </div>
               <button
                 type="button"
