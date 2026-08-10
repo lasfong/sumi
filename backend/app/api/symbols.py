@@ -10,6 +10,14 @@ from app.services.readiness_service import ReadinessService
 router = APIRouter()
 
 
+from app.schemas.import_schema import CatalogItemSchema
+from app.services.import_workflow_service import ImportWorkflowService
+
+@router.get("/data/catalog", response_model=List[CatalogItemSchema])
+def get_data_catalog_endpoint(db: Session = Depends(get_db)):
+    return ImportWorkflowService.get_catalog(db)
+
+
 @router.get("/symbols/readiness", response_model=DataReadinessResponse)
 def get_data_readiness(db: Session = Depends(get_db)):
     return ReadinessService.get_readiness(db)

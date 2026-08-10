@@ -132,7 +132,7 @@ describe('DashboardPage (PRO-UX-01 / R02-02)', () => {
     expect(await screen.findByText('Failed to query market data readiness.')).toBeInTheDocument();
     expect(await screen.findByText('Error loading recent practice sessions.')).toBeInTheDocument();
     expect(await screen.findByText('Error loading recent research runs.')).toBeInTheDocument();
-    
+
     const retryButtons = await screen.findAllByRole('button', { name: /Retry/i });
     expect(retryButtons.length).toBeGreaterThanOrEqual(3);
   });

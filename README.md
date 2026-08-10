@@ -54,6 +54,8 @@ CafeF batch import:
 ```powershell
 cd backend
 .\.venv\Scripts\python.exe scripts\import_batch.py ..\data\raw\cafef_sample
+# Preview only. Add --confirm only after reviewing the printed preview/checksum.
+# .\.venv\Scripts\python.exe scripts\import_batch.py ..\data\raw\cafef_sample --confirm
 ```
 
 Raw data should live under `data/raw/`. Local databases such as `backend/sumi.db` are runtime artifacts and should not be committed.
@@ -99,13 +101,16 @@ backtest, Strategy Lab, scanner-to-replay and analytics loading.
 
 ## Canonical Docs
 
-Start with:
+Start every current development or transferred-machine session with:
 
+- `AGENTS.md`
+- `docs/MACHINE_TRANSFER_HANDOFF_2026-08-10.md`
 - `docs/INDEX.md`
-- `docs/PRODUCT_COMPLETION_PLAN_2026-07-04.md`
-- `docs/PROGRESS_V2.md`
-- `docs/RELEASE_CHECKLIST_V2.md`
-- `docs/ACCEPTANCE_CRITERIA_V2.md`
+- `docs/AUTONOMOUS_EXECUTION_STATE.md`
+- `docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md`
+- `docs/PRODUCT_ACCEPTANCE_CRITERIA_V3.md`
+
+V2 completion/release documents are historical evidence and do not override the current V3/Professionalization program.
 
 ## Known V2 Limits
 

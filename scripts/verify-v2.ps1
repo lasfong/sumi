@@ -25,6 +25,11 @@ function Invoke-Checked {
 }
 
 Write-Host "== Sumi V2 backend tests =="
+$TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("sumi-verify-v2-" + [Guid]::NewGuid().ToString('N').Substring(0,8))
+New-Item -ItemType Directory -Path $TempDir -Force | Out-Null
+$TempDb = (Join-Path $TempDir "sumi-verify.db").Replace('\', '/')
+$env:DATABASE_URL = "sqlite:///$TempDb"
+
 Push-Location (Join-Path $Root "backend")
 try {
   Invoke-Checked "Backend pytest" { & .\.venv\Scripts\python.exe -m pytest app\tests -q }
@@ -34,6 +39,8 @@ try {
 }
 finally {
   Pop-Location
+  Remove-Item env:DATABASE_URL -ErrorAction SilentlyContinue
+  Remove-Item -Path $TempDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "== Sumi V2 frontend lint/test/build =="

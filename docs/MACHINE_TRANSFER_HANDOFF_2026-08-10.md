@@ -1,0 +1,203 @@
+# Sumi machine-transfer handoff — 2026-08-10
+
+This is the single entry point when Sumi is moved to another computer. It records what is authoritative, what must be copied, what is already approved, and the exact instruction that starts the next bounded batch. Chat history is not required.
+
+## 1. Transfer checkpoint
+
+- Repository: `https://github.com/lasfong/sumi.git`
+- Branch: `master`
+- Pushed remote: `origin/master` contains PRO-00, PRO-01, PRO-02, and PRO-03 commits.
+- Approved program state: PRO-00, PRO-01, PRO-02, and PRO-03 approved; PRO-04 through PRO-12 not started.
+- Latest verdict: `docs/reviews/PRO_03_REVIEW_2026-08-10_R2.md` — `APPROVE`.
+- Authoritative reviewer UAT: `test-results/product-uat/2026-08-10T13-19-58-163Z/results.json` — 305/305 passed, 0 failed, 0 blocking failed, no runtime errors.
+- Production database: `backend/sumi.db`, 620,945,408 bytes, SHA-256 `F890F5BC16ECE557EA78E19A6095A362DE8641E341382DF66D6A9C997E84F080`.
+- Reviewer results SHA-256: `15407E93BF54ADAD745ED5E54ECE62DECDF05C9C9D1D07EA2F067822293B7E3D`.
+- Workspace state: All versioned source, migrations, tests, exec-plans, prompts, and handoff documentation for PRO-03 are committed to `master` and pushed to `origin/master`.
+
+PRO-03 is fully committed and pushed. PRO-04 implementation has not started.
+
+## 2. What must move to the new computer
+
+### Versioned workspace layer — mandatory
+
+Clone or pull `master` from `https://github.com/lasfong/sumi.git`. Because PRO-03 is committed and pushed to `origin/master`, `git clone` or `git pull` supplies the entire versioned code, tests, migrations, dossiers, and handoff documentation.
+
+Do not copy machine-specific dependency caches. Recreate these on the destination:
+
+- `backend/.venv/`
+- `frontend/node_modules/`
+- root or spike `node_modules/`
+- `dist/`, `.vite/`, `.pytest_cache/`, and `__pycache__/`
+
+### Local-first data layer — mandatory when preserving the current workstation data
+
+These paths are ignored by Git and require a separate copy:
+
+- `backend/sumi.db`
+- `data/raw/` and other user-owned files under `data/` (currently about 592 MB total)
+- any local backups or exports the user needs
+
+After copying `backend/sumi.db`, verify its SHA-256 before opening the application or running migrations.
+
+### Reviewer evidence layer — mandatory for durable audit continuity
+
+Copy at least this complete directory:
+
+`test-results/product-uat/2026-08-10T13-19-58-163Z/`
+
+It contains `results.json` and the retained screenshots. The directory is ignored by Git. Other historical `test-results/` directories are optional unless the user wants the full audit history.
+
+## 3. Recommended transfer method
+
+1. **Code & Docs**: Perform a standard `git clone https://github.com/lasfong/sumi.git` or `git pull origin master` on the new machine.
+2. **Local Data & Test Evidence**: Copy `backend/sumi.db`, `data/raw/`, and `test-results/product-uat/2026-08-10T13-19-58-163Z/` via local network, external drive, or secure file transfer.
+
+Before disconnecting the old machine, retain two independent copies of `backend/sumi.db`. Do not delete or overwrite the old workspace until the destination passes the checks below.
+
+## 4. Destination bootstrap
+
+Required toolchain:
+
+- Git
+- Python 3.12 or newer (`pandas-ta==0.4.71b0` requires it)
+- Node.js compatible with the checked-in frontend lockfile; the source machine used Node `v24.14.0` and npm `11.9.0`
+- PowerShell on Windows for the repository-supported gate wrappers
+
+From the destination repository root:
+
+```powershell
+py -3.12 -m venv backend\.venv
+& backend\.venv\Scripts\python.exe -m pip install --upgrade pip
+& backend\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+Set-Location frontend
+npm.cmd install
+Set-Location ..
+```
+
+Do not seed or import into `backend/sumi.db` during handoff verification.
+
+## 5. Destination integrity checks
+
+Run these before any implementation:
+
+```powershell
+git branch --show-current
+git rev-parse HEAD
+git status --short
+Get-FileHash -Algorithm SHA256 backend\sumi.db
+Get-FileHash -Algorithm SHA256 test-results\product-uat\2026-08-10T13-19-58-163Z\results.json
+git diff --check
+```
+
+Expected branch/commit and both expected hashes are recorded in section 1. The dirty-file inventory must be preserved; a clean destination at commit `bc82434` means the uncommitted PRO-03 workspace was lost.
+
+After dependencies are installed, run the isolated fast gate:
+
+```powershell
+.\scripts\verify-v2.ps1
+```
+
+Record the database hash before and after; both must equal the value in section 1. Product UAT need not be rerun merely to copy the workspace if the retained reviewer artifact and hashes match. Rerun it when PRO-04 reaches its Reviewer gate.
+
+## 6. Canonical read order on the new computer
+
+1. `AGENTS.md`
+2. this file
+3. `docs/INDEX.md`
+4. `docs/AUTONOMOUS_EXECUTION_STATE.md`
+5. `docs/LOW_MODEL_AUTONOMOUS_EXECUTION_PROTOCOL.md`
+6. `docs/SESSION_HANDOFF_PROTOCOL.md`
+7. `docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md`
+8. `docs/reviews/PRO_03_REVIEW_2026-08-10_R2.md`
+9. `docs/program/PRO_04_CORE_INDICATOR_EXPANSION.md`
+10. `docs/exec-plans/PRO_04_CORE_INDICATOR_EXPANSION.md`
+11. `docs/dev-prompts/PRO_04_CORE_INDICATOR_EXPANSION_LOW_MODEL_PROMPT.md`
+
+Old V2 documents, historical V3 Batch 0–5 records, `docs/tester/`, and superseded handoffs are evidence only. They do not override the files above.
+
+## 7. Program outcome in one view
+
+| Batch | Status | User outcome |
+| --- | --- | --- |
+| PRO-00 | Approved | Honest blind/signal-review replay and fail-closed UAT authority. |
+| PRO-01 | Approved | Backtest and analytics metrics report validity and refuse false precision. |
+| PRO-02 | Approved | Dashboard, Replay, Journal, and Analytics operate as one daily workflow. |
+| PRO-03 | Approved | Catalogued Daily/Weekly data with preview, conflicts, provenance, idempotence, and rollback. |
+| PRO-04 | Prepared, not started | Release SMA, Bollinger Bands, ATR, and backend Volume SMA completely. |
+| PRO-05 | Not started | Release MFI, Stochastic, ADX, and Relative Strength vs VNINDEX. |
+| PRO-06 | Not started | Release Keltner Channels, PSAR, and SuperTrend. |
+| PRO-07 | Not started | Release Ichimoku with an explicit no-look-ahead displacement contract. |
+| PRO-08 | Not started | Add risk-based trade planning, position sizing, checklist, and richer journal review. |
+| PRO-09 | Not started | Make strategy comparison reproducible and resistant to overfitting. |
+| PRO-10 | Not started | Approve or reject a market-data provider using license/security/coverage evidence. |
+| PRO-11 | Conditional | If PRO-10 approves, add explicit one-click local data synchronization with preview/rollback. |
+| PRO-12 | Not started | Produce the independently verified Professional release candidate. |
+
+After PRO-12, the intended result is a dependable local-first Vietnam-market replay, technical-analysis, data-management, trading-practice, journaling, and strategy-research workstation with evidence-backed release quality.
+
+## 8. Exact next action
+
+PRO-04 planning is already prepared, but implementation has not started. After the destination checks pass, open one DEV/Antigravity session at the repository root and give it exactly this prompt:
+
+```text
+Execute docs/dev-prompts/PRO_04_CORE_INDICATOR_EXPANSION_LOW_MODEL_PROMPT.md exactly. Work continuously from the transferred workspace until a genuine blocker or the Independent Reviewer gate. Do not rely on chat history, do not commit or push, and do not start PRO-05.
+```
+
+The DEV session must update repository files and retained artifacts directly. The user does not copy intermediate logs between IDEs. At the Reviewer gate, return to an Independent Reviewer session and say only:
+
+```text
+Antigravity has reached the Reviewer gate. Review PRO-04 from the current workspace.
+```
+
+The reviewer reads the workspace; no pasted implementation report is required.
+
+## Appendix A — expected worktree inventory
+
+The source checkpoint has 23 modified entries and 21 untracked entries. `docs/program/` is shown by Git as one untracked directory but contains the PRO-03 through PRO-12 dossiers listed in `docs/program/README.md`.
+
+```text
+ M README.md
+ M backend/app/api/import_data.py
+ M backend/app/api/symbols.py
+ M backend/app/models/__init__.py
+ M backend/app/schemas/import_schema.py
+ M backend/app/services/cafef_importer.py
+ M backend/app/tests/conftest.py
+ M backend/app/tests/test_cafef_importer.py
+ M backend/scripts/import_batch.py
+ M backend/seed_cafef.py
+ M docs/AUTONOMOUS_EXECUTION_STATE.md
+ M docs/INDEX.md
+ M docs/PROFESSIONALIZATION_HANDOFF_2026-08-01.md
+ M docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md
+ M docs/exec-plans/PRO_02_DAILY_TRADER_WORKFLOW.md
+ M frontend/src/api/importApi.ts
+ M frontend/src/hooks/__tests__/useSessionSelection.test.tsx
+ M frontend/src/hooks/useSessionSelection.ts
+ M frontend/src/pages/ImportPage.tsx
+ M frontend/src/pages/__tests__/DashboardPage.test.tsx
+ M scripts/fixtures/product-uat-v3-baseline.json
+ M scripts/product-uat.mjs
+ M scripts/verify-v2.ps1
+?? backend/app/services/import_classifier.py
+?? backend/app/services/import_workflow_service.py
+?? backend/app/services/weekly_aggregator.py
+?? backend/app/tests/test_import_api.py
+?? backend/app/tests/test_import_classifier.py
+?? backend/app/tests/test_import_workflow.py
+?? backend/app/tests/test_weekly_aggregator.py
+?? docs/MACHINE_TRANSFER_HANDOFF_2026-08-10.md
+?? docs/SESSION_HANDOFF_PROTOCOL.md
+?? docs/dev-prompts/PRO_03_DATA_CATALOG_AND_IMPORT_QUALITY_LOW_MODEL_PROMPT.md
+?? docs/dev-prompts/PRO_04_CORE_INDICATOR_EXPANSION_LOW_MODEL_PROMPT.md
+?? docs/exec-plans/PRO_03_DATA_CATALOG_AND_IMPORT_QUALITY.md
+?? docs/exec-plans/PRO_04_CORE_INDICATOR_EXPANSION.md
+?? docs/program/
+?? docs/reviews/PRO_02_REVIEW_2026-08-09.md
+?? docs/reviews/PRO_03_REVIEW_2026-08-09.md
+?? docs/reviews/PRO_03_REVIEW_2026-08-10.md
+?? docs/reviews/PRO_03_REVIEW_2026-08-10_R2.md
+?? docs/tester/README.md
+?? scripts/negative-operation-tracker.mjs
+?? scripts/negative-operation-tracker.test.mjs
+```

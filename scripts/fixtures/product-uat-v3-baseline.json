@@ -2324,7 +2324,7 @@
       "acceptance_ids": [
         "R-02",
         "PRO-UX-02",
-        "PRO-UX-03"
+        "PRO-UX-09"
       ]
     },
     {
@@ -2332,8 +2332,8 @@
       "blocking": true,
       "acceptance_ids": [
         "R-02",
-        "PRO-UX-02",
-        "PRO-UX-03"
+        "PRO-UX-03",
+        "PRO-UX-09"
       ]
     },
     {
@@ -2341,8 +2341,9 @@
       "blocking": true,
       "acceptance_ids": [
         "R-02",
-        "PRO-UX-02",
-        "PRO-UX-03"
+        "PRO-UX-01",
+        "PRO-UX-03",
+        "PRO-UX-09"
       ]
     },
     {
@@ -2350,8 +2351,8 @@
       "blocking": true,
       "acceptance_ids": [
         "R-02",
-        "PRO-UX-02",
-        "PRO-UX-03"
+        "PRO-UX-08",
+        "PRO-UX-09"
       ]
     },
     {
@@ -2359,8 +2360,7 @@
       "blocking": true,
       "acceptance_ids": [
         "R-02",
-        "PRO-UX-02",
-        "PRO-UX-03"
+        "PRO-UX-06"
       ]
     },
     {
@@ -2369,7 +2369,8 @@
       "acceptance_ids": [
         "R-02",
         "PRO-UX-02",
-        "PRO-UX-03"
+        "PRO-UX-03",
+        "PRO-UX-09"
       ]
     },
     {
@@ -2377,8 +2378,8 @@
       "blocking": true,
       "acceptance_ids": [
         "R-02",
-        "PRO-UX-02",
-        "PRO-UX-03"
+        "PRO-UX-01",
+        "PRO-UX-06"
       ]
     },
     {
@@ -2386,8 +2387,9 @@
       "blocking": true,
       "acceptance_ids": [
         "R-02",
-        "PRO-UX-02",
-        "PRO-UX-03"
+        "PRO-UX-04",
+        "PRO-UX-05",
+        "PRO-UX-07"
       ]
     },
     {
@@ -2395,8 +2397,7 @@
       "blocking": true,
       "acceptance_ids": [
         "R-02",
-        "PRO-UX-02",
-        "PRO-UX-03"
+        "PRO-UX-09"
       ]
     },
     {
@@ -2405,7 +2406,57 @@
       "acceptance_ids": [
         "R-02",
         "PRO-UX-02",
-        "PRO-UX-03"
+        "PRO-UX-06",
+        "PRO-UX-09"
+      ]
+    },
+    {
+      "id": "pro03.catalog-provenance",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-DATA-01"
+      ]
+    },
+    {
+      "id": "pro03.preview-classification-before-mutation",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-DATA-02"
+      ]
+    },
+    {
+      "id": "pro03.fail-closed-ambiguity-and-conflicts",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-DATA-03"
+      ]
+    },
+    {
+      "id": "pro03.idempotent-manifest-checksum",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-DATA-04"
+      ]
+    },
+    {
+      "id": "pro03.vn-trading-week-v1-provenance",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-DATA-05"
+      ]
+    },
+    {
+      "id": "pro03.adjustment-isolation-and-conflict-quarantine",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-DATA-06"
+      ]
+    },
+    {
+      "id": "pro03.exact-guarded-rollback",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-DATA-07"
       ]
     }
   ]

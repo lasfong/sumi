@@ -51,6 +51,7 @@ const createWrapper = (initialEntry = '/journal') => {
 
 describe('useSessionSelection controller (R02-01 / PRO-UX-02 / PRO-UX-03)', () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     useReplayStore.getState().clearSession();
     vi.mocked(replayApi.getReplaySession).mockImplementation(async (id: number) => {
       if (id === 42) return mockSession42;
@@ -85,6 +86,18 @@ describe('useSessionSelection controller (R02-01 / PRO-UX-02 / PRO-UX-03)', () =
 
     expect(result.current.sessionId).toBeNull();
     expect(useReplayStore.getState().sessionId).toBeNull();
+  });
+
+  it('malformed URL syntax clears selection even when store is pre-populated with a valid session', async () => {
+    useReplayStore.getState().setSession(10);
+    const wrapper = createWrapper('/journal?session=abc');
+    const { result } = renderHook(() => useSessionSelection(), { wrapper });
+
+    await waitFor(() => {
+      expect(result.current.sessionId).toBeNull();
+      expect(useReplayStore.getState().sessionId).toBeNull();
+    });
+    expect(replayApi.getReplaySession).not.toHaveBeenCalled();
   });
 
   it('deleted or missing session ID is rejected and clears store', async () => {

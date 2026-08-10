@@ -11,6 +11,7 @@ from app.models.event_log import EventLog
 from app.models.drawing import DrawingState
 from app.models.strategy_lab_run import StrategyLabRun
 from app.models.scanner_run import ScannerRun
+from app.models.import_run import ImportRun, ImportRunItem, ImportRunMutation, WeeklyCandleProvenance
 
 __all__ = [
     "Symbol",
@@ -26,4 +27,8 @@ __all__ = [
     "DrawingState",
     "StrategyLabRun",
     "ScannerRun",
+    "ImportRun",
+    "ImportRunItem",
+    "ImportRunMutation",
+    "WeeklyCandleProvenance",
 ]

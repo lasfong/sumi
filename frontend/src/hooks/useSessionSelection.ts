@@ -27,14 +27,28 @@ export function useSessionSelection(): SessionSelectionResult {
   const clearStoreSession = useReplayStore((state) => state.clearSession);
 
   const rawUrlParam = searchParams.get('session');
-  const urlSessionId = useMemo(() => {
-    if (!rawUrlParam || !/^\d+$/.test(rawUrlParam)) return null;
-    const parsed = parseInt(rawUrlParam, 10);
-    return parsed > 0 ? parsed : null;
-  }, [rawUrlParam]);
+  const hasUrlParam = searchParams.has('session');
 
-  // Determine candidate session ID
-  const candidateId = urlSessionId !== null ? urlSessionId : storeSessionId;
+  const { urlSessionId, isUrlParamInvalid } = useMemo(() => {
+    if (!hasUrlParam) {
+      return { urlSessionId: null, isUrlParamInvalid: false };
+    }
+    if (rawUrlParam && /^\d+$/.test(rawUrlParam)) {
+      const parsed = parseInt(rawUrlParam, 10);
+      if (parsed > 0) {
+        return { urlSessionId: parsed, isUrlParamInvalid: false };
+      }
+    }
+    return { urlSessionId: null, isUrlParamInvalid: true };
+  }, [hasUrlParam, rawUrlParam]);
+
+  // Determine candidate session ID:
+  // If URL parameter is present and valid -> use URL session ID.
+  // If URL parameter is invalid -> no candidate (must clear selection, do NOT fall back to store).
+  // If URL parameter is absent -> fall back to storeSessionId.
+  const candidateId = isUrlParamInvalid
+    ? null
+    : (urlSessionId !== null ? urlSessionId : storeSessionId);
 
   // Validate candidate session ID against backend API
   const { data: sessionData, isError, isLoading } = useQuery({
@@ -61,6 +75,11 @@ export function useSessionSelection(): SessionSelectionResult {
 
   // Synchronize store & URL based on validation result
   useEffect(() => {
+    if (isUrlParamInvalid) {
+      clearSession();
+      return;
+    }
+
     if (candidateId === null) return;
 
     if (isError) {
@@ -82,9 +101,9 @@ export function useSessionSelection(): SessionSelectionResult {
         );
       }
     }
-  }, [candidateId, sessionData, isError, urlSessionId, storeSessionId, setStoreSession, setSearchParams, clearSession]);
+  }, [candidateId, sessionData, isError, urlSessionId, storeSessionId, setStoreSession, setSearchParams, clearSession, isUrlParamInvalid]);
 
-  const activeSessionId = sessionData && !isError ? candidateId : null;
+  const activeSessionId = sessionData && !isError && !isUrlParamInvalid ? candidateId : null;
 
   const selectSession = useCallback(
     (id: number, options?: { replace?: boolean }) => {

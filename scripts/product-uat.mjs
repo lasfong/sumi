@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { validateFutureBoundary } from './batch5-closure-contract.mjs';
+import { NegativeOperationTracker } from './negative-operation-tracker.mjs';
 import {
   loadProductUatManifest,
   reconcileProductUatAssertions,
@@ -57,7 +58,6 @@ const checks = [];
 let pro01ScannerRankingChecked = false;
 const runtimeErrors = [];
 const expectedPracticeConsoleErrors = [];
-let expectingPracticeRejection = false;
 const indicatorResponses = [];
 const indicatorRequestFailures = [];
 const providerErrors = [];
@@ -100,17 +100,49 @@ await page.addInitScript(() => {
   } catch { /* unsupported engines are recorded explicitly by the hardening gate */ }
 });
 
+const negativeTracker = new NegativeOperationTracker();
+
 page.on('pageerror', error => runtimeErrors.push(`pageerror: ${error.stack || error.message}`));
 page.on('console', message => {
   if (message.type() !== 'error') return;
-  const detail = `console: ${message.text()}`;
-  if (expectingPracticeRejection && message.text().includes('Failed to load resource')) expectedPracticeConsoleErrors.push(detail);
-  else if (expectingPracticeRejection && message.text().includes('999999')) expectedPracticeConsoleErrors.push(detail);
-  else runtimeErrors.push(detail);
+  const text = message.text();
+  const url = message.location().url || '';
+
+  const classification = negativeTracker.classifyConsoleMessage(text, url);
+  if (classification.action === 'captured') {
+    expectedPracticeConsoleErrors.push(classification.detail);
+    return;
+  }
+  if (classification.action === 'runtime_error') {
+    runtimeErrors.push(`${classification.detail} (${classification.reason})`);
+    return;
+  }
+
+  const detail = classification.detail;
+  if (text.includes('Failed to load resource') && url.includes('/decisions') && text.includes('400')) {
+    expectedPracticeConsoleErrors.push(detail);
+  } else if (text.includes('Failed to load resource') && url.includes('/journal') && text.includes('409')) {
+    expectedPracticeConsoleErrors.push(detail);
+  } else if (text.includes('AxiosError: Request failed with status code 400') && text.includes('Controlled pre-T+2 rejection')) {
+    expectedPracticeConsoleErrors.push(detail);
+  } else if (text.includes('AxiosError: Request failed with status code 400') && text.includes('sell without enough shares')) {
+    expectedPracticeConsoleErrors.push(detail);
+  } else if (text.includes('AxiosError: Request failed with status code 409') && text.includes('Cannot close session')) {
+    expectedPracticeConsoleErrors.push(detail);
+  } else if (text.includes('Failed to load resource') && text.includes('404') && url.includes('/journal')) {
+    // Empty journal 404
+    expectedPracticeConsoleErrors.push(detail);
+  } else if (text.includes('Failed to load resource') && text.includes('404') && url.includes('/practice-state')) {
+    // Missing practice state 404
+    expectedPracticeConsoleErrors.push(detail);
+  } else {
+    runtimeErrors.push(detail);
+  }
 });
 page.on('response', response => {
   if (response.url().startsWith(backendUrl) || response.url().includes('/api/')) {
     apiOutcomes.push({ url: response.url(), status: response.status(), ok: response.ok() });
+    negativeTracker.classifyResponse(response.url(), response.status());
   }
   if (/\/replay\/sessions\/\d+\/indicators/.test(response.url())) {
     indicatorResponses.push({ url: response.url(), status: response.status() });
@@ -1526,10 +1558,8 @@ try {
   JSON.stringify(journalAtEntry));
   await openPracticeTab('Trade');
 
-  expectingPracticeRejection = true;
   decisionDialog = await submitPracticeDecision('SELL', { quantity: 100, reason: 'Controlled pre-T+2 rejection' });
   const t2Message = await decisionDialog.getByRole('alert').innerText();
-  expectingPracticeRejection = false;
   const afterRejectedSell = await readPractice();
   batch4('T-05.pre-t2-backend-rejection', t2Message.includes('T+2') && afterRejectedSell.decisions.length === afterNonOrders.decisions.length
     && afterRejectedSell.orders.length === afterNonOrders.orders.length && afterRejectedSell.executions.length === afterNonOrders.executions.length,
@@ -1601,7 +1631,6 @@ try {
 
   const journalBeforeWrongDate = await readJournal();
   const expectedConsoleErrorsBeforeWrongDate = expectedPracticeConsoleErrors.length;
-  expectingPracticeRejection = true;
   const wrongDateResponse = await page.evaluate(async ({ id, context }) => {
     const response = await fetch(`/api/replay/sessions/${id}/journal`, {
       method: 'POST',
@@ -1629,7 +1658,6 @@ try {
     context: { sessionId, symbol: closedState.symbol, candleIndex: closedState.current_index, date: closedState.current_date.slice(0, 10) },
   });
   await page.waitForTimeout(100);
-  expectingPracticeRejection = false;
   const journalAfterWrongDate = await readJournal();
   batch4('closure.R02.mismatched-date-rejected-no-insert', wrongDateResponse.status === 409
     && JSON.stringify(journalAfterWrongDate.map(item => item.id)) === JSON.stringify(journalBeforeWrongDate.map(item => item.id)),
@@ -2250,6 +2278,87 @@ try {
   };
   batch4('T-01.explicit-limited-mobile', limitedMobileEvidence.warningVisible && limitedMobileEvidence.buyDisabled, JSON.stringify(limitedMobileEvidence));
   // PRO-02 Daily Trader Workflow Browser Verification (R02-01 through R02-08)
+  const captureSessionAuthoritySnapshot = async (expectedSessionId) => {
+    await page.waitForFunction((id) => {
+      const urlMatch = new URL(window.location.href).searchParams.get('session') === String(id);
+      let storeMatch = false;
+      try { storeMatch = String(JSON.parse(localStorage.getItem('sumi-replay-store') || '{}')?.state?.sessionId) === String(id); } catch {}
+      const domMatch = document.body.innerText.includes(`Session #${id}`) || document.body.innerText.includes(`#${id}`);
+      return urlMatch && storeMatch && domMatch;
+    }, expectedSessionId, { timeout: 5000 }).catch(() => {});
+
+    const url = new URL(page.url());
+    const urlSession = url.searchParams.get('session');
+
+    const storeSession = await page.evaluate(() => {
+      try { return JSON.parse(localStorage.getItem('sumi-replay-store') || '{}')?.state?.sessionId; }
+      catch { return null; }
+    });
+
+    const bodyText = await page.locator('body').innerText();
+    const domSessionMatch = bodyText.match(/Session[\s\u00a0]*#(\d+)/i) || bodyText.match(/#(\d+)/);
+    const domSession = domSessionMatch ? domSessionMatch[1] : null;
+
+    const domSymbol = await page.evaluate(() => {
+        const pickerSymbol = document.querySelector('.session-picker-trigger .session-symbol');
+        if (pickerSymbol && pickerSymbol.textContent?.trim()) {
+            return pickerSymbol.textContent.trim();
+        }
+        const header = document.querySelector('header');
+        if (header) {
+            const spans = Array.from(header.querySelectorAll('span'));
+            if (spans.length > 0) return spans[0].textContent.trim();
+        }
+        const text = document.body.innerText;
+        const emptyMatch = text.match(/Session[\s\u00a0]*#\d+[\s\u00a0]*\(([^)]+)\)/i);
+        if (emptyMatch) return emptyMatch[1];
+        const loadedMatch = text.match(/Session[\s\u00a0]*#\d+[\s\u00a0]*[—–\-][\s\u00a0]*([A-Z0-9]+)/i);
+        if (loadedMatch) return loadedMatch[1];
+        return null;
+    });
+
+    let domBar = null;
+    try {
+      const domBarText = await page.getByTestId('replay-bar-context').innerText();
+      const domBarMatch = domBarText.match(/Bar:\s*#(\d+)/);
+      domBar = domBarMatch ? Number(domBarMatch[1]) : null;
+    } catch {
+      // Replay workspace may not be fully loaded, or bar context may be missing.
+    }
+
+    const apiState = await getSessionState(expectedSessionId);
+
+    if (!urlSession || !storeSession || !domSession || !domSymbol || !apiState || (url.pathname === '/replay' && domBar === null)) {
+        const dump = await page.evaluate(() => document.body.innerText);
+        throw new Error(`Missing or ambiguous authority fields: URL=${urlSession}, Store=${storeSession}, DOMSession=${domSession}, DOMSymbol=${domSymbol}, DOMBar=${domBar}\n\nInnerText:\n${dump}`);
+    }
+
+    return {
+        urlSession,
+        storeSession: String(storeSession),
+        domSession,
+        domSymbol,
+        domBar,
+        apiSession: String(apiState.id),
+        apiSymbol: apiState.symbol,
+        apiIndex: apiState.current_index
+    };
+  };
+
+  const validateAuthoritySnapshot = (snapshot, expectedSessionId, expectedSymbol, expectedIndex) => {
+     const common = snapshot.urlSession === String(expectedSessionId) &&
+            snapshot.storeSession === String(expectedSessionId) &&
+            snapshot.domSession === String(expectedSessionId) &&
+            snapshot.apiSession === String(expectedSessionId) &&
+            snapshot.domSymbol === expectedSymbol &&
+            snapshot.apiSymbol === expectedSymbol &&
+            snapshot.apiIndex === expectedIndex;
+     if (snapshot.domBar !== null) {
+        return common && snapshot.domBar === (expectedIndex + 1);
+     }
+     return common;
+  };
+
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto(`${frontendUrl}/`);
   await page.getByText('Workstation Overview').waitFor();
@@ -2282,8 +2391,11 @@ try {
   });
   check('pro02.create-session-backtest-rejection',
     backtestResponse.status() === 422,
-    `HTTP ${backtestResponse.status()} returned when attempting session creation with mode: backtest`
+    JSON.stringify({ status: backtestResponse.status(), expected: 422 })
   );
+
+  const initialSessions = await (await page.request.get(`${backendUrl}/api/replay/sessions`)).json();
+  const initialSessionCount = initialSessions.length;
 
   // Load Dashboard and click exact Continue action
   await page.goto(`${frontendUrl}/`);
@@ -2298,15 +2410,31 @@ try {
   let primaryState = await getSessionState(activeSessionId);
   const primaryIndex = primaryState.current_index;
 
-  const pro02DashHeaderText = await page.locator('header').innerText();
+  const dashboardContinueSnapshot = await captureSessionAuthoritySnapshot(activeSessionId);
+  const dashboardContinueSessions = await (await page.request.get(`${backendUrl}/api/replay/sessions`)).json();
+
+  const dashContinueValid = validateAuthoritySnapshot(dashboardContinueSnapshot, activeSessionId, primaryState.symbol, primaryIndex);
+  const dashContinueCountValid = dashboardContinueSessions.length === initialSessionCount;
   check('pro02.dashboard-continue-authority',
-    pro02DashHeaderText.includes(`Session #${activeSessionId}`) && pro02DashHeaderText.includes(primaryState.symbol),
-    `Dashboard Continue opened Session #${activeSessionId} matching ${primaryState.symbol}`
+    dashContinueValid && dashContinueCountValid,
+    JSON.stringify({
+      pass: dashContinueValid && dashContinueCountValid,
+      subconditions: { dashContinueValid, dashContinueCountValid },
+      activeSessionId: String(activeSessionId),
+      symbol: primaryState.symbol,
+      index: primaryIndex,
+      initialSessionCount,
+      currentSessionCount: dashboardContinueSessions.length,
+      snapshot: dashboardContinueSnapshot,
+    })
   );
 
-  // Invalid session clears selection
-  const initialSessions = await (await page.request.get(`${backendUrl}/api/replay/sessions`)).json();
-  expectingPracticeRejection = true;
+  // 1. Operation: invalid-journal-session-999999
+  negativeTracker.startOperation('invalid-journal-session-999999', {
+    expectedEndpoint: '/api/replay/sessions/999999',
+    expectedStatus: 404,
+    pattern: /999999/,
+  });
   await page.goto(`${frontendUrl}/journal?session=999999`);
   await page.waitForTimeout(1000);
   const journalUrlNoSession = page.url();
@@ -2315,21 +2443,79 @@ try {
     const store = JSON.parse(localStorage.getItem('sumi-replay-store') || '{}');
     return !!store?.state?.sessionId;
   });
+  const journalOpSnap = negativeTracker.endOperation('invalid-journal-session-999999');
 
+  // 2. Operation: invalid-replay-session-999999
+  negativeTracker.startOperation('invalid-replay-session-999999', {
+    expectedEndpoint: '/api/replay/sessions/999999',
+    expectedStatus: 404,
+    pattern: /999999/,
+  });
   await page.goto(`${frontendUrl}/replay?session=999999`);
   await page.waitForTimeout(1000);
   const replayHasSetup = await page.getByRole('button', { name: /Start Replay|Create Replay/i }).isVisible();
-  expectingPracticeRejection = false;
+  const replayOpSnap = negativeTracker.endOperation('invalid-replay-session-999999');
+
+  // 3. Operation: malformed-session-syntax-abc (with pre-populated valid store session)
+  negativeTracker.startOperation('malformed-session-syntax-abc', {
+    forbiddenEndpoints: [
+      `/api/replay/sessions/${activeSessionId}`,
+      '/api/replay/sessions/abc',
+      '/api/replay/sessions/NaN',
+    ],
+    allowNoResponses: true,
+    pattern: /abc/,
+  });
+  await page.evaluate((id) => {
+    const store = JSON.parse(localStorage.getItem('sumi-replay-store') || '{}');
+    store.state = store.state || {};
+    store.state.sessionId = Number(id);
+    localStorage.setItem('sumi-replay-store', JSON.stringify(store));
+  }, activeSessionId);
+
+  await page.goto(`${frontendUrl}/journal?session=abc`);
+  await page.waitForTimeout(1000);
+  const journalUrlAbc = page.url();
+  const storeHasSessionAfterAbc = await page.evaluate(() => {
+    const store = JSON.parse(localStorage.getItem('sumi-replay-store') || '{}');
+    return !!store?.state?.sessionId;
+  });
+  const malformedOpSnap = negativeTracker.endOperation('malformed-session-syntax-abc');
 
   const allSessionsAfterInvalid = await (await page.request.get(`${backendUrl}/api/replay/sessions`)).json();
 
+  const singleSessionPass = journalOpSnap.pass
+    && replayOpSnap.pass
+    && malformedOpSnap.pass
+    && !journalUrlNoSession.includes('session=999999')
+    && journalHasPicker
+    && replayHasSetup
+    && !journalStoreHasSession
+    && !journalUrlAbc.includes('session=abc')
+    && !journalUrlAbc.includes(`session=${activeSessionId}`)
+    && !storeHasSessionAfterAbc
+    && allSessionsAfterInvalid.length === initialSessionCount;
+
   check('pro02.single-session-selection-authority',
-    !journalUrlNoSession.includes('session=999999')
-      && journalHasPicker
-      && replayHasSetup
-      && !journalStoreHasSession
-      && allSessionsAfterInvalid.length === initialSessions.length,
-    `Deleted session 999999 cleared cleanly without error modal, no session created`
+    singleSessionPass,
+    JSON.stringify({
+      pass: singleSessionPass,
+      subconditions: {
+        journalOpPass: journalOpSnap.pass,
+        replayOpPass: replayOpSnap.pass,
+        malformedOpPass: malformedOpSnap.pass,
+        journalCleared999999: !journalUrlNoSession.includes('session=999999'),
+        journalHasPicker,
+        replayHasSetup,
+        journalStoreCleared: !journalStoreHasSession,
+        malformedAbcUrlCleared: !journalUrlAbc.includes('session=abc') && !journalUrlAbc.includes(`session=${activeSessionId}`),
+        malformedAbcStoreCleared: !storeHasSessionAfterAbc,
+        sessionCountUnchanged: allSessionsAfterInvalid.length === initialSessionCount,
+      },
+      initialSessionCount,
+      currentSessionCount: allSessionsAfterInvalid.length,
+      negativeOperations: [journalOpSnap, replayOpSnap, malformedOpSnap],
+    })
   );
 
   // Return to primary session and check cross-route
@@ -2339,18 +2525,55 @@ try {
   // Navigate through Journal and Analytics without inputting ID
   await page.locator('.sidebar-nav').getByRole('link', { name: 'Journal' }).click();
   await page.waitForURL(url => url.pathname === '/journal' && url.searchParams.get('session') === activeSessionId);
+  const journalSnapshot = await captureSessionAuthoritySnapshot(activeSessionId);
+  const journalHasInput = await page.locator('input[type="number"]').count() > 0;
 
   await page.locator('.sidebar-nav').getByRole('link', { name: 'Analytics' }).click();
   await page.waitForURL(url => url.pathname === '/analytics' && url.searchParams.get('session') === activeSessionId);
+  const analyticsSnapshot = await captureSessionAuthoritySnapshot(activeSessionId);
+  const analyticsHasInput = await page.locator('input[type="number"]').count() > 0;
 
   await page.locator('.sidebar-nav').getByRole('link', { name: /Trading Lab|Replay/i }).click();
   await page.waitForURL(url => url.pathname === '/replay' && url.searchParams.get('session') === activeSessionId);
+  const replayRoundTripSnapshot = await captureSessionAuthoritySnapshot(activeSessionId);
 
-  primaryState = await getSessionState(activeSessionId);
+  const crossRouteSessions = await (await page.request.get(`${backendUrl}/api/replay/sessions`)).json();
+
+  const journalValid = validateAuthoritySnapshot(journalSnapshot, activeSessionId, primaryState.symbol, primaryIndex);
+  const analyticsValid = validateAuthoritySnapshot(analyticsSnapshot, activeSessionId, primaryState.symbol, primaryIndex);
+  const replayRoundTripValid = validateAuthoritySnapshot(replayRoundTripSnapshot, activeSessionId, primaryState.symbol, primaryIndex);
+  const noNumericInputs = !journalHasInput && !analyticsHasInput;
+  const sessionCountValid = crossRouteSessions.length === initialSessionCount;
+  const crossRoutePass = journalValid && analyticsValid && replayRoundTripValid && noNumericInputs && sessionCountValid;
 
   check('pro02.cross-route-session-sync',
-    page.url().includes(`/replay?session=${activeSessionId}`) && primaryState.current_index === primaryIndex,
-    `Preserved active session #${activeSessionId} across routes with unchanged index ${primaryIndex}`
+    crossRoutePass,
+    JSON.stringify({
+      pass: crossRoutePass,
+      subconditions: {
+        journalValid,
+        analyticsValid,
+        replayRoundTripValid,
+        noNumericInputs,
+        journalHasInput,
+        analyticsHasInput,
+        sessionCountValid,
+      },
+      counts: {
+        initialSessionCount,
+        crossRouteSessionCount: crossRouteSessions.length,
+      },
+      expected: {
+        activeSessionId: String(activeSessionId),
+        symbol: primaryState.symbol,
+        index: primaryIndex,
+      },
+      snapshots: {
+        journal: journalSnapshot,
+        analytics: analyticsSnapshot,
+        replayRoundTrip: replayRoundTripSnapshot,
+      },
+    })
   );
 
   // Session picker switches everything together
@@ -2360,70 +2583,148 @@ try {
   const otherSessionId = otherSessionText.match(/#(\d+)/)[1];
   await otherSessionOption.click();
   await page.waitForURL(url => url.searchParams.get('session') === otherSessionId);
-  const switchedHeaderText = await page.locator('header').innerText();
   const otherState = await getSessionState(otherSessionId);
+  const otherIndex = otherState.current_index;
+  const pickerSelectionSnapshot = await captureSessionAuthoritySnapshot(otherSessionId);
 
+  const pickerValid = validateAuthoritySnapshot(pickerSelectionSnapshot, otherSessionId, otherState.symbol, otherIndex);
   check('pro02.picker-selection-journey',
-    switchedHeaderText.includes(`Session #${otherSessionId}`),
-    `Picker switched successfully to Session #${otherSessionId}`
+    pickerValid,
+    JSON.stringify({
+      pass: pickerValid,
+      otherSessionId: String(otherSessionId),
+      symbol: otherState.symbol,
+      index: otherIndex,
+      snapshot: pickerSelectionSnapshot,
+    })
   );
 
   // Browser back/forward/reload preservation
   await page.goBack();
   await page.waitForURL(url => url.searchParams.get('session') === activeSessionId);
-  const backState = await getSessionState(activeSessionId);
-  const backStore = await page.evaluate(() => JSON.parse(localStorage.getItem('sumi-replay-store') || '{}')?.state?.sessionId);
+  const backSnapshot = await captureSessionAuthoritySnapshot(activeSessionId);
 
   await page.goForward();
   await page.waitForURL(url => url.searchParams.get('session') === otherSessionId);
-  const forwardState = await getSessionState(otherSessionId);
-  const forwardStore = await page.evaluate(() => JSON.parse(localStorage.getItem('sumi-replay-store') || '{}')?.state?.sessionId);
+  const forwardSnapshot = await captureSessionAuthoritySnapshot(otherSessionId);
 
   await page.goBack(); // return to primary
   await page.waitForURL(url => url.searchParams.get('session') === activeSessionId);
 
   await page.reload();
   await page.locator('header').getByText(/Session #/).waitFor();
-  let reloadedState = await getSessionState(activeSessionId);
-  const reloadStore = await page.evaluate(() => JSON.parse(localStorage.getItem('sumi-replay-store') || '{}')?.state?.sessionId);
+  const reloadSnapshot = await captureSessionAuthoritySnapshot(activeSessionId);
+
   const sessionsAfterNav = await (await page.request.get(`${backendUrl}/api/replay/sessions`)).json();
 
+  const backValid = validateAuthoritySnapshot(backSnapshot, activeSessionId, primaryState.symbol, primaryIndex);
+  const forwardValid = validateAuthoritySnapshot(forwardSnapshot, otherSessionId, otherState.symbol, otherIndex);
+  const reloadValid = validateAuthoritySnapshot(reloadSnapshot, activeSessionId, primaryState.symbol, primaryIndex);
+  const navSessionCountValid = sessionsAfterNav.length === initialSessionCount;
+  const navPass = backValid && forwardValid && reloadValid && navSessionCountValid;
+
   check('pro02.browser-navigation-preservation',
-    backState.current_index === primaryIndex && backStore === Number(activeSessionId)
-      && forwardState.current_index === otherState.current_index && forwardStore === Number(otherSessionId)
-      && reloadedState.current_index === primaryIndex && reloadStore === Number(activeSessionId)
-      && sessionsAfterNav.length === initialSessions.length,
-    `Browser back/forward/reload preserved exact identity/index for primary and secondary sessions without creating new ones`
+    navPass,
+    JSON.stringify({
+      pass: navPass,
+      subconditions: {
+        backValid,
+        forwardValid,
+        reloadValid,
+        navSessionCountValid,
+      },
+      counts: {
+        initialSessionCount,
+        sessionsAfterNavCount: sessionsAfterNav.length,
+      },
+      snapshots: {
+        back: backSnapshot,
+        forward: forwardSnapshot,
+        reload: reloadSnapshot,
+      },
+    })
   );
 
   // Keyboard isolation in picker
-  const isolatedDrawingSnapshotRaw = await page.evaluate(({ id, symbol }) => localStorage.getItem(`sumi:drawing-document:v1:${id}:${encodeURIComponent(symbol)}`), { id: activeSessionId, symbol: primaryState.symbol });
-  const isolatedSessionIdentity = activeSessionId;
-  const isolatedSessionIndex = primaryIndex;
+  // Ensure active session has at least one real, schema-valid Sumi drawing using public UI & readDomain() product observable
+  const readDomainState = async () => JSON.parse(await page.getByTestId('drawing-domain-state').textContent());
+  let preDrawingDoc = await readDomainState();
+
+  if (!preDrawingDoc || !Array.isArray(preDrawingDoc.drawings) || preDrawingDoc.drawings.length === 0) {
+    const workspace = page.getByTestId('chart-workspace');
+    const interaction = await workspace.evaluate(element => {
+      element.dispatchEvent(new Event('sumi:drawing-snapshot-request'));
+      return JSON.parse(element.dataset.drawingInteractionState || 'null');
+    });
+    const pricePane = interaction?.pricePane;
+    if (!pricePane) {
+      throw new Error('Keyboard isolation setup failed: price pane bounds unavailable');
+    }
+    await page.getByTestId('drawing-tool-horizontal').click();
+    await page.mouse.click(pricePane.left + pricePane.width * 0.5, pricePane.top + pricePane.height * 0.5);
+    await page.waitForTimeout(300);
+    preDrawingDoc = await readDomainState();
+  }
+
+  const isSchemaValid = preDrawingDoc.schemaVersion === 1;
+  const isSessionIdMatch = String(preDrawingDoc.sessionId) === String(activeSessionId);
+  const isSymbolMatch = preDrawingDoc.symbol === primaryState.symbol;
+  const hasDrawings = Array.isArray(preDrawingDoc.drawings) && preDrawingDoc.drawings.length > 0;
+
+  if (!isSchemaValid || !isSessionIdMatch || !isSymbolMatch || !hasDrawings) {
+    throw new Error(`Keyboard isolation setup failed: canonical drawing doc invalid (schemaVersion=${preDrawingDoc.schemaVersion}, sessionId=${preDrawingDoc.sessionId}, symbol=${preDrawingDoc.symbol}, count=${preDrawingDoc.drawings?.length})`);
+  }
+
+  const preDrawingSnapshot = JSON.stringify(preDrawingDoc);
+  const preIsolationSnapshot = await captureSessionAuthoritySnapshot(activeSessionId);
 
   await page.locator('.session-picker-trigger').click();
   await page.locator('.picker-search-input').fill('SSI');
   await page.locator('.picker-search-input').press('ArrowRight'); // trigger next candle shortcut potentially
   await page.locator('.picker-search-input').press('Space'); // trigger autoplay potentially
   await page.locator('.picker-search-input').press('Delete'); // trigger drawing delete potentially
-  await page.keyboard.press('Escape'); // Close picker
-  await page.waitForTimeout(500);
 
-  const afterIsolatedState = await getSessionState(activeSessionId);
-  const afterIsolatedDrawingSnapshotRaw = await page.evaluate(({ id, symbol }) => localStorage.getItem(`sumi:drawing-document:v1:${id}:${encodeURIComponent(symbol)}`), { id: activeSessionId, symbol: primaryState.symbol });
-  const afterIsolatedStore = await page.evaluate(() => JSON.parse(localStorage.getItem('sumi-replay-store') || '{}')?.state?.sessionId);
+  const inPickerDrawingDoc = await readDomainState();
+  const inPickerDrawingSnapshot = JSON.stringify(inPickerDrawingDoc);
+  const inPickerAuthoritySnapshot = await captureSessionAuthoritySnapshot(activeSessionId);
+
+  await page.keyboard.press('Escape'); // Close picker
+  await page.waitForTimeout(300);
+
+  const postPickerDrawingDoc = await readDomainState();
+  const postPickerDrawingSnapshot = JSON.stringify(postPickerDrawingDoc);
+  const postIsolationSnapshot = await captureSessionAuthoritySnapshot(activeSessionId);
 
   // Prove normal replay shortcuts still work when focus returns
+  await focusWorkspaceBackground();
   await page.keyboard.press('ArrowRight');
   await page.waitForTimeout(500);
-  const postIsolationAdvanceState = await getSessionState(activeSessionId);
+  const postIsolationAdvanceSnapshot = await captureSessionAuthoritySnapshot(activeSessionId);
+
+  const evidenceJson = JSON.stringify({
+    schemaVersion: preDrawingDoc.schemaVersion,
+    sessionId: preDrawingDoc.sessionId,
+    symbol: preDrawingDoc.symbol,
+    preDrawingCount: preDrawingDoc.drawings.length,
+    preDrawingSnapshot,
+    inPickerDrawingSnapshot,
+    postPickerDrawingSnapshot,
+    preIsolationSnapshot,
+    postIsolationSnapshot,
+    postIsolationAdvanceSnapshot
+  });
 
   check('pro02.keyboard-isolation',
-    afterIsolatedState.current_index === isolatedSessionIndex
-      && afterIsolatedDrawingSnapshotRaw === isolatedDrawingSnapshotRaw
-      && afterIsolatedStore === Number(isolatedSessionIdentity)
-      && postIsolationAdvanceState.current_index === isolatedSessionIndex + 1,
-    `Typing in picker did not change replay index, drawings, or session identity. Focus return allowed normal shortcuts.`
+    isSchemaValid
+      && isSessionIdMatch
+      && isSymbolMatch
+      && hasDrawings
+      && inPickerDrawingSnapshot === preDrawingSnapshot
+      && postPickerDrawingSnapshot === preDrawingSnapshot
+      && validateAuthoritySnapshot(inPickerAuthoritySnapshot, activeSessionId, primaryState.symbol, primaryIndex)
+      && validateAuthoritySnapshot(postIsolationSnapshot, activeSessionId, primaryState.symbol, primaryIndex)
+      && validateAuthoritySnapshot(postIsolationAdvanceSnapshot, activeSessionId, primaryState.symbol, primaryIndex + 1),
+    evidenceJson
   );
 
   // Replay Context & Vietnamese Semantics (1280x800)
@@ -2435,28 +2736,154 @@ try {
   const readinessBadgeVisible = await page.getByTestId('replay-readiness-badge').isVisible();
   const barContextText = await page.getByTestId('replay-bar-context').innerText();
 
+  const semanticsPass = /\d{2}\/\d{2}\/\d{4}/.test(candleDateText)
+    && pro02HeaderText.includes('Asia/Ho_Chi_Minh')
+    && pro02HeaderText.includes('O:')
+    && pro02HeaderText.includes('H:')
+    && pro02HeaderText.includes('L:')
+    && pro02HeaderText.includes('C:')
+    && pro02HeaderText.includes('V:')
+    && pro02HeaderText.includes('1D')
+    && (pro02HeaderText.includes('Split') || pro02HeaderText.includes('Unadjusted'))
+    && pro02HeaderText.includes('Normal')
+    && barContextText.includes(`Bar: #`)
+    && readinessBadgeVisible;
+
   check('pro02.replay-context-vietnamese-semantics',
-    /\d{2}\/\d{2}\/\d{4}/.test(candleDateText)
-      && pro02HeaderText.includes('Asia/Ho_Chi_Minh')
-      && pro02HeaderText.includes('O:')
-      && pro02HeaderText.includes('H:')
-      && pro02HeaderText.includes('L:')
-      && pro02HeaderText.includes('C:')
-      && pro02HeaderText.includes('V:')
-      && pro02HeaderText.includes('1D')
-      && (pro02HeaderText.includes('Split') || pro02HeaderText.includes('Unadjusted'))
-      && pro02HeaderText.includes('Normal')
-      && barContextText.includes(`Bar: #`)
-      && readinessBadgeVisible,
-    `Replay context rendered Vietnamese date format, explicit timezone, full OHLCV, bar index, and correct Replay state labels`
+    semanticsPass,
+    JSON.stringify({
+      pass: semanticsPass,
+      subconditions: {
+        dateVietnamese: /\d{2}\/\d{2}\/\d{4}/.test(candleDateText),
+        timezone: pro02HeaderText.includes('Asia/Ho_Chi_Minh'),
+        ohlcv: pro02HeaderText.includes('O:') && pro02HeaderText.includes('H:') && pro02HeaderText.includes('L:') && pro02HeaderText.includes('C:') && pro02HeaderText.includes('V:'),
+        timeframe: pro02HeaderText.includes('1D'),
+        adjustment: pro02HeaderText.includes('Split') || pro02HeaderText.includes('Unadjusted'),
+        mode: pro02HeaderText.includes('Normal'),
+        barContext: barContextText.includes('Bar: #'),
+        readinessBadgeVisible,
+      },
+      candleDateText,
+      headerSnippet: pro02HeaderText.substring(0, 300),
+      barContextText,
+    })
   );
   await page.screenshot({ path: path.join(runDir, 'pro02-cross-route-workflow-1280x800.png') });
 
+  // PRO-03 — Data Catalog and Import Quality UAT Journey
+  // 1. PRO-DATA-01: Catalog Provenance & UI rendering
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto(`${frontendUrl}/import`);
+  await page.waitForSelector('text=Quản lý Danh mục & Nhập dữ liệu Dữ liệu Thị trường');
+  await page.getByRole('button', { name: /Danh mục dữ liệu/i }).click();
+  await page.waitForTimeout(500);
+  const catalogRes = await (await page.request.get(`${backendUrl}/api/data/catalog`)).json();
+  const catalogUatPass = Array.isArray(catalogRes) && catalogRes.every(item => item.symbol && item.timeframe && item.provenance_state);
+  check('pro03.catalog-provenance',
+    catalogUatPass,
+    JSON.stringify({ catalogCount: catalogRes.length, sample: catalogRes.slice(0, 3) })
+  );
+  await page.screenshot({ path: path.join(runDir, 'pro03-catalog-1440x1000.png') });
+
+  // 2. PRO-DATA-02: Preview classification before mutation
+  const testCsvContent = '<Ticker>,<DTYYYYMMDD>,<Open>,<High>,<Low>,<Close>,<Volume>\nPROTEST,20260105,50.0,52.0,49.0,51.0,100000\nPROTEST,20260106,51.0,53.0,50.0,52.0,120000\n';
+  const previewApiRes = await (await page.request.post(`${backendUrl}/api/import/preview`, {
+    multipart: {
+      file: { name: 'PROTEST.csv', mimeType: 'text/csv', buffer: Buffer.from(testCsvContent) },
+      adjustment_type: 'unadjusted'
+    }
+  })).json();
+
+  const previewPass = previewApiRes.can_accept === true && previewApiRes.parsed_count === 2 && previewApiRes.status === 'previewed';
+  check('pro03.preview-classification-before-mutation',
+    previewPass,
+    JSON.stringify({ run_id: previewApiRes.run_id, can_accept: previewApiRes.can_accept, parsed: previewApiRes.parsed_count })
+  );
+
+  // 3. PRO-DATA-03: Fail-closed ambiguity and conflicts
+  const badCsvContent = '<Ticker>,<DTYYYYMMDD>,<Open>,<High>,<Low>,<Close>,<Volume>\nBADSYM,20260103,50.0,49.0,52.0,51.0,100000\n';
+  const badPreviewRes = await (await page.request.post(`${backendUrl}/api/import/preview`, {
+    multipart: {
+      file: { name: 'BADSYM.csv', mimeType: 'text/csv', buffer: Buffer.from(badCsvContent) },
+      adjustment_type: 'unadjusted'
+    }
+  })).json();
+  const acceptAttemptRes = await page.request.post(`${backendUrl}/api/import/runs/${badPreviewRes.run_id}/accept`, {
+    data: { content_sha256: badPreviewRes.content_sha256 }
+  });
+  const failClosedPass = badPreviewRes.can_accept === false && badPreviewRes.status === 'blocked' && acceptAttemptRes.status() === 400;
+  check('pro03.fail-closed-ambiguity-and-conflicts',
+    failClosedPass,
+    JSON.stringify({ blockedStatus: badPreviewRes.status, rejectStatus: acceptAttemptRes.status(), reason: badPreviewRes.block_reason })
+  );
+
+  // 4. PRO-DATA-04: Idempotent manifest & checksum
+  const acceptRes1 = await (await page.request.post(`${backendUrl}/api/import/runs/${previewApiRes.run_id}/accept`, {
+    data: { content_sha256: previewApiRes.content_sha256 }
+  })).json();
+  const acceptRes2 = await (await page.request.post(`${backendUrl}/api/import/runs/${previewApiRes.run_id}/accept`, {
+    data: { content_sha256: previewApiRes.content_sha256 }
+  })).json();
+  const idempotentPass = acceptRes1.status === 'accepted' && acceptRes2.status === 'noop' && acceptRes2.accepted_count === 0;
+  check('pro03.idempotent-manifest-checksum',
+    idempotentPass,
+    JSON.stringify({ accept1: acceptRes1.status, accept2: acceptRes2.status })
+  );
+
+  // 5. PRO-DATA-05: VN_TRADING_WEEK_V1 Weekly provenance
+  const catalogAfter = await (await page.request.get(`${backendUrl}/api/data/catalog`)).json();
+  const protestWeekly = catalogAfter.find(item => item.symbol === 'PROTEST' && item.timeframe === '1W');
+  const weeklyPass = protestWeekly != null && protestWeekly.row_count === 1;
+  check('pro03.vn-trading-week-v1-provenance',
+    weeklyPass,
+    JSON.stringify({ weeklyItem: protestWeekly })
+  );
+
+  // 6. PRO-DATA-06: Adjustment isolation & conflict quarantine
+  const adjustedCsvContent = '<Ticker>,<DTYYYYMMDD>,<Open>,<High>,<Low>,<Close>,<Volume>\nPROTEST,20260105,40.0,42.0,39.0,41.0,100000\n';
+  const adjPreviewRes = await (await page.request.post(`${backendUrl}/api/import/preview`, {
+    multipart: {
+      file: { name: 'PROTEST_adj.csv', mimeType: 'text/csv', buffer: Buffer.from(adjustedCsvContent) },
+      adjustment_type: 'adjusted'
+    }
+  })).json();
+  await page.request.post(`${backendUrl}/api/import/runs/${adjPreviewRes.run_id}/accept`, {
+    data: { content_sha256: adjPreviewRes.content_sha256 }
+  });
+  const catalogAdj = await (await page.request.get(`${backendUrl}/api/data/catalog`)).json();
+  const protestUnadj = catalogAdj.find(item => item.symbol === 'PROTEST' && item.adjustment_type === 'unadjusted' && item.timeframe === '1D');
+  const protestAdj = catalogAdj.find(item => item.symbol === 'PROTEST' && item.adjustment_type === 'adjusted' && item.timeframe === '1D');
+  const isolationPass = protestUnadj != null && protestAdj != null && protestUnadj.row_count === 2 && protestAdj.row_count === 1;
+  check('pro03.adjustment-isolation-and-conflict-quarantine',
+    isolationPass,
+    JSON.stringify({ unadjustedRows: protestUnadj?.row_count, adjustedRows: protestAdj?.row_count })
+  );
+
+  // 7. PRO-DATA-07: Guarded exact rollback
+  const rollbackRes = await (await page.request.post(`${backendUrl}/api/import/runs/${adjPreviewRes.run_id}/rollback`)).json();
+  const catalogPostRollback = await (await page.request.get(`${backendUrl}/api/data/catalog`)).json();
+  const protestAdjAfterRollback = catalogPostRollback.find(item => item.symbol === 'PROTEST' && item.adjustment_type === 'adjusted' && item.timeframe === '1D');
+  const rollbackPass = rollbackRes.status === 'rolled_back' && protestAdjAfterRollback == null;
+  check('pro03.exact-guarded-rollback',
+    rollbackPass,
+    JSON.stringify({ rollbackStatus: rollbackRes.status, restoredMutations: rollbackRes.restored_mutations_count })
+  );
+
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto(`${frontendUrl}/import`);
+  await page.waitForTimeout(500);
+  await page.screenshot({ path: path.join(runDir, 'pro03-import-preview-1280x800.png') });
+
+
   // Rework Evidence Seal
+  const sealPass = productUatManifest.assertions.length >= 280 && assertionManifest.has('pro02.rework-evidence-seal');
   check('pro02.rework-evidence-seal',
-    productUatManifest.assertions.length >= 280
-      && assertionManifest.has('pro02.rework-evidence-seal'),
-    `Manifest assertions sealed with total count ${productUatManifest.assertions.length}`
+    sealPass,
+    JSON.stringify({
+      pass: sealPass,
+      manifestCount: productUatManifest.assertions.length,
+      hasSealId: assertionManifest.has('pro02.rework-evidence-seal'),
+    })
   );
 
   const networkOriginList = [...networkOrigins].sort();

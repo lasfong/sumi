@@ -289,15 +289,10 @@ Ignored `test-results/` paths cannot be the sole authority for a fail-closed UAT
 
 Only the next approved batch is authorized. A later batch may be refined using evidence from earlier work, but its outcome and acceptance contract cannot be silently reduced.
 
-### Current program status — 2026-08-01
+### Program status (volatile state)
 
 - The ordered program contains 13 batches, `PRO-00` through `PRO-12`.
-- PRO-00 implementation is complete and pushed to `origin/master` in commit `55ec5f9` (`fix(replay): close PRO-00 integrity and evidence gaps`).
-- Focused backend/frontend tests, the full technical suites, lint, build, `verify-v2`, and a temporary-database browser UAT result of 275/275 have passed during implementation.
-- At the user's direction, the final canonical `run-product-uat`/`verify-product` rerun is separated from implementation and remains pending.
-- PRO-00 has not passed the independent Reviewer gate. Its implementation-complete state is not a batch-complete or release-ready claim.
-- PRO-01 through PRO-12 have not started. PRO-01 remains unauthorized until PRO-00 verification and independent review close successfully.
-- Cross-machine continuation is governed by `docs/PROFESSIONALIZATION_HANDOFF_2026-08-01.md` and `docs/dev-prompts/PRO_00_VERIFICATION_CONTINUATION_PROMPT.md`.
+The current approval, active batch, evidence paths, and exact next action are volatile and are maintained only in `docs/AUTONOMOUS_EXECUTION_STATE.md`. This master plan defines the stable ordered contract; it must not duplicate a dated execution status.
 
 ### PRO-00 — Integrity and Evidence Closure
 

@@ -1,5 +1,7 @@
 # Sumi Professionalization cross-machine handoff
 
+> **SUPERSEDED (2026-08-09).** This handoff describes the pre-PRO-00 state and is retained as historical provenance only. For current work, read `AGENTS.md`, `docs/INDEX.md`, `docs/AUTONOMOUS_EXECUTION_STATE.md`, the active PRO dossier, and the active DEV prompt named by the ledger.
+
 ## Purpose
 
 This document is the concise operational handoff for continuing the Professionalization program on another machine. It supplements, but does not replace, `AGENTS.md`, the canonical V3 documents, the Professionalization master plan, or the active batch ExecPlan.
