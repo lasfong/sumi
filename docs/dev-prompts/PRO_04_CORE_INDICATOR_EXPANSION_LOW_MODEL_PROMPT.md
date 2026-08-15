@@ -14,7 +14,7 @@ Read completely before editing:
 6. `docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md`, especially PRO-IND-01..11 and PRO-04
 7. `docs/program/PRO_04_CORE_INDICATOR_EXPANSION.md`
 8. `docs/exec-plans/PRO_04_CORE_INDICATOR_EXPANSION.md`
-9. `docs/reviews/PRO_03_REVIEW_2026-08-10_R2.md`
+9. `docs/reviews/PRO_03_REVIEW_2026-08-12_R4.md`
 10. `PLANS.md`
 
 Invocation of this prompt is the user's explicit authorization to start PRO-04 implementation, but not to commit, push, tag, release, add a dependency, mutate production data, or begin PRO-05.

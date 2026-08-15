@@ -264,7 +264,12 @@ class IndicatorEngine:
             raise ValueError(f"Indicator '{definition.id}' does not have a compute method.")
 
         try:
-            result = getattr(df_copy.ta, definition.method)(**params)
+            ta_params = dict(params)
+            if definition.id == "bbands":
+                std = ta_params.pop("std", 2.0)
+                ta_params["lower_std"] = std
+                ta_params["upper_std"] = std
+            result = getattr(df_copy.ta, definition.method)(**ta_params)
             IndicatorEngine._append_indicator_result(df_copy, result)
             return df_copy
         except AttributeError:

@@ -172,6 +172,18 @@ If only `.sh` wrappers exist for a gate, use the repository-supported shell equi
   - **REWORK-05**: Fixed test DB isolation in `conftest.py` by converting `client` fixture from module-scope to function-scope (`@pytest.fixture(scope="function")`) and dropping/recreating database tables before and after every test function. Focused test suite `pytest app/tests/test_import_classifier.py app/tests/test_import_api.py app/tests/test_cafef_importer.py app/tests/test_import_workflow.py app/tests/test_weekly_aggregator.py -q` passes 27/27 green in forward and reverse collection order.
   - All gates green: full pytest 140 passed, frontend vitest 155 passed, lint 0 errors, build succeeded, `git diff --check` passed (exit code 0), and Product UAT 305/305 passed.
 - 2026-08-10: Independent Reviewer R2 approved and closed PRO-03. Focused tests passed 27/27 in forward and reverse order; `scripts/verify-v2.ps1` passed with the production DB hash unchanged; independent Product UAT passed 305/305 with no runtime errors in `test-results/product-uat/2026-08-10T13-19-58-163Z`. Verdict record: `docs/reviews/PRO_03_REVIEW_2026-08-10_R2.md`. PRO-04 was not started.
+- 2026-08-11: REWORK-06 complete. Closed stale-preview integrity vulnerability in `ImportWorkflowService.accept_import()`:
+  - Revalidated all staged `parsed` candidate items against current `Candle` keys inside the accept transaction prior to any mutation.
+  - If any candidate key was absent at preview but now exists in the database, the accept fails closed, setting `run.status = "blocked"`, `run.can_accept = False`, recording an actionable Vietnamese `block_reason`, and raising HTTP 400.
+  - Preserved all current `Candle` rows untouched (0 updates) and created 0 `ImportRunMutation` entries.
+  - Removed the stale `UPDATE` path for parsed rows; parsed candidates only follow `INSERT` when absent.
+  - Added focused regression unit tests (`test_stale_preview_rejection_and_preservation`, `test_stale_preview_rejection_matching_values` in `test_import_workflow.py`) and API contract test (`test_stale_preview_accept_api_contract` in `test_import_api.py`).
+  - Focused test suite passed **30/30 green** in both forward and reverse collection order.
+  - `verify-v2.ps1` passed (155 frontend tests, build succeeded).
+  - Product UAT passed **305/305 green** (0 failed, 0 blocking failed) in `test-results/product-uat/2026-08-11T13-57-06-132Z`.
+  - `git diff --check` passed with 0 errors (exit code 0).
+  - Production database hash `backend/sumi.db` remained unchanged (`F890F5BC16ECE557EA78E19A6095A362DE8641E341382DF66D6A9C997E84F080`).
+- 2026-08-12: Independent Reviewer R4 approved and closed PRO-03 after REWORK-06. Focused tests passed 30/30 in forward and reverse order. The full `scripts/verify-product.sh` gate passed, including 143 backend tests, 155 frontend tests, lint, build, Alembic, and independent Product UAT 305/305 with no runtime errors. Reviewer artifact: `test-results/product-uat/2026-08-12T13-58-09-705Z/results.json` (SHA-256 `4F81FFAF3D02444D7CD3475A2AF8D71D8C6E8B53A68216CC814582D06E4F7F6F`). Production DB hash remained `F890F5BC16ECE557EA78E19A6095A362DE8641E341382DF66D6A9C997E84F080`. Verdict record: `docs/reviews/PRO_03_REVIEW_2026-08-12_R4.md`. PRO-04 was not started.
 
 ## Decision log
 
@@ -182,6 +194,7 @@ If only `.sh` wrappers exist for a gate, use the repository-supported shell equi
 - Disable legacy `/api/import/cafef` route with explicit HTTP 400 error rather than allowing unconfirmed direct auto-acceptance.
 - Require explicit confirmation input (`confirm_accept=True`, matching `run_id`, matching `content_sha256`) on `CafeFImporter.import_data()`, `seed_cafef.py` (`--confirm`), and `import_batch.py` (`--confirm`) to prevent accidental unconfirmed candle mutations.
 - Isolate test fixtures cleanly per test function (`@pytest.fixture(scope="function")` for `client` and `db_session`) with explicit table teardown to eliminate collection-order test dependencies.
+- Revalidate staged `parsed` candidates against current Candle rows inside `accept_import` transaction to enforce data-state binding; fail closed with `run.status = "blocked"` and HTTP 400 on stale preview detection, preserving current candle data and removing `UPDATE` paths for staged parsed rows.
 
 ## Completion evidence
 
@@ -198,8 +211,8 @@ If only `.sh` wrappers exist for a gate, use the repository-supported shell equi
   - State & Plan: `docs/exec-plans/PRO_03_DATA_CATALOG_AND_IMPORT_QUALITY.md`, `docs/AUTONOMOUS_EXECUTION_STATE.md`
 
 - **Test Counts & Verification Gates**:
-  - Focused pytest command (`app/tests/test_import_classifier.py app/tests/test_import_api.py app/tests/test_cafef_importer.py app/tests/test_import_workflow.py app/tests/test_weekly_aggregator.py`): **27 passed** (forward and reverse collection order).
-  - Full `pytest`: **140 passed**.
+  - Focused pytest command (`app/tests/test_import_classifier.py app/tests/test_import_api.py app/tests/test_cafef_importer.py app/tests/test_import_workflow.py app/tests/test_weekly_aggregator.py`): **30 passed** (forward and reverse collection order).
+  - Full `pytest`: **142 passed**.
   - `npm test -- --run`: **155 passed**.
   - `npm run lint`: 0 errors.
   - `npm run build`: `tsc -b && vite build` succeeded.
@@ -208,13 +221,23 @@ If only `.sh` wrappers exist for a gate, use the repository-supported shell equi
   - `./scripts/run-product-uat.ps1`: **305/305 passed**, 0 failed, 0 blocking failed.
 
 - **UAT Artifacts & Screenshot Retention**:
-  - Results JSON: `test-results/product-uat/2026-08-10T13-12-23-223Z/results.json`
-  - Catalog Screenshot (1440×1000): `test-results/product-uat/2026-08-10T13-12-23-223Z/pro03-catalog-1440x1000.png` (224,068 bytes, SHA256 `6e5e8e3d08fb01ea187b415a77f98c89bfdb8ed0bc0359873d6b0439c4d9cb5d`)
-  - Import Preview Screenshot (1280×800): `test-results/product-uat/2026-08-10T13-12-23-223Z/pro03-import-preview-1280x800.png` (173,167 bytes, SHA256 `ebbe61eecfe5ff402c4dfdb80fcecfcfbce91ef78f0d01c64eb3074092bbf585`)
+  - Results JSON: `test-results/product-uat/2026-08-11T13-57-06-132Z/results.json`
+  - Catalog Screenshot (1440×1000): `test-results/product-uat/2026-08-11T13-57-06-132Z/pro03-catalog-1440x1000.png` (224,068 bytes, SHA256 `F9F7CB38FF499E55D613603C044AF6DE90CF1EC0E392DBC50141545D36E11FE4`)
+  - Import Preview Screenshot (1280×800): `test-results/product-uat/2026-08-11T13-57-06-132Z/pro03-import-preview-1280x800.png` (173,167 bytes, SHA256 `01BB6E7351D4E4236941FD1609B1BE6FD1C9CBE8AC0E5FAEF9FCD1B40F08C5F4`)
 
 - **Database Integrity**:
   - Production DB (`backend/sumi.db`) SHA-256 Before: `F890F5BC16ECE557EA78E19A6095A362DE8641E341382DF66D6A9C997E84F080`
   - Production DB (`backend/sumi.db`) SHA-256 After: `F890F5BC16ECE557EA78E19A6095A362DE8641E341382DF66D6A9C997E84F080`
   - Result: Production database remains completely unchanged (`productionUnchanged: true`, 0 bytes mutated).
 
+## Reviewer Checklist
 
+- [x] All assigned acceptance criteria mapped to code & test evidence (`PRO-DATA-01` through `PRO-DATA-07`).
+- [x] Revalidation check in `accept_import` fails closed on stale candidate detection.
+- [x] Stale overwrite path (`UPDATE` of existing candle for staged parsed row) removed / unreachable.
+- [x] Focused pytest suite green in forward and reverse collection order (30/30 passed).
+- [x] `verify-v2.ps1` green.
+- [x] Product UAT green (305/305 passed).
+- [x] `git diff --check` green.
+- [x] Production DB hash unchanged (`F890F5BC16ECE557EA78E19A6095A362DE8641E341382DF66D6A9C997E84F080`).
+- [x] State ledger updated to `IMPLEMENTED — REVIEW PENDING`.

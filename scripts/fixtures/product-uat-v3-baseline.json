@@ -2458,6 +2458,58 @@
       "acceptance_ids": [
         "PRO-DATA-07"
       ]
+    },
+    {
+      "id": "pro04.sma-overlay",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-IND-02",
+        "PRO-IND-04",
+        "PRO-IND-05"
+      ]
+    },
+    {
+      "id": "pro04.bbands-channel",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-IND-02",
+        "PRO-IND-04",
+        "PRO-IND-05"
+      ]
+    },
+    {
+      "id": "pro04.atr-oscillator",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-IND-02",
+        "PRO-IND-04",
+        "PRO-IND-05"
+      ]
+    },
+    {
+      "id": "pro04.volume-sma-line",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-IND-02",
+        "PRO-IND-04",
+        "PRO-IND-05"
+      ]
+    },
+    {
+      "id": "pro04.unreleased-fail-closed",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-IND-02",
+        "PRO-IND-03"
+      ]
+    },
+    {
+      "id": "pro04.indicator-expansion-lifecycle",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-IND-06",
+        "PRO-IND-11"
+      ]
     }
   ]
 }

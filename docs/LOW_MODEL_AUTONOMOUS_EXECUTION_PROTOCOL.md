@@ -6,6 +6,8 @@ This protocol lets a lower-cost implementation model execute one approved Sumi b
 
 It does not relax `AGENTS.md`, acceptance criteria, architecture decisions, independent Reviewer gates, or the prohibition on starting a later batch before the current batch is approved.
 
+For the exact shared-workspace state machine, file ownership, detailed DEV/REVIEW definition of done, and standardized Antigravity session prompts, use `docs/ANTIGRAVITY_TWO_SESSION_OPERATING_MODEL.md`. This document retains the core autonomous-execution rules.
+
 ## Roles
 
 ### Implementation session

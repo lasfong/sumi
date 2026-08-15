@@ -7,14 +7,14 @@ This is the single entry point when Sumi is moved to another computer. It record
 - Repository: `https://github.com/lasfong/sumi.git`
 - Branch: `master`
 - Pushed remote: `origin/master` contains PRO-00, PRO-01, PRO-02, and PRO-03 commits.
-- Approved program state: PRO-00, PRO-01, PRO-02, and PRO-03 approved; PRO-04 through PRO-12 not started.
-- Latest verdict: `docs/reviews/PRO_03_REVIEW_2026-08-10_R2.md` — `APPROVE`.
-- Authoritative reviewer UAT: `test-results/product-uat/2026-08-10T13-19-58-163Z/results.json` — 305/305 passed, 0 failed, 0 blocking failed, no runtime errors.
+- Approved program state: PRO-00 through PRO-04 approved. PRO-05 through PRO-12 not started.
+- Latest verdict: `docs/reviews/PRO_04_REVIEW_2026-08-15_R5.md` — `APPROVE`.
+- Authoritative reviewer UAT: `test-results/product-uat/2026-08-15T14-13-42-897Z/results.json` — 311/311 passed, 0 failed, 0 blocking failed, no runtime errors.
 - Production database: `backend/sumi.db`, 620,945,408 bytes, SHA-256 `F890F5BC16ECE557EA78E19A6095A362DE8641E341382DF66D6A9C997E84F080`.
-- Reviewer results SHA-256: `15407E93BF54ADAD745ED5E54ECE62DECDF05C9C9D1D07EA2F067822293B7E3D`.
-- Workspace state: All versioned source, migrations, tests, exec-plans, prompts, and handoff documentation for PRO-03 are committed to `master` and pushed to `origin/master`.
+- Reviewer results SHA-256: `227C60A3E18C8B01467B0AC8D5CEA1AA7C5A73F9A760D6E690521C800E9C3E26`.
+- Workspace state: the prior PRO-03 implementation is committed to `master`; PRO-04 implementation and reviewer approval documents are in the working tree.
 
-PRO-03 is fully committed and pushed. PRO-04 implementation has not started.
+PRO-04 is approved and closed. PRO-05 implementation has not started.
 
 ## 2. What must move to the new computer
 
@@ -43,14 +43,14 @@ After copying `backend/sumi.db`, verify its SHA-256 before opening the applicati
 
 Copy at least this complete directory:
 
-`test-results/product-uat/2026-08-10T13-19-58-163Z/`
+`test-results/product-uat/2026-08-12T13-58-09-705Z/`
 
 It contains `results.json` and the retained screenshots. The directory is ignored by Git. Other historical `test-results/` directories are optional unless the user wants the full audit history.
 
 ## 3. Recommended transfer method
 
 1. **Code & Docs**: Perform a standard `git clone https://github.com/lasfong/sumi.git` or `git pull origin master` on the new machine.
-2. **Local Data & Test Evidence**: Copy `backend/sumi.db`, `data/raw/`, and `test-results/product-uat/2026-08-10T13-19-58-163Z/` via local network, external drive, or secure file transfer.
+2. **Local Data & Test Evidence**: Copy `backend/sumi.db`, `data/raw/`, and `test-results/product-uat/2026-08-12T13-58-09-705Z/` via local network, external drive, or secure file transfer.
 
 Before disconnecting the old machine, retain two independent copies of `backend/sumi.db`. Do not delete or overwrite the old workspace until the destination passes the checks below.
 
@@ -85,7 +85,7 @@ git branch --show-current
 git rev-parse HEAD
 git status --short
 Get-FileHash -Algorithm SHA256 backend\sumi.db
-Get-FileHash -Algorithm SHA256 test-results\product-uat\2026-08-10T13-19-58-163Z\results.json
+Get-FileHash -Algorithm SHA256 test-results\product-uat\2026-08-12T13-58-09-705Z\results.json
 git diff --check
 ```
 
@@ -97,7 +97,7 @@ After dependencies are installed, run the isolated fast gate:
 .\scripts\verify-v2.ps1
 ```
 
-Record the database hash before and after; both must equal the value in section 1. Product UAT need not be rerun merely to copy the workspace if the retained reviewer artifact and hashes match. Rerun it when PRO-04 reaches its Reviewer gate.
+Record the database hash before and after; both must equal the value in section 1. Product UAT need not be rerun merely to copy the workspace if the retained reviewer artifact and hashes match. Rerun it when a later PRO reaches its Reviewer gate.
 
 ## 6. Canonical read order on the new computer
 
@@ -105,13 +105,13 @@ Record the database hash before and after; both must equal the value in section 
 2. this file
 3. `docs/INDEX.md`
 4. `docs/AUTONOMOUS_EXECUTION_STATE.md`
-5. `docs/LOW_MODEL_AUTONOMOUS_EXECUTION_PROTOCOL.md`
-6. `docs/SESSION_HANDOFF_PROTOCOL.md`
-7. `docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md`
-8. `docs/reviews/PRO_03_REVIEW_2026-08-10_R2.md`
-9. `docs/program/PRO_04_CORE_INDICATOR_EXPANSION.md`
-10. `docs/exec-plans/PRO_04_CORE_INDICATOR_EXPANSION.md`
-11. `docs/dev-prompts/PRO_04_CORE_INDICATOR_EXPANSION_LOW_MODEL_PROMPT.md`
+5. `docs/ANTIGRAVITY_TWO_SESSION_OPERATING_MODEL.md`
+6. `docs/LOW_MODEL_AUTONOMOUS_EXECUTION_PROTOCOL.md`
+7. `docs/SESSION_HANDOFF_PROTOCOL.md`
+8. `docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md`
+9. `docs/reviews/PRO_03_REVIEW_2026-08-12_R4.md`
+10. `docs/reviews/PRO_04_REVIEW_2026-08-15_R5.md`
+11. `docs/exec-plans/PRO_04_CORE_INDICATOR_EXPANSION.md`
 
 Old V2 documents, historical V3 Batch 0–5 records, `docs/tester/`, and superseded handoffs are evidence only. They do not override the files above.
 
@@ -122,8 +122,8 @@ Old V2 documents, historical V3 Batch 0–5 records, `docs/tester/`, and superse
 | PRO-00 | Approved | Honest blind/signal-review replay and fail-closed UAT authority. |
 | PRO-01 | Approved | Backtest and analytics metrics report validity and refuse false precision. |
 | PRO-02 | Approved | Dashboard, Replay, Journal, and Analytics operate as one daily workflow. |
-| PRO-03 | Approved | Catalogued Daily/Weekly data with preview, conflicts, provenance, idempotence, and rollback. |
-| PRO-04 | Prepared, not started | Release SMA, Bollinger Bands, ATR, and backend Volume SMA completely. |
+| PRO-03 | Approved | Catalog/import capability with stale-preview acceptance fail-closed. |
+| PRO-04 | Approved | Release SMA, Bollinger Bands, ATR, and Volume SMA with exact parameter/output contracts. |
 | PRO-05 | Not started | Release MFI, Stochastic, ADX, and Relative Strength vs VNINDEX. |
 | PRO-06 | Not started | Release Keltner Channels, PSAR, and SuperTrend. |
 | PRO-07 | Not started | Release Ichimoku with an explicit no-look-ahead displacement contract. |
@@ -137,21 +137,17 @@ After PRO-12, the intended result is a dependable local-first Vietnam-market rep
 
 ## 8. Exact next action
 
-PRO-04 planning is already prepared, but implementation has not started. After the destination checks pass, open one DEV/Antigravity session at the repository root and give it exactly this prompt:
+PRO-04 is closed and independently approved. PRO-05 remains unauthorized until explicit user instruction. No further session actions are authorized without user prompt.
 
-```text
-Execute docs/dev-prompts/PRO_04_CORE_INDICATOR_EXPANSION_LOW_MODEL_PROMPT.md exactly. Work continuously from the transferred workspace until a genuine blocker or the Independent Reviewer gate. Do not rely on chat history, do not commit or push, and do not start PRO-05.
-```
+## Appendix A — historical transferred worktree inventory
 
-The DEV session must update repository files and retained artifacts directly. The user does not copy intermediate logs between IDEs. At the Reviewer gate, return to an Independent Reviewer session and say only:
+This appendix records the original 2026-08-10 transfer snapshot only. It is historical and does not describe the current dirty-worktree inventory; section 8 and the state ledger are the current authority.
 
-```text
-Antigravity has reached the Reviewer gate. Review PRO-04 from the current workspace.
-```
-
-The reviewer reads the workspace; no pasted implementation report is required.
-
-## Appendix A — expected worktree inventory
+- `docs/AUTONOMOUS_EXECUTION_STATE.md`
+- `docs/INDEX.md`
+- `docs/MACHINE_TRANSFER_HANDOFF_2026-08-10.md`
+- `docs/dev-prompts/PRO_03_STALE_PREVIEW_REWORK_PROMPT.md`
+- `docs/reviews/PRO_03_REVIEW_2026-08-10_R3.md`
 
 The source checkpoint has 23 modified entries and 21 untracked entries. `docs/program/` is shown by Git as one untracked directory but contains the PRO-03 through PRO-12 dossiers listed in `docs/program/README.md`.
 

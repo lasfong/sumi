@@ -42,7 +42,13 @@ export class SeriesManager {
   setVolume(data: VolumeData[]): void {
     this.volumeData = data;
     this.indicatorSeries.forEach(managed => {
-      if (managed.paneId === 'volume') managed.series.forEach(series => series.setData(data));
+      if (managed.paneId === 'volume') {
+        managed.series.forEach((series, index) => {
+          if (managed.definitions[index]?.seriesKey === 'raw-volume' || managed.definitions[index]?.type === 'histogram') {
+            series.setData(data);
+          }
+        });
+      }
     });
   }
   updateCandle(candle: CandleData, volume?: VolumeData): void {
@@ -50,7 +56,13 @@ export class SeriesManager {
     this.candleData = index < 0 ? [...this.candleData, candle] : this.candleData.map((item, itemIndex) => itemIndex === index ? candle : item);
     this.candles.update(candle);
     if (volume) this.indicatorSeries.forEach(managed => {
-      if (managed.paneId === 'volume') managed.series.forEach(series => series.update(volume));
+      if (managed.paneId === 'volume') {
+        managed.series.forEach((series, index) => {
+          if (managed.definitions[index]?.seriesKey === 'raw-volume' || managed.definitions[index]?.type === 'histogram') {
+            series.update(volume);
+          }
+        });
+      }
     });
   }
 
@@ -72,7 +84,8 @@ export class SeriesManager {
           : this.chart.addSeries(LineSeries, options, paneIndex);
         staged.push(created);
         stage = `set-data:${definition.seriesKey}`;
-        created.setData((paneId === 'volume' ? this.volumeData : definition.data) as never);
+        const seriesData = (paneId === 'volume' && (definition.seriesKey === 'raw-volume' || definition.type === 'histogram')) ? this.volumeData : definition.data;
+        created.setData(seriesData as never);
         stage = `references:${definition.seriesKey}`;
         definition.references?.forEach(reference => created.createPriceLine({
           price: reference.value, title: reference.label, color: reference.color ?? 'rgba(255,255,255,.35)',

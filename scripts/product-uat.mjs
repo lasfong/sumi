@@ -327,7 +327,7 @@ try {
       page.getByRole('button', { name, exact: true }).click(),
     ]);
     if (!response.ok()) throw new Error(`Replay navigation ${name} failed: ${response.status()}`);
-    await page.waitForTimeout(40);
+    await page.waitForTimeout(200);
     return getSessionState(sessionIdValue);
   };
   const inspectForbiddenSignalSurface = async (signal, sessionState) => {
@@ -508,7 +508,7 @@ try {
   const focusWorkspaceBackground = async () => page.getByTestId('chart-workspace').evaluate(node => { node.setAttribute('tabindex', '-1'); node.focus(); });
   const batch2 = (id, pass, evidence) => check(`batch2.${id}`, pass, evidence);
   const inspectIndicatorLayout = (document, chart) => {
-    const expected = document.instances.filter(instance => instance.visible && instance.placement !== 'price').map(instance => instance.paneId);
+    const expected = [...new Set(document.instances.filter(instance => instance.visible && instance.placement !== 'price').map(instance => instance.paneId))];
     const panes = chart.panes.filter(pane => pane.id === 'price' || expected.includes(pane.id));
     const actual = panes.filter(pane => pane.id !== 'price').map(pane => pane.id);
     const price = panes.find(pane => pane.id === 'price');
@@ -709,6 +709,121 @@ try {
   batch2('layout-add-remove-cycle', inspectIndicatorLayout(addedLayoutDocument, addedLayoutChart).pass
     && inspectIndicatorLayout(removedLayoutDocument, removedLayoutChart).pass,
   JSON.stringify({ added: inspectIndicatorLayout(addedLayoutDocument, addedLayoutChart), removed: inspectIndicatorLayout(removedLayoutDocument, removedLayoutChart) }));
+
+  // PRO-04: exercise core indicator expansion (SMA, Bollinger Bands, ATR, Volume SMA) and unreleased definition isolation.
+  const sma20 = await addIndicator('sma', { length: 20 });
+  const bbands = await addIndicator('bbands', { length: 20, std: 2.25 });
+  const atr = await addIndicator('atr', { length: 14 });
+  const volumeSma = await addIndicator('volume_sma', { length: 20 });
+  await page.waitForTimeout(1_000);
+
+  const pro04DomainDoc = await readIndicatorDomain();
+  const pro04Chart = await readIndicatorChart();
+
+  const smaSnapshot = pro04Chart.instances.find(inst => inst.id === sma20.id);
+  const bbandsSnapshot = pro04Chart.instances.find(inst => inst.id === bbands.id);
+  const atrSnapshot = pro04Chart.instances.find(inst => inst.id === atr.id);
+  const volumeSmaSnapshot = pro04Chart.instances.find(inst => inst.id === volumeSma.id);
+
+  const pro04Runtime = await readIndicatorRuntime();
+  const smaVal = pro04Runtime[sma20.id]?.values?.primary;
+  const bbUpperVal = pro04Runtime[bbands.id]?.values?.upper;
+  const bbMiddleVal = pro04Runtime[bbands.id]?.values?.middle;
+  const bbLowerVal = pro04Runtime[bbands.id]?.values?.lower;
+  const atrVal = pro04Runtime[atr.id]?.values?.primary;
+  const volSmaVal = pro04Runtime[volumeSma.id]?.values?.primary;
+
+  const getRows = json => (Array.isArray(json) ? json : (json?.data || []));
+  const smaData = getRows(await (await page.request.get(`${backendUrl}/api/replay/sessions/${sessionId}/indicators?indicator=sma&length=20`)).json());
+  const bbandsData = getRows(await (await page.request.get(`${backendUrl}/api/replay/sessions/${sessionId}/indicators?indicator=bbands&length=20&std=2.25`)).json());
+  const atrData = getRows(await (await page.request.get(`${backendUrl}/api/replay/sessions/${sessionId}/indicators?indicator=atr&length=14`)).json());
+  const volSmaData = getRows(await (await page.request.get(`${backendUrl}/api/replay/sessions/${sessionId}/indicators?indicator=volume_sma&length=20`)).json());
+
+  const expectedSmaVal = smaData[smaData.length - 1]?.['SMA_20'];
+  const expectedBbuVal = bbandsData[bbandsData.length - 1]?.['BBU_20_2.25_2.25'];
+  const expectedBbmVal = bbandsData[bbandsData.length - 1]?.['BBM_20_2.25_2.25'];
+  const expectedBblVal = bbandsData[bbandsData.length - 1]?.['BBL_20_2.25_2.25'];
+  const expectedAtrVal = atrData[atrData.length - 1]?.['ATRr_14'];
+  const expectedVolSmaVal = volSmaData[volSmaData.length - 1]?.['VOLUME_SMA_20'];
+
+  check('pro04.sma-overlay', sma20.placement === 'price'
+    && sma20.paneId === 'price'
+    && sma20.params.length === 20
+    && Number.isFinite(smaVal)
+    && smaVal === expectedSmaVal
+    && smaSnapshot?.series.includes('primary'),
+    JSON.stringify({ instance: sma20, snapshot: smaSnapshot, renderedValue: smaVal, expectedValue: expectedSmaVal }));
+
+  check('pro04.bbands-channel', bbands.placement === 'price'
+    && bbands.paneId === 'price'
+    && bbands.params.length === 20
+    && bbands.params.std === 2.25
+    && Number.isFinite(bbUpperVal) && Number.isFinite(bbMiddleVal) && Number.isFinite(bbLowerVal)
+    && bbUpperVal === expectedBbuVal && bbMiddleVal === expectedBbmVal && bbLowerVal === expectedBblVal
+    && bbUpperVal > bbMiddleVal && bbMiddleVal > bbLowerVal
+    && JSON.stringify(bbandsSnapshot?.series) === JSON.stringify(['upper', 'middle', 'lower']),
+    JSON.stringify({
+      instance: bbands, snapshot: bbandsSnapshot,
+      renderedValues: { upper: bbUpperVal, middle: bbMiddleVal, lower: bbLowerVal },
+      expectedValues: { upper: expectedBbuVal, middle: expectedBbmVal, lower: expectedBblVal },
+    }));
+
+  check('pro04.atr-oscillator', atr.placement === 'oscillator'
+    && atr.paneId.startsWith('indicator:')
+    && atr.params.length === 14
+    && Number.isFinite(atrVal)
+    && atrVal === expectedAtrVal
+    && atrSnapshot?.series.includes('primary'),
+    JSON.stringify({ instance: atr, snapshot: atrSnapshot, renderedValue: atrVal, expectedValue: expectedAtrVal }));
+
+  check('pro04.volume-sma-line', volumeSma.placement === 'volume'
+    && volumeSma.paneId === 'volume'
+    && volumeSma.params.length === 20
+    && Number.isFinite(volSmaVal)
+    && volSmaVal === expectedVolSmaVal
+    && volumeSmaSnapshot?.series.includes('primary'),
+    JSON.stringify({ instance: volumeSma, snapshot: volumeSmaSnapshot, renderedValue: volSmaVal, expectedValue: expectedVolSmaVal }));
+
+  const backendDefsResponse = await page.request.get(`${backendUrl}/api/indicators/registry`);
+  const backendDefs = (await backendDefsResponse.json()).indicators || [];
+  const approvedIds = pro04DomainDoc.instances.map(i => i.definitionId);
+  check('pro04.unreleased-fail-closed', backendDefs.some(d => d.id === 'ichimoku')
+    && !approvedIds.includes('ichimoku')
+    && !approvedIds.includes('stoch'),
+    JSON.stringify({ backendCount: backendDefs.length, approvedInstances: approvedIds }));
+
+  const domSections = await page.locator('section[data-pane-id]').evaluateAll(nodes => nodes.map(node => ({
+    paneId: node.getAttribute('data-pane-id'),
+    chromeIds: Array.from(node.querySelectorAll('[data-testid^="indicator-pane-chrome-"]'))
+      .map(el => el.getAttribute('data-testid').replace('indicator-pane-chrome-', '')),
+  })));
+  const subpanes = pro04Chart.panes.filter(p => p.id !== 'price');
+  const paneOrderMatch = JSON.stringify(domSections.map(s => s.paneId)) === JSON.stringify(subpanes.map(p => p.id));
+  const volumeSection = domSections.find(s => s.paneId === 'volume');
+  const volumeGroupComplete = volumeSection?.chromeIds.includes(volume.id) && volumeSection?.chromeIds.includes(volumeSma.id);
+  const atrSection = domSections.find(s => s.paneId === atr.paneId);
+  const atrSectionCorrect = atrSection?.chromeIds.includes(atr.id);
+
+  const semanticValuesValid = Number.isFinite(smaVal) && Number.isFinite(bbUpperVal)
+    && Number.isFinite(bbMiddleVal) && Number.isFinite(bbLowerVal)
+    && Number.isFinite(atrVal) && Number.isFinite(volSmaVal)
+    && smaVal === expectedSmaVal && atrVal === expectedAtrVal && volSmaVal === expectedVolSmaVal
+    && bbUpperVal === expectedBbuVal && bbMiddleVal === expectedBbmVal && bbLowerVal === expectedBblVal;
+
+  check('pro04.indicator-expansion-lifecycle', [sma20.id, bbands.id, atr.id, volumeSma.id].every(id => pro04DomainDoc.instances.some(i => i.id === id))
+    && inspectActiveRuntime(pro04DomainDoc, pro04Runtime).pass
+    && paneOrderMatch && volumeGroupComplete && atrSectionCorrect && semanticValuesValid,
+    JSON.stringify({
+      instances: pro04DomainDoc.instances.map(i => ({ id: i.id, def: i.definitionId, pane: i.paneId })),
+      domSections, subpanes, paneOrderMatch, volumeGroupComplete, atrSectionCorrect, semanticValuesValid,
+    }));
+
+  await page.screenshot({ path: path.join(runDir, 'pro04-core-indicators-1440x1000.png'), fullPage: true });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.locator(`section[data-pane-id="${atr.paneId}"]`).scrollIntoViewIfNeeded();
+  await page.waitForTimeout(200);
+  await page.screenshot({ path: path.join(runDir, 'pro04-core-indicators-1280x800.png'), fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
 
   await page.getByTestId('active-indicator-list').evaluate(element => { element.scrollLeft = 0; });
   await page.screenshot({ path: path.join(runDir, '01-indicators.png'), fullPage: true });
@@ -1404,12 +1519,13 @@ try {
   JSON.stringify({ before: { count: lifecycleBefore.drawings.length, revision: lifecycleBefore.revision }, after: { count: lifecycleAfter.drawings.length, revision: lifecycleAfter.revision }, listenerCount: lifecycleDrawingInteraction.listenerCount, primitiveCount: lifecycleDrawingInteraction.primitiveCount }));
   const lifecycleIndicatorChart = await readIndicatorChart();
   const lifecycleIndicatorResponses = indicatorResponses.slice(indicatorResponsesBeforeLifecycle);
+  const expectedResponsesCount = 10 * beforeReloadIndicatorDocument.instances.filter(i => i.definitionId !== 'volume').length;
   batch2('mount-unmount-10', lifecycleIndicatorChart.keys.length === beforeReloadIndicatorChart.keys.length
     && new Set(lifecycleIndicatorChart.keys).size === lifecycleIndicatorChart.keys.length
     && lifecycleIndicatorCycles.every(state => state.chart.keys.length === beforeReloadIndicatorChart.keys.length && new Set(state.chart.keys).size === state.chart.keys.length)
-    && lifecycleIndicatorResponses.length === 40
+    && lifecycleIndicatorResponses.length === expectedResponsesCount
     && lifecycleIndicatorResponses.every(response => response.status === 200),
-  JSON.stringify({ responses: lifecycleIndicatorResponses.length, cycles: lifecycleIndicatorCycles.map(state => state.chart.keys), chart: lifecycleIndicatorChart }));
+  JSON.stringify({ responses: lifecycleIndicatorResponses.length, expectedResponses: expectedResponsesCount, cycles: lifecycleIndicatorCycles.map(state => state.chart.keys), chart: lifecycleIndicatorChart }));
   batch2('layout-every-remount', lifecycleIndicatorCycles.every(state => state.layout.pass), JSON.stringify(lifecycleIndicatorCycles.map(state => state.layout)));
   batch2('runtime-every-remount-no-active-error', lifecycleIndicatorCycles.every(state => state.runtime.pass), JSON.stringify(lifecycleIndicatorCycles.map(state => state.runtime)));
 

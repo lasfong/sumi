@@ -285,6 +285,49 @@ class ImportWorkflowService:
                 message="Tất cả dòng dữ liệu đã tồn tại trong hệ thống (Idempotent no-op)"
             )
 
+        # Revalidate every staged 'parsed' candidate against current Candle rows.
+        # A candidate that was absent at preview but now exists is stale, even if its values happen to match.
+        if parsed_items:
+            symbols_to_check = set(item.symbol for item in parsed_items)
+            existing_candles = (
+                db.query(Candle)
+                .filter(
+                    Candle.symbol.in_(list(symbols_to_check)),
+                    Candle.timeframe == run.timeframe,
+                    Candle.adjustment_type == run.adjustment_type
+                )
+                .all()
+            )
+            existing_keys = {
+                (
+                    c.symbol,
+                    c.timeframe,
+                    c.timestamp.date() if isinstance(c.timestamp, datetime) else c.timestamp,
+                    c.adjustment_type
+                )
+                for c in existing_candles
+            }
+
+            stale_items = []
+            for item in parsed_items:
+                item_date = item.timestamp.date() if isinstance(item.timestamp, datetime) else item.timestamp
+                key = (item.symbol, item.timeframe, item_date, item.adjustment_type)
+                if key in existing_keys:
+                    stale_items.append((item, item_date))
+
+            if stale_items:
+                first_item, dt = stale_items[0]
+                dt_str = dt.strftime("%Y-%m-%d") if isinstance(dt, (date, datetime)) else str(dt)
+                block_reason = (
+                    f"Bản xem trước đã hết hạn: Dữ liệu nến cho mã {first_item.symbol} ngày {dt_str} "
+                    f"đã được tạo hoặc thay đổi sau khi xem trước. Vui lòng tạo lại bản xem trước."
+                )
+                run.status = "blocked"
+                run.can_accept = False
+                run.block_reason = block_reason
+                db.commit()
+                raise HTTPException(status_code=400, detail=block_reason)
+
         affected_symbols: Set[str] = set()
 
         for item in parsed_items:
@@ -297,69 +340,30 @@ class ImportWorkflowService:
                 db.add(sym_rec)
                 db.flush()
 
-            # Check existing Candle
             item_ts = item.timestamp
-            existing_candle = (
-                db.query(Candle)
-                .filter(
-                    Candle.symbol == item.symbol,
-                    Candle.timeframe == item.timeframe,
-                    Candle.timestamp == item_ts,
-                    Candle.adjustment_type == item.adjustment_type
-                )
-                .first()
+            mutation = ImportRunMutation(
+                run_id=run_id,
+                action="INSERT",
+                symbol=item.symbol,
+                timeframe=item.timeframe,
+                timestamp=item_ts,
+                adjustment_type=item.adjustment_type,
+                before_open=None, before_high=None, before_low=None, before_close=None, before_volume=None,
+                after_open=item.open, after_high=item.high, after_low=item.low, after_close=item.close, after_volume=item.volume
             )
-
-            if existing_candle:
-                mutation = ImportRunMutation(
-                    run_id=run_id,
-                    action="UPDATE",
-                    symbol=item.symbol,
-                    timeframe=item.timeframe,
-                    timestamp=item_ts,
-                    adjustment_type=item.adjustment_type,
-                    before_open=existing_candle.open,
-                    before_high=existing_candle.high,
-                    before_low=existing_candle.low,
-                    before_close=existing_candle.close,
-                    before_volume=existing_candle.volume,
-                    after_open=item.open,
-                    after_high=item.high,
-                    after_low=item.low,
-                    after_close=item.close,
-                    after_volume=item.volume
-                )
-                existing_candle.open = item.open
-                existing_candle.high = item.high
-                existing_candle.low = item.low
-                existing_candle.close = item.close
-                existing_candle.volume = item.volume
-                existing_candle.source = run_id
-            else:
-                mutation = ImportRunMutation(
-                    run_id=run_id,
-                    action="INSERT",
-                    symbol=item.symbol,
-                    timeframe=item.timeframe,
-                    timestamp=item_ts,
-                    adjustment_type=item.adjustment_type,
-                    before_open=None, before_high=None, before_low=None, before_close=None, before_volume=None,
-                    after_open=item.open, after_high=item.high, after_low=item.low, after_close=item.close, after_volume=item.volume
-                )
-                new_candle = Candle(
-                    symbol=item.symbol,
-                    timeframe=item.timeframe,
-                    timestamp=item_ts,
-                    open=item.open,
-                    high=item.high,
-                    low=item.low,
-                    close=item.close,
-                    volume=item.volume,
-                    source=run_id,
-                    adjustment_type=item.adjustment_type
-                )
-                db.add(new_candle)
-
+            new_candle = Candle(
+                symbol=item.symbol,
+                timeframe=item.timeframe,
+                timestamp=item_ts,
+                open=item.open,
+                high=item.high,
+                low=item.low,
+                close=item.close,
+                volume=item.volume,
+                source=run_id,
+                adjustment_type=item.adjustment_type
+            )
+            db.add(new_candle)
             db.add(mutation)
 
         run.status = "accepted"

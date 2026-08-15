@@ -11,12 +11,19 @@ const registry: IndicatorDefinition[] = [
   { id: 'rsi', label: 'Relative Strength Index', category: 'Momentum', pane: 'oscillator', description: 'RSI', params: [{ name: 'length', type: 'int', default: 14, minimum: 1, maximum: 200 }, { name: 'offset', type: 'int', default: 0, minimum: null, maximum: null }] },
   { id: 'macd', label: 'MACD', category: 'Momentum', pane: 'oscillator', description: 'MACD', params: [{ name: 'fast', type: 'int', default: 12, minimum: 1, maximum: 200 }, { name: 'slow', type: 'int', default: 26, minimum: 2, maximum: 400 }, { name: 'signal', type: 'int', default: 9, minimum: 1, maximum: 200 }, { name: 'offset', type: 'int', default: 0, minimum: null, maximum: null }] },
   { id: 'cci', label: 'Commodity Channel Index', category: 'Momentum', pane: 'oscillator', description: 'CCI', params: [{ name: 'length', type: 'int', default: 20, minimum: 1, maximum: 200 }, { name: 'offset', type: 'int', default: 0, minimum: null, maximum: null }] },
+  { id: 'sma', label: 'Simple Moving Average', category: 'Trend', pane: 'main', description: 'SMA', params: [{ name: 'length', type: 'int', default: 20, minimum: 1, maximum: 500 }, { name: 'offset', type: 'int', default: 0, minimum: -100, maximum: 100 }] },
+  { id: 'bbands', label: 'Bollinger Bands', category: 'Volatility', pane: 'main', description: 'Bollinger Bands', params: [{ name: 'length', type: 'int', default: 20, minimum: 1, maximum: 500 }, { name: 'std', type: 'float', default: 2.0, minimum: 0.1, maximum: 10 }] },
+  { id: 'atr', label: 'Average True Range', category: 'Volatility', pane: 'oscillator', description: 'ATR', params: [{ name: 'length', type: 'int', default: 14, minimum: 1, maximum: 200 }] },
+  { id: 'volume_sma', label: 'Volume Moving Average', category: 'Volume', pane: 'oscillator', description: 'Volume SMA', params: [{ name: 'length', type: 'int', default: 20, minimum: 1, maximum: 500 }] },
+  { id: 'ichimoku', label: 'Ichimoku Cloud', category: 'Trend', pane: 'main', description: 'Ichimoku', params: [{ name: 'tenkan', type: 'int', default: 9, minimum: 1, maximum: 200 }] },
 ];
 const definitions = approvedDefinitions(registry);
 const byId = (id: string) => definitions.find(item => item.id === id)!;
 const ids = [
   '00000000-0000-4000-8000-000000000001' as ReturnType<typeof crypto.randomUUID>,
   '00000000-0000-4000-8000-000000000002' as ReturnType<typeof crypto.randomUUID>,
+  '00000000-0000-4000-8000-000000000003' as ReturnType<typeof crypto.randomUUID>,
+  '00000000-0000-4000-8000-000000000004' as ReturnType<typeof crypto.randomUUID>,
 ];
 
 describe('indicator domain', () => {
@@ -28,6 +35,32 @@ describe('indicator domain', () => {
     expect(second.paneId).toBe(`indicator:${ids[1]}`);
     expect(first.params).toEqual({ length: 14, offset: 0 });
     expect(second.params).toEqual({ length: 21, offset: 0 });
+  });
+
+  it('filters out unreleased backend definitions like ichimoku from approved definitions', () => {
+    const idsInApproved = definitions.map(def => def.id);
+    expect(idsInApproved).toContain('sma');
+    expect(idsInApproved).toContain('bbands');
+    expect(idsInApproved).toContain('atr');
+    expect(idsInApproved).toContain('volume_sma');
+    expect(idsInApproved).toContain('volume');
+    expect(idsInApproved).not.toContain('ichimoku');
+  });
+
+  it('correctly assigns price, volume, and oscillator placements for all PRO-04 indicators', () => {
+    const smaInst = createIndicatorInstance(byId('sma'), {}, 0, ids[0]);
+    const bbandsInst = createIndicatorInstance(byId('bbands'), {}, 1, ids[1]);
+    const atrInst = createIndicatorInstance(byId('atr'), {}, 2, ids[2]);
+    const vmaInst = createIndicatorInstance(byId('volume_sma'), {}, 3, ids[3]);
+
+    expect(smaInst.placement).toBe('price');
+    expect(smaInst.paneId).toBe('price');
+    expect(bbandsInst.placement).toBe('price');
+    expect(bbandsInst.paneId).toBe('price');
+    expect(atrInst.placement).toBe('oscillator');
+    expect(atrInst.paneId).toBe(`indicator:${ids[2]}`);
+    expect(vmaInst.placement).toBe('volume');
+    expect(vmaInst.paneId).toBe('volume');
   });
 
   it('validates type and registry ranges before an instance can be added', () => {

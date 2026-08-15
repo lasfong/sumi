@@ -94,6 +94,10 @@ def test_replay_indicator_api_matches_strategy_indicator_adapter_after_warmup():
                 {"name": "rsi", "type": "rsi", "length": 14},
                 {"name": "macd", "type": "macd", "fast": 12, "slow": 26, "signal": 9},
                 {"name": "cci", "type": "cci", "length": 20},
+                {"name": "sma", "type": "sma", "length": 20},
+                {"name": "bbands", "type": "bbands", "length": 20, "std": 2.0},
+                {"name": "atr", "type": "atr", "length": 14},
+                {"name": "volume_sma", "type": "volume_sma", "length": 20},
             ],
             "entry_rules": [{"dsl": {"gt": ["rsi", 50]}}],
             "exit_rules": [{"dsl": {"lt": ["rsi", 50]}}],
@@ -102,12 +106,22 @@ def test_replay_indicator_api_matches_strategy_indicator_adapter_after_warmup():
         adapter_values = StrategyIndicatorAdapter.compute(df, strategy.indicators)
         dates = [value.isoformat() for value in df["timestamp"]]
 
+        bbu_key = next(k for k in adapter_values if k.startswith("bbands_bbu"))
+        bbm_key = next(k for k in adapter_values if k.startswith("bbands_bbm"))
+        bbl_key = next(k for k in adapter_values if k.startswith("bbands_bbl"))
+
         checks = [
             ("rsi", {"indicator": "rsi", "length": 14}, "rsi", "rsi"),
             ("macd_line", {"indicator": "macd", "fast": 12, "slow": 26, "signal": 9}, "macd_", "macd"),
             ("macd_signal", {"indicator": "macd", "fast": 12, "slow": 26, "signal": 9}, "macds", "macd"),
             ("macd_hist", {"indicator": "macd", "fast": 12, "slow": 26, "signal": 9}, "macdh", "macd"),
             ("cci", {"indicator": "cci", "length": 20}, "cci", "cci"),
+            ("sma", {"indicator": "sma", "length": 20}, "sma_", "sma"),
+            (bbu_key, {"indicator": "bbands", "length": 20, "std": 2.0}, "bbu_", "bbands"),
+            (bbm_key, {"indicator": "bbands", "length": 20, "std": 2.0}, "bbm_", "bbands"),
+            (bbl_key, {"indicator": "bbands", "length": 20, "std": 2.0}, "bbl_", "bbands"),
+            ("atr", {"indicator": "atr", "length": 14}, "atrr_", "atr"),
+            ("volume_sma", {"indicator": "volume_sma", "length": 20}, "volume_sma_", "volume_sma"),
         ]
 
         cached_api_payloads = {}
@@ -127,6 +141,75 @@ def test_replay_indicator_api_matches_strategy_indicator_adapter_after_warmup():
                 assert api_values[timestamp] == pytest.approx(float(expected), rel=1e-9, abs=1e-9)
                 compared += 1
             assert compared > 0
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+def test_replay_indicator_api_non_default_bbands_parity():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(bind=engine)
+    db = TestingSessionLocal()
+    symbol = "PARITY_BB"
+    base_date = date(2024, 1, 1)
+    df = _seed_deterministic_candles(db, symbol, base_date)
+
+    client = _make_client(db)
+    try:
+        session_response = client.post("/api/replay/sessions", json={
+            "symbol": symbol,
+            "timeframe": "1D",
+            "adjustment_type": "unadjusted",
+            "start_date": str(base_date),
+            "end_date": str(base_date + timedelta(days=len(df))),
+            "initial_cash": 100_000_000,
+            "mode": "normal",
+        })
+        assert session_response.status_code == 200, session_response.text
+        session_id = session_response.json()["id"]
+        advance_response = client.post(f"/api/replay/sessions/{session_id}/next", params={"steps": len(df) - 1})
+        assert advance_response.status_code == 200, advance_response.text
+
+        strategy = load_strategy_from_dict({
+            "name": "Bollinger Non-Default Parity",
+            "indicators": [
+                {"name": "bbands_225", "type": "bbands", "length": 20, "std": 2.25},
+            ],
+            "entry_rules": [],
+            "exit_rules": [],
+            "position_sizing": {"method": "fixed_quantity", "quantity": 100},
+        })
+        adapter_values = StrategyIndicatorAdapter.compute(df, strategy.indicators)
+        dates = [value.isoformat() for value in df["timestamp"]]
+
+        assert "bbands_225_bbu_20_2.25_2.25" in adapter_values
+        assert "bbands_225_bbm_20_2.25_2.25" in adapter_values
+        assert "bbands_225_bbl_20_2.25_2.25" in adapter_values
+
+        response = client.get(f"/api/replay/sessions/{session_id}/indicators", params={"indicator": "bbands", "length": 20, "std": 2.25})
+        assert response.status_code == 200, response.text
+        api_data = response.json()["data"]
+
+        api_upper = _value_by_timestamp(api_data, "bbu_")
+        api_middle = _value_by_timestamp(api_data, "bbm_")
+        api_lower = _value_by_timestamp(api_data, "bbl_")
+
+        for idx, ts in enumerate(dates):
+            exp_u = adapter_values["bbands_225_bbu_20_2.25_2.25"][idx]
+            exp_m = adapter_values["bbands_225_bbm_20_2.25_2.25"][idx]
+            exp_l = adapter_values["bbands_225_bbl_20_2.25_2.25"][idx]
+            if pd.isna(exp_u):
+                continue
+            assert api_upper[ts] == pytest.approx(float(exp_u), rel=1e-9, abs=1e-9)
+            assert api_middle[ts] == pytest.approx(float(exp_m), rel=1e-9, abs=1e-9)
+            assert api_lower[ts] == pytest.approx(float(exp_l), rel=1e-9, abs=1e-9)
     finally:
         client.close()
         app.dependency_overrides.clear()

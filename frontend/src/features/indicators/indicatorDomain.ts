@@ -4,9 +4,12 @@ export type IndicatorValue = string | number | boolean;
 export type IndicatorPlacement = 'price' | 'oscillator' | 'volume';
 export interface IndicatorSeriesStyle { color: string; lineStyle?: 'solid' | 'dashed' | 'dotted' }
 
+export const SUPPORTED_INDICATORS = ['ema', 'rsi', 'macd', 'cci', 'volume', 'sma', 'bbands', 'atr', 'volume_sma'] as const;
+export type SupportedIndicatorId = (typeof SUPPORTED_INDICATORS)[number];
+
 export interface IndicatorInstanceV1 {
   id: string;
-  definitionId: 'ema' | 'rsi' | 'macd' | 'cci' | 'volume';
+  definitionId: SupportedIndicatorId;
   label: string;
   params: Record<string, IndicatorValue>;
   placement: IndicatorPlacement;
@@ -23,7 +26,6 @@ export interface IndicatorDocumentV1 {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-export const SUPPORTED_INDICATORS = ['ema', 'rsi', 'macd', 'cci', 'volume'] as const;
 
 export const VOLUME_DEFINITION: IndicatorDefinition = {
   id: 'volume', label: 'Volume', category: 'Volume', pane: 'oscillator', params: [],
@@ -31,14 +33,14 @@ export const VOLUME_DEFINITION: IndicatorDefinition = {
 };
 
 export const approvedDefinitions = (definitions: IndicatorDefinition[]): IndicatorDefinition[] => {
-  const approved = definitions.filter(definition => ['ema', 'rsi', 'macd', 'cci'].includes(definition.id));
+  const approved = definitions.filter(definition => (SUPPORTED_INDICATORS as readonly string[]).includes(definition.id));
   return [...approved, VOLUME_DEFINITION];
 };
 
 export const emptyIndicatorDocument = (sessionId: number): IndicatorDocumentV1 => ({ schemaVersion: 1, sessionId, instances: [] });
 
 const placementFor = (definition: IndicatorDefinition): IndicatorPlacement =>
-  definition.id === 'volume' ? 'volume' : definition.pane === 'main' ? 'price' : 'oscillator';
+  definition.id === 'volume' || definition.id === 'volume_sma' ? 'volume' : definition.pane === 'main' ? 'price' : 'oscillator';
 
 const defaultStyles = (definitionId: string): Record<string, IndicatorSeriesStyle> => {
   if (definitionId === 'macd') return {
@@ -47,6 +49,12 @@ const defaultStyles = (definitionId: string): Record<string, IndicatorSeriesStyl
   if (definitionId === 'volume') return { volume: { color: '#58A6FF' } };
   if (definitionId === 'rsi') return { primary: { color: '#B388FF' } };
   if (definitionId === 'cci') return { primary: { color: '#FFD166' } };
+  if (definitionId === 'sma') return { primary: { color: '#FFD166' } };
+  if (definitionId === 'bbands') return {
+    upper: { color: '#00E5FF' }, middle: { color: '#FFD166' }, lower: { color: '#00E5FF' },
+  };
+  if (definitionId === 'atr') return { primary: { color: '#E040FB' } };
+  if (definitionId === 'volume_sma') return { primary: { color: '#FF8A00' } };
   return { primary: { color: '#58A6FF' } };
 };
 

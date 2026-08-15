@@ -5,11 +5,12 @@
 1. `AGENTS.md` — repository rules and non-negotiable invariants.
 2. `docs/MACHINE_TRANSFER_HANDOFF_2026-08-10.md` — destination bootstrap, transfer integrity, program summary, and exact next prompt.
 3. `docs/AUTONOMOUS_EXECUTION_STATE.md` — volatile authority: approvals, active batch, control point, and exact next action.
-4. `docs/LOW_MODEL_AUTONOMOUS_EXECUTION_PROTOCOL.md` — DEV/Reviewer workflow and stop rules.
-5. `docs/SESSION_HANDOFF_PROTOCOL.md` — workspace-based handoff contract.
-6. `docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md` — stable PRO-00 through PRO-12 roadmap and acceptance contract.
-7. The active or prepared-next dossier under `docs/program/`.
-8. The ExecPlan and DEV/Reviewer prompt named by the ledger.
+4. `docs/ANTIGRAVITY_TWO_SESSION_OPERATING_MODEL.md` — two-session DEV/REVIEW state machine, file ownership, and detailed DoD.
+5. `docs/LOW_MODEL_AUTONOMOUS_EXECUTION_PROTOCOL.md` — core DEV/Reviewer workflow and stop rules.
+6. `docs/SESSION_HANDOFF_PROTOCOL.md` — workspace-based handoff contract.
+7. `docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md` — stable PRO-00 through PRO-12 roadmap and acceptance contract.
+8. The active or prepared-next dossier under `docs/program/`.
+9. The ExecPlan and DEV/Reviewer prompt named by the ledger.
 
 The workspace, not chat history, is the handoff channel. Only the batch named **Active batch** by the ledger is authorized.
 
@@ -34,7 +35,7 @@ The workspace, not chat history, is the handoff channel. Only the batch named **
 
 PRO-00–PRO-02 and historical V3 Batch 0–5 records are completed evidence, not current instructions. `docs/PROFESSIONALIZATION_HANDOFF_2026-08-01.md` is explicitly superseded and retained only for provenance.
 
-Current boundary: PRO-03 is independently approved. PRO-04 has a prepared ExecPlan and standalone prompt but is not active until the user invokes that prompt. `docs/MACHINE_TRANSFER_HANDOFF_2026-08-10.md` is the authoritative entrypoint for moving to another computer.
+Current boundary: PRO-03 is independently approved and closed by `docs/reviews/PRO_03_REVIEW_2026-08-12_R4.md`. PRO-04 is independently approved and closed by `docs/reviews/PRO_04_REVIEW_2026-08-15_R5.md`; PRO-05 remains unauthorized. Start a new DEV session with `docs/dev-prompts/ANTIGRAVITY_DEV_SESSION_INIT_PROMPT.md` and a REVIEW session with `docs/reviewer-prompts/ANTIGRAVITY_REVIEW_SESSION_INIT_PROMPT.md`. `docs/AUTONOMOUS_EXECUTION_STATE.md` is the volatile execution authority; `docs/MACHINE_TRANSFER_HANDOFF_2026-08-10.md` remains the transfer entrypoint.
 
 ## Research and historical material
 

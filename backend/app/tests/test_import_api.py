@@ -90,3 +90,29 @@ def test_legacy_cafef_route_disabled(client: TestClient):
     assert res.status_code == 400
     assert "vô hiệu hóa" in res.json()["detail"]
 
+
+def test_stale_preview_accept_api_contract(client: TestClient):
+    # 1. Preview candidate
+    csv_bytes = b"<Ticker>,<DTYYYYMMDD>,<Open>,<High>,<Low>,<Close>,<Volume>\nAPI_STALE,20231010,10.0,11.0,9.5,10.5,10000\n"
+    files = {"file": ("API_STALE.csv", csv_bytes, "text/csv")}
+    preview_res = client.post("/api/import/preview", files=files, data={"adjustment_type": "unadjusted"}).json()
+
+    run_id = preview_res["run_id"]
+    checksum = preview_res["content_sha256"]
+
+    # 2. Intervening accept of another preview for the same candle key
+    csv_bytes_2 = b"<Ticker>,<DTYYYYMMDD>,<Open>,<High>,<Low>,<Close>,<Volume>\nAPI_STALE,20231010,10.0,12.0,9.5,11.5,20000\n"
+    files_2 = {"file": ("API_STALE_2.csv", csv_bytes_2, "text/csv")}
+    p2 = client.post("/api/import/preview", files=files_2, data={"adjustment_type": "unadjusted"}).json()
+    client.post(f"/api/import/runs/{p2['run_id']}/accept", json={"content_sha256": p2["content_sha256"]})
+
+    # 3. Attempt accept of original preview -> fails with 400 detail stating stale preview
+    accept_res = client.post(f"/api/import/runs/{run_id}/accept", json={"content_sha256": checksum})
+    assert accept_res.status_code == 400
+    assert "Bản xem trước đã hết hạn" in accept_res.json()["detail"]
+
+    # 4. Verify run status in list_import_runs
+    runs = client.get("/api/import/runs").json()
+    stale_run = next(r for r in runs if r["run_id"] == run_id)
+    assert stale_run["status"] == "blocked"
+    assert stale_run["can_accept"] is False

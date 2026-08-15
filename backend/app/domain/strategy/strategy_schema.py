@@ -8,6 +8,7 @@ class IndicatorConfig(BaseModel):
     fast: Optional[int] = None
     slow: Optional[int] = None
     signal: Optional[int] = None
+    std: Optional[float] = None
 
 class PositionSizing(BaseModel):
     method: str = "fixed_quantity"
