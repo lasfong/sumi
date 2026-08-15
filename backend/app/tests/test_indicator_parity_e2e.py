@@ -215,3 +215,104 @@ def test_replay_indicator_api_non_default_bbands_parity():
         app.dependency_overrides.clear()
         db.close()
         Base.metadata.drop_all(bind=engine)
+
+
+def test_replay_indicator_api_pro05_momentum_parity():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(bind=engine)
+    db = TestingSessionLocal()
+    symbol = "PARITY_MOM"
+    base_date = date(2024, 1, 1)
+    df = _seed_deterministic_candles(db, symbol, base_date, count=90)
+    # Seed VNINDEX benchmark candles
+    _seed_deterministic_candles(db, "VNINDEX", base_date, count=90)
+
+    client = _make_client(db)
+    try:
+        session_response = client.post("/api/replay/sessions", json={
+            "symbol": symbol,
+            "timeframe": "1D",
+            "adjustment_type": "unadjusted",
+            "start_date": str(base_date),
+            "end_date": str(base_date + timedelta(days=len(df))),
+            "initial_cash": 100_000_000,
+            "mode": "normal",
+        })
+        assert session_response.status_code == 200, session_response.text
+        session_id = session_response.json()["id"]
+        advance_response = client.post(f"/api/replay/sessions/{session_id}/next", params={"steps": len(df) - 1})
+        assert advance_response.status_code == 200, advance_response.text
+
+        strategy = load_strategy_from_dict({
+            "name": "PRO-05 Momentum Parity",
+            "indicators": [
+                {"name": "mfi", "type": "mfi", "length": 14},
+                {"name": "stoch", "type": "stoch", "k": 14, "d": 3, "smooth_k": 3},
+                {"name": "adx", "type": "adx", "length": 14},
+            ],
+            "entry_rules": [],
+            "exit_rules": [],
+            "position_sizing": {"method": "fixed_quantity", "quantity": 100},
+        })
+        adapter_values = StrategyIndicatorAdapter.compute(df, strategy.indicators)
+        dates = [value.isoformat() for value in df["timestamp"]]
+
+        # 1. MFI
+        res_mfi = client.get(f"/api/replay/sessions/{session_id}/indicators", params={"indicator": "mfi", "length": 14})
+        assert res_mfi.status_code == 200, res_mfi.text
+        api_mfi = _value_by_timestamp(res_mfi.json()["data"], "mfi_")
+        for idx, expected in enumerate(adapter_values["mfi"]):
+            if pd.isna(expected):
+                continue
+            ts = dates[idx]
+            assert api_mfi[ts] == pytest.approx(float(expected), rel=1e-9, abs=1e-9)
+
+        # 2. Stochastic
+        res_stoch = client.get(f"/api/replay/sessions/{session_id}/indicators", params={"indicator": "stoch", "k": 14, "d": 3, "smooth_k": 3})
+        assert res_stoch.status_code == 200, res_stoch.text
+        api_stoch_k = _value_by_timestamp(res_stoch.json()["data"], "stochk_")
+        api_stoch_d = _value_by_timestamp(res_stoch.json()["data"], "stochd_")
+        stoch_k_key = next(k for k in adapter_values if k.startswith("stoch_stochk_"))
+        stoch_d_key = next(k for k in adapter_values if k.startswith("stoch_stochd_"))
+        for idx, ts in enumerate(dates):
+            exp_k = adapter_values[stoch_k_key][idx]
+            exp_d = adapter_values[stoch_d_key][idx]
+            if pd.isna(exp_k) or pd.isna(exp_d):
+                continue
+            assert api_stoch_k[ts] == pytest.approx(float(exp_k), rel=1e-9, abs=1e-9)
+            assert api_stoch_d[ts] == pytest.approx(float(exp_d), rel=1e-9, abs=1e-9)
+
+        # 3. ADX
+        res_adx = client.get(f"/api/replay/sessions/{session_id}/indicators", params={"indicator": "adx", "length": 14})
+        assert res_adx.status_code == 200, res_adx.text
+        api_adx = _value_by_timestamp(res_adx.json()["data"], "adx_")
+        api_dmp = _value_by_timestamp(res_adx.json()["data"], "dmp_")
+        api_dmn = _value_by_timestamp(res_adx.json()["data"], "dmn_")
+        adx_key = next(k for k in adapter_values if k.startswith("adx_adx_"))
+        dmp_key = next(k for k in adapter_values if k.startswith("adx_dmp_"))
+        dmn_key = next(k for k in adapter_values if k.startswith("adx_dmn_"))
+        for idx, ts in enumerate(dates):
+            exp_adx = adapter_values[adx_key][idx]
+            exp_dmp = adapter_values[dmp_key][idx]
+            exp_dmn = adapter_values[dmn_key][idx]
+            if pd.isna(exp_adx) or pd.isna(exp_dmp) or pd.isna(exp_dmn):
+                continue
+            assert api_adx[ts] == pytest.approx(float(exp_adx), rel=1e-9, abs=1e-9)
+            assert api_dmp[ts] == pytest.approx(float(exp_dmp), rel=1e-9, abs=1e-9)
+            assert api_dmn[ts] == pytest.approx(float(exp_dmn), rel=1e-9, abs=1e-9)
+
+        # 4. Relative Strength vs VNINDEX
+        res_rs = client.get(f"/api/replay/sessions/{session_id}/indicators", params={"indicator": "relative_strength", "length": 20, "benchmark": "VNINDEX"})
+        assert res_rs.status_code == 200, res_rs.text
+        api_rs = _value_by_timestamp(res_rs.json()["data"], "rs_vnindex_")
+        assert len(api_rs) > 0
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
+        db.close()
+        Base.metadata.drop_all(bind=engine)

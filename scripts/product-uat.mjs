@@ -789,7 +789,7 @@ try {
   const approvedIds = pro04DomainDoc.instances.map(i => i.definitionId);
   check('pro04.unreleased-fail-closed', backendDefs.some(d => d.id === 'ichimoku')
     && !approvedIds.includes('ichimoku')
-    && !approvedIds.includes('stoch'),
+    && !approvedIds.includes('kc'),
     JSON.stringify({ backendCount: backendDefs.length, approvedInstances: approvedIds }));
 
   const domSections = await page.locator('section[data-pane-id]').evaluateAll(nodes => nodes.map(node => ({
@@ -824,6 +824,98 @@ try {
   await page.waitForTimeout(200);
   await page.screenshot({ path: path.join(runDir, 'pro04-core-indicators-1280x800.png'), fullPage: true });
   await page.setViewportSize({ width: 1440, height: 1000 });
+
+  // PRO-05: Momentum and Relative Strength expansion (MFI, Stochastic, ADX, Relative Strength vs VNINDEX)
+  const mfi = await addIndicator('mfi', { length: 14 });
+  const stoch = await addIndicator('stoch', { k: 14, d: 3, smooth_k: 3 });
+  const adx = await addIndicator('adx', { length: 14 });
+  const rsVnindex = await addIndicator('relative_strength', { length: 20, benchmark: 'VNINDEX' });
+  await page.waitForTimeout(1_000);
+
+  const pro05DomainDoc = await readIndicatorDomain();
+  const pro05Chart = await readIndicatorChart();
+
+  const mfiSnapshot = pro05Chart.instances.find(inst => inst.id === mfi.id);
+  const stochSnapshot = pro05Chart.instances.find(inst => inst.id === stoch.id);
+  const adxSnapshot = pro05Chart.instances.find(inst => inst.id === adx.id);
+  const rsSnapshot = pro05Chart.instances.find(inst => inst.id === rsVnindex.id);
+
+  const pro05Runtime = await readIndicatorRuntime();
+  const mfiVal = pro05Runtime[mfi.id]?.values?.primary;
+  const stochKVal = pro05Runtime[stoch.id]?.values?.k;
+  const stochDVal = pro05Runtime[stoch.id]?.values?.d;
+  const adxVal = pro05Runtime[adx.id]?.values?.adx;
+  const dmpVal = pro05Runtime[adx.id]?.values?.dmp;
+  const dmnVal = pro05Runtime[adx.id]?.values?.dmn;
+  const rsVal = pro05Runtime[rsVnindex.id]?.values?.primary;
+
+  const mfiData = getRows(await (await page.request.get(`${backendUrl}/api/replay/sessions/${sessionId}/indicators?indicator=mfi&length=14`)).json());
+  const stochData = getRows(await (await page.request.get(`${backendUrl}/api/replay/sessions/${sessionId}/indicators?indicator=stoch&k=14&d=3&smooth_k=3`)).json());
+  const adxData = getRows(await (await page.request.get(`${backendUrl}/api/replay/sessions/${sessionId}/indicators?indicator=adx&length=14`)).json());
+  const rsData = getRows(await (await page.request.get(`${backendUrl}/api/replay/sessions/${sessionId}/indicators?indicator=relative_strength&length=20&benchmark=VNINDEX`)).json());
+
+  const expectedMfiVal = mfiData[mfiData.length - 1]?.['MFI_14'];
+  const expectedStochKVal = stochData[stochData.length - 1]?.['STOCHk_14_3_3'];
+  const expectedStochDVal = stochData[stochData.length - 1]?.['STOCHd_14_3_3'];
+  const expectedAdxVal = adxData[adxData.length - 1]?.['ADX_14'];
+  const expectedDmpVal = adxData[adxData.length - 1]?.['DMP_14'];
+  const expectedDmnVal = adxData[adxData.length - 1]?.['DMN_14'];
+  const expectedRsVal = rsData[rsData.length - 1]?.['RS_VNINDEX_20'];
+
+  check('pro05.mfi-oscillator', mfi.placement === 'oscillator'
+    && mfi.paneId.startsWith('indicator:')
+    && mfi.params.length === 14
+    && Number.isFinite(mfiVal)
+    && mfiVal === expectedMfiVal
+    && mfiSnapshot?.series.includes('primary')
+    && mfiSnapshot?.references.includes('MFI 20')
+    && mfiSnapshot?.references.includes('MFI 80'),
+    JSON.stringify({ instance: mfi, snapshot: mfiSnapshot, renderedValue: mfiVal, expectedValue: expectedMfiVal }));
+
+  check('pro05.stoch-oscillator', stoch.placement === 'oscillator'
+    && stoch.paneId.startsWith('indicator:')
+    && stoch.params.k === 14 && stoch.params.d === 3 && stoch.params.smooth_k === 3
+    && Number.isFinite(stochKVal) && Number.isFinite(stochDVal)
+    && stochKVal === expectedStochKVal && stochDVal === expectedStochDVal
+    && JSON.stringify(stochSnapshot?.series) === JSON.stringify(['k', 'd'])
+    && stochSnapshot?.references.includes('Stoch 20')
+    && stochSnapshot?.references.includes('Stoch 80'),
+    JSON.stringify({ instance: stoch, snapshot: stochSnapshot, renderedValues: { k: stochKVal, d: stochDVal }, expectedValues: { k: expectedStochKVal, d: expectedStochDVal } }));
+
+  check('pro05.adx-oscillator', adx.placement === 'oscillator'
+    && adx.paneId.startsWith('indicator:')
+    && adx.params.length === 14
+    && Number.isFinite(adxVal) && Number.isFinite(dmpVal) && Number.isFinite(dmnVal)
+    && adxVal === expectedAdxVal && dmpVal === expectedDmpVal && dmnVal === expectedDmnVal
+    && JSON.stringify(adxSnapshot?.series) === JSON.stringify(['adx', 'dmp', 'dmn'])
+    && adxSnapshot?.references.includes('ADX 20')
+    && adxSnapshot?.references.includes('ADX 25'),
+    JSON.stringify({ instance: adx, snapshot: adxSnapshot, renderedValues: { adx: adxVal, dmp: dmpVal, dmn: dmnVal }, expectedValues: { adx: expectedAdxVal, dmp: expectedDmpVal, dmn: expectedDmnVal } }));
+
+  check('pro05.relative-strength-oscillator', rsVnindex.placement === 'oscillator'
+    && rsVnindex.paneId.startsWith('indicator:')
+    && rsVnindex.params.length === 20
+    && rsVnindex.params.benchmark === 'VNINDEX'
+    && (expectedRsVal === undefined || expectedRsVal === null || (Number.isFinite(rsVal) && rsVal === expectedRsVal))
+    && rsSnapshot?.series.includes('primary')
+    && rsSnapshot?.references.includes('100'),
+    JSON.stringify({ instance: rsVnindex, snapshot: rsSnapshot, renderedValue: rsVal, expectedValue: expectedRsVal }));
+
+  check('pro05.momentum-expansion-lifecycle', [mfi.id, stoch.id, adx.id, rsVnindex.id].every(id => pro05DomainDoc.instances.some(i => i.id === id))
+    && inspectActiveRuntime(pro05DomainDoc, pro05Runtime).pass,
+    JSON.stringify({ instances: pro05DomainDoc.instances.map(i => ({ id: i.id, def: i.definitionId, pane: i.paneId })) }));
+
+  await page.screenshot({ path: path.join(runDir, 'pro05-momentum-indicators-1440x1000.png'), fullPage: true });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.locator(`section[data-pane-id="${stoch.paneId}"]`).scrollIntoViewIfNeeded();
+  await page.waitForTimeout(200);
+  await page.screenshot({ path: path.join(runDir, 'pro05-momentum-indicators-1280x800.png'), fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+
+  await instanceAction(rsVnindex.id, 'remove').click(); await page.waitForTimeout(100);
+  await instanceAction(adx.id, 'remove').click(); await page.waitForTimeout(100);
+  await instanceAction(stoch.id, 'remove').click(); await page.waitForTimeout(100);
+  await instanceAction(mfi.id, 'remove').click(); await page.waitForTimeout(100);
 
   await page.getByTestId('active-indicator-list').evaluate(element => { element.scrollLeft = 0; });
   await page.screenshot({ path: path.join(runDir, '01-indicators.png'), fullPage: true });

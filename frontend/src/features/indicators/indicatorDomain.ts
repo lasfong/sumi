@@ -4,7 +4,10 @@ export type IndicatorValue = string | number | boolean;
 export type IndicatorPlacement = 'price' | 'oscillator' | 'volume';
 export interface IndicatorSeriesStyle { color: string; lineStyle?: 'solid' | 'dashed' | 'dotted' }
 
-export const SUPPORTED_INDICATORS = ['ema', 'rsi', 'macd', 'cci', 'volume', 'sma', 'bbands', 'atr', 'volume_sma'] as const;
+export const SUPPORTED_INDICATORS = [
+  'ema', 'rsi', 'macd', 'cci', 'volume', 'sma', 'bbands', 'atr', 'volume_sma',
+  'mfi', 'stoch', 'adx', 'relative_strength',
+] as const;
 export type SupportedIndicatorId = (typeof SUPPORTED_INDICATORS)[number];
 
 export interface IndicatorInstanceV1 {
@@ -55,6 +58,14 @@ const defaultStyles = (definitionId: string): Record<string, IndicatorSeriesStyl
   };
   if (definitionId === 'atr') return { primary: { color: '#E040FB' } };
   if (definitionId === 'volume_sma') return { primary: { color: '#FF8A00' } };
+  if (definitionId === 'mfi') return { primary: { color: '#26A69A' } };
+  if (definitionId === 'stoch') return {
+    k: { color: '#58A6FF' }, d: { color: '#FF8A00' },
+  };
+  if (definitionId === 'adx') return {
+    adx: { color: '#FFD166' }, dmp: { color: '#26A69A' }, dmn: { color: '#EF5350' },
+  };
+  if (definitionId === 'relative_strength') return { primary: { color: '#00E5FF' } };
   return { primary: { color: '#58A6FF' } };
 };
 
@@ -70,7 +81,7 @@ const coerceParam = (param: IndicatorParamDefinition, raw: unknown): IndicatorVa
     if (raw === 'true' || raw === 'false') return raw === 'true';
     return null;
   }
-  if (param.type === 'string') return typeof raw === 'string' ? raw : null;
+  if (param.type === 'string' || param.type === 'str') return typeof raw === 'string' ? raw : (raw !== null && raw !== undefined ? String(raw) : null);
   if (raw === '' || raw === null || raw === undefined) return null;
   const value = Number(raw);
   if (!Number.isFinite(value) || (param.type === 'int' && !Number.isInteger(value))) return null;

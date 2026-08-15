@@ -1,6 +1,8 @@
 from dataclasses import asdict, dataclass
+from datetime import date, datetime
 from typing import Any, Optional
 
+import numpy as np
 import pandas as pd
 import pandas_ta  # noqa: F401 - registers the pandas .ta accessor
 
@@ -208,6 +210,20 @@ INDICATOR_REGISTRY: dict[str, IndicatorDefinition] = {
         aliases=("keltner", "keltner_channels"),
         description="ATR-based volatility channel.",
     ),
+    "relative_strength": IndicatorDefinition(
+        id="relative_strength",
+        label="Relative Strength (vs VNINDEX)",
+        category="Oscillators",
+        pane="oscillator",
+        method=None,
+        params=(
+            IndicatorParam("length", "int", 20, 1, 500),
+            IndicatorParam("benchmark", "str", "VNINDEX"),
+            *COMMON_PARAMS,
+        ),
+        aliases=("rs", "rs_vnindex", "rel_strength"),
+        description="Ratio of symbol price performance to VNINDEX benchmark over a lookback window.",
+    ),
 }
 
 ALIASES = {
@@ -260,6 +276,10 @@ class IndicatorEngine:
         if definition.id == "cci":
             return IndicatorEngine._compute_cci(df_copy, params)
 
+        if definition.id == "relative_strength":
+            benchmark_df = kwargs.get("benchmark_df")
+            return IndicatorEngine._compute_relative_strength(df_copy, params, benchmark_df=benchmark_df)
+
         if definition.method is None:
             raise ValueError(f"Indicator '{definition.id}' does not have a compute method.")
 
@@ -280,7 +300,7 @@ class IndicatorEngine:
     @staticmethod
     def _normalize_params(definition: IndicatorDefinition, kwargs: dict[str, Any]) -> dict[str, Any]:
         allowed_params = {param.name: param for param in definition.params}
-        unknown_params = set(kwargs) - set(allowed_params)
+        unknown_params = set(kwargs) - set(allowed_params) - {"benchmark_df"}
         if unknown_params:
             names = ", ".join(sorted(unknown_params))
             raise ValueError(f"Unsupported parameter(s) for indicator '{definition.id}': {names}")
@@ -344,4 +364,53 @@ class IndicatorEngine:
         if offset:
             result = result.shift(offset)
         df_copy[f"CCI_{length}_0.015"] = result
+        return df_copy
+
+    @staticmethod
+    def _compute_relative_strength(
+        df_copy: pd.DataFrame,
+        params: dict[str, Any],
+        benchmark_df: Optional[pd.DataFrame] = None,
+    ) -> pd.DataFrame:
+        """
+        Compute Relative Strength vs benchmark over lookback window `length`.
+        Performance ratio = (symbol_perf / benchmark_perf) * 100.
+        """
+        length = int(params.get("length", 20))
+        offset = int(params.get("offset", 0))
+        benchmark_symbol = str(params.get("benchmark", "VNINDEX")).upper()
+        col_name = f"RS_{benchmark_symbol}_{length}"
+
+        if benchmark_df is None or benchmark_df.empty or "close" not in benchmark_df.columns:
+            df_copy[col_name] = pd.Series(index=df_copy.index, dtype="float64")
+            return df_copy
+
+        def _to_date_str(val: Any) -> str:
+            if isinstance(val, (pd.Timestamp, datetime, date)):
+                return val.strftime("%Y-%m-%d")
+            return str(val)[:10]
+
+        df_timestamps = df_copy.index if "timestamp" not in df_copy.columns else df_copy["timestamp"]
+        bench_timestamps = benchmark_df.index if "timestamp" not in benchmark_df.columns else benchmark_df["timestamp"]
+
+        df_date_keys = [_to_date_str(ts) for ts in df_timestamps]
+        bench_date_keys = [_to_date_str(ts) for ts in bench_timestamps]
+
+        bench_series = pd.Series(
+            data=benchmark_df["close"].astype(float).values,
+            index=bench_date_keys,
+        )
+        bench_series = bench_series[~bench_series.index.duplicated(keep="last")]
+
+        aligned_bench_close = pd.Series([bench_series.get(d, np.nan) for d in df_date_keys], index=df_copy.index, dtype="float64")
+
+        symbol_close = df_copy["close"].astype(float)
+        symbol_perf = symbol_close / symbol_close.shift(length)
+        bench_perf = aligned_bench_close / aligned_bench_close.shift(length)
+
+        rs = (symbol_perf / bench_perf) * 100.0
+        if offset:
+            rs = rs.shift(offset)
+
+        df_copy[col_name] = rs
         return df_copy

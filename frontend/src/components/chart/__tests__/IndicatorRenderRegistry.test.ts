@@ -184,4 +184,79 @@ describe('IndicatorRenderRegistry', () => {
     const partialBbands = [{ timestamp: '2026-01-02', 'BBU_20_2.0_2.0': 110, 'BBL_20_2.0_2.0': 90 }];
     expect(IndicatorRenderRegistry.mapBackendData(partialBbands, instance('bbands'))).toEqual([]);
   });
+
+  it('renders MFI with scale 0..100, reference levels 20/80, and exact column contract', () => {
+    const mfiInstance = { ...instance('mfi'), params: { length: 14 } };
+    const rendered = IndicatorRenderRegistry.mapBackendData([{ timestamp: '2026-01-02', MFI_14: 68.5 }], mfiInstance);
+    expect(rendered).toHaveLength(1);
+    expect(rendered[0]).toMatchObject({
+      seriesKey: 'primary',
+      name: 'MFI 14',
+      scale: { minimum: 0, maximum: 100 },
+      references: [{ value: 20, label: 'MFI 20' }, { value: 80, label: 'MFI 80' }],
+      data: [{ time: '2026-01-02', value: 68.5 }],
+    });
+
+    // Mismatched length fails closed
+    expect(IndicatorRenderRegistry.mapBackendData([{ timestamp: '2026-01-02', MFI_20: 68.5 }], mfiInstance)).toEqual([]);
+  });
+
+  it('renders Stochastic with %K and %D series, scale 0..100, reference levels 20/80, and all-or-nothing integrity', () => {
+    const stochInstance = { ...instance('stoch'), params: { k: 14, d: 3, smooth_k: 3 } };
+    const validData = [{ timestamp: '2026-01-02', STOCHk_14_3_3: 75.2, STOCHd_14_3_3: 70.1 }];
+    const rendered = IndicatorRenderRegistry.mapBackendData(validData, stochInstance);
+    expect(rendered.map(s => s.seriesKey)).toEqual(['k', 'd']);
+    expect(rendered[0]).toMatchObject({
+      name: '%K',
+      scale: { minimum: 0, maximum: 100 },
+      references: [{ value: 20, label: 'Stoch 20' }, { value: 80, label: 'Stoch 80' }],
+      data: [{ time: '2026-01-02', value: 75.2 }],
+    });
+    expect(rendered[1]).toMatchObject({
+      name: '%D',
+      data: [{ time: '2026-01-02', value: 70.1 }],
+    });
+
+    // Partial stochastic (missing %D) must fail closed
+    expect(IndicatorRenderRegistry.mapBackendData([{ timestamp: '2026-01-02', STOCHk_14_3_3: 75.2 }], stochInstance)).toEqual([]);
+
+    // Mismatched parameters fail closed
+    expect(IndicatorRenderRegistry.mapBackendData([{ timestamp: '2026-01-02', STOCHk_20_3_3: 75.2, STOCHd_20_3_3: 70.1 }], stochInstance)).toEqual([]);
+  });
+
+  it('renders ADX with ADX, +DI, -DI series, reference levels 20/25, and all-or-nothing integrity', () => {
+    const adxInstance = { ...instance('adx'), params: { length: 14 } };
+    const validData = [{ timestamp: '2026-01-02', ADX_14: 32.5, DMP_14: 28.1, DMN_14: 15.4 }];
+    const rendered = IndicatorRenderRegistry.mapBackendData(validData, adxInstance);
+    expect(rendered.map(s => s.seriesKey)).toEqual(['adx', 'dmp', 'dmn']);
+    expect(rendered[0]).toMatchObject({
+      name: 'ADX',
+      references: [{ value: 20, label: 'ADX 20' }, { value: 25, label: 'ADX 25' }],
+      data: [{ time: '2026-01-02', value: 32.5 }],
+    });
+    expect(rendered[1]).toMatchObject({ name: '+DI', data: [{ time: '2026-01-02', value: 28.1 }] });
+    expect(rendered[2]).toMatchObject({ name: '-DI', data: [{ time: '2026-01-02', value: 15.4 }] });
+
+    // Partial ADX (missing -DI) must fail closed
+    expect(IndicatorRenderRegistry.mapBackendData([{ timestamp: '2026-01-02', ADX_14: 32.5, DMP_14: 28.1 }], adxInstance)).toEqual([]);
+
+    // Mismatched length fails closed
+    expect(IndicatorRenderRegistry.mapBackendData([{ timestamp: '2026-01-02', ADX_20: 32.5, DMP_20: 28.1, DMN_20: 15.4 }], adxInstance)).toEqual([]);
+  });
+
+  it('renders Relative Strength vs VNINDEX with reference level 100 and exact column contract', () => {
+    const rsInstance = { ...instance('relative_strength'), params: { length: 20, benchmark: 'VNINDEX' } };
+    const rendered = IndicatorRenderRegistry.mapBackendData([{ timestamp: '2026-01-02', RS_VNINDEX_20: 104.8 }], rsInstance);
+    expect(rendered).toHaveLength(1);
+    expect(rendered[0]).toMatchObject({
+      seriesKey: 'primary',
+      name: 'RS (VNINDEX) 20',
+      references: [{ value: 100, label: '100' }],
+      data: [{ time: '2026-01-02', value: 104.8 }],
+    });
+
+    // Mismatched parameters fail closed
+    expect(IndicatorRenderRegistry.mapBackendData([{ timestamp: '2026-01-02', RS_VNINDEX_50: 104.8 }], rsInstance)).toEqual([]);
+    expect(IndicatorRenderRegistry.mapBackendData([{ timestamp: '2026-01-02', RS_VN30_20: 104.8 }], rsInstance)).toEqual([]);
+  });
 });

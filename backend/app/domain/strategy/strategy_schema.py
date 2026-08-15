@@ -9,6 +9,10 @@ class IndicatorConfig(BaseModel):
     slow: Optional[int] = None
     signal: Optional[int] = None
     std: Optional[float] = None
+    k: Optional[int] = None
+    d: Optional[int] = None
+    smooth_k: Optional[int] = None
+    benchmark: Optional[str] = None
 
 class PositionSizing(BaseModel):
     method: str = "fixed_quantity"

@@ -71,6 +71,20 @@ def calculate_indicator(
                         else:
                             kwargs[key] = value
 
+        if indicator in ("relative_strength", "rs", "rs_vnindex"):
+            benchmark_symbol = kwargs.get("benchmark", "VNINDEX")
+            if candles:
+                max_ts = candles[-1].timestamp
+                bench_candles = db.query(Candle).filter(
+                    Candle.symbol == benchmark_symbol,
+                    Candle.timeframe == timeframe,
+                    Candle.timestamp <= max_ts
+                ).order_by(Candle.timestamp.asc()).all()
+                if bench_candles:
+                    b_data = [{"timestamp": c.timestamp, "close": float(c.close)} for c in bench_candles]
+                    b_df = pd.DataFrame(b_data).set_index("timestamp")
+                    kwargs["benchmark_df"] = b_df
+
         result_df = IndicatorEngine.compute(df, indicator, **kwargs)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

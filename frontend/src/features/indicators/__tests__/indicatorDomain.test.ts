@@ -15,6 +15,10 @@ const registry: IndicatorDefinition[] = [
   { id: 'bbands', label: 'Bollinger Bands', category: 'Volatility', pane: 'main', description: 'Bollinger Bands', params: [{ name: 'length', type: 'int', default: 20, minimum: 1, maximum: 500 }, { name: 'std', type: 'float', default: 2.0, minimum: 0.1, maximum: 10 }] },
   { id: 'atr', label: 'Average True Range', category: 'Volatility', pane: 'oscillator', description: 'ATR', params: [{ name: 'length', type: 'int', default: 14, minimum: 1, maximum: 200 }] },
   { id: 'volume_sma', label: 'Volume Moving Average', category: 'Volume', pane: 'oscillator', description: 'Volume SMA', params: [{ name: 'length', type: 'int', default: 20, minimum: 1, maximum: 500 }] },
+  { id: 'mfi', label: 'Money Flow Index', category: 'Oscillators', pane: 'oscillator', description: 'MFI', params: [{ name: 'length', type: 'int', default: 14, minimum: 1, maximum: 200 }] },
+  { id: 'stoch', label: 'Stochastic Oscillator', category: 'Oscillators', pane: 'oscillator', description: 'Stoch', params: [{ name: 'k', type: 'int', default: 14, minimum: 1, maximum: 200 }, { name: 'd', type: 'int', default: 3, minimum: 1, maximum: 50 }, { name: 'smooth_k', type: 'int', default: 3, minimum: 1, maximum: 50 }] },
+  { id: 'adx', label: 'Average Directional Index', category: 'Trend', pane: 'oscillator', description: 'ADX', params: [{ name: 'length', type: 'int', default: 14, minimum: 1, maximum: 200 }] },
+  { id: 'relative_strength', label: 'Relative Strength (vs VNINDEX)', category: 'Oscillators', pane: 'oscillator', description: 'RS', params: [{ name: 'length', type: 'int', default: 20, minimum: 1, maximum: 500 }, { name: 'benchmark', type: 'str', default: 'VNINDEX', minimum: null, maximum: null }] },
   { id: 'ichimoku', label: 'Ichimoku Cloud', category: 'Trend', pane: 'main', description: 'Ichimoku', params: [{ name: 'tenkan', type: 'int', default: 9, minimum: 1, maximum: 200 }] },
 ];
 const definitions = approvedDefinitions(registry);
@@ -44,14 +48,22 @@ describe('indicator domain', () => {
     expect(idsInApproved).toContain('atr');
     expect(idsInApproved).toContain('volume_sma');
     expect(idsInApproved).toContain('volume');
+    expect(idsInApproved).toContain('mfi');
+    expect(idsInApproved).toContain('stoch');
+    expect(idsInApproved).toContain('adx');
+    expect(idsInApproved).toContain('relative_strength');
     expect(idsInApproved).not.toContain('ichimoku');
   });
 
-  it('correctly assigns price, volume, and oscillator placements for all PRO-04 indicators', () => {
+  it('correctly assigns price, volume, and oscillator placements for all indicators', () => {
     const smaInst = createIndicatorInstance(byId('sma'), {}, 0, ids[0]);
     const bbandsInst = createIndicatorInstance(byId('bbands'), {}, 1, ids[1]);
     const atrInst = createIndicatorInstance(byId('atr'), {}, 2, ids[2]);
     const vmaInst = createIndicatorInstance(byId('volume_sma'), {}, 3, ids[3]);
+    const mfiInst = createIndicatorInstance(byId('mfi'), {}, 4, ids[0]);
+    const stochInst = createIndicatorInstance(byId('stoch'), {}, 5, ids[1]);
+    const adxInst = createIndicatorInstance(byId('adx'), {}, 6, ids[2]);
+    const rsInst = createIndicatorInstance(byId('relative_strength'), {}, 7, ids[3]);
 
     expect(smaInst.placement).toBe('price');
     expect(smaInst.paneId).toBe('price');
@@ -61,6 +73,14 @@ describe('indicator domain', () => {
     expect(atrInst.paneId).toBe(`indicator:${ids[2]}`);
     expect(vmaInst.placement).toBe('volume');
     expect(vmaInst.paneId).toBe('volume');
+    expect(mfiInst.placement).toBe('oscillator');
+    expect(mfiInst.paneId).toBe(`indicator:${ids[0]}`);
+    expect(stochInst.placement).toBe('oscillator');
+    expect(stochInst.paneId).toBe(`indicator:${ids[1]}`);
+    expect(adxInst.placement).toBe('oscillator');
+    expect(adxInst.paneId).toBe(`indicator:${ids[2]}`);
+    expect(rsInst.placement).toBe('oscillator');
+    expect(rsInst.paneId).toBe(`indicator:${ids[3]}`);
   });
 
   it('validates type and registry ranges before an instance can be added', () => {

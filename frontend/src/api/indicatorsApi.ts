@@ -7,7 +7,7 @@ export interface IndicatorDataPoint {
 
 export interface IndicatorParamDefinition {
   name: string;
-  type: 'int' | 'float' | 'string' | 'bool';
+  type: 'int' | 'float' | 'string' | 'str' | 'bool';
   default: string | number | boolean | null;
   minimum: number | null;
   maximum: number | null;

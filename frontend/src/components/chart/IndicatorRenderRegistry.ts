@@ -37,6 +37,10 @@ export class IndicatorRenderRegistry {
   static referencesFor(definitionId: IndicatorInstanceV1['definitionId']): Array<{ value: number; label: string }> {
     if (definitionId === 'rsi') return [30, 50, 70].map(value => ({ value, label: `RSI ${value}` }));
     if (definitionId === 'cci') return [-100, 0, 100].map(value => ({ value, label: `CCI ${value}` }));
+    if (definitionId === 'mfi') return [20, 80].map(value => ({ value, label: `MFI ${value}` }));
+    if (definitionId === 'stoch') return [20, 80].map(value => ({ value, label: `Stoch ${value}` }));
+    if (definitionId === 'adx') return [20, 25].map(value => ({ value, label: `ADX ${value}` }));
+    if (definitionId === 'relative_strength') return [{ value: 100, label: '100' }];
     if (definitionId === 'macd') return [{ value: 0, label: 'Zero' }];
     return [];
   }
@@ -109,9 +113,67 @@ export class IndicatorRenderRegistry {
         { seriesKey: 'lower', name: 'Lower Band', data: lowerPoints, color: instance.styles.lower?.color ?? '#00E5FF' },
       ];
     }
+    if (instance.definitionId === 'stoch') {
+      const k = getIntParam(instance, 'k', 14);
+      const d = getIntParam(instance, 'd', 3);
+      const smoothK = getIntParam(instance, 'smooth_k', 3);
+
+      const expectedK = `STOCHk_${k}_${d}_${smoothK}`;
+      const expectedD = `STOCHd_${k}_${d}_${smoothK}`;
+
+      const kCol = available.find(c => c === expectedK);
+      const dCol = available.find(c => c === expectedD);
+
+      // All-or-nothing: both %K and %D must be present
+      if (!kCol || !dCol) {
+        return [];
+      }
+
+      const kPoints = finitePoints(data, kCol);
+      const dPoints = finitePoints(data, dCol);
+
+      if (!kPoints.length || !dPoints.length) {
+        return [];
+      }
+
+      return [
+        { seriesKey: 'k', name: '%K', data: kPoints, color: instance.styles.k?.color ?? '#58A6FF', scale: { minimum: 0, maximum: 100 }, references: this.referencesFor('stoch') },
+        { seriesKey: 'd', name: '%D', data: dPoints, color: instance.styles.d?.color ?? '#FF8A00' },
+      ];
+    }
+    if (instance.definitionId === 'adx') {
+      const length = getIntParam(instance, 'length', 14);
+
+      const expectedAdx = `ADX_${length}`;
+      const expectedDmp = `DMP_${length}`;
+      const expectedDmn = `DMN_${length}`;
+
+      const adxCol = available.find(c => c === expectedAdx);
+      const dmpCol = available.find(c => c === expectedDmp);
+      const dmnCol = available.find(c => c === expectedDmn);
+
+      // All-or-nothing: ADX, +DI, and -DI must all be present
+      if (!adxCol || !dmpCol || !dmnCol) {
+        return [];
+      }
+
+      const adxPoints = finitePoints(data, adxCol);
+      const dmpPoints = finitePoints(data, dmpCol);
+      const dmnPoints = finitePoints(data, dmnCol);
+
+      if (!adxPoints.length || !dmpPoints.length || !dmnPoints.length) {
+        return [];
+      }
+
+      return [
+        { seriesKey: 'adx', name: 'ADX', data: adxPoints, color: instance.styles.adx?.color ?? '#FFD166', references: this.referencesFor('adx') },
+        { seriesKey: 'dmp', name: '+DI', data: dmpPoints, color: instance.styles.dmp?.color ?? '#26A69A' },
+        { seriesKey: 'dmn', name: '-DI', data: dmnPoints, color: instance.styles.dmn?.color ?? '#EF5350' },
+      ];
+    }
     // Single-series released definitions: find exact single pinned output contract
     const findExactColumn = (defId: string): string | undefined => {
-      const defaultLen = (defId === 'rsi' || defId === 'atr') ? 14 : 20;
+      const defaultLen = (defId === 'rsi' || defId === 'atr' || defId === 'mfi') ? 14 : 20;
       const length = getIntParam(instance, 'length', defaultLen);
 
       if (defId === 'sma') return available.find(c => c === `SMA_${length}`);
@@ -120,6 +182,11 @@ export class IndicatorRenderRegistry {
       if (defId === 'cci') return available.find(c => c === `CCI_${length}_0.015`);
       if (defId === 'atr') return available.find(c => c === `ATRr_${length}`);
       if (defId === 'volume_sma') return available.find(c => c === `VOLUME_SMA_${length}`);
+      if (defId === 'mfi') return available.find(c => c === `MFI_${length}`);
+      if (defId === 'relative_strength') {
+        const benchmark = String(instance.params.benchmark ?? 'VNINDEX').toUpperCase();
+        return available.find(c => c === `RS_${benchmark}_${length}`);
+      }
       return undefined;
     };
 
@@ -149,6 +216,18 @@ export class IndicatorRenderRegistry {
     if (instance.definitionId === 'volume_sma') return [{
       seriesKey: 'primary', name: `Volume SMA ${length}`, type: 'line', data: points, color: instance.styles.primary?.color ?? '#FF8A00',
     }];
+    if (instance.definitionId === 'mfi') return [{
+      seriesKey: 'primary', name: `MFI ${length}`, data: points, color: instance.styles.primary?.color ?? '#26A69A',
+      scale: { minimum: 0, maximum: 100 }, references: this.referencesFor('mfi'),
+    }];
+    if (instance.definitionId === 'relative_strength') {
+      const benchmark = String(instance.params.benchmark ?? 'VNINDEX').toUpperCase();
+      const lengthVal = getIntParam(instance, 'length', 20);
+      return [{
+        seriesKey: 'primary', name: `RS (${benchmark}) ${lengthVal}`, data: points, color: instance.styles.primary?.color ?? '#00E5FF',
+        references: this.referencesFor('relative_strength'),
+      }];
+    }
     return [];
   }
 

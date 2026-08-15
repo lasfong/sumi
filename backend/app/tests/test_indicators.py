@@ -149,3 +149,78 @@ def test_invalid_indicator():
     
     with pytest.raises(ValueError, match="Indicator 'invalid_ind' is not supported"):
         IndicatorEngine.compute(df, 'invalid_ind')
+
+def test_mfi_calculation():
+    df = create_sample_data(100)
+    result_df = IndicatorEngine.compute(df, 'mfi', length=14)
+    assert 'MFI_14' in result_df.columns
+    assert pd.isna(result_df['MFI_14'].iloc[0])
+    last_mfi = result_df['MFI_14'].iloc[-1]
+    assert 0 <= last_mfi <= 100
+
+def test_stoch_calculation():
+    df = create_sample_data(100)
+    result_df = IndicatorEngine.compute(df, 'stoch', k=14, d=3, smooth_k=3)
+    assert 'STOCHk_14_3_3' in result_df.columns
+    assert 'STOCHd_14_3_3' in result_df.columns
+    assert pd.isna(result_df['STOCHk_14_3_3'].iloc[0])
+    last_k = result_df['STOCHk_14_3_3'].iloc[-1]
+    last_d = result_df['STOCHd_14_3_3'].iloc[-1]
+    assert 0 <= last_k <= 100
+    assert 0 <= last_d <= 100
+
+def test_adx_calculation():
+    df = create_sample_data(100)
+    result_df = IndicatorEngine.compute(df, 'adx', length=14)
+    assert 'ADX_14' in result_df.columns
+    assert 'DMP_14' in result_df.columns
+    assert 'DMN_14' in result_df.columns
+    assert pd.isna(result_df['ADX_14'].iloc[0])
+    last_adx = result_df['ADX_14'].iloc[-1]
+    assert last_adx >= 0
+
+def test_relative_strength_calculation():
+    dates = [datetime(2024, 1, 1) + timedelta(days=i) for i in range(30)]
+    df = pd.DataFrame({
+        'open': [100.0 + i for i in range(30)],
+        'high': [105.0 + i for i in range(30)],
+        'low': [95.0 + i for i in range(30)],
+        'close': [100.0 + i for i in range(30)],
+        'volume': [1000 + i for i in range(30)],
+    }, index=dates)
+
+    bench_df = pd.DataFrame({
+        'close': [1000.0 + i * 5 for i in range(30)],
+    }, index=dates)
+
+    result_df = IndicatorEngine.compute(df, 'relative_strength', length=10, benchmark_df=bench_df)
+    assert 'RS_VNINDEX_10' in result_df.columns
+    # Warm up period: first 10 rows must be NaN
+    for i in range(10):
+        assert pd.isna(result_df['RS_VNINDEX_10'].iloc[i])
+
+    # Day 10 calculation: symbol rose from 100 to 110 (+10%), bench rose from 1000 to 1050 (+5%)
+    expected_day10 = (110.0 / 100.0) / (1050.0 / 1000.0) * 100.0
+    assert result_df['RS_VNINDEX_10'].iloc[10] == pytest.approx(expected_day10)
+
+def test_relative_strength_missing_benchmark_and_dates():
+    dates = [datetime(2024, 1, 1) + timedelta(days=i) for i in range(30)]
+    df = pd.DataFrame({
+        'open': [100.0 + i for i in range(30)],
+        'high': [105.0 + i for i in range(30)],
+        'low': [95.0 + i for i in range(30)],
+        'close': [100.0 + i for i in range(30)],
+        'volume': [1000 + i for i in range(30)],
+    }, index=dates)
+
+    # Empty benchmark returns column filled with NaNs
+    res_empty = IndicatorEngine.compute(df, 'relative_strength', length=10, benchmark_df=None)
+    assert 'RS_VNINDEX_10' in res_empty.columns
+    assert res_empty['RS_VNINDEX_10'].isna().all()
+
+    # Benchmark missing some dates produces NaNs for missing dates without crashing
+    bench_dates = [dates[i] for i in range(30) if i != 15]
+    bench_df = pd.DataFrame({'close': [1000.0 + i * 5 for i in range(len(bench_dates))]}, index=bench_dates)
+    res_gaps = IndicatorEngine.compute(df, 'relative_strength', length=10, benchmark_df=bench_df)
+    assert 'RS_VNINDEX_10' in res_gaps.columns
+    assert pd.isna(res_gaps['RS_VNINDEX_10'].iloc[15])

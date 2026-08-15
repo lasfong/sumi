@@ -3,7 +3,7 @@
 > Authority: `docs/ANTIGRAVITY_TWO_SESSION_OPERATING_MODEL.md` (with `docs/LOW_MODEL_AUTONOMOUS_EXECUTION_PROTOCOL.md`)
 > Current plan: PRO-05 — Momentum and Relative Strength
 > Machine-transfer entrypoint: `docs/MACHINE_TRANSFER_HANDOFF_2026-08-10.md`
-> Latest review record: `docs/reviews/PRO_04_REVIEW_2026-08-15_R5.md`
+> Latest review record: `docs/reviews/PRO_05_REVIEW_2026-08-15.md`
 > Prior approval record: `docs/reviews/PRO_04_REVIEW_2026-08-15_R5.md`
 > Canonical roadmap: `docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md`
 
@@ -16,28 +16,60 @@ Last updated: 2026-08-15
 - PRO-02: independently approved on 2026-08-09 in `docs/reviews/PRO_02_REVIEW_2026-08-09.md`. Authoritative reviewer artifact: `test-results/product-uat/2026-08-09T14-03-23-889Z/results.json`, 298/298 passed. Committed in `bc82434` and pushed to `origin/master`.
 - PRO-03: independently approved and closed on 2026-08-12 in `docs/reviews/PRO_03_REVIEW_2026-08-12_R4.md`. Committed in `dc9f007` and pushed to `origin/master`.
 - PRO-04: independently approved and closed on 2026-08-15 in `docs/reviews/PRO_04_REVIEW_2026-08-15_R5.md`. Committed in `f35f62f` and pushed to `origin/master`.
-- PRO-05: USER AUTHORIZED on 2026-08-15; PRO-06 through PRO-12 not started.
+- PRO-05: independently approved and closed on 2026-08-15 in `docs/reviews/PRO_05_REVIEW_2026-08-15.md`. PRO-06 through PRO-12 not started.
 
 ## Current control point
 
-Milestone: `PRO-05 PREPARED — MOMENTUM AND RELATIVE STRENGTH`
+Milestone: `PRO-05 CLOSED — INDEPENDENTLY APPROVED`
 
 ## Active batch
 
-PRO-05 — Momentum and Relative Strength.
+PRO-05 — Momentum and Relative Strength (CLOSED).
 
 ## State
 
-PREPARED
+CLOSED
 
-Status: PRO-05 authorized by user on 2026-08-15. ExecPlan: `docs/exec-plans/PRO_05_MOMENTUM_AND_RELATIVE_STRENGTH.md`. Active DEV prompt: `docs/dev-prompts/PRO_05_MOMENTUM_AND_RELATIVE_STRENGTH_DEV_PROMPT.md`.
+Status: PRO-05 independently approved on 2026-08-15. ExecPlan: `docs/exec-plans/PRO_05_MOMENTUM_AND_RELATIVE_STRENGTH.md`. Reviewer Record: `docs/reviews/PRO_05_REVIEW_2026-08-15.md`.
 
-### R4 findings resolved
+## PRO-05 Implementation & Verification Summary (2026-08-15)
 
-1. Translated public bbands `std` parameter to `lower_std`/`upper_std` in `IndicatorEngine` and `StrategyIndicatorAdapter`, keeping `std` as the public released/persisted product parameter.
-2. Implemented `formatBollingerStd` in `IndicatorRenderRegistry.ts` to deterministically format integral floats (`2.0`, `3.0`, `10.0`) and fractional floats (`2.25`, `1.15`, `2.5`, `0.1`) matching backend column outputs.
-3. Added backend unit/edge tests for `std=2.25` and `std=1.15`, frontend tests for exact/rounded/mismatched columns, and end-to-end parity tests.
-4. Strengthened Product UAT (`scripts/product-uat.mjs`) with non-default `bbands` (`std=2.25`), asserting exact equality against session-scoped backend output columns `BBU_20_2.25_2.25`, `BBM_20_2.25_2.25`, `BBL_20_2.25_2.25`.
+- **Backend Calculation & Benchmark Date Alignment**:
+  - Implemented `relative_strength` calculation in `IndicatorEngine._compute_relative_strength` aligning symbol daily candles with VNINDEX benchmark dates without future data leakage (`timestamp <= visible_candles[-1].timestamp`).
+  - Allowed `benchmark_df` in `_normalize_params` and added `k`, `d`, `smooth_k`, `benchmark` to `IndicatorConfig` and `StrategyIndicatorAdapter._params_for`.
+  - Added session-scoped benchmark candle querying to Replay and Indicator API routes (`backend/app/api/replay.py`, `backend/app/api/indicators.py`).
+- **Frontend Catalog & Typed Domain (`indicatorDomain.ts`, `indicatorsApi.ts`)**:
+  - Released `mfi`, `stoch`, `adx`, and `relative_strength` in `SUPPORTED_INDICATORS`.
+  - Added default styles for `mfi` (`#26A69A`), `stoch` (`k`: `#58A6FF`, `d`: `#FF8A00`), `adx` (`adx`: `#FFD166`, `dmp`: `#26A69A`, `dmn`: `#EF5350`), and `relative_strength` (`#00E5FF`).
+  - Added `str` parameter type support in `coerceParam` and `IndicatorParamDefinition`.
+- **Renderer Registry & Exact Contracts (`IndicatorRenderRegistry.ts`)**:
+  - Added reference lines for `mfi` (`[20, 80]`), `stoch` (`[20, 80]`), `adx` (`[20, 25]`), and `relative_strength` (`[100]`).
+  - Added multi-series mapping and fail-closed all-or-nothing handling for `stoch` (`STOCHk_${k}_${d}_${smooth_k}`, `STOCHd_${k}_${d}_${smooth_k}`) and `adx` (`ADX_${length}`, `DMP_${length}`, `DMN_${length}`).
+  - Added single-series exact column mapping for `mfi` (`MFI_${length}`) and `relative_strength` (`RS_${benchmark}_${length}`).
+- **Technical Gate Verification (`verify-v2.ps1`)**:
+  - Backend pytest: 154 passed (0 failed).
+  - Alembic migrations: clean (0 drift).
+  - ESLint: 0 errors.
+  - Frontend vitest: 175 passed across 27 files (47 passed across 6 indicator/chart files).
+  - Frontend production build (`tsc -b && vite build`): clean (0 errors).
+- **Product UAT Verification (`run-product-uat.ps1`)**:
+  - Directory: `test-results/product-uat/2026-08-15T15-34-06-297Z/`
+  - `results.json` SHA-256: `3B770B5E45D2F00D410A432DA0C5BEBD1A4CC19EAC6CDFA2C6015203946BC988`
+  - Assertions Passed: **316 / 316** (0 failed, 0 blocking failed).
+  - Manifest Reconciliation: `pass: true` (8/8 tests passed in `scripts/product-uat-manifest.test.mjs`).
+  - PRO-05 Assertions Verified:
+    - `pro05.mfi-oscillator`: PASS (renderedValue: 100, expectedValue: 100, refs: [20, 80])
+    - `pro05.stoch-oscillator`: PASS (renderedValues: {k: 78.45, d: 78.75}, refs: [20, 80])
+    - `pro05.adx-oscillator`: PASS (renderedValues: {adx: 63.77, dmp: 8.11, dmn: 0.84}, refs: [20, 25])
+    - `pro05.relative-strength-oscillator`: PASS (renderedValue: 97.07, expectedValue: 97.07, ref: 100)
+    - `pro05.momentum-expansion-lifecycle`: PASS (all instances verified in DOM and runtime)
+- **Retained Visual Screenshots**:
+  - `pro05-momentum-indicators-1440x1000.png` (1440×1000, SHA-256: `EA2E05C2CA2870B2CACAB218B1963046AF33AD04615E1FA08C249FE170150A17`)
+  - `pro05-momentum-indicators-1280x800.png` (1280×800, SHA-256: `5368BB794D54F3A2918C84370ECF389BD8AE1A33631959E5D7BDF1B114E5A79F`)
+- **Database Hash Invariant**:
+  - `backend/sumi.db` SHA-256 before/after: `F890F5BC16ECE557EA78E19A6095A362DE8641E341382DF66D6A9C997E84F080` (0 bytes mutated).
+- **Whitespace / Format Check**:
+  - `git diff --check`: 0 errors.
 
 ## PRO-04 REWORK-04 Implementation & Verification Summary (2026-08-15)
 
@@ -127,12 +159,14 @@ Status: PRO-05 authorized by user on 2026-08-15. ExecPlan: `docs/exec-plans/PRO_
 - Archived DEV prompt: `docs/dev-prompts/PRO_04_REWORK_04_BBANDS_STD_CONTRACT_PROMPT.md`
 - Final reviewer record: `docs/reviews/PRO_04_REVIEW_2026-08-15_R5.md`
 
-## Active PRO-05 authority package
+## Closed PRO-05 authority package
 
-- Stable dossier: `docs/program/PRO_05_MOMENTUM_AND_RELATIVE_STRENGTH.md`
-- Prepared ExecPlan: `docs/exec-plans/PRO_05_MOMENTUM_AND_RELATIVE_STRENGTH.md`
-- Active DEV prompt: `docs/dev-prompts/PRO_05_MOMENTUM_AND_RELATIVE_STRENGTH_DEV_PROMPT.md`
+- Operating protocol: `docs/LOW_MODEL_AUTONOMOUS_EXECUTION_PROTOCOL.md`
+- Program dossier: `docs/program/PRO_05_MOMENTUM_AND_RELATIVE_STRENGTH.md`
+- Completed ExecPlan: `docs/exec-plans/PRO_05_MOMENTUM_AND_RELATIVE_STRENGTH.md`
+- Archived DEV prompt: `docs/dev-prompts/PRO_05_MOMENTUM_AND_RELATIVE_STRENGTH_DEV_PROMPT.md`
+- Final reviewer record: `docs/reviews/PRO_05_REVIEW_2026-08-15.md`
 
 ## Next action
 
-Execute `docs/dev-prompts/ANTIGRAVITY_DEV_SESSION_INIT_PROMPT.md` in a new DEV session. Implement PRO-05 (MFI, Stochastic, ADX, Relative Strength vs VNINDEX) and stop at the Independent Reviewer Gate. PRO-06 remains unauthorized.
+PRO-05 is CLOSED and independently approved. PRO-06 (Advanced Trend Overlays: Keltner Channels, PSAR, SuperTrend) remains UNAUTHORIZED until explicit user authorization. No further session actions are authorized without user prompt.
