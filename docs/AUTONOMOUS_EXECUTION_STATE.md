@@ -1,10 +1,10 @@
 # Sumi autonomous execution state
 
 > Authority: `docs/ANTIGRAVITY_TWO_SESSION_OPERATING_MODEL.md` (with `docs/LOW_MODEL_AUTONOMOUS_EXECUTION_PROTOCOL.md`)
-> Current plan: PRO-05 — Momentum and Relative Strength
+> Current plan: PRO-06 — Advanced Trend Overlays
 > Machine-transfer entrypoint: `docs/MACHINE_TRANSFER_HANDOFF_2026-08-10.md`
 > Latest review record: `docs/reviews/PRO_05_REVIEW_2026-08-15.md`
-> Prior approval record: `docs/reviews/PRO_04_REVIEW_2026-08-15_R5.md`
+> Prior approval record: `docs/reviews/PRO_05_REVIEW_2026-08-15.md`
 > Canonical roadmap: `docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md`
 
 Last updated: 2026-08-15
@@ -16,21 +16,22 @@ Last updated: 2026-08-15
 - PRO-02: independently approved on 2026-08-09 in `docs/reviews/PRO_02_REVIEW_2026-08-09.md`. Authoritative reviewer artifact: `test-results/product-uat/2026-08-09T14-03-23-889Z/results.json`, 298/298 passed. Committed in `bc82434` and pushed to `origin/master`.
 - PRO-03: independently approved and closed on 2026-08-12 in `docs/reviews/PRO_03_REVIEW_2026-08-12_R4.md`. Committed in `dc9f007` and pushed to `origin/master`.
 - PRO-04: independently approved and closed on 2026-08-15 in `docs/reviews/PRO_04_REVIEW_2026-08-15_R5.md`. Committed in `f35f62f` and pushed to `origin/master`.
-- PRO-05: independently approved and closed on 2026-08-15 in `docs/reviews/PRO_05_REVIEW_2026-08-15.md`. PRO-06 through PRO-12 not started.
+- PRO-05: independently approved and closed on 2026-08-15 in `docs/reviews/PRO_05_REVIEW_2026-08-15.md`. Committed in `a789342` and pushed to `origin/master`.
+- PRO-06: USER AUTHORIZED on 2026-08-15; PRO-07 through PRO-12 not started.
 
 ## Current control point
 
-Milestone: `PRO-05 CLOSED — INDEPENDENTLY APPROVED`
+Milestone: `PRO-06 PREPARED — ADVANCED TREND OVERLAYS`
 
 ## Active batch
 
-PRO-05 — Momentum and Relative Strength (CLOSED).
+PRO-06 — Advanced Trend Overlays.
 
 ## State
 
-CLOSED
+PREPARED
 
-Status: PRO-05 independently approved on 2026-08-15. ExecPlan: `docs/exec-plans/PRO_05_MOMENTUM_AND_RELATIVE_STRENGTH.md`. Reviewer Record: `docs/reviews/PRO_05_REVIEW_2026-08-15.md`.
+Status: PRO-06 authorized by user on 2026-08-15. ExecPlan: `docs/exec-plans/PRO_06_ADVANCED_TREND_OVERLAYS.md`. Active DEV prompt: `docs/dev-prompts/PRO_06_ADVANCED_TREND_OVERLAYS_DEV_PROMPT.md`.
 
 ## PRO-05 Implementation & Verification Summary (2026-08-15)
 
@@ -167,6 +168,12 @@ Status: PRO-05 independently approved on 2026-08-15. ExecPlan: `docs/exec-plans/
 - Archived DEV prompt: `docs/dev-prompts/PRO_05_MOMENTUM_AND_RELATIVE_STRENGTH_DEV_PROMPT.md`
 - Final reviewer record: `docs/reviews/PRO_05_REVIEW_2026-08-15.md`
 
+## Active PRO-06 authority package
+
+- Stable dossier: `docs/program/PRO_06_ADVANCED_TREND_OVERLAYS.md`
+- Prepared ExecPlan: `docs/exec-plans/PRO_06_ADVANCED_TREND_OVERLAYS.md`
+- Active DEV prompt: `docs/dev-prompts/PRO_06_ADVANCED_TREND_OVERLAYS_DEV_PROMPT.md`
+
 ## Next action
 
-PRO-05 is CLOSED and independently approved. PRO-06 (Advanced Trend Overlays: Keltner Channels, PSAR, SuperTrend) remains UNAUTHORIZED until explicit user authorization. No further session actions are authorized without user prompt.
+Execute `docs/dev-prompts/ANTIGRAVITY_DEV_SESSION_INIT_PROMPT.md` in a new DEV session. Implement PRO-06 (Keltner Channels, Parabolic SAR, SuperTrend) and stop at the Independent Reviewer Gate. PRO-07 remains unauthorized.
