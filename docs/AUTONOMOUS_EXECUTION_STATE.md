@@ -1,10 +1,10 @@
 # Sumi autonomous execution state
 
 > Authority: `docs/ANTIGRAVITY_TWO_SESSION_OPERATING_MODEL.md` (with `docs/LOW_MODEL_AUTONOMOUS_EXECUTION_PROTOCOL.md`)
-> Current plan: PRO-04 — Core Indicator Expansion
+> Current plan: PRO-05 — Momentum and Relative Strength
 > Machine-transfer entrypoint: `docs/MACHINE_TRANSFER_HANDOFF_2026-08-10.md`
 > Latest review record: `docs/reviews/PRO_04_REVIEW_2026-08-15_R5.md`
-> Prior approval record: `docs/reviews/PRO_03_REVIEW_2026-08-12_R4.md`
+> Prior approval record: `docs/reviews/PRO_04_REVIEW_2026-08-15_R5.md`
 > Canonical roadmap: `docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md`
 
 Last updated: 2026-08-15
@@ -14,22 +14,23 @@ Last updated: 2026-08-15
 - PRO-00: independently approved and committed in `24468dd` (`fix(replay): close PRO-00 verification blockers`). Pushed to `origin/master`.
 - PRO-01: independently approved and committed in `b3f18d8` (`feat(analytics): complete analytics trust contracts`). Final product evidence is retained in `test-results/product-uat/2026-08-02T06-29-03-858Z/results.json`, 288/288; production DB SHA-256 remained `4166D749119B0EBB4B9ADF418EA18442FF6E0C14AE762147CD3D0FBE20F76459`. Pushed to `origin/master`.
 - PRO-02: independently approved on 2026-08-09 in `docs/reviews/PRO_02_REVIEW_2026-08-09.md`. Authoritative reviewer artifact: `test-results/product-uat/2026-08-09T14-03-23-889Z/results.json`, 298/298 passed. Committed in `bc82434` and pushed to `origin/master`.
-- PRO-03: independently approved and closed on 2026-08-12 in `docs/reviews/PRO_03_REVIEW_2026-08-12_R4.md`. The stale-preview overwrite path is closed fail-closed.
-- PRO-04: independently approved and closed on 2026-08-15 in `docs/reviews/PRO_04_REVIEW_2026-08-15_R5.md`. PRO-05 through PRO-12 are not started.
+- PRO-03: independently approved and closed on 2026-08-12 in `docs/reviews/PRO_03_REVIEW_2026-08-12_R4.md`. Committed in `dc9f007` and pushed to `origin/master`.
+- PRO-04: independently approved and closed on 2026-08-15 in `docs/reviews/PRO_04_REVIEW_2026-08-15_R5.md`. Committed in `f35f62f` and pushed to `origin/master`.
+- PRO-05: USER AUTHORIZED on 2026-08-15; PRO-06 through PRO-12 not started.
 
 ## Current control point
 
-Milestone: `PRO-04 CLOSED — INDEPENDENTLY APPROVED`
+Milestone: `PRO-05 PREPARED — MOMENTUM AND RELATIVE STRENGTH`
 
 ## Active batch
 
-PRO-04 — Core Indicator Expansion (CLOSED).
+PRO-05 — Momentum and Relative Strength.
 
 ## State
 
-CLOSED
+PREPARED
 
-Status: PRO-04 approved on 2026-08-15. ExecPlan: `docs/exec-plans/PRO_04_CORE_INDICATOR_EXPANSION.md`. Reviewer Record: `docs/reviews/PRO_04_REVIEW_2026-08-15_R5.md`.
+Status: PRO-05 authorized by user on 2026-08-15. ExecPlan: `docs/exec-plans/PRO_05_MOMENTUM_AND_RELATIVE_STRENGTH.md`. Active DEV prompt: `docs/dev-prompts/PRO_05_MOMENTUM_AND_RELATIVE_STRENGTH_DEV_PROMPT.md`.
 
 ### R4 findings resolved
 
@@ -126,6 +127,12 @@ Status: PRO-04 approved on 2026-08-15. ExecPlan: `docs/exec-plans/PRO_04_CORE_IN
 - Archived DEV prompt: `docs/dev-prompts/PRO_04_REWORK_04_BBANDS_STD_CONTRACT_PROMPT.md`
 - Final reviewer record: `docs/reviews/PRO_04_REVIEW_2026-08-15_R5.md`
 
+## Active PRO-05 authority package
+
+- Stable dossier: `docs/program/PRO_05_MOMENTUM_AND_RELATIVE_STRENGTH.md`
+- Prepared ExecPlan: `docs/exec-plans/PRO_05_MOMENTUM_AND_RELATIVE_STRENGTH.md`
+- Active DEV prompt: `docs/dev-prompts/PRO_05_MOMENTUM_AND_RELATIVE_STRENGTH_DEV_PROMPT.md`
+
 ## Next action
 
-PRO-04 is CLOSED and independently approved. PRO-05 (MFI, Stochastic, ADX, Relative Strength vs VNINDEX) remains UNAUTHORIZED until explicit user authorization. No further session actions are authorized without user prompt.
+Execute `docs/dev-prompts/ANTIGRAVITY_DEV_SESSION_INIT_PROMPT.md` in a new DEV session. Implement PRO-05 (MFI, Stochastic, ADX, Relative Strength vs VNINDEX) and stop at the Independent Reviewer Gate. PRO-06 remains unauthorized.
