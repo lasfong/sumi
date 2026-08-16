@@ -1,10 +1,10 @@
 # Sumi autonomous execution state
 
 > Authority: `docs/ANTIGRAVITY_TWO_SESSION_OPERATING_MODEL.md` (with `docs/LOW_MODEL_AUTONOMOUS_EXECUTION_PROTOCOL.md`)
-> Current plan: PRO-08 — Trade Planning and Journal
+> Current plan: PRO-09 — Strategy Research UX
 > Machine-transfer entrypoint: `docs/MACHINE_TRANSFER_HANDOFF_2026-08-10.md`
 > Latest review record: `docs/reviews/PRO_08_REVIEW_2026-08-16.md`
-> Prior approval record: `docs/reviews/PRO_07_REVIEW_2026-08-16.md`
+> Prior approval record: `docs/reviews/PRO_08_REVIEW_2026-08-16.md`
 > Canonical roadmap: `docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md`
 
 Last updated: 2026-08-16
@@ -19,21 +19,22 @@ Last updated: 2026-08-16
 - PRO-05: independently approved and closed on 2026-08-15 in `docs/reviews/PRO_05_REVIEW_2026-08-15.md`. Committed in `a789342` and pushed to `origin/master`.
 - PRO-06: independently approved and closed on 2026-08-16 in `docs/reviews/PRO_06_REVIEW_2026-08-16.md`. Committed in `d94d324` and pushed to `origin/master`.
 - PRO-07: independently approved and closed on 2026-08-16 in `docs/reviews/PRO_07_REVIEW_2026-08-16.md`. Committed in `d0f69e5` and pushed to `origin/master`.
-- PRO-08: independently approved and closed on 2026-08-16 in `docs/reviews/PRO_08_REVIEW_2026-08-16.md`. PRO-09 through PRO-12 not started.
+- PRO-08: independently approved and closed on 2026-08-16 in `docs/reviews/PRO_08_REVIEW_2026-08-16.md`. Committed in `92c2d0a` and pushed to `origin/master`.
+- PRO-09: USER AUTHORIZED on 2026-08-16; PRO-10 through PRO-12 not started.
 
 ## Current control point
 
-Milestone: `PRO-08 CLOSED — INDEPENDENTLY APPROVED`
+Milestone: `PRO-09 PREPARED — STRATEGY RESEARCH UX`
 
 ## Active batch
 
-PRO-08 — Trade Planning and Journal (CLOSED).
+PRO-09 — Strategy Research UX.
 
 ## State
 
-CLOSED
+PREPARED
 
-Status: PRO-08 independently approved on 2026-08-16. ExecPlan: `docs/exec-plans/PRO_08_TRADE_PLANNING_AND_JOURNAL.md`. Reviewer Record: `docs/reviews/PRO_08_REVIEW_2026-08-16.md`.
+Status: PRO-09 authorized by user on 2026-08-16. ExecPlan: `docs/exec-plans/PRO_09_STRATEGY_RESEARCH_UX.md`. Active DEV prompt: `docs/dev-prompts/PRO_09_STRATEGY_RESEARCH_UX_DEV_PROMPT.md`.
 
 ## PRO-08 Implementation & Verification Summary (2026-08-16)
 
@@ -318,6 +319,12 @@ Status: PRO-08 independently approved on 2026-08-16. ExecPlan: `docs/exec-plans/
 - Archived DEV prompt: `docs/dev-prompts/PRO_08_TRADE_PLANNING_AND_JOURNAL_DEV_PROMPT.md`
 - Final reviewer record: `docs/reviews/PRO_08_REVIEW_2026-08-16.md`
 
+## Active PRO-09 authority package
+
+- Stable dossier: `docs/program/PRO_09_STRATEGY_RESEARCH_UX.md`
+- Prepared ExecPlan: `docs/exec-plans/PRO_09_STRATEGY_RESEARCH_UX.md`
+- Active DEV prompt: `docs/dev-prompts/PRO_09_STRATEGY_RESEARCH_UX_DEV_PROMPT.md`
+
 ## Next action
 
-PRO-08 is CLOSED and independently approved. PRO-09 (Strategy Research UX) remains UNAUTHORIZED until explicit user authorization. No further session actions are authorized without user prompt.
+Execute `docs/dev-prompts/ANTIGRAVITY_DEV_SESSION_INIT_PROMPT.md` in a new DEV session. Implement PRO-09 (Strategy Research UX) and stop at the Independent Reviewer Gate. PRO-10 remains unauthorized.
