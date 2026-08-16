@@ -917,6 +917,81 @@ try {
   await instanceAction(stoch.id, 'remove').click(); await page.waitForTimeout(100);
   await instanceAction(mfi.id, 'remove').click(); await page.waitForTimeout(100);
 
+  // PRO-06: Advanced Trend Overlays (Keltner Channels, Parabolic SAR, SuperTrend)
+  const kc = await addIndicator('kc', { length: 20, scalar: 2.0 });
+  const psar = await addIndicator('psar', { af0: 0.02, af: 0.02, max_af: 0.2 });
+  const supertrend = await addIndicator('supertrend', { length: 7, multiplier: 3.0 });
+  await page.waitForTimeout(1_000);
+
+  const pro06DomainDoc = await readIndicatorDomain();
+  const pro06Chart = await readIndicatorChart();
+
+  const kcSnapshot = pro06Chart.instances.find(inst => inst.id === kc.id);
+  const psarSnapshot = pro06Chart.instances.find(inst => inst.id === psar.id);
+  const supertrendSnapshot = pro06Chart.instances.find(inst => inst.id === supertrend.id);
+
+  const pro06Runtime = await readIndicatorRuntime();
+  const kcUpperVal = pro06Runtime[kc.id]?.values?.upper;
+  const kcMiddleVal = pro06Runtime[kc.id]?.values?.middle;
+  const kcLowerVal = pro06Runtime[kc.id]?.values?.lower;
+  const psarVal = pro06Runtime[psar.id]?.values?.sar;
+  const supertrendVal = pro06Runtime[supertrend.id]?.values?.supertrend;
+
+  const kcData = getRows(await (await page.request.get(`${backendUrl}/api/replay/sessions/${sessionId}/indicators?indicator=kc&length=20&scalar=2.0`)).json());
+  const psarData = getRows(await (await page.request.get(`${backendUrl}/api/replay/sessions/${sessionId}/indicators?indicator=psar&af0=0.02&af=0.02&max_af=0.2`)).json());
+  const supertrendData = getRows(await (await page.request.get(`${backendUrl}/api/replay/sessions/${sessionId}/indicators?indicator=supertrend&length=7&multiplier=3.0`)).json());
+
+  const expectedKcUpperVal = kcData[kcData.length - 1]?.['KCUe_20_2.0'];
+  const expectedKcMiddleVal = kcData[kcData.length - 1]?.['KCBe_20_2.0'];
+  const expectedKcLowerVal = kcData[kcData.length - 1]?.['KCLe_20_2.0'];
+  const lastPsarRow = psarData[psarData.length - 1] || {};
+  const expectedPsarVal = (lastPsarRow['PSARl_0.02_0.2'] !== null && lastPsarRow['PSARl_0.02_0.2'] !== undefined)
+    ? lastPsarRow['PSARl_0.02_0.2']
+    : lastPsarRow['PSARs_0.02_0.2'];
+  const expectedSupertrendVal = supertrendData[supertrendData.length - 1]?.['SUPERT_7_3.0'];
+
+  check('pro06.kc-channel', kc.placement === 'price'
+    && kc.paneId === 'price'
+    && kc.params.length === 20
+    && (kc.params.scalar === 2 || kc.params.scalar === 2.0)
+    && Number.isFinite(kcUpperVal) && Number.isFinite(kcMiddleVal) && Number.isFinite(kcLowerVal)
+    && kcUpperVal === expectedKcUpperVal && kcMiddleVal === expectedKcMiddleVal && kcLowerVal === expectedKcLowerVal
+    && kcUpperVal > kcMiddleVal && kcMiddleVal > kcLowerVal
+    && JSON.stringify(kcSnapshot?.series) === JSON.stringify(['upper', 'middle', 'lower']),
+    JSON.stringify({ instance: kc, snapshot: kcSnapshot, renderedValues: { upper: kcUpperVal, middle: kcMiddleVal, lower: kcLowerVal }, expectedValues: { upper: expectedKcUpperVal, middle: expectedKcMiddleVal, lower: expectedKcLowerVal } }));
+
+  check('pro06.psar-overlay', psar.placement === 'price'
+    && psar.paneId === 'price'
+    && psar.params.af0 === 0.02 && psar.params.max_af === 0.2
+    && Number.isFinite(psarVal)
+    && psarVal === expectedPsarVal
+    && psarSnapshot?.series.includes('sar'),
+    JSON.stringify({ instance: psar, snapshot: psarSnapshot, renderedValue: psarVal, expectedValue: expectedPsarVal }));
+
+  check('pro06.supertrend-overlay', supertrend.placement === 'price'
+    && supertrend.paneId === 'price'
+    && supertrend.params.length === 7
+    && (supertrend.params.multiplier === 3 || supertrend.params.multiplier === 3.0)
+    && Number.isFinite(supertrendVal)
+    && supertrendVal === expectedSupertrendVal
+    && supertrendSnapshot?.series.includes('supertrend'),
+    JSON.stringify({ instance: supertrend, snapshot: supertrendSnapshot, renderedValue: supertrendVal, expectedValue: expectedSupertrendVal }));
+
+  check('pro06.advanced-trend-lifecycle', [kc.id, psar.id, supertrend.id].every(id => pro06DomainDoc.instances.some(i => i.id === id))
+    && inspectActiveRuntime(pro06DomainDoc, pro06Runtime).pass,
+    JSON.stringify({ instances: pro06DomainDoc.instances.map(i => ({ id: i.id, def: i.definitionId, pane: i.paneId })) }));
+
+  await page.screenshot({ path: path.join(runDir, 'pro06-advanced-trend-indicators-1440x1000.png'), fullPage: true });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.locator('[data-testid="chart-workspace"]').scrollIntoViewIfNeeded();
+  await page.waitForTimeout(200);
+  await page.screenshot({ path: path.join(runDir, 'pro06-advanced-trend-indicators-1280x800.png'), fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+
+  await instanceAction(supertrend.id, 'remove').click(); await page.waitForTimeout(100);
+  await instanceAction(psar.id, 'remove').click(); await page.waitForTimeout(100);
+  await instanceAction(kc.id, 'remove').click(); await page.waitForTimeout(100);
+
   await page.getByTestId('active-indicator-list').evaluate(element => { element.scrollLeft = 0; });
   await page.screenshot({ path: path.join(runDir, '01-indicators.png'), fullPage: true });
 

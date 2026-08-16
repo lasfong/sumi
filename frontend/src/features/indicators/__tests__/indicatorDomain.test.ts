@@ -19,6 +19,9 @@ const registry: IndicatorDefinition[] = [
   { id: 'stoch', label: 'Stochastic Oscillator', category: 'Oscillators', pane: 'oscillator', description: 'Stoch', params: [{ name: 'k', type: 'int', default: 14, minimum: 1, maximum: 200 }, { name: 'd', type: 'int', default: 3, minimum: 1, maximum: 50 }, { name: 'smooth_k', type: 'int', default: 3, minimum: 1, maximum: 50 }] },
   { id: 'adx', label: 'Average Directional Index', category: 'Trend', pane: 'oscillator', description: 'ADX', params: [{ name: 'length', type: 'int', default: 14, minimum: 1, maximum: 200 }] },
   { id: 'relative_strength', label: 'Relative Strength (vs VNINDEX)', category: 'Oscillators', pane: 'oscillator', description: 'RS', params: [{ name: 'length', type: 'int', default: 20, minimum: 1, maximum: 500 }, { name: 'benchmark', type: 'str', default: 'VNINDEX', minimum: null, maximum: null }] },
+  { id: 'kc', label: 'Keltner Channels', category: 'Volatility', pane: 'main', description: 'KC', params: [{ name: 'length', type: 'int', default: 20, minimum: 1, maximum: 500 }, { name: 'scalar', type: 'float', default: 2.0, minimum: 0.1, maximum: 20 }] },
+  { id: 'psar', label: 'Parabolic SAR', category: 'Trend', pane: 'main', description: 'PSAR', params: [{ name: 'af0', type: 'float', default: 0.02, minimum: 0.001, maximum: 1 }, { name: 'af', type: 'float', default: 0.02, minimum: 0.001, maximum: 1 }, { name: 'max_af', type: 'float', default: 0.2, minimum: 0.001, maximum: 1 }] },
+  { id: 'supertrend', label: 'SuperTrend', category: 'Trend', pane: 'main', description: 'SuperTrend', params: [{ name: 'length', type: 'int', default: 7, minimum: 1, maximum: 200 }, { name: 'multiplier', type: 'float', default: 3.0, minimum: 0.1, maximum: 20 }] },
   { id: 'ichimoku', label: 'Ichimoku Cloud', category: 'Trend', pane: 'main', description: 'Ichimoku', params: [{ name: 'tenkan', type: 'int', default: 9, minimum: 1, maximum: 200 }] },
 ];
 const definitions = approvedDefinitions(registry);
@@ -52,6 +55,9 @@ describe('indicator domain', () => {
     expect(idsInApproved).toContain('stoch');
     expect(idsInApproved).toContain('adx');
     expect(idsInApproved).toContain('relative_strength');
+    expect(idsInApproved).toContain('kc');
+    expect(idsInApproved).toContain('psar');
+    expect(idsInApproved).toContain('supertrend');
     expect(idsInApproved).not.toContain('ichimoku');
   });
 
@@ -64,11 +70,20 @@ describe('indicator domain', () => {
     const stochInst = createIndicatorInstance(byId('stoch'), {}, 5, ids[1]);
     const adxInst = createIndicatorInstance(byId('adx'), {}, 6, ids[2]);
     const rsInst = createIndicatorInstance(byId('relative_strength'), {}, 7, ids[3]);
+    const kcInst = createIndicatorInstance(byId('kc'), {}, 8, ids[0]);
+    const psarInst = createIndicatorInstance(byId('psar'), {}, 9, ids[1]);
+    const stInst = createIndicatorInstance(byId('supertrend'), {}, 10, ids[2]);
 
     expect(smaInst.placement).toBe('price');
     expect(smaInst.paneId).toBe('price');
     expect(bbandsInst.placement).toBe('price');
     expect(bbandsInst.paneId).toBe('price');
+    expect(kcInst.placement).toBe('price');
+    expect(kcInst.paneId).toBe('price');
+    expect(psarInst.placement).toBe('price');
+    expect(psarInst.paneId).toBe('price');
+    expect(stInst.placement).toBe('price');
+    expect(stInst.paneId).toBe('price');
     expect(atrInst.placement).toBe('oscillator');
     expect(atrInst.paneId).toBe(`indicator:${ids[2]}`);
     expect(vmaInst.placement).toBe('volume');

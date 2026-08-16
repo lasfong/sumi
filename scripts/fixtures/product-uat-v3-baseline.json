@@ -2561,6 +2561,46 @@
         "PRO-IND-08",
         "PRO-IND-11"
       ]
+    },
+    {
+      "id": "pro06.kc-channel",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-IND-01",
+        "PRO-IND-02",
+        "PRO-IND-04",
+        "PRO-IND-05"
+      ]
+    },
+    {
+      "id": "pro06.psar-overlay",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-IND-01",
+        "PRO-IND-02",
+        "PRO-IND-04",
+        "PRO-IND-05"
+      ]
+    },
+    {
+      "id": "pro06.supertrend-overlay",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-IND-01",
+        "PRO-IND-02",
+        "PRO-IND-04",
+        "PRO-IND-05"
+      ]
+    },
+    {
+      "id": "pro06.advanced-trend-lifecycle",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-IND-06",
+        "PRO-IND-07",
+        "PRO-IND-08",
+        "PRO-IND-11"
+      ]
     }
   ]
 }

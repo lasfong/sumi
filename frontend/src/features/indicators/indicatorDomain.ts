@@ -7,6 +7,7 @@ export interface IndicatorSeriesStyle { color: string; lineStyle?: 'solid' | 'da
 export const SUPPORTED_INDICATORS = [
   'ema', 'rsi', 'macd', 'cci', 'volume', 'sma', 'bbands', 'atr', 'volume_sma',
   'mfi', 'stoch', 'adx', 'relative_strength',
+  'kc', 'psar', 'supertrend',
 ] as const;
 export type SupportedIndicatorId = (typeof SUPPORTED_INDICATORS)[number];
 
@@ -55,6 +56,15 @@ const defaultStyles = (definitionId: string): Record<string, IndicatorSeriesStyl
   if (definitionId === 'sma') return { primary: { color: '#FFD166' } };
   if (definitionId === 'bbands') return {
     upper: { color: '#00E5FF' }, middle: { color: '#FFD166' }, lower: { color: '#00E5FF' },
+  };
+  if (definitionId === 'kc') return {
+    upper: { color: '#00E5FF' }, middle: { color: '#FFD166' }, lower: { color: '#00E5FF' },
+  };
+  if (definitionId === 'psar') return {
+    sar: { color: '#E040FB' }, primary: { color: '#E040FB' },
+  };
+  if (definitionId === 'supertrend') return {
+    supertrend: { color: '#26A69A' }, bull: { color: '#26A69A' }, bear: { color: '#EF5350' }, primary: { color: '#26A69A' },
   };
   if (definitionId === 'atr') return { primary: { color: '#E040FB' } };
   if (definitionId === 'volume_sma') return { primary: { color: '#FF8A00' } };

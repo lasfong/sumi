@@ -70,7 +70,7 @@ export const IndicatorManager: React.FC<Props> = ({ definitions, document, runti
       <button type="button" data-testid="open-add-indicator" aria-label="Add indicator" onClick={openAdd}>+ Add Indicator</button>
     </div>
     <div data-testid="active-indicator-list" style={{ display: 'flex', gap: 7, overflowX: 'auto', minHeight: 58 }}>
-      {!document.instances.length && <div data-testid="indicator-empty-state" style={{ color: 'var(--text-muted)', fontSize: 12, padding: 12 }}>No active indicators. Add SMA, EMA, RSI, MACD, CCI, Bollinger Bands, ATR, Volume, Volume SMA, MFI, Stochastic, ADX, or Relative Strength.</div>}
+      {!document.instances.length && <div data-testid="indicator-empty-state" style={{ color: 'var(--text-muted)', fontSize: 12, padding: 12 }}>No active indicators. Add SMA, EMA, RSI, MACD, CCI, Bollinger Bands, ATR, Volume, Volume SMA, MFI, Stochastic, ADX, Relative Strength, Keltner Channels, Parabolic SAR, or SuperTrend.</div>}
       {document.instances.map((instance, index) => {
         const state = runtime[instance.id] ?? { status: 'idle', values: {} };
         const mainColor = Object.values(instance.styles)[0]?.color ?? '#58A6FF';

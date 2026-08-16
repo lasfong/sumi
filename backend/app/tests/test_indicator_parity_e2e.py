@@ -316,3 +316,107 @@ def test_replay_indicator_api_pro05_momentum_parity():
         app.dependency_overrides.clear()
         db.close()
         Base.metadata.drop_all(bind=engine)
+
+
+def test_replay_indicator_api_pro06_advanced_trend_parity():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(bind=engine)
+    db = TestingSessionLocal()
+    symbol = "PARITY_TREND"
+    base_date = date(2024, 1, 1)
+    df = _seed_deterministic_candles(db, symbol, base_date, count=90)
+
+    client = _make_client(db)
+    try:
+        session_response = client.post("/api/replay/sessions", json={
+            "symbol": symbol,
+            "timeframe": "1D",
+            "adjustment_type": "unadjusted",
+            "start_date": str(base_date),
+            "end_date": str(base_date + timedelta(days=len(df))),
+            "initial_cash": 100_000_000,
+            "mode": "normal",
+        })
+        assert session_response.status_code == 200, session_response.text
+        session_id = session_response.json()["id"]
+        advance_response = client.post(f"/api/replay/sessions/{session_id}/next", params={"steps": len(df) - 1})
+        assert advance_response.status_code == 200, advance_response.text
+
+        strategy = load_strategy_from_dict({
+            "name": "PRO-06 Advanced Trend Parity",
+            "indicators": [
+                {"name": "kc", "type": "kc", "length": 20, "scalar": 2.0},
+                {"name": "psar", "type": "psar", "af0": 0.02, "af": 0.02, "max_af": 0.2},
+                {"name": "supertrend", "type": "supertrend", "length": 7, "multiplier": 3.0},
+            ],
+            "entry_rules": [],
+            "exit_rules": [],
+            "position_sizing": {"method": "fixed_quantity", "quantity": 100},
+        })
+        adapter_values = StrategyIndicatorAdapter.compute(df, strategy.indicators)
+        dates = [value.isoformat() for value in df["timestamp"]]
+
+        # 1. Keltner Channels
+        res_kc = client.get(f"/api/replay/sessions/{session_id}/indicators", params={"indicator": "kc", "length": 20, "scalar": 2.0})
+        assert res_kc.status_code == 200, res_kc.text
+        api_kcu = _value_by_timestamp(res_kc.json()["data"], "kcue_")
+        api_kcb = _value_by_timestamp(res_kc.json()["data"], "kcbe_")
+        api_kcl = _value_by_timestamp(res_kc.json()["data"], "kcle_")
+
+        kcu_key = next(k for k in adapter_values if k.startswith("kc_kcue_"))
+        kcb_key = next(k for k in adapter_values if k.startswith("kc_kcbe_"))
+        kcl_key = next(k for k in adapter_values if k.startswith("kc_kcle_"))
+
+        for idx, ts in enumerate(dates):
+            exp_u = adapter_values[kcu_key][idx]
+            exp_b = adapter_values[kcb_key][idx]
+            exp_l = adapter_values[kcl_key][idx]
+            if pd.isna(exp_u) or pd.isna(exp_b) or pd.isna(exp_l):
+                continue
+            assert api_kcu[ts] == pytest.approx(float(exp_u), rel=1e-9, abs=1e-9)
+            assert api_kcb[ts] == pytest.approx(float(exp_b), rel=1e-9, abs=1e-9)
+            assert api_kcl[ts] == pytest.approx(float(exp_l), rel=1e-9, abs=1e-9)
+
+        # 2. PSAR
+        res_psar = client.get(f"/api/replay/sessions/{session_id}/indicators", params={"indicator": "psar", "af0": 0.02, "af": 0.02, "max_af": 0.2})
+        assert res_psar.status_code == 200, res_psar.text
+        api_psarl = _value_by_timestamp(res_psar.json()["data"], "psarl_")
+        api_psars = _value_by_timestamp(res_psar.json()["data"], "psars_")
+
+        psarl_key = next(k for k in adapter_values if k.startswith("psar_psarl_"))
+        psars_key = next(k for k in adapter_values if k.startswith("psar_psars_"))
+
+        for idx, ts in enumerate(dates):
+            exp_l = adapter_values[psarl_key][idx]
+            exp_s = adapter_values[psars_key][idx]
+            if not pd.isna(exp_l):
+                assert api_psarl[ts] == pytest.approx(float(exp_l), rel=1e-9, abs=1e-9)
+            if not pd.isna(exp_s):
+                assert api_psars[ts] == pytest.approx(float(exp_s), rel=1e-9, abs=1e-9)
+
+        # 3. SuperTrend
+        res_st = client.get(f"/api/replay/sessions/{session_id}/indicators", params={"indicator": "supertrend", "length": 7, "multiplier": 3.0})
+        assert res_st.status_code == 200, res_st.text
+        api_st = _value_by_timestamp(res_st.json()["data"], "supert_")
+        api_std = _value_by_timestamp(res_st.json()["data"], "supertd_")
+
+        st_key = next(k for k in adapter_values if k.startswith("supertrend_supert_"))
+        std_key = next(k for k in adapter_values if k.startswith("supertrend_supertd_"))
+
+        for idx, ts in enumerate(dates):
+            exp_st = adapter_values[st_key][idx]
+            exp_std = adapter_values[std_key][idx]
+            if pd.isna(exp_st) or pd.isna(exp_std):
+                continue
+            assert api_st[ts] == pytest.approx(float(exp_st), rel=1e-9, abs=1e-9)
+            assert api_std[ts] == pytest.approx(float(exp_std), rel=1e-9, abs=1e-9)
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
+        db.close()
+        Base.metadata.drop_all(bind=engine)

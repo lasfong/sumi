@@ -13,6 +13,11 @@ class IndicatorConfig(BaseModel):
     d: Optional[int] = None
     smooth_k: Optional[int] = None
     benchmark: Optional[str] = None
+    scalar: Optional[float] = None
+    af0: Optional[float] = None
+    af: Optional[float] = None
+    max_af: Optional[float] = None
+    multiplier: Optional[float] = None
 
 class PositionSizing(BaseModel):
     method: str = "fixed_quantity"

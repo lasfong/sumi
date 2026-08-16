@@ -35,7 +35,10 @@ class StrategyIndicatorAdapter:
     @staticmethod
     def _params_for(indicator) -> dict[str, Any]:
         params: dict[str, Any] = {}
-        for name in ("length", "fast", "slow", "signal", "std", "k", "d", "smooth_k", "benchmark"):
+        for name in (
+            "length", "fast", "slow", "signal", "std", "k", "d", "smooth_k", "benchmark",
+            "scalar", "af0", "af", "max_af", "multiplier",
+        ):
             value = getattr(indicator, name, None)
             if value is not None:
                 params[name] = value

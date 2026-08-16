@@ -224,3 +224,57 @@ def test_relative_strength_missing_benchmark_and_dates():
     res_gaps = IndicatorEngine.compute(df, 'relative_strength', length=10, benchmark_df=bench_df)
     assert 'RS_VNINDEX_10' in res_gaps.columns
     assert pd.isna(res_gaps['RS_VNINDEX_10'].iloc[15])
+
+def test_kc_calculation():
+    df = create_sample_data(100)
+    result_df = IndicatorEngine.compute(df, 'kc', length=20, scalar=2.0)
+    assert 'KCUe_20_2.0' in result_df.columns
+    assert 'KCBe_20_2.0' in result_df.columns
+    assert 'KCLe_20_2.0' in result_df.columns
+    assert pd.isna(result_df['KCUe_20_2.0'].iloc[18])
+    last_upper = result_df['KCUe_20_2.0'].iloc[-1]
+    last_mid = result_df['KCBe_20_2.0'].iloc[-1]
+    last_lower = result_df['KCLe_20_2.0'].iloc[-1]
+    assert last_upper > last_mid > last_lower
+
+def test_kc_non_default_scalar():
+    df = create_sample_data(100)
+    res_default = IndicatorEngine.compute(df, 'kc', length=20, scalar=2.0)
+    res_15 = IndicatorEngine.compute(df, 'kc', length=20, scalar=1.5)
+    res_25 = IndicatorEngine.compute(df, 'kc', length=20, scalar=2.5)
+
+    assert 'KCUe_20_1.5' in res_15.columns
+    assert 'KCBe_20_1.5' in res_15.columns
+    assert 'KCLe_20_1.5' in res_15.columns
+    assert 'KCUe_20_2.5' in res_25.columns
+
+    upper_25 = res_25['KCUe_20_2.5'].iloc[-1]
+    upper_default = res_default['KCUe_20_2.0'].iloc[-1]
+    upper_15 = res_15['KCUe_20_1.5'].iloc[-1]
+    assert upper_25 > upper_default > upper_15
+
+def test_psar_calculation():
+    df = create_sample_data(100)
+    result_df = IndicatorEngine.compute(df, 'psar', af0=0.02, af=0.02, max_af=0.2)
+    assert 'PSARl_0.02_0.2' in result_df.columns
+    assert 'PSARs_0.02_0.2' in result_df.columns
+    assert 'PSARaf_0.02_0.2' in result_df.columns
+    assert 'PSARr_0.02_0.2' in result_df.columns
+
+    # Either long or short stop is valid (not both simultaneously)
+    valid_long = result_df['PSARl_0.02_0.2'].dropna()
+    valid_short = result_df['PSARs_0.02_0.2'].dropna()
+    assert len(valid_long) > 0 or len(valid_short) > 0
+
+def test_supertrend_calculation():
+    df = create_sample_data(100)
+    result_df = IndicatorEngine.compute(df, 'supertrend', length=7, multiplier=3.0)
+    assert 'SUPERT_7_3.0' in result_df.columns
+    assert 'SUPERTd_7_3.0' in result_df.columns
+    assert 'SUPERTl_7_3.0' in result_df.columns
+    assert 'SUPERTs_7_3.0' in result_df.columns
+
+    last_dir = result_df['SUPERTd_7_3.0'].iloc[-1]
+    assert last_dir in (1.0, -1.0)
+    last_st = result_df['SUPERT_7_3.0'].iloc[-1]
+    assert not pd.isna(last_st)

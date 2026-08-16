@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { IndicatorDataPoint } from '../../../api/indicatorsApi';
 import type { IndicatorInstanceV1 } from '../../../features/indicators/indicatorDomain';
-import { formatBollingerStd, IndicatorRenderRegistry } from '../IndicatorRenderRegistry';
+import { formatBollingerStd, formatFloatParam, IndicatorRenderRegistry } from '../IndicatorRenderRegistry';
 
 const instance = (definitionId: IndicatorInstanceV1['definitionId']): IndicatorInstanceV1 => ({
   id: `00000000-0000-4000-8000-00000000000${definitionId.length}`,
@@ -258,5 +258,103 @@ describe('IndicatorRenderRegistry', () => {
     // Mismatched parameters fail closed
     expect(IndicatorRenderRegistry.mapBackendData([{ timestamp: '2026-01-02', RS_VNINDEX_50: 104.8 }], rsInstance)).toEqual([]);
     expect(IndicatorRenderRegistry.mapBackendData([{ timestamp: '2026-01-02', RS_VN30_20: 104.8 }], rsInstance)).toEqual([]);
+  });
+
+  it('formats float parameters deterministically', () => {
+    expect(formatFloatParam(2.0, '2.0')).toBe('2.0');
+    expect(formatFloatParam(2, '2.0')).toBe('2.0');
+    expect(formatFloatParam(1.5, '2.0')).toBe('1.5');
+    expect(formatFloatParam(0.02, '0.02')).toBe('0.02');
+    expect(formatFloatParam(0.2, '0.2')).toBe('0.2');
+    expect(formatFloatParam(3.0, '3.0')).toBe('3.0');
+    expect(formatFloatParam(NaN, '2.0')).toBe('2.0');
+  });
+
+  it('renders Keltner Channels with upper, middle, and lower channel series and exact scalar contract', () => {
+    const kcInstance: IndicatorInstanceV1 = { ...instance('kc'), params: { length: 20, scalar: 2.0 } };
+    const validData = [{ timestamp: '2026-01-02', 'KCUe_20_2.0': 115.0, 'KCBe_20_2.0': 105.0, 'KCLe_20_2.0': 95.0 }];
+    const rendered = IndicatorRenderRegistry.mapBackendData(validData, kcInstance);
+    expect(rendered.map(s => s.seriesKey)).toEqual(['upper', 'middle', 'lower']);
+    expect(rendered[0]).toMatchObject({ name: 'Upper Channel', data: [{ time: '2026-01-02', value: 115.0 }] });
+    expect(rendered[1]).toMatchObject({ name: 'Middle Channel', data: [{ time: '2026-01-02', value: 105.0 }] });
+    expect(rendered[2]).toMatchObject({ name: 'Lower Channel', data: [{ time: '2026-01-02', value: 95.0 }] });
+
+    // Non-default scalar 1.5
+    const kc15Instance: IndicatorInstanceV1 = { ...instance('kc'), params: { length: 20, scalar: 1.5 } };
+    const validData15 = [{ timestamp: '2026-01-02', 'KCUe_20_1.5': 112.5, 'KCBe_20_1.5': 105.0, 'KCLe_20_1.5': 97.5 }];
+    const rendered15 = IndicatorRenderRegistry.mapBackendData(validData15, kc15Instance);
+    expect(rendered15.map(s => s.seriesKey)).toEqual(['upper', 'middle', 'lower']);
+    expect(rendered15[0]).toMatchObject({ name: 'Upper Channel', data: [{ time: '2026-01-02', value: 112.5 }] });
+
+    // Partial Keltner Channels (missing lower) must fail closed
+    expect(IndicatorRenderRegistry.mapBackendData([{ timestamp: '2026-01-02', 'KCUe_20_2.0': 115.0, 'KCBe_20_2.0': 105.0 }], kcInstance)).toEqual([]);
+
+    // Mismatched length or scalar fail closed
+    expect(IndicatorRenderRegistry.mapBackendData([{ timestamp: '2026-01-02', 'KCUe_14_2.0': 115.0, 'KCBe_14_2.0': 105.0, 'KCLe_14_2.0': 95.0 }], kcInstance)).toEqual([]);
+    expect(IndicatorRenderRegistry.mapBackendData(validData15, kcInstance)).toEqual([]);
+  });
+
+  it('renders Parabolic SAR with continuous stop points across trend reversals and exact parameter contract', () => {
+    const psarInstance: IndicatorInstanceV1 = { ...instance('psar'), params: { af0: 0.02, af: 0.02, max_af: 0.2 } };
+    const multiRowData = [
+      { timestamp: '2026-01-01', 'PSARl_0.02_0.2': 100.0, 'PSARs_0.02_0.2': null },
+      { timestamp: '2026-01-02', 'PSARl_0.02_0.2': 101.5, 'PSARs_0.02_0.2': null },
+      { timestamp: '2026-01-03', 'PSARl_0.02_0.2': null, 'PSARs_0.02_0.2': 108.0 },
+    ];
+    const rendered = IndicatorRenderRegistry.mapBackendData(multiRowData, psarInstance);
+    expect(rendered).toHaveLength(1);
+    expect(rendered[0]).toMatchObject({
+      seriesKey: 'sar',
+      name: 'PSAR 0.02/0.2',
+      data: [
+        { time: '2026-01-01', value: 100.0 },
+        { time: '2026-01-02', value: 101.5 },
+        { time: '2026-01-03', value: 108.0 },
+      ],
+    });
+
+    // Non-default parameters (0.01 / 0.1)
+    const psarNonDefault: IndicatorInstanceV1 = { ...instance('psar'), params: { af0: 0.01, af: 0.01, max_af: 0.1 } };
+    const nonDefaultData = [{ timestamp: '2026-01-01', 'PSARl_0.01_0.1': 99.0, 'PSARs_0.01_0.1': null }];
+    const renderedNonDefault = IndicatorRenderRegistry.mapBackendData(nonDefaultData, psarNonDefault);
+    expect(renderedNonDefault[0]).toMatchObject({
+      seriesKey: 'sar',
+      name: 'PSAR 0.01/0.1',
+      data: [{ time: '2026-01-01', value: 99.0 }],
+    });
+
+    // Partial PSAR (missing short stop column in response) must fail closed
+    expect(IndicatorRenderRegistry.mapBackendData([{ timestamp: '2026-01-01', 'PSARl_0.02_0.2': 100.0 }], psarInstance)).toEqual([]);
+
+    // Mismatched parameters fail closed
+    expect(IndicatorRenderRegistry.mapBackendData(nonDefaultData, psarInstance)).toEqual([]);
+  });
+
+  it('renders SuperTrend with trend line and direction contract', () => {
+    const stInstance: IndicatorInstanceV1 = { ...instance('supertrend'), params: { length: 7, multiplier: 3.0 } };
+    const validData = [{ timestamp: '2026-01-02', 'SUPERT_7_3.0': 102.4, 'SUPERTd_7_3.0': 1.0 }];
+    const rendered = IndicatorRenderRegistry.mapBackendData(validData, stInstance);
+    expect(rendered).toHaveLength(1);
+    expect(rendered[0]).toMatchObject({
+      seriesKey: 'supertrend',
+      name: 'SuperTrend 7/3.0',
+      data: [{ time: '2026-01-02', value: 102.4 }],
+    });
+
+    // Non-default parameters (length: 10, multiplier: 2.0)
+    const stNonDefault: IndicatorInstanceV1 = { ...instance('supertrend'), params: { length: 10, multiplier: 2.0 } };
+    const nonDefaultData = [{ timestamp: '2026-01-02', 'SUPERT_10_2.0': 103.1, 'SUPERTd_10_2.0': -1.0 }];
+    const renderedNonDefault = IndicatorRenderRegistry.mapBackendData(nonDefaultData, stNonDefault);
+    expect(renderedNonDefault[0]).toMatchObject({
+      seriesKey: 'supertrend',
+      name: 'SuperTrend 10/2.0',
+      data: [{ time: '2026-01-02', value: 103.1 }],
+    });
+
+    // Partial SuperTrend (missing SUPERTd direction) must fail closed
+    expect(IndicatorRenderRegistry.mapBackendData([{ timestamp: '2026-01-02', 'SUPERT_7_3.0': 102.4 }], stInstance)).toEqual([]);
+
+    // Mismatched parameters fail closed
+    expect(IndicatorRenderRegistry.mapBackendData(nonDefaultData, stInstance)).toEqual([]);
   });
 });

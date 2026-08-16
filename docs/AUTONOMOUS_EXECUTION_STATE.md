@@ -3,11 +3,11 @@
 > Authority: `docs/ANTIGRAVITY_TWO_SESSION_OPERATING_MODEL.md` (with `docs/LOW_MODEL_AUTONOMOUS_EXECUTION_PROTOCOL.md`)
 > Current plan: PRO-06 — Advanced Trend Overlays
 > Machine-transfer entrypoint: `docs/MACHINE_TRANSFER_HANDOFF_2026-08-10.md`
-> Latest review record: `docs/reviews/PRO_05_REVIEW_2026-08-15.md`
+> Latest review record: `docs/reviews/PRO_06_REVIEW_2026-08-16.md`
 > Prior approval record: `docs/reviews/PRO_05_REVIEW_2026-08-15.md`
 > Canonical roadmap: `docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md`
 
-Last updated: 2026-08-15
+Last updated: 2026-08-16
 
 ## Accepted program state
 
@@ -17,21 +17,59 @@ Last updated: 2026-08-15
 - PRO-03: independently approved and closed on 2026-08-12 in `docs/reviews/PRO_03_REVIEW_2026-08-12_R4.md`. Committed in `dc9f007` and pushed to `origin/master`.
 - PRO-04: independently approved and closed on 2026-08-15 in `docs/reviews/PRO_04_REVIEW_2026-08-15_R5.md`. Committed in `f35f62f` and pushed to `origin/master`.
 - PRO-05: independently approved and closed on 2026-08-15 in `docs/reviews/PRO_05_REVIEW_2026-08-15.md`. Committed in `a789342` and pushed to `origin/master`.
-- PRO-06: USER AUTHORIZED on 2026-08-15; PRO-07 through PRO-12 not started.
+- PRO-06: independently approved and closed on 2026-08-16 in `docs/reviews/PRO_06_REVIEW_2026-08-16.md`. PRO-07 through PRO-12 not started.
 
 ## Current control point
 
-Milestone: `PRO-06 PREPARED — ADVANCED TREND OVERLAYS`
+Milestone: `PRO-06 CLOSED — INDEPENDENTLY APPROVED`
 
 ## Active batch
 
-PRO-06 — Advanced Trend Overlays.
+PRO-06 — Advanced Trend Overlays (CLOSED).
 
 ## State
 
-PREPARED
+CLOSED
 
-Status: PRO-06 authorized by user on 2026-08-15. ExecPlan: `docs/exec-plans/PRO_06_ADVANCED_TREND_OVERLAYS.md`. Active DEV prompt: `docs/dev-prompts/PRO_06_ADVANCED_TREND_OVERLAYS_DEV_PROMPT.md`.
+Status: PRO-06 independently approved on 2026-08-16. ExecPlan: `docs/exec-plans/PRO_06_ADVANCED_TREND_OVERLAYS.md`. Reviewer Record: `docs/reviews/PRO_06_REVIEW_2026-08-16.md`.
+
+## PRO-06 Implementation & Verification Summary (2026-08-15)
+
+- **Backend Calculation & Strategy Adapter Support**:
+  - Verified `kc`, `psar`, `supertrend` calculation in `IndicatorEngine` and added aliases (`sar`, `parabolic_sar`, `st`).
+  - Added parameters `scalar`, `af0`, `af`, `max_af`, `multiplier` to `IndicatorConfig` (`backend/app/domain/strategy/strategy_schema.py`) and `StrategyIndicatorAdapter._params_for` (`backend/app/domain/engine/strategy_indicator_adapter.py`).
+  - Added unit and parity tests in `backend/app/tests/test_indicators.py` and `backend/app/tests/test_indicator_parity_e2e.py`.
+- **Frontend Catalog & Typed Domain (`indicatorDomain.ts`, `IndicatorManager.tsx`)**:
+  - Released `kc`, `psar`, `supertrend` in `SUPPORTED_INDICATORS`.
+  - Added default styles for `kc` (`upper`: `#00E5FF`, `middle`: `#FFD166`, `lower`: `#00E5FF`), `psar` (`sar`: `#E040FB`), and `supertrend` (`supertrend`: `#26A69A`, `bull`: `#26A69A`, `bear`: `#EF5350`).
+  - Updated empty-state helper text in `IndicatorManager.tsx`.
+- **Renderer Registry & Price Overlay Contracts (`IndicatorRenderRegistry.ts`)**:
+  - Exported `formatFloatParam` with deterministic decimal formatting.
+  - Implemented parameter-exact column matching and all-or-nothing multi-series mapping for `kc` (`KCUe_${length}_${scalarStr}`, `KCBe_${length}_${scalarStr}`, `KCLe_${length}_${scalarStr}`), `psar` (`PSARl_${af0}_${max_af}`, `PSARs_${af0}_${max_af}`), and `supertrend` (`SUPERT_${length}_${multiplierStr}`, `SUPERTd_${length}_${multiplierStr}`).
+  - Added comprehensive unit tests in `IndicatorRenderRegistry.test.ts` and `indicatorDomain.test.ts`.
+- **Technical Gate Verification (`verify-v2.ps1`)**:
+  - Backend pytest: 159 passed (0 failed).
+  - Alembic migrations: clean (0 drift).
+  - ESLint: 0 errors.
+  - Frontend vitest: 179 passed across 27 files (51 passed across 6 indicator/chart files).
+  - Frontend production build (`tsc -b && vite build`): clean (0 errors).
+- **Product UAT Verification (`run-product-uat.ps1`)**:
+  - Directory: `test-results/product-uat/2026-08-15T16-26-02-855Z/`
+  - `results.json` SHA-256: `C98FAD635E1966522CB250892BAC9D1FAC327C8A4CB276902D412E8851E7223F`
+  - Assertions Passed: **320 / 320** (0 failed, 0 blocking failed).
+  - Manifest Reconciliation: `pass: true` (8/8 tests passed in `scripts/product-uat-manifest.test.mjs`).
+  - PRO-06 Assertions Verified:
+    - `pro06.kc-channel`: PASS (renderedValues: {upper: 95120.25, middle: 87497.58, lower: 79874.91}, expectedValues: {upper: 95120.25, middle: 87497.58, lower: 79874.91})
+    - `pro06.psar-overlay`: PASS (renderedValue: 87495.39, expectedValue: 87495.39)
+    - `pro06.supertrend-overlay`: PASS (renderedValue: 78865.02, expectedValue: 78865.02)
+    - `pro06.advanced-trend-lifecycle`: PASS (all instances verified in DOM and runtime)
+- **Retained Visual Screenshots**:
+  - `pro06-advanced-trend-indicators-1440x1000.png` (1440×1000, SHA-256: `2B2954EE1CA692E6A87269D94379D81DAD3D6575F6F3160DF33F09380697694A`)
+  - `pro06-advanced-trend-indicators-1280x800.png` (1280×800, SHA-256: `FC12333800DE50F7840504865B4DCDBCEB4AE156FF0FF0E730F8D694D683AE11`)
+- **Database Hash Invariant**:
+  - `backend/sumi.db` SHA-256 before/after: `F890F5BC16ECE557EA78E19A6095A362DE8641E341382DF66D6A9C997E84F080` (0 bytes mutated).
+- **Whitespace / Format Check**:
+  - `git diff --check`: 0 errors.
 
 ## PRO-05 Implementation & Verification Summary (2026-08-15)
 
@@ -168,12 +206,14 @@ Status: PRO-06 authorized by user on 2026-08-15. ExecPlan: `docs/exec-plans/PRO_
 - Archived DEV prompt: `docs/dev-prompts/PRO_05_MOMENTUM_AND_RELATIVE_STRENGTH_DEV_PROMPT.md`
 - Final reviewer record: `docs/reviews/PRO_05_REVIEW_2026-08-15.md`
 
-## Active PRO-06 authority package
+## Closed PRO-06 authority package
 
-- Stable dossier: `docs/program/PRO_06_ADVANCED_TREND_OVERLAYS.md`
-- Prepared ExecPlan: `docs/exec-plans/PRO_06_ADVANCED_TREND_OVERLAYS.md`
-- Active DEV prompt: `docs/dev-prompts/PRO_06_ADVANCED_TREND_OVERLAYS_DEV_PROMPT.md`
+- Operating protocol: `docs/LOW_MODEL_AUTONOMOUS_EXECUTION_PROTOCOL.md`
+- Program dossier: `docs/program/PRO_06_ADVANCED_TREND_OVERLAYS.md`
+- Completed ExecPlan: `docs/exec-plans/PRO_06_ADVANCED_TREND_OVERLAYS.md`
+- Archived DEV prompt: `docs/dev-prompts/PRO_06_ADVANCED_TREND_OVERLAYS_DEV_PROMPT.md`
+- Final reviewer record: `docs/reviews/PRO_06_REVIEW_2026-08-16.md`
 
 ## Next action
 
-Execute `docs/dev-prompts/ANTIGRAVITY_DEV_SESSION_INIT_PROMPT.md` in a new DEV session. Implement PRO-06 (Keltner Channels, Parabolic SAR, SuperTrend) and stop at the Independent Reviewer Gate. PRO-07 remains unauthorized.
+PRO-06 is CLOSED and independently approved. PRO-07 (Ichimoku Contract) remains UNAUTHORIZED until explicit user authorization. No further session actions are authorized without user prompt.

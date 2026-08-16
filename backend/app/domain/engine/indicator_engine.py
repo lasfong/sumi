@@ -163,6 +163,7 @@ INDICATOR_REGISTRY: dict[str, IndicatorDefinition] = {
             IndicatorParam("max_af", "float", 0.2, 0.001, 1),
             *COMMON_PARAMS,
         ),
+        aliases=("sar", "parabolic_sar"),
         description="Trailing stop and trend-following indicator.",
     ),
     "supertrend": IndicatorDefinition(
@@ -176,6 +177,7 @@ INDICATOR_REGISTRY: dict[str, IndicatorDefinition] = {
             IndicatorParam("multiplier", "float", 3.0, 0.1, 20),
             *COMMON_PARAMS,
         ),
+        aliases=("st",),
         description="ATR-based trend following overlay.",
     ),
     "cci": IndicatorDefinition(

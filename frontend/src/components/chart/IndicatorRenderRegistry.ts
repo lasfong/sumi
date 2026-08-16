@@ -26,12 +26,14 @@ const getFloatParam = (instance: IndicatorInstanceV1, name: string, defaultValue
   return Number.isFinite(num) && num > 0 ? num : defaultValue;
 };
 
-export const formatBollingerStd = (std: number): string => {
-  if (!Number.isFinite(std) || std <= 0) {
-    return '2.0';
+export const formatFloatParam = (val: number, defaultVal = '2.0'): string => {
+  if (!Number.isFinite(val) || val <= 0) {
+    return defaultVal;
   }
-  return Number.isInteger(std) ? std.toFixed(1) : String(std);
+  return Number.isInteger(val) ? val.toFixed(1) : String(val);
 };
+
+export const formatBollingerStd = (std: number): string => formatFloatParam(std, '2.0');
 
 export class IndicatorRenderRegistry {
   static referencesFor(definitionId: IndicatorInstanceV1['definitionId']): Array<{ value: number; label: string }> {
@@ -111,6 +113,98 @@ export class IndicatorRenderRegistry {
         { seriesKey: 'upper', name: 'Upper Band', data: upperPoints, color: instance.styles.upper?.color ?? '#00E5FF' },
         { seriesKey: 'middle', name: 'Middle Band', data: middlePoints, color: instance.styles.middle?.color ?? '#FFD166' },
         { seriesKey: 'lower', name: 'Lower Band', data: lowerPoints, color: instance.styles.lower?.color ?? '#00E5FF' },
+      ];
+    }
+    if (instance.definitionId === 'kc') {
+      const length = getIntParam(instance, 'length', 20);
+      const scalar = getFloatParam(instance, 'scalar', 2.0);
+      const scalarStr = formatFloatParam(scalar, '2.0');
+
+      const expectedUpper = `KCUe_${length}_${scalarStr}`;
+      const expectedMiddle = `KCBe_${length}_${scalarStr}`;
+      const expectedLower = `KCLe_${length}_${scalarStr}`;
+
+      const upper = available.find(c => c === expectedUpper);
+      const middle = available.find(c => c === expectedMiddle);
+      const lower = available.find(c => c === expectedLower);
+
+      // All-or-nothing: upper, middle, and lower must all be present
+      if (!upper || !middle || !lower) {
+        return [];
+      }
+
+      const upperPoints = finitePoints(data, upper);
+      const middlePoints = finitePoints(data, middle);
+      const lowerPoints = finitePoints(data, lower);
+
+      if (!upperPoints.length || !middlePoints.length || !lowerPoints.length) {
+        return [];
+      }
+
+      return [
+        { seriesKey: 'upper', name: 'Upper Channel', data: upperPoints, color: instance.styles.upper?.color ?? '#00E5FF' },
+        { seriesKey: 'middle', name: 'Middle Channel', data: middlePoints, color: instance.styles.middle?.color ?? '#FFD166' },
+        { seriesKey: 'lower', name: 'Lower Channel', data: lowerPoints, color: instance.styles.lower?.color ?? '#00E5FF' },
+      ];
+    }
+    if (instance.definitionId === 'psar') {
+      const af0 = getFloatParam(instance, 'af0', 0.02);
+      const maxAf = getFloatParam(instance, 'max_af', 0.2);
+      const af0Str = formatFloatParam(af0, '0.02');
+      const maxAfStr = formatFloatParam(maxAf, '0.2');
+
+      const expectedLong = `PSARl_${af0Str}_${maxAfStr}`;
+      const expectedShort = `PSARs_${af0Str}_${maxAfStr}`;
+
+      const longCol = available.find(c => c === expectedLong);
+      const shortCol = available.find(c => c === expectedShort);
+
+      // All-or-nothing: both long and short stop columns must be present in response
+      if (!longCol || !shortCol) {
+        return [];
+      }
+
+      const sarPoints = data.flatMap(row => {
+        const l = row[longCol];
+        const s = row[shortCol];
+        const raw = (l !== null && l !== '' && l !== undefined) ? l : s;
+        if (raw === null || raw === '' || raw === undefined) return [];
+        const value = typeof raw === 'number' ? raw : Number(raw);
+        return Number.isFinite(value) ? [{ time: (toDateKey(row.timestamp) || row.timestamp) as Time, value }] : [];
+      });
+
+      if (!sarPoints.length) {
+        return [];
+      }
+
+      return [
+        { seriesKey: 'sar', name: `PSAR ${af0Str}/${maxAfStr}`, data: sarPoints, color: instance.styles.sar?.color ?? instance.styles.primary?.color ?? '#E040FB' },
+      ];
+    }
+    if (instance.definitionId === 'supertrend') {
+      const length = getIntParam(instance, 'length', 7);
+      const multiplier = getFloatParam(instance, 'multiplier', 3.0);
+      const multStr = formatFloatParam(multiplier, '3.0');
+
+      const expectedSt = `SUPERT_${length}_${multStr}`;
+      const expectedDir = `SUPERTd_${length}_${multStr}`;
+
+      const stCol = available.find(c => c === expectedSt);
+      const dirCol = available.find(c => c === expectedDir);
+
+      // All-or-nothing: both SuperTrend line and direction columns must be present
+      if (!stCol || !dirCol) {
+        return [];
+      }
+
+      const stPoints = finitePoints(data, stCol);
+
+      if (!stPoints.length) {
+        return [];
+      }
+
+      return [
+        { seriesKey: 'supertrend', name: `SuperTrend ${length}/${multStr}`, data: stPoints, color: instance.styles.supertrend?.color ?? instance.styles.bull?.color ?? '#26A69A' },
       ];
     }
     if (instance.definitionId === 'stoch') {

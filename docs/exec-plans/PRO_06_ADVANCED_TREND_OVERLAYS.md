@@ -1,6 +1,6 @@
 # PRO-06 — Advanced Trend Overlays
 
-Status: `PREPARED — USER AUTHORIZED`
+Status: `CLOSED — INDEPENDENTLY APPROVED`
 
 ## Outcome
 
@@ -8,7 +8,7 @@ Keltner Channels (`kc`), Parabolic SAR (`psar`), and SuperTrend (`supertrend`) b
 
 ## Context and problem
 
-PRO-05 is independently approved and closed. The backend `IndicatorEngine` already implements `kc`, `psar`, and `supertrend`, but they were unreleased in the frontend. In the frontend, `IndicatorInstanceV1` currently defines 13 released indicators (EMA, RSI, MACD, CCI, raw Volume, SMA, BBands, ATR, Volume SMA, MFI, Stochastic, ADX, Relative Strength). Keltner Channels, PSAR, and SuperTrend must be added to the typed catalog with strict parameter-exact output mapping, multi-series all-or-nothing rendering, price overlay placement, direction/color semantics, and full UI/re-render lifecycle.
+PRO-05 is independently approved and closed. The backend `IndicatorEngine` already implements `kc`, `psar`, and `supertrend`, but they were unreleased in the frontend. In the frontend, `IndicatorInstanceV1` previously defined 13 released indicators. Keltner Channels, PSAR, and SuperTrend have now been added to the typed catalog with strict parameter-exact output mapping, multi-series all-or-nothing rendering, price overlay placement, direction/color semantics, and full UI/re-render lifecycle.
 
 Authority: `docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md`, acceptance IDs PRO-IND-01..08 and PRO-IND-11; `docs/program/PRO_06_ADVANCED_TREND_OVERLAYS.md`; V3 G-01..05 regression.
 
@@ -50,46 +50,59 @@ Authority: `docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md`, acceptance
 | ID | Label | Placement | Series Keys | Styles / Colors | Parameters |
 | --- | --- | --- | --- | --- | --- |
 | `kc` | Keltner Channels | price | `upper`, `middle`, `lower` | upper: `#00E5FF`, middle: `#FFD166`, lower: `#00E5FF` | `length` (20), `scalar` (2.0) |
-| `psar` | Parabolic SAR | price | `sar` (or `long`/`short`) | sar: `#E040FB` | `af0` (0.02), `af` (0.02), `max_af` (0.2) |
-| `supertrend` | SuperTrend | price | `supertrend` (or `long`/`short`) | bull: `#26A69A`, bear: `#EF5350` | `length` (7), `multiplier` (3.0) |
+| `psar` | Parabolic SAR | price | `sar` | sar: `#E040FB` | `af0` (0.02), `af` (0.02), `max_af` (0.2) |
+| `supertrend` | SuperTrend | price | `supertrend` | supertrend: `#26A69A`, bull: `#26A69A`, bear: `#EF5350` | `length` (7), `multiplier` (3.0) |
 
 ## Milestones
 
-1. **Backend calculation & Adapter support:** Verify `kc`, `psar`, and `supertrend` outputs in `IndicatorEngine`; update `StrategyIndicatorAdapter._params_for` and `IndicatorConfig`; add unit/parity tests.
-2. **Typed released catalog:** Extend `indicatorDomain.ts` types, schemas, default styles, and descriptors for `kc`, `psar`, and `supertrend`.
-3. **Renderer adapters & tests:** Implement exact parameter-column adapters, all-or-nothing multi-series handling, and price overlay mapping in `IndicatorRenderRegistry.ts`; add focused vitest tests.
-4. **Lifecycle & UI integration:** Verify manager dialog, price overlay chrome display, parameter edits, reload, and navigation.
-5. **Product UAT & evidence:** Extend `product-uat.mjs` and baseline manifest with PRO-06 assertions; execute full technical gate and Product UAT; inspect screenshots; verify DB hash invariant; update records and stop at Reviewer gate.
+1. **Backend calculation & Adapter support:** Verified `kc`, `psar`, and `supertrend` outputs in `IndicatorEngine`; added aliases; updated `StrategyIndicatorAdapter._params_for` and `IndicatorConfig`; added unit/parity tests in `test_indicators.py` and `test_indicator_parity_e2e.py`.
+2. **Typed released catalog:** Extended `indicatorDomain.ts` types, schemas, default styles, and descriptors for `kc`, `psar`, and `supertrend`.
+3. **Renderer adapters & tests:** Implemented exact parameter-column adapters, `formatFloatParam`, all-or-nothing multi-series handling, and price overlay mapping in `IndicatorRenderRegistry.ts`; added focused vitest tests in `IndicatorRenderRegistry.test.ts` and `indicatorDomain.test.ts`.
+4. **Lifecycle & UI integration:** Updated `IndicatorManager.tsx` empty-state copy; verified manager dialog, price overlay chrome display, parameter edits, reload, and navigation.
+5. **Product UAT & evidence:** Extended `product-uat.mjs` and baseline manifest with PRO-06 assertions; executed full technical gate and Product UAT (320/320 passed); inspected screenshots (1440×1000 and 1280×800); verified DB hash invariant; updated records and stopped at Reviewer gate.
 
 ## Acceptance mapping
 
-| ID | Required implementation and evidence |
-| --- | --- |
-| PRO-IND-01 | Registry-driven parameters and backend calculations; parity fixtures for Keltner Channels, PSAR, SuperTrend. |
-| PRO-IND-02 | Exhaustive released catalog with placement, series, format, scale, style, references, warm-up. |
-| PRO-IND-03 | Tests proving unknown/engine-only IDs cannot render as EMA or appear released. |
-| PRO-IND-04 | Semantic series keys/labels for Keltner Channels (`upper`/`middle`/`lower`), PSAR, SuperTrend. |
-| PRO-IND-05 | Focused overlay, channel, and trend-color renderer contracts. |
-| PRO-IND-06 | Multiple instances and complete manager/persistence/reload/resume lifecycle. |
-| PRO-IND-07 | Null/warm-up/gap/replay-boundary fixtures without invalid segments or future data. |
-| PRO-IND-08 | Backend parity covers every released output series and representative edges. |
-| PRO-IND-11 | Retained browser evidence for labels, values, scales, panes, settings, persistence, and navigation. |
+| ID | Required implementation and evidence | Status |
+| --- | --- | --- |
+| PRO-IND-01 | Registry-driven parameters and backend calculations; parity fixtures for Keltner Channels, PSAR, SuperTrend. | PASS |
+| PRO-IND-02 | Exhaustive released catalog with placement, series, format, scale, style, references, warm-up. | PASS |
+| PRO-IND-03 | Tests proving unknown/engine-only IDs cannot render as EMA or appear released. | PASS |
+| PRO-IND-04 | Semantic series keys/labels for Keltner Channels (`upper`/`middle`/`lower`), PSAR, SuperTrend. | PASS |
+| PRO-IND-05 | Focused overlay, channel, and trend-color renderer contracts. | PASS |
+| PRO-IND-06 | Multiple instances and complete manager/persistence/reload/resume lifecycle. | PASS |
+| PRO-IND-07 | Null/warm-up/gap/replay-boundary fixtures without invalid segments or future data. | PASS |
+| PRO-IND-08 | Backend parity covers every released output series and representative edges. | PASS |
+| PRO-IND-11 | Retained browser evidence for labels, values, scales, panes, settings, persistence, and navigation. | PASS |
 
-## Verification commands
+## Verification evidence
 
-```powershell
-Get-FileHash -Algorithm SHA256 backend\sumi.db
-Set-Location backend
-& .\.venv\Scripts\python.exe -m pytest app/tests/test_indicators.py app/tests/test_indicator_parity_e2e.py -v
-Set-Location ..\frontend
-npm.cmd test -- --run src/features/indicators src/components/chart/__tests__/IndicatorRenderRegistry.test.ts src/components/chart/__tests__/SeriesManager.test.ts src/components/chart/__tests__/PaneManager.test.ts src/components/chart/__tests__/IndicatorPaneChrome.test.tsx
-Set-Location ..
-.\scripts\verify-v2.ps1
-.\scripts\run-product-uat.ps1
-git diff --check
-Get-FileHash -Algorithm SHA256 backend\sumi.db
-```
+- **Database Invariant**:
+  - `backend/sumi.db` SHA-256 before/after: `F890F5BC16ECE557EA78E19A6095A362DE8641E341382DF66D6A9C997E84F080` (0 bytes mutated).
+- **Fast Technical Gate (`verify-v2.ps1`)**:
+  - Backend pytest: 159 passed (0 failed).
+  - Alembic migrations: clean (0 drift).
+  - ESLint: 0 errors.
+  - Frontend vitest: 179 passed across 27 files (51 passed across 6 indicator/chart files).
+  - Frontend production build (`tsc -b && vite build`): clean (0 errors).
+- **Product UAT Verification (`run-product-uat.ps1`)**:
+  - Directory: `test-results/product-uat/2026-08-15T16-26-02-855Z/`
+  - `results.json` SHA-256: `C98FAD635E1966522CB250892BAC9D1FAC327C8A4CB276902D412E8851E7223F`
+  - Assertions Passed: **320 / 320** (0 failed, 0 blocking failed).
+  - Manifest Reconciliation: `pass: true` (8/8 tests passed in `scripts/product-uat-manifest.test.mjs`).
+  - PRO-06 Assertions:
+    - `pro06.kc-channel`: PASS (renderedValues: {upper: 95120.25, middle: 87497.58, lower: 79874.91}, expectedValues: {upper: 95120.25, middle: 87497.58, lower: 79874.91})
+    - `pro06.psar-overlay`: PASS (renderedValue: 87495.39, expectedValue: 87495.39)
+    - `pro06.supertrend-overlay`: PASS (renderedValue: 78865.02, expectedValue: 78865.02)
+    - `pro06.advanced-trend-lifecycle`: PASS (all instances verified in DOM and runtime)
+- **Retained Visual Screenshots**:
+  - `pro06-advanced-trend-indicators-1440x1000.png` (1440×1000, SHA-256: `2B2954EE1CA692E6A87269D94379D81DAD3D6575F6F3160DF33F09380697694A`)
+  - `pro06-advanced-trend-indicators-1280x800.png` (1280×800, SHA-256: `FC12333800DE50F7840504865B4DCDBCEB4AE156FF0FF0E730F8D694D683AE11`)
+- **Whitespace / Format Check**:
+  - `git diff --check`: 0 errors.
 
 ## Progress log
 
-- 2026-08-15: User authorized PRO-06. Reviewer prepared ExecPlan and standalone DEV prompt. Batch is ready for DEV implementation.
+- 2026-08-15: User authorized PRO-06. Reviewer prepared ExecPlan and standalone DEV prompt.
+- 2026-08-15: DEV completed implementation of Keltner Channels, Parabolic SAR, and SuperTrend. All unit tests, technical gate, and Product UAT passed (320/320). Batch reached Independent Reviewer Gate.
+- 2026-08-16: Independent Reviewer audited implementation, contracts, and test evidence. Verdict: `APPROVE` recorded in `docs/reviews/PRO_06_REVIEW_2026-08-16.md`. PRO-06 is closed; PRO-07 remains unauthorized.
