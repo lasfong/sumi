@@ -3,7 +3,7 @@
 > Authority: `docs/ANTIGRAVITY_TWO_SESSION_OPERATING_MODEL.md` (with `docs/LOW_MODEL_AUTONOMOUS_EXECUTION_PROTOCOL.md`)
 > Current plan: PRO-07 — Ichimoku Contract
 > Machine-transfer entrypoint: `docs/MACHINE_TRANSFER_HANDOFF_2026-08-10.md`
-> Latest review record: `docs/reviews/PRO_06_REVIEW_2026-08-16.md`
+> Latest review record: `docs/reviews/PRO_07_REVIEW_2026-08-16.md`
 > Prior approval record: `docs/reviews/PRO_06_REVIEW_2026-08-16.md`
 > Canonical roadmap: `docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md`
 
@@ -18,21 +18,56 @@ Last updated: 2026-08-16
 - PRO-04: independently approved and closed on 2026-08-15 in `docs/reviews/PRO_04_REVIEW_2026-08-15_R5.md`. Committed in `f35f62f` and pushed to `origin/master`.
 - PRO-05: independently approved and closed on 2026-08-15 in `docs/reviews/PRO_05_REVIEW_2026-08-15.md`. Committed in `a789342` and pushed to `origin/master`.
 - PRO-06: independently approved and closed on 2026-08-16 in `docs/reviews/PRO_06_REVIEW_2026-08-16.md`. Committed in `d94d324` and pushed to `origin/master`.
-- PRO-07: USER AUTHORIZED on 2026-08-16; PRO-08 through PRO-12 not started.
+- PRO-07: independently approved and closed on 2026-08-16 in `docs/reviews/PRO_07_REVIEW_2026-08-16.md`. PRO-08 through PRO-12 not started.
 
 ## Current control point
 
-Milestone: `PRO-07 PREPARED — ICHIMOKU CONTRACT`
+Milestone: `PRO-07 CLOSED — INDEPENDENTLY APPROVED`
 
 ## Active batch
 
-PRO-07 — Ichimoku Contract.
+PRO-07 — Ichimoku Contract (CLOSED).
 
 ## State
 
-PREPARED
+CLOSED
 
-Status: PRO-07 authorized by user on 2026-08-16. ExecPlan: `docs/exec-plans/PRO_07_ICHIMOKU_CONTRACT.md`. Active DEV prompt: `docs/dev-prompts/PRO_07_ICHIMOKU_CONTRACT_DEV_PROMPT.md`.
+Status: PRO-07 independently approved on 2026-08-16. ExecPlan: `docs/exec-plans/PRO_07_ICHIMOKU_CONTRACT.md`. Reviewer Record: `docs/reviews/PRO_07_REVIEW_2026-08-16.md`.
+
+## PRO-07 Implementation & Verification Summary (2026-08-16)
+
+- **Backend Calculation & Strategy Adapter Support**:
+  - Updated `IndicatorEngine._append_indicator_result` to combine DataFrame/Series results cleanly, preserving multi-DataFrame outputs (like pandas-ta `ichimoku` tuple) without overwriting valid data with disaligned future rows.
+  - Added parameters `tenkan`, `kijun`, `senkou` to `IndicatorConfig` (`backend/app/domain/strategy/strategy_schema.py`) and `StrategyIndicatorAdapter._params_for` (`backend/app/domain/engine/strategy_indicator_adapter.py`).
+  - Added unit and parity tests in `backend/app/tests/test_indicators.py` and `backend/app/tests/test_indicator_parity_e2e.py` (27/27 passed).
+- **Frontend Catalog & Typed Domain (`indicatorDomain.ts`, `IndicatorManager.tsx`)**:
+  - Released `ichimoku` in `SUPPORTED_INDICATORS` (`indicatorDomain.ts`).
+  - Added default styles for `ichimoku` (`tenkan`: `#26A69A`, `kijun`: `#EF5350`, `spanA`: `#00E5FF`, `spanB`: `#FF8A00`, `chikou`: `#E040FB`).
+  - Updated empty-state helper text in `IndicatorManager.tsx`.
+- **Renderer Registry & Price Overlay Contracts (`IndicatorRenderRegistry.ts`)**:
+  - Implemented parameter-exact column matching and all-or-nothing multi-series mapping for `ichimoku` (`ITS_${tenkan}`, `IKS_${kijun}`, `ISA_${tenkan}`, `ISB_${kijun}`, `ICS_${kijun}`).
+  - Added unit tests in `IndicatorRenderRegistry.test.ts` and `indicatorDomain.test.ts` (52/52 passed across 6 test files).
+- **Technical Gate Verification (`verify-v2.ps1`)**:
+  - Backend pytest: 162 passed (0 failed).
+  - Alembic migrations: clean (0 drift).
+  - ESLint: 0 errors (0 warnings).
+  - Frontend vitest: 180 passed across 27 files.
+  - Frontend production build (`tsc -b && vite build`): clean (0 errors).
+- **Product UAT Verification (`run-product-uat.ps1`)**:
+  - Directory: `test-results/product-uat/2026-08-16T01-55-43-601Z/`
+  - `results.json` SHA-256: `9A586DE296E80094E51A6A65193A490B6B0A0A5305D9E7F428F7656C4B12678B`
+  - Assertions Passed: **322 / 322** (0 failed, 0 blocking failed).
+  - Manifest Reconciliation: `pass: true` (8/8 tests passed in `scripts/product-uat-manifest.test.mjs`).
+  - PRO-07 Assertions Verified:
+    - `pro07.ichimoku-cloud`: PASS (renderedValues: {tenkan: 88693.92, kijun: 86526.56, spanA: 85546.455, spanB: null, chikou: 90168.67}, expectedValues: {tenkan: 88693.92, kijun: 86526.56, spanA: 85546.455, spanB: null})
+    - `pro07.ichimoku-lifecycle`: PASS (all instances verified in DOM and runtime)
+- **Retained Visual Screenshots**:
+  - `pro07-ichimoku-cloud-1440x1000.png` (1440×1000, SHA-256: `A862B89BA833DB4C26FE0859B2494A78E8EB8B8A384DDF72DE79956F7E591087`)
+  - `pro07-ichimoku-cloud-1280x800.png` (1280×800, SHA-256: `114704E58A1F5E7D43B927E26CD4D14CFA65959CA9576E1DB7AC954A318EBCFA`)
+- **Database Hash Invariant**:
+  - `backend/sumi.db` SHA-256 before/after: `F890F5BC16ECE557EA78E19A6095A362DE8641E341382DF66D6A9C997E84F080` (0 bytes mutated).
+- **Whitespace / Format Check**:
+  - `git diff --check`: 0 errors.
 
 ## PRO-06 Implementation & Verification Summary (2026-08-15)
 
@@ -215,12 +250,14 @@ Status: PRO-07 authorized by user on 2026-08-16. ExecPlan: `docs/exec-plans/PRO_
 - Archived DEV prompt: `docs/dev-prompts/PRO_06_ADVANCED_TREND_OVERLAYS_DEV_PROMPT.md`
 - Final reviewer record: `docs/reviews/PRO_06_REVIEW_2026-08-16.md`
 
-## Active PRO-07 authority package
+## Closed PRO-07 authority package
 
-- Stable dossier: `docs/program/PRO_07_ICHIMOKU_CONTRACT.md`
-- Prepared ExecPlan: `docs/exec-plans/PRO_07_ICHIMOKU_CONTRACT.md`
-- Active DEV prompt: `docs/dev-prompts/PRO_07_ICHIMOKU_CONTRACT_DEV_PROMPT.md`
+- Operating protocol: `docs/LOW_MODEL_AUTONOMOUS_EXECUTION_PROTOCOL.md`
+- Program dossier: `docs/program/PRO_07_ICHIMOKU_CONTRACT.md`
+- Completed ExecPlan: `docs/exec-plans/PRO_07_ICHIMOKU_CONTRACT.md`
+- Archived DEV prompt: `docs/dev-prompts/PRO_07_ICHIMOKU_CONTRACT_DEV_PROMPT.md`
+- Final reviewer record: `docs/reviews/PRO_07_REVIEW_2026-08-16.md`
 
 ## Next action
 
-Execute `docs/dev-prompts/ANTIGRAVITY_DEV_SESSION_INIT_PROMPT.md` in a new DEV session. Implement PRO-07 (Ichimoku Contract) and stop at the Independent Reviewer Gate. PRO-08 remains unauthorized.
+PRO-07 is CLOSED and independently approved. PRO-08 (Trade Planning and Journal) remains UNAUTHORIZED until explicit user authorization. No further session actions are authorized without user prompt.

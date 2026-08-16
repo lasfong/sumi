@@ -420,3 +420,82 @@ def test_replay_indicator_api_pro06_advanced_trend_parity():
         app.dependency_overrides.clear()
         db.close()
         Base.metadata.drop_all(bind=engine)
+
+
+def test_replay_indicator_api_pro07_ichimoku_parity():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(bind=engine)
+    db = TestingSessionLocal()
+    symbol = "PARITY_ICHIMOKU"
+    base_date = date(2024, 1, 1)
+    df = _seed_deterministic_candles(db, symbol, base_date, count=120)
+
+    client = _make_client(db)
+    try:
+        session_response = client.post("/api/replay/sessions", json={
+            "symbol": symbol,
+            "timeframe": "1D",
+            "adjustment_type": "unadjusted",
+            "start_date": str(base_date),
+            "end_date": str(base_date + timedelta(days=len(df))),
+            "initial_cash": 100_000_000,
+            "mode": "normal",
+        })
+        assert session_response.status_code == 200, session_response.text
+        session_id = session_response.json()["id"]
+        advance_response = client.post(f"/api/replay/sessions/{session_id}/next", params={"steps": len(df) - 1})
+        assert advance_response.status_code == 200, advance_response.text
+
+        strategy = load_strategy_from_dict({
+            "name": "PRO-07 Ichimoku Parity",
+            "indicators": [
+                {"name": "ichimoku", "type": "ichimoku", "tenkan": 9, "kijun": 26, "senkou": 52},
+            ],
+            "entry_rules": [],
+            "exit_rules": [],
+            "position_sizing": {"method": "fixed_quantity", "quantity": 100},
+        })
+        adapter_values = StrategyIndicatorAdapter.compute(df, strategy.indicators)
+        dates = [value.isoformat() for value in df["timestamp"]]
+
+        res_ichimoku = client.get(f"/api/replay/sessions/{session_id}/indicators", params={"indicator": "ichimoku", "tenkan": 9, "kijun": 26, "senkou": 52})
+        assert res_ichimoku.status_code == 200, res_ichimoku.text
+        api_its = _value_by_timestamp(res_ichimoku.json()["data"], "its_")
+        api_iks = _value_by_timestamp(res_ichimoku.json()["data"], "iks_")
+        api_isa = _value_by_timestamp(res_ichimoku.json()["data"], "isa_")
+        api_isb = _value_by_timestamp(res_ichimoku.json()["data"], "isb_")
+        api_ics = _value_by_timestamp(res_ichimoku.json()["data"], "ics_")
+
+        its_key = next(k for k in adapter_values if k.startswith("ichimoku_its_"))
+        iks_key = next(k for k in adapter_values if k.startswith("ichimoku_iks_"))
+        isa_key = next(k for k in adapter_values if k.startswith("ichimoku_isa_"))
+        isb_key = next(k for k in adapter_values if k.startswith("ichimoku_isb_"))
+        ics_key = next(k for k in adapter_values if k.startswith("ichimoku_ics_"))
+
+        for idx, ts in enumerate(dates):
+            exp_its = adapter_values[its_key][idx]
+            exp_iks = adapter_values[iks_key][idx]
+            exp_isa = adapter_values[isa_key][idx]
+            exp_isb = adapter_values[isb_key][idx]
+            exp_ics = adapter_values[ics_key][idx]
+
+            if not pd.isna(exp_its):
+                assert api_its[ts] == pytest.approx(float(exp_its), rel=1e-9, abs=1e-9)
+            if not pd.isna(exp_iks):
+                assert api_iks[ts] == pytest.approx(float(exp_iks), rel=1e-9, abs=1e-9)
+            if not pd.isna(exp_isa):
+                assert api_isa[ts] == pytest.approx(float(exp_isa), rel=1e-9, abs=1e-9)
+            if not pd.isna(exp_isb):
+                assert api_isb[ts] == pytest.approx(float(exp_isb), rel=1e-9, abs=1e-9)
+            if not pd.isna(exp_ics):
+                assert api_ics[ts] == pytest.approx(float(exp_ics), rel=1e-9, abs=1e-9)
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
+        db.close()
+        Base.metadata.drop_all(bind=engine)

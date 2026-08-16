@@ -7,7 +7,7 @@ export interface IndicatorSeriesStyle { color: string; lineStyle?: 'solid' | 'da
 export const SUPPORTED_INDICATORS = [
   'ema', 'rsi', 'macd', 'cci', 'volume', 'sma', 'bbands', 'atr', 'volume_sma',
   'mfi', 'stoch', 'adx', 'relative_strength',
-  'kc', 'psar', 'supertrend',
+  'kc', 'psar', 'supertrend', 'ichimoku',
 ] as const;
 export type SupportedIndicatorId = (typeof SUPPORTED_INDICATORS)[number];
 
@@ -65,6 +65,13 @@ const defaultStyles = (definitionId: string): Record<string, IndicatorSeriesStyl
   };
   if (definitionId === 'supertrend') return {
     supertrend: { color: '#26A69A' }, bull: { color: '#26A69A' }, bear: { color: '#EF5350' }, primary: { color: '#26A69A' },
+  };
+  if (definitionId === 'ichimoku') return {
+    tenkan: { color: '#26A69A' },
+    kijun: { color: '#EF5350' },
+    spanA: { color: '#00E5FF' },
+    spanB: { color: '#FF8A00' },
+    chikou: { color: '#E040FB' },
   };
   if (definitionId === 'atr') return { primary: { color: '#E040FB' } };
   if (definitionId === 'volume_sma') return { primary: { color: '#FF8A00' } };

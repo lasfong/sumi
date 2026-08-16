@@ -265,6 +265,45 @@ export class IndicatorRenderRegistry {
         { seriesKey: 'dmn', name: '-DI', data: dmnPoints, color: instance.styles.dmn?.color ?? '#EF5350' },
       ];
     }
+    if (instance.definitionId === 'ichimoku') {
+      const tenkan = getIntParam(instance, 'tenkan', 9);
+      const kijun = getIntParam(instance, 'kijun', 26);
+
+      const expectedTenkan = `ITS_${tenkan}`;
+      const expectedKijun = `IKS_${kijun}`;
+      const expectedSpanA = `ISA_${tenkan}`;
+      const expectedSpanB = `ISB_${kijun}`;
+      const expectedChikou = `ICS_${kijun}`;
+
+      const tenkanCol = available.find(c => c === expectedTenkan);
+      const kijunCol = available.find(c => c === expectedKijun);
+      const spanACol = available.find(c => c === expectedSpanA);
+      const spanBCol = available.find(c => c === expectedSpanB);
+      const chikouCol = available.find(c => c === expectedChikou);
+
+      // All-or-nothing: tenkan, kijun, spanA, spanB, chikou columns must all be present
+      if (!tenkanCol || !kijunCol || !spanACol || !spanBCol || !chikouCol) {
+        return [];
+      }
+
+      const tenkanPoints = finitePoints(data, tenkanCol);
+      const kijunPoints = finitePoints(data, kijunCol);
+      const spanAPoints = finitePoints(data, spanACol);
+      const spanBPoints = finitePoints(data, spanBCol);
+      const chikouPoints = finitePoints(data, chikouCol);
+
+      if (!tenkanPoints.length && !kijunPoints.length && !spanAPoints.length && !spanBPoints.length && !chikouPoints.length) {
+        return [];
+      }
+
+      return [
+        { seriesKey: 'tenkan', name: `Tenkan (${tenkan})`, data: tenkanPoints, color: instance.styles.tenkan?.color ?? '#26A69A' },
+        { seriesKey: 'kijun', name: `Kijun (${kijun})`, data: kijunPoints, color: instance.styles.kijun?.color ?? '#EF5350' },
+        { seriesKey: 'spanA', name: 'Span A', data: spanAPoints, color: instance.styles.spanA?.color ?? '#00E5FF' },
+        { seriesKey: 'spanB', name: 'Span B', data: spanBPoints, color: instance.styles.spanB?.color ?? '#FF8A00' },
+        { seriesKey: 'chikou', name: `Chikou (${kijun})`, data: chikouPoints, color: instance.styles.chikou?.color ?? '#E040FB' },
+      ];
+    }
     // Single-series released definitions: find exact single pinned output contract
     const findExactColumn = (defId: string): string | undefined => {
       const defaultLen = (defId === 'rsi' || defId === 'atr' || defId === 'mfi') ? 14 : 20;

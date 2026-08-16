@@ -37,7 +37,7 @@ class StrategyIndicatorAdapter:
         params: dict[str, Any] = {}
         for name in (
             "length", "fast", "slow", "signal", "std", "k", "d", "smooth_k", "benchmark",
-            "scalar", "af0", "af", "max_af", "multiplier",
+            "scalar", "af0", "af", "max_af", "multiplier", "tenkan", "kijun", "senkou",
         ):
             value = getattr(indicator, name, None)
             if value is not None:

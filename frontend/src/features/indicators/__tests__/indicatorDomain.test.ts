@@ -22,7 +22,8 @@ const registry: IndicatorDefinition[] = [
   { id: 'kc', label: 'Keltner Channels', category: 'Volatility', pane: 'main', description: 'KC', params: [{ name: 'length', type: 'int', default: 20, minimum: 1, maximum: 500 }, { name: 'scalar', type: 'float', default: 2.0, minimum: 0.1, maximum: 20 }] },
   { id: 'psar', label: 'Parabolic SAR', category: 'Trend', pane: 'main', description: 'PSAR', params: [{ name: 'af0', type: 'float', default: 0.02, minimum: 0.001, maximum: 1 }, { name: 'af', type: 'float', default: 0.02, minimum: 0.001, maximum: 1 }, { name: 'max_af', type: 'float', default: 0.2, minimum: 0.001, maximum: 1 }] },
   { id: 'supertrend', label: 'SuperTrend', category: 'Trend', pane: 'main', description: 'SuperTrend', params: [{ name: 'length', type: 'int', default: 7, minimum: 1, maximum: 200 }, { name: 'multiplier', type: 'float', default: 3.0, minimum: 0.1, maximum: 20 }] },
-  { id: 'ichimoku', label: 'Ichimoku Cloud', category: 'Trend', pane: 'main', description: 'Ichimoku', params: [{ name: 'tenkan', type: 'int', default: 9, minimum: 1, maximum: 200 }] },
+  { id: 'ichimoku', label: 'Ichimoku Cloud', category: 'Trend', pane: 'main', description: 'Ichimoku', params: [{ name: 'tenkan', type: 'int', default: 9, minimum: 1, maximum: 200 }, { name: 'kijun', type: 'int', default: 26, minimum: 1, maximum: 400 }, { name: 'senkou', type: 'int', default: 52, minimum: 1, maximum: 800 }] },
+  { id: 'unreleased_mock', label: 'Unreleased Mock', category: 'Experimental', pane: 'oscillator', description: 'Unreleased', params: [] },
 ];
 const definitions = approvedDefinitions(registry);
 const byId = (id: string) => definitions.find(item => item.id === id)!;
@@ -44,7 +45,7 @@ describe('indicator domain', () => {
     expect(second.params).toEqual({ length: 21, offset: 0 });
   });
 
-  it('filters out unreleased backend definitions like ichimoku from approved definitions', () => {
+  it('filters out unreleased backend definitions from approved definitions', () => {
     const idsInApproved = definitions.map(def => def.id);
     expect(idsInApproved).toContain('sma');
     expect(idsInApproved).toContain('bbands');
@@ -58,7 +59,8 @@ describe('indicator domain', () => {
     expect(idsInApproved).toContain('kc');
     expect(idsInApproved).toContain('psar');
     expect(idsInApproved).toContain('supertrend');
-    expect(idsInApproved).not.toContain('ichimoku');
+    expect(idsInApproved).toContain('ichimoku');
+    expect(idsInApproved).not.toContain('unreleased_mock');
   });
 
   it('correctly assigns price, volume, and oscillator placements for all indicators', () => {
@@ -73,6 +75,7 @@ describe('indicator domain', () => {
     const kcInst = createIndicatorInstance(byId('kc'), {}, 8, ids[0]);
     const psarInst = createIndicatorInstance(byId('psar'), {}, 9, ids[1]);
     const stInst = createIndicatorInstance(byId('supertrend'), {}, 10, ids[2]);
+    const ichiInst = createIndicatorInstance(byId('ichimoku'), {}, 11, ids[3]);
 
     expect(smaInst.placement).toBe('price');
     expect(smaInst.paneId).toBe('price');
@@ -84,6 +87,9 @@ describe('indicator domain', () => {
     expect(psarInst.paneId).toBe('price');
     expect(stInst.placement).toBe('price');
     expect(stInst.paneId).toBe('price');
+    expect(ichiInst.placement).toBe('price');
+    expect(ichiInst.paneId).toBe('price');
+    expect(Object.keys(ichiInst.styles)).toEqual(['tenkan', 'kijun', 'spanA', 'spanB', 'chikou']);
     expect(atrInst.placement).toBe('oscillator');
     expect(atrInst.paneId).toBe(`indicator:${ids[2]}`);
     expect(vmaInst.placement).toBe('volume');

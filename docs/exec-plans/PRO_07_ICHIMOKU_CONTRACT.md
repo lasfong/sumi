@@ -1,6 +1,6 @@
 # PRO-07 — Ichimoku Contract
 
-Status: `PREPARED — USER AUTHORIZED`
+Status: `CLOSED — INDEPENDENTLY APPROVED`
 
 ## Outcome
 
@@ -57,11 +57,11 @@ Authority: `docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md`, acceptance
 
 ## Milestones
 
-1. **Backend calculation & Adapter support:** Verify `ichimoku` outputs in `IndicatorEngine`; update `StrategyIndicatorAdapter._params_for` and `IndicatorConfig`; add unit/parity/displacement tests in `test_indicators.py` and `test_indicator_parity_e2e.py`.
-2. **Typed released catalog:** Extend `indicatorDomain.ts` types, schemas, default styles, and descriptors for `ichimoku`.
-3. **Renderer adapters & tests:** Implement exact parameter-column adapters, all-or-nothing multi-series handling, and price overlay mapping for Ichimoku in `IndicatorRenderRegistry.ts`; add focused vitest tests in `IndicatorRenderRegistry.test.ts` and `indicatorDomain.test.ts`.
-4. **Lifecycle & UI integration:** Update `IndicatorManager.tsx` empty-state copy; verify manager dialog, price overlay chrome display, parameter edits, reload, and navigation.
-5. **Product UAT & evidence:** Extend `product-uat.mjs` and baseline manifest with PRO-07 assertions; execute full technical gate and Product UAT; inspect screenshots; verify DB hash invariant; update records and stop at Reviewer gate.
+1. [x] **Backend calculation & Adapter support:** Verify `ichimoku` outputs in `IndicatorEngine`; update `StrategyIndicatorAdapter._params_for` and `IndicatorConfig`; add unit/parity/displacement tests in `test_indicators.py` and `test_indicator_parity_e2e.py`.
+2. [x] **Typed released catalog:** Extend `indicatorDomain.ts` types, schemas, default styles, and descriptors for `ichimoku`.
+3. [x] **Renderer adapters & tests:** Implement exact parameter-column adapters, all-or-nothing multi-series handling, and price overlay mapping for Ichimoku in `IndicatorRenderRegistry.ts`; add focused vitest tests in `IndicatorRenderRegistry.test.ts` and `indicatorDomain.test.ts`.
+4. [x] **Lifecycle & UI integration:** Update `IndicatorManager.tsx` empty-state copy; verify manager dialog, price overlay chrome display, parameter edits, reload, and navigation.
+5. [x] **Product UAT & evidence:** Extend `product-uat.mjs` and baseline manifest with PRO-07 assertions; execute full technical gate and Product UAT; inspect screenshots; verify DB hash invariant; update records and stop at Reviewer gate.
 
 ## Acceptance mapping
 
@@ -78,21 +78,67 @@ Authority: `docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md`, acceptance
 | PRO-IND-10 | Ichimoku displacement is a documented display transform and cannot reveal a value calculated from a future candle. |
 | PRO-IND-11 | Retained browser evidence for labels, values, scales, panes, settings, persistence, and navigation. |
 
-## Verification commands
+## Verification commands and evidence
 
 ```powershell
+# 1. Pre-implementation DB hash invariant check
 Get-FileHash -Algorithm SHA256 backend\sumi.db
+# SHA256: F890F5BC16ECE557EA78E19A6095A362DE8641E341382DF66D6A9C997E84F080
+
+# 2. Focused backend unit & parity tests
 Set-Location backend
 & .\.venv\Scripts\python.exe -m pytest app/tests/test_indicators.py app/tests/test_indicator_parity_e2e.py -v
+# 27 passed, 0 failed
+
+# 3. Focused frontend unit tests
 Set-Location ..\frontend
 npm.cmd test -- --run src/features/indicators src/components/chart/__tests__/IndicatorRenderRegistry.test.ts src/components/chart/__tests__/SeriesManager.test.ts src/components/chart/__tests__/PaneManager.test.ts src/components/chart/__tests__/IndicatorPaneChrome.test.tsx
+# 52 passed across 6 test files
+
+# 4. Fast technical gate (verify-v2.ps1)
 Set-Location ..
 .\scripts\verify-v2.ps1
+# Backend pytest: 162 passed (0 failed)
+# Alembic migrations: clean (0 drift)
+# ESLint: clean (0 errors, 0 warnings)
+# Frontend vitest: 180 passed across 27 files
+# Frontend production build: clean (0 errors)
+
+# 5. Product UAT execution (run-product-uat.ps1)
 .\scripts\run-product-uat.ps1
+# Directory: test-results/product-uat/2026-08-16T01-55-43-601Z/
+# results.json SHA-256: 9A586DE296E80094E51A6A65193A490B6B0A0A5305D9E7F428F7656C4B12678B
+# Assertions Passed: 322 / 322 (0 failed, 0 blocking failed)
+# Manifest Reconciliation: pass: true (8/8 manifest tests passed)
+
+# 6. Whitespace check
 git diff --check
+# 0 whitespace or formatting errors
+
+# 7. Post-verification DB hash invariant check
 Get-FileHash -Algorithm SHA256 backend\sumi.db
+# SHA256: F890F5BC16ECE557EA78E19A6095A362DE8641E341382DF66D6A9C997E84F080 (0 bytes mutated)
 ```
+
+## Retained Visual Screenshots
+
+- `test-results/product-uat/2026-08-16T01-55-43-601Z/pro07-ichimoku-cloud-1440x1000.png` (1440×1000, SHA-256: `A862B89BA833DB4C26FE0859B2494A78E8EB8B8A384DDF72DE79956F7E591087`)
+- `test-results/product-uat/2026-08-16T01-55-43-601Z/pro07-ichimoku-cloud-1280x800.png` (1280×800, SHA-256: `114704E58A1F5E7D43B927E26CD4D14CFA65959CA9576E1DB7AC954A318EBCFA`)
 
 ## Progress log
 
-- 2026-08-16: User authorized PRO-07. Reviewer prepared ExecPlan and standalone DEV prompt. Batch is ready for DEV implementation.
+- 2026-08-16: User authorized PRO-07. Reviewer prepared ExecPlan and standalone DEV prompt.
+- 2026-08-16: DEV session executed and completed all PRO-07 tasks:
+  - Fixed `IndicatorEngine._append_indicator_result` tuple preservation so Ichimoku series columns are retained without disaligned future row overwrites.
+  - Added parameters `tenkan`, `kijun`, `senkou` to `IndicatorConfig` and `StrategyIndicatorAdapter._params_for`.
+  - Added unit, edge, and parity tests in `test_indicators.py` and `test_indicator_parity_e2e.py` (27/27 passed).
+  - Extended `indicatorDomain.ts` with `ichimoku` in `SUPPORTED_INDICATORS` and default styles for `tenkan`, `kijun`, `spanA`, `spanB`, `chikou`.
+  - Extended `IndicatorRenderRegistry.ts` with exact parameter column mapping (`ITS_${tenkan}`, `IKS_${kijun}`, `ISA_${tenkan}`, `ISB_${kijun}`, `ICS_${kijun}`) and all-or-nothing multi-series contracts.
+  - Updated empty-state helper text in `IndicatorManager.tsx`.
+  - Added unit tests in `indicatorDomain.test.ts` and `IndicatorRenderRegistry.test.ts` (52/52 passed).
+  - Fast technical gate `verify-v2.ps1` passed: 162 backend tests, clean migrations, 0 ESLint errors, 180 frontend tests, clean production build.
+  - Deterministic Product UAT `run-product-uat.ps1` passed: 322/322 assertions passed with green manifest reconciliation.
+  - Retained and inspected 1440×1000 and 1280×800 screenshots.
+  - Verified `backend/sumi.db` SHA-256 exact match before and after.
+  - Batch stopped at the Independent Reviewer Gate.
+- 2026-08-16: Independent Reviewer audited implementation, contracts, and test evidence. Verdict: `APPROVE` recorded in `docs/reviews/PRO_07_REVIEW_2026-08-16.md`. PRO-07 is closed; PRO-08 remains unauthorized.

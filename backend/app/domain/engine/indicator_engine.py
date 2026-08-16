@@ -345,11 +345,18 @@ class IndicatorEngine:
 
         if isinstance(result, pd.DataFrame):
             for col in result.columns:
-                df_copy[col] = result[col]
+                series = result[col]
+                if col in df_copy.columns:
+                    df_copy[col] = df_copy[col].combine_first(series)
+                else:
+                    df_copy[col] = series
             return
 
         if isinstance(result, pd.Series):
-            df_copy[result.name] = result
+            if result.name in df_copy.columns:
+                df_copy[result.name] = df_copy[result.name].combine_first(result)
+            else:
+                df_copy[result.name] = result
 
     @staticmethod
     def _compute_cci(df_copy: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:

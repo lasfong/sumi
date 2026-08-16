@@ -992,6 +992,54 @@ try {
   await instanceAction(psar.id, 'remove').click(); await page.waitForTimeout(100);
   await instanceAction(kc.id, 'remove').click(); await page.waitForTimeout(100);
 
+  // PRO-07: Ichimoku Cloud Overlay
+  const ichimoku = await addIndicator('ichimoku', { tenkan: 9, kijun: 26, senkou: 52 });
+  await page.waitForTimeout(1_000);
+
+  const pro07DomainDoc = await readIndicatorDomain();
+  const pro07Chart = await readIndicatorChart();
+
+  const ichimokuSnapshot = pro07Chart.instances.find(inst => inst.id === ichimoku.id);
+
+  const pro07Runtime = await readIndicatorRuntime();
+  const tenkanVal = pro07Runtime[ichimoku.id]?.values?.tenkan;
+  const kijunVal = pro07Runtime[ichimoku.id]?.values?.kijun;
+  const spanAVal = pro07Runtime[ichimoku.id]?.values?.spanA;
+  const spanBVal = pro07Runtime[ichimoku.id]?.values?.spanB;
+  const chikouVal = pro07Runtime[ichimoku.id]?.values?.chikou;
+
+  const ichimokuData = getRows(await (await page.request.get(`${backendUrl}/api/replay/sessions/${sessionId}/indicators?indicator=ichimoku&tenkan=9&kijun=26&senkou=52`)).json());
+
+  const lastIchimokuRow = ichimokuData[ichimokuData.length - 1] || {};
+  const expectedTenkanVal = lastIchimokuRow['ITS_9'];
+  const expectedKijunVal = lastIchimokuRow['IKS_26'];
+  const expectedSpanAVal = lastIchimokuRow['ISA_9'];
+  const expectedSpanBVal = lastIchimokuRow['ISB_26'];
+
+  check('pro07.ichimoku-cloud', ichimoku.placement === 'price'
+    && ichimoku.paneId === 'price'
+    && ichimoku.params.tenkan === 9 && ichimoku.params.kijun === 26 && ichimoku.params.senkou === 52
+    && Number.isFinite(tenkanVal) && Number.isFinite(kijunVal)
+    && tenkanVal === expectedTenkanVal && kijunVal === expectedKijunVal
+    && (expectedSpanAVal === null || expectedSpanAVal === undefined || spanAVal === expectedSpanAVal)
+    && (expectedSpanBVal === null || expectedSpanBVal === undefined || spanBVal === expectedSpanBVal)
+    && (chikouVal === null || chikouVal === undefined || Number.isFinite(chikouVal))
+    && JSON.stringify(ichimokuSnapshot?.series) === JSON.stringify(['tenkan', 'kijun', 'spanA', 'spanB', 'chikou']),
+    JSON.stringify({ instance: ichimoku, snapshot: ichimokuSnapshot, renderedValues: { tenkan: tenkanVal, kijun: kijunVal, spanA: spanAVal, spanB: spanBVal, chikou: chikouVal }, expectedValues: { tenkan: expectedTenkanVal, kijun: expectedKijunVal, spanA: expectedSpanAVal, spanB: expectedSpanBVal } }));
+
+  check('pro07.ichimoku-lifecycle', pro07DomainDoc.instances.some(i => i.id === ichimoku.id)
+    && inspectActiveRuntime(pro07DomainDoc, pro07Runtime).pass,
+    JSON.stringify({ instances: pro07DomainDoc.instances.map(i => ({ id: i.id, def: i.definitionId, pane: i.paneId })) }));
+
+  await page.screenshot({ path: path.join(runDir, 'pro07-ichimoku-cloud-1440x1000.png'), fullPage: true });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.locator('[data-testid="chart-workspace"]').scrollIntoViewIfNeeded();
+  await page.waitForTimeout(200);
+  await page.screenshot({ path: path.join(runDir, 'pro07-ichimoku-cloud-1280x800.png'), fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+
+  await instanceAction(ichimoku.id, 'remove').click(); await page.waitForTimeout(100);
+
   await page.getByTestId('active-indicator-list').evaluate(element => { element.scrollLeft = 0; });
   await page.screenshot({ path: path.join(runDir, '01-indicators.png'), fullPage: true });
 

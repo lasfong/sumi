@@ -18,6 +18,9 @@ class IndicatorConfig(BaseModel):
     af: Optional[float] = None
     max_af: Optional[float] = None
     multiplier: Optional[float] = None
+    tenkan: Optional[int] = None
+    kijun: Optional[int] = None
+    senkou: Optional[int] = None
 
 class PositionSizing(BaseModel):
     method: str = "fixed_quantity"
