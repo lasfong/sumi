@@ -2669,6 +2669,45 @@
       "acceptance_ids": [
         "PRO-TRADE-10"
       ]
+    },
+    {
+      "id": "pro09.typed-strategy-controls",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-STRAT-01",
+        "PRO-STRAT-02"
+      ]
+    },
+    {
+      "id": "pro09.train-test-split-and-bounds",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-STRAT-03",
+        "PRO-STRAT-04"
+      ]
+    },
+    {
+      "id": "pro09.robustness-ranking-exclusion",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-STRAT-05",
+        "PRO-STRAT-06"
+      ]
+    },
+    {
+      "id": "pro09.sweep-cancellation",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-STRAT-04"
+      ]
+    },
+    {
+      "id": "pro09.reproducibility-and-parity",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-STRAT-07",
+        "PRO-STRAT-08"
+      ]
     }
   ]
 }

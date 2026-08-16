@@ -6,15 +6,15 @@ This is the single entry point when Sumi is moved to another computer. It record
 
 - Repository: `https://github.com/lasfong/sumi.git`
 - Branch: `master`
-- Pushed remote: `origin/master` contains PRO-00, PRO-01, PRO-02, PRO-03, PRO-04, PRO-05, PRO-06, and PRO-07 commits.
-- Approved program state: PRO-00 through PRO-08 approved. PRO-09 through PRO-12 not started.
-- Latest verdict: `docs/reviews/PRO_08_REVIEW_2026-08-16.md` — `APPROVE`.
-- Authoritative reviewer UAT: `test-results/product-uat/2026-08-16T12-47-04-991Z/results.json` — 328/328 passed, 0 failed, 0 blocking failed, no runtime errors.
+- Pushed remote: `origin/master` contains PRO-00, PRO-01, PRO-02, PRO-03, PRO-04, PRO-05, PRO-06, PRO-07, and PRO-08 commits.
+- Approved program state: PRO-00 through PRO-09 approved. PRO-10 through PRO-12 not started.
+- Latest verdict: `docs/reviews/PRO_09_REVIEW_2026-08-16.md` — `APPROVE`.
+- Authoritative reviewer UAT: `test-results/product-uat/2026-08-16T13-32-35-789Z/results.json` — 333/333 passed, 0 failed, 0 blocking failed, no runtime errors.
 - Production database: `backend/sumi.db`, 620,945,408 bytes, SHA-256 `450B7EE02A2F8CEC18E1C3B01A6F76CE2355EF1980BECFCE2EF969D25BD9896A`.
-- Reviewer results SHA-256: `882F7858FA82369A0113A3E136D0484AF76301BD8FED99A52F49ED009782747F`.
-- Workspace state: PRO-00 through PRO-07 committed to `master`; PRO-08 implementation and reviewer approval documents are in the working tree.
+- Reviewer results SHA-256: `DA3F3ED78BC1AA3DB0C1B2312B61404FB3C1B2DCB4C4FC91B78F2CC5E87DC2B7`.
+- Workspace state: PRO-00 through PRO-08 committed to `master`; PRO-09 implementation and reviewer approval documents are in the working tree.
 
-PRO-08 is approved and closed. PRO-09 implementation has not started.
+PRO-09 is approved and closed. PRO-10 implementation has not started.
 
 ## 2. What must move to the new computer
 
@@ -114,7 +114,8 @@ Record the database hash before and after; both must equal the value in section 
 11. `docs/reviews/PRO_06_REVIEW_2026-08-16.md`
 12. `docs/reviews/PRO_07_REVIEW_2026-08-16.md`
 13. `docs/reviews/PRO_08_REVIEW_2026-08-16.md`
-14. `docs/exec-plans/PRO_08_TRADE_PLANNING_AND_JOURNAL.md`
+14. `docs/reviews/PRO_09_REVIEW_2026-08-16.md`
+15. `docs/exec-plans/PRO_09_STRATEGY_RESEARCH_UX.md`
 
 Old V2 documents, historical V3 Batch 0–5 records, `docs/tester/`, and superseded handoffs are evidence only. They do not override the files above.
 
@@ -131,7 +132,7 @@ Old V2 documents, historical V3 Batch 0–5 records, `docs/tester/`, and superse
 | PRO-06 | Approved | Release Keltner Channels, PSAR, and SuperTrend. |
 | PRO-07 | Approved | Release Ichimoku with an explicit no-look-ahead displacement contract. |
 | PRO-08 | Approved | Add risk-based trade planning, position sizing, checklist, and richer journal review. |
-| PRO-09 | Not started | Make strategy comparison reproducible and resistant to overfitting. |
+| PRO-09 | Approved | Make strategy comparison reproducible and resistant to overfitting. |
 | PRO-10 | Not started | Approve or reject a market-data provider using license/security/coverage evidence. |
 | PRO-11 | Conditional | If PRO-10 approves, add explicit one-click local data synchronization with preview/rollback. |
 | PRO-12 | Not started | Produce the independently verified Professional release candidate. |
@@ -140,7 +141,7 @@ After PRO-12, the intended result is a dependable local-first Vietnam-market rep
 
 ## 8. Exact next action
 
-PRO-08 is closed and independently approved. PRO-09 remains unauthorized until explicit user instruction. No further session actions are authorized without user prompt.
+PRO-09 is closed and independently approved. PRO-10 remains unauthorized until explicit user instruction. No further session actions are authorized without user prompt.
 
 ## Appendix A — historical transferred worktree inventory
 

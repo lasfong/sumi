@@ -1,6 +1,6 @@
 # PRO-09 — Strategy Research UX
 
-Status: `PREPARED — USER AUTHORIZED`
+Status: `CLOSED — INDEPENDENTLY APPROVED`
 
 ## Outcome
 
@@ -21,8 +21,8 @@ Authority: `docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md`, acceptance
    - Explicit training (In-Sample) and testing (Out-of-Sample) non-overlapping date ranges retained in run manifests.
    - Distinct In-Sample and Out-of-Sample performance metrics display (PnL, Win Rate, Profit Factor, Max Drawdown, Sample Size).
 3. **Bounded Parameter Sweeps & Cancellation (`PRO-STRAT-04`):**
-   - Configurable sweep parameter ranges with safety bounds (max combinations cap) and deterministic execution ordering.
-   - Cooperative sweep cancellation mechanism allowing users to abort running sweeps cleanly.
+   - Configurable sweep parameter ranges with safety bounds (max combinations cap: 1..50) and deterministic execution ordering.
+   - Cooperative sweep cancellation mechanism (`POST /api/strategy-lab/sweep/cancel`) allowing users to abort running sweeps cleanly.
 4. **Robustness Comparison & Ranking Exclusion (`PRO-STRAT-05`, `PRO-STRAT-06`):**
    - Comparison surface displaying sample size, metric validity, robustness score, and OOS stability rather than only peak PnL.
    - Low-sample (< 5 trades) or invalid/insufficient observations automatically excluded from winning ranking badges or heatmap recommendations.
@@ -56,32 +56,59 @@ Authority: `docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md`, acceptance
 
 ## Acceptance mapping
 
-| ID | Requirement |
-| --- | --- |
-| PRO-STRAT-01 | Strategy parameters use typed product controls; users do not edit internal paths such as `indicators[1].length`. |
-| PRO-STRAT-02 | Strategy definitions are versioned declarative data validated without `eval` or arbitrary Python execution. |
-| PRO-STRAT-03 | Training and out-of-sample periods are explicit, non-overlapping, and retained in the run manifest. |
-| PRO-STRAT-04 | Parameter sweeps enforce bounds, maximum variants, cancellation, and deterministic ordering. |
-| PRO-STRAT-05 | Invalid/insufficient metrics cannot win ranking, heatmap, comparison, or recommendation surfaces. |
-| PRO-STRAT-06 | Comparison shows coverage, sample size, assumptions, robustness, and out-of-sample results rather than only maximum PnL. |
-| PRO-STRAT-07 | Saved strategy versions and runs can be reproduced or report why required data/version is unavailable. |
-| PRO-STRAT-08 | Scanner, Replay, Backtest, and Strategy Lab share the same versioned strategy and indicator semantics. |
+| ID | Requirement | Status |
+| --- | --- | --- |
+| PRO-STRAT-01 | Strategy parameters use typed product controls; users do not edit internal paths such as `indicators[1].length`. | Verified in unit test & browser UAT |
+| PRO-STRAT-02 | Strategy definitions are versioned declarative data validated without `eval` or arbitrary Python execution. | Verified in unit test & browser UAT |
+| PRO-STRAT-03 | Training and out-of-sample periods are explicit, non-overlapping, and retained in the run manifest. | Verified in unit test & browser UAT |
+| PRO-STRAT-04 | Parameter sweeps enforce bounds, maximum variants, cancellation, and deterministic ordering. | Verified in unit test & browser UAT |
+| PRO-STRAT-05 | Invalid/insufficient metrics cannot win ranking, heatmap, comparison, or recommendation surfaces. | Verified in unit test & browser UAT |
+| PRO-STRAT-06 | Comparison shows coverage, sample size, assumptions, robustness, and out-of-sample results rather than only maximum PnL. | Verified in unit test & browser UAT |
+| PRO-STRAT-07 | Saved strategy versions and runs can be reproduced or report why required data/version is unavailable. | Verified in unit test & browser UAT |
+| PRO-STRAT-08 | Scanner, Replay, Backtest, and Strategy Lab share the same versioned strategy and indicator semantics. | Verified in unit test & browser UAT |
 
-## Verification commands
+## Verification commands & results
 
 ```powershell
 Get-FileHash -Algorithm SHA256 backend\sumi.db
+# SHA256: 450B7EE02A2F8CEC18E1C3B01A6F76CE2355EF1980BECFCE2EF969D25BD9896A (unchanged)
+
 Set-Location backend
 & .\.venv\Scripts\python.exe -m pytest app/tests/ -v
+# 176 passed in 5.19s
+
 Set-Location ..\frontend
 npm.cmd test -- --run
+# 27 test files passed, 182 tests passed
+
+npm.cmd run lint; npm.cmd run build
+# ESLint clean (0 errors), Vite production build clean
+
 Set-Location ..
 .\scripts\verify-v2.ps1
+# All fast technical gates passed
+
 .\scripts\run-product-uat.ps1
+# 333 passed, 0 failed, 0 blocking failed (Reconciliation: pass)
+
 git diff --check
+# Clean, no trailing whitespace or conflicts
+
 Get-FileHash -Algorithm SHA256 backend\sumi.db
+# SHA256: 450B7EE02A2F8CEC18E1C3B01A6F76CE2355EF1980BECFCE2EF969D25BD9896A (unchanged)
 ```
+
+## Retained Visual Evidence
+
+- `pro09-strategy-research-1440x1000.png` (203,605 bytes, SHA-256: `66d8f8a846175ecfbf8da4fe8f64560731f2ae5ba312984578b548b8987b22ff`)
+- `pro09-strategy-research-1280x800.png` (165,517 bytes, SHA-256: `81bda3bfd82cefd211df051663df858ffdb8aa787fe94a6136e4f3583cb5c189`)
 
 ## Progress log
 
-- 2026-08-16: User authorized PRO-09. Reviewer prepared ExecPlan and standalone DEV prompt. Batch is ready for DEV implementation.
+- 2026-08-16: User authorized PRO-09. Reviewer prepared ExecPlan and standalone DEV prompt.
+- 2026-08-16: Implemented backend typed parameter discovery, AST validation without eval, train/test split, robustness scoring, ranking exclusion for < 5 trades, and cooperative sweep cancellation manager (`StrategyLabService`, `test_strategy_lab.py`).
+- 2026-08-16: Implemented frontend typed parameter dropdowns, In-Sample/OOS split inputs with overlap validation, max variants bounds, cancellation button, and robustness ranking indicators (`StrategyLabPage.tsx`, `strategyLabApi.ts`, `StrategyLabPage.test.tsx`).
+- 2026-08-16: Added deterministic Product UAT assertions (`pro09.*`) in `product-uat-v3-baseline.json` and `product-uat.mjs`.
+- 2026-08-16: Verified fast gate (`verify-v2.ps1`) and deterministic product UAT (`run-product-uat.ps1`: 333/333 passed). Verified `backend/sumi.db` SHA-256 unchanged.
+- 2026-08-16: Implementation completed. Ready for Independent Reviewer evaluation.
+- 2026-08-16: Independent Reviewer audited implementation, contracts, and test evidence. Verdict: `APPROVE` recorded in `docs/reviews/PRO_09_REVIEW_2026-08-16.md`. PRO-09 is closed; PRO-10 remains unauthorized.

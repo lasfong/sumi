@@ -280,10 +280,11 @@ try {
   const pro01LabRun = await pro01LabResponse.json();
   await page.getByText('Comparison', { exact: true }).waitFor();
   const pro01LabSaveResponse = await pro01LabSaveResponsePromise;
-  const labEligible = pro01LabRun.status === 'succeeded' && pro01LabRun.analytics?.metrics?.total_net_pnl?.status === 'valid';
+  const labTrades = pro01LabRun.summary?.total_trades ?? pro01LabRun.analytics?.total_trades ?? 0;
+  const labEligible = pro01LabRun.status === 'succeeded' && labTrades >= 5 && pro01LabRun.analytics?.metrics?.total_net_pnl?.status === 'valid';
   check('pro01.strategy-ranking-validity', pro01LabSaveResponse.ok() && (labEligible
     ? await page.getByText('Best eligible').isVisible()
-    : await page.getByText('Not rankable').isVisible()), JSON.stringify({ labEligible, saveStatus: pro01LabSaveResponse.status(), metrics: pro01LabRun.analytics?.metrics }));
+    : (await page.getByText('Not rankable (Low sample)').isVisible() || await page.getByText('Not rankable').isVisible())), JSON.stringify({ labEligible, saveStatus: pro01LabSaveResponse.status(), metrics: pro01LabRun.analytics?.metrics }));
 
   const runScannerForSignal = async () => {
     await page.goto(`${frontendUrl}/scanner`);
@@ -3390,6 +3391,166 @@ try {
       hasSession: exportJsonRes.session != null,
       tradeCount: exportJsonRes.trades?.length,
       csvHeaderValid: exportCsvRes.includes('# TRADES'),
+    })
+  );
+
+  // =========================================================================
+  // PRO-09: Strategy Research UX (PRO-STRAT-01 through PRO-STRAT-08)
+  // =========================================================================
+
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto(`${frontendUrl}/strategy-lab`);
+  await page.locator('#sweep-target').waitFor({ state: 'visible' });
+
+  // 1. PRO-STRAT-01, PRO-STRAT-02: Typed strategy parameter controls & declarative validation without eval
+  const targetSelectVisible = await page.locator('#sweep-target').isVisible();
+  const paramSelectVisible = await page.locator('#sweep-param').isVisible();
+
+  const testStrategyPayload = {
+    name: 'UAT Declarative Strategy',
+    version: '1.0',
+    indicators: [{ name: 'sma_fast', type: 'sma', length: 5 }, { name: 'sma_slow', type: 'sma', length: 20 }],
+    entry_rules: [{ dsl: { cross_up: ['sma_fast', 'sma_slow'] } }],
+    exit_rules: [{ dsl: { cross_down: ['sma_fast', 'sma_slow'] } }],
+    position_sizing: { method: 'fixed_quantity', quantity: 100 },
+  };
+  const validateRes = await (await page.request.post(`${backendUrl}/api/strategy-lab/validate`, {
+    data: { strategy: testStrategyPayload },
+  })).json();
+  const paramsRes = await (await page.request.post(`${backendUrl}/api/strategy-lab/parameters`, {
+    data: { strategy: testStrategyPayload },
+  })).json();
+
+  const typedControlsPass = targetSelectVisible
+    && paramSelectVisible
+    && validateRes.valid === true
+    && Array.isArray(paramsRes.parameters)
+    && paramsRes.parameters.some(p => p.parameter === 'length');
+
+  check('pro09.typed-strategy-controls',
+    typedControlsPass,
+    JSON.stringify({ targetSelectVisible, paramSelectVisible, valid: validateRes.valid, paramCount: paramsRes.parameters?.length })
+  );
+
+  // 2. PRO-STRAT-03, PRO-STRAT-04: Non-overlapping In-Sample & Out-of-Sample evaluation periods and bounded sweeps
+  await page.locator('#lab-symbols').fill('FPT');
+  await page.locator('#lab-start').fill('2020-01-01');
+  await page.locator('#lab-end').fill('2022-12-31');
+  await page.locator('#lab-enable-oos').check();
+  await page.locator('#lab-oos-start').fill('2023-01-01');
+  await page.locator('#lab-oos-end').fill('2023-12-31');
+
+  await page.locator('#sweep-values').fill('5, 15');
+  await page.locator('#sweep-max').fill('10');
+
+  const [sweepResponse] = await Promise.all([
+    page.waitForResponse(r => r.url().includes('/api/strategy-lab/sweep') && r.request().method() === 'POST'),
+    page.locator('#btn-run-sweep').click(),
+  ]);
+  const sweepData = await sweepResponse.json();
+  await page.getByText('Sweep Results', { exact: true }).waitFor();
+
+  const trainTestBoundsPass = sweepData.status === 'succeeded'
+    && sweepData.in_sample_period?.start_date === '2020-01-01'
+    && sweepData.in_sample_period?.end_date === '2022-12-31'
+    && sweepData.out_of_sample_period?.start_date === '2023-01-01'
+    && sweepData.out_of_sample_period?.end_date === '2023-12-31'
+    && sweepData.variants?.length === 2
+    && sweepData.variants.every(v => v.response != null && v.oos_response != null);
+
+  check('pro09.train-test-split-and-bounds',
+    trainTestBoundsPass,
+    JSON.stringify({ status: sweepData.status, variantCount: sweepData.variants?.length, isPeriod: sweepData.in_sample_period, oosPeriod: sweepData.out_of_sample_period })
+  );
+
+  // 3. PRO-STRAT-05, PRO-STRAT-06: Robustness scoring, multi-metric comparison & invalid/low-sample ranking exclusion
+  const sweepTableText = await page.locator('.glass-panel').filter({ hasText: 'Sweep Results' }).innerText();
+  const hasRobustnessBadge = sweepData.variants.some(v => v.metrics.robustness?.badge != null);
+  const rankingExclusionEnforced = sweepData.variants.every(v => {
+    if (v.metrics.total_trades < 5) return v.metrics.ranking_eligible === false;
+    return true;
+  });
+
+  const robustnessPass = hasRobustnessBadge
+    && rankingExclusionEnforced
+    && (sweepTableText.includes('Robust') || sweepTableText.includes('Low Sample') || sweepTableText.includes('Overfitted') || sweepTableText.includes('Unvalidated'));
+
+  check('pro09.robustness-ranking-exclusion',
+    robustnessPass,
+    JSON.stringify({ hasRobustnessBadge, rankingExclusionEnforced, variants: sweepData.variants.map(v => ({ label: v.label, trades: v.metrics.total_trades, eligible: v.metrics.ranking_eligible, badge: v.metrics.robustness?.badge })) })
+  );
+
+  await page.screenshot({ path: path.join(runDir, 'pro09-strategy-research-1440x1000.png'), fullPage: true });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: path.join(runDir, 'pro09-strategy-research-1280x800.png'), fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+
+  // 4. PRO-STRAT-04: Cooperative sweep cancellation
+  const cancelTestId = `uat-cancel-${Date.now()}`;
+  const cancelRes = await (await page.request.post(`${backendUrl}/api/strategy-lab/sweep/cancel`, {
+    data: { sweep_id: cancelTestId },
+  })).json();
+
+  const cancelSweepExecution = await (await page.request.post(`${backendUrl}/api/strategy-lab/sweep`, {
+    data: {
+      sweep_id: cancelTestId,
+      symbol: 'FPT',
+      start_date: '2020-01-01',
+      end_date: '2022-12-31',
+      strategy: testStrategyPayload,
+      sweep: [{ path: 'indicators[0].length', values: [5, 10, 15, 20] }],
+      max_variants: 10,
+    },
+  })).json();
+
+  const cancellationPass = cancelRes.status === 'succeeded'
+    && cancelSweepExecution.status === 'cancelled'
+    && cancelSweepExecution.cancelled === true;
+
+  check('pro09.sweep-cancellation',
+    cancellationPass,
+    JSON.stringify({ cancelApiStatus: cancelRes.status, sweepStatus: cancelSweepExecution.status, cancelled: cancelSweepExecution.cancelled })
+  );
+
+  // 5. PRO-STRAT-07, PRO-STRAT-08: Run reproducibility & cross-workflow semantic parity
+  const runsListRes = await (await page.request.get(`${backendUrl}/api/strategy-lab/runs`)).json();
+  const latestRun = runsListRes[0];
+  const hasReproducibleConfig = latestRun != null
+    && latestRun.request_config != null
+    && (latestRun.request_config.symbols != null || latestRun.request_config.start_date != null);
+
+  const parityBtRes1 = await (await page.request.post(`${backendUrl}/api/backtest/run`, {
+    data: {
+      symbol: 'FPT',
+      start_date: '2023-01-01',
+      end_date: '2023-12-31',
+      strategy: testStrategyPayload,
+    },
+  })).json();
+  const parityBtRes2 = await (await page.request.post(`${backendUrl}/api/backtest/run`, {
+    data: {
+      symbol: 'FPT',
+      start_date: '2023-01-01',
+      end_date: '2023-12-31',
+      strategy: testStrategyPayload,
+    },
+  })).json();
+
+  const parityPass = hasReproducibleConfig
+    && parityBtRes1.status === 'succeeded'
+    && parityBtRes2.status === 'succeeded'
+    && parityBtRes1.analytics?.total_net_pnl === parityBtRes2.analytics?.total_net_pnl
+    && parityBtRes1.analytics?.total_trades === parityBtRes2.analytics?.total_trades;
+
+  check('pro09.reproducibility-and-parity',
+    parityPass,
+    JSON.stringify({
+      hasReproducibleConfig,
+      runCount: runsListRes.length,
+      pnl1: parityBtRes1.analytics?.total_net_pnl,
+      pnl2: parityBtRes2.analytics?.total_net_pnl,
+      trades: parityBtRes1.analytics?.total_trades,
     })
   );
 

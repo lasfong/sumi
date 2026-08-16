@@ -3,7 +3,7 @@
 > Authority: `docs/ANTIGRAVITY_TWO_SESSION_OPERATING_MODEL.md` (with `docs/LOW_MODEL_AUTONOMOUS_EXECUTION_PROTOCOL.md`)
 > Current plan: PRO-09 — Strategy Research UX
 > Machine-transfer entrypoint: `docs/MACHINE_TRANSFER_HANDOFF_2026-08-10.md`
-> Latest review record: `docs/reviews/PRO_08_REVIEW_2026-08-16.md`
+> Latest review record: `docs/reviews/PRO_09_REVIEW_2026-08-16.md`
 > Prior approval record: `docs/reviews/PRO_08_REVIEW_2026-08-16.md`
 > Canonical roadmap: `docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md`
 
@@ -20,23 +20,45 @@ Last updated: 2026-08-16
 - PRO-06: independently approved and closed on 2026-08-16 in `docs/reviews/PRO_06_REVIEW_2026-08-16.md`. Committed in `d94d324` and pushed to `origin/master`.
 - PRO-07: independently approved and closed on 2026-08-16 in `docs/reviews/PRO_07_REVIEW_2026-08-16.md`. Committed in `d0f69e5` and pushed to `origin/master`.
 - PRO-08: independently approved and closed on 2026-08-16 in `docs/reviews/PRO_08_REVIEW_2026-08-16.md`. Committed in `92c2d0a` and pushed to `origin/master`.
-- PRO-09: USER AUTHORIZED on 2026-08-16; PRO-10 through PRO-12 not started.
+- PRO-09: independently approved and closed on 2026-08-16 in `docs/reviews/PRO_09_REVIEW_2026-08-16.md`. PRO-10 through PRO-12 not started.
 
 ## Current control point
 
-Milestone: `PRO-09 PREPARED — STRATEGY RESEARCH UX`
+Milestone: `PRO-09 CLOSED — INDEPENDENTLY APPROVED`
 
 ## Active batch
 
-PRO-09 — Strategy Research UX.
+PRO-09 — Strategy Research UX (CLOSED).
 
 ## State
 
-PREPARED
+CLOSED
 
-Status: PRO-09 authorized by user on 2026-08-16. ExecPlan: `docs/exec-plans/PRO_09_STRATEGY_RESEARCH_UX.md`. Active DEV prompt: `docs/dev-prompts/PRO_09_STRATEGY_RESEARCH_UX_DEV_PROMPT.md`.
+Status: PRO-09 independently approved on 2026-08-16. ExecPlan: `docs/exec-plans/PRO_09_STRATEGY_RESEARCH_UX.md`. Reviewer Record: `docs/reviews/PRO_09_REVIEW_2026-08-16.md`.
 
-## PRO-08 Implementation & Verification Summary (2026-08-16)
+## PRO-09 Implementation & Verification Summary (2026-08-16)
+
+- **Backend Strategy Lab Domain & APIs (`backend/app/services/strategy_lab_service.py`, `backend/app/api/strategy_lab.py`)**:
+  - Implemented typed parameter discovery (`get_strategy_parameters`) returning schema-aware target types, default values, and parameter types (e.g. `int`, `float`).
+  - Implemented AST-safe declarative strategy validation without `eval` (`validate_strategy_definition`).
+  - Added In-Sample vs Out-of-Sample (OOS) non-overlapping date range validation and split backtest execution.
+  - Implemented multi-metric robustness classification and scoring (`Robust`, `Overfitted`, `Low Sample`, `Unvalidated`, `Unprofitable`, `Degraded`).
+  - Implemented ranking eligibility rule: variants with `< 5 trades` or invalid metrics are marked `ranking_eligible = False` and excluded from winning badges (`PRO-STRAT-05`).
+  - Added cooperative sweep cancellation manager (`SweepCancellationManager`) and endpoint `POST /api/strategy-lab/sweep/cancel`.
+  - Added `POST /api/strategy-lab/validate` and `POST /api/strategy-lab/parameters`.
+  - Added unit test suite in `backend/app/tests/test_strategy_lab.py` (10/10 passed; all 176 backend tests passed).
+- **Frontend Strategy Lab UI & Controls (`frontend/src/pages/StrategyLabPage.tsx`, `frontend/src/api/strategyLabApi.ts`)**:
+  - Implemented structured Target Component & Parameter dropdowns replacing internal path strings (`PRO-STRAT-01`).
+  - Added In-Sample / Out-of-Sample date range inputs with non-overlapping period validation (`PRO-STRAT-03`).
+  - Added Max Variants bounds (1..50) and cooperative cancellation button (`PRO-STRAT-04`).
+  - Rendered comparison and sweep tables with In-Sample vs OOS columns, robustness badges, and ranking exclusion tags (`PRO-STRAT-05`, `PRO-STRAT-06`).
+  - Implemented run history restoration with full reproducible configuration (`PRO-STRAT-07`).
+  - All 182 frontend vitest tests passed; ESLint and Vite production build clean.
+- **Product UAT & Invariants Verification**:
+  - Extended `scripts/fixtures/product-uat-v3-baseline.json` and `scripts/product-uat.mjs` with `pro09.*` assertions.
+  - Deterministic Product UAT: 333 passed, 0 failed, 0 blocking failed (Reconciliation: pass).
+  - Retained screenshots: `pro09-strategy-research-1440x1000.png` (203,605 bytes) and `pro09-strategy-research-1280x800.png` (165,517 bytes).
+  - Verified `backend/sumi.db` SHA-256 unchanged: `450B7EE02A2F8CEC18E1C3B01A6F76CE2355EF1980BECFCE2EF969D25BD9896A`.
 
 - **Backend Trade Planning & Sizing Domain (`backend/app/domain/trade_planning.py`)**:
   - Implemented standard 100-share lot increments, minimum lot constraints, Vietnam fees (0.15% buy/sell) & tax (0.10% sell) modeling, gross and net R calculations, and cash constraints.
@@ -319,12 +341,14 @@ Status: PRO-09 authorized by user on 2026-08-16. ExecPlan: `docs/exec-plans/PRO_
 - Archived DEV prompt: `docs/dev-prompts/PRO_08_TRADE_PLANNING_AND_JOURNAL_DEV_PROMPT.md`
 - Final reviewer record: `docs/reviews/PRO_08_REVIEW_2026-08-16.md`
 
-## Active PRO-09 authority package
+## Closed PRO-09 authority package
 
-- Stable dossier: `docs/program/PRO_09_STRATEGY_RESEARCH_UX.md`
-- Prepared ExecPlan: `docs/exec-plans/PRO_09_STRATEGY_RESEARCH_UX.md`
-- Active DEV prompt: `docs/dev-prompts/PRO_09_STRATEGY_RESEARCH_UX_DEV_PROMPT.md`
+- Operating protocol: `docs/LOW_MODEL_AUTONOMOUS_EXECUTION_PROTOCOL.md`
+- Program dossier: `docs/program/PRO_09_STRATEGY_RESEARCH_UX.md`
+- Completed ExecPlan: `docs/exec-plans/PRO_09_STRATEGY_RESEARCH_UX.md`
+- Archived DEV prompt: `docs/dev-prompts/PRO_09_STRATEGY_RESEARCH_UX_DEV_PROMPT.md`
+- Final reviewer record: `docs/reviews/PRO_09_REVIEW_2026-08-16.md`
 
 ## Next action
 
-Execute `docs/dev-prompts/ANTIGRAVITY_DEV_SESSION_INIT_PROMPT.md` in a new DEV session. Implement PRO-09 (Strategy Research UX) and stop at the Independent Reviewer Gate. PRO-10 remains unauthorized.
+PRO-09 is CLOSED and independently approved. PRO-10 (Provider Selection and Boundary) remains UNAUTHORIZED until explicit user authorization. No further session actions are authorized without user prompt.
