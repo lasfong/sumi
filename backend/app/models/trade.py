@@ -31,6 +31,13 @@ class Trade(Base):
     result = Column(String, default='open')
     setup_type = Column(String, nullable=True)
     mistake_tag = Column(String, nullable=True)
+    planned_entry_price = Column(Float, nullable=True)
+    planned_quantity = Column(Float, nullable=True)
+    planned_r = Column(Float, nullable=True)
+    market_regime = Column(String, nullable=True)
+    emotion = Column(String, nullable=True)
+    rule_violation = Column(String, nullable=True)
+    notes = Column(String, nullable=True)
     
     created_at = Column(DateTime(timezone=True), default=func.now())
     updated_at = Column(DateTime(timezone=True), default=func.now(), onupdate=func.now())

@@ -87,6 +87,13 @@ class JournalService:
             note_type=entry_in.note_type,
             content=content,
             tags=entry_in.tags,
+            setup_type=entry_in.setup_type,
+            market_regime=entry_in.market_regime,
+            confidence_score=entry_in.confidence_score,
+            emotion=entry_in.emotion,
+            mistake_tag=entry_in.mistake_tag,
+            rule_violation=entry_in.rule_violation,
+            checklist_snapshot=entry_in.checklist_snapshot,
         )
         db.add(entry)
         db.commit()
@@ -116,3 +123,98 @@ class JournalService:
                     continue
             visible.append(entry)
         return visible
+
+    @staticmethod
+    def export_session_journal_json(db: Session, session_id: int) -> dict:
+        from app.services.practice_workflow_service import PracticeWorkflowService
+        snapshot = PracticeWorkflowService.get_snapshot(db, session_id)
+        entries = JournalService.list_visible(db, session_id)
+
+        return {
+            "schema_version": 1,
+            "export_type": "sumi_replay_journal",
+            "session": {
+                "id": snapshot.session_id,
+                "symbol": snapshot.symbol,
+                "current_index": snapshot.current_index,
+                "visible_bar": snapshot.visible_bar,
+                "total_bars": snapshot.total_bars,
+                "current_date": snapshot.current_date.isoformat(),
+                "initial_cash": snapshot.initial_cash,
+                "current_cash": snapshot.current_cash,
+            },
+            "decisions": [d.model_dump(mode="json") for d in snapshot.decisions],
+            "trades": [t.model_dump(mode="json") for t in snapshot.trades],
+            "journal_entries": [
+                {
+                    "id": e.id,
+                    "session_id": e.session_id,
+                    "decision_id": e.decision_id,
+                    "trade_id": e.trade_id,
+                    "note_type": e.note_type,
+                    "content": e.content,
+                    "tags": e.tags,
+                    "setup_type": e.setup_type,
+                    "market_regime": e.market_regime,
+                    "confidence_score": e.confidence_score,
+                    "emotion": e.emotion,
+                    "mistake_tag": e.mistake_tag,
+                    "rule_violation": e.rule_violation,
+                    "checklist_snapshot": e.checklist_snapshot,
+                    "created_at": e.created_at.isoformat() if e.created_at else None,
+                }
+                for e in entries
+            ],
+        }
+
+    @staticmethod
+    def export_session_journal_csv(db: Session, session_id: int) -> str:
+        import csv
+        import io
+        from app.services.practice_workflow_service import PracticeWorkflowService
+
+        snapshot = PracticeWorkflowService.get_snapshot(db, session_id)
+        entries = JournalService.list_visible(db, session_id)
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        # Section 1: Trades
+        writer.writerow(["# TRADES"])
+        writer.writerow([
+            "Trade ID", "Symbol", "Entry Date", "Entry Price", "Exit Date", "Exit Price",
+            "Quantity", "Net PnL", "PnL %", "Initial Risk", "Planned R", "Realized R",
+            "Setup", "Regime", "Emotion", "Mistake Tag", "Rule Violation", "Status", "Result"
+        ])
+        for t in snapshot.trades:
+            writer.writerow([
+                t.id, t.symbol, t.entry_date.isoformat(), t.entry_price,
+                t.exit_date.isoformat() if t.exit_date else "",
+                t.exit_price if t.exit_price is not None else "",
+                t.quantity,
+                f"{t.net_pnl:.2f}" if t.net_pnl is not None else "",
+                f"{t.pnl_percent:.2f}%" if t.pnl_percent is not None else "",
+                f"{t.initial_risk:.2f}" if t.initial_risk is not None else "",
+                f"{t.planned_r:.2f}" if t.planned_r is not None else "",
+                f"{t.r_multiple:.2f}" if t.r_multiple is not None else "",
+                t.setup_type or "", t.market_regime or "", t.emotion or "",
+                t.mistake_tag or "", t.rule_violation or "", t.status, t.result,
+            ])
+
+        writer.writerow([])
+        # Section 2: Journal & Checklist Entries
+        writer.writerow(["# JOURNAL ENTRIES"])
+        writer.writerow([
+            "Entry ID", "Decision ID", "Trade ID", "Type", "Content", "Tags",
+            "Setup", "Regime", "Confidence", "Emotion", "Mistake Tag", "Rule Violation", "Created At"
+        ])
+        for e in entries:
+            writer.writerow([
+                e.id, e.decision_id or "", e.trade_id or "", e.note_type,
+                e.content.replace("\n", " "), e.tags or "",
+                e.setup_type or "", e.market_regime or "", e.confidence_score or "",
+                e.emotion or "", e.mistake_tag or "", e.rule_violation or "",
+                e.created_at.isoformat() if e.created_at else "",
+            ])
+
+        return output.getvalue()

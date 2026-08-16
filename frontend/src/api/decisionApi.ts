@@ -30,3 +30,11 @@ export const getPracticeState = async (sessionId: number): Promise<PracticeWorkf
   const response = await apiClient.get(`/replay/sessions/${sessionId}/practice-state`);
   return response.data;
 };
+
+export const planTradeSizing = async (
+  sessionId: number,
+  plan: import('../types/decision').TradePlanInput
+): Promise<import('../types/decision').TradePlanResult> => {
+  const response = await apiClient.post(`/replay/sessions/${sessionId}/plan-sizing`, plan);
+  return response.data;
+};

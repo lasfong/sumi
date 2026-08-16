@@ -538,3 +538,189 @@ def test_tc004_hose_limit_within_band_pending_and_fills(db_session):
     assert pos is not None
     assert pos.status == "open"
     assert pos.quantity == 1000
+
+
+def test_trade_planning_and_rich_taxonomy_recorded(db_session):
+    """
+    Verify PRO-TRADE-01, PRO-TRADE-06, PRO-TRADE-07, PRO-TRADE-08:
+    A plan records entry, stop, target, direction, account risk, planned quantity, fees, and expected R multiple.
+    Taxonomy tags and checklist snapshots are persisted immutably and compared.
+    """
+    symbol = "PLAN_TEST"
+    closes = [50.0, 52.0, 55.0]
+    for i, close in enumerate(closes):
+        db_session.add(Candle(
+            symbol=symbol, timeframe="1D", timestamp=date(2024, 5, 1) + timedelta(days=i),
+            open=close, high=close + 1, low=close - 1, close=close, volume=1000000,
+            adjustment_type="unadjusted"
+        ))
+    db_session.commit()
+
+    session = ReplayService.create_session(
+        db_session,
+        ReplaySessionCreate(symbol=symbol, start_date=date(2024, 5, 1), end_date=date(2024, 5, 3), initial_cash=100_000_000.0)
+    )
+
+    decision_in = DecisionCreate(
+        action=DecisionAction.BUY,
+        quantity=500.0,
+        price=50.0,
+        stop_loss=45.0,
+        target_price=60.0,
+        planned_quantity=500.0,
+        setup_type="Breakout",
+        market_regime="Bull Trend",
+        confidence_score=4,
+        emotion="Calm / Disciplined",
+        mistake_tag="None",
+        rule_violation="None",
+        reason="Clean cup-and-handle breakout on high volume",
+        note="Plan to trail stop after 1R",
+        checklist_snapshot='{"checks": {"trendIdentified": true, "setupConfirmed": true}}',
+    )
+    decision = TradeLifecycleService.process_decision(db_session, session.id, decision_in)
+
+    assert decision.stop_loss == 45.0
+    assert decision.target_price == 60.0
+    assert decision.planned_quantity == 500.0
+    assert decision.planned_risk == (50.0 - 45.0) * 500.0 # 2,500
+    assert decision.planned_r == (60.0 - 50.0) / (50.0 - 45.0) # 2.0
+    assert decision.setup_type == "Breakout"
+    assert decision.market_regime == "Bull Trend"
+    assert decision.confidence_score == 4
+    assert decision.emotion == "Calm / Disciplined"
+    assert decision.checklist_snapshot is not None
+
+    trade = db_session.query(Trade).filter_by(session_id=session.id).first()
+    assert trade is not None
+    assert trade.planned_entry_price == 50.0
+    assert trade.planned_quantity == 500.0
+    assert trade.initial_stop_loss == 45.0
+    assert trade.target_price == 60.0
+    assert trade.planned_r == 2.0
+    assert trade.setup_type == "Breakout"
+    assert trade.market_regime == "Bull Trend"
+    assert trade.emotion == "Calm / Disciplined"
+
+    # Advance to T+2 and close trade at 55.0
+    ReplayService.next_candle(db_session, session.id)
+    ReplayService.next_candle(db_session, session.id)
+
+    close_decision = DecisionCreate(action=DecisionAction.CLOSE)
+    TradeLifecycleService.process_decision(db_session, session.id, close_decision)
+
+    db_session.refresh(trade)
+    assert trade.status == "closed"
+    assert trade.exit_price == 55.0
+    # Gross profit = (55 - 50) * 500 = 2,500. Initial risk = (50 - 45) * 500 = 2,500
+    assert trade.r_multiple is not None
+    # Net PnL is close to 2,500 minus fees/taxes (~2,400) -> R is ~0.96
+    assert trade.r_multiple == pytest.approx(trade.net_pnl / trade.initial_risk, abs=0.001)
+
+    # Check practice workflow snapshot projection
+    from app.services.practice_workflow_service import PracticeWorkflowService
+    snapshot = PracticeWorkflowService.get_snapshot(db_session, session.id)
+    assert len(snapshot.trades) == 1
+    p_trade = snapshot.trades[0]
+    assert p_trade.setup_type == "Breakout"
+    assert p_trade.planned_r == 2.0
+    assert p_trade.entry_drift == 0.0 # 50 - 50
+    assert p_trade.size_variance == 0.0 # 500 - 500
+    assert p_trade.r_multiple == pytest.approx(trade.r_multiple)
+
+
+def test_t2_settlement_detailed_rejection_feedback(db_session):
+    """
+    Verify PRO-TRADE-05: T+2 availability and rejection feedback state the blocked quantity,
+    available quantity, and release date.
+    """
+    symbol = "T2_FEEDBACK_TEST"
+    for i in range(5):
+        db_session.add(Candle(
+            symbol=symbol, timeframe="1D", timestamp=date(2024, 6, 1) + timedelta(days=i),
+            open=100.0, high=101.0, low=99.0, close=100.0, volume=1000000,
+            adjustment_type="unadjusted"
+        ))
+    db_session.commit()
+
+    session = ReplayService.create_session(
+        db_session,
+        ReplaySessionCreate(symbol=symbol, start_date=date(2024, 6, 1), end_date=date(2024, 6, 5), initial_cash=100_000_000.0)
+    )
+
+    # Buy 200 at Bar 1 (T0)
+    TradeLifecycleService.process_decision(db_session, session.id, DecisionCreate(action=DecisionAction.BUY, quantity=200))
+    # Step to Bar 2 (T1)
+    ReplayService.next_candle(db_session, session.id)
+
+    # Attempt to sell at T1 -> Rejected with detailed message
+    with pytest.raises(HTTPException) as excinfo:
+        TradeLifecycleService.process_decision(db_session, session.id, DecisionCreate(action=DecisionAction.SELL, quantity=100))
+
+    assert excinfo.value.status_code == 400
+    detail = excinfo.value.detail
+    assert "T+2 constraint" in detail
+    assert "Available: 0" in detail
+    assert "Blocked: 200" in detail
+    assert "Earliest release date: 2024-06-03" in detail
+
+
+def test_journal_json_and_csv_export(db_session):
+    """
+    Verify PRO-TRADE-10: Journal export and backup preserve local privacy and stable identifiers.
+    """
+    symbol = "EXPORT_TEST"
+    for i in range(4):
+        db_session.add(Candle(
+            symbol=symbol, timeframe="1D", timestamp=date(2024, 7, 1) + timedelta(days=i),
+            open=100.0, high=101.0, low=99.0, close=100.0, volume=1000000,
+            adjustment_type="unadjusted"
+        ))
+    db_session.commit()
+
+    session = ReplayService.create_session(
+        db_session,
+        ReplaySessionCreate(symbol=symbol, start_date=date(2024, 7, 1), end_date=date(2024, 7, 4), initial_cash=100_000_000.0)
+    )
+
+    # Add a decision and trade
+    TradeLifecycleService.process_decision(
+        db_session, session.id,
+        DecisionCreate(
+            action=DecisionAction.BUY, quantity=300, price=100.0,
+            stop_loss=90.0, target_price=120.0, setup_type="Pullback", market_regime="Bull Trend",
+            emotion="Disciplined", reason="Support bounce"
+        )
+    )
+
+    # Add a journal entry
+    from app.services.journal_service import JournalService
+    from app.schemas.journal_schema import JournalEntryCreate
+    JournalService.create(
+        db_session, session.id,
+        JournalEntryCreate(
+            note_type="session_review",
+            content="Great execution following daily trading plan.",
+            tags="discipline,plan",
+            setup_type="Pullback",
+            market_regime="Bull Trend",
+            confidence_score=5,
+            emotion="Disciplined",
+        )
+    )
+
+    # Export JSON
+    json_export = JournalService.export_session_journal_json(db_session, session.id)
+    assert json_export["schema_version"] == 1
+    assert json_export["session"]["symbol"] == symbol
+    assert len(json_export["decisions"]) == 1
+    assert len(json_export["trades"]) == 1
+    assert len(json_export["journal_entries"]) == 1
+    assert json_export["decisions"][0]["setup_type"] == "Pullback"
+
+    # Export CSV
+    csv_export = JournalService.export_session_journal_csv(db_session, session.id)
+    assert "# TRADES" in csv_export
+    assert "# JOURNAL ENTRIES" in csv_export
+    assert "Pullback" in csv_export
+    assert "Disciplined" in csv_export

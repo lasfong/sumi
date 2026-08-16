@@ -24,4 +24,14 @@ class TradeResponse(BaseModel):
     result: Optional[str] = None
     setup_type: Optional[str] = None
     mistake_tag: Optional[str] = None
+    planned_entry_price: Optional[float] = None
+    planned_quantity: Optional[float] = None
+    planned_r: Optional[float] = None
+    market_regime: Optional[str] = None
+    emotion: Optional[str] = None
+    rule_violation: Optional[str] = None
+    notes: Optional[str] = None
+    entry_drift: Optional[float] = None
+    size_variance: Optional[float] = None
+    r_variance: Optional[float] = None
     model_config = ConfigDict(from_attributes=True)

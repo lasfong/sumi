@@ -46,6 +46,12 @@ export const PositionPanel: React.FC<PositionPanelProps> = ({ positions, snapsho
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}><span style={{ color: 'var(--text-muted)' }}>Current Price:</span><span>{p.current_price.toLocaleString()}</span></div>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}><span style={{ color: 'var(--text-muted)' }}>Realized PnL:</span><span>{p.realized_pnl.toLocaleString()}</span></div>
           <div data-testid="t2-available" style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}><span style={{ color: 'var(--text-muted)' }}>T+2 Available:</span><strong>{p.available_quantity.toLocaleString()}</strong></div>
+          {(p.blocked_quantity !== undefined && p.blocked_quantity > 0) && (
+            <div data-testid="t2-blocked" style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', color: '#FFD166' }}>
+              <span>T+2 Blocked:</span>
+              <strong>{p.blocked_quantity.toLocaleString()}{p.earliest_release_date ? ` (release: ${p.earliest_release_date.slice(0, 10)})` : ''}</strong>
+            </div>
+          )}
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}>
             <span style={{ color: 'var(--text-muted)' }}>Unrealized PnL:</span>
             <span style={{ color: p.unrealized_pnl >= 0 ? 'var(--color-buy)' : 'var(--color-sell)', fontWeight: 600 }}>

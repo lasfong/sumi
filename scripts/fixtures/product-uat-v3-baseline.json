@@ -2623,6 +2623,52 @@
         "PRO-IND-10",
         "PRO-IND-11"
       ]
+    },
+    {
+      "id": "pro08.trade-plan-and-sizing",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-TRADE-01",
+        "PRO-TRADE-02",
+        "PRO-TRADE-04"
+      ]
+    },
+    {
+      "id": "pro08.risk-reward-drawing-contract",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-TRADE-03"
+      ]
+    },
+    {
+      "id": "pro08.lifecycle-t2-settlement",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-TRADE-05"
+      ]
+    },
+    {
+      "id": "pro08.checklist-snapshot-immutability",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-TRADE-06"
+      ]
+    },
+    {
+      "id": "pro08.journal-taxonomy-and-review",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-TRADE-07",
+        "PRO-TRADE-08",
+        "PRO-TRADE-09"
+      ]
+    },
+    {
+      "id": "pro08.journal-local-export",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-TRADE-10"
+      ]
     }
   ]
 }

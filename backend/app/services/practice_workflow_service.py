@@ -109,12 +109,22 @@ class PracticeWorkflowService:
             candle_index=decision.candle_index,
             decision_date=decision.decision_date,
             price=decision.price,
+            quantity=decision.planned_quantity,
+            stop_loss=decision.stop_loss,
+            target_price=decision.target_price,
+            planned_quantity=decision.planned_quantity,
+            planned_risk=decision.planned_risk,
+            planned_r=decision.planned_r,
             setup_type=decision.setup_type,
             confidence_score=decision.confidence_score,
             market_context=decision.market_context,
+            market_regime=decision.market_regime,
+            emotion=decision.emotion,
             reason=decision.reason,
             note=decision.note,
             mistake_tag=decision.mistake_tag,
+            rule_violation=decision.rule_violation,
+            checklist_snapshot=decision.checklist_snapshot,
         ) for decision in visible_decisions]
 
         projected_orders: list[PracticeOrder] = []
@@ -193,6 +203,23 @@ class PracticeWorkflowService:
             if order_by_id[execution.order_id].side == "SELL"
         )
         available_quantity = max(0.0, settled_bought - visible_sold)
+        blocked_quantity = max(0.0, quantity - available_quantity)
+
+        earliest_release_date = None
+        if blocked_quantity > 0:
+            unsettled_buy_indices = [
+                decision_by_id[order_by_id[execution.order_id].decision_id].candle_index
+                for execution in visible_executions
+                if order_by_id[execution.order_id].side == "BUY"
+                and decision_by_id[order_by_id[execution.order_id].decision_id].candle_index > current_index - 2
+            ]
+            if unsettled_buy_indices:
+                earliest_buy_idx = min(unsettled_buy_indices)
+                release_bar = earliest_buy_idx + 2
+                all_session_candles = PracticeWorkflowService._candles(db, session)
+                if all_session_candles and release_bar < len(all_session_candles):
+                    earliest_release_date = all_session_candles[release_bar].timestamp
+
         average_price = total_cost / quantity if quantity > 0 else 0.0
         stored_position = db.query(Position).filter(Position.session_id == session_id).order_by(Position.id).first()
         positions = []
@@ -207,6 +234,8 @@ class PracticeWorkflowService:
                 realized_pnl=realized_pnl,
                 unrealized_pnl=(current_candle.close - average_price) * quantity,
                 available_quantity=min(quantity, available_quantity),
+                blocked_quantity=blocked_quantity,
+                earliest_release_date=earliest_release_date,
                 opened_at=opened_at,
             ))
 
@@ -226,6 +255,11 @@ class PracticeWorkflowService:
             closed = sold_qty >= bought_qty and bool(sells)
             net_pnl = sum(execution.net_amount for execution in sells) - sum(execution.net_amount for execution in buys) if closed else None
             buy_cash = sum(execution.net_amount for execution in buys)
+            r_multiple = (net_pnl / trade.initial_risk) if (closed and net_pnl is not None and trade.initial_risk and trade.initial_risk > 0) else None
+            entry_drift = (trade.entry_price - trade.planned_entry_price) if (trade.planned_entry_price is not None) else None
+            size_variance = (bought_qty - trade.planned_quantity) if (trade.planned_quantity is not None) else None
+            r_variance = (r_multiple - trade.planned_r) if (r_multiple is not None and trade.planned_r is not None) else None
+
             projected_trades.append(PracticeTrade(
                 id=trade.id,
                 symbol=trade.symbol,
@@ -236,6 +270,22 @@ class PracticeWorkflowService:
                 exit_price=sells[-1].execution_price if closed else None,
                 net_pnl=net_pnl,
                 pnl_percent=(net_pnl / buy_cash * 100) if closed and buy_cash else None,
+                initial_stop_loss=trade.initial_stop_loss,
+                target_price=trade.target_price,
+                initial_risk=trade.initial_risk,
+                r_multiple=r_multiple,
+                planned_entry_price=trade.planned_entry_price,
+                planned_quantity=trade.planned_quantity,
+                planned_r=trade.planned_r,
+                setup_type=trade.setup_type,
+                market_regime=trade.market_regime,
+                emotion=trade.emotion,
+                mistake_tag=trade.mistake_tag,
+                rule_violation=trade.rule_violation,
+                entry_drift=entry_drift,
+                size_variance=size_variance,
+                r_variance=r_variance,
+                notes=trade.notes,
                 status="closed" if closed else "open",
                 result=("win" if net_pnl and net_pnl > 0 else "loss" if net_pnl and net_pnl < 0 else "breakeven") if closed else "open",
             ))
@@ -253,6 +303,8 @@ class PracticeWorkflowService:
             initial_cash=session.initial_cash,
             current_cash=current_cash,
             available_quantity=min(max(quantity, 0.0), available_quantity),
+            blocked_quantity=blocked_quantity,
+            earliest_release_date=earliest_release_date,
             latest_activity_index=latest_activity_index,
             historical=historical,
             can_trade=not historical,

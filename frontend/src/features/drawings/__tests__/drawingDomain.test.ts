@@ -8,7 +8,7 @@ import schema from '../../../../../docs/decision-packs/sumi-drawing-document-v1.
 import { DrawingCommandHistory } from '../DrawingCommandHistory';
 import { DRAWING_CONTRACT_CORPUS, materializeDrawingContractCase } from '../drawingContractCorpus';
 import { DrawingRepository, DrawingRevisionConflict } from '../DrawingRepository';
-import { parseDrawingDocument, validateDrawingDocument, validateDrawingDocumentSemantics, type SumiDrawingDocumentV1 } from '../drawingDomain';
+import { createDrawing, parseDrawingDocument, validateDrawingDocument, validateDrawingDocumentSemantics, type SumiDrawingDocumentV1 } from '../drawingDomain';
 
 describe('Sumi drawing document v1', () => {
   it('validates and round-trips the valid fixture', () => {
@@ -147,5 +147,25 @@ describe('DrawingRepository and DrawingCommandHistory', () => {
     const remote = { ...(valid as SumiDrawingDocumentV1), revision: 10, drawings: [] };
     const hydration = repository.hydrate(7, 'FPT', JSON.stringify(remote));
     expect(hydration.document).toEqual(local); expect(hydration.conflict).toContain('diverged'); expect(repository.load(7, 'FPT')).toEqual(local);
+  });
+  it('creates and validates risk-reward drawing contract', () => {
+    const rr = createDrawing('risk-reward', [
+      { time: '2026-07-01', price: 100 },
+      { time: '2026-07-01', price: 90 },
+      { time: '2026-07-01', price: 125 },
+    ], 0);
+    expect(rr.tool).toBe('risk-reward');
+    if (rr.tool !== 'risk-reward') throw new Error('type mismatch');
+    expect(rr.geometry.direction).toBe('long');
+    expect(rr.geometry.riskRewardRatio).toBe(2.5);
+
+    const doc: SumiDrawingDocumentV1 = {
+      schemaVersion: 1,
+      revision: 1,
+      sessionId: 7,
+      symbol: 'FPT',
+      drawings: [rr],
+    };
+    expect(validateDrawingDocument(doc)).toBe(true);
   });
 });

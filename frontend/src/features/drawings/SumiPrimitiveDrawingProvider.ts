@@ -61,6 +61,56 @@ class SumiDrawingDocumentPrimitive implements ISeriesPrimitive<Time> {
             context.fillText(`${level.ratio.toFixed(3).replace(/0+$/, '').replace(/\.$/, '')}  ${price.toFixed(2)}`, Math.min(a.x, b.x) + 5, y - 3);
           }
         }
+        if (drawing.tool === 'risk-reward' && projected.anchors.length === 3) {
+          const [entryPt, stopPt, targetPt] = projected.anchors;
+          const minX = Math.min(entryPt.x, stopPt.x, targetPt.x);
+          const maxX = Math.max(entryPt.x, stopPt.x, targetPt.x, mediaSize.width);
+          const width = Math.max(10, maxX - minX);
+
+          // 1. Target (profit) zone
+          const targetTop = Math.min(entryPt.y, targetPt.y);
+          const targetHeight = Math.abs(entryPt.y - targetPt.y);
+          context.save();
+          context.fillStyle = 'rgba(38, 166, 154, 0.18)';
+          context.fillRect(minX, targetTop, width, targetHeight);
+          context.strokeStyle = '#26A69A';
+          context.lineWidth = 1.5;
+          context.strokeRect(minX, targetTop, width, targetHeight);
+          context.restore();
+
+          // 2. Stop (loss) zone
+          const stopTop = Math.min(entryPt.y, stopPt.y);
+          const stopHeight = Math.abs(entryPt.y - stopPt.y);
+          context.save();
+          context.fillStyle = 'rgba(239, 83, 80, 0.18)';
+          context.fillRect(minX, stopTop, width, stopHeight);
+          context.strokeStyle = '#EF5350';
+          context.lineWidth = 1.5;
+          context.strokeRect(minX, stopTop, width, stopHeight);
+          context.restore();
+
+          // 3. Entry line
+          context.save();
+          context.strokeStyle = '#58A6FF';
+          context.lineWidth = 2;
+          context.setLineDash([4, 4]);
+          context.beginPath();
+          context.moveTo(minX, entryPt.y);
+          context.lineTo(minX + width, entryPt.y);
+          context.stroke();
+          context.restore();
+
+          // 4. Text labels
+          context.fillStyle = '#F0F6FC';
+          context.font = '11px sans-serif';
+          const targetPrice = drawing.anchors[2].price;
+          const entryPrice = drawing.anchors[0].price;
+          const stopPrice = drawing.anchors[1].price;
+          const ratio = drawing.geometry.riskRewardRatio;
+          context.fillText(`Target: ${targetPrice.toFixed(2)}`, minX + 8, targetPt.y + (targetPt.y < entryPt.y ? 14 : -4));
+          context.fillText(`Entry: ${entryPrice.toFixed(2)} (R:R ${ratio.toFixed(2)})`, minX + 8, entryPt.y - 4);
+          context.fillText(`Stop: ${stopPrice.toFixed(2)}`, minX + 8, stopPt.y + (stopPt.y > entryPt.y ? -4 : 14));
+        }
         if (drawing.tool === 'text') {
           context.fillStyle = drawing.style.textColor ?? drawing.style.lineColor; context.font = `${drawing.style.fontSize ?? 14}px sans-serif`;
           const layout = layoutDrawingText(drawing.geometry.text, a, drawing.style.fontSize ?? 14);
@@ -94,7 +144,9 @@ class SumiDrawingDocumentPrimitive implements ISeriesPrimitive<Time> {
 export class SumiPrimitiveDrawingProvider implements DrawingProvider {
   private tool: DrawingTool = 'select'; private document: SumiDrawingDocumentV1; private selectedIds: string[] = [];
   private listeners = new Set<(event: DrawingProviderEvent) => void>(); private primitive: SumiDrawingDocumentPrimitive;
-  private destroyed = false; private preview: SumiDrawing | null = null; private creationAnchor: SumiDrawingAnchor | null = null;
+  private destroyed = false; private preview: SumiDrawing | null = null;
+  private creationAnchor: SumiDrawingAnchor | null = null;
+  private creationAnchors: SumiDrawingAnchor[] = [];
   private magnetMode: MagnetMode = 'off'; private candles: MagnetCandle[] = [];
   private drag: { drawing: SumiDrawing; pointerId: number; part: string; start: ScreenPoint } | null = null;
   private readonly chart: IChartApi; private readonly series: ISeriesApi<'Candlestick'>; private readonly container: HTMLElement;
@@ -125,7 +177,7 @@ export class SumiPrimitiveDrawingProvider implements DrawingProvider {
           ? layoutDrawingText(drawing.geometry.text, anchors[0] as ScreenPoint, drawing.style.fontSize ?? 14).bounds : null;
         return { id: drawing.id, tool: drawing.tool, price: drawing.anchors[0].price, coordinate: this.series.priceToCoordinate(drawing.anchors[0].price), visible: drawing.visible,
           providerVisible: drawing.visible && anchors.every(anchor => anchor.x !== null && anchor.y !== null), selected: this.selectedIds.includes(drawing.id), geometry: structuredClone(drawing.geometry), anchors, handles, bounds }; }),
-      preview: this.preview ? { tool: this.preview.tool, anchors: structuredClone(this.preview.anchors) } : this.creationAnchor ? { tool: this.tool, anchors: [structuredClone(this.creationAnchor)] } : null,
+      preview: this.preview ? { tool: this.preview.tool, anchors: structuredClone(this.preview.anchors) } : this.creationAnchors.length > 0 ? { tool: this.tool, anchors: structuredClone(this.creationAnchors) } : this.creationAnchor ? { tool: this.tool, anchors: [structuredClone(this.creationAnchor)] } : null,
       magnet: { mode: this.magnetMode, threshold: 10, visibleCandles: this.candles.map(candle => ({ time: candle.time, x: this.chart.timeScale().timeToCoordinate(candle.time as Time), prices: (['open', 'high', 'low', 'close'] as const).map(field => ({ field, price: candle[field], y: this.series.priceToCoordinate(candle[field]) })) })) },
       dragging: this.drag !== null, dragPart: this.drag?.part ?? null, primitiveCount: this.destroyed ? 0 : 1, listenerCount: this.destroyed ? 0 : 6 };
   }
@@ -143,7 +195,7 @@ export class SumiPrimitiveDrawingProvider implements DrawingProvider {
   private clearTransaction(rollback: boolean): void { if (this.drag) { const { drawing, pointerId } = this.drag; this.drag = null;
       if (rollback) { this.document = { ...this.document, drawings: this.document.drawings.map(item => item.id === drawing.id ? structuredClone(drawing) : item) }; this.emit({ type: 'change-preview', drawings: [structuredClone(drawing)] }); }
       this.releaseCapture(pointerId); }
-    this.preview = null; this.creationAnchor = null; this.chart.applyOptions({ handleScroll: true }); }
+    this.preview = null; this.creationAnchor = null; this.creationAnchors = []; this.chart.applyOptions({ handleScroll: true }); }
   private panePoint(event: PointerEvent): ScreenPoint | null { const rect = this.getPricePaneElement()?.getBoundingClientRect(); if (!rect || event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) return null; return { x: event.clientX - rect.left, y: event.clientY - rect.top }; }
   private anchorAt(point: ScreenPoint): SumiDrawingAnchor | null { const price = this.series.coordinateToPrice(point.y); const time = timeKey(this.chart.timeScale().coordinateToTime(point.x)); if (price === null || !Number.isFinite(price) || price <= 0 || !time || !isDrawingDate(time)) return null;
     const raw = { time, price }; return snapAnchor(raw, point, this.candles, { timeToX: value => this.chart.timeScale().timeToCoordinate(value as Time), priceToY: value => this.series.priceToCoordinate(value) }, this.magnetMode); }
@@ -189,21 +241,37 @@ export class SumiPrimitiveDrawingProvider implements DrawingProvider {
     return { ...original, anchors } as SumiDrawing;
   }
   private onPointerDown = (event: PointerEvent): void => { if (event.button !== 0 || this.destroyed) return; const point = this.panePoint(event); if (!point) return; const anchor = this.anchorAt(point); if (!anchor) return;
-    if (this.tool !== 'select') { event.preventDefault(); if (this.tool === 'horizontal') { const drawing = createDrawing(this.tool, [anchor], this.document.drawings.length); this.emit({ type: 'created', drawing }); this.tool = 'select'; this.redraw(); return; }
+    if (this.tool !== 'select') { event.preventDefault();
+      if (this.tool === 'horizontal') { const drawing = createDrawing(this.tool, [anchor], this.document.drawings.length); this.emit({ type: 'created', drawing }); this.tool = 'select'; this.redraw(); return; }
       if (this.tool === 'text') { this.emit({ type: 'text-placement-requested', anchor }); this.tool = 'select'; this.redraw(); return; }
+      if (this.tool === 'risk-reward') {
+        if (this.creationAnchors.length === 0) { this.creationAnchors = [anchor]; this.chart.applyOptions({ handleScroll: false }); this.redraw(); return; }
+        if (this.creationAnchors.length === 1) { this.creationAnchors.push(anchor); this.redraw(); return; }
+        const drawing = createDrawing(this.tool, [this.creationAnchors[0], this.creationAnchors[1], anchor], this.document.drawings.length);
+        this.creationAnchors = []; this.creationAnchor = null; this.preview = null; this.chart.applyOptions({ handleScroll: true });
+        this.emit({ type: 'created', drawing }); this.tool = 'select'; this.redraw(); return;
+      }
       if (!this.creationAnchor) { this.creationAnchor = anchor; this.chart.applyOptions({ handleScroll: false }); this.redraw(); return; }
       if (this.tool === 'ray' && !isRightwardRay([this.creationAnchor, anchor])) { this.preview = null; this.redraw(); return; }
       const drawing = createDrawing(this.tool, [this.creationAnchor, anchor], this.document.drawings.length); this.creationAnchor = null; this.preview = null; this.chart.applyOptions({ handleScroll: true }); this.emit({ type: 'created', drawing }); this.tool = 'select'; this.redraw(); return; }
     const hit = this.hit(point); if (!hit) { this.select([]); return; } event.preventDefault(); this.select([hit.drawing.id]);
     this.drag = { drawing: structuredClone(hit.drawing), pointerId: event.pointerId, part: hit.part, start: point }; this.container.setPointerCapture?.(event.pointerId); this.chart.applyOptions({ handleScroll: false }); this.emit({ type: 'change-started', drawingIds: [hit.drawing.id] }); this.publishSnapshot(); };
   private onPointerMove = (event: PointerEvent): void => { if (this.destroyed) return; const point = this.panePoint(event); if (!point) return;
-    if (this.creationAnchor && this.tool !== 'select' && this.tool !== 'horizontal' && this.tool !== 'text') { const anchor = this.anchorAt(point); if (!anchor) return;
+    if (this.tool === 'risk-reward' && this.creationAnchors.length > 0) { const anchor = this.anchorAt(point); if (!anchor) return;
+      if (this.creationAnchors.length === 1) {
+        const defaultTarget = { time: anchor.time, price: this.creationAnchors[0].price + Math.abs(this.creationAnchors[0].price - anchor.price) * 2 };
+        this.preview = createDrawing(this.tool, [this.creationAnchors[0], anchor, defaultTarget], this.document.drawings.length);
+      } else {
+        this.preview = createDrawing(this.tool, [this.creationAnchors[0], this.creationAnchors[1], anchor], this.document.drawings.length);
+      }
+      this.redraw(); return; }
+    if (this.creationAnchor && this.tool !== 'select' && this.tool !== 'horizontal' && this.tool !== 'text' && this.tool !== 'risk-reward') { const anchor = this.anchorAt(point); if (!anchor) return;
       if (this.tool === 'ray' && !isRightwardRay([this.creationAnchor, anchor])) { this.preview = null; this.redraw(); return; }
       this.preview = createDrawing(this.tool, [this.creationAnchor, anchor], this.document.drawings.length); this.redraw(); return; }
     if (!this.drag || event.pointerId !== this.drag.pointerId) return; const part = this.drag.part; const changed = this.updateDrag(point);
     if (!changed) { if (part === 'body') this.rejectDrag(); return; }
     this.document = { ...this.document, drawings: this.document.drawings.map(drawing => drawing.id === changed.id ? changed : drawing) }; this.redraw(); this.emit({ type: 'change-preview', drawings: [structuredClone(changed)] }); };
   private onPointerUp = (event: PointerEvent): void => { if (!this.drag || event.pointerId !== this.drag.pointerId) return; const before = this.drag.drawing; const after = this.document.drawings.find(drawing => drawing.id === before.id) ?? before; this.drag = null; this.releaseCapture(event.pointerId); this.chart.applyOptions({ handleScroll: true }); if (JSON.stringify(after.anchors) !== JSON.stringify(before.anchors)) this.emit({ type: 'change-committed', before: [before], after: [structuredClone(after)] }); this.publishSnapshot(); };
-  private onPointerCancel = (event: PointerEvent): void => { if (this.destroyed) return; if (this.drag && event.pointerId === this.drag.pointerId) { this.clearTransaction(true); this.redraw(); } else if (this.creationAnchor) { const previous = this.tool; this.clearTransaction(false); this.tool = 'select'; this.emit({ type: 'cancelled', tool: previous }); this.redraw(); } };
+  private onPointerCancel = (event: PointerEvent): void => { if (this.destroyed) return; if (this.drag && event.pointerId === this.drag.pointerId) { this.clearTransaction(true); this.redraw(); } else if (this.creationAnchor || this.creationAnchors.length > 0) { const previous = this.tool; this.clearTransaction(false); this.tool = 'select'; this.emit({ type: 'cancelled', tool: previous }); this.redraw(); } };
   private onLostPointerCapture = (event: PointerEvent): void => { if (this.destroyed || !this.drag || event.pointerId !== this.drag.pointerId) return; this.clearTransaction(true); this.redraw(); };
 }

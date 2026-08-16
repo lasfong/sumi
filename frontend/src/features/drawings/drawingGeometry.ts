@@ -55,8 +55,8 @@ export const hitProjectedDrawing = (projected: ProjectedDrawing, point: ScreenPo
   if (drawing.tool === 'rectangle') return pointInRectangle(point, anchors[0], anchors[1], 5) ? { part: 'body', distance: 0 } : null;
   if (drawing.tool === 'text') { const bounds = layoutDrawingText(drawing.geometry.text, anchors[0], drawing.style.fontSize ?? 14).bounds;
     return point.x >= bounds.left - 4 && point.x <= bounds.right + 4 && point.y >= bounds.top - 4 && point.y <= bounds.bottom + 4 ? { part: 'body', distance: 0 } : null; }
-  if (drawing.tool === 'fibonacci-retracement') {
-    const top = Math.min(anchors[0].y, anchors[1].y); const bottom = Math.max(anchors[0].y, anchors[1].y);
+  if (drawing.tool === 'fibonacci-retracement' || drawing.tool === 'risk-reward') {
+    const top = Math.min(...anchors.map(a => a.y)); const bottom = Math.max(...anchors.map(a => a.y));
     return point.x >= Math.min(...anchors.map(anchor => anchor.x)) - 5 && point.x <= width && point.y >= top - 5 && point.y <= bottom + 5 ? { part: 'body', distance: 0 } : null;
   }
   const end = drawing.tool === 'ray' ? rayEndpoint(anchors[0], anchors[1], width) : anchors[1];

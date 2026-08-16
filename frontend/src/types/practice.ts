@@ -4,12 +4,22 @@ export interface PracticeDecision {
   candle_index: number;
   decision_date: string;
   price?: number | null;
+  quantity?: number | null;
+  stop_loss?: number | null;
+  target_price?: number | null;
+  planned_quantity?: number | null;
+  planned_risk?: number | null;
+  planned_r?: number | null;
   setup_type?: string | null;
   confidence_score?: number | null;
   market_context?: string | null;
+  market_regime?: string | null;
+  emotion?: string | null;
   reason?: string | null;
   note?: string | null;
   mistake_tag?: string | null;
+  rule_violation?: string | null;
+  checklist_snapshot?: string | null;
 }
 
 export interface PracticeOrder {
@@ -46,6 +56,8 @@ export interface PracticePosition {
   realized_pnl: number;
   unrealized_pnl: number;
   available_quantity: number;
+  blocked_quantity?: number;
+  earliest_release_date?: string | null;
   opened_at: string;
 }
 
@@ -59,6 +71,22 @@ export interface PracticeTrade {
   exit_price?: number | null;
   net_pnl?: number | null;
   pnl_percent?: number | null;
+  initial_stop_loss?: number | null;
+  target_price?: number | null;
+  initial_risk?: number | null;
+  r_multiple?: number | null;
+  planned_entry_price?: number | null;
+  planned_quantity?: number | null;
+  planned_r?: number | null;
+  setup_type?: string | null;
+  market_regime?: string | null;
+  emotion?: string | null;
+  mistake_tag?: string | null;
+  rule_violation?: string | null;
+  entry_drift?: number | null;
+  size_variance?: number | null;
+  r_variance?: number | null;
+  notes?: string | null;
   status: string;
   result: string;
 }
@@ -75,6 +103,8 @@ export interface PracticeWorkflowSnapshot {
   initial_cash: number;
   current_cash: number;
   available_quantity: number;
+  blocked_quantity?: number;
+  earliest_release_date?: string | null;
   latest_activity_index: number;
   historical: boolean;
   can_trade: boolean;

@@ -17,6 +17,7 @@ const TOOLS: Array<{ id: DrawingTool; label: string; icon: string; hint: string 
   { id: 'ray', label: 'Ray', icon: '↗', hint: 'Click origin and direction' },
   { id: 'rectangle', label: 'Rectangle', icon: '□', hint: 'Click opposite corners' },
   { id: 'fibonacci-retracement', label: 'Fibonacci Retracement', icon: '≋', hint: 'Click two directional anchors' },
+  { id: 'risk-reward', label: 'Long/Short Risk-Reward', icon: '⚖', hint: 'Click entry, stop loss, and target' },
   { id: 'text', label: 'Text / Note', icon: 'T', hint: 'Click anchor, then enter text' },
 ];
 

@@ -1,6 +1,6 @@
 # PRO-08 — Trade Planning and Journal
 
-Status: `PREPARED — USER AUTHORIZED`
+Status: `CLOSED — INDEPENDENTLY APPROVED`
 
 ## Outcome
 
@@ -87,4 +87,15 @@ Get-FileHash -Algorithm SHA256 backend\sumi.db
 
 ## Progress log
 
-- 2026-08-16: User authorized PRO-08. Reviewer prepared ExecPlan and standalone DEV prompt. Batch is ready for DEV implementation.
+- 2026-08-16: User authorized PRO-08. Reviewer prepared ExecPlan and standalone DEV prompt.
+- 2026-08-16: Implementation completed across all layers:
+  1. Backend position sizing domain engine (`trade_planning.py`) with 100-share lot increments, cash constraint caps, Vietnam fee (0.15% buy/sell) & tax (0.10% sell) modeling, gross and net R calculations.
+  2. Database migration and model schema extensions for `decisions`, `trades`, and `journal_entries` (`checklist_snapshot`, `market_regime`, `emotion`, `rule_violation`, planned metrics).
+  3. Authoritative lifecycle T+2 settlement tracking with detailed blocked quantity, available quantity, and release date calculation without leaking future candle prices.
+  4. Local privacy export endpoints (`GET /sessions/{session_id}/journal/export?format=json|csv`).
+  5. Sumi-owned `risk-reward` drawing tool contract with 3 anchors (`entry`, `stop`, `target`), visual canvas rendering, inspector ratio display, and toolbar integration.
+  6. Replay and Journal UI enhancements: sizing calculator in `TradeControls.tsx`, T+2 availability breakdown in `PositionPanel.tsx`, Planned vs Executed review table and export in `JournalPage.tsx`.
+  7. Verification passed: 169 backend pytest tests, 181 frontend vitest tests, clean build/lint, and 328/328 Product UAT assertions including all 6 PRO-08 checks.
+  8. SHA256 of `backend/sumi.db` unchanged (`450B7EE02A2F8CEC18E1C3B01A6F76CE2355EF1980BECFCE2EF969D25BD9896A`).
+  9. Batch status transitioned to `IMPLEMENTED — REVIEW PENDING`. DEV task stopped at Independent Reviewer Gate.
+- 2026-08-16: Independent Reviewer audited implementation, contracts, and test evidence. Verdict: `APPROVE` recorded in `docs/reviews/PRO_08_REVIEW_2026-08-16.md`. PRO-08 is closed; PRO-09 remains unauthorized.

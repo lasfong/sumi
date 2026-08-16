@@ -16,11 +16,22 @@ from app.domain.enums import PositionStatus
 from app.schemas.practice_workflow_schema import PracticeWorkflowSnapshot
 from app.services.practice_workflow_service import PracticeWorkflowService
 
+from app.domain.trade_planning import TradePlanInput, TradePlanResult, calculate_position_size
+
 router = APIRouter()
 
 @router.get("/sessions/{session_id}/practice-state", response_model=PracticeWorkflowSnapshot)
 def get_practice_state(session_id: int, db: Session = Depends(get_db)):
     return PracticeWorkflowService.get_snapshot(db, session_id)
+
+@router.post("/sessions/{session_id}/plan-sizing", response_model=TradePlanResult)
+def calculate_trade_plan(session_id: int, plan_in: TradePlanInput, db: Session = Depends(get_db)):
+    session = ReplayService.get_session(db, session_id)
+    snapshot = PracticeWorkflowService.get_snapshot(db, session_id)
+    # Total equity = available cash + current value of open positions
+    open_position_value = sum(p.current_price * p.quantity for p in snapshot.positions)
+    equity = snapshot.current_cash + open_position_value
+    return calculate_position_size(equity=equity, available_cash=snapshot.current_cash, plan=plan_in)
 
 @router.post("/sessions/{session_id}/decisions", response_model=DecisionResponse)
 def submit_decision(session_id: int, decision_in: DecisionCreate, db: Session = Depends(get_db)):

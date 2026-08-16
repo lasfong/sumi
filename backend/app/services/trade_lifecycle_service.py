@@ -32,6 +32,17 @@ class TradeLifecycleService:
         current_candle = candles[-1] # The latest visible candle
 
         # 1. Create Decision
+        exec_price = decision_in.price if decision_in.price is not None else current_candle.close
+        planned_qty = decision_in.planned_quantity if decision_in.planned_quantity is not None else decision_in.quantity
+        planned_risk = None
+        planned_r = None
+        if decision_in.stop_loss and decision_in.stop_loss > 0 and exec_price > decision_in.stop_loss:
+            risk_unit = exec_price - decision_in.stop_loss
+            if planned_qty:
+                planned_risk = risk_unit * planned_qty
+            if decision_in.target_price and decision_in.target_price > exec_price:
+                planned_r = (decision_in.target_price - exec_price) / risk_unit
+
         decision = Decision(
             session_id=session_id,
             symbol=session.symbol,
@@ -44,7 +55,16 @@ class TradeLifecycleService:
             market_context=decision_in.market_context,
             reason=decision_in.reason,
             note=decision_in.note,
-            mistake_tag=decision_in.mistake_tag
+            mistake_tag=decision_in.mistake_tag,
+            stop_loss=decision_in.stop_loss,
+            target_price=decision_in.target_price,
+            planned_quantity=decision_in.planned_quantity,
+            planned_risk=planned_risk,
+            planned_r=planned_r,
+            market_regime=decision_in.market_regime,
+            emotion=decision_in.emotion,
+            rule_violation=decision_in.rule_violation,
+            checklist_snapshot=decision_in.checklist_snapshot,
         )
         db.add(decision)
         db.flush() # get decision.id
@@ -56,7 +76,6 @@ class TradeLifecycleService:
             return decision
 
         # Execute logic if it's a trading action
-        exec_price = decision_in.price if decision_in.price is not None else current_candle.close
         qty = decision_in.quantity if decision_in.quantity is not None else 100.0
 
         if exec_price <= 0:
@@ -129,8 +148,11 @@ class TradeLifecycleService:
 
             # Calculate initial risk if stop_loss provided
             initial_risk = None
-            if decision_in.stop_loss:
+            planned_r = None
+            if decision_in.stop_loss and decision_in.stop_loss > 0 and price > decision_in.stop_loss:
                 initial_risk = (price - decision_in.stop_loss) * qty
+                if decision_in.target_price and decision_in.target_price > price:
+                    planned_r = (decision_in.target_price - price) / (price - decision_in.stop_loss)
 
             trade = Trade(
                 session_id=session.id, symbol=symbol,
@@ -138,9 +160,16 @@ class TradeLifecycleService:
                 initial_stop_loss=decision_in.stop_loss,
                 target_price=decision_in.target_price,
                 initial_risk=initial_risk,
+                planned_entry_price=decision_in.price if decision_in.price is not None else price,
+                planned_quantity=decision_in.planned_quantity if decision_in.planned_quantity is not None else qty,
+                planned_r=planned_r,
                 status='open', result='open',
                 setup_type=decision_in.setup_type,
-                mistake_tag=decision_in.mistake_tag
+                market_regime=decision_in.market_regime,
+                emotion=decision_in.emotion,
+                mistake_tag=decision_in.mistake_tag,
+                rule_violation=decision_in.rule_violation,
+                notes=decision_in.note or decision_in.reason,
             )
             db.add(trade)
             db.flush()
@@ -193,10 +222,36 @@ class TradeLifecycleService:
                 Order.side == OrderSide.SELL.value
             ).scalar() or 0.0
 
-        available_qty = settled_bought - total_sold
+        available_qty = max(0.0, settled_bought - total_sold)
 
         if available_qty < qty:
-            raise HTTPException(status_code=400, detail=f"Cannot sell: T+2 constraint. Available: {available_qty}, Requested: {qty}")
+            blocked_qty = position.quantity - available_qty
+            # Find earliest release date from unsettled buy decisions
+            unsettled_decisions = db.query(Decision.candle_index, Decision.decision_date) \
+                .join(Order, Decision.id == Order.decision_id) \
+                .join(Execution, Order.id == Execution.order_id) \
+                .filter(
+                    Execution.session_id == session.id,
+                    Execution.symbol == symbol,
+                    Order.side == OrderSide.BUY.value,
+                    Decision.candle_index > session.current_index - 2
+                ).order_by(Decision.candle_index.asc()).all()
+
+            release_date_str = "T+2"
+            if unsettled_decisions:
+                earliest_candle_index = unsettled_decisions[0][0]
+                release_bar_index = earliest_candle_index + 2
+                from app.services.practice_workflow_service import PracticeWorkflowService
+                all_candles = PracticeWorkflowService._candles(db, session)
+                if all_candles and release_bar_index < len(all_candles):
+                    release_date_str = all_candles[release_bar_index].timestamp.date().isoformat()
+                else:
+                    release_date_str = f"bar #{release_bar_index + 1}"
+
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot sell: T+2 constraint. Available: {available_qty:g}, Blocked: {blocked_qty:g}, Earliest release date: {release_date_str}"
+            )
 
 
         amounts = calculate_sell_amounts(price, qty)

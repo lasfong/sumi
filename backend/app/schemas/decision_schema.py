@@ -1,6 +1,6 @@
 from pydantic import BaseModel, ConfigDict, model_validator
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Union
 from app.domain.enums import DecisionAction
 
 class DecisionBase(BaseModel):
@@ -16,6 +16,13 @@ class DecisionBase(BaseModel):
     reason: Optional[str] = None
     note: Optional[str] = None
     mistake_tag: Optional[str] = None
+    planned_quantity: Optional[float] = None
+    planned_risk: Optional[float] = None
+    planned_r: Optional[float] = None
+    market_regime: Optional[str] = None
+    emotion: Optional[str] = None
+    rule_violation: Optional[str] = None
+    checklist_snapshot: Optional[Union[dict, str]] = None
 
 class DecisionCreate(DecisionBase):
     @model_validator(mode='after')

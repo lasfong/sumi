@@ -3,7 +3,7 @@
 > Authority: `docs/ANTIGRAVITY_TWO_SESSION_OPERATING_MODEL.md` (with `docs/LOW_MODEL_AUTONOMOUS_EXECUTION_PROTOCOL.md`)
 > Current plan: PRO-08 — Trade Planning and Journal
 > Machine-transfer entrypoint: `docs/MACHINE_TRANSFER_HANDOFF_2026-08-10.md`
-> Latest review record: `docs/reviews/PRO_07_REVIEW_2026-08-16.md`
+> Latest review record: `docs/reviews/PRO_08_REVIEW_2026-08-16.md`
 > Prior approval record: `docs/reviews/PRO_07_REVIEW_2026-08-16.md`
 > Canonical roadmap: `docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md`
 
@@ -19,21 +19,72 @@ Last updated: 2026-08-16
 - PRO-05: independently approved and closed on 2026-08-15 in `docs/reviews/PRO_05_REVIEW_2026-08-15.md`. Committed in `a789342` and pushed to `origin/master`.
 - PRO-06: independently approved and closed on 2026-08-16 in `docs/reviews/PRO_06_REVIEW_2026-08-16.md`. Committed in `d94d324` and pushed to `origin/master`.
 - PRO-07: independently approved and closed on 2026-08-16 in `docs/reviews/PRO_07_REVIEW_2026-08-16.md`. Committed in `d0f69e5` and pushed to `origin/master`.
-- PRO-08: USER AUTHORIZED on 2026-08-16; PRO-09 through PRO-12 not started.
+- PRO-08: independently approved and closed on 2026-08-16 in `docs/reviews/PRO_08_REVIEW_2026-08-16.md`. PRO-09 through PRO-12 not started.
 
 ## Current control point
 
-Milestone: `PRO-08 PREPARED — TRADE PLANNING AND JOURNAL`
+Milestone: `PRO-08 CLOSED — INDEPENDENTLY APPROVED`
 
 ## Active batch
 
-PRO-08 — Trade Planning and Journal.
+PRO-08 — Trade Planning and Journal (CLOSED).
 
 ## State
 
-PREPARED
+CLOSED
 
-Status: PRO-08 authorized by user on 2026-08-16. ExecPlan: `docs/exec-plans/PRO_08_TRADE_PLANNING_AND_JOURNAL.md`. Active DEV prompt: `docs/dev-prompts/PRO_08_TRADE_PLANNING_AND_JOURNAL_DEV_PROMPT.md`.
+Status: PRO-08 independently approved on 2026-08-16. ExecPlan: `docs/exec-plans/PRO_08_TRADE_PLANNING_AND_JOURNAL.md`. Reviewer Record: `docs/reviews/PRO_08_REVIEW_2026-08-16.md`.
+
+## PRO-08 Implementation & Verification Summary (2026-08-16)
+
+- **Backend Trade Planning & Sizing Domain (`backend/app/domain/trade_planning.py`)**:
+  - Implemented standard 100-share lot increments, minimum lot constraints, Vietnam fees (0.15% buy/sell) & tax (0.10% sell) modeling, gross and net R calculations, and cash constraints.
+  - Added `calculate_position_size(equity, available_cash, plan)` and `TradePlanInput` / `TradePlanResult`.
+  - Added dedicated unit tests in `backend/app/tests/test_trade_planning.py` (7/7 passed).
+- **Database Schema Migration & Models (`alembic`, `models`, `schemas`)**:
+  - Created migration `backend/alembic/versions/20260816_0001_trade_planning_journal.py`.
+  - Added `checklist_snapshot`, `market_regime`, `emotion`, `rule_violation`, and planned metrics (`stop_loss`, `target_price`, `planned_quantity`, `planned_risk`, `planned_r`, `planned_entry_price`) across `decisions`, `trades`, and `journal_entries`.
+  - Enabled immutable checklist snapshot persistence (`JournalService.record_entry`) and JSON/CSV local exports (`JournalService.export_session_journal_json`, `JournalService.export_session_journal_csv`).
+  - Added `POST /api/replay/sessions/{session_id}/plan-sizing` and `GET /api/replay/sessions/{session_id}/journal/export`.
+- **Authoritative T+2 Lifecycle Settlement Tracking (`TradeLifecycleService`, `PracticeWorkflowService`)**:
+  - Implemented T+2 settlement tracking returning `available_quantity`, `blocked_quantity`, and `earliest_release_date` without future candle price leaks.
+  - T+2 sell rejection feedback provides clear details: `Cannot sell: T+2 constraint. Available: {available_qty:g}, Blocked: {blocked_qty:g}, Earliest release date: {release_date_str}`.
+  - Calculated variance metrics on closed and open trades: `entry_drift`, `size_variance`, `r_variance`.
+  - All 169 backend pytest tests passed.
+- **Frontend Long/Short Risk-Reward Tool Contract & Rendering**:
+  - Added `'risk-reward'` kind to `drawingDomain.ts`, 3-anchor `[entry, stop, target]` domain contract, hit testing in `drawingGeometry.ts`, and creation/rendering in `SumiPrimitiveDrawingProvider.ts`.
+  - Added toolbar button in `DrawingToolbar.tsx` and ratio/level display in `DrawingInspector.tsx`.
+  - Added unit tests in `drawingDomain.test.ts`.
+- **Frontend Replay & Journal Review UI**:
+  - Integrated position sizing calculator and Risk-Reward drawing sync into `TradeControls.tsx`.
+  - Added T+2 breakdown (Available, Blocked, Earliest Release Date) to `PositionPanel.tsx`.
+  - Enhanced `JournalPage.tsx` with Planned vs Executed Trade Review table, taxonomy tags, and JSON/CSV local export buttons.
+  - All 181 frontend vitest tests passed and production build is clean.
+- **Technical Gate Verification (`verify-v2.ps1`)**:
+  - Backend pytest: 169 passed (0 failed).
+  - Alembic migrations: clean (0 drift).
+  - ESLint: 0 errors (0 warnings).
+  - Frontend vitest: 181 passed across 27 test files.
+  - Frontend production build (`tsc -b && vite build`): clean (0 errors).
+- **Product UAT Verification (`run-product-uat.ps1`)**:
+  - Directory: `test-results/product-uat/2026-08-16T07-37-19-942Z/`
+  - `results.json` SHA-256: `D30FE8BFC4753CBC33A0CE053C7F9FF02B0D60288AE54F9D7F92B5B0E1FD4E70`
+  - Assertions Passed: **328 / 328** (0 failed, 0 blocking failed).
+  - Manifest Reconciliation: `pass: true` (8/8 tests passed in `scripts/product-uat-manifest.test.mjs`).
+  - PRO-08 Assertions Verified:
+    - `pro08.trade-plan-and-sizing`: PASS (`PRO-TRADE-01`, `PRO-TRADE-02`, `PRO-TRADE-04`)
+    - `pro08.risk-reward-drawing-contract`: PASS (`PRO-TRADE-03`)
+    - `pro08.lifecycle-t2-settlement`: PASS (`PRO-TRADE-05`)
+    - `pro08.checklist-snapshot-immutability`: PASS (`PRO-TRADE-06`)
+    - `pro08.journal-taxonomy-and-review`: PASS (`PRO-TRADE-07`, `PRO-TRADE-08`, `PRO-TRADE-09`)
+    - `pro08.journal-local-export`: PASS (`PRO-TRADE-10`)
+- **Retained Visual Screenshots**:
+  - `pro08-trade-planning-1440x1000.png` (1440×1000, SHA-256: `260308CEBF7789C57227B05A681AAD439DDC413F33C055598A835FFD8E6A33F1`)
+  - `pro08-trade-planning-1280x800.png` (1280×800, SHA-256: `F9D6FDAD61F0195C7FE60E2ED953FAC2A7C47E8320A9EC47B0C5482B8476B8A7`)
+- **Database Hash Invariant**:
+  - `backend/sumi.db` SHA-256 before/after: `450B7EE02A2F8CEC18E1C3B01A6F76CE2355EF1980BECFCE2EF969D25BD9896A` (0 bytes mutated).
+- **Whitespace / Format Check**:
+  - `git diff --check`: 0 errors.
 
 ## PRO-07 Implementation & Verification Summary (2026-08-16)
 
@@ -259,12 +310,14 @@ Status: PRO-08 authorized by user on 2026-08-16. ExecPlan: `docs/exec-plans/PRO_
 - Archived DEV prompt: `docs/dev-prompts/PRO_07_ICHIMOKU_CONTRACT_DEV_PROMPT.md`
 - Final reviewer record: `docs/reviews/PRO_07_REVIEW_2026-08-16.md`
 
-## Active PRO-08 authority package
+## Closed PRO-08 authority package
 
-- Stable dossier: `docs/program/PRO_08_TRADE_PLANNING_AND_JOURNAL.md`
-- Prepared ExecPlan: `docs/exec-plans/PRO_08_TRADE_PLANNING_AND_JOURNAL.md`
-- Active DEV prompt: `docs/dev-prompts/PRO_08_TRADE_PLANNING_AND_JOURNAL_DEV_PROMPT.md`
+- Operating protocol: `docs/LOW_MODEL_AUTONOMOUS_EXECUTION_PROTOCOL.md`
+- Program dossier: `docs/program/PRO_08_TRADE_PLANNING_AND_JOURNAL.md`
+- Completed ExecPlan: `docs/exec-plans/PRO_08_TRADE_PLANNING_AND_JOURNAL.md`
+- Archived DEV prompt: `docs/dev-prompts/PRO_08_TRADE_PLANNING_AND_JOURNAL_DEV_PROMPT.md`
+- Final reviewer record: `docs/reviews/PRO_08_REVIEW_2026-08-16.md`
 
 ## Next action
 
-Execute `docs/dev-prompts/ANTIGRAVITY_DEV_SESSION_INIT_PROMPT.md` in a new DEV session. Implement PRO-08 (Trade Planning and Journal) and stop at the Independent Reviewer Gate. PRO-09 remains unauthorized.
+PRO-08 is CLOSED and independently approved. PRO-09 (Strategy Research UX) remains UNAUTHORIZED until explicit user authorization. No further session actions are authorized without user prompt.

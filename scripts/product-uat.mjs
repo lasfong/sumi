@@ -3205,6 +3205,193 @@ try {
   await page.waitForTimeout(500);
   await page.screenshot({ path: path.join(runDir, 'pro03-import-preview-1280x800.png') });
 
+  // ==========================================
+  // PRO-08: Trade Planning, Sizing & Journal
+  // ==========================================
+
+  // 1. PRO-TRADE-01, 02, 04: Trade plan & position sizing engine
+  const planSizingRes = await (await page.request.post(`${backendUrl}/api/replay/sessions/${sessionId}/plan-sizing`, {
+    data: {
+      entry_price: 100.0,
+      stop_loss: 95.0,
+      target_price: 115.0,
+      risk_percent: 2.0,
+      lot_size: 100,
+    },
+  })).json();
+
+  const tradePlanPass = planSizingRes.risk_per_share === 5.0
+    && planSizingRes.expected_r_multiple === 3.0
+    && planSizingRes.planned_quantity % 100 === 0
+    && planSizingRes.planned_quantity > 0
+    && planSizingRes.planned_risk_amount === planSizingRes.planned_quantity * 5.0
+    && Number.isFinite(planSizingRes.estimated_net_r);
+
+  check('pro08.trade-plan-and-sizing',
+    tradePlanPass,
+    JSON.stringify(planSizingRes)
+  );
+
+  // 2. PRO-TRADE-03: Risk-Reward drawing contract
+  await page.goto(`${frontendUrl}/replay?session=${sessionId}`);
+  await page.waitForTimeout(600);
+
+  const beforeDrawings = await readDomain();
+  const drawingRev = beforeDrawings.revision;
+  await page.getByTestId('drawing-tool-risk-reward').click();
+  await page.mouse.click(visiblePoint(.40, .50).x, visiblePoint(.40, .50).y);
+  await page.mouse.click(visiblePoint(.40, .60).x, visiblePoint(.40, .60).y);
+  await page.mouse.click(visiblePoint(.40, .30).x, visiblePoint(.40, .30).y);
+  await waitForRevision(drawingRev + 1);
+
+  const updatedDrawings = await readDomain();
+  const foundRrDrawing = updatedDrawings.drawings?.find(d => d.tool === 'risk-reward');
+  const rrContractPass = foundRrDrawing != null
+    && foundRrDrawing.tool === 'risk-reward'
+    && foundRrDrawing.anchors.length === 3
+    && Number.isFinite(foundRrDrawing.anchors[0].price)
+    && Number.isFinite(foundRrDrawing.anchors[1].price)
+    && Number.isFinite(foundRrDrawing.anchors[2].price);
+
+  check('pro08.risk-reward-drawing-contract',
+    rrContractPass,
+    JSON.stringify(foundRrDrawing)
+  );
+
+  // 3. PRO-TRADE-05: T+2 settlement tracking & rejection feedback
+  let preBuyPractice = await readPractice();
+  while (!preBuyPractice.can_trade && preBuyPractice.current_index < preBuyPractice.total_bars - 10) {
+    await page.request.post(`${backendUrl}/api/replay/sessions/${sessionId}/next?steps=5`);
+    preBuyPractice = await readPractice();
+  }
+
+  const buyRes = await (await page.request.post(`${backendUrl}/api/replay/sessions/${sessionId}/decisions`, {
+    data: {
+      action: 'BUY',
+      order_type: 'MARKET_AT_CLOSE',
+      quantity: 100,
+      planned_entry_price: preBuyPractice.current_price,
+      planned_quantity: 100,
+      stop_loss: preBuyPractice.current_price * 0.95,
+      target_price: preBuyPractice.current_price * 1.15,
+      planned_risk: 100 * (preBuyPractice.current_price * 0.05),
+      planned_r: 3.0,
+      setup_type: 'Breakout',
+      market_regime: 'Bull Trend',
+      emotion: 'Disciplined',
+      note: 'PRO-08 planned buy',
+    },
+  })).json();
+
+  const buySnapshot = await (await page.request.get(`${backendUrl}/api/replay/sessions/${sessionId}/practice-state`)).json();
+  const blockedPos = buySnapshot.positions?.find(p => p.quantity > 0);
+  const buyRecordedPass = Boolean(buyRes?.id)
+    && Boolean(buySnapshot.decisions?.some(d => d.setup_type === 'Breakout'))
+    && Boolean(buySnapshot.blocked_quantity > 0 || (blockedPos && blockedPos.blocked_quantity > 0))
+    && Boolean(buySnapshot.earliest_release_date || (blockedPos && blockedPos.earliest_release_date));
+
+  // Attempt immediate sell -> expect 400 with T+2 constraint
+  expectedPracticeConsoleErrors.push('Cannot sell: T+2 constraint');
+  const rejectedSellRes = await page.request.post(`${backendUrl}/api/replay/sessions/${sessionId}/decisions`, {
+    data: {
+      action: 'SELL',
+      order_type: 'MARKET_AT_CLOSE',
+      quantity: 100,
+    },
+  });
+  const rejectedSellData = await rejectedSellRes.json();
+  const t2RejectPass = rejectedSellRes.status() === 400
+    && String(rejectedSellData.detail || '').includes('T+2 constraint')
+    && String(rejectedSellData.detail || '').includes('Blocked:');
+
+  check('pro08.lifecycle-t2-settlement',
+    Boolean(buyRecordedPass && t2RejectPass),
+    JSON.stringify({ buyRecorded: buyRecordedPass, buyRes, t2RejectPass, t2Detail: rejectedSellData.detail, blockedPos })
+  );
+
+  // 4. PRO-TRADE-06: Immutable checklist snapshots
+  const checklistRes = await (await page.request.post(`${backendUrl}/api/replay/sessions/${sessionId}/journal`, {
+    data: {
+      content: 'Checklist verified before trade execution',
+      note_type: 'checklist',
+      setup_type: 'Breakout',
+      market_regime: 'Bull Trend',
+      emotion: 'Disciplined',
+      checklist_snapshot: {
+        trend_identified: true,
+        support_resistance_clear: true,
+        risk_defined: true,
+      },
+    },
+  })).json();
+
+  const sessionJournal = await readJournal();
+  const recordedChecklist = sessionJournal.find(j => j.id === checklistRes.id);
+  const checklistSnapshotPass = recordedChecklist != null
+    && recordedChecklist.setup_type === 'Breakout'
+    && recordedChecklist.market_regime === 'Bull Trend'
+    && recordedChecklist.checklist_snapshot != null
+    && recordedChecklist.checklist_snapshot.trend_identified === true;
+
+  check('pro08.checklist-snapshot-immutability',
+    checklistSnapshotPass,
+    JSON.stringify(recordedChecklist)
+  );
+
+  // Advance replay by 3 bars to settle T+2 shares, then close position
+  await page.request.post(`${backendUrl}/api/replay/sessions/${sessionId}/next?steps=3`);
+  const settledSnapshot = await (await page.request.get(`${backendUrl}/api/replay/sessions/${sessionId}/practice-state`)).json();
+  if (settledSnapshot.positions.some(p => p.available_quantity > 0)) {
+    await page.request.post(`${backendUrl}/api/replay/sessions/${sessionId}/decisions`, {
+      data: {
+        action: 'CLOSE',
+        order_type: 'MARKET_AT_CLOSE',
+        reason: 'PRO-08 take profit target reached',
+        mistake_tag: 'None',
+      },
+    });
+  }
+
+  // 5. PRO-TRADE-07, 08, 09: Journal taxonomy, planned vs executed review table
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto(`${frontendUrl}/journal?session=${sessionId}`);
+  await page.waitForTimeout(800);
+
+  const reviewTableVisible = await page.getByTestId('planned-vs-executed-table').isVisible();
+  const reviewTableText = await page.getByTestId('planned-vs-executed-table').innerText();
+  const journalReviewPass = reviewTableVisible && reviewTableText.includes('Breakout');
+
+  check('pro08.journal-taxonomy-and-review',
+    journalReviewPass,
+    JSON.stringify({ reviewTableVisible, reviewTableText: reviewTableText.slice(0, 200) })
+  );
+
+  await page.screenshot({ path: path.join(runDir, 'pro08-trade-planning-1440x1000.png'), fullPage: true });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: path.join(runDir, 'pro08-trade-planning-1280x800.png'), fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+
+  // 6. PRO-TRADE-10: Local privacy JSON & CSV export
+  const exportJsonRes = await (await page.request.get(`${backendUrl}/api/replay/sessions/${sessionId}/journal/export?format=json`)).json();
+  const exportCsvRes = await (await page.request.get(`${backendUrl}/api/replay/sessions/${sessionId}/journal/export?format=csv`)).text();
+
+  const exportPass = exportJsonRes.session != null
+    && Array.isArray(exportJsonRes.trades)
+    && Array.isArray(exportJsonRes.journal_entries)
+    && exportCsvRes.includes('# TRADES')
+    && exportCsvRes.includes('Trade ID')
+    && await page.getByTestId('export-journal-json').isVisible()
+    && await page.getByTestId('export-journal-csv').isVisible();
+
+  check('pro08.journal-local-export',
+    exportPass,
+    JSON.stringify({
+      hasSession: exportJsonRes.session != null,
+      tradeCount: exportJsonRes.trades?.length,
+      csvHeaderValid: exportCsvRes.includes('# TRADES'),
+    })
+  );
 
   // Rework Evidence Seal
   const sealPass = productUatManifest.assertions.length >= 280 && assertionManifest.has('pro02.rework-evidence-seal');

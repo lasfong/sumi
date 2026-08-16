@@ -22,3 +22,15 @@ export const getJournalEntries = async (
   );
   return response.data;
 };
+
+/** Export journal data in json or csv */
+export const exportJournal = async (
+  sessionId: number,
+  format: 'json' | 'csv' = 'json'
+): Promise<unknown> => {
+  const response = await apiClient.get(`/replay/sessions/${sessionId}/journal/export`, {
+    params: { format },
+    responseType: format === 'csv' ? 'text' : 'json',
+  });
+  return response.data;
+};

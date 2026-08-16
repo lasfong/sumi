@@ -1,5 +1,5 @@
 export type DrawingTool = 'select' | DrawingKind;
-export type DrawingKind = 'horizontal' | 'trendline' | 'ray' | 'rectangle' | 'fibonacci-retracement' | 'text';
+export type DrawingKind = 'horizontal' | 'trendline' | 'ray' | 'rectangle' | 'fibonacci-retracement' | 'text' | 'risk-reward';
 export type LineStyle = 'solid' | 'dashed' | 'dotted';
 export type FibonacciDirection = 'start-to-end' | 'end-to-start';
 
@@ -21,7 +21,10 @@ export type SumiFibonacciDrawing = SumiDrawingBase<'fibonacci-retracement', [Sum
   kind: 'fibonacci-retracement'; levels: FibonacciLevel[]; direction: FibonacciDirection;
 }>;
 export type SumiTextDrawing = SumiDrawingBase<'text', [SumiDrawingAnchor], { kind: 'text'; text: string }>;
-export type SumiDrawing = SumiHorizontalDrawing | SumiTrendlineDrawing | SumiRayDrawing | SumiRectangleDrawing | SumiFibonacciDrawing | SumiTextDrawing;
+export type SumiRiskRewardDrawing = SumiDrawingBase<'risk-reward', [SumiDrawingAnchor, SumiDrawingAnchor, SumiDrawingAnchor], {
+  kind: 'risk-reward'; direction: 'long' | 'short'; riskRewardRatio: number;
+}>;
+export type SumiDrawing = SumiHorizontalDrawing | SumiTrendlineDrawing | SumiRayDrawing | SumiRectangleDrawing | SumiFibonacciDrawing | SumiTextDrawing | SumiRiskRewardDrawing;
 export interface SumiDrawingDocumentV1 {
   schemaVersion: 1; revision: number; sessionId: number; symbol: string; drawings: SumiDrawing[];
 }
@@ -63,6 +66,10 @@ const validFibGeometry = (geometry: Record<string, unknown>) => {
     && level.ratio === FIBONACCI_RATIOS[index] && typeof level.visible === 'boolean'
     && (level.color === undefined || (typeof level.color === 'string' && level.color.length > 0)));
 };
+const isRiskRewardGeometry = (geometry: Record<string, unknown>) =>
+  exactKeys(geometry, ['kind', 'direction', 'riskRewardRatio']) && geometry.kind === 'risk-reward'
+  && ['long', 'short'].includes(String(geometry.direction))
+  && typeof geometry.riskRewardRatio === 'number' && Number.isFinite(geometry.riskRewardRatio) && geometry.riskRewardRatio >= 0;
 
 export const emptyDrawingDocument = (sessionId: number, symbol: string): SumiDrawingDocumentV1 => ({
   schemaVersion: 1, revision: 0, sessionId, symbol, drawings: [],
@@ -85,6 +92,7 @@ export const validateDrawingDocument = (value: unknown): value is SumiDrawingDoc
     if (item.tool === 'ray') return item.anchors.length === 2 && exactKeys(item.geometry, ['kind']) && item.geometry.kind === 'ray' && isRightwardRay(item.anchors);
     if (item.tool === 'rectangle') return item.anchors.length === 2 && exactKeys(item.geometry, ['kind']) && item.geometry.kind === 'rectangle';
     if (item.tool === 'fibonacci-retracement') return item.anchors.length === 2 && validFibGeometry(item.geometry);
+    if (item.tool === 'risk-reward') return item.anchors.length === 3 && isRiskRewardGeometry(item.geometry);
     if (item.tool === 'text') return item.anchors.length === 1 && exactKeys(item.geometry, ['kind', 'text']) && item.geometry.kind === 'text'
       && typeof item.geometry.text === 'string' && item.geometry.text.length <= TEXT_MAX_LENGTH
       && item.geometry.text.trim().length > 0;
@@ -113,6 +121,26 @@ export const createDrawing = (tool: Exclude<DrawingTool, 'select'>, anchors: Sum
   if (tool === 'fibonacci-retracement' && anchors.length === 2) return { ...base(tool, anchors, order), anchors: [anchors[0], anchors[1]], geometry: {
     kind: tool, levels: FIBONACCI_RATIOS.map(ratio => ({ ratio, visible: true })), direction: 'start-to-end',
   } };
+  if (tool === 'risk-reward' && anchors.length === 3) {
+    const risk = Math.abs(anchors[0].price - anchors[1].price);
+    const reward = Math.abs(anchors[2].price - anchors[0].price);
+    const riskRewardRatio = risk > 0 ? reward / risk : 0;
+    const direction = anchors[2].price >= anchors[0].price ? 'long' : 'short';
+    return {
+      ...base(tool, anchors, order),
+      anchors: [anchors[0], anchors[1], anchors[2]],
+      style: {
+        ...structuredClone(DEFAULT_DRAWING_STYLE),
+        lineColor: '#2962FF',
+        fillColor: '#26A69A',
+      },
+      geometry: {
+        kind: tool,
+        direction,
+        riskRewardRatio: Number(riskRewardRatio.toFixed(4)),
+      },
+    };
+  }
   if (tool === 'text' && anchors.length === 1) return { ...base(tool, anchors, order), anchors: [anchors[0]], style: {
     ...structuredClone(DEFAULT_DRAWING_STYLE), textColor: '#F0F6FC', fontSize: 14,
   }, geometry: { kind: tool, text: text.trim() } };
