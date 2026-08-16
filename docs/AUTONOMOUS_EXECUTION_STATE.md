@@ -3,7 +3,7 @@
 > Authority: `docs/ANTIGRAVITY_TWO_SESSION_OPERATING_MODEL.md` (with `docs/LOW_MODEL_AUTONOMOUS_EXECUTION_PROTOCOL.md`)
 > Current plan: PRO-10 — Market Data Provider Decision
 > Machine-transfer entrypoint: `docs/MACHINE_TRANSFER_HANDOFF_2026-08-10.md`
-> Latest review record: `docs/reviews/PRO_09_REVIEW_2026-08-16.md`
+> Latest review record: `docs/reviews/PRO_10_REVIEW_2026-08-16.md`
 > Prior approval record: `docs/reviews/PRO_09_REVIEW_2026-08-16.md`
 > Canonical roadmap: `docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md`
 
@@ -21,21 +21,50 @@ Last updated: 2026-08-16
 - PRO-07: independently approved and closed on 2026-08-16 in `docs/reviews/PRO_07_REVIEW_2026-08-16.md`. Committed in `d0f69e5` and pushed to `origin/master`.
 - PRO-08: independently approved and closed on 2026-08-16 in `docs/reviews/PRO_08_REVIEW_2026-08-16.md`. Committed in `92c2d0a` and pushed to `origin/master`.
 - PRO-09: independently approved and closed on 2026-08-16 in `docs/reviews/PRO_09_REVIEW_2026-08-16.md`. Committed in `12645d2` and pushed to `origin/master`.
-- PRO-10: USER AUTHORIZED on 2026-08-16; PRO-11 through PRO-12 not started.
+- PRO-10: independently approved and closed on 2026-08-16 in `docs/reviews/PRO_10_REVIEW_2026-08-16.md`. PRO-11 through PRO-12 not started.
 
 ## Current control point
 
-Milestone: `PRO-10 PREPARED — MARKET DATA PROVIDER DECISION`
+Milestone: `PRO-10 CLOSED — INDEPENDENTLY APPROVED`
 
 ## Active batch
 
-PRO-10 — Market Data Provider Decision.
+PRO-10 — Market Data Provider Decision (CLOSED).
 
 ## State
 
-PREPARED
+CLOSED
 
-Status: PRO-10 authorized by user on 2026-08-16. ExecPlan: `docs/exec-plans/PRO_10_DATA_PROVIDER_EVALUATION.md`. Active DEV prompt: `docs/dev-prompts/PRO_10_DATA_PROVIDER_EVALUATION_DEV_PROMPT.md`.
+Status: PRO-10 independently approved on 2026-08-16. Architectural Decision Record: `docs/ARCHITECTURE_DECISION_002_MARKET_DATA_PROVIDER.md`. ExecPlan: `docs/exec-plans/PRO_10_DATA_PROVIDER_EVALUATION.md`. Reviewer Record: `docs/reviews/PRO_10_REVIEW_2026-08-16.md`.
+
+## PRO-10 Implementation & Verification Summary (2026-08-16)
+
+- **Market Data Provider Evaluation Spike (`docs/ARCHITECTURE_DECISION_002_MARKET_DATA_PROVIDER.md`)**:
+  - Evaluated 6 market data integration options: SSI FastConnect / Open API, DNSE Open API / Entrade, TCBS Web Endpoints, `vnstock` community library, Commercial enterprise feeds (Vietstock, FiinPro, FireAnt), and CafeF EOD file archives (PRO-03 baseline).
+  - Documented licensing, commercial redistribution restrictions, personal desktop usage rights, and attribution requirements across all candidates (`PRO-PROV-01`).
+  - Formulated strict credential security and secret lifecycle protocol: local env variable / secure config storage, zero hardcoded secrets, frontend key masking, ephemeral in-memory JWT token cache (`PRO-PROV-02`).
+  - Evaluated Daily and Weekly historical lookback depth (5–15+ years for HOSE/HNX/UPCOM, VNINDEX, VN30), request rate limits, and latency benchmarks (`PRO-PROV-03`).
+  - Formulated price adjustment isolation policy (`unadjusted` vs `adjusted` series), `Asia/Ho_Chi_Minh` UTC+7 timezone semantics, and internal `WeeklyAggregator` derivation contract (`PRO-PROV-04`).
+  - Designed fail-closed retry with exponential backoff, rate limit handling, user-triggered on-demand sync invariant, and 100% offline local SQLite parity (`PRO-PROV-05`).
+  - Delivered definitive architectural verdict: `APPROVE WITH PROVIDER BOUNDARY ADAPTER` unlocking PRO-11 (`PRO-PROV-06`).
+  - Designed authoritative `MarketDataProviderAdapter` abstract interface and detailed PRO-11 implementation roadmap (`PRO-PROV-06`).
+- **Technical Gate Verification (`verify-v2.ps1`)**:
+  - Backend pytest: 176 passed (0 failed).
+  - Alembic migrations: clean (0 drift).
+  - ESLint: 0 errors (0 warnings).
+  - Frontend vitest: 182 passed across 27 files.
+  - Frontend production build (`tsc -b && vite build`): clean (0 errors, 683ms).
+- **Product UAT Verification (`run-product-uat.ps1`)**:
+  - Directory: `test-results/product-uat/2026-08-16T14-51-49-955Z/`
+  - `results.json` SHA-256: `20AEFF4435C1A1D615F06E3E2AF059827972F88E8C0F31C33D9216AE22212DD1`
+  - Assertions Passed: **333 / 333** (0 failed, 0 blocking failed).
+  - Manifest Reconciliation: `pass: true`.
+  - Runtime Errors: 0.
+  - Provider Errors: 0.
+- **Database Hash Invariant**:
+  - `backend/sumi.db` SHA-256 before/after: `450B7EE02A2F8CEC18E1C3B01A6F76CE2355EF1980BECFCE2EF969D25BD9896A` (0 bytes mutated).
+- **Whitespace / Format Check**:
+  - `git diff --check`: 0 errors.
 
 ## PRO-09 Implementation & Verification Summary (2026-08-16)
 
@@ -350,12 +379,15 @@ Status: PRO-10 authorized by user on 2026-08-16. ExecPlan: `docs/exec-plans/PRO_
 - Archived DEV prompt: `docs/dev-prompts/PRO_09_STRATEGY_RESEARCH_UX_DEV_PROMPT.md`
 - Final reviewer record: `docs/reviews/PRO_09_REVIEW_2026-08-16.md`
 
-## Active PRO-10 authority package
+## Closed PRO-10 authority package
 
-- Stable dossier: `docs/program/PRO_10_MARKET_DATA_PROVIDER_DECISION.md`
-- Prepared ExecPlan: `docs/exec-plans/PRO_10_DATA_PROVIDER_EVALUATION.md`
-- Active DEV prompt: `docs/dev-prompts/PRO_10_DATA_PROVIDER_EVALUATION_DEV_PROMPT.md`
+- Operating protocol: `docs/LOW_MODEL_AUTONOMOUS_EXECUTION_PROTOCOL.md`
+- Program dossier: `docs/program/PRO_10_MARKET_DATA_PROVIDER_DECISION.md`
+- Completed ExecPlan: `docs/exec-plans/PRO_10_DATA_PROVIDER_EVALUATION.md`
+- Archived DEV prompt: `docs/dev-prompts/PRO_10_DATA_PROVIDER_EVALUATION_DEV_PROMPT.md`
+- Architectural Decision Record: `docs/ARCHITECTURE_DECISION_002_MARKET_DATA_PROVIDER.md`
+- Final reviewer record: `docs/reviews/PRO_10_REVIEW_2026-08-16.md`
 
 ## Next action
 
-Execute `docs/dev-prompts/ANTIGRAVITY_DEV_SESSION_INIT_PROMPT.md` in a new DEV session. Implement PRO-10 (Market Data Provider Decision) and stop at the Independent Reviewer Gate. PRO-11 remains unauthorized.
+PRO-10 is CLOSED and independently approved. PRO-11 (One-Click Local Data Synchronization) remains UNAUTHORIZED until explicit user authorization. No further session actions are authorized without user prompt.

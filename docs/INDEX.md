@@ -35,7 +35,7 @@ The workspace, not chat history, is the handoff channel. Only the batch named **
 
 PRO-00–PRO-02 and historical V3 Batch 0–5 records are completed evidence, not current instructions. `docs/PROFESSIONALIZATION_HANDOFF_2026-08-01.md` is explicitly superseded and retained only for provenance.
 
-Current boundary: PRO-08 is independently approved and closed by `docs/reviews/PRO_08_REVIEW_2026-08-16.md`. PRO-09 is independently approved and closed by `docs/reviews/PRO_09_REVIEW_2026-08-16.md`; PRO-10 remains unauthorized. Start a new DEV session with `docs/dev-prompts/ANTIGRAVITY_DEV_SESSION_INIT_PROMPT.md` and a REVIEW session with `docs/reviewer-prompts/ANTIGRAVITY_REVIEW_SESSION_INIT_PROMPT.md`. `docs/AUTONOMOUS_EXECUTION_STATE.md` is the volatile execution authority; `docs/MACHINE_TRANSFER_HANDOFF_2026-08-10.md` remains the transfer entrypoint.
+Current boundary: PRO-09 is independently approved and closed by `docs/reviews/PRO_09_REVIEW_2026-08-16.md`. PRO-10 is independently approved and closed by `docs/reviews/PRO_10_REVIEW_2026-08-16.md`; PRO-11 remains unauthorized. Start a new DEV session with `docs/dev-prompts/ANTIGRAVITY_DEV_SESSION_INIT_PROMPT.md` and a REVIEW session with `docs/reviewer-prompts/ANTIGRAVITY_REVIEW_SESSION_INIT_PROMPT.md`. `docs/AUTONOMOUS_EXECUTION_STATE.md` is the volatile execution authority; `docs/MACHINE_TRANSFER_HANDOFF_2026-08-10.md` remains the transfer entrypoint.
 
 ## Research and historical material
 
