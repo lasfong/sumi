@@ -264,6 +264,7 @@ class ReplayService:
             return
 
         db.commit()
+        TradeLifecycleService.auto_liquidate_positions(db, session, current_candle)
         ReplayService._match_pending_orders(db, session)
 
     @staticmethod
@@ -284,15 +285,24 @@ class ReplayService:
         ).all()
 
         for order in pending_orders:
-            if current_candle.low <= order.requested_price <= current_candle.high:
-                exec_price = order.requested_price
-                if order.side == "BUY":
+            executed = False
+            exec_price = order.requested_price
+
+            if getattr(order, "order_type", "") == "MARKET_NEXT_OPEN":
+                executed = True
+                exec_price = current_candle.open
+            elif order.side == "BUY":
+                if current_candle.low <= order.requested_price:
+                    executed = True
                     if current_candle.open <= order.requested_price:
                         exec_price = current_candle.open
-                else:
+            else:
+                if current_candle.high >= order.requested_price:
+                    executed = True
                     if current_candle.open >= order.requested_price:
                         exec_price = current_candle.open
 
+            if executed:
                 TradeLifecycleService.execute_pending_order(db, session, order, exec_price, current_candle)
                 db.commit()
 

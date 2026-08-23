@@ -423,7 +423,7 @@ export const useReplayWorkspaceController = () => {
         const series = IndicatorRenderRegistry.mapVolume(volumeData, instance);
         try {
           if (!chartRef.current) throw new Error('Chart workspace is not mounted');
-          chartRef.current.addIndicator({ instanceId: instance.id, paneId: instance.paneId, series, paneOrder });
+          chartRef.current.updateIndicatorData({ instanceId: instance.id, paneId: instance.paneId, series, paneOrder });
           queueMicrotask(() => effectActive && setIndicatorRuntime(previous => ({ ...previous, [instance.id]: {
             status: series[0].data.length ? 'ready' : 'warming', values: IndicatorRenderRegistry.currentValues(series),
             inputMaxDate: currentDate, responseMaxDate: String(series[0].data.at(-1)?.time ?? '').slice(0, 10) || null,
@@ -468,7 +468,7 @@ export const useReplayWorkspaceController = () => {
         }
         try {
           if (!chartRef.current) throw new Error('Chart workspace is not mounted');
-          chartRef.current.addIndicator({ instanceId: instance.id, paneId: instance.paneId, series, paneOrder });
+          chartRef.current.updateIndicatorData({ instanceId: instance.id, paneId: instance.paneId, series, paneOrder });
           chartRef.current.setIndicatorOrder(paneOrder);
         } catch (error) {
           publishFailure(instance.id, 'chart', `Chart rendering failed — the previous valid display was retained.${technicalDetail(error)}`);
@@ -482,6 +482,20 @@ export const useReplayWorkspaceController = () => {
     }
     return () => { effectActive = false; indicatorRequests.cancelAll(); };
   }, [candlesData?.length, currentCandle, currentDate, indicatorDocument, indicatorRequests, sessionId, volumeData]);
+
+  useEffect(() => {
+    if (!practiceData) return;
+    const openPosition = practiceData.positions.find(p => p.quantity > 0);
+    if (openPosition) {
+      const activeTrade = practiceData.trades.find(t => t.status === 'open') ?? null;
+      chartRef.current?.setPositionLines(
+        { average_price: openPosition.average_price },
+        activeTrade ? { initial_stop_loss: activeTrade.initial_stop_loss, target_price: activeTrade.target_price } : null
+      );
+    } else {
+      chartRef.current?.clearPositionLines();
+    }
+  }, [practiceData]);
 
   useEffect(() => () => indicatorRequests.cancelAll(), [indicatorRequests]);
   return {

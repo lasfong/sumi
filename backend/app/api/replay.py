@@ -146,6 +146,7 @@ def get_session_indicators(
     
     # Prepare response
     response_data = []
+    result_df.index.name = "timestamp"
     result_df.reset_index(inplace=True)
     for _, row in result_df.iterrows():
         record = {"timestamp": row["timestamp"].isoformat()}

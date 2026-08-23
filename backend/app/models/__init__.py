@@ -12,6 +12,7 @@ from app.models.drawing import DrawingState
 from app.models.strategy_lab_run import StrategyLabRun
 from app.models.scanner_run import ScannerRun
 from app.models.import_run import ImportRun, ImportRunItem, ImportRunMutation, WeeklyCandleProvenance
+from app.models.sync_run import SyncRun, SyncRunItem, SyncRunMutation
 
 __all__ = [
     "Symbol",
@@ -31,4 +32,7 @@ __all__ = [
     "ImportRunItem",
     "ImportRunMutation",
     "WeeklyCandleProvenance",
+    "SyncRun",
+    "SyncRunItem",
+    "SyncRunMutation",
 ]

@@ -292,7 +292,7 @@ class IndicatorEngine:
                 ta_params["lower_std"] = std
                 ta_params["upper_std"] = std
             result = getattr(df_copy.ta, definition.method)(**ta_params)
-            IndicatorEngine._append_indicator_result(df_copy, result)
+            df_copy = IndicatorEngine._append_indicator_result(df_copy, result)
             return df_copy
         except AttributeError:
             raise ValueError(f"Indicator '{definition.id}' is not supported by pandas-ta.")
@@ -337,26 +337,31 @@ class IndicatorEngine:
         return coerced
 
     @staticmethod
-    def _append_indicator_result(df_copy: pd.DataFrame, result: Any) -> None:
+    def _append_indicator_result(df_copy: pd.DataFrame, result: Any) -> pd.DataFrame:
         if isinstance(result, tuple):
             for item in result:
-                IndicatorEngine._append_indicator_result(df_copy, item)
-            return
+                df_copy = IndicatorEngine._append_indicator_result(df_copy, item)
+            return df_copy
 
-        if isinstance(result, pd.DataFrame):
-            for col in result.columns:
-                series = result[col]
-                if col in df_copy.columns:
-                    df_copy[col] = df_copy[col].combine_first(series)
-                else:
-                    df_copy[col] = series
-            return
+        if isinstance(result, (pd.DataFrame, pd.Series)):
+            # Combine axes so df_copy index is extended if result has future dates
+            new_index = df_copy.index.union(result.index)
+            df_copy = df_copy.reindex(new_index)
 
-        if isinstance(result, pd.Series):
-            if result.name in df_copy.columns:
-                df_copy[result.name] = df_copy[result.name].combine_first(result)
+            if isinstance(result, pd.DataFrame):
+                for col in result.columns:
+                    series = result[col]
+                    if col in df_copy.columns:
+                        df_copy[col] = df_copy[col].combine_first(series)
+                    else:
+                        df_copy[col] = series
             else:
-                df_copy[result.name] = result
+                if result.name in df_copy.columns:
+                    df_copy[result.name] = df_copy[result.name].combine_first(result)
+                else:
+                    df_copy[result.name] = result
+
+        return df_copy
 
     @staticmethod
     def _compute_cci(df_copy: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:

@@ -6,7 +6,7 @@ import type { CanvasRenderingTarget2D } from 'fancy-canvas';
 import type { DrawingInteractionSnapshot, DrawingProvider, DrawingProviderEvent } from './DrawingProvider';
 import { fibonacciPrice, hitProjectedDrawing, layoutDrawingText, rayEndpoint, rectangleCorners, type ProjectedDrawing, type ScreenPoint } from './drawingGeometry';
 import { snapAnchor, type MagnetCandle, type MagnetMode } from './drawingMagnet';
-import { createDrawing, isDrawingDate, isRightwardRay, type DrawingTool, type SumiDrawing, type SumiDrawingAnchor, type SumiDrawingDocumentV1 } from './drawingDomain';
+import { addTradingDays, countTradingDays, isFutureDate, createDrawing, isDrawingDate, isRightwardRay, type DrawingTool, type SumiDrawing, type SumiDrawingAnchor, type SumiDrawingDocumentV1 } from './drawingDomain';
 
 const timeKey = (time: Time | null): string | null => {
   if (time === null) return null;
@@ -19,19 +19,32 @@ const dash = (style: SumiDrawing['style']['lineStyle']) => style === 'dashed' ? 
 class SumiDrawingDocumentPrimitive implements ISeriesPrimitive<Time> {
   private requestUpdate: (() => void) | null = null;
   private readonly series: ISeriesApi<'Candlestick'>; private readonly chart: IChartApi;
-  private document: SumiDrawingDocumentV1; private selectedIds: string[]; private preview: SumiDrawing | null;
-  constructor(series: ISeriesApi<'Candlestick'>, chart: IChartApi, document: SumiDrawingDocumentV1, selectedIds: string[], preview: SumiDrawing | null) {
-    this.series = series; this.chart = chart; this.document = document; this.selectedIds = selectedIds; this.preview = preview;
+  private document: SumiDrawingDocumentV1; private selectedIds: string[]; private preview: SumiDrawing | null; private candles: MagnetCandle[] = [];
+  constructor(series: ISeriesApi<'Candlestick'>, chart: IChartApi, document: SumiDrawingDocumentV1, selectedIds: string[], preview: SumiDrawing | null, candles: MagnetCandle[] = []) {
+    this.series = series; this.chart = chart; this.document = document; this.selectedIds = selectedIds; this.preview = preview; this.candles = candles;
   }
   attached(param: SeriesAttachedParameter<Time>): void { this.requestUpdate = param.requestUpdate; }
   detached(): void { this.requestUpdate = null; }
-  replace(document: SumiDrawingDocumentV1, selectedIds: string[], preview: SumiDrawing | null): void {
-    this.document = document; this.selectedIds = selectedIds; this.preview = preview; this.requestUpdate?.();
+  replace(document: SumiDrawingDocumentV1, selectedIds: string[], preview: SumiDrawing | null, candles: MagnetCandle[]): void {
+    this.document = document; this.selectedIds = selectedIds; this.preview = preview; this.candles = candles; this.requestUpdate?.();
   }
   private project(drawing: SumiDrawing): ProjectedDrawing | null {
-    const anchors = drawing.anchors.map(anchor => ({
-      x: this.chart.timeScale().timeToCoordinate(anchor.time as Time), y: this.series.priceToCoordinate(anchor.price),
-    }));
+    const anchors = drawing.anchors.map(anchor => {
+      let x = this.chart.timeScale().timeToCoordinate(anchor.time as Time);
+      if (x === null && this.candles.length >= 2) {
+        const lastCandle = this.candles[this.candles.length - 1];
+        const prevCandle = this.candles[this.candles.length - 2];
+        const lastX = this.chart.timeScale().timeToCoordinate(lastCandle.time as Time);
+        const prevX = this.chart.timeScale().timeToCoordinate(prevCandle.time as Time);
+        if (lastX !== null && prevX !== null) {
+          const barWidth = lastX - prevX;
+          const tradingDays = countTradingDays(lastCandle.time as string, anchor.time);
+          x = lastX + tradingDays * barWidth;
+        }
+      }
+      const y = this.series.priceToCoordinate(anchor.price);
+      return { x, y };
+    });
     return anchors.every(anchor => anchor.x !== null && anchor.y !== null)
       ? { drawing, anchors: anchors as ScreenPoint[] } : null;
   }
@@ -154,7 +167,7 @@ export class SumiPrimitiveDrawingProvider implements DrawingProvider {
   constructor(chart: IChartApi, series: ISeriesApi<'Candlestick'>, container: HTMLElement,
     document: SumiDrawingDocumentV1, _currentTime: () => string, getPricePaneElement: () => HTMLElement | null) {
     this.chart = chart; this.series = series; this.container = container; this.getPricePaneElement = getPricePaneElement;
-    this.document = structuredClone(document); this.primitive = new SumiDrawingDocumentPrimitive(series, chart, this.document, this.selectedIds, null);
+    this.document = structuredClone(document); this.primitive = new SumiDrawingDocumentPrimitive(series, chart, this.document, this.selectedIds, null, this.candles);
     series.attachPrimitive(this.primitive);
     container.addEventListener('pointerdown', this.onPointerDown); container.addEventListener('pointermove', this.onPointerMove);
     container.addEventListener('pointerup', this.onPointerUp); container.addEventListener('pointercancel', this.onPointerCancel);
@@ -188,7 +201,7 @@ export class SumiPrimitiveDrawingProvider implements DrawingProvider {
     this.container.removeEventListener('lostpointercapture', this.onLostPointerCapture);
     this.container.removeEventListener('sumi:drawing-snapshot-request', this.onSnapshotRequest); this.series.detachPrimitive(this.primitive); delete this.container.dataset.drawingInteractionState; }
   private emit(event: DrawingProviderEvent): void { this.listeners.forEach(listener => listener(event)); }
-  private redraw(): void { this.primitive.replace(this.document, this.selectedIds, this.preview); this.publishSnapshot(); }
+  private redraw(): void { this.primitive.replace(this.document, this.selectedIds, this.preview, this.candles); this.publishSnapshot(); }
   private publishSnapshot(): void { if (!this.destroyed) this.container.dataset.drawingInteractionState = JSON.stringify(this.snapshotInteraction()); }
   private onSnapshotRequest = () => this.publishSnapshot();
   private releaseCapture(pointerId: number): void { try { if (!this.container.hasPointerCapture || this.container.hasPointerCapture(pointerId)) this.container.releasePointerCapture?.(pointerId); } catch { /* already released */ } }
@@ -197,9 +210,55 @@ export class SumiPrimitiveDrawingProvider implements DrawingProvider {
       this.releaseCapture(pointerId); }
     this.preview = null; this.creationAnchor = null; this.creationAnchors = []; this.chart.applyOptions({ handleScroll: true }); }
   private panePoint(event: PointerEvent): ScreenPoint | null { const rect = this.getPricePaneElement()?.getBoundingClientRect(); if (!rect || event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) return null; return { x: event.clientX - rect.left, y: event.clientY - rect.top }; }
-  private anchorAt(point: ScreenPoint): SumiDrawingAnchor | null { const price = this.series.coordinateToPrice(point.y); const time = timeKey(this.chart.timeScale().coordinateToTime(point.x)); if (price === null || !Number.isFinite(price) || price <= 0 || !time || !isDrawingDate(time)) return null;
-    const raw = { time, price }; return snapAnchor(raw, point, this.candles, { timeToX: value => this.chart.timeScale().timeToCoordinate(value as Time), priceToY: value => this.series.priceToCoordinate(value) }, this.magnetMode); }
-  private projected(drawing: SumiDrawing): ProjectedDrawing | null { const anchors = drawing.anchors.map(anchor => ({ x: this.chart.timeScale().timeToCoordinate(anchor.time as Time), y: this.series.priceToCoordinate(anchor.price) })); return anchors.every(anchor => anchor.x !== null && anchor.y !== null) ? { drawing, anchors: anchors as ScreenPoint[] } : null; }
+  private extrapolateTime(x: number): string | null {
+    if (this.candles.length < 2) return null;
+    const lastCandle = this.candles[this.candles.length - 1];
+    const prevCandle = this.candles[this.candles.length - 2];
+    const lastX = this.chart.timeScale().timeToCoordinate(lastCandle.time as Time);
+    const prevX = this.chart.timeScale().timeToCoordinate(prevCandle.time as Time);
+    if (lastX === null || prevX === null) return null;
+    const barWidth = lastX - prevX;
+    if (barWidth <= 0) return null;
+    const offsetBars = Math.round((x - lastX) / barWidth);
+    if (Math.abs(offsetBars) > 250) return null; // Cap at ~1 year
+    return addTradingDays(lastCandle.time as string, offsetBars);
+  }
+  private anchorAt(point: ScreenPoint): SumiDrawingAnchor | null {
+    const price = this.series.coordinateToPrice(point.y);
+    let time = timeKey(this.chart.timeScale().coordinateToTime(point.x));
+    if (price === null || !Number.isFinite(price) || price <= 0) return null;
+    // Fallback: extrapolate time for future whitespace
+    if (!time || !isDrawingDate(time)) {
+      time = this.extrapolateTime(point.x);
+      if (!time || !isDrawingDate(time)) return null;
+      // No magnet snapping in whitespace (no candles to snap to)
+      return { time, price };
+    }
+    const raw = { time, price };
+    return snapAnchor(raw, point, this.candles, { timeToX: value => this.chart.timeScale().timeToCoordinate(value as Time), priceToY: value => this.series.priceToCoordinate(value) }, this.magnetMode);
+  }
+  private projected(drawing: SumiDrawing): ProjectedDrawing | null {
+    const anchors = drawing.anchors.map(anchor => {
+      let x = this.chart.timeScale().timeToCoordinate(anchor.time as Time);
+      // Extrapolate x position if missing (future, past, or holiday)
+      if (x === null && this.candles.length >= 2) {
+        const lastCandle = this.candles[this.candles.length - 1];
+        const prevCandle = this.candles[this.candles.length - 2];
+        const lastX = this.chart.timeScale().timeToCoordinate(lastCandle.time as Time);
+        const prevX = this.chart.timeScale().timeToCoordinate(prevCandle.time as Time);
+        if (lastX !== null && prevX !== null) {
+          const barWidth = lastX - prevX;
+          // Count trading days between last candle and anchor time
+          const tradingDays = countTradingDays(lastCandle.time as string, anchor.time);
+          x = lastX + tradingDays * barWidth;
+        }
+      }
+      const y = this.series.priceToCoordinate(anchor.price);
+      return { x, y };
+    });
+    return anchors.every(anchor => anchor.x !== null && anchor.y !== null)
+      ? { drawing, anchors: anchors as ScreenPoint[] } : null;
+  }
   private hit(point: ScreenPoint): { drawing: SumiDrawing; part: string } | null { const width = this.chart.paneSize().width; for (const drawing of [...this.document.drawings].reverse()) { if (!drawing.visible || drawing.locked) continue; const projected = this.projected(drawing); const result = projected && hitProjectedDrawing(projected, point, width); if (result) return { drawing, part: result.part }; } return null; }
   private translateBody(original: SumiDrawing, point: ScreenPoint): SumiDrawingAnchor[] | null {
     const projected = this.projected(original); if (!projected) return null;
@@ -207,19 +266,32 @@ export class SumiPrimitiveDrawingProvider implements DrawingProvider {
     const failure = this.container.dataset.sumiDrawingBodyConversionFailure ?? '';
     const converted = projected.anchors.map((anchor, index) => {
       const rawPrice = failure === `price:${index}` ? null : this.series.coordinateToPrice(anchor.y + dy);
-      const rawTime = failure === `time:${index}` ? null : this.chart.timeScale().coordinateToTime(anchor.x + dx);
-      const time = timeKey(rawTime); const price = rawPrice;
+      let rawTime = failure === `time:${index}` ? null : this.chart.timeScale().coordinateToTime(anchor.x + dx);
+      let time = timeKey(rawTime);
+      // Extrapolate if in whitespace
+      if (!time || !isDrawingDate(time)) {
+        time = this.extrapolateTime(anchor.x + dx);
+      }
+      const price = rawPrice;
       return price !== null && Number.isFinite(price) && price > 0 && time && isDrawingDate(time) ? { time, price } : null;
     });
     if (converted.some(anchor => anchor === null)) return null;
     const anchors = converted as SumiDrawingAnchor[];
     if (anchors.length < 2) return anchors;
     const candleIndex = new Map(this.candles.map((candle, index) => [candle.time, index]));
+    const lastCandleTime = this.candles.length > 0 ? this.candles[this.candles.length - 1].time as string : '';
     const logicalDeltas = anchors.map((anchor, index) => {
-      const beforeIndex = candleIndex.get(original.anchors[index].time); const afterIndex = candleIndex.get(anchor.time);
-      return beforeIndex === undefined || afterIndex === undefined ? null : afterIndex - beforeIndex;
+      const beforeIndex = candleIndex.get(original.anchors[index].time);
+      const afterIndex = candleIndex.get(anchor.time);
+      // If either anchor is missing (holiday, future, past), allow the move
+      if (beforeIndex === undefined || afterIndex === undefined) return 'missing' as const;
+      return afterIndex - beforeIndex;
     });
-    if (logicalDeltas.some(delta => delta === null) || !logicalDeltas.every(delta => delta === logicalDeltas[0])) return null;
+    // Allow if all deltas are 'missing' or all are the same number
+    const numericDeltas = logicalDeltas.filter((d): d is number => typeof d === 'number');
+    const futureCount = logicalDeltas.filter(d => d === 'missing').length;
+    if (logicalDeltas.some(d => d === null)) return null;
+    if (numericDeltas.length > 0 && !numericDeltas.every(d => d === numericDeltas[0])) return null;
     const priceDeltas = anchors.map((anchor, index) => anchor.price - original.anchors[index].price);
     if (!priceDeltas.every(delta => Number.isFinite(delta)) || !priceDeltas.every(delta => Math.abs(delta - priceDeltas[0]) <= 1e-7)) return null;
     const priceDelta = priceDeltas[0];

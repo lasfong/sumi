@@ -25,7 +25,7 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
   );
   const [pendingAction, setPendingAction] = useState<DecisionAction | null>(null);
   const [quantity, setQuantity] = useState('100');
-  const [orderType, setOrderType] = useState('MARKET_AT_CLOSE');
+  const [orderType, setOrderType] = useState('MARKET_NEXT_OPEN');
   const [limitPrice, setLimitPrice] = useState('');
   const [stopLoss, setStopLoss] = useState('');
   const [targetPrice, setTargetPrice] = useState('');
@@ -53,7 +53,7 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
   }, []);
 
   const open = useCallback((action: DecisionAction) => {
-    setPendingAction(action); setQuantity('100'); setOrderType('MARKET_AT_CLOSE'); setLimitPrice('');
+    setPendingAction(action); setQuantity('100'); setOrderType('MARKET_NEXT_OPEN'); setLimitPrice('');
     setStopLoss(''); setTargetPrice(''); setRiskPercent('1.0'); setSetupType(''); setMarketRegime('Bull Trend');
     setConfidenceScore('4'); setEmotion('Calm / Disciplined'); setMistakeTag('None'); setRuleViolation('None');
     setReason(''); setNote(''); setFeedback(null);
@@ -128,7 +128,7 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
     const decision: DecisionCreate = {
       action: pendingAction,
       quantity: isTradeAction && quantity !== '' ? Number(quantity) : undefined,
-      order_type: isTradeAction ? orderType : 'MARKET_AT_CLOSE',
+      order_type: isTradeAction ? orderType : 'MARKET_NEXT_OPEN',
       price: isTradeAction && orderType === 'LIMIT' && limitPrice !== '' ? Number(limitPrice) : undefined,
       stop_loss: isTradeAction && stopLoss !== '' ? Number(stopLoss) : undefined,
       target_price: isTradeAction && targetPrice !== '' ? Number(targetPrice) : undefined,
@@ -159,7 +159,11 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
     if (result.ok) setPendingAction(null);
   }, [confidenceScore, emotion, isTradeAction, limitPrice, marketRegime, mistakeTag, note, onSubmitDecision, orderType, pendingAction, quantity, reason, ruleViolation, setupType, sizingCalc, snapshot, stopLoss, targetPrice]);
 
-  const actionsDisabled = disabled || limitedViewport || submitting || !snapshot.can_trade;
+  const actionsDisabled = !snapshot.can_trade || submitting || disabled || limitedViewport;
+  const hasOpenPosition = snapshot.positions.length > 0;
+  const sellDisabled = actionsDisabled || (!hasOpenPosition || snapshot.available_quantity <= 0);
+  const sellTitle = (!hasOpenPosition) ? "No open position" : (snapshot.available_quantity <= 0 ? "Cổ phiếu chưa về tài khoản (T+2)" : undefined);
+
   useModalFocus(pendingAction !== null, close, dialogElement);
   return <section className="panel" data-testid="trade-controls" style={{ padding: 12, display: 'grid', gap: 10 }}>
     <div>
@@ -171,8 +175,8 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
     {snapshot.trade_block_reason && <div role="status" data-testid="historical-trade-block" style={{ color: '#FFD166', fontSize: 12 }}>{snapshot.trade_block_reason}</div>}
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
       <button className="btn-buy" disabled={actionsDisabled} onClick={() => open('BUY')}>BUY</button>
-      <button className="btn-sell" disabled={actionsDisabled} onClick={() => open('SELL')}>SELL</button>
-      <button disabled={actionsDisabled || !snapshot.positions.length} onClick={() => open('CLOSE')} style={{ color: 'var(--color-close)' }}>CLOSE</button>
+      <button className="btn-sell" disabled={sellDisabled} title={sellTitle} onClick={() => open('SELL')}>SELL</button>
+      <button disabled={sellDisabled} title={sellTitle} onClick={() => open('CLOSE')} style={{ color: 'var(--color-close)' }}>CLOSE</button>
       <button disabled={actionsDisabled} onClick={() => open('HOLD')}>HOLD</button>
       <button disabled={actionsDisabled} onClick={() => open('SKIP')}>SKIP</button>
     </div>
@@ -193,7 +197,7 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
             <label>Order type
               <select aria-label="Order type" value={orderType} onChange={event => setOrderType(event.target.value)}>
-                <option value="MARKET_AT_CLOSE">Market at close</option>
+                <option value="MARKET_NEXT_OPEN">Market at next open</option>
                 <option value="LIMIT">Limit</option>
               </select>
             </label>

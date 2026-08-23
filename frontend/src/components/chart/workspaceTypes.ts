@@ -79,4 +79,7 @@ export interface ChartWorkspaceRef {
   updateCandle: (candle: CandleData, volume?: VolumeData) => void;
   cancelDrawing: () => void;
   getDrawingInteractionState: () => DrawingInteractionSnapshot | null;
+  updateIndicatorData: (input: IndicatorRenderInput) => void;
+  setPositionLines: (position: { average_price: number }, trade: { initial_stop_loss?: number | null; target_price?: number | null } | null) => void;
+  clearPositionLines: () => void;
 }

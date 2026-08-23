@@ -52,6 +52,13 @@ export const ChartWorkspace = forwardRef<ChartWorkspaceRef, ChartWorkspaceProps>
     updateCandle: (candle, volume) => seriesRef.current?.updateCandle(candle, volume),
     cancelDrawing: () => providerRef.current?.cancel(),
     getDrawingInteractionState: () => providerRef.current?.snapshotInteraction() ?? null,
+    updateIndicatorData: input => {
+      if (!seriesRef.current || !containerRef.current) throw new Error('Chart workspace is not mounted');
+      seriesRef.current.updateIndicatorData(input.instanceId, input.paneId, input.series, input.paneOrder, containerRef.current.clientHeight || 500);
+      containerRef.current.dataset.indicatorChartState = JSON.stringify(seriesRef.current.snapshot());
+    },
+    setPositionLines: (position, trade) => seriesRef.current?.setPositionLines(position, trade),
+    clearPositionLines: () => seriesRef.current?.clearPositionLines(),
   }), []);
 
   useEffect(() => {

@@ -2708,6 +2708,73 @@
         "PRO-STRAT-07",
         "PRO-STRAT-08"
       ]
+    },
+    {
+      "id": "pro11.provider-listing-and-connectivity",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-PROV-06",
+        "PRO-DATA-08"
+      ]
+    },
+    {
+      "id": "pro11.sync-preview-and-classification",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-DATA-08"
+      ]
+    },
+    {
+      "id": "pro11.atomic-sync-and-weekly-derivation",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-DATA-08",
+        "PRO-DATA-09"
+      ]
+    },
+    {
+      "id": "pro11.sync-manifest-audit-trail",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-DATA-09"
+      ]
+    },
+    {
+      "id": "pro11.sync-rollback-and-integrity",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-DATA-10"
+      ]
+    },
+    {
+      "id": "pro12.sustained-practice-regression",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-G-01",
+        "PRO-G-05"
+      ]
+    },
+    {
+      "id": "pro12.backup-restore-verification",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-G-02",
+        "PRO-DATA-10"
+      ]
+    },
+    {
+      "id": "pro12.keyboard-navigation-accessibility",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-UX-08"
+      ]
+    },
+    {
+      "id": "pro12.local-privacy-contract",
+      "blocking": true,
+      "acceptance_ids": [
+        "PRO-G-08"
+      ]
     }
   ]
 }

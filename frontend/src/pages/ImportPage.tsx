@@ -10,6 +10,7 @@ import {
   type CatalogItem,
   type ImportRunSummary
 } from '../api/importApi';
+import { DataSyncPanel } from '../components/sync/DataSyncPanel';
 import toast from 'react-hot-toast';
 
 interface ApiError {
@@ -22,7 +23,7 @@ interface ApiError {
 
 export const ImportPage: React.FC = () => {
   const queryClient = useQueryClient();
-  const [activeTab, setActiveTab] = useState<'import' | 'catalog' | 'history'>('import');
+  const [activeTab, setActiveTab] = useState<'sync' | 'import' | 'catalog' | 'history'>('sync');
   const [file, setFile] = useState<File | null>(null);
   const [adjustmentType, setAdjustmentType] = useState<string>('unadjusted');
   const [preview, setPreview] = useState<ImportPreviewResponse | null>(null);
@@ -122,6 +123,19 @@ export const ImportPage: React.FC = () => {
       {/* Tabs */}
       <div style={{ display: 'flex', gap: '0.5rem', borderBottom: '1px solid var(--border-color)', marginBottom: '1.5rem' }}>
         <button
+          id="tab-btn-sync"
+          onClick={() => setActiveTab('sync')}
+          style={{
+            padding: '8px 16px', background: 'none', border: 'none',
+            borderBottom: activeTab === 'sync' ? '2px solid var(--color-primary)' : '2px solid transparent',
+            color: activeTab === 'sync' ? 'var(--color-primary)' : 'var(--text-muted)',
+            fontWeight: 700, cursor: 'pointer',
+          }}
+        >
+          🔄 Đồng bộ trực tuyến (One-Click Sync)
+        </button>
+        <button
+          id="tab-btn-import"
           onClick={() => setActiveTab('import')}
           style={{
             padding: '8px 16px', background: 'none', border: 'none',
@@ -130,9 +144,10 @@ export const ImportPage: React.FC = () => {
             fontWeight: 700, cursor: 'pointer',
           }}
         >
-          📥 Nhập dữ liệu mới
+          📥 Nhập tập tin CafeF
         </button>
         <button
+          id="tab-btn-catalog"
           onClick={() => setActiveTab('catalog')}
           style={{
             padding: '8px 16px', background: 'none', border: 'none',
@@ -144,6 +159,7 @@ export const ImportPage: React.FC = () => {
           📚 Danh mục dữ liệu ({catalogQuery.data?.length || 0})
         </button>
         <button
+          id="tab-btn-history"
           onClick={() => setActiveTab('history')}
           style={{
             padding: '8px 16px', background: 'none', border: 'none',
@@ -152,9 +168,12 @@ export const ImportPage: React.FC = () => {
             fontWeight: 700, cursor: 'pointer',
           }}
         >
-          📜 Lịch sử nhập & Hoàn tác ({historyQuery.data?.length || 0})
+          📜 Lịch sử nhập tập tin ({historyQuery.data?.length || 0})
         </button>
       </div>
+
+      {/* TAB 0: ONLINE SYNC WORKFLOW */}
+      {activeTab === 'sync' && <DataSyncPanel />}
 
       {/* TAB 1: IMPORT WORKFLOW */}
       {activeTab === 'import' && (

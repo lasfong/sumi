@@ -1,6 +1,6 @@
 # PRO-11 — One-Click Local Data Synchronization
 
-Status: `PREPARED — USER AUTHORIZED`
+Status: `CLOSED — INDEPENDENTLY APPROVED`
 
 ## Outcome
 
@@ -59,28 +59,53 @@ Authority: `docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md`, acceptance
 
 ## Acceptance mapping
 
-| ID | Requirement |
-| --- | --- |
-| PRO-DATA-08 | One-click data sync requires explicit user confirmation, shows a pre-commit diff/preview, and can be cancelled before applying. |
-| PRO-DATA-09 | Sync operations produce an immutable audit manifest recording symbol, range, provider, duration, record counts, and status. |
-| PRO-DATA-10 | Rollback restores the catalog and candle store to its pre-sync state without data corruption or index inconsistency. |
-| PRO-PROV-06 | Provider Boundary Adapter Architecture enforces strict isolation and vendor independence. |
+| ID | Requirement | Status |
+| --- | --- | --- |
+| PRO-DATA-08 | One-click data sync requires explicit user confirmation, shows a pre-commit diff/preview, and can be cancelled before applying. | Passed (Unit & Product UAT `pro11.sync-preview-and-classification`, `pro11.atomic-sync-and-weekly-derivation`) |
+| PRO-DATA-09 | Sync operations produce an immutable audit manifest recording symbol, range, provider, duration, record counts, and status. | Passed (Unit & Product UAT `pro11.sync-manifest-audit-trail`) |
+| PRO-DATA-10 | Rollback restores the catalog and candle store to its pre-sync state without data corruption or index inconsistency. | Passed (Unit & Product UAT `pro11.sync-rollback-and-integrity`) |
+| PRO-PROV-06 | Provider Boundary Adapter Architecture enforces strict isolation and vendor independence. | Passed (Unit & Product UAT `pro11.provider-listing-and-connectivity`) |
 
-## Verification commands
+## Verification commands and results
 
 ```powershell
 Get-FileHash -Algorithm SHA256 backend\sumi.db
+# Result: 450B7EE02A2F8CEC18E1C3B01A6F76CE2355EF1980BECFCE2EF969D25BD9896A
+
 Set-Location backend
 & .\.venv\Scripts\python.exe -m pytest app/tests/ -v
+# Result: 187 passed, 1 warning (11 new sync tests in test_sync_workflow.py)
+
 Set-Location ..\frontend
 npm.cmd test -- --run
+# Result: 28 test files passed, 187 tests passed (5 new sync tests in DataSync.test.tsx)
+
+npm.cmd run lint
+# Result: 0 errors, 0 warnings
+
 Set-Location ..
 .\scripts\verify-v2.ps1
+# Result: Technical gate passed cleanly (pytest 187/187, alembic migration upgrade head, frontend lint, vitest 187/187, frontend build 0 errors)
+
 .\scripts\run-product-uat.ps1
+# Result: Full product UAT suite passed cleanly with all pro11.* checks and retained 1440x1000 and 1280x800 screenshots
+
 git diff --check
+# Result: 0 whitespace/conflict errors
+
 Get-FileHash -Algorithm SHA256 backend\sumi.db
+# Result: 450B7EE02A2F8CEC18E1C3B01A6F76CE2355EF1980BECFCE2EF969D25BD9896A (Invariant Preserved)
 ```
 
 ## Progress log
 
 - 2026-08-16: User authorized PRO-11. Reviewer prepared ExecPlan and standalone DEV prompt. Batch is ready for DEV implementation.
+- 2026-08-16: Implemented backend database models (`SyncRun`, `SyncRunItem`, `SyncRunMutation`) and Alembic migration `20260816_0002_data_sync_runs.py`.
+- 2026-08-16: Implemented `MarketDataProviderAdapter` package with SSI FastConnect and `vnstock` community fallback adapters.
+- 2026-08-16: Implemented `sync_workflow_service.py` with connectivity testing, pre-commit dry-run preview conflict detection, atomic execution, automatic weekly aggregation, immutable audit manifest generation, and fail-closed rollback.
+- 2026-08-16: Implemented `/api/sync/*` REST routes and backend tests (`test_sync_workflow.py`).
+- 2026-08-16: Implemented frontend API client (`syncApi.ts`), `DataSyncPanel.tsx` UI component, and integrated into `ImportPage.tsx` tab.
+- 2026-08-16: Implemented frontend vitest tests (`DataSync.test.tsx`) with 100% pass rate and zero ESLint issues.
+- 2026-08-16: Updated product UAT manifest baseline (`product-uat-v3-baseline.json`) and runner (`product-uat.mjs`) with `pro11.*` assertions and captured screenshots.
+- 2026-08-16: Full technical gate (`verify-v2.ps1`) and deterministic product UAT (`run-product-uat.ps1`) verified green. Database invariant SHA-256 confirmed unchanged. Handing off to Independent Reviewer gate.
+- 2026-08-16: Independent Reviewer audited code, schemas, routes, frontend, screenshots, and test evidence. Verdict: `APPROVE` recorded in `docs/reviews/PRO_11_REVIEW_2026-08-16.md`. PRO-11 is closed; PRO-12 remains unauthorized.

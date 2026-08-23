@@ -21,6 +21,45 @@ from app.services.event_logging_service import EventLoggingService
 
 class TradeLifecycleService:
     @staticmethod
+    def auto_liquidate_positions(db: Session, session, current_candle):
+        from app.models.trade import Trade
+        from app.schemas.decision_schema import DecisionCreate
+        from app.domain.enums import DecisionAction
+
+        trades = db.query(Trade).filter(
+            Trade.session_id == session.id,
+            Trade.status == "open"
+        ).all()
+
+        for trade in trades:
+            qty = trade.quantity
+
+            # Check Stop Loss
+            if trade.initial_stop_loss and trade.initial_stop_loss > 0:
+                if current_candle.low <= trade.initial_stop_loss:
+                    exec_price = min(current_candle.open, trade.initial_stop_loss)
+                    decision_in = DecisionCreate(
+                        action=DecisionAction.SELL,
+                        quantity=qty,
+                        price=exec_price,
+                        note="System auto-liquidated at stop loss"
+                    )
+                    TradeLifecycleService.process_decision(db, session.id, decision_in)
+                    continue
+
+            # Check Take Profit
+            if trade.target_price and trade.target_price > 0:
+                if current_candle.high >= trade.target_price:
+                    exec_price = max(current_candle.open, trade.target_price)
+                    decision_in = DecisionCreate(
+                        action=DecisionAction.SELL,
+                        quantity=qty,
+                        price=exec_price,
+                        note="System auto-liquidated at take profit"
+                    )
+                    TradeLifecycleService.process_decision(db, session.id, decision_in)
+
+    @staticmethod
     def process_decision(db: Session, session_id: int, decision_in: DecisionCreate) -> Decision:
         session = ReplayService.get_session(db, session_id)
         from app.services.practice_workflow_service import PracticeWorkflowService
@@ -88,6 +127,25 @@ class TradeLifecycleService:
         try:
             if decision_in.order_type == OrderType.LIMIT.value:
                 TradeLifecycleService._create_limit_order(db, session, decision.id, decision_in, session.symbol, exec_price, qty, candles)
+            elif decision_in.order_type == OrderType.MARKET_NEXT_OPEN.value:
+                if decision_in.action in [DecisionAction.CLOSE, DecisionAction.CUT_LOSS, DecisionAction.TAKE_PROFIT]:
+                    position = db.query(Position).filter(Position.session_id == session_id, Position.status == PositionStatus.OPEN.value).first()
+                    if not position or position.quantity <= 0:
+                        raise HTTPException(status_code=400, detail="Cannot close: no open position")
+                    qty = position.quantity
+
+                order = Order(
+                    session_id=session.id,
+                    decision_id=decision.id,
+                    symbol=session.symbol,
+                    side=OrderSide.BUY.value if decision_in.action in [DecisionAction.BUY, DecisionAction.ADD] else OrderSide.SELL.value,
+                    order_type=OrderType.MARKET_NEXT_OPEN.value,
+                    requested_price=exec_price,
+                    quantity=qty,
+                    status=OrderStatus.PENDING.value
+                )
+                db.add(order)
+                db.flush()
             else:
                 if decision_in.action in [DecisionAction.BUY, DecisionAction.ADD]:
                     TradeLifecycleService._execute_buy(db, session, decision.id, decision_in, session.symbol, current_candle.timestamp, exec_price, qty)
@@ -184,7 +242,7 @@ class TradeLifecycleService:
                 trade.quantity += qty
                 trade.entry_price = position.average_price
 
-        execution = Execution(order_id=order.id, trade_id=trade.id if trade else None, session_id=session.id, symbol=symbol, execution_date=date, execution_price=price, quantity=qty, gross_amount=amounts.gross_amount, net_amount=amounts.net_amount, fee=amounts.fee, tax=amounts.tax)
+        execution = Execution(order_id=order.id, trade_id=trade.id if trade else None, session_id=session.id, symbol=symbol, execution_date=date, execution_price=price, quantity=qty, gross_amount=amounts.gross_amount, net_amount=amounts.net_amount, fee=amounts.fee, tax=amounts.tax, execution_candle_index=session.current_index)
         db.add(execution)
 
         # Update cash on session
@@ -202,16 +260,44 @@ class TradeLifecycleService:
         from app.models.order import Order
         from app.models.execution import Execution
 
-        # 1. Calculate total quantity bought that has settled (T+2)
-        settled_bought = db.query(func.sum(Execution.quantity)) \
+        # 1. Fetch all buy executions for this symbol
+        buy_executions = db.query(Execution) \
             .join(Order, Execution.order_id == Order.id) \
-            .join(Decision, Order.decision_id == Decision.id) \
             .filter(
                 Execution.session_id == session.id,
                 Execution.symbol == symbol,
-                Order.side == OrderSide.BUY.value,
-                Decision.candle_index <= session.current_index - 2
-            ).scalar() or 0.0
+                Order.side == OrderSide.BUY.value
+            ).all()
+
+        from app.services.practice_workflow_service import PracticeWorkflowService
+        all_candles = PracticeWorkflowService._candles(db, session)
+        
+        unique_dates = []
+        for c in all_candles:
+            d = c.timestamp.date() if hasattr(c.timestamp, 'date') else c.timestamp
+            if not unique_dates or unique_dates[-1] != d:
+                unique_dates.append(d)
+                
+        current_candle = all_candles[session.current_index]
+        current_date = current_candle.timestamp.date() if hasattr(current_candle.timestamp, 'date') else current_candle.timestamp
+        
+        settled_bought = 0.0
+        earliest_unsettled_release_date = None
+        
+        for exc in buy_executions:
+            exc_date = exc.execution_date.date() if hasattr(exc.execution_date, 'date') else exc.execution_date
+            try:
+                d_idx = unique_dates.index(exc_date)
+                release_date = unique_dates[d_idx + 2] if d_idx + 2 < len(unique_dates) else None
+            except ValueError:
+                release_date = None
+                
+            if release_date and current_date >= release_date:
+                settled_bought += exc.quantity
+            else:
+                if release_date:
+                    if earliest_unsettled_release_date is None or release_date < earliest_unsettled_release_date:
+                        earliest_unsettled_release_date = release_date
 
         # 2. Calculate total quantity already sold (which naturally uses up the settled bought quantity first)
         total_sold = db.query(func.sum(Execution.quantity)) \
@@ -226,28 +312,7 @@ class TradeLifecycleService:
 
         if available_qty < qty:
             blocked_qty = position.quantity - available_qty
-            # Find earliest release date from unsettled buy decisions
-            unsettled_decisions = db.query(Decision.candle_index, Decision.decision_date) \
-                .join(Order, Decision.id == Order.decision_id) \
-                .join(Execution, Order.id == Execution.order_id) \
-                .filter(
-                    Execution.session_id == session.id,
-                    Execution.symbol == symbol,
-                    Order.side == OrderSide.BUY.value,
-                    Decision.candle_index > session.current_index - 2
-                ).order_by(Decision.candle_index.asc()).all()
-
-            release_date_str = "T+2"
-            if unsettled_decisions:
-                earliest_candle_index = unsettled_decisions[0][0]
-                release_bar_index = earliest_candle_index + 2
-                from app.services.practice_workflow_service import PracticeWorkflowService
-                all_candles = PracticeWorkflowService._candles(db, session)
-                if all_candles and release_bar_index < len(all_candles):
-                    release_date_str = all_candles[release_bar_index].timestamp.date().isoformat()
-                else:
-                    release_date_str = f"bar #{release_bar_index + 1}"
-
+            release_date_str = earliest_unsettled_release_date.isoformat() if hasattr(earliest_unsettled_release_date, 'isoformat') else str(earliest_unsettled_release_date) if earliest_unsettled_release_date else "T+2"
             raise HTTPException(
                 status_code=400,
                 detail=f"Cannot sell: T+2 constraint. Available: {available_qty:g}, Blocked: {blocked_qty:g}, Earliest release date: {release_date_str}"
@@ -267,7 +332,7 @@ class TradeLifecycleService:
             db.add(order)
             db.flush()
 
-        execution = Execution(order_id=order.id, trade_id=trade.id if trade else None, session_id=session.id, symbol=symbol, execution_date=date, execution_price=price, quantity=qty, gross_amount=amounts.gross_amount, net_amount=amounts.net_amount, fee=amounts.fee, tax=amounts.tax)
+        execution = Execution(order_id=order.id, trade_id=trade.id if trade else None, session_id=session.id, symbol=symbol, execution_date=date, execution_price=price, quantity=qty, gross_amount=amounts.gross_amount, net_amount=amounts.net_amount, fee=amounts.fee, tax=amounts.tax, execution_candle_index=session.current_index)
         db.add(execution)
         db.flush()
 
@@ -367,7 +432,7 @@ class TradeLifecycleService:
 
         trade = db.query(Trade).filter(Trade.session_id == session.id, Trade.exit_date == None).first()
 
-        execution = Execution(order_id=order.id, trade_id=trade.id if trade else None, session_id=session.id, symbol=session.symbol, execution_date=current_candle.timestamp, execution_price=price, quantity=qty, gross_amount=amounts.gross_amount, net_amount=amounts.net_amount, fee=amounts.fee, tax=amounts.tax)
+        execution = Execution(order_id=order.id, trade_id=trade.id if trade else None, session_id=session.id, symbol=session.symbol, execution_date=current_candle.timestamp, execution_price=price, quantity=qty, gross_amount=amounts.gross_amount, net_amount=amounts.net_amount, fee=amounts.fee, tax=amounts.tax, execution_candle_index=session.current_index)
         db.add(execution)
 
         # Update session

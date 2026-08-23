@@ -6,15 +6,15 @@ This is the single entry point when Sumi is moved to another computer. It record
 
 - Repository: `https://github.com/lasfong/sumi.git`
 - Branch: `master`
-- Pushed remote: `origin/master` contains PRO-00, PRO-01, PRO-02, PRO-03, PRO-04, PRO-05, PRO-06, PRO-07, PRO-08, and PRO-09 commits.
-- Approved program state: PRO-00 through PRO-10 approved. PRO-11 through PRO-12 not started.
-- Latest verdict: `docs/reviews/PRO_10_REVIEW_2026-08-16.md` — `APPROVE`.
-- Authoritative reviewer UAT: `test-results/product-uat/2026-08-16T15-02-02-832Z/results.json` — 333/333 passed, 0 failed, 0 blocking failed, no runtime errors.
+- Pushed remote: `origin/master` contains PRO-00, PRO-01, PRO-02, PRO-03, PRO-04, PRO-05, PRO-06, PRO-07, PRO-08, PRO-09, and PRO-10 commits.
+- Approved program state: PRO-00 through PRO-12 approved (PROGRAM COMPLETE).
+- Latest verdict: `docs/reviews/PRO_12_REVIEW_2026-08-17.md` — `APPROVE`.
+- Authoritative reviewer UAT: `test-results/product-uat/2026-08-17T14-35-30-877Z/results.json` — 342/342 passed, 0 failed, 0 blocking failed, no runtime errors.
 - Production database: `backend/sumi.db`, 620,945,408 bytes, SHA-256 `450B7EE02A2F8CEC18E1C3B01A6F76CE2355EF1980BECFCE2EF969D25BD9896A`.
-- Reviewer results SHA-256: `8937BF06D7938A5FC7D197E6293C1E81DEF001E371191BE930BE5181B6FBE07E`.
-- Workspace state: PRO-00 through PRO-09 committed to `master`; PRO-10 implementation and reviewer approval documents are in the working tree.
+- Reviewer results SHA-256: `A74D7DE6637614CA5061F270E4087F4D14CAC1C03EF4DB3905F55F115EAB000F`.
+- Workspace state: PRO-00 through PRO-10 committed to `master`; PRO-11, PRO-12 implementation and reviewer approval documents are in the working tree.
 
-PRO-10 is approved and closed. PRO-11 implementation has not started.
+PRO-12 is approved and closed. Sumi Professionalization Program is 100% complete.
 
 ## 2. What must move to the new computer
 
@@ -115,8 +115,10 @@ Record the database hash before and after; both must equal the value in section 
 12. `docs/reviews/PRO_07_REVIEW_2026-08-16.md`
 13. `docs/reviews/PRO_08_REVIEW_2026-08-16.md`
 14. `docs/reviews/PRO_09_REVIEW_2026-08-16.md`
-15. `docs/reviews/PRO_10_REVIEW_2026-08-16.md`
-16. `docs/exec-plans/PRO_10_DATA_PROVIDER_EVALUATION.md`
+16. `docs/reviews/PRO_11_REVIEW_2026-08-16.md`
+17. `docs/reviews/PRO_12_REVIEW_2026-08-17.md`
+18. `docs/release/RELEASE_NOTES_v3.0.0.md`
+19. `docs/exec-plans/PRO_12_PROFESSIONAL_RELEASE_HARDENING.md`
 
 Old V2 documents, historical V3 Batch 0–5 records, `docs/tester/`, and superseded handoffs are evidence only. They do not override the files above.
 
@@ -135,14 +137,14 @@ Old V2 documents, historical V3 Batch 0–5 records, `docs/tester/`, and superse
 | PRO-08 | Approved | Add risk-based trade planning, position sizing, checklist, and richer journal review. |
 | PRO-09 | Approved | Make strategy comparison reproducible and resistant to overfitting. |
 | PRO-10 | Approved | Approve market-data provider under Provider Boundary Adapter architecture. |
-| PRO-11 | Conditional | Add explicit one-click local data synchronization with preview/rollback under `MarketDataProviderAdapter`. |
-| PRO-12 | Not started | Produce the independently verified Professional release candidate. |
+| PRO-11 | Approved | Add explicit one-click local data synchronization with preview/rollback under `MarketDataProviderAdapter`. |
+| PRO-12 | Approved | Produce the independently verified Professional release candidate (`v3.0.0-rc1`). |
 
-After PRO-12, the intended result is a dependable local-first Vietnam-market replay, technical-analysis, data-management, trading-practice, journaling, and strategy-research workstation with evidence-backed release quality.
+Sumi Professionalization Program (PRO-00 through PRO-12) is 100% complete with evidence-backed release quality.
 
 ## 8. Exact next action
 
-PRO-10 is closed and independently approved. PRO-11 remains unauthorized until explicit user instruction. No further session actions are authorized without user prompt.
+PRO-12 is closed and independently approved. Program is COMPLETE. Ready for git tag `v3.0.0-rc1` and commit/push to master.
 
 ## Appendix A — historical transferred worktree inventory
 

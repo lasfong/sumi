@@ -16,6 +16,7 @@ class Execution(Base):
     fee = Column(Float, default=0.0)
     tax = Column(Float, default=0.0)
     slippage = Column(Float, default=0.0)
+    execution_candle_index = Column(Integer, nullable=True)  # Bar index when this execution was filled; used for T+2 settlement
     gross_amount = Column(Float, nullable=False)
     net_amount = Column(Float, nullable=False)
     

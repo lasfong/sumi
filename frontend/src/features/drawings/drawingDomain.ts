@@ -42,6 +42,39 @@ export const isDrawingDate = (value: string): boolean => {
   const parsed = new Date(`${value}T00:00:00Z`);
   return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 };
+
+/** Adds N trading days to a base date, skipping weekends (Sat/Sun). */
+export function addTradingDays(baseDate: string, days: number): string {
+  const date = new Date(baseDate + 'T00:00:00Z');
+  let remaining = Math.abs(days);
+  const direction = days >= 0 ? 1 : -1;
+  while (remaining > 0) {
+    date.setUTCDate(date.getUTCDate() + direction);
+    const dow = date.getUTCDay();
+    if (dow !== 0 && dow !== 6) remaining--;
+  }
+  return date.toISOString().slice(0, 10);
+}
+
+/** Returns true if the date string is beyond the last candle time. */
+export function isFutureDate(date: string, lastCandleTime: string): boolean {
+  return date > lastCandleTime;
+}
+
+/** Counts trading days between two dates (excluding weekends). */
+export function countTradingDays(fromDate: string, toDate: string): number {
+  const from = new Date(fromDate + 'T00:00:00Z');
+  const to = new Date(toDate + 'T00:00:00Z');
+  let count = 0;
+  const direction = to > from ? 1 : -1;
+  const current = new Date(from);
+  while (direction > 0 ? current < to : current > to) {
+    current.setUTCDate(current.getUTCDate() + direction);
+    const dow = current.getUTCDay();
+    if (dow !== 0 && dow !== 6) count++;
+  }
+  return count * direction;
+}
 export const isRightwardRay = (anchors: readonly SumiDrawingAnchor[]): boolean => anchors.length === 2
   && isDrawingDate(anchors[0].time) && isDrawingDate(anchors[1].time) && anchors[1].time > anchors[0].time;
 const exactKeys = (value: Record<string, unknown>, allowed: string[]) => Object.keys(value).every(key => allowed.includes(key));

@@ -10,6 +10,7 @@ import {
   type Time,
 } from 'lightweight-charts';
 import { PaneManager } from './PaneManager';
+import { PositionLineManager } from './PositionLineManager';
 import type { CandleData, IndicatorChartSnapshot, IndicatorSeriesData, PaneId, VolumeData } from './workspaceTypes';
 
 type ManagedSeries = ISeriesApi<'Line'> | ISeriesApi<'Histogram'>;
@@ -19,6 +20,7 @@ export class SeriesManager {
   private candleData: CandleData[] = [];
   private volumeData: VolumeData[] = [];
   private readonly indicatorSeries = new Map<string, { paneId: PaneId; definitions: IndicatorSeriesData[]; series: ManagedSeries[] }>();
+  private readonly positionLines: PositionLineManager;
   private readonly markerPlugin;
   private readonly chart: IChartApi;
   private readonly panes: PaneManager;
@@ -30,6 +32,7 @@ export class SeriesManager {
       upColor: '#00E676', downColor: '#FF1744', borderVisible: false,
       wickUpColor: '#00E676', wickDownColor: '#FF1744',
     }, panes.index('price'));
+    this.positionLines = new PositionLineManager(this.candles);
     this.markerPlugin = createSeriesMarkers(this.candles, []);
   }
 
@@ -64,6 +67,49 @@ export class SeriesManager {
         });
       }
     });
+  }
+
+  setPositionLines(position: { average_price: number }, trade: { initial_stop_loss?: number | null; target_price?: number | null } | null): void {
+    this.positionLines.update(position, trade);
+  }
+
+  clearPositionLines(): void {
+    this.positionLines.clear();
+  }
+
+  updateIndicatorData(key: string, paneId: PaneId, definitions: IndicatorSeriesData[], paneOrder?: PaneId[], height = 500): void {
+    const existing = this.indicatorSeries.get(key);
+    // Can reuse if: same pane, same number of definitions, same series types
+    if (existing && existing.paneId === paneId && existing.definitions.length === definitions.length &&
+        existing.definitions.every((def, i) => def.type === definitions[i].type && def.seriesKey === definitions[i].seriesKey)) {
+      // Incremental path: just update data on existing series handles
+      existing.series.forEach((series, index) => {
+        const seriesData = (paneId === 'volume' && (definitions[index].seriesKey === 'raw-volume' || definitions[index].type === 'histogram')) 
+          ? this.volumeData : definitions[index].data;
+        const previousData = existing.definitions[index].data;
+        if (previousData && previousData.length > 0) {
+            if (seriesData.length === previousData.length + 1) {
+                const prevInNew = seriesData[seriesData.length - 2];
+                if (previousData[previousData.length - 1].time === prevInNew.time) {
+                    series.update(seriesData[seriesData.length - 1] as never);
+                    return;
+                }
+            } else if (seriesData.length === previousData.length) {
+                const lastInNew = seriesData[seriesData.length - 1];
+                if (previousData[previousData.length - 1].time === lastInNew.time) {
+                    series.update(lastInNew as never);
+                    return;
+                }
+            }
+        }
+        series.setData(seriesData as never);
+      });
+      // Update stored definitions (new data references)
+      existing.definitions = definitions;
+      return;
+    }
+    // Structural change: fall through to full recreation
+    this.setIndicator(key, paneId, definitions, paneOrder, height);
   }
 
   setIndicator(key: string, paneId: PaneId, definitions: IndicatorSeriesData[], paneOrder?: PaneId[], height = 500): void {
