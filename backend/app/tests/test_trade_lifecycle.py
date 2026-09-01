@@ -312,25 +312,25 @@ def test_partial_reduce_keeps_trade_open_and_updates_cash(db_session):
     TradeLifecycleService.process_decision(
         db_session,
         session.id,
-        DecisionCreate(action=DecisionAction.BUY, quantity=100),
+        DecisionCreate(action=DecisionAction.BUY, quantity=200),
     )
     ReplayService.next_candle(db_session, session.id)
     ReplayService.next_candle(db_session, session.id)
     TradeLifecycleService.process_decision(
         db_session,
         session.id,
-        DecisionCreate(action=DecisionAction.REDUCE, quantity=40),
+        DecisionCreate(action=DecisionAction.REDUCE, quantity=100),
     )
 
     position = db_session.query(Position).filter_by(session_id=session.id).first()
     assert position.status == "open"
-    assert position.quantity == 60
-    assert position.realized_pnl == pytest.approx((110.0 - 100.0) * 40)
+    assert position.quantity == 100
+    assert position.realized_pnl == pytest.approx((110.0 - 100.0) * 100)
 
     trade = db_session.query(Trade).filter_by(session_id=session.id).first()
     assert trade.status == "open"
     assert trade.exit_date is None
-    assert trade.quantity == 100
+    assert trade.quantity == 200
 
     buy_execution = db_session.query(Execution).join(Order).filter(
         Execution.session_id == session.id,

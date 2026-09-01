@@ -282,7 +282,7 @@ def test_supertrend_calculation():
 def test_ichimoku_calculation():
     df = create_sample_data(120)
     result_df = IndicatorEngine.compute(df, 'ichimoku', tenkan=9, kijun=26, senkou=52)
-    assert len(result_df) == len(df)
+    assert len(result_df) >= len(df)
     assert 'ITS_9' in result_df.columns
     assert 'IKS_26' in result_df.columns
     assert 'ISA_9' in result_df.columns
@@ -292,21 +292,26 @@ def test_ichimoku_calculation():
     # Verify Tenkan-sen and Kijun-sen formulas
     expected_tenkan = (df['high'].rolling(9).max() + df['low'].rolling(9).min()) / 2
     expected_kijun = (df['high'].rolling(26).max() + df['low'].rolling(26).min()) / 2
-    assert result_df['ITS_9'].iloc[-1] == pytest.approx(expected_tenkan.iloc[-1])
-    assert result_df['IKS_26'].iloc[-1] == pytest.approx(expected_kijun.iloc[-1])
+    
+    current_idx = len(df) - 1
+    assert result_df['ITS_9'].iloc[current_idx] == pytest.approx(expected_tenkan.iloc[-1])
+    assert result_df['IKS_26'].iloc[current_idx] == pytest.approx(expected_kijun.iloc[-1])
 
     # Verify Span A and Span B are present and non-NaN after warm-up
-    assert not pd.isna(result_df['ISA_9'].iloc[-1])
-    assert not pd.isna(result_df['ISB_26'].iloc[-1])
+    assert not pd.isna(result_df['ISA_9'].iloc[current_idx])
+    assert not pd.isna(result_df['ISB_26'].iloc[current_idx])
+    # Also verify they extend into the future
+    assert len(result_df) > len(df)
+    assert not result_df['ISA_9'].dropna().empty
 
-    # Chikou is shifted backward by kijun (26 periods), so the last 26 rows are NaN
-    assert pd.isna(result_df['ICS_26'].iloc[-1])
+    # Chikou is shifted backward by kijun (26 periods), so the current row is NaN
+    assert pd.isna(result_df['ICS_26'].iloc[current_idx])
     assert not pd.isna(result_df['ICS_26'].iloc[50])
 
 def test_ichimoku_non_default_parameters():
     df = create_sample_data(150)
     res_custom = IndicatorEngine.compute(df, 'ichimoku', tenkan=10, kijun=30, senkou=60)
-    assert len(res_custom) == len(df)
+    assert len(res_custom) >= len(df)
     assert 'ITS_10' in res_custom.columns
     assert 'IKS_30' in res_custom.columns
     assert 'ISA_10' in res_custom.columns
@@ -315,5 +320,17 @@ def test_ichimoku_non_default_parameters():
 
     expected_tenkan_10 = (df['high'].rolling(10).max() + df['low'].rolling(10).min()) / 2
     expected_kijun_30 = (df['high'].rolling(30).max() + df['low'].rolling(30).min()) / 2
-    assert res_custom['ITS_10'].iloc[-1] == pytest.approx(expected_tenkan_10.iloc[-1])
-    assert res_custom['IKS_30'].iloc[-1] == pytest.approx(expected_kijun_30.iloc[-1])
+    
+    current_idx = len(df) - 1
+    assert res_custom['ITS_10'].iloc[current_idx] == pytest.approx(expected_tenkan_10.iloc[current_idx])
+    assert res_custom['IKS_30'].iloc[current_idx] == pytest.approx(expected_kijun_30.iloc[current_idx])
+
+    assert not pd.isna(res_custom['ISA_10'].iloc[current_idx])
+    assert not pd.isna(res_custom['ISB_30'].iloc[current_idx])
+    
+    # Verify future cloud extension
+    assert len(res_custom) > len(df)
+    assert not res_custom['ISA_10'].dropna().empty
+
+    assert pd.isna(res_custom['ICS_30'].iloc[current_idx])
+    assert not pd.isna(res_custom['ICS_30'].iloc[50])

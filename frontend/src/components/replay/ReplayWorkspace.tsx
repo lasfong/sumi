@@ -63,6 +63,8 @@ export const ReplayWorkspace: React.FC = () => {
     journalError,
     handleSaveJournal,
     handleSubmitDecision,
+    targetTimeframe,
+    setTargetTimeframe,
   } = useReplayWorkspaceController();
 
   if (!sessionId) {
@@ -137,9 +139,25 @@ export const ReplayWorkspace: React.FC = () => {
           </span>
           {sessionData && (
             <div style={{ display: 'flex', gap: '6px', fontSize: '13px', color: 'var(--text-muted)' }}>
-              <span style={{ background: 'rgba(255,255,255,0.05)', padding: '2px 6px', borderRadius: '4px' }}>
-                {sessionData.timeframe}
-              </span>
+              <select 
+                value={targetTimeframe ?? sessionData.timeframe} 
+                onChange={(e) => setTargetTimeframe(e.target.value === sessionData.timeframe ? undefined : e.target.value)}
+                style={{ 
+                  background: 'rgba(255,255,255,0.05)', 
+                  padding: '2px 6px', 
+                  borderRadius: '4px', 
+                  border: '1px solid rgba(255,255,255,0.1)', 
+                  color: 'var(--text-main)', 
+                  outline: 'none', 
+                  cursor: 'pointer' 
+                }}
+              >
+                {['5m', '15m', '1H', '1D', '1W', '1M'].map(tf => (
+                  <option key={tf} value={tf} style={{ background: '#1e222d' }}>
+                    {tf}
+                  </option>
+                ))}
+              </select>
               <span style={{ background: 'rgba(255,255,255,0.05)', padding: '2px 6px', borderRadius: '4px', textTransform: 'capitalize' }}>
                 {sessionData.adjustment_type}
               </span>

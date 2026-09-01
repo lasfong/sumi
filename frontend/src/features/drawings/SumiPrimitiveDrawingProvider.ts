@@ -6,7 +6,7 @@ import type { CanvasRenderingTarget2D } from 'fancy-canvas';
 import type { DrawingInteractionSnapshot, DrawingProvider, DrawingProviderEvent } from './DrawingProvider';
 import { fibonacciPrice, hitProjectedDrawing, layoutDrawingText, rayEndpoint, rectangleCorners, type ProjectedDrawing, type ScreenPoint } from './drawingGeometry';
 import { snapAnchor, type MagnetCandle, type MagnetMode } from './drawingMagnet';
-import { addTradingDays, countTradingDays, isFutureDate, createDrawing, isDrawingDate, isRightwardRay, type DrawingTool, type SumiDrawing, type SumiDrawingAnchor, type SumiDrawingDocumentV1 } from './drawingDomain';
+import { addTradingDays, countTradingDays, createDrawing, isDrawingDate, isRightwardRay, type DrawingTool, type SumiDrawing, type SumiDrawingAnchor, type SumiDrawingDocumentV1 } from './drawingDomain';
 
 const timeKey = (time: Time | null): string | null => {
   if (time === null) return null;
@@ -39,7 +39,7 @@ class SumiDrawingDocumentPrimitive implements ISeriesPrimitive<Time> {
         if (lastX !== null && prevX !== null) {
           const barWidth = lastX - prevX;
           const tradingDays = countTradingDays(lastCandle.time as string, anchor.time);
-          x = lastX + tradingDays * barWidth;
+          x = (lastX + tradingDays * barWidth) as unknown as typeof x;
         }
       }
       const y = this.series.priceToCoordinate(anchor.price);
@@ -227,12 +227,16 @@ export class SumiPrimitiveDrawingProvider implements DrawingProvider {
     const price = this.series.coordinateToPrice(point.y);
     let time = timeKey(this.chart.timeScale().coordinateToTime(point.x));
     if (price === null || !Number.isFinite(price) || price <= 0) return null;
-    // Fallback: extrapolate time for future whitespace
+    // Fallback: extrapolate time for future whitespace (strictly right of last candle)
     if (!time || !isDrawingDate(time)) {
-      time = this.extrapolateTime(point.x);
-      if (!time || !isDrawingDate(time)) return null;
-      // No magnet snapping in whitespace (no candles to snap to)
-      return { time, price };
+      const lastCandle = this.candles.length > 0 ? this.candles[this.candles.length - 1] : null;
+      const lastX = lastCandle ? this.chart.timeScale().timeToCoordinate(lastCandle.time as Time) : null;
+      if (lastX !== null && point.x > lastX) {
+        time = this.extrapolateTime(point.x);
+        if (!time || !isDrawingDate(time)) return null;
+        return { time, price };
+      }
+      return null;
     }
     const raw = { time, price };
     return snapAnchor(raw, point, this.candles, { timeToX: value => this.chart.timeScale().timeToCoordinate(value as Time), priceToY: value => this.series.priceToCoordinate(value) }, this.magnetMode);
@@ -250,7 +254,7 @@ export class SumiPrimitiveDrawingProvider implements DrawingProvider {
           const barWidth = lastX - prevX;
           // Count trading days between last candle and anchor time
           const tradingDays = countTradingDays(lastCandle.time as string, anchor.time);
-          x = lastX + tradingDays * barWidth;
+          x = (lastX + tradingDays * barWidth) as unknown as typeof x;
         }
       }
       const y = this.series.priceToCoordinate(anchor.price);
@@ -266,11 +270,16 @@ export class SumiPrimitiveDrawingProvider implements DrawingProvider {
     const failure = this.container.dataset.sumiDrawingBodyConversionFailure ?? '';
     const converted = projected.anchors.map((anchor, index) => {
       const rawPrice = failure === `price:${index}` ? null : this.series.coordinateToPrice(anchor.y + dy);
-      let rawTime = failure === `time:${index}` ? null : this.chart.timeScale().coordinateToTime(anchor.x + dx);
+      const rawTime = failure === `time:${index}` ? null : this.chart.timeScale().coordinateToTime(anchor.x + dx);
+      if (failure === `time:${index}`) return null;
       let time = timeKey(rawTime);
       // Extrapolate if in whitespace
       if (!time || !isDrawingDate(time)) {
-        time = this.extrapolateTime(anchor.x + dx);
+        const lastCandle = this.candles.length > 0 ? this.candles[this.candles.length - 1] : null;
+        const lastX = lastCandle ? this.chart.timeScale().timeToCoordinate(lastCandle.time as Time) : null;
+        if (lastX !== null && (anchor.x + dx) > lastX) {
+          time = this.extrapolateTime(anchor.x + dx);
+        }
       }
       const price = rawPrice;
       return price !== null && Number.isFinite(price) && price > 0 && time && isDrawingDate(time) ? { time, price } : null;
@@ -279,7 +288,6 @@ export class SumiPrimitiveDrawingProvider implements DrawingProvider {
     const anchors = converted as SumiDrawingAnchor[];
     if (anchors.length < 2) return anchors;
     const candleIndex = new Map(this.candles.map((candle, index) => [candle.time, index]));
-    const lastCandleTime = this.candles.length > 0 ? this.candles[this.candles.length - 1].time as string : '';
     const logicalDeltas = anchors.map((anchor, index) => {
       const beforeIndex = candleIndex.get(original.anchors[index].time);
       const afterIndex = candleIndex.get(anchor.time);
@@ -289,7 +297,6 @@ export class SumiPrimitiveDrawingProvider implements DrawingProvider {
     });
     // Allow if all deltas are 'missing' or all are the same number
     const numericDeltas = logicalDeltas.filter((d): d is number => typeof d === 'number');
-    const futureCount = logicalDeltas.filter(d => d === 'missing').length;
     if (logicalDeltas.some(d => d === null)) return null;
     if (numericDeltas.length > 0 && !numericDeltas.every(d => d === numericDeltas[0])) return null;
     const priceDeltas = anchors.map((anchor, index) => anchor.price - original.anchors[index].price);
@@ -310,6 +317,17 @@ export class SumiPrimitiveDrawingProvider implements DrawingProvider {
         : index === 2 ? [a, anchor] : [{ ...a, time: anchor.time }, { ...b, price: anchor.price }]; }
     else { const translated = this.translateBody(original, point); if (!translated) return null; anchors = translated; }
     if (original.tool === 'ray' && !isRightwardRay(anchors)) return null;
+    if (original.tool === 'risk-reward' && anchors.length === 3) {
+      const risk = Math.abs(anchors[0].price - anchors[1].price);
+      const reward = Math.abs(anchors[2].price - anchors[0].price);
+      const riskRewardRatio = risk > 0 ? reward / risk : 0;
+      const direction = anchors[2].price >= anchors[0].price ? 'long' : 'short';
+      return { 
+        ...original, 
+        anchors, 
+        geometry: { ...original.geometry, direction, riskRewardRatio: Number(riskRewardRatio.toFixed(4)) } 
+      } as SumiDrawing;
+    }
     return { ...original, anchors } as SumiDrawing;
   }
   private onPointerDown = (event: PointerEvent): void => { if (event.button !== 0 || this.destroyed) return; const point = this.panePoint(event); if (!point) return; const anchor = this.anchorAt(point); if (!anchor) return;

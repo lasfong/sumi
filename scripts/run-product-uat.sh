@@ -28,6 +28,11 @@ if command -v cygpath >/dev/null 2>&1; then
   export MSYS2_ENV_CONV_EXCL="DATABASE_URL;CORS_ALLOWED_ORIGINS;SUMI_API_TARGET;SUMI_FRONTEND_URL;SUMI_BACKEND_URL;SUMI_UAT_DATABASE_PATH;SUMI_PRODUCTION_DATABASE_PATH"
 fi
 
+if command -v lsof >/dev/null 2>&1; then
+  lsof -ti :$BACKEND_PORT | xargs kill -9 2>/dev/null || true
+  lsof -ti :$FRONTEND_PORT | xargs kill -9 2>/dev/null || true
+fi
+
 cleanup() {
   if command -v cygpath >/dev/null 2>&1; then
     if [[ -n "$FRONTEND_PID" ]]; then taskkill //PID "$FRONTEND_PID" //T //F >/dev/null 2>&1 || true; fi

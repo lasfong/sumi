@@ -704,7 +704,7 @@ export const DataSyncPanel: React.FC = () => {
                       {run.accepted_count} nến
                     </td>
                     <td style={{ padding: '8px 12px', color: 'var(--text-muted)', fontSize: '12px' }}>
-                      {run.duration_ms.toFixed(1)} ms
+                      {run.duration_ms?.toFixed(1) ?? '0.0'} ms
                     </td>
                     <td style={{ padding: '8px 12px' }}>
                       <span

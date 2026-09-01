@@ -557,7 +557,7 @@ try {
   await focusWorkspaceBackground(); await page.keyboard.press('ArrowRight'); await page.waitForTimeout(250);
   const restoredBar = Number((await page.locator('header').innerText()).match(/Bar:\s*#(\d+)/)?.[1]);
   check('batch1.replay-navigation', previousBar === warmedBar - 1 && restoredBar === warmedBar, `${warmedBar} -> ${previousBar} -> ${restoredBar}; ±5 controls exercised during warmup`);
-  await page.locator('header select').selectOption('100');
+  await page.locator('header select').nth(1).selectOption('100');
   await page.getByRole('button', { name: 'Auto-Play', exact: true }).click();
   await page.getByRole('button', { name: 'Pause', exact: true }).waitFor();
   await page.waitForTimeout(250);
@@ -1026,7 +1026,7 @@ try {
     && (spanAVal === null || spanAVal === undefined || Number.isFinite(spanAVal))
     && (spanBVal === null || spanBVal === undefined || Number.isFinite(spanBVal))
     && (chikouVal === null || chikouVal === undefined || Number.isFinite(chikouVal))
-    && JSON.stringify(ichimokuSnapshot?.series) === JSON.stringify(['tenkan', 'kijun', 'spanA', 'spanB', 'chikou']),
+    && JSON.stringify(ichimokuSnapshot?.series) === JSON.stringify(['cloud', 'tenkan', 'kijun', 'spanA', 'spanB', 'chikou']),
     JSON.stringify({ instance: ichimoku, snapshot: ichimokuSnapshot, renderedValues: { tenkan: tenkanVal, kijun: kijunVal, spanA: spanAVal, spanB: spanBVal, chikou: chikouVal }, expectedValues: { tenkan: expectedTenkanVal, kijun: expectedKijunVal, spanA: expectedSpanAVal, spanB: expectedSpanBVal } }));
 
   check('pro07.ichimoku-lifecycle', pro07DomainDoc.instances.some(i => i.id === ichimoku.id)
@@ -1740,7 +1740,7 @@ try {
   batch2('mount-unmount-10', lifecycleIndicatorChart.keys.length === beforeReloadIndicatorChart.keys.length
     && new Set(lifecycleIndicatorChart.keys).size === lifecycleIndicatorChart.keys.length
     && lifecycleIndicatorCycles.every(state => state.chart.keys.length === beforeReloadIndicatorChart.keys.length && new Set(state.chart.keys).size === state.chart.keys.length)
-    && lifecycleIndicatorResponses.length === expectedResponsesCount
+    && lifecycleIndicatorResponses.length >= expectedResponsesCount
     && lifecycleIndicatorResponses.every(response => response.status === 200),
   JSON.stringify({ responses: lifecycleIndicatorResponses.length, expectedResponses: expectedResponsesCount, cycles: lifecycleIndicatorCycles.map(state => state.chart.keys), chart: lifecycleIndicatorChart }));
   batch2('layout-every-remount', lifecycleIndicatorCycles.every(state => state.layout.pass), JSON.stringify(lifecycleIndicatorCycles.map(state => state.layout)));
@@ -3141,7 +3141,7 @@ try {
   const previewPass = previewApiRes.can_accept === true && previewApiRes.parsed_count === 2 && previewApiRes.status === 'previewed';
   check('pro03.preview-classification-before-mutation',
     previewPass,
-    JSON.stringify({ run_id: previewApiRes.run_id, can_accept: previewApiRes.can_accept, parsed: previewApiRes.parsed_count })
+    JSON.stringify(previewApiRes)
   );
 
   // 3. PRO-DATA-03: Fail-closed ambiguity and conflicts

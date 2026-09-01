@@ -37,16 +37,13 @@ describe('integrated practice workflow UI', () => {
     resolveSubmit?.({ ok: true, message: 'BUY executed.' });
   });
 
-  it('keeps the modal open with honest backend rejection and blocks historical actions', async () => {
-    const user = userEvent.setup();
-    const onSubmit = vi.fn().mockResolvedValue({ ok: false, message: 'Cannot sell: T+2 constraint.' });
+  it('disables SELL button due to T+2 constraints and blocks historical actions', async () => {
+    const onSubmit = vi.fn();
     const { rerender } = render(<TradeControls snapshot={snapshot({ positions: [{ id: 1, symbol: 'FPT', quantity: 100, average_price: 90, total_cost: 9000, current_price: 100, realized_pnl: 0, unrealized_pnl: 1000, available_quantity: 0, opened_at: '2024-01-01' }] })} onSubmitDecision={onSubmit} />);
-    await user.click(screen.getByRole('button', { name: 'SELL' }));
-    await user.click(screen.getByRole('button', { name: 'Submit SELL' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('T+2 constraint');
-    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    const sellBtn = screen.getByRole('button', { name: 'SELL' });
+    expect(sellBtn).toBeDisabled();
+    expect(sellBtn).toHaveAttribute('title', 'T+2: Cổ phiếu chưa về tài khoản');
 
-    await user.click(screen.getByRole('button', { name: 'Cancel' }));
     rerender(<TradeControls snapshot={snapshot({ can_trade: false, historical: true, latest_activity_index: 15, trade_block_reason: 'Advance to bar #16.' })} onSubmitDecision={onSubmit} />);
     expect(screen.getByTestId('historical-trade-block')).toHaveTextContent('Advance to bar #16');
     expect(screen.getByRole('button', { name: 'BUY' })).toBeDisabled();

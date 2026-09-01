@@ -193,10 +193,15 @@ class PracticeWorkflowService:
                 total_cost = max(0.0, average_price * quantity)
                 current_cash += execution.net_amount
 
+        def get_exc_bar_idx(execution):
+            if execution.execution_candle_index is not None:
+                return execution.execution_candle_index
+            return decision_by_id[order_by_id[execution.order_id].decision_id].candle_index
+
         settled_bought = sum(
             execution.quantity for execution in visible_executions
             if order_by_id[execution.order_id].side == "BUY"
-            and decision_by_id[order_by_id[execution.order_id].decision_id].candle_index <= current_index - 2
+            and get_exc_bar_idx(execution) <= current_index - 2
         )
         visible_sold = sum(
             execution.quantity for execution in visible_executions
@@ -208,10 +213,10 @@ class PracticeWorkflowService:
         earliest_release_date = None
         if blocked_quantity > 0:
             unsettled_buy_indices = [
-                decision_by_id[order_by_id[execution.order_id].decision_id].candle_index
+                get_exc_bar_idx(execution)
                 for execution in visible_executions
                 if order_by_id[execution.order_id].side == "BUY"
-                and decision_by_id[order_by_id[execution.order_id].decision_id].candle_index > current_index - 2
+                and get_exc_bar_idx(execution) > current_index - 2
             ]
             if unsettled_buy_indices:
                 earliest_buy_idx = min(unsettled_buy_indices)

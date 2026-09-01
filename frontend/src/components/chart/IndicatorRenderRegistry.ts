@@ -296,7 +296,21 @@ export class IndicatorRenderRegistry {
         return [];
       }
 
+      const allTimes = new Set<string>();
+      spanAPoints.forEach(p => allTimes.add(p.time as string));
+      spanBPoints.forEach(p => allTimes.add(p.time as string));
+      
+      const spanAMap = new Map(spanAPoints.map(p => [p.time as string, p.value]));
+      const spanBMap = new Map(spanBPoints.map(p => [p.time as string, p.value]));
+
+      const cloudData = Array.from(allTimes).sort().map(time => ({
+        time,
+        spanA: spanAMap.get(time) ?? null,
+        spanB: spanBMap.get(time) ?? null
+      }));
+
       return [
+        { seriesKey: 'cloud', name: 'Kumo', data: cloudData, type: 'ichimoku-cloud' },
         { seriesKey: 'tenkan', name: `Tenkan (${tenkan})`, data: tenkanPoints, color: instance.styles.tenkan?.color ?? '#26A69A' },
         { seriesKey: 'kijun', name: `Kijun (${kijun})`, data: kijunPoints, color: instance.styles.kijun?.color ?? '#EF5350' },
         { seriesKey: 'spanA', name: 'Span A', data: spanAPoints, color: instance.styles.spanA?.color ?? '#00E5FF' },

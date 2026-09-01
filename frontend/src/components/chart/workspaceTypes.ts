@@ -35,9 +35,9 @@ export interface VolumeData {
 export interface IndicatorSeriesData {
   seriesKey: string;
   name: string;
-  data: Array<LineData | HistogramData>;
+  data: Array<LineData | HistogramData | Record<string, unknown>>;
   color?: string;
-  type?: 'line' | 'histogram';
+  type?: 'line' | 'histogram' | 'ichimoku-cloud';
   references?: Array<{ value: number; label: string; color?: string }>;
   scale?: { minimum: number; maximum: number };
 }

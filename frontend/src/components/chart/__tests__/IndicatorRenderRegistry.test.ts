@@ -372,12 +372,13 @@ describe('IndicatorRenderRegistry', () => {
       ICS_26: 110.0,
     }];
     const rendered = IndicatorRenderRegistry.mapBackendData(validData, ichiInstance);
-    expect(rendered.map(s => s.seriesKey)).toEqual(['tenkan', 'kijun', 'spanA', 'spanB', 'chikou']);
-    expect(rendered[0]).toMatchObject({ name: 'Tenkan (9)', data: [{ time: '2026-01-02', value: 105.0 }] });
-    expect(rendered[1]).toMatchObject({ name: 'Kijun (26)', data: [{ time: '2026-01-02', value: 100.0 }] });
-    expect(rendered[2]).toMatchObject({ name: 'Span A', data: [{ time: '2026-01-02', value: 102.5 }] });
-    expect(rendered[3]).toMatchObject({ name: 'Span B', data: [{ time: '2026-01-02', value: 98.0 }] });
-    expect(rendered[4]).toMatchObject({ name: 'Chikou (26)', data: [{ time: '2026-01-02', value: 110.0 }] });
+    expect(rendered.map(s => s.seriesKey)).toEqual(['cloud', 'tenkan', 'kijun', 'spanA', 'spanB', 'chikou']);
+    expect(rendered[0]).toMatchObject({ name: 'Kumo', data: [{ time: '2026-01-02', spanA: 102.5, spanB: 98.0 }] });
+    expect(rendered[1]).toMatchObject({ name: 'Tenkan (9)', data: [{ time: '2026-01-02', value: 105.0 }] });
+    expect(rendered[2]).toMatchObject({ name: 'Kijun (26)', data: [{ time: '2026-01-02', value: 100.0 }] });
+    expect(rendered[3]).toMatchObject({ name: 'Span A', data: [{ time: '2026-01-02', value: 102.5 }] });
+    expect(rendered[4]).toMatchObject({ name: 'Span B', data: [{ time: '2026-01-02', value: 98.0 }] });
+    expect(rendered[5]).toMatchObject({ name: 'Chikou (26)', data: [{ time: '2026-01-02', value: 110.0 }] });
 
     // Non-default parameters (tenkan: 10, kijun: 30, senkou: 60)
     const ichiCustom: IndicatorInstanceV1 = {
@@ -393,9 +394,13 @@ describe('IndicatorRenderRegistry', () => {
       ICS_30: 111.0,
     }];
     const renderedCustom = IndicatorRenderRegistry.mapBackendData(customData, ichiCustom);
-    expect(renderedCustom.map(s => s.seriesKey)).toEqual(['tenkan', 'kijun', 'spanA', 'spanB', 'chikou']);
-    expect(renderedCustom[0]).toMatchObject({ name: 'Tenkan (10)', data: [{ time: '2026-01-02', value: 106.0 }] });
-    expect(renderedCustom[1]).toMatchObject({ name: 'Kijun (30)', data: [{ time: '2026-01-02', value: 101.0 }] });
+    expect(renderedCustom.map(s => s.seriesKey)).toEqual(['cloud', 'tenkan', 'kijun', 'spanA', 'spanB', 'chikou']);
+    expect(renderedCustom[0]).toMatchObject({ name: 'Kumo', data: [{ time: '2026-01-02', spanA: 103.5, spanB: 97.0 }] });
+    expect(renderedCustom[1]).toMatchObject({ name: 'Tenkan (10)', data: [{ time: '2026-01-02', value: 106.0 }] });
+    expect(renderedCustom[2]).toMatchObject({ name: 'Kijun (30)', data: [{ time: '2026-01-02', value: 101.0 }] });
+    expect(renderedCustom[3]).toMatchObject({ name: 'Span A', data: [{ time: '2026-01-02', value: 103.5 }] });
+    expect(renderedCustom[4]).toMatchObject({ name: 'Span B', data: [{ time: '2026-01-02', value: 97.0 }] });
+    expect(renderedCustom[5]).toMatchObject({ name: 'Chikou (30)', data: [{ time: '2026-01-02', value: 111.0 }] });
 
     // Partial Ichimoku (missing Span B) must fail closed as a whole
     const partialData = [{

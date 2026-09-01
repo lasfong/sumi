@@ -37,13 +37,12 @@ export const getIndicatorData = async (symbol: string, indicator: string, params
   return response.data.data;
 };
 
-export const getSessionIndicatorData = async (sessionId: number, indicator: string, params: Record<string, string | number | boolean> = {}, signal?: AbortSignal): Promise<IndicatorDataPoint[]> => {
+export const getSessionIndicatorData = async (sessionId: number, indicator: string, params: Record<string, string | number | boolean> = {}, signal?: AbortSignal, timeframe?: string): Promise<IndicatorDataPoint[]> => {
+  const queryParams: Record<string, string | number | boolean> = { indicator, ...params };
+  if (timeframe) queryParams.timeframe = timeframe;
   const response = await apiClient.get(`/replay/sessions/${sessionId}/indicators`, {
     signal,
-    params: {
-      indicator,
-      ...params
-    }
+    params: queryParams
   });
   return response.data.data;
 };

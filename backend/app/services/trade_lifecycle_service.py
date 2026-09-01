@@ -69,6 +69,9 @@ class TradeLifecycleService:
             raise HTTPException(status_code=400, detail="No candles available in session")
 
         current_candle = candles[-1] # The latest visible candle
+        
+        if decision_in.quantity is not None and decision_in.quantity % 100 != 0:
+            raise HTTPException(status_code=400, detail="Quantity must be a multiple of 100")
 
         # 1. Create Decision
         exec_price = decision_in.price if decision_in.price is not None else current_candle.close
@@ -123,6 +126,9 @@ class TradeLifecycleService:
         if qty <= 0:
             db.rollback()
             raise HTTPException(status_code=400, detail="Execution quantity must be greater than zero")
+        if int(qty) % 100 != 0:
+            db.rollback()
+            raise HTTPException(status_code=400, detail="Execution quantity must be in 100-share lot increments")
 
         try:
             if decision_in.order_type == OrderType.LIMIT.value:
@@ -271,33 +277,29 @@ class TradeLifecycleService:
 
         from app.services.practice_workflow_service import PracticeWorkflowService
         all_candles = PracticeWorkflowService._candles(db, session)
-        
-        unique_dates = []
-        for c in all_candles:
-            d = c.timestamp.date() if hasattr(c.timestamp, 'date') else c.timestamp
-            if not unique_dates or unique_dates[-1] != d:
-                unique_dates.append(d)
-                
-        current_candle = all_candles[session.current_index]
-        current_date = current_candle.timestamp.date() if hasattr(current_candle.timestamp, 'date') else current_candle.timestamp
-        
+
         settled_bought = 0.0
         earliest_unsettled_release_date = None
-        
+
         for exc in buy_executions:
-            exc_date = exc.execution_date.date() if hasattr(exc.execution_date, 'date') else exc.execution_date
-            try:
-                d_idx = unique_dates.index(exc_date)
-                release_date = unique_dates[d_idx + 2] if d_idx + 2 < len(unique_dates) else None
-            except ValueError:
-                release_date = None
-                
-            if release_date and current_date >= release_date:
+            exc_bar_idx = exc.execution_candle_index
+            if exc_bar_idx is None:
+                exc_date = exc.execution_date.date() if hasattr(exc.execution_date, 'date') else exc.execution_date
+                for idx, c in enumerate(all_candles):
+                    c_date = c.timestamp.date() if hasattr(c.timestamp, 'date') else c.timestamp
+                    if c_date == exc_date:
+                        exc_bar_idx = idx
+                        break
+
+            release_bar_idx = (exc_bar_idx + 2) if exc_bar_idx is not None else None
+
+            if release_bar_idx is not None and session.current_index >= release_bar_idx:
                 settled_bought += exc.quantity
             else:
-                if release_date:
-                    if earliest_unsettled_release_date is None or release_date < earliest_unsettled_release_date:
-                        earliest_unsettled_release_date = release_date
+                if release_bar_idx is not None and release_bar_idx < len(all_candles):
+                    rel_date = all_candles[release_bar_idx].timestamp.date() if hasattr(all_candles[release_bar_idx].timestamp, 'date') else all_candles[release_bar_idx].timestamp
+                    if earliest_unsettled_release_date is None or rel_date < earliest_unsettled_release_date:
+                        earliest_unsettled_release_date = rel_date
 
         # 2. Calculate total quantity already sold (which naturally uses up the settled bought quantity first)
         total_sold = db.query(func.sum(Execution.quantity)) \

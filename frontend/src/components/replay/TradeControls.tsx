@@ -160,9 +160,10 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
   }, [confidenceScore, emotion, isTradeAction, limitPrice, marketRegime, mistakeTag, note, onSubmitDecision, orderType, pendingAction, quantity, reason, ruleViolation, setupType, sizingCalc, snapshot, stopLoss, targetPrice]);
 
   const actionsDisabled = !snapshot.can_trade || submitting || disabled || limitedViewport;
-  const hasOpenPosition = snapshot.positions.length > 0;
-  const sellDisabled = actionsDisabled || (!hasOpenPosition || snapshot.available_quantity <= 0);
-  const sellTitle = (!hasOpenPosition) ? "No open position" : (snapshot.available_quantity <= 0 ? "Cổ phiếu chưa về tài khoản (T+2)" : undefined);
+  const openPosition = snapshot.positions.find(p => p.quantity > 0);
+  const availableQty = openPosition?.available_quantity || 0;
+  const sellDisabled = actionsDisabled || !openPosition || availableQty <= 0;
+  const sellTitle = !openPosition ? "No open position" : (availableQty <= 0 ? "T+2: Cổ phiếu chưa về tài khoản" : undefined);
 
   useModalFocus(pendingAction !== null, close, dialogElement);
   return <section className="panel" data-testid="trade-controls" style={{ padding: 12, display: 'grid', gap: 10 }}>
@@ -191,7 +192,7 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
         </div>
         {isTradeAction && <>
           <label>Quantity
-            <input aria-label="Quantity" type="number" min="1" value={quantity} onChange={event => setQuantity(event.target.value)} />
+            <input aria-label="Quantity" type="number" step="100" min="100" value={quantity} onChange={event => setQuantity(event.target.value)} />
           </label>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
@@ -298,7 +299,7 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
         {feedback && <div role="alert" style={{ color: feedback.ok ? 'var(--color-buy)' : 'var(--color-sell)' }}>{feedback.message}</div>}
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
           <button onClick={close} disabled={submitting}>Cancel</button>
-          <button className="btn-primary" onClick={submit} disabled={submitting}>{submitting ? 'Submitting…' : `Submit ${pendingAction}`}</button>
+          <button className="btn-primary" onClick={submit} disabled={submitting || (isTradeAction && Number(quantity) % 100 !== 0)}>{submitting ? 'Submitting…' : `Submit ${pendingAction}`}</button>
         </div>
       </div>
     </div>}

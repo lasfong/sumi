@@ -23,8 +23,9 @@ export const listReplaySessions = async (limit: number = 10): Promise<ReplaySess
   return response.data;
 };
 
-export const getSessionCandles = async (sessionId: number): Promise<Candle[]> => {
-  const response = await apiClient.get(`/replay/sessions/${sessionId}/candles`);
+export const getSessionCandles = async (sessionId: number, targetTimeframe?: string): Promise<Candle[]> => {
+  const params = targetTimeframe ? { target_timeframe: targetTimeframe } : undefined;
+  const response = await apiClient.get(`/replay/sessions/${sessionId}/candles`, { params });
   return response.data;
 };
 

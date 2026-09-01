@@ -107,9 +107,16 @@ export const useReplayWorkspaceController = () => {
     }
   });
 
+  const [targetTimeframe, setTargetTimeframe] = useState<string | undefined>(undefined);
+  const [prevSessionId, setPrevSessionId] = useState<number | null | undefined>(sessionId);
+  if (sessionId !== prevSessionId) {
+    setPrevSessionId(sessionId);
+    setTargetTimeframe(undefined);
+  }
+
   const { data: candlesData, refetch: refetchCandles } = useQuery({
-    queryKey: ['candles', sessionId],
-    queryFn: () => getSessionCandles(sessionId!),
+    queryKey: ['candles', sessionId, targetTimeframe],
+    queryFn: () => getSessionCandles(sessionId!, targetTimeframe),
     enabled: !!sessionId,
   });
 
@@ -225,7 +232,7 @@ export const useReplayWorkspaceController = () => {
           close: newCandle.close,
         };
         chartRef.current.updateCandle(chartCandle, {
-          time: newCandle.time as Time,
+          time: wsDateKey as Time,
           value: newCandle.volume,
           color: newCandle.close >= newCandle.open ? 'rgba(0, 230, 118, 0.5)' : 'rgba(255, 23, 68, 0.5)'
         });
@@ -438,11 +445,12 @@ export const useReplayWorkspaceController = () => {
         ...previous, [instance.id]: { ...previous[instance.id], status: 'loading', values: previous[instance.id]?.values ?? {} },
       })));
       const paramsKey = JSON.stringify(Object.entries(instance.params).sort(([a], [b]) => a.localeCompare(b)));
-      const workKey = `${sessionId}:${candlesData?.length ?? 0}:${instance.definitionId}:${paramsKey}`;
+      const baseIndex = sessionData?.current_index ?? candlesData?.length ?? 0;
+      const workKey = `${sessionId}:${targetTimeframe ?? 'default'}:${baseIndex}:${instance.definitionId}:${paramsKey}`;
       void (async () => {
         let result: { stale: boolean; data?: IndicatorDataPoint[] };
         try {
-          result = await indicatorRequests.request(instance.id, workKey, signal => getSessionIndicatorData(sessionId!, instance.definitionId, instance.params, signal));
+          result = await indicatorRequests.request(instance.id, workKey, signal => getSessionIndicatorData(sessionId!, instance.definitionId, instance.params, signal, targetTimeframe));
         } catch (error) {
           if (!effectActive || (error as { code?: string }).code === 'ERR_CANCELED' || (error as { name?: string }).name === 'AbortError') return;
           publishFailure(instance.id, 'transport', 'Data request failed — retry by showing or editing this indicator.');
@@ -481,7 +489,7 @@ export const useReplayWorkspaceController = () => {
       })();
     }
     return () => { effectActive = false; indicatorRequests.cancelAll(); };
-  }, [candlesData?.length, currentCandle, currentDate, indicatorDocument, indicatorRequests, sessionId, volumeData]);
+  }, [candlesData?.length, currentCandle, currentDate, indicatorDocument, indicatorRequests, sessionId, sessionData?.current_index, volumeData, targetTimeframe]);
 
   useEffect(() => {
     if (!practiceData) return;
@@ -500,6 +508,7 @@ export const useReplayWorkspaceController = () => {
   useEffect(() => () => indicatorRequests.cancelAll(), [indicatorRequests]);
   return {
     sessionId, chartRef, symbolName, sessionStatus: sessionData?.status, sessionData, sourceContext, currentDate, currentCandle, candleCount: candlesData?.length ?? 0,
+    targetTimeframe, setTargetTimeframe,
     handleCreateSession, handleResumeSession, isCreatingSession: createMutation.isPending, handleClearSession, isValidating,
     indicatorDefinitions, indicatorDocument, indicatorRuntime, addIndicatorInstance, updateIndicatorInstance,
     removeIndicatorInstance, toggleIndicatorInstance, moveIndicatorInstance,
