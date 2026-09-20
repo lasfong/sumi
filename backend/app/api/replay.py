@@ -5,6 +5,7 @@ from app.dependencies import get_db
 from app.schemas.replay_schema import ReplaySessionCreate, ReplaySessionResponse
 from app.schemas.candle_schema import CandleResponse
 from app.services.replay_service import ReplayService
+from app.services.practice_workflow_service import PracticeWorkflowService
 
 router = APIRouter()
 
@@ -148,12 +149,27 @@ def get_session_indicators(
     response_data = []
     result_df.index.name = "timestamp"
     result_df.reset_index(inplace=True)
+    max_visible_ts = candles[-1].timestamp if candles else None
     for _, row in result_df.iterrows():
-        record = {"timestamp": row["timestamp"].isoformat()}
+        row_ts = row["timestamp"]
+        is_projected = False
+        if max_visible_ts is not None:
+            try:
+                is_projected = bool(pd.to_datetime(row_ts) > pd.to_datetime(max_visible_ts))
+            except Exception:
+                is_projected = False
+
+        record = {
+            "timestamp": row_ts.isoformat(),
+        }
+        if is_projected:
+            record["is_projected"] = True
+
         for col in new_cols:
             val = row[col]
             record[col] = None if pd.isna(val) else val
         response_data.append(record)
+
         
     return {
         "session_id": session_id,
@@ -161,3 +177,9 @@ def get_session_indicators(
         "indicator": indicator,
         "data": response_data
     }
+
+
+@router.post("/sessions/{session_id}/reset-practice")
+def reset_practice(session_id: int, db: Session = Depends(get_db)):
+    PracticeWorkflowService.reset_practice(db, session_id)
+    return {"status": "succeeded", "message": f"Practice trades reset for session {session_id}"}

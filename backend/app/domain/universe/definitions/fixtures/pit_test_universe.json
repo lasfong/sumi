@@ -1,0 +1,83 @@
+{
+  "universe_id": "TEST-PIT",
+  "version": "fixture_v1",
+  "name": "Point-in-Time Test Fixture Universe",
+  "status": "APPROVED",
+  "default_mode": "POINT_IN_TIME",
+  "effective_from": "2024-01-01",
+  "effective_to": "2026-12-31",
+  "selection_purpose": "Verification of point-in-time constituent lifecycles, additions, delistings, and coverage",
+  "selection_rules": [
+    "Include AAA from 2024-01-01 to 2026-12-31",
+    "Include BBB from 2024-06-01 to 2026-12-31 (late listing)",
+    "Include CCC from 2024-01-01 to 2025-06-30 (delisted)",
+    "Include DDD as SUSPENDED",
+    "Include EEE as RESERVE"
+  ],
+  "source_evidence": "Synthetic test fixture for invariant checking",
+  "metadata": {
+    "fixture_type": "unit_test_oracle"
+  },
+  "members": [
+    {
+      "symbol": "AAA",
+      "exchange": "HOSE",
+      "company_name": "Test Alpha Corp",
+      "sector": "Technology",
+      "effective_from": "2024-01-01",
+      "effective_to": "2026-12-31",
+      "status": "ACTIVE",
+      "inclusion_reason": "Continuous core listing",
+      "weight": 1.0,
+      "metadata": {}
+    },
+    {
+      "symbol": "BBB",
+      "exchange": "HOSE",
+      "company_name": "Test Beta Corp",
+      "sector": "Financials",
+      "effective_from": "2024-06-01",
+      "effective_to": "2026-12-31",
+      "status": "ACTIVE",
+      "inclusion_reason": "Added on 2024-06-01",
+      "weight": 1.0,
+      "metadata": {}
+    },
+    {
+      "symbol": "CCC",
+      "exchange": "HNX",
+      "company_name": "Test Gamma Corp",
+      "sector": "Industrials",
+      "effective_from": "2024-01-01",
+      "effective_to": "2025-06-30",
+      "status": "ACTIVE",
+      "inclusion_reason": "Delisted after 2025-06-30",
+      "weight": 1.0,
+      "metadata": {}
+    },
+    {
+      "symbol": "DDD",
+      "exchange": "UPCOM",
+      "company_name": "Test Delta Corp",
+      "sector": "Energy",
+      "effective_from": "2024-01-01",
+      "effective_to": "2026-12-31",
+      "status": "SUSPENDED",
+      "inclusion_reason": "Trading suspended",
+      "weight": 1.0,
+      "metadata": {}
+    },
+    {
+      "symbol": "EEE",
+      "exchange": "HOSE",
+      "company_name": "Test Epsilon Corp",
+      "sector": "Materials",
+      "effective_from": "2024-01-01",
+      "effective_to": "2026-12-31",
+      "status": "RESERVE",
+      "inclusion_reason": "Reserve candidate buffer",
+      "weight": 1.0,
+      "metadata": {}
+    }
+  ]
+}

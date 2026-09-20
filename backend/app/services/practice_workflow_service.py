@@ -323,3 +323,14 @@ class PracticeWorkflowService:
             positions=positions,
             trades=projected_trades,
         )
+
+    @staticmethod
+    def reset_practice(db: Session, session_id: int) -> None:
+        session = ReplayService.get_session(db, session_id)
+        db.query(Execution).filter(Execution.session_id == session_id).delete()
+        db.query(Order).filter(Order.session_id == session_id).delete()
+        db.query(Decision).filter(Decision.session_id == session_id).delete()
+        db.query(Position).filter(Position.session_id == session_id).delete()
+        db.query(Trade).filter(Trade.session_id == session_id).delete()
+        session.current_cash = session.initial_cash
+        db.commit()

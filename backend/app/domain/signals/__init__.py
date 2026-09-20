@@ -1,0 +1,178 @@
+"""Signals domain package containing pure signal models, registry, and algorithms."""
+
+from app.domain.signals.candle_features import (
+    CandleGeometry,
+    calculate_candle_geometry,
+    calculate_causal_atr,
+)
+from app.domain.signals.models import (
+    CandleBar,
+    SignalDefinition,
+    SignalOutputPoint,
+    SignalOutputType,
+    SignalQuality,
+    SignalSeriesResult,
+    SignalStatus,
+    compute_canonical_params_hash,
+)
+from app.domain.signals.patterns import (
+    calculate_any_bearish_pattern,
+    calculate_any_bullish_pattern,
+    calculate_bearish_engulfing,
+    calculate_bullish_engulfing,
+    calculate_dark_cloud_cover,
+    calculate_evening_star,
+    calculate_hammer,
+    calculate_inside_bar_breakout_down,
+    calculate_inside_bar_breakout_up,
+    calculate_morning_star,
+    calculate_piercing_line,
+    calculate_shooting_star,
+    calculate_tweezer_bottom,
+    calculate_tweezer_top,
+)
+from app.domain.signals.regimes import (
+    calculate_downtrend_regime,
+    calculate_new_high,
+    calculate_new_low,
+    calculate_pullback_regime,
+    calculate_recovery_regime,
+    calculate_sideways_regime,
+    calculate_uptrend_regime,
+)
+from app.domain.signals.registry import SignalRegistry
+from app.domain.signals.support_resistance import (
+    calculate_near_resistance,
+    calculate_near_support,
+)
+from app.domain.signals.technical import (
+    calculate_composite_technical_trigger,
+    calculate_ema_cross,
+    calculate_macd_signal_cross,
+    calculate_macd_zero_cross,
+    calculate_rsi_level_cross,
+    calculate_swing_break,
+    compute_causal_ema,
+    compute_causal_macd,
+    compute_causal_rsi,
+)
+from app.domain.signals.volume import (
+    calculate_relative_volume,
+    calculate_volume_climax_down,
+    calculate_volume_climax_up,
+    calculate_volume_spike,
+    validate_relative_volume_params,
+    validate_volume_spike_params,
+)
+from app.domain.signals.structure import calculate_candle_structure_score
+from app.domain.signals.vsa import (
+    calculate_spring,
+    calculate_strong_demand,
+    calculate_strong_demand_at_support,
+    calculate_strong_supply_at_resistance,
+    calculate_upthrust,
+    calculate_weak_demand,
+)
+from app.domain.signals.ichimoku import (
+    calculate_ichimoku_score,
+    calculate_ichimoku_bullish,
+    calculate_ichimoku_bearish,
+    calculate_ichimoku_tk_cross_bullish,
+    calculate_ichimoku_tk_cross_bearish,
+    calculate_ichimoku_kumo_breakout_bullish,
+    calculate_ichimoku_kumo_breakout_bearish,
+)
+from app.domain.signals.divergence import (
+    calculate_confirmed_pivot_high,
+    calculate_confirmed_pivot_low,
+    calculate_rsi_regular_bullish,
+    calculate_rsi_regular_bearish,
+    calculate_rsi_hidden_bullish,
+    calculate_rsi_hidden_bearish,
+    calculate_macd_regular_bullish,
+    calculate_macd_regular_bearish,
+    calculate_macd_hidden_bullish,
+    calculate_macd_hidden_bearish,
+    calculate_stoch_regular_bullish,
+    calculate_stoch_regular_bearish,
+    calculate_stoch_hidden_bullish,
+    calculate_stoch_hidden_bearish,
+)
+from app.domain.signals.health import (
+    calculate_technical_health_score,
+    calculate_technical_health_favorable,
+    calculate_technical_health_unfavorable,
+)
+from app.domain.signals.flow_events import (
+    calculate_bb_direction_rising,
+    calculate_bb_direction_falling,
+    calculate_bb_regime_positive,
+    calculate_bb_regime_negative,
+    calculate_bb_confluence_bullish,
+    calculate_bb_confluence_bearish,
+    calculate_bb_turn_up,
+    calculate_bb_turn_down,
+)
+
+
+
+__all__ = [
+    "CandleBar",
+    "CandleGeometry",
+    "SignalDefinition",
+    "SignalOutputPoint",
+    "SignalOutputType",
+    "SignalQuality",
+    "SignalSeriesResult",
+    "SignalStatus",
+    "SignalRegistry",
+    "compute_canonical_params_hash",
+    "calculate_candle_geometry",
+    "calculate_causal_atr",
+    "calculate_candle_structure_score",
+    "calculate_relative_volume",
+    "calculate_volume_climax_down",
+    "calculate_volume_climax_up",
+    "calculate_volume_spike",
+    "calculate_spring",
+    "calculate_strong_demand",
+    "calculate_strong_demand_at_support",
+    "calculate_strong_supply_at_resistance",
+    "calculate_upthrust",
+    "calculate_weak_demand",
+    "calculate_ichimoku_score",
+    "calculate_ichimoku_bullish",
+    "calculate_ichimoku_bearish",
+    "calculate_ichimoku_tk_cross_bullish",
+    "calculate_ichimoku_tk_cross_bearish",
+    "calculate_ichimoku_kumo_breakout_bullish",
+    "calculate_ichimoku_kumo_breakout_bearish",
+    "calculate_confirmed_pivot_high",
+    "calculate_confirmed_pivot_low",
+    "calculate_rsi_regular_bullish",
+    "calculate_rsi_regular_bearish",
+    "calculate_rsi_hidden_bullish",
+    "calculate_rsi_hidden_bearish",
+    "calculate_macd_regular_bullish",
+    "calculate_macd_regular_bearish",
+    "calculate_macd_hidden_bullish",
+    "calculate_macd_hidden_bearish",
+    "calculate_stoch_regular_bullish",
+    "calculate_stoch_regular_bearish",
+    "calculate_stoch_hidden_bullish",
+    "calculate_stoch_hidden_bearish",
+    "calculate_technical_health_score",
+    "calculate_technical_health_favorable",
+    "calculate_technical_health_unfavorable",
+    "calculate_bb_direction_rising",
+    "calculate_bb_direction_falling",
+    "calculate_bb_regime_positive",
+    "calculate_bb_regime_negative",
+    "calculate_bb_confluence_bullish",
+    "calculate_bb_confluence_bearish",
+    "calculate_bb_turn_up",
+    "calculate_bb_turn_down",
+    "validate_relative_volume_params",
+    "validate_volume_spike_params",
+]
+

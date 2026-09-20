@@ -38,10 +38,14 @@ app.include_router(analytics.router, prefix="/api/replay", tags=["analytics"])
 app.include_router(symbols.router, prefix="/api", tags=["symbols"])
 app.include_router(journal.router, prefix="/api/replay", tags=["journal"])
 
-from app.api import indicators, ws_replay, backtest, scanner, strategy_lab, sync
+from app.api import indicators, ws_replay, backtest, scanner, strategy_lab, sync, signals, bb, universe
 app.include_router(indicators.router, prefix="/api/indicators", tags=["indicators"])
 app.include_router(ws_replay.router, prefix="/api", tags=["websocket"])
 app.include_router(backtest.router, prefix="/api/backtest", tags=["backtest"])
 app.include_router(scanner.router, prefix="/api/scanner", tags=["scanner"])
 app.include_router(strategy_lab.router, prefix="/api/strategy-lab", tags=["strategy-lab"])
 app.include_router(sync.router, prefix="/api/sync", tags=["sync"])
+app.include_router(signals.router, prefix="/api/signals", tags=["signals"])
+app.include_router(bb.router, prefix="/api/bb", tags=["money-flow"])
+app.include_router(universe.router)
+

@@ -18,6 +18,7 @@ import uuid
 from app.domain.strategy.rule_evaluator import RuleEvaluationError
 from app.utils.date_range import end_before, start_at
 from app.domain.accounting import BUY_FEE_RATE, SELL_FEE_RATE, SELL_TAX_RATE
+from app.domain.backtest.batch_runner import BatchBacktestRunner, PhaseDefinition
 from app.schemas.analytics_trust_schema import DataCoverage, ExecutionAssumptions, RunManifest
 
 class BacktestService:
@@ -26,6 +27,9 @@ class BacktestService:
         self.analytics_service = AnalyticsService()
 
     async def run_backtest(self, db: Session, config: dict) -> dict:
+        if config.get("phases"):
+            return await self.run_batch_backtest(db, config)
+
         symbols = config.get("symbols")
         if symbols:
             clean_symbols = [symbol for symbol in symbols if symbol]
@@ -49,6 +53,128 @@ class BacktestService:
             }
 
         return await self._run_single_symbol_backtest(db, config)
+
+    async def run_batch_backtest(self, db: Session, config: dict) -> dict:
+        """Execute multi-symbol, multi-phase backtest with compute-once caching and independent capital."""
+        symbols = config.get("symbols") or []
+        if not symbols and config.get("symbol"):
+            symbols = [config["symbol"]]
+        clean_symbols = [s.strip().upper() for s in symbols if s and s.strip()]
+        if not clean_symbols:
+            return {
+                "status": "failed",
+                "error_code": "INVALID_SYMBOLS",
+                "message": "At least one symbol is required for batch backtest.",
+                "total_symbols": 0,
+                "total_phases": 0,
+                "total_runs": 0,
+                "feature_compute_count": 0,
+                "simulation_run_count": 0,
+                "phase_results": [],
+                "summary": {},
+            }
+
+        raw_phases = config.get("phases") or []
+        if not raw_phases:
+            return {
+                "status": "failed",
+                "error_code": "INVALID_PHASES",
+                "message": "At least one phase definition is required for batch backtest.",
+                "total_symbols": len(clean_symbols),
+                "total_phases": 0,
+                "total_runs": 0,
+                "feature_compute_count": 0,
+                "simulation_run_count": 0,
+                "phase_results": [],
+                "summary": {},
+            }
+
+        phase_objs = []
+        try:
+            for p in raw_phases:
+                if isinstance(p, PhaseDefinition):
+                    phase_objs.append(p)
+                elif isinstance(p, dict):
+                    phase_objs.append(PhaseDefinition(
+                        name=p.get("name", ""),
+                        start_date=p.get("start_date", ""),
+                        end_date=p.get("end_date", ""),
+                        description=p.get("description"),
+                    ))
+                elif hasattr(p, "name"):
+                    phase_objs.append(PhaseDefinition(
+                        name=p.name,
+                        start_date=p.start_date,
+                        end_date=p.end_date,
+                        description=getattr(p, "description", None),
+                    ))
+            BatchBacktestRunner.validate_phases(phase_objs)
+        except Exception as exc:
+            return {
+                "status": "failed",
+                "error_code": "PHASE_VALIDATION_ERROR",
+                "message": str(exc),
+                "total_symbols": len(clean_symbols),
+                "total_phases": len(phase_objs),
+                "total_runs": 0,
+                "feature_compute_count": 0,
+                "simulation_run_count": 0,
+                "phase_results": [],
+                "summary": {},
+            }
+
+        try:
+            strategy = load_strategy_from_dict(config["strategy"])
+        except Exception as exc:
+            return {
+                "status": "failed",
+                "error_code": "STRATEGY_LOAD_FAILED",
+                "message": str(exc),
+                "total_symbols": len(clean_symbols),
+                "total_phases": len(phase_objs),
+                "total_runs": 0,
+                "feature_compute_count": 0,
+                "simulation_run_count": 0,
+                "phase_results": [],
+                "summary": {},
+            }
+
+        def candle_provider(sym: str, start: str, end: str) -> pd.DataFrame:
+            candles = db.query(Candle).filter(
+                Candle.symbol == sym,
+                Candle.timestamp >= start_at(start),
+                Candle.timestamp < end_before(end),
+            ).order_by(Candle.timestamp).all()
+            if not candles:
+                return pd.DataFrame()
+            return pd.DataFrame([{
+                "timestamp": c.timestamp,
+                "open": c.open,
+                "high": c.high,
+                "low": c.low,
+                "close": c.close,
+                "volume": c.volume
+            } for c in candles])
+
+        initial_cash = float(config.get("initial_cash", 100_000_000.0))
+        execution_profile = config.get("execution_profile") or "vietnam_default_conservative"
+        exchange = config.get("exchange") or "HOSE"
+        slippage_rate = float(config.get("slippage_rate", 0.0))
+        use_cache = bool(config.get("use_cache", True))
+
+        result = BatchBacktestRunner.run_batch(
+            strategy=strategy,
+            symbols=clean_symbols,
+            phases=phase_objs,
+            candle_provider=candle_provider,
+            initial_cash_per_run=initial_cash,
+            execution_profile_name=execution_profile,
+            exchange=exchange,
+            slippage_rate=slippage_rate,
+            use_cache=use_cache,
+        )
+
+        return result.to_dict()
 
     async def _run_multi_symbol_backtest(self, db: Session, config: dict, symbols: list[str]) -> dict:
         runs = []

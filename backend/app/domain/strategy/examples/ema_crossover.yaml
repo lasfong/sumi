@@ -1,0 +1,26 @@
+﻿name: "EMA Trend Following"
+version: "1.0"
+description: |
+  Classic EMA Trend Following strategy:
+  - Entry when fast EMA(20) crosses above slow EMA(50).
+  - Exit when fast EMA(20) crosses below slow EMA(50).
+
+indicators:
+  - name: ema_fast
+    type: ema
+    length: 20
+  - name: ema_slow
+    type: ema
+    length: 50
+
+entry_rules:
+  - dsl:
+      cross_up: ["ema_fast", "ema_slow"]
+
+exit_rules:
+  - dsl:
+      cross_down: ["ema_fast", "ema_slow"]
+
+position_sizing:
+  method: fixed_quantity
+  quantity: 1000

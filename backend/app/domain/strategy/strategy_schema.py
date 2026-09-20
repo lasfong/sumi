@@ -31,6 +31,10 @@ class RiskManagement(BaseModel):
     stop_loss_pct: Optional[float] = None
     take_profit_pct: Optional[float] = None
 
+class FlowConstraintsConfig(BaseModel):
+    accepted_methods: List[str] = ["OHLCV_PROXY"]
+    min_quality: str = "HIGH"
+
 class StrategyConfig(BaseModel):
     name: str
     version: str = "1.0"
@@ -40,3 +44,4 @@ class StrategyConfig(BaseModel):
     exit_rules: List[Dict[str, Any]]
     position_sizing: PositionSizing
     risk_management: Optional[RiskManagement] = None
+    flow_constraints: Optional[FlowConstraintsConfig] = None

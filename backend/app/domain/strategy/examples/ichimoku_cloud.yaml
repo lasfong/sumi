@@ -1,0 +1,31 @@
+﻿name: "Ichimoku Cloud Breakout"
+version: "1.0"
+description: |
+  Ichimoku Kumo Cloud Breakout strategy:
+  - Entry when Close is above both Span A and Span B (above the cloud), and Tenkan-sen crosses above Kijun-sen.
+  - Exit when Close falls below Span A or Span B, or Tenkan crosses below Kijun.
+
+indicators:
+  - name: ichimoku
+    type: ichimoku
+    tenkan: 9
+    kijun: 26
+    senkou: 52
+
+entry_rules:
+  - dsl:
+      all:
+        - gt: ["close", "ichimoku_span_a"]
+        - gt: ["close", "ichimoku_span_b"]
+        - cross_up: ["ichimoku_tenkan", "ichimoku_kijun"]
+
+exit_rules:
+  - dsl:
+      any:
+        - lt: ["close", "ichimoku_span_a"]
+        - lt: ["close", "ichimoku_span_b"]
+        - cross_down: ["ichimoku_tenkan", "ichimoku_kijun"]
+
+position_sizing:
+  method: fixed_quantity
+  quantity: 1000

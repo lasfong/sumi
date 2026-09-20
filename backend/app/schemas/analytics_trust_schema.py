@@ -29,7 +29,7 @@ class DataCoverage(BaseModel):
 
 
 class ExecutionAssumptions(BaseModel):
-    execution_timing: str = "signal evaluated on close; market order executed at close"
+    execution_timing: str = "daily signal generated on bar T close, executed at bar T+1 open (no same-bar close fills)"
     price_basis: str = "OHLC close"
     fees: Dict[str, float] = Field(default_factory=dict)
     taxes: Dict[str, float] = Field(default_factory=dict)
@@ -37,6 +37,21 @@ class ExecutionAssumptions(BaseModel):
     liquidity: str = "no volume/liquidity constraint beyond available cash and position"
     position_sizing: Dict[str, Any] = Field(default_factory=dict)
     settlement: str = "Vietnam cash-equity T+2 sell settlement"
+    execution_profile: str = "vietnam_default_conservative"
+    market_rule_version: str = "VN_EQUITY_DAILY_V1"
+    calendar_version: str = "VN_CALENDAR_2020_2026_V1"
+    settlement_details: Dict[str, Any] = Field(default_factory=lambda: {
+        "regime": "T+1.5_afternoon",
+        "conservative_1d_daily": True,
+        "sellable_session": "T+2 Close or T+3 Open",
+    })
+    price_bands: Dict[str, float] = Field(default_factory=lambda: {
+        "HOSE": 0.07,
+        "HNX": 0.10,
+        "UPCOM": 0.15,
+    })
+    board_lot: int = 100
+    locked_limit_policy: str = "conservative_reject"
 
 
 class RunManifest(BaseModel):

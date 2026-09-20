@@ -58,6 +58,7 @@ def test_strategy_indicator_adapter_uses_shared_indicator_engine_outputs():
     assert values["macd_signal"][-1] == pytest.approx(macd_df["MACDs_12_26_9"].iloc[-1])
     assert values["macd_hist"][-1] == pytest.approx(macd_df["MACDh_12_26_9"].iloc[-1])
     assert values["rsi"][-1] == pytest.approx(rsi_df["RSI_14"].iloc[-1])
+
     assert math.isnan(values["rsi"][0])
     candles = [SimpleNamespace(
         timestamp=date(2024, 1, 1) + timedelta(days=index),
@@ -65,12 +66,50 @@ def test_strategy_indicator_adapter_uses_shared_indicator_engine_outputs():
     ) for index, row in df.iterrows()]
     assert BacktestService()._estimate_warmup(strategy, candles) == 33
 
+
+def test_backtest_supports_ichimoku_strategy_indicators():
+    strategies = list_available_strategies()
+    sample = next(item for item in strategies if item["filename"] == "ichimoku_cloud.yaml")
+    strategy = load_strategy_from_dict(sample["config"])
+    df = pd.DataFrame({
+        "open": [100 + i * 0.5 for i in range(120)],
+        "high": [102 + i * 0.5 for i in range(120)],
+        "low": [98 + i * 0.5 for i in range(120)],
+        "close": [101 + i * 0.5 for i in range(120)],
+        "volume": [1_000_000 + i for i in range(120)],
+    })
+
+    values = StrategyIndicatorAdapter.compute(df, strategy.indicators)
+    assert "ichimoku_tenkan" in values
+    assert "ichimoku_kijun" in values
+    assert "ichimoku_span_a" in values
+    assert "ichimoku_span_b" in values
+    StrategyRuleEvaluator.validate_strategy_rules(strategy, set(values.keys()))
+
+
+def test_backtest_supports_ema_crossover_strategy_indicators():
+    strategies = list_available_strategies()
+    sample = next(item for item in strategies if item["filename"] == "ema_crossover.yaml")
+    strategy = load_strategy_from_dict(sample["config"])
+    df = pd.DataFrame({
+        "open": [100 + i * 0.5 for i in range(80)],
+        "high": [102 + i * 0.5 for i in range(80)],
+        "low": [98 + i * 0.5 for i in range(80)],
+        "close": [101 + i * 0.5 for i in range(80)],
+        "volume": [1_000_000 + i for i in range(80)],
+    })
+
+    values = StrategyIndicatorAdapter.compute(df, strategy.indicators)
+    assert "ema_fast" in values
+    assert "ema_slow" in values
+    StrategyRuleEvaluator.validate_strategy_rules(strategy, set(values.keys()))
+
+
 @pytest.mark.asyncio
 async def test_backtest_ma_crossover_e2e(db_session):
     symbol = "BACKTEST_TEST"
     base_date = date(2024, 1, 1)
-    
-    # Seed 100 candles with a sine wave pattern for clear MA crossovers
+
     candles_to_insert = []
     for i in range(100):
         price = 100 + 30 * math.sin(i * 0.06)

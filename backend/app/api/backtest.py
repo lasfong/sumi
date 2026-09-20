@@ -3,20 +3,16 @@ from sqlalchemy.orm import Session
 from app.dependencies import get_db
 from app.services.backtest_service import BacktestService
 from app.services.backtest_cleanup_service import BacktestCleanupService
+from app.schemas.backtest_schema import (
+    BacktestRequest,
+    BatchBacktestRequest,
+    BatchBacktestResponse,
+)
 from pydantic import BaseModel
 from typing import Dict, Any, Optional, List
 
 router = APIRouter()
 backtest_service = BacktestService()
-
-class BacktestRequest(BaseModel):
-    symbol: Optional[str] = None
-    symbols: Optional[List[str]] = None
-    start_date: str
-    end_date: str
-    initial_cash: float = 100000000
-    benchmark_symbol: Optional[str] = "VNINDEX"
-    strategy: Dict[str, Any]
 
 class BacktestCleanupRequest(BaseModel):
     session_ids: Optional[List[int]] = None
@@ -26,9 +22,19 @@ class BacktestCleanupRequest(BaseModel):
 @router.post("/run")
 async def run_backtest(config: BacktestRequest, db: Session = Depends(get_db)):
     """
-    Chạy backtest cho strategy.
+    Chạy backtest cho strategy. Hỗ trợ single symbol, multi-symbol và multi-phase.
     """
-    result = await backtest_service.run_backtest(db, config.dict())
+    payload = config.model_dump() if hasattr(config, "model_dump") else config.dict()
+    result = await backtest_service.run_backtest(db, payload)
+    return result
+
+@router.post("/batch/run", response_model=BatchBacktestResponse)
+async def run_batch_backtest(config: BatchBacktestRequest, db: Session = Depends(get_db)):
+    """
+    Execute multi-symbol, multi-phase backtest with compute-once caching and independent capital.
+    """
+    payload = config.model_dump() if hasattr(config, "model_dump") else config.dict()
+    result = await backtest_service.run_batch_backtest(db, payload)
     return result
 
 @router.get("/strategies")

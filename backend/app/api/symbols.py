@@ -1,17 +1,18 @@
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy.orm import Session
 from typing import List, Optional
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import case, func
+from sqlalchemy.orm import Session
+
 from app.dependencies import get_db
-from app.schemas.symbol_schema import SymbolResponse
-from app.schemas.readiness_schema import DataReadinessResponse
 from app.models.symbol import Symbol
+from app.schemas.import_schema import CatalogItemSchema
+from app.schemas.readiness_schema import DataReadinessResponse
+from app.schemas.symbol_schema import SymbolResponse
+from app.services.import_workflow_service import ImportWorkflowService
 from app.services.readiness_service import ReadinessService
 
 router = APIRouter()
 
-
-from app.schemas.import_schema import CatalogItemSchema
-from app.services.import_workflow_service import ImportWorkflowService
 
 @router.get("/data/catalog", response_model=List[CatalogItemSchema])
 def get_data_catalog_endpoint(db: Session = Depends(get_db)):
@@ -36,5 +37,10 @@ def list_symbols(
     if exchange:
         query = query.filter(Symbol.exchange == exchange)
     if search:
-        query = query.filter(Symbol.symbol.ilike(f"%{search}%"))
+        s = search.strip().upper()
+        is_exact = case((func.upper(Symbol.symbol) == s, 0), else_=1)
+        is_short_stock = case((func.length(Symbol.symbol) <= 5, 0), else_=1)
+        is_prefix = case((func.upper(Symbol.symbol).like(f"{s}%"), 0), else_=1)
+        query = query.filter(Symbol.symbol.ilike(f"%{s}%"))
+        return query.order_by(is_exact, is_short_stock, is_prefix, Symbol.symbol).limit(50).all()
     return query.order_by(Symbol.symbol).all()

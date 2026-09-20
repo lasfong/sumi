@@ -30,6 +30,9 @@ class StrategyIndicatorAdapter:
                     indicator_id=indicator_id,
                 )
             )
+        for col in ("open", "high", "low", "close", "volume"):
+            if col in df.columns:
+                values[col] = df[col].values
         return values
 
     @staticmethod
@@ -53,6 +56,8 @@ class StrategyIndicatorAdapter:
     ) -> dict[str, Any]:
         if indicator_id == "macd":
             return StrategyIndicatorAdapter._map_macd_columns(result_df, output_columns, indicator_name)
+        if indicator_id == "ichimoku":
+            return StrategyIndicatorAdapter._map_ichimoku_columns(result_df, output_columns, indicator_name)
 
         if len(output_columns) == 1:
             return {indicator_name: result_df[output_columns[0]].values}
@@ -77,4 +82,27 @@ class StrategyIndicatorAdapter:
                 mapped[f"{indicator_name}_signal"] = result_df[column].values
             elif key.startswith("macd"):
                 mapped[f"{indicator_name}_line"] = result_df[column].values
+        return mapped
+
+    @staticmethod
+    def _map_ichimoku_columns(
+        result_df: pd.DataFrame,
+        output_columns: list[str],
+        indicator_name: str,
+    ) -> dict[str, Any]:
+        mapped: dict[str, Any] = {}
+        for column in output_columns:
+            key = column.upper()
+            vals = result_df[column].values
+            mapped[f"{indicator_name}_{column.lower()}"] = vals
+            if key.startswith("ITS"):
+                mapped[f"{indicator_name}_tenkan"] = vals
+            elif key.startswith("IKS"):
+                mapped[f"{indicator_name}_kijun"] = vals
+            elif key.startswith("ISA"):
+                mapped[f"{indicator_name}_span_a"] = vals
+            elif key.startswith("ISB"):
+                mapped[f"{indicator_name}_span_b"] = vals
+            elif key.startswith("ICS"):
+                mapped[f"{indicator_name}_chikou"] = vals
         return mapped
