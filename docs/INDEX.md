@@ -1,52 +1,41 @@
-# Sumi documentation index
+# Sumi Documentation Index
 
-## Read order for every new session
+Tài liệu dự án **Sumi V3** (Technical Analysis & Strategy Lab for Vietnam Stock Market).
 
-1. `AGENTS.md` — repository rules and non-negotiable invariants.
-2. `docs/MACHINE_TRANSFER_HANDOFF_2026-08-10.md` — destination bootstrap, transfer integrity, program summary, and exact next prompt.
-3. `docs/AUTONOMOUS_EXECUTION_STATE.md` — volatile authority: approvals, active batch, control point, and exact next action.
-4. `docs/ANTIGRAVITY_TWO_SESSION_OPERATING_MODEL.md` — two-session DEV/REVIEW state machine, file ownership, and detailed DoD.
-5. `docs/LOW_MODEL_AUTONOMOUS_EXECUTION_PROTOCOL.md` — core DEV/Reviewer workflow and stop rules.
-6. `docs/SESSION_HANDOFF_PROTOCOL.md` — workspace-based handoff contract.
-7. `docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md` — stable PRO-00 through PRO-12 roadmap and acceptance contract.
-8. The active or prepared-next dossier under `docs/program/`.
-9. The ExecPlan and DEV/Reviewer prompt named by the ledger.
+---
 
-The workspace, not chat history, is the handoff channel. Only the batch named **Active batch** by the ledger is authorized.
+## Tài Liệu Hiện Hành
 
-## Canonical product and architecture sources
+| File | Mục đích |
+|---|---|
+| [V3_FINAL_HANDOFF_REPORT_2026-09-12.md](file:///e:/Workspace/sumi/docs/V3_FINAL_HANDOFF_REPORT_2026-09-12.md) | Báo cáo bàn giao chính thức: kiến trúc hai trụ cột, 31 kịch bản E2E, bằng chứng kiểm định 100%, hướng dẫn vận hành |
+| [PRODUCT_ACCEPTANCE_CRITERIA_V3.md](file:///e:/Workspace/sumi/docs/PRODUCT_ACCEPTANCE_CRITERIA_V3.md) | Tiêu chuẩn nghiệm thu định lượng V3 (G, R, I, D, T) — hợp đồng chất lượng bắt buộc |
+| [ARCHITECTURE_DECISION_001_REPLAY_UI_REBUILD.md](file:///e:/Workspace/sumi/docs/ARCHITECTURE_DECISION_001_REPLAY_UI_REBUILD.md) | ADR-001: Tái thiết kế Replay UI, ranh giới Canvas/Provider/State |
+| [ARCHITECTURE_DECISION_002_MARKET_DATA_PROVIDER.md](file:///e:/Workspace/sumi/docs/ARCHITECTURE_DECISION_002_MARKET_DATA_PROVIDER.md) | ADR-002: Đánh giá Market Data Provider, thiết kế Provider Boundary Adapter |
 
-- `docs/PRODUCT_V3_PLAN_2026-07-15.md` — V3 product outcome and controlled UI rebuild.
-- `docs/PRODUCT_ACCEPTANCE_CRITERIA_V3.md` — measurable V3 release contract.
-- `docs/ARCHITECTURE_DECISION_001_REPLAY_UI_REBUILD.md` — replay UI decision and retained boundaries.
-- `docs/DEVELOPMENT_OPERATING_MODEL.md` — reviewer/DEV roles and bounded-batch workflow.
-- `docs/PROJECT_REVIEW_REPORT_2026-07-15.md` — evidence-backed baseline.
-- `PLANS.md` — required ExecPlan structure.
-- `docs/SUMI_PROFESSIONALIZATION_MASTER_PLAN_2026-07-31.md` — canonical Professionalization outcome, acceptance IDs, ordered program, risks, and release policy.
+## Gói Phát Hành (`docs/release/`)
 
-## Execution records
+| File | Mục đích |
+|---|---|
+| [RELEASE_NOTES_v3.0.0.md](file:///e:/Workspace/sumi/docs/release/RELEASE_NOTES_v3.0.0.md) | Ghi chú phát hành v3.0.0, ma trận nghiệm thu, giới hạn hệ thống |
+| [ACCESSIBILITY_AND_KEYBOARD.md](file:///e:/Workspace/sumi/docs/release/ACCESSIBILITY_AND_KEYBOARD.md) | Đặc tả phím tắt và khả năng điều hướng bàn phím |
+| [PLATFORMS_AND_PRIVACY.md](file:///e:/Workspace/sumi/docs/release/PLATFORMS_AND_PRIVACY.md) | Yêu cầu hệ thống và cam kết bảo mật 100% Local-first |
+| [BACKUP_AND_RECOVERY.md](file:///e:/Workspace/sumi/docs/release/BACKUP_AND_RECOVERY.md) | Quy trình sao lưu, phục hồi cơ sở dữ liệu và xuất dữ liệu |
 
-- `docs/program/` — stable batch dossiers. Future dossiers frame outcomes but do not authorize implementation.
-- `docs/exec-plans/` — detailed, living plans and evidence for one bounded batch.
-- `docs/dev-prompts/` — standalone implementation authority for a DEV session with no chat context.
-- `docs/reviewer-prompts/` — bounded Reviewer/rework authorities.
-- `docs/reviews/` — dated independent `APPROVE` or `REWORK` records.
-- `docs/review-artifacts/` — selected durable review evidence; full local UAT artifacts remain under ignored `test-results/`.
+## Schema & Quyết Định Kỹ Thuật (`docs/decision-packs/`)
 
-PRO-00–PRO-02 and historical V3 Batch 0–5 records are completed evidence, not current instructions. `docs/PROFESSIONALIZATION_HANDOFF_2026-08-01.md` is explicitly superseded and retained only for provenance.
+| File | Mục đích |
+|---|---|
+| [BATCH_0_DRAWING_PROVIDER_DECISION.md](file:///e:/Workspace/sumi/docs/decision-packs/BATCH_0_DRAWING_PROVIDER_DECISION.md) | Quyết định thiết kế drawing engine tự xây, TypeScript interface `DrawingProvider` |
+| [sumi-drawing-document-v1.schema.json](file:///e:/Workspace/sumi/docs/decision-packs/sumi-drawing-document-v1.schema.json) | JSON Schema chuẩn hóa cho đối tượng vẽ — đang được kiểm tra trong test suite |
 
-Current boundary: PRO-11 is independently approved and closed by `docs/reviews/PRO_11_REVIEW_2026-08-16.md`. PRO-12 is independently approved and closed by `docs/reviews/PRO_12_REVIEW_2026-08-17.md`. Sumi Professionalization Program (PRO-00 through PRO-12) is 100% complete. Release candidate `v3.0.0-rc1` is ready for final tagging and master push. `docs/AUTONOMOUS_EXECUTION_STATE.md` is the volatile execution authority; `docs/MACHINE_TRANSFER_HANDOFF_2026-08-10.md` remains the transfer entrypoint.
+## Nghiên Cứu (`docs/research/`)
 
-## Research and historical material
+Thư mục nghiên cứu chứa các tài liệu đặc tả kỹ thuật chuyên sâu và hồ sơ thiết kế tính năng mới.
 
-- `docs/tester/` contains non-authoritative exploratory research and test ideas. Findings become requirements only after adoption into the active acceptance mapping/ExecPlan.
-- V2 specifications, completion plans, checklists, and release evidence are historical baselines. They do not override V3/PRO acceptance.
-- `docs/archive/pre_v2/` is historical only.
-- `docs/BacktestSample/`, `docs/FEATURE_MATRIX_RESEARCH.md`, and similar research documents are inputs, not batch approval.
+## Bất Biến Kỹ Thuật
 
-## Operational rules
-
-- Raw market files belong under `data/raw/`.
-- Automated tests and UAT must never mutate `backend/sumi.db`.
-- Local research clones belong under ignored `research_repos/`.
-- Do not infer authorization to commit, push, tag, package, publish, or start a later PRO from any plan or approval record.
+- **Không bao giờ** làm lộ nến tương lai — API replay chỉ trả dữ liệu đến `current_index`.
+- **Không bao giờ** thay đổi `backend/sumi.db` trong test tự động — dùng database tạm.
+- **Tính toán chỉ báo authoritative** từ backend `IndicatorEngine`.
+- **100% Local-first** — không telemetry, không gửi dữ liệu ra bên ngoài.

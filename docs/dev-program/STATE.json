@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "status": "complete",
+  "workingRoot": "e:\\Workspace\\sumi",
+  "bootstrapEvidence": "docs/reviews/DEV_PROGRAM_BOOTSTRAP_EVIDENCE.md",
+  "reviewerMechanism": "independent_context:critic_auditor",
+  "ownerQuestions": [],
+  "tasks": [
+    {"id":"BOOTSTRAP","status":"accepted","dependsOn":[],"evidence":["docs/reviews/DEV_PROGRAM_BOOTSTRAP_EVIDENCE.md"]},
+    {"id":"P1-SIG-01","status":"accepted","dependsOn":[],"evidence":["docs/reviews/P1_SIGNAL_VOLUME_SPIKE_REVIEW_2026-09-12.md"]},
+    {"id":"P1-SIG-02","status":"accepted","dependsOn":["P1-SIG-01"],"evidence":["docs/reviews/P1_SIGNAL_VOLUME_SPIKE_REVIEW_2026-09-12.md"]},
+    {"id":"P2-BT-01","status":"accepted","dependsOn":["BOOTSTRAP","P1-SIG-02"],"evidence":["docs/reviews/P2_BT_01_REVIEW.md"]},
+    {"id":"P2-MKT-02","status":"accepted","dependsOn":["P2-BT-01"],"evidence":["docs/reviews/P2_MKT_02_REVIEW.md"]},
+    {"id":"P3-PRICE-01","status":"accepted","dependsOn":["BOOTSTRAP","P1-SIG-02"],"evidence":["docs/reviews/P3_PRICE_01_REVIEW.md"]},
+    {"id":"P3-VSA-02","status":"accepted","dependsOn":["P3-PRICE-01"],"evidence":["docs/reviews/P3_VSA_02_REVIEW.md"]},
+    {"id":"P4-BATCH-01","status":"accepted","dependsOn":["P2-MKT-02"],"evidence":["docs/reviews/P4_BATCH_01_REVIEW.md"]},
+    {"id":"P4-MET-02","status":"accepted","dependsOn":["P4-BATCH-01"],"evidence":["docs/reviews/P4_MET_02_REVIEW.md"]},
+    {"id":"P5-DATA-01","status":"accepted","dependsOn":["BOOTSTRAP","P1-SIG-02"],"evidence":["docs/reviews/P5_DATA_01_REVIEW.md"]},
+    {"id":"P5-BB-02","status":"accepted","dependsOn":["P5-DATA-01"],"evidence":["docs/reviews/P5_BB_02_REVIEW.md"]},
+    {"id":"P6-MEASURE-01","status":"accepted","dependsOn":["P5-BB-02"],"evidence":["docs/reviews/P6_MEASURE_01_REVIEW.md"]},
+    {"id":"P7-UNI-01","status":"accepted","dependsOn":["P5-DATA-01"],"evidence":["docs/reviews/P7_UNI_01_REVIEW.md"]},
+    {"id":"P7-MKT-02","status":"accepted","dependsOn":["P5-BB-02","P7-UNI-01"],"evidence":["docs/reviews/P7_MKT_02_REVIEW.md"]},
+    {"id":"P8-ICHI-01","status":"accepted","dependsOn":["BOOTSTRAP","P1-SIG-02"],"evidence":["docs/reviews/P8_ICHI_01_REVIEW.md"]},
+    {"id":"P8-DIV-02","status":"accepted","dependsOn":["P3-PRICE-01"],"evidence":["docs/reviews/P8_DIV_02_REVIEW.md"]},
+    {"id":"P8-COMP-03","status":"accepted","dependsOn":["P3-VSA-02","P6-MEASURE-01","P8-ICHI-01","P8-DIV-02"],"evidence":["docs/reviews/P8_COMP_03_REVIEW.md"]},
+    {"id":"P9-UI-01","status":"accepted","dependsOn":["P4-MET-02","P7-MKT-02","P8-COMP-03"],"evidence":["docs/reviews/P9_UI_01_REVIEW.md"]},
+    {"id":"P10-PERF-01","status":"accepted","dependsOn":["P9-UI-01"],"evidence":["docs/reviews/P10_PERF_01_REVIEW.md"]},
+    {"id":"P10-SEAL-02","status":"accepted","dependsOn":["P10-PERF-01"],"evidence":["docs/reviews/P10_SEAL_02_REVIEW.md"]}
+  ]
+}

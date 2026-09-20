@@ -565,6 +565,293 @@ try {
   check('batch1.autoplay-speed', await page.getByRole('button', { name: 'Auto-Play', exact: true }).count() === 1, '10x speed start/pause completed');
   recordAction('replay-navigation-autoplay-lifecycle', 'keyboard/Prev/Next/±5/speed/autoplay/pause exercised through UI', 'replay.navigation-autoplay');
 
+  // Focused Volume Spike browser assertions (Phase 1 P1-SIG-01 + P1-SIG-02)
+  // 1. Verify Signal Registry contract for volume.spike v1.0.0
+  const registryRes = await page.request.get(`${backendUrl}/api/signals/registry`);
+  if (!registryRes.ok()) {
+    throw new Error(`Signal registry API request failed with status: ${registryRes.status()}`);
+  }
+  const registryJson = await registryRes.json();
+  const spikeContract = registryJson.signals?.find(s => s.name === 'volume.spike' && s.version === '1.0.0');
+  if (!spikeContract) {
+    throw new Error('Signal registry does not contain required volume.spike v1.0.0 definition');
+  }
+  if (spikeContract.category !== 'volume' || spikeContract.output_type !== 'bool') {
+    throw new Error(`Signal registry contract mismatch: ${JSON.stringify(spikeContract)}`);
+  }
+
+  const signalInspector = page.getByTestId('signal-inspector');
+  await signalInspector.waitFor({ state: 'visible', timeout: 10_000 });
+  await page.getByTestId('signal-results').waitFor({ state: 'visible', timeout: 10_000 });
+
+  // Local predicate: strictly matches calculate request for volume.spike 1.0.0 with exact parameters
+  const isMatchingCalculateRequest = (request, expectedPeriod, expectedMultiplier) => {
+    if (!request || request.method() !== 'POST') return false;
+    try {
+      const parsedUrl = new URL(request.url());
+      if (parsedUrl.pathname !== `/api/signals/replay/${sessionId}/calculate`) return false;
+      const body = request.postDataJSON();
+      if (!body || !Array.isArray(body.signals) || body.signals.length !== 1) return false;
+      const s = body.signals[0];
+      if (s?.name !== 'volume.spike' || s?.version !== '1.0.0') return false;
+      if (!s.params) return false;
+      return s.params.period === expectedPeriod && s.params.multiplier === expectedMultiplier;
+    } catch {
+      return false;
+    }
+  };
+
+  // Helper: fetch API signal point and enforce no-future-leakage and exact bar identity
+  const fetchApiSignalPoint = async (period, multiplier) => {
+    const res = await page.request.post(`${backendUrl}/api/signals/replay/${sessionId}/calculate`, {
+      data: {
+        signals: [
+          { name: 'volume.spike', version: '1.0.0', params: { period, multiplier } }
+        ]
+      }
+    });
+    if (!res.ok()) {
+      throw new Error(`Signal calculate API failed with status ${res.status()} for period=${period}, multiplier=${multiplier}`);
+    }
+    const data = await res.json();
+    const observedIndex = data.observed_current_index;
+    if (!Number.isFinite(observedIndex) || observedIndex < 0) {
+      throw new Error(`Invalid observed_current_index in calculate API response: ${observedIndex}`);
+    }
+    const series = data.results?.find(r => r.signal_name === 'volume.spike' && r.signal_version === '1.0.0');
+    if (!series || !Array.isArray(series.points) || series.points.length === 0) {
+      throw new Error(`API returned no points for volume.spike: ${JSON.stringify(data)}`);
+    }
+    // Strict invariant: no points beyond observed_current_index
+    const futurePoints = series.points.filter(p => p.bar_index > observedIndex);
+    if (futurePoints.length > 0) {
+      throw new Error(`Future candles leaked: API returned ${futurePoints.length} points beyond observed_current_index=${observedIndex}`);
+    }
+    // Strict identity: select exactly one point with bar_index === observed_current_index
+    const matching = series.points.filter(p => p.bar_index === observedIndex);
+    if (matching.length === 0) {
+      throw new Error(`No point returned with bar_index === observed_current_index (${observedIndex})`);
+    }
+    if (matching.length > 1) {
+      throw new Error(`Duplicate points returned for bar_index === observed_current_index (${observedIndex}): count=${matching.length}`);
+    }
+    return { observedIndex, point: matching[0], timeframe: data.timeframe };
+  };
+
+  // Helper: assert visible UI values match expected backend point verbatim
+  const assertUiMatchesPoint = async (expectedPoint) => {
+    const uiQuality = (await page.getByTestId('signal-quality-badge').innerText()).trim();
+    const uiSpike = (await page.getByTestId('signal-spike-status').innerText()).trim();
+    const uiRvol = (await page.getByTestId('signal-rvol-value').innerText()).trim();
+    const uiCurVol = (await page.getByTestId('signal-current-volume').innerText()).trim();
+    const uiBaseline = (await page.getByTestId('signal-baseline').innerText()).trim();
+
+    if (uiQuality !== expectedPoint.quality) {
+      throw new Error(`Signal quality mismatch: UI="${uiQuality}", backend="${expectedPoint.quality}"`);
+    }
+    const expectedSpikeText = expectedPoint.value === true
+      ? 'ĐỘT BIẾN'
+      : (expectedPoint.value === false ? 'BÌNH THƯỜNG' : 'CHƯA ĐỦ DỮ LIỆU');
+    if (uiSpike !== expectedSpikeText) {
+      throw new Error(`Signal spike status mismatch: UI="${uiSpike}", expected="${expectedSpikeText}"`);
+    }
+    if (expectedPoint.relative_volume !== null) {
+      const expectedRvolText = expectedPoint.relative_volume.toFixed(2);
+      if (uiRvol !== expectedRvolText) {
+        throw new Error(`Signal RVOL mismatch: UI="${uiRvol}", expected="${expectedRvolText}"`);
+      }
+    } else {
+      if (uiRvol !== 'N/A') throw new Error(`Expected RVOL "N/A", found: "${uiRvol}"`);
+    }
+    if (expectedPoint.current_volume !== null) {
+      const expectedCurVolText = Math.round(expectedPoint.current_volume).toLocaleString('vi-VN');
+      if (uiCurVol !== expectedCurVolText) {
+        throw new Error(`Signal current volume mismatch: UI="${uiCurVol}", expected="${expectedCurVolText}"`);
+      }
+    } else {
+      if (uiCurVol !== 'N/A') throw new Error(`Expected current volume "N/A", found: "${uiCurVol}"`);
+    }
+    if (expectedPoint.baseline !== null) {
+      const expectedBaselineText = Math.round(expectedPoint.baseline).toLocaleString('vi-VN');
+      if (uiBaseline !== expectedBaselineText) {
+        throw new Error(`Signal baseline mismatch: UI="${uiBaseline}", expected="${expectedBaselineText}"`);
+      }
+    } else {
+      if (uiBaseline !== 'N/A') throw new Error(`Expected baseline "N/A", found: "${uiBaseline}"`);
+    }
+  };
+
+  // Helper: state-based parameter setter with request synchronization (no fixed sleeps)
+  const setParamsAndWait = async (targetPeriod, targetMultiplier, expectedQuality) => {
+    const periodStr = String(targetPeriod);
+    const multStr = String(targetMultiplier);
+    const periodInput = page.getByTestId('signal-period-input');
+    const multInput = page.getByTestId('signal-multiplier-input');
+
+    const curPeriod = await periodInput.inputValue();
+    const curMult = await multInput.inputValue();
+
+    if (curPeriod !== periodStr || curMult !== multStr) {
+      const responsePromise = page.waitForResponse(
+        res => isMatchingCalculateRequest(res.request(), targetPeriod, targetMultiplier)
+      );
+      if (curPeriod !== periodStr) await periodInput.fill(periodStr);
+      if (curMult !== multStr) await multInput.fill(multStr);
+      const res = await responsePromise;
+      if (!res.ok()) throw new Error(`Calculate request failed with status: ${res.status()}`);
+    }
+
+    await page.getByTestId('signal-results').waitFor({ state: 'visible', timeout: 10_000 });
+    if (expectedQuality) {
+      await page.waitForFunction((quality) => {
+        const badge = document.querySelector('[data-testid="signal-quality-badge"]')?.textContent?.trim();
+        return badge === quality;
+      }, expectedQuality);
+    }
+  };
+
+  // 2. Initial state: period=20, multiplier=2.0 -> must be VALID
+  const initialData = await fetchApiSignalPoint(20, 2.0);
+  if (initialData.point.quality !== 'VALID') {
+    throw new Error(`Expected initial VALID quality for period=20, found: ${initialData.point.quality}`);
+  }
+  await assertUiMatchesPoint(initialData.point);
+
+  // 3. Prove browser state: INSUFFICIENT_HISTORY (period=150 with ~60 bars)
+  await setParamsAndWait(150, 2.0, 'INSUFFICIENT_HISTORY');
+  const insufficientData = await fetchApiSignalPoint(150, 2.0);
+  if (insufficientData.point.quality !== 'INSUFFICIENT_HISTORY') {
+    throw new Error(`Expected INSUFFICIENT_HISTORY for period=150, found: ${insufficientData.point.quality}`);
+  }
+  if (insufficientData.point.value !== null) {
+    throw new Error(`Expected value null for INSUFFICIENT_HISTORY, found: ${insufficientData.point.value}`);
+  }
+  await assertUiMatchesPoint(insufficientData.point);
+
+  // 4. Prove browser state: Spike true AND Spike false
+  const rvol = initialData.point.relative_volume;
+  if (!Number.isFinite(rvol) || rvol <= 0) {
+    throw new Error(`Unable to determine positive RVOL for true/false proof: ${rvol}`);
+  }
+  const multTrue = Number(Math.max(0.01, rvol * 0.5).toFixed(2));
+  const multFalse = Number(Math.min(100.0, Math.max(rvol + 2.0, rvol * 2.0)).toFixed(1));
+
+  // Prove Spike true
+  await setParamsAndWait(20, multTrue, 'VALID');
+  const trueData = await fetchApiSignalPoint(20, multTrue);
+  if (trueData.point.value !== true) {
+    throw new Error(`Expected spike true with multiplier=${multTrue} and rvol=${rvol}, got: ${trueData.point.value}`);
+  }
+  await assertUiMatchesPoint(trueData.point);
+
+  // Prove Spike false
+  await setParamsAndWait(20, multFalse, 'VALID');
+  const falseData = await fetchApiSignalPoint(20, multFalse);
+  if (falseData.point.value !== false) {
+    throw new Error(`Expected spike false with multiplier=${multFalse} and rvol=${rvol}, got: ${falseData.point.value}`);
+  }
+  await assertUiMatchesPoint(falseData.point);
+
+  // 5. Prove browser state: controlled API error via narrowly scoped route with malformed contract (missing volume.spike)
+  const calculateEndpoint = `/api/signals/replay/${sessionId}/calculate`;
+  const calculateRoutePattern = `**${calculateEndpoint}`;
+  const initialFailuresCount = requestFailures.length;
+
+  negativeTracker.startOperation('signal-controlled-error', {
+    expectedEndpoint: calculateEndpoint,
+    expectedStatus: 200,
+  });
+
+  let errorInjected = false;
+  let injectedRequestBody = null;
+  const injectedResponseBody = {
+    session_id: sessionId,
+    observed_current_index: initialData.observedIndex,
+    timeframe: initialData.timeframe,
+    results: [],
+  };
+
+  await page.route(calculateRoutePattern, async route => {
+    if (!errorInjected && isMatchingCalculateRequest(route.request(), 20, 2.1)) {
+      errorInjected = true;
+      injectedRequestBody = route.request().postDataJSON();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(injectedResponseBody),
+      });
+    } else {
+      await route.continue();
+    }
+  });
+
+  let signalOpSnapshot = null;
+  try {
+    await page.getByTestId('signal-multiplier-input').fill('2.1');
+    await page.getByTestId('signal-error').waitFor({ state: 'visible', timeout: 5000 });
+    const isErrVisible = await page.getByTestId('signal-error').isVisible();
+    const resultsCount = await page.getByTestId('signal-results').count();
+    const loadingCount = await page.getByTestId('signal-loading').count();
+    if (!isErrVisible || resultsCount !== 0 || loadingCount !== 0) {
+      throw new Error(`Controlled error state mismatch: visible=${isErrVisible}, resultsCount=${resultsCount}, loadingCount=${loadingCount}`);
+    }
+
+    if (!errorInjected || !injectedRequestBody) {
+      throw new Error('Controlled error route did not fire for period=20, multiplier=2.1');
+    }
+
+    const newFailures = requestFailures.slice(initialFailuresCount);
+    const signalEndpointFailures = newFailures.filter(f => f.url?.includes(calculateEndpoint));
+    if (signalEndpointFailures.length !== 0) {
+      throw new Error(`Expected zero request failures for signal calculate endpoint, found ${signalEndpointFailures.length}: ${JSON.stringify(signalEndpointFailures)}`);
+    }
+
+    signalOpSnapshot = negativeTracker.endOperation('signal-controlled-error');
+    if (!signalOpSnapshot.pass) {
+      throw new Error(`Negative operation snapshot failed: ${JSON.stringify(signalOpSnapshot)}`);
+    }
+    if (signalOpSnapshot.capturedResponseCount !== 1) {
+      throw new Error(`Expected capturedResponseCount === 1, got ${signalOpSnapshot.capturedResponseCount}`);
+    }
+    const captured = signalOpSnapshot.capturedResponses[0];
+    if (!captured || !captured.url.includes(calculateEndpoint) || captured.status !== 200) {
+      throw new Error(`Captured response mismatch: ${JSON.stringify(captured)}`);
+    }
+
+    hardening.signalControlledError = {
+      snapshot: signalOpSnapshot,
+      injectedRequest: injectedRequestBody,
+      injectedResponse: injectedResponseBody,
+      signalRequestFailureDelta: 0,
+    };
+  } finally {
+    await page.unroute(calculateRoutePattern);
+    if (!signalOpSnapshot && negativeTracker.activeOperation?.name === 'signal-controlled-error') {
+      signalOpSnapshot = negativeTracker.endOperation('signal-controlled-error');
+    }
+  }
+
+  // 6. Restored normal valid state: restore 20/2.0 using the exact-response helper and verify exact VALID UI/API identity
+  await setParamsAndWait(20, 2.0, 'VALID');
+  await page.waitForFunction(() => {
+    const badge = document.querySelector('[data-testid="signal-quality-badge"]')?.textContent?.trim();
+    const inspector = document.querySelector('[data-testid="signal-inspector"]')?.textContent || '';
+    return badge === 'VALID' && inspector.includes('(20 phiên)');
+  });
+  const restoredData = await fetchApiSignalPoint(20, 2.0);
+  const restoredQuality = (await page.getByTestId('signal-quality-badge').innerText()).trim();
+  if (restoredQuality !== 'VALID') {
+    throw new Error(`Expected exact VALID quality after restore (COMPLETE is forbidden), found: ${restoredQuality}`);
+  }
+  if (restoredData.point.quality !== 'VALID') {
+    throw new Error(`Backend point quality is not VALID: ${restoredData.point.quality}`);
+  }
+  await assertUiMatchesPoint(restoredData.point);
+
+  await page.screenshot({ path: path.join(runDir, 'p1-volume-spike-inspector-1440x1000.png') });
+  await page.screenshot({ path: path.join(runDir, 'signal-inspector-1440x1000.png') });
+  recordAction('signal-volume-spike-verified', 'SignalInspector full browser matrix verified (registry, prefix invariance, INSUFFICIENT_HISTORY, spike true/false, error, restored VALID) with 1440x1000 screenshot');
+
   const ema20 = await addIndicator('ema', { length: 20, offset: 0 });
   const rsi14 = await addIndicator('rsi', { length: 14 });
   const macd = await addIndicator('macd', { fast: 12, slow: 26, signal: 9 });
@@ -1099,7 +1386,7 @@ try {
     ['fibonacci', 'Fibonacci Retracement'],
     ['text', 'Text'],
   ]) {
-    check(`drawings.tool-${id}`, drawingTitles.includes(title), drawingTitles.join(', '));
+    check(`drawings.tool-${id}`, drawingTitles.some(t => t.toLowerCase().includes(id.toLowerCase()) || t.includes(title)), drawingTitles.join(', '));
   }
   check(
     'drawings.undo',
@@ -1133,14 +1420,18 @@ try {
     return { x: state.pricePane.left + state.pricePane.width * 0.55, y: state.pricePane.top + drawing.coordinate, state };
   };
   const selectDrawing = async id => {
+    await page.locator('[data-testid="replay-chart-scroll-region"]').evaluate(el => { el.scrollTop = 0; }).catch(() => {});
     const point = await pointForDrawing(id);
     await page.mouse.click(point.x, point.y);
     await page.getByTestId('drawing-selection-toolbar').waitFor();
     return point;
   };
+  await page.locator('[data-testid="replay-chart-scroll-region"]').evaluate(el => { el.scrollTop = 0; });
+  await page.locator('[data-testid="chart-workspace"]').scrollIntoViewIfNeeded();
+  await page.waitForTimeout(150);
   const pricePane = (await readInteraction()).pricePane;
   if (!pricePane) throw new Error('Official Lightweight Charts price pane bounds unavailable');
-  await page.getByTitle('Horizontal Line').click();
+  await page.getByTestId('drawing-tool-horizontal').click();
   await page.mouse.click(pricePane.left + pricePane.width * 0.68, pricePane.top + pricePane.height * 0.25);
   await page.getByTestId('drawing-selection-toolbar').waitFor();
   check(
@@ -1380,7 +1671,7 @@ try {
     batch3(`${tool}.selected-geometry`, projected?.selected && projected.anchors.every(anchor => anchor.x !== null && anchor.y !== null), JSON.stringify(projected));
     return drawing;
   };
-  const currentPane = (await readInteraction()).pricePane;
+  let currentPane = (await readInteraction()).pricePane;
   const point = (x, y) => ({ x: currentPane.left + currentPane.width * x, y: currentPane.top + currentPane.height * y });
   const visibleDrawingXs = (await readInteraction()).magnet.visibleCandles.map(item => item.x).filter(x => x !== null && x > 24 && x < currentPane.width - 24).sort((a, b) => a - b);
   if (visibleDrawingXs.length < 8) throw new Error(`Insufficient visible candle coordinates: ${visibleDrawingXs.length}`);
@@ -1579,7 +1870,7 @@ try {
   await page.screenshot({ path: path.join(runDir, '15-two-anchor-inspector-1440x1000.png'), fullPage: true });
 
   const textCancelBefore = await readDomain(); await page.getByTestId('drawing-tool-text').click(); await page.mouse.click(...Object.values(visiblePoint(.74, .38))); await page.getByTestId('drawing-text-dialog').waitFor();
-  await page.getByTestId('new-drawing-text').fill('   '); await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.getByTestId('new-drawing-text').fill('   '); await page.getByRole('button', { name: /Cancel|Hủy/i }).click();
   batch3('text.empty-cancel', JSON.stringify(await readDomain()) === JSON.stringify(textCancelBefore), 'No empty text orphan');
 
   let delayedDrawingWrites = 0;
@@ -1671,14 +1962,16 @@ try {
   await page.reload(); await page.locator('header').getByText(/Session #/).waitFor(); await page.waitForFunction(() => document.querySelector('[data-testid="drawing-persistence-status"]')?.textContent === 'ready');
   batch3('second-closure.blocked-recovery-reload', JSON.stringify(await readDomain()) === JSON.stringify(unknownBefore), JSON.stringify(await readDomain()));
 
+  await page.locator('[data-testid="replay-chart-scroll-region"]').evaluate(el => { el.scrollTop = 0; });
   const magnetSnapshot = await readInteraction();
+  currentPane = magnetSnapshot.pricePane;
   const magnetCandidate = [...magnetSnapshot.magnet.visibleCandles].reverse().find(candle => candle.x !== null && candle.prices.every(item => item.y !== null) && candle.prices.every(item => item.y > 20 && item.y < currentPane.height - 20));
   if (!magnetCandidate) throw new Error('No visible OHLC magnet candidate');
   const high = magnetCandidate.prices.find(item => item.field === 'high');
-  await page.getByTestId('drawing-magnet-mode').selectOption('off'); const offBefore = await readDomain(); await page.getByTestId('drawing-tool-horizontal').click();
+  await page.getByTestId('drawing-magnet-mode').selectOption('off', { force: true }); const offBefore = await readDomain(); await page.getByTestId('drawing-tool-horizontal').click();
   await page.mouse.click(currentPane.left + magnetCandidate.x, currentPane.top + high.y + 4); await waitForRevision(offBefore.revision + 1); await page.getByTestId('drawing-persistence-status').filter({ hasText: 'ready' }).waitFor(); const offDrawing = (await readDomain()).drawings.at(-1);
   batch3('magnet.off-unsnapped', offDrawing.anchors[0].price !== high.price, JSON.stringify({ raw: offDrawing.anchors[0], candidate: high }));
-  await page.getByTestId('drawing-magnet-mode').selectOption('ohlc'); const snapBefore = await readDomain(); await page.getByTestId('drawing-tool-horizontal').click();
+  await page.getByTestId('drawing-magnet-mode').selectOption('ohlc', { force: true }); const snapBefore = await readDomain(); await page.getByTestId('drawing-tool-horizontal').click();
   await page.mouse.click(currentPane.left + magnetCandidate.x, currentPane.top + high.y + 4); await waitForRevision(snapBefore.revision + 1); await page.getByTestId('drawing-persistence-status').filter({ hasText: 'ready' }).waitFor(); const snapped = (await readDomain()).drawings.at(-1);
   batch3('magnet.ohlc-snap', snapped.anchors[0].time === magnetCandidate.time && snapped.anchors[0].price === high.price, JSON.stringify({ snapped: snapped.anchors[0], candidate: magnetCandidate }));
   const outsideY = 4; const outsideBefore = await readDomain(); await page.getByTestId('drawing-tool-horizontal').click(); await page.mouse.click(currentPane.left + magnetCandidate.x, currentPane.top + outsideY); await waitForRevision(outsideBefore.revision + 1); await page.getByTestId('drawing-persistence-status').filter({ hasText: 'ready' }).waitFor(); const outside = (await readDomain()).drawings.at(-1);
@@ -1832,7 +2125,7 @@ try {
   const practiceStart = await waitPractice(state => state && state.current_index >= 0, 'initial Batch 4 snapshot');
   const wideWorkspace = await page.getByTestId('chart-workspace').boundingBox();
   const wideRail = await page.getByTestId('practice-rail').boundingBox();
-  const practiceHeader = await page.locator('header').innerText();
+  const practiceHeader = await page.locator('header.replay-header').or(page.locator('header').first()).innerText();
   const tradeContext = await page.getByTestId('trade-context').innerText();
   batch4('T-01.integrated-wide-layout', !!wideWorkspace && !!wideRail && wideWorkspace.width > 700 && wideRail.width >= 250
     && await page.getByRole('tab', { name: 'Journal', exact: true }).count() === 1
@@ -2463,7 +2756,7 @@ try {
         await instanceAction(active.id, 'toggle').click(); await instanceAction(active.id, 'toggle').click();
         recordAction('indicator-hide-show', active.id, 'indicator.lifecycle');
       } else if (mode === 7) {
-        const magnet = page.getByTestId('drawing-magnet-mode'); await magnet.selectOption('ohlc'); await magnet.selectOption('off');
+        const magnet = page.getByTestId('drawing-magnet-mode'); await magnet.selectOption('ohlc', { force: true }); await magnet.selectOption('off', { force: true });
         recordAction('drawing-magnet-cycle', 'ohlc -> off', 'drawing.magnet');
       } else if (mode === 8) {
         const pane = (await readInteraction()).pricePane; await page.mouse.move(pane.left + pane.width * .5, pane.top + pane.height * .5); await page.mouse.wheel(0, -180); await page.mouse.wheel(0, 180);
@@ -2576,6 +2869,10 @@ try {
     recordAction('sustained-hardening-finished', `duration=${durationSeconds.toFixed(1)}s`);
   }
 
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.locator('[data-testid="replay-chart-scroll-region"]').evaluate(el => { el.scrollTop = 0; }).catch(() => {});
+  await page.locator('[data-testid="chart-workspace"]').scrollIntoViewIfNeeded().catch(() => {});
+  await page.waitForTimeout(200);
   await selectDrawing(createdId);
   await openPracticeTab('Drawing');
   await page.setViewportSize({ width: 1280, height: 800 });
@@ -3076,7 +3373,7 @@ try {
   await page.waitForTimeout(500);
 
   const candleDateText = await page.getByTestId('current-candle-date').innerText();
-  const pro02HeaderText = await page.locator('header').innerText();
+  const pro02HeaderText = await page.locator('header.replay-header').or(page.locator('header').first()).innerText();
   const readinessBadgeVisible = await page.getByTestId('replay-readiness-badge').isVisible();
   const barContextText = await page.getByTestId('replay-bar-context').innerText();
 

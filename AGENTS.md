@@ -2,26 +2,22 @@
 
 ## Product standard
 
-Sumi is a local-first manual replay and backtesting product for serious technical-analysis practice on Vietnam market data. Do not call the product “TradingView-like” unless every relevant requirement in `docs/PRODUCT_ACCEPTANCE_CRITERIA_V3.md` passes in browser UAT.
+Sumi is a local-first manual replay and backtesting product for serious technical-analysis practice on Vietnam market data. Do not call the product "TradingView-like" unless every relevant requirement in `docs/PRODUCT_ACCEPTANCE_CRITERIA_V3.md` passes in browser UAT.
 
 ## Canonical sources
 
 Read these before planning or changing product behavior:
 
-1. `docs/PRODUCT_V3_PLAN_2026-07-15.md`
-2. `docs/PRODUCT_ACCEPTANCE_CRITERIA_V3.md`
-3. `docs/ARCHITECTURE_DECISION_001_REPLAY_UI_REBUILD.md`
-4. `docs/DEVELOPMENT_OPERATING_MODEL.md`
-5. `docs/PROJECT_REVIEW_REPORT_2026-07-15.md`
-6. `PLANS.md` for execution-plan format
-
-Older V2 completion/release documents are historical evidence. They do not override V3 acceptance criteria.
+1. `docs/PRODUCT_ACCEPTANCE_CRITERIA_V3.md`
+2. `docs/ARCHITECTURE_DECISION_001_REPLAY_UI_REBUILD.md`
+3. `docs/ARCHITECTURE_DECISION_002_MARKET_DATA_PROVIDER.md`
+4. `docs/V3_FINAL_HANDOFF_REPORT_2026-09-12.md`
+5. `PLANS.md` for execution-plan format
 
 ## Non-negotiable invariants
 
 - Never leak future candles. Replay APIs must return data only through `current_index`; do not send all candles and slice in the browser.
 - Keep indicator calculation authoritative in backend `IndicatorEngine` unless an approved architecture decision changes this.
-- Do not move, retag, or rewrite `v2.0.0-rc2`.
 - Do not mutate `backend/sumi.db` in automated tests or product UAT. Use a temporary database.
 - Do not add a chart/drawing dependency without a recorded spike result, license review, and provider-boundary design.
 - Do not declare a feature complete from unit tests alone. User-facing chart work requires browser evidence.
@@ -29,34 +25,42 @@ Older V2 completion/release documents are historical evidence. They do not overr
 
 ## Development workflow
 
+- Autonomous program entry point: `docs/dev-program/START.md`. When the owner launches it, the orchestrator may dispatch bounded batches, obtain independent internal review, repair and advance without owner handoff after each batch. Existing safety/data/acceptance gates still apply. Legacy `docs/dev-prompts/` STOP instructions are historical, not the next-work queue. Internal review does not authorize owner-only decisions. Only one production writer at a time; persist progress in `docs/dev-program/STATE.json`.
+
 - Work in one bounded batch at a time, with an ExecPlan following `PLANS.md`.
 - A batch must deliver a complete vertical capability, not scattered partial changes.
 - Keep implementation work in a dedicated DEV task. By default it uses the current checkout and branch; create a branch/worktree only when the user explicitly requests isolation or parallel writes. The reviewer/orchestrator task should not concurrently edit the same files.
 - Before coding, record scope, affected modules, acceptance IDs, rollback strategy, and exact verification commands.
+- Before any batch that depends on Doraemon data or a provider capability, read `docs/research/DORAEMON_MARKET_DATA_AUDIT.md` and `docs/research/data_capability_matrix.csv`, then run a read-only targeted freshness check for only the exact source, endpoint, fields, symbols/universe, and date range the batch will use. Do not repeat the full Doraemon audit.
+- If the targeted check differs from the recorded schema, freshness, coverage, semantics, access, or rights classification, update the audit evidence and capability matrix before coding. Stop for reviewer direction when a mandatory capability has regressed or remains unverified.
 - After coding, review the diff against the ExecPlan and acceptance IDs; document deviations.
 - Never hide a known failure by weakening a test, removing an assertion, or changing acceptance criteria in the same implementation batch without reviewer approval.
+
+## Escalation rules
+
+DEV must stop and return to reviewer when:
+
+- A provider fails a mandatory spike criterion.
+- Persistence migration could lose existing sessions/drawings.
+- A new dependency changes license/security posture.
+- Fixing the batch requires changing a backend contract outside scope.
+- Product acceptance criteria are internally inconsistent or infeasible.
 
 ## Required verification
 
 Fast technical gate:
 
-```bash
-./scripts/verify-v2.sh
+```powershell
+.\scripts\verify-v2.ps1
 ```
 
-Deterministic product UAT (starts isolated backend/frontend and retains artifacts):
+Comprehensive browser E2E UAT:
 
-```bash
-./scripts/run-product-uat.sh
+```powershell
+.\scripts\run-comprehensive-uat.ps1
 ```
 
-Full product gate:
-
-```bash
-./scripts/verify-product.sh
-```
-
-For Replay/Chart/Indicator/Drawing changes, the product UAT result must be green and screenshots must be reviewed at 1440×1000. Add focused UAT assertions for new behavior rather than relying on “page is not blank.”
+For Replay/Chart/Indicator/Drawing changes, the product UAT result must be green and screenshots must be reviewed at 1440×1000. Add focused UAT assertions for new behavior rather than relying on "page is not blank."
 
 ## Architecture boundaries
 
@@ -64,7 +68,7 @@ For Replay/Chart/Indicator/Drawing changes, the product UAT result must be green
 - `ReplayPage` is an application composition surface, not a place for chart engine, persistence, or drawing geometry logic.
 - Chart-library calls belong behind chart/provider adapters.
 - Indicator product state must be explicit and serializable: identity, parameters, pane, visibility, style, order.
-- Drawing product state must be versioned and independent of a specific community provider’s raw JSON.
+- Drawing product state must be versioned and independent of a specific community provider's raw JSON.
 - Keep UI labels and pane semantics separate from backend dataframe column names.
 
 ## Definition of done

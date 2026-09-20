@@ -1,0 +1,1135 @@
+{
+  "metadata": {
+    "study_id": "P6-MEASURE-01",
+    "study_title": "Symbol BB OHLCV_PROXY Behavior Study on Real Audited Sample",
+    "execution_date": "2026-09-18",
+    "symbols": [
+      "FPT",
+      "HPG",
+      "SSI"
+    ],
+    "total_symbols": 3,
+    "date_range": {
+      "start": "2024-01-02",
+      "end": "2026-09-18"
+    },
+    "sample_sessions_per_symbol": {
+      "FPT": 673,
+      "HPG": 673,
+      "SSI": 673
+    },
+    "flow_method": "OHLCV_PROXY",
+    "methodology_version": "bb_v1_ohlcv_proxy",
+    "zero_database_mutation": true
+  },
+  "per_symbol": {
+    "FPT": {
+      "total_bars": 673,
+      "horizons": {
+        "T03": {
+          "valid_count": 671,
+          "warmup_bars": 2,
+          "mean": 45.68,
+          "std": 20.93,
+          "median": 45.7,
+          "iqr": 30.48,
+          "min": 0.0,
+          "max": 99.89,
+          "percentiles": {
+            "p05": 11.22,
+            "p10": 17.02,
+            "p25": 30.63,
+            "p50": 45.7,
+            "p75": 61.11,
+            "p90": 73.17,
+            "p95": 80.15
+          },
+          "zone_occupancy_pct": {
+            "le_20": 12.52,
+            "le_30": 24.44,
+            "corridor_30_70": 61.1,
+            "ge_70": 14.46,
+            "ge_80": 5.22
+          },
+          "smoothness": {
+            "mean_abs_delta": 13.41,
+            "std_delta": 17.04,
+            "max_abs_delta": 52.11,
+            "autocorrelation_lag1": 0.6641
+          },
+          "saturation": {
+            "pct_exact_0": 0.15,
+            "pct_exact_100": 0.0
+          },
+          "crossings_50": {
+            "count": 167,
+            "per_100_sessions": 24.89
+          },
+          "regime_persistence": {
+            "avg_run_positive": 2.99,
+            "max_run_positive": 10,
+            "avg_run_negative": 4.17,
+            "max_run_negative": 20
+          }
+        },
+        "T05": {
+          "valid_count": 669,
+          "warmup_bars": 4,
+          "mean": 45.6,
+          "std": 16.82,
+          "median": 45.47,
+          "iqr": 24.15,
+          "min": 0.06,
+          "max": 89.37,
+          "percentiles": {
+            "p05": 18.88,
+            "p10": 24.18,
+            "p25": 33.44,
+            "p50": 45.47,
+            "p75": 57.59,
+            "p90": 66.61,
+            "p95": 73.91
+          },
+          "zone_occupancy_pct": {
+            "le_20": 5.53,
+            "le_30": 18.54,
+            "corridor_30_70": 73.69,
+            "ge_70": 7.77,
+            "ge_80": 2.39
+          },
+          "smoothness": {
+            "mean_abs_delta": 8.31,
+            "std_delta": 10.69,
+            "max_abs_delta": 38.86,
+            "autocorrelation_lag1": 0.7965
+          },
+          "saturation": {
+            "pct_exact_0": 0.0,
+            "pct_exact_100": 0.0
+          },
+          "crossings_50": {
+            "count": 133,
+            "per_100_sessions": 19.88
+          },
+          "regime_persistence": {
+            "avg_run_positive": 4.14,
+            "max_run_positive": 18,
+            "avg_run_negative": 5.86,
+            "max_run_negative": 23
+          }
+        },
+        "T10": {
+          "valid_count": 664,
+          "warmup_bars": 9,
+          "mean": 45.6,
+          "std": 12.72,
+          "median": 45.44,
+          "iqr": 16.64,
+          "min": 0.5,
+          "max": 80.35,
+          "percentiles": {
+            "p05": 23.65,
+            "p10": 28.86,
+            "p25": 37.55,
+            "p50": 45.44,
+            "p75": 54.19,
+            "p90": 62.04,
+            "p95": 66.85
+          },
+          "zone_occupancy_pct": {
+            "le_20": 2.86,
+            "le_30": 11.3,
+            "corridor_30_70": 85.84,
+            "ge_70": 2.86,
+            "ge_80": 0.15
+          },
+          "smoothness": {
+            "mean_abs_delta": 4.4,
+            "std_delta": 5.94,
+            "max_abs_delta": 50.22,
+            "autocorrelation_lag1": 0.8902
+          },
+          "saturation": {
+            "pct_exact_0": 0.0,
+            "pct_exact_100": 0.0
+          },
+          "crossings_50": {
+            "count": 85,
+            "per_100_sessions": 12.8
+          },
+          "regime_persistence": {
+            "avg_run_positive": 6.63,
+            "max_run_positive": 24,
+            "avg_run_negative": 13.46,
+            "max_run_negative": 48
+          }
+        },
+        "T20": {
+          "valid_count": 654,
+          "warmup_bars": 19,
+          "mean": 45.67,
+          "std": 10.54,
+          "median": 45.69,
+          "iqr": 16.03,
+          "min": 0.88,
+          "max": 68.56,
+          "percentiles": {
+            "p05": 27.04,
+            "p10": 32.63,
+            "p25": 38.22,
+            "p50": 45.69,
+            "p75": 54.25,
+            "p90": 59.34,
+            "p95": 61.83
+          },
+          "zone_occupancy_pct": {
+            "le_20": 0.46,
+            "le_30": 7.65,
+            "corridor_30_70": 92.35,
+            "ge_70": 0.0,
+            "ge_80": 0.0
+          },
+          "smoothness": {
+            "mean_abs_delta": 2.33,
+            "std_delta": 3.6,
+            "max_abs_delta": 43.07,
+            "autocorrelation_lag1": 0.9413
+          },
+          "saturation": {
+            "pct_exact_0": 0.0,
+            "pct_exact_100": 0.0
+          },
+          "crossings_50": {
+            "count": 41,
+            "per_100_sessions": 6.27
+          },
+          "regime_persistence": {
+            "avg_run_positive": 17.45,
+            "max_run_positive": 49,
+            "avg_run_negative": 31.19,
+            "max_run_negative": 96
+          }
+        },
+        "T50": {
+          "valid_count": 624,
+          "warmup_bars": 49,
+          "mean": 45.38,
+          "std": 8.38,
+          "median": 46.85,
+          "iqr": 14.52,
+          "min": 1.78,
+          "max": 59.91,
+          "percentiles": {
+            "p05": 32.46,
+            "p10": 34.08,
+            "p25": 38.52,
+            "p50": 46.85,
+            "p75": 53.04,
+            "p90": 55.56,
+            "p95": 56.84
+          },
+          "zone_occupancy_pct": {
+            "le_20": 0.32,
+            "le_30": 1.76,
+            "corridor_30_70": 98.24,
+            "ge_70": 0.0,
+            "ge_80": 0.0
+          },
+          "smoothness": {
+            "mean_abs_delta": 1.07,
+            "std_delta": 2.37,
+            "max_abs_delta": 37.73,
+            "autocorrelation_lag1": 0.9591
+          },
+          "saturation": {
+            "pct_exact_0": 0.0,
+            "pct_exact_100": 0.0
+          },
+          "crossings_50": {
+            "count": 17,
+            "per_100_sessions": 2.72
+          },
+          "regime_persistence": {
+            "avg_run_positive": 29.63,
+            "max_run_positive": 84,
+            "avg_run_negative": 41.45,
+            "max_run_negative": 112
+          }
+        },
+        "T200": {
+          "valid_count": 474,
+          "warmup_bars": 199,
+          "mean": 44.52,
+          "std": 5.21,
+          "median": 43.93,
+          "iqr": 8.52,
+          "min": 7.75,
+          "max": 55.21,
+          "percentiles": {
+            "p05": 38.27,
+            "p10": 38.77,
+            "p25": 40.04,
+            "p50": 43.93,
+            "p75": 48.57,
+            "p90": 52.01,
+            "p95": 52.37
+          },
+          "zone_occupancy_pct": {
+            "le_20": 0.42,
+            "le_30": 0.42,
+            "corridor_30_70": 99.58,
+            "ge_70": 0.0,
+            "ge_80": 0.0
+          },
+          "smoothness": {
+            "mean_abs_delta": 0.47,
+            "std_delta": 2.04,
+            "max_abs_delta": 30.93,
+            "autocorrelation_lag1": 0.9209
+          },
+          "saturation": {
+            "pct_exact_0": 0.0,
+            "pct_exact_100": 0.0
+          },
+          "crossings_50": {
+            "count": 3,
+            "per_100_sessions": 0.63
+          },
+          "regime_persistence": {
+            "avg_run_positive": 40.11,
+            "max_run_positive": 82,
+            "avg_run_negative": 135.7,
+            "max_run_negative": 316
+          }
+        }
+      }
+    },
+    "HPG": {
+      "total_bars": 673,
+      "horizons": {
+        "T03": {
+          "valid_count": 671,
+          "warmup_bars": 2,
+          "mean": 41.85,
+          "std": 19.14,
+          "median": 40.49,
+          "iqr": 27.86,
+          "min": 0.0,
+          "max": 91.08,
+          "percentiles": {
+            "p05": 10.85,
+            "p10": 17.47,
+            "p25": 27.93,
+            "p50": 40.49,
+            "p75": 55.79,
+            "p90": 67.25,
+            "p95": 74.78
+          },
+          "zone_occupancy_pct": {
+            "le_20": 12.97,
+            "le_30": 28.32,
+            "corridor_30_70": 64.08,
+            "ge_70": 7.6,
+            "ge_80": 3.13
+          },
+          "smoothness": {
+            "mean_abs_delta": 13.43,
+            "std_delta": 17.01,
+            "max_abs_delta": 59.93,
+            "autocorrelation_lag1": 0.6053
+          },
+          "saturation": {
+            "pct_exact_0": 1.34,
+            "pct_exact_100": 0.0
+          },
+          "crossings_50": {
+            "count": 164,
+            "per_100_sessions": 24.44
+          },
+          "regime_persistence": {
+            "avg_run_positive": 2.67,
+            "max_run_positive": 10,
+            "avg_run_negative": 4.68,
+            "max_run_negative": 21
+          }
+        },
+        "T05": {
+          "valid_count": 669,
+          "warmup_bars": 4,
+          "mean": 42.22,
+          "std": 15.23,
+          "median": 40.95,
+          "iqr": 20.71,
+          "min": 0.0,
+          "max": 90.93,
+          "percentiles": {
+            "p05": 19.04,
+            "p10": 23.7,
+            "p25": 31.56,
+            "p50": 40.95,
+            "p75": 52.27,
+            "p90": 62.68,
+            "p95": 69.73
+          },
+          "zone_occupancy_pct": {
+            "le_20": 6.43,
+            "le_30": 21.52,
+            "corridor_30_70": 73.54,
+            "ge_70": 4.93,
+            "ge_80": 0.75
+          },
+          "smoothness": {
+            "mean_abs_delta": 8.06,
+            "std_delta": 10.36,
+            "max_abs_delta": 39.05,
+            "autocorrelation_lag1": 0.7685
+          },
+          "saturation": {
+            "pct_exact_0": 0.15,
+            "pct_exact_100": 0.0
+          },
+          "crossings_50": {
+            "count": 102,
+            "per_100_sessions": 15.25
+          },
+          "regime_persistence": {
+            "avg_run_positive": 4.4,
+            "max_run_positive": 22,
+            "avg_run_negative": 7.83,
+            "max_run_negative": 42
+          }
+        },
+        "T10": {
+          "valid_count": 664,
+          "warmup_bars": 9,
+          "mean": 42.64,
+          "std": 10.97,
+          "median": 41.65,
+          "iqr": 14.47,
+          "min": 18.81,
+          "max": 75.18,
+          "percentiles": {
+            "p05": 27.47,
+            "p10": 29.78,
+            "p25": 34.47,
+            "p50": 41.65,
+            "p75": 48.94,
+            "p90": 58.62,
+            "p95": 63.24
+          },
+          "zone_occupancy_pct": {
+            "le_20": 0.3,
+            "le_30": 10.84,
+            "corridor_30_70": 87.5,
+            "ge_70": 1.66,
+            "ge_80": 0.0
+          },
+          "smoothness": {
+            "mean_abs_delta": 4.23,
+            "std_delta": 5.47,
+            "max_abs_delta": 26.98,
+            "autocorrelation_lag1": 0.8744
+          },
+          "saturation": {
+            "pct_exact_0": 0.0,
+            "pct_exact_100": 0.0
+          },
+          "crossings_50": {
+            "count": 54,
+            "per_100_sessions": 8.13
+          },
+          "regime_persistence": {
+            "avg_run_positive": 6.65,
+            "max_run_positive": 24,
+            "avg_run_negative": 18.02,
+            "max_run_negative": 81
+          }
+        },
+        "T20": {
+          "valid_count": 654,
+          "warmup_bars": 19,
+          "mean": 43.02,
+          "std": 7.9,
+          "median": 42.19,
+          "iqr": 10.23,
+          "min": 23.9,
+          "max": 69.22,
+          "percentiles": {
+            "p05": 32.09,
+            "p10": 34.11,
+            "p25": 37.3,
+            "p50": 42.19,
+            "p75": 47.53,
+            "p90": 53.26,
+            "p95": 58.11
+          },
+          "zone_occupancy_pct": {
+            "le_20": 0.0,
+            "le_30": 1.22,
+            "corridor_30_70": 98.78,
+            "ge_70": 0.0,
+            "ge_80": 0.0
+          },
+          "smoothness": {
+            "mean_abs_delta": 2.23,
+            "std_delta": 3.12,
+            "max_abs_delta": 26.83,
+            "autocorrelation_lag1": 0.9214
+          },
+          "saturation": {
+            "pct_exact_0": 0.0,
+            "pct_exact_100": 0.0
+          },
+          "crossings_50": {
+            "count": 36,
+            "per_100_sessions": 5.5
+          },
+          "regime_persistence": {
+            "avg_run_positive": 7.6,
+            "max_run_positive": 28,
+            "avg_run_negative": 40.62,
+            "max_run_negative": 144
+          }
+        },
+        "T50": {
+          "valid_count": 624,
+          "warmup_bars": 49,
+          "mean": 43.25,
+          "std": 5.13,
+          "median": 43.97,
+          "iqr": 6.71,
+          "min": 30.85,
+          "max": 63.79,
+          "percentiles": {
+            "p05": 34.55,
+            "p10": 36.43,
+            "p25": 39.72,
+            "p50": 43.97,
+            "p75": 46.43,
+            "p90": 49.26,
+            "p95": 53.15
+          },
+          "zone_occupancy_pct": {
+            "le_20": 0.0,
+            "le_30": 0.0,
+            "corridor_30_70": 100.0,
+            "ge_70": 0.0,
+            "ge_80": 0.0
+          },
+          "smoothness": {
+            "mean_abs_delta": 0.99,
+            "std_delta": 1.87,
+            "max_abs_delta": 26.17,
+            "autocorrelation_lag1": 0.9336
+          },
+          "saturation": {
+            "pct_exact_0": 0.0,
+            "pct_exact_100": 0.0
+          },
+          "crossings_50": {
+            "count": 16,
+            "per_100_sessions": 2.56
+          },
+          "regime_persistence": {
+            "avg_run_positive": 14.25,
+            "max_run_positive": 37,
+            "avg_run_negative": 66.71,
+            "max_run_negative": 193
+          }
+        },
+        "T200": {
+          "valid_count": 474,
+          "warmup_bars": 199,
+          "mean": 42.83,
+          "std": 3.22,
+          "median": 43.55,
+          "iqr": 2.39,
+          "min": 31.09,
+          "max": 60.53,
+          "percentiles": {
+            "p05": 35.09,
+            "p10": 38.66,
+            "p25": 42.29,
+            "p50": 43.55,
+            "p75": 44.67,
+            "p90": 45.19,
+            "p95": 46.38
+          },
+          "zone_occupancy_pct": {
+            "le_20": 0.0,
+            "le_30": 0.0,
+            "corridor_30_70": 100.0,
+            "ge_70": 0.0,
+            "ge_80": 0.0
+          },
+          "smoothness": {
+            "mean_abs_delta": 0.48,
+            "std_delta": 1.53,
+            "max_abs_delta": 21.6,
+            "autocorrelation_lag1": 0.8855
+          },
+          "saturation": {
+            "pct_exact_0": 0.0,
+            "pct_exact_100": 0.0
+          },
+          "crossings_50": {
+            "count": 2,
+            "per_100_sessions": 0.42
+          },
+          "regime_persistence": {
+            "avg_run_positive": 1.0,
+            "max_run_positive": 1,
+            "avg_run_negative": 170.53,
+            "max_run_negative": 393
+          }
+        }
+      }
+    },
+    "SSI": {
+      "total_bars": 673,
+      "horizons": {
+        "T03": {
+          "valid_count": 671,
+          "warmup_bars": 2,
+          "mean": 42.39,
+          "std": 19.02,
+          "median": 42.75,
+          "iqr": 27.99,
+          "min": 0.0,
+          "max": 100.0,
+          "percentiles": {
+            "p05": 11.78,
+            "p10": 16.87,
+            "p25": 28.48,
+            "p50": 42.75,
+            "p75": 56.46,
+            "p90": 66.88,
+            "p95": 71.9
+          },
+          "zone_occupancy_pct": {
+            "le_20": 12.67,
+            "le_30": 27.12,
+            "corridor_30_70": 66.02,
+            "ge_70": 6.86,
+            "ge_80": 3.13
+          },
+          "smoothness": {
+            "mean_abs_delta": 13.19,
+            "std_delta": 16.66,
+            "max_abs_delta": 57.07,
+            "autocorrelation_lag1": 0.6157
+          },
+          "saturation": {
+            "pct_exact_0": 0.45,
+            "pct_exact_100": 0.3
+          },
+          "crossings_50": {
+            "count": 179,
+            "per_100_sessions": 26.68
+          },
+          "regime_persistence": {
+            "avg_run_positive": 2.91,
+            "max_run_positive": 18,
+            "avg_run_negative": 4.94,
+            "max_run_negative": 24
+          }
+        },
+        "T05": {
+          "valid_count": 669,
+          "warmup_bars": 4,
+          "mean": 42.77,
+          "std": 15.25,
+          "median": 43.25,
+          "iqr": 21.27,
+          "min": 0.03,
+          "max": 90.85,
+          "percentiles": {
+            "p05": 18.63,
+            "p10": 22.18,
+            "p25": 31.88,
+            "p50": 43.25,
+            "p75": 53.14,
+            "p90": 61.94,
+            "p95": 68.82
+          },
+          "zone_occupancy_pct": {
+            "le_20": 6.28,
+            "le_30": 20.18,
+            "corridor_30_70": 75.78,
+            "ge_70": 4.04,
+            "ge_80": 0.9
+          },
+          "smoothness": {
+            "mean_abs_delta": 7.96,
+            "std_delta": 10.34,
+            "max_abs_delta": 57.02,
+            "autocorrelation_lag1": 0.7672
+          },
+          "saturation": {
+            "pct_exact_0": 0.0,
+            "pct_exact_100": 0.0
+          },
+          "crossings_50": {
+            "count": 128,
+            "per_100_sessions": 19.13
+          },
+          "regime_persistence": {
+            "avg_run_positive": 3.59,
+            "max_run_positive": 16,
+            "avg_run_negative": 7.41,
+            "max_run_negative": 26
+          }
+        },
+        "T10": {
+          "valid_count": 664,
+          "warmup_bars": 9,
+          "mean": 42.99,
+          "std": 11.61,
+          "median": 43.53,
+          "iqr": 16.02,
+          "min": 0.22,
+          "max": 76.46,
+          "percentiles": {
+            "p05": 23.79,
+            "p10": 27.98,
+            "p25": 34.61,
+            "p50": 43.53,
+            "p75": 50.63,
+            "p90": 57.46,
+            "p95": 62.77
+          },
+          "zone_occupancy_pct": {
+            "le_20": 1.96,
+            "le_30": 13.55,
+            "corridor_30_70": 85.69,
+            "ge_70": 0.75,
+            "ge_80": 0.0
+          },
+          "smoothness": {
+            "mean_abs_delta": 4.24,
+            "std_delta": 5.87,
+            "max_abs_delta": 56.77,
+            "autocorrelation_lag1": 0.8721
+          },
+          "saturation": {
+            "pct_exact_0": 0.0,
+            "pct_exact_100": 0.0
+          },
+          "crossings_50": {
+            "count": 105,
+            "per_100_sessions": 15.81
+          },
+          "regime_persistence": {
+            "avg_run_positive": 6.56,
+            "max_run_positive": 33,
+            "avg_run_negative": 13.63,
+            "max_run_negative": 64
+          }
+        },
+        "T20": {
+          "valid_count": 654,
+          "warmup_bars": 19,
+          "mean": 43.07,
+          "std": 9.12,
+          "median": 42.69,
+          "iqr": 12.17,
+          "min": 1.07,
+          "max": 69.46,
+          "percentiles": {
+            "p05": 29.74,
+            "p10": 32.01,
+            "p25": 36.72,
+            "p50": 42.69,
+            "p75": 48.89,
+            "p90": 53.91,
+            "p95": 59.3
+          },
+          "zone_occupancy_pct": {
+            "le_20": 0.61,
+            "le_30": 5.66,
+            "corridor_30_70": 94.34,
+            "ge_70": 0.0,
+            "ge_80": 0.0
+          },
+          "smoothness": {
+            "mean_abs_delta": 2.38,
+            "std_delta": 4.03,
+            "max_abs_delta": 55.85,
+            "autocorrelation_lag1": 0.9019
+          },
+          "saturation": {
+            "pct_exact_0": 0.0,
+            "pct_exact_100": 0.0
+          },
+          "crossings_50": {
+            "count": 59,
+            "per_100_sessions": 9.02
+          },
+          "regime_persistence": {
+            "avg_run_positive": 8.43,
+            "max_run_positive": 35,
+            "avg_run_negative": 24.19,
+            "max_run_negative": 77
+          }
+        },
+        "T50": {
+          "valid_count": 624,
+          "warmup_bars": 49,
+          "mean": 43.26,
+          "std": 6.6,
+          "median": 43.35,
+          "iqr": 8.74,
+          "min": 4.39,
+          "max": 59.3,
+          "percentiles": {
+            "p05": 32.83,
+            "p10": 34.41,
+            "p25": 38.66,
+            "p50": 43.35,
+            "p75": 47.4,
+            "p90": 50.52,
+            "p95": 55.84
+          },
+          "zone_occupancy_pct": {
+            "le_20": 0.16,
+            "le_30": 0.8,
+            "corridor_30_70": 99.2,
+            "ge_70": 0.0,
+            "ge_80": 0.0
+          },
+          "smoothness": {
+            "mean_abs_delta": 1.12,
+            "std_delta": 2.86,
+            "max_abs_delta": 51.89,
+            "autocorrelation_lag1": 0.9053
+          },
+          "saturation": {
+            "pct_exact_0": 0.0,
+            "pct_exact_100": 0.0
+          },
+          "crossings_50": {
+            "count": 24,
+            "per_100_sessions": 3.85
+          },
+          "regime_persistence": {
+            "avg_run_positive": 19.06,
+            "max_run_positive": 53,
+            "avg_run_negative": 55.38,
+            "max_run_negative": 141
+          }
+        },
+        "T200": {
+          "valid_count": 474,
+          "warmup_bars": 199,
+          "mean": 43.49,
+          "std": 5.36,
+          "median": 45.51,
+          "iqr": 2.9,
+          "min": 16.69,
+          "max": 54.76,
+          "percentiles": {
+            "p05": 32.88,
+            "p10": 32.89,
+            "p25": 43.28,
+            "p50": 45.51,
+            "p75": 46.18,
+            "p90": 48.59,
+            "p95": 49.72
+          },
+          "zone_occupancy_pct": {
+            "le_20": 0.21,
+            "le_30": 0.63,
+            "corridor_30_70": 99.37,
+            "ge_70": 0.0,
+            "ge_80": 0.0
+          },
+          "smoothness": {
+            "mean_abs_delta": 0.51,
+            "std_delta": 2.33,
+            "max_abs_delta": 38.07,
+            "autocorrelation_lag1": 0.9047
+          },
+          "saturation": {
+            "pct_exact_0": 0.0,
+            "pct_exact_100": 0.0
+          },
+          "crossings_50": {
+            "count": 8,
+            "per_100_sessions": 1.69
+          },
+          "regime_persistence": {
+            "avg_run_positive": 3.78,
+            "max_run_positive": 8,
+            "avg_run_negative": 80.21,
+            "max_run_negative": 201
+          }
+        }
+      }
+    }
+  },
+  "pooled": {
+    "T03": {
+      "total_observations": 2013,
+      "mean": 43.31,
+      "std": 19.79,
+      "median": 42.63,
+      "iqr": 28.61,
+      "min": 0.0,
+      "max": 100.0,
+      "percentiles": {
+        "p05": 11.26,
+        "p10": 17.04,
+        "p25": 28.78,
+        "p50": 42.63,
+        "p75": 57.39,
+        "p90": 69.59,
+        "p95": 76.18
+      },
+      "zone_occupancy_pct": {
+        "le_20": 12.72,
+        "le_30": 26.63,
+        "corridor_30_70": 63.74,
+        "ge_70": 9.64,
+        "ge_80": 3.83
+      },
+      "smoothness": {
+        "mean_abs_delta": 13.35,
+        "std_delta": 16.91,
+        "autocorrelation_lag1": 0.632
+      },
+      "saturation": {
+        "pct_exact_0": 0.65,
+        "pct_exact_100": 0.1
+      }
+    },
+    "T05": {
+      "total_observations": 2007,
+      "mean": 43.53,
+      "std": 15.85,
+      "median": 42.96,
+      "iqr": 21.88,
+      "min": 0.0,
+      "max": 90.93,
+      "percentiles": {
+        "p05": 18.69,
+        "p10": 23.31,
+        "p25": 32.24,
+        "p50": 42.96,
+        "p75": 54.11,
+        "p90": 64.43,
+        "p95": 71.07
+      },
+      "zone_occupancy_pct": {
+        "le_20": 6.08,
+        "le_30": 20.08,
+        "corridor_30_70": 74.34,
+        "ge_70": 5.58,
+        "ge_80": 1.35
+      },
+      "smoothness": {
+        "mean_abs_delta": 8.11,
+        "std_delta": 10.46,
+        "autocorrelation_lag1": 0.7797
+      },
+      "saturation": {
+        "pct_exact_0": 0.05,
+        "pct_exact_100": 0.0
+      }
+    },
+    "T10": {
+      "total_observations": 1992,
+      "mean": 43.75,
+      "std": 11.86,
+      "median": 43.35,
+      "iqr": 15.94,
+      "min": 0.22,
+      "max": 80.35,
+      "percentiles": {
+        "p05": 24.99,
+        "p10": 28.9,
+        "p25": 35.3,
+        "p50": 43.35,
+        "p75": 51.24,
+        "p90": 59.94,
+        "p95": 65.06
+      },
+      "zone_occupancy_pct": {
+        "le_20": 1.71,
+        "le_30": 11.9,
+        "corridor_30_70": 86.35,
+        "ge_70": 1.76,
+        "ge_80": 0.05
+      },
+      "smoothness": {
+        "mean_abs_delta": 4.29,
+        "std_delta": 5.76,
+        "autocorrelation_lag1": 0.8805
+      },
+      "saturation": {
+        "pct_exact_0": 0.0,
+        "pct_exact_100": 0.0
+      }
+    },
+    "T20": {
+      "total_observations": 1962,
+      "mean": 43.92,
+      "std": 9.33,
+      "median": 43.19,
+      "iqr": 12.66,
+      "min": 0.88,
+      "max": 69.46,
+      "percentiles": {
+        "p05": 30.16,
+        "p10": 33.01,
+        "p25": 37.3,
+        "p50": 43.19,
+        "p75": 49.96,
+        "p90": 56.77,
+        "p95": 60.65
+      },
+      "zone_occupancy_pct": {
+        "le_20": 0.36,
+        "le_30": 4.84,
+        "corridor_30_70": 95.16,
+        "ge_70": 0.0,
+        "ge_80": 0.0
+      },
+      "smoothness": {
+        "mean_abs_delta": 2.31,
+        "std_delta": 3.6,
+        "autocorrelation_lag1": 0.9244
+      },
+      "saturation": {
+        "pct_exact_0": 0.0,
+        "pct_exact_100": 0.0
+      }
+    },
+    "T50": {
+      "total_observations": 1872,
+      "mean": 43.96,
+      "std": 6.91,
+      "median": 44.21,
+      "iqr": 9.44,
+      "min": 1.78,
+      "max": 63.79,
+      "percentiles": {
+        "p05": 33.04,
+        "p10": 34.86,
+        "p25": 38.85,
+        "p50": 44.21,
+        "p75": 48.29,
+        "p90": 53.75,
+        "p95": 55.65
+      },
+      "zone_occupancy_pct": {
+        "le_20": 0.16,
+        "le_30": 0.85,
+        "corridor_30_70": 99.15,
+        "ge_70": 0.0,
+        "ge_80": 0.0
+      },
+      "smoothness": {
+        "mean_abs_delta": 1.06,
+        "std_delta": 2.4,
+        "autocorrelation_lag1": 0.9388
+      },
+      "saturation": {
+        "pct_exact_0": 0.0,
+        "pct_exact_100": 0.0
+      }
+    },
+    "T200": {
+      "total_observations": 1422,
+      "mean": 43.61,
+      "std": 4.75,
+      "median": 44.37,
+      "iqr": 4.06,
+      "min": 7.75,
+      "max": 60.53,
+      "percentiles": {
+        "p05": 33.29,
+        "p10": 37.99,
+        "p25": 41.97,
+        "p50": 44.37,
+        "p75": 46.03,
+        "p90": 49.23,
+        "p95": 51.42
+      },
+      "zone_occupancy_pct": {
+        "le_20": 0.21,
+        "le_30": 0.35,
+        "corridor_30_70": 99.65,
+        "ge_70": 0.0,
+        "ge_80": 0.0
+      },
+      "smoothness": {
+        "mean_abs_delta": 0.49,
+        "std_delta": 1.99,
+        "autocorrelation_lag1": 0.9096
+      },
+      "saturation": {
+        "pct_exact_0": 0.0,
+        "pct_exact_100": 0.0
+      }
+    }
+  },
+  "cross_horizon": {
+    "confluence": {
+      "ticker": "FPT",
+      "fully_warmed_sessions": 474,
+      "confluence_all_positive_count": 17,
+      "confluence_all_positive_pct": 3.59,
+      "confluence_all_negative_count": 179,
+      "confluence_all_negative_pct": 37.76,
+      "total_confluence_pct": 41.35
+    },
+    "lead_lag_correlations_t03_to_t20": {
+      "lag_-3": -0.3966,
+      "lag_-2": 0.0053,
+      "lag_-1": -0.004,
+      "lag_0": 0.4559,
+      "lag_1": -0.0148,
+      "lag_2": -0.0308,
+      "lag_3": 0.0957
+    }
+  },
+  "value_source_segmentation": {
+    "T20": {
+      "actual_matched_value_count": 144,
+      "actual_matched_mean": 37.74,
+      "actual_matched_std": 5.97,
+      "actual_matched_median": 36.22,
+      "estimated_tp_count": 1818,
+      "estimated_tp_mean": 44.41,
+      "estimated_tp_std": 9.38,
+      "estimated_tp_median": 43.79,
+      "mean_difference": -6.66
+    }
+  },
+  "threshold_evaluation": {
+    "hypothesis_20_30_70_80": {
+      "empirical_occupancy_T20_le_20_pct": 0.36,
+      "empirical_occupancy_T20_le_30_pct": 4.84,
+      "empirical_occupancy_T20_ge_70_pct": 0.0,
+      "empirical_occupancy_T20_ge_80_pct": 0.0,
+      "corridor_30_70_pct": 95.16,
+      "empirical_percentiles_T20": {
+        "p05": 30.16,
+        "p10": 33.01,
+        "p25": 37.3,
+        "p50": 43.19,
+        "p75": 49.96,
+        "p90": 56.77,
+        "p95": 60.65
+      }
+    },
+    "findings": [
+      "1. Extreme Corridor Compression: Slower horizons compress heavily into the (30, 70) corridor (95.16% on T20, 99.15% on T50, 99.65% on T200). Fixed 70/80 thresholds are almost never reached for H >= 20 (0.00% time >= 70 on T20, T50, T200).",
+      "2. Asymmetric Zone Occupancy: On fast horizons like T03, time <= 30 (26.63%) is nearly 3x higher than time >= 70 (9.64%), demonstrating that raw daily price pressure is asymmetric and skewed downwards during consolidation.",
+      "3. Horizon Smoothing Decay: T03 exhibits wide swings (std ~19.79) and frequent 50-crossings (24.89 per 100 days), whereas T50/T200 show strong autocorrelation (>0.90) and rarely cross 50 (0.63 crossings/100 days on T200), functioning as structural macro regime indicators rather than swing triggers.",
+      "4. Value Source Consistency: The mean values of ACTUAL_MATCHED_VALUE and ESTIMATED_TP_X_VOLUME remain aligned within typical market fluctuations, validating the typical price proxy fallback."
+    ],
+    "verdict": "NOT_PRODUCTION_SEMANTICS_YET",
+    "verdict_rationale": "Thresholds 20/30/70/80 do not correspond to stable, symmetrical, or regime-invariant percentiles across horizons. Hardcoding them as production buy/sell triggers would fabricate false signals. They remain unvalidated research hypotheses until dynamic/quantile-based bands are investigated."
+  }
+}

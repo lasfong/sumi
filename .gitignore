@@ -26,4 +26,7 @@ research_repos/
 *.log
 tmp/
 temp/
+scratch/
 test-results/
+.agents/
+ORIGINAL_REQUEST.md
