@@ -106,6 +106,117 @@ export interface AvailableStrategy {
   config: StrategyConfig | Record<string, unknown>;
 }
 
+export interface PhaseDefinitionRequest {
+  name: string;
+  start_date: string;
+  end_date: string;
+  description?: string;
+}
+
+export interface BatchTimingMetricsResponse {
+  total_duration_ms: number;
+  feature_compute_ms: number;
+  simulation_ms: number;
+  cache_hits: number;
+  cache_misses: number;
+}
+
+export interface BatchBacktestRequest {
+  symbols: string[];
+  phases: PhaseDefinitionRequest[];
+  strategy: StrategyConfig | Record<string, unknown>;
+  initial_cash?: number;
+  execution_profile?: string;
+  exchange?: string;
+  benchmark_symbol?: string;
+  use_cache?: boolean;
+}
+
+export interface BenchmarkMetricRowResponse {
+  ticker: string;
+  phase_name?: string;
+  start_date?: string;
+  end_date?: string;
+  initial_cash: number;
+  final_cash: number;
+  final_equity: number;
+  net_profit: number;
+  net_profit_pct: number;
+  num_trades: int_or_number;
+  avg_profit_loss_pct?: number | null;
+  avg_bars_held?: number | null;
+  win_rate_pct?: number | null;
+  win_avg_profit_pct?: number | null;
+  loss_avg_loss_pct?: number | null;
+  num_winners: number;
+  num_losers: number;
+  num_breakeven: number;
+  profit_factor?: number | null;
+  max_drawdown: number;
+  open_position_quantity: number;
+  open_position_value: number;
+}
+
+type int_or_number = number;
+
+export interface CrossPhaseDegradationResponse {
+  ticker: string;
+  base_phase_name: string;
+  target_phase_name: string;
+  net_profit_delta: number;
+  return_delta_pct: number;
+  win_rate_delta_pct?: number | null;
+  profit_ratio?: number | null;
+  degradation_pct?: number | null;
+  is_degraded: boolean;
+  drawdown_delta: number;
+}
+
+export interface PhaseMetricMatrixResponse {
+  phase_names: string[];
+  symbols: string[];
+  rows_by_symbol: Record<string, Record<string, BenchmarkMetricRowResponse>>;
+  portfolio_by_phase: Record<string, BenchmarkMetricRowResponse>;
+  cross_phase_degradations: CrossPhaseDegradationResponse[];
+  consistency_score: number;
+}
+
+export interface BatchPhaseResultResponse {
+  symbol: string;
+  phase_name: string;
+  start_date: string;
+  end_date: string;
+  status: string;
+  total_candles: number;
+  initial_cash: number;
+  final_cash: number;
+  final_equity: number;
+  net_pnl: number;
+  net_return_pct: number;
+  total_trades: number;
+  open_position_quantity: number;
+  open_position_value: number;
+  warnings: string[];
+  error_message?: string | null;
+  benchmark_metrics?: BenchmarkMetricRowResponse | null;
+}
+
+export interface BatchBacktestResponse {
+  status: string;
+  total_symbols: number;
+  total_phases: number;
+  total_runs: number;
+  feature_compute_count: number;
+  simulation_run_count: number;
+  phase_results: BatchPhaseResultResponse[];
+  summary: Record<string, unknown>;
+  metric_matrix?: PhaseMetricMatrixResponse | null;
+  cross_phase_degradations?: CrossPhaseDegradationResponse[] | null;
+  timing_metrics?: BatchTimingMetricsResponse | null;
+  markdown_table?: string | null;
+  csv_export?: string | null;
+}
+
 export async function getAvailableStrategies(): Promise<AvailableStrategy[]> {
   const response = await apiClient.get('/backtest/strategies');
   return response.data;
@@ -115,3 +226,9 @@ export async function runBacktest(config: BacktestRequest): Promise<BacktestResp
   const response = await apiClient.post('/backtest/run', config);
   return response.data;
 }
+
+export async function runBatchBacktest(config: BatchBacktestRequest): Promise<BatchBacktestResponse> {
+  const response = await apiClient.post('/backtest/batch/run', config);
+  return response.data;
+}
+

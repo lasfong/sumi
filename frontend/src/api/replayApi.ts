@@ -50,3 +50,8 @@ export const updateDrawings = async (sessionId: number, stateData: string): Prom
   if (response.headers['x-sumi-uat-commit-then-error'] === '1') throw new Error('Controlled drawing PUT committed before client failure');
   return response.data;
 };
+
+export const resetPracticeSession = async (sessionId: number): Promise<{ status: string; message: string }> => {
+  const response = await apiClient.post(`/replay/sessions/${sessionId}/reset-practice`);
+  return response.data;
+};

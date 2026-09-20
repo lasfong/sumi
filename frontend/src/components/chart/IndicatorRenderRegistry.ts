@@ -309,8 +309,27 @@ export class IndicatorRenderRegistry {
         spanB: spanBMap.get(time) ?? null
       }));
 
+      const cloudUpColor = instance.styles.cloudUp?.color ?? '#26A69A';
+      const cloudDownColor = instance.styles.cloudDown?.color ?? '#EF5350';
+      const toRgba = (hex: string, alpha: number) => {
+        if (hex.startsWith('#') && hex.length === 7) {
+          const r = parseInt(hex.slice(1, 3), 16);
+          const g = parseInt(hex.slice(3, 5), 16);
+          const b = parseInt(hex.slice(5, 7), 16);
+          return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+        }
+        return hex;
+      };
+
       return [
-        { seriesKey: 'cloud', name: 'Kumo', data: cloudData, type: 'ichimoku-cloud' },
+        {
+          seriesKey: 'cloud',
+          name: 'Kumo',
+          data: cloudData,
+          type: 'ichimoku-cloud',
+          upColor: toRgba(cloudUpColor, 0.25),
+          downColor: toRgba(cloudDownColor, 0.25),
+        },
         { seriesKey: 'tenkan', name: `Tenkan (${tenkan})`, data: tenkanPoints, color: instance.styles.tenkan?.color ?? '#26A69A' },
         { seriesKey: 'kijun', name: `Kijun (${kijun})`, data: kijunPoints, color: instance.styles.kijun?.color ?? '#EF5350' },
         { seriesKey: 'spanA', name: 'Span A', data: spanAPoints, color: instance.styles.spanA?.color ?? '#00E5FF' },

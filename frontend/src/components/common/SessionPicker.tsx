@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { listReplaySessions } from '../../api/replayApi';
 import type { ReplaySession } from '../../types';
@@ -36,6 +36,12 @@ export const SessionPicker: React.FC<SessionPickerProps> = ({
     queryFn: () => listReplaySessions(50),
     staleTime: 10000,
   });
+
+  useEffect(() => {
+    if (selectedSessionId && !sessions.some((s) => s.id === selectedSessionId)) {
+      refetch();
+    }
+  }, [selectedSessionId, sessions, refetch]);
 
   const selectedSession = useMemo(() => {
     if (!selectedSessionId) return null;
@@ -112,7 +118,7 @@ export const SessionPicker: React.FC<SessionPickerProps> = ({
         <span className="trigger-label">
           {selectedSession ? (
             <span className="selected-session-info">
-              <strong className="session-id">#{selectedSession.id}</strong>
+              <strong className="session-id">Session <span>#{selectedSession.id}</span></strong>
               <span className="session-symbol">{selectedSession.symbol}</span>
               <span className="session-tf">({selectedSession.timeframe || 'D'})</span>
               <span className="session-mode-tag">

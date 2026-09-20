@@ -72,6 +72,8 @@ const defaultStyles = (definitionId: string): Record<string, IndicatorSeriesStyl
     spanA: { color: '#00E5FF' },
     spanB: { color: '#FF8A00' },
     chikou: { color: '#E040FB' },
+    cloudUp: { color: '#26A69A' },
+    cloudDown: { color: '#EF5350' },
   };
   if (definitionId === 'atr') return { primary: { color: '#E040FB' } };
   if (definitionId === 'volume_sma') return { primary: { color: '#FF8A00' } };

@@ -45,17 +45,31 @@ export const ChartWorkspace = forwardRef<ChartWorkspaceRef, ChartWorkspaceProps>
       seriesRef.current.setIndicator(input.instanceId, input.paneId, input.series, input.paneOrder, containerRef.current.clientHeight || 500);
       containerRef.current.dataset.indicatorChartState = JSON.stringify(seriesRef.current.snapshot());
     },
-    removeIndicator: key => { seriesRef.current?.removeIndicator(key); if (containerRef.current && seriesRef.current) containerRef.current.dataset.indicatorChartState = JSON.stringify(seriesRef.current.snapshot()); },
-    clearIndicators: () => { seriesRef.current?.clearIndicators(); if (containerRef.current && seriesRef.current) containerRef.current.dataset.indicatorChartState = JSON.stringify(seriesRef.current.snapshot()); },
-    setIndicatorOrder: paneIds => { seriesRef.current?.layout(paneIds, containerRef.current?.clientHeight || 500); if (containerRef.current && seriesRef.current) containerRef.current.dataset.indicatorChartState = JSON.stringify(seriesRef.current.snapshot()); },
+    removeIndicator: key => {
+      seriesRef.current?.removeIndicator(key);
+      seriesRef.current?.refreshCandles();
+      if (containerRef.current && seriesRef.current) containerRef.current.dataset.indicatorChartState = JSON.stringify(seriesRef.current.snapshot());
+    },
+    clearIndicators: () => {
+      seriesRef.current?.clearIndicators();
+      seriesRef.current?.refreshCandles();
+      if (containerRef.current && seriesRef.current) containerRef.current.dataset.indicatorChartState = JSON.stringify(seriesRef.current.snapshot());
+    },
+    setIndicatorOrder: paneIds => {
+      seriesRef.current?.layout(paneIds, containerRef.current?.clientHeight || 500);
+      seriesRef.current?.refreshCandles();
+      if (containerRef.current && seriesRef.current) containerRef.current.dataset.indicatorChartState = JSON.stringify(seriesRef.current.snapshot());
+    },
     getIndicatorState: () => seriesRef.current?.snapshot() ?? null,
     updateCandle: (candle, volume) => seriesRef.current?.updateCandle(candle, volume),
+    refreshCandles: () => seriesRef.current?.refreshCandles(),
     cancelDrawing: () => providerRef.current?.cancel(),
     getDrawingInteractionState: () => providerRef.current?.snapshotInteraction() ?? null,
     updateIndicatorData: input => {
       if (!seriesRef.current || !containerRef.current) throw new Error('Chart workspace is not mounted');
       seriesRef.current.updateIndicatorData(input.instanceId, input.paneId, input.series, input.paneOrder, containerRef.current.clientHeight || 500);
-      containerRef.current.dataset.indicatorChartState = JSON.stringify(seriesRef.current.snapshot());
+      seriesRef.current.refreshCandles();
+      if (containerRef.current && seriesRef.current) containerRef.current.dataset.indicatorChartState = JSON.stringify(seriesRef.current.snapshot());
     },
     setPositionLines: (position, trade) => seriesRef.current?.setPositionLines(position, trade),
     clearPositionLines: () => seriesRef.current?.clearPositionLines(),
@@ -73,7 +87,7 @@ export const ChartWorkspace = forwardRef<ChartWorkspaceRef, ChartWorkspaceProps>
       },
       crosshair: { mode: 1 },
       rightPriceScale: { borderColor: 'rgba(255,255,255,0.12)' },
-      timeScale: { borderColor: 'rgba(255,255,255,0.12)', timeVisible: false, shiftVisibleRangeOnNewBar: true },
+      timeScale: { borderColor: 'rgba(255,255,255,0.12)', timeVisible: false, shiftVisibleRangeOnNewBar: true, rightOffset: 12 },
       height: container.clientHeight || 500,
     });
     const panes = new PaneManager(chart);

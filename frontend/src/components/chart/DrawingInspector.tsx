@@ -13,7 +13,31 @@ export const DrawingInspector: React.FC<Props> = ({ selected, persistenceStatus,
   const [draft, setDraft] = useState<SumiDrawing | null>(() => selected ? structuredClone(selected) : null);
   const [message, setMessage] = useState('');
   const valid = useMemo(() => draft ? validDraft(draft) : false, [draft]);
-  if (!selected || !draft) return null;
+  if (!selected || !draft) {
+    return (
+      <div
+        data-testid="drawing-inspector-empty"
+        style={{
+          padding: '24px 16px',
+          textAlign: 'center',
+          color: 'var(--text-muted)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: 12,
+          background: 'rgba(255,255,255,0.02)',
+          borderRadius: 8,
+          border: '1px dashed var(--border-color)',
+        }}
+      >
+        <div style={{ fontSize: 28 }}>📐</div>
+        <div style={{ fontWeight: 600, color: 'var(--text-main)', fontSize: 13 }}>Chưa chọn hình vẽ nào</div>
+        <div style={{ fontSize: 12, lineHeight: 1.5, maxWidth: 220 }}>
+          Nhấp chuột vào bất kỳ đường kẻ, hộp chữ nhật hoặc công cụ Risk-Reward trên biểu đồ để điều chỉnh màu sắc, độ dày và tọa độ.
+        </div>
+      </div>
+    );
+  }
   const controlStyle: React.CSSProperties = { width: '100%', minWidth: 0, boxSizing: 'border-box' };
   const updateAnchor = (index: number, field: 'time' | 'price', value: string | number) => setDraft(previous => previous ? ({
     ...previous, anchors: previous.anchors.map((anchor, anchorIndex) => anchorIndex === index ? { ...anchor, [field]: value } : anchor),

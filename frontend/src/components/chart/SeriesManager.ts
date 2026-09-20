@@ -8,20 +8,17 @@ import {
   type ISeriesApi,
   type SeriesMarker,
   type Time,
-  type WhitespaceData,
 } from 'lightweight-charts';
 import { PaneManager } from './PaneManager';
 import { PositionLineManager } from './PositionLineManager';
 import { IchimokuCloudPlugin } from './plugins/IchimokuCloudPlugin';
 import type { CandleData, IndicatorChartSnapshot, IndicatorSeriesData, PaneId, VolumeData } from './workspaceTypes';
-import { addTradingDays } from '../../features/drawings/drawingDomain';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type ManagedSeries = ISeriesApi<'Line'> | ISeriesApi<'Histogram'> | ISeriesApi<'Custom'> | any;
 
 export class SeriesManager {
   readonly candles: ISeriesApi<'Candlestick'>;
-  private readonly whitespaceSeries: ISeriesApi<'Line'>;
   private candleData: CandleData[] = [];
   private volumeData: VolumeData[] = [];
   private readonly indicatorSeries = new Map<string, { paneId: PaneId; definitions: IndicatorSeriesData[]; series: ManagedSeries[] }>();
@@ -31,6 +28,8 @@ export class SeriesManager {
   private readonly chart: IChartApi;
   private readonly panes: PaneManager;
 
+  private currentMarkers: SeriesMarker<Time>[] = [];
+
   constructor(chart: IChartApi, panes: PaneManager) {
     this.chart = chart;
     this.panes = panes;
@@ -38,25 +37,22 @@ export class SeriesManager {
       upColor: '#00E676', downColor: '#FF1744', borderVisible: false,
       wickUpColor: '#00E676', wickDownColor: '#FF1744',
     }, panes.index('price'));
-    this.whitespaceSeries = chart.addSeries(LineSeries, { visible: false, crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false });
     this.positionLines = new PositionLineManager(this.candles);
     this.markerPlugin = createSeriesMarkers(this.candles, []);
   }
 
   setCandles(data: CandleData[], markers: SeriesMarker<Time>[] = []): void {
     this.candleData = data;
+    this.currentMarkers = markers;
     this.candles.setData(data.map(d => ({ ...d })));
-    if (data.length > 0) {
-      const lastCandleTime = data[data.length - 1].time as string;
-      const wsData: WhitespaceData[] = [];
-      for (let i = 1; i <= 100; i++) {
-        wsData.push({ time: addTradingDays(lastCandleTime, i) as Time });
-      }
-      this.whitespaceSeries.setData(wsData);
-    } else {
-      this.whitespaceSeries.setData([]);
-    }
     this.markerPlugin.setMarkers(markers);
+  }
+
+  refreshCandles(): void {
+    if (this.candleData && this.candleData.length > 0) {
+      this.candles.setData(this.candleData.map(d => ({ ...d })));
+      this.markerPlugin.setMarkers(this.currentMarkers);
+    }
   }
 
   setVolume(data: VolumeData[]): void {
@@ -79,14 +75,6 @@ export class SeriesManager {
       const volIndex = this.volumeData.findIndex(item => item.time === volume.time);
       this.volumeData = volIndex < 0 ? [...this.volumeData, volume] : this.volumeData.map((item, i) => i === volIndex ? volume : item);
     }
-
-    // Push the whitespace series forward
-    const lastCandleTime = candle.time as string;
-    const wsData: WhitespaceData[] = [];
-    for (let i = 1; i <= 100; i++) {
-      wsData.push({ time: addTradingDays(lastCandleTime, i) as Time });
-    }
-    this.whitespaceSeries.setData(wsData);
 
     this.candles.update({ ...candle });
 
@@ -114,8 +102,22 @@ export class SeriesManager {
     // Can reuse if: same pane, same number of definitions, same series types
     if (existing && existing.paneId === paneId && existing.definitions.length === definitions.length &&
         existing.definitions.every((def, i) => def.type === definitions[i].type && def.seriesKey === definitions[i].seriesKey)) {
-      // Incremental path: just update data on existing series handles
+      // Incremental path: update options/styles and data on existing series handles
       existing.series.forEach((series, index) => {
+        const def = definitions[index];
+        if (def.type === 'ichimoku-cloud') {
+          try {
+            series.applyOptions({
+              upColor: def.upColor ?? 'rgba(38, 166, 154, 0.25)',
+              downColor: def.downColor ?? 'rgba(239, 83, 80, 0.25)',
+            });
+          } catch { /* ignore */ }
+        } else if (def.color) {
+          try {
+            series.applyOptions({ color: def.color });
+          } catch { /* ignore */ }
+        }
+
         const seriesData = (paneId === 'volume' && (definitions[index].seriesKey === 'raw-volume' || definitions[index].type === 'histogram')) 
           ? this.volumeData : definitions[index].data;
         const previousData = existing.definitions[index].data;
@@ -161,7 +163,12 @@ export class SeriesManager {
         let created: any;
         if (definition.type === 'ichimoku-cloud') {
           // Ichimoku Cloud Custom Series
-          created = this.chart.addCustomSeries(new IchimokuCloudPlugin(), options, paneIndex);
+          const cloudOptions = {
+            ...options,
+            upColor: definition.upColor ?? 'rgba(38, 166, 154, 0.25)',
+            downColor: definition.downColor ?? 'rgba(239, 83, 80, 0.25)',
+          };
+          created = this.chart.addCustomSeries(new IchimokuCloudPlugin(), cloudOptions, paneIndex);
         } else if (definition.type === 'histogram') {
           created = this.chart.addSeries(HistogramSeries, options, paneIndex);
         } else {
@@ -183,6 +190,7 @@ export class SeriesManager {
       this.indicatorSeries.set(key, { paneId, definitions, series: staged });
       previous?.series.forEach(series => this.chart.removeSeries(series));
       if (previous && previous.paneId !== paneId) this.panes.removeIfEmpty(previous.paneId);
+      this.refreshCandles();
     } catch (error) {
       staged.forEach(series => {
         try { this.chart.removeSeries(series); } catch { /* retain the originating error */ }
@@ -190,6 +198,7 @@ export class SeriesManager {
       if (!previous || previous.paneId !== paneId) {
         try { this.panes.removeIfEmpty(paneId); } catch { /* retain the originating error */ }
       }
+      this.refreshCandles();
       const detail = error instanceof Error ? error.message : String(error);
       throw new Error(`${stage}: ${detail}`, { cause: error });
     }
@@ -201,14 +210,22 @@ export class SeriesManager {
     managed.series.forEach(series => this.chart.removeSeries(series));
     this.indicatorSeries.delete(key);
     this.panes.removeIfEmpty(managed.paneId);
+    this.refreshCandles();
   }
 
   clearIndicators(): void {
     [...this.indicatorSeries.keys()].forEach(key => this.removeIndicator(key));
+    this.refreshCandles();
   }
 
-  layout(paneIds: PaneId[], height: number): void { this.panes.layout(paneIds, height); }
-  resizeLayout(height: number): void { this.panes.resize(height); }
+  layout(paneIds: PaneId[], height: number): void {
+    this.panes.layout(paneIds, height);
+    this.refreshCandles();
+  }
+  resizeLayout(height: number): void {
+    this.panes.resize(height);
+    this.refreshCandles();
+  }
 
   snapshot(): IndicatorChartSnapshot {
     const seriesCounts = new Map<PaneId, number>([['price', 1]]);

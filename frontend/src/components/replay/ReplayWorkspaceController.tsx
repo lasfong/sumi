@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import type { CandleChartRef } from '../chart/CandleChart';
 import type { SeriesMarker, Time, SeriesMarkerPosition, SeriesMarkerShape } from 'lightweight-charts';
-import { createReplaySession, getReplaySession, getSessionCandles, nextCandle, previousCandle } from '../../api/replayApi';
+import { createReplaySession, getReplaySession, getSessionCandles, nextCandle, previousCandle, resetPracticeSession } from '../../api/replayApi';
 import { getPracticeState, submitDecision } from '../../api/decisionApi';
 import { createJournalEntry, getJournalEntries } from '../../api/journalApi';
 import { getIndicatorRegistry, getSessionIndicatorData, type IndicatorDefinition } from '../../api/indicatorsApi';
@@ -204,6 +204,17 @@ export const useReplayWorkspaceController = () => {
     }
   }, [refetchJournal, sessionId]);
 
+  const handleResetPractice = useCallback(async () => {
+    if (!sessionId) return;
+    try {
+      await resetPracticeSession(sessionId);
+      await Promise.all([refetchPractice(), refetchSession(), refetchJournal()]);
+      chartRef.current?.clearPositionLines();
+      toast.success('Đã reset bảng điểm và lệnh luyện tập');
+    } catch {
+      toast.error('Không thể reset trạng thái luyện tập');
+    }
+  }, [sessionId, refetchPractice, refetchSession, refetchJournal]);
 
   const symbolName = candlesData?.[0]?.symbol || '—';
   const currentCandle = candlesData?.length ? candlesData[candlesData.length - 1] : null;
@@ -239,37 +250,45 @@ export const useReplayWorkspaceController = () => {
       }
 
       // Update react-query cache to sync rest of UI
-      queryClient.setQueryData(['candles', sessionId], (old: Candle[] | undefined) => {
-        if (!old) return old;
-        const dbCandle = {
-          id: 0,
-          session_id: sessionId!,
-          symbol: symbolName,
-          timeframe: 'D',
-          adjustment_type: 'split',
-          timestamp: wsDateKey,
-          open: newCandle.open,
-          high: newCandle.high,
-          low: newCandle.low,
-          close: newCandle.close,
-          volume: newCandle.volume
-        };
-        return [...old, dbCandle];
-      });
+      queryClient.setQueriesData(
+        { queryKey: ['candles', sessionId] },
+        (old: Candle[] | undefined) => {
+          if (!old) return old;
+          const dbCandle: Candle = {
+            id: old.length ? Math.max(...old.map(c => c.id)) + 1 : 0,
+            symbol: symbolName,
+            timeframe: targetTimeframe || 'D',
+            adjustment_type: 'split',
+            timestamp: wsDateKey,
+            open: newCandle.open,
+            high: newCandle.high,
+            low: newCandle.low,
+            close: newCandle.close,
+            volume: newCandle.volume,
+            source: 'websocket',
+          };
+          return [...old, dbCandle];
+        }
+      );
 
-      // Sync positions silently
+      // Sync replay session current_index and source_context
+      queryClient.setQueryData(
+        ['replay-session', sessionId],
+        (old: ReplaySession | undefined) => {
+          if (!old) return old;
+          return {
+            ...old,
+            current_index: old.current_index + 1,
+            ...(msg.source_context ? { source_context: msg.source_context } : {}),
+          };
+        }
+      );
+
+      // Sync positions and journal silently
       queryClient.invalidateQueries({ queryKey: ['practice-state', sessionId] });
-      if (msg.source_context) {
-        queryClient.setQueryData(
-          ['replay-session', sessionId],
-          (old: ReplaySession | undefined) => old ? { ...old, source_context: msg.source_context! } : old,
-        );
-      } else {
-        queryClient.invalidateQueries({ queryKey: ['replay-session', sessionId] });
-      }
       queryClient.invalidateQueries({ queryKey: ['journal', sessionId] });
     }
-  }, [sessionId, queryClient, symbolName]);
+  }, [sessionId, queryClient, symbolName, targetTimeframe]);
 
   const { isConnected, sendCommand } = useWebSocket(sessionId, handleWebSocketMessage);
   const handleNext = useCallback((steps: number = 1) => {
@@ -296,6 +315,25 @@ export const useReplayWorkspaceController = () => {
       if (!isGlobalShortcutEligible(e)) return;
       if (!sessionId) return;
 
+      // Alt-key combinations for drawing tools
+      if (e.altKey && !e.ctrlKey && !e.metaKey) {
+        if (e.code === 'KeyT') {
+          e.preventDefault();
+          handleDrawingTool('trendline');
+          return;
+        }
+        if (e.code === 'KeyH') {
+          e.preventDefault();
+          handleDrawingTool('horizontal');
+          return;
+        }
+        if (e.code === 'KeyR') {
+          e.preventDefault();
+          handleDrawingTool('risk-reward');
+          return;
+        }
+      }
+
       switch (e.code) {
         case 'Escape':
           chartRef.current?.cancelDrawing();
@@ -314,11 +352,43 @@ export const useReplayWorkspaceController = () => {
           e.preventDefault();
           handlePrev(e.shiftKey ? 5 : 1);
           break;
+        case 'KeyB':
+          e.preventDefault();
+          window.dispatchEvent(new CustomEvent('sumi:switch-tab', { detail: 'trade' }));
+          window.dispatchEvent(new CustomEvent('sumi:trade-action', { detail: 'BUY' }));
+          break;
+        case 'KeyS':
+          e.preventDefault();
+          window.dispatchEvent(new CustomEvent('sumi:switch-tab', { detail: 'trade' }));
+          window.dispatchEvent(new CustomEvent('sumi:trade-action', { detail: 'SELL' }));
+          break;
+        case 'KeyH':
+          e.preventDefault();
+          window.dispatchEvent(new CustomEvent('sumi:switch-tab', { detail: 'trade' }));
+          window.dispatchEvent(new CustomEvent('sumi:trade-action', { detail: 'HOLD' }));
+          break;
+        case 'KeyC':
+          e.preventDefault();
+          window.dispatchEvent(new CustomEvent('sumi:switch-tab', { detail: 'journal' }));
+          break;
+        case 'KeyD':
+          e.preventDefault();
+          window.dispatchEvent(new CustomEvent('sumi:open-debrief'));
+          break;
+        case 'Slash':
+          if (e.shiftKey) {
+            e.preventDefault();
+            window.dispatchEvent(new CustomEvent('sumi:open-shortcuts'));
+          } else {
+            e.preventDefault();
+            window.dispatchEvent(new CustomEvent('sumi:open-symbol-switcher'));
+          }
+          break;
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [drawing, handleNext, handlePrev, sessionId]);
+  }, [drawing, handleDrawingTool, handleNext, handlePrev, sessionId]);
 
   const chartCandleRows = useMemo(() => Array.from(
     new Map((candlesData || []).map((c: Candle) => [toDateKey(c.timestamp) || c.timestamp, c] as const)).entries()
@@ -505,17 +575,28 @@ export const useReplayWorkspaceController = () => {
     }
   }, [practiceData]);
 
+  const handleQuickSwitchSymbol = useCallback((newSymbol: string) => {
+    if (!newSymbol) return;
+    createMutation.mutate({
+      symbol: newSymbol.toUpperCase(),
+      start_date: sessionData?.start_date ? String(sessionData.start_date).slice(0, 10) : '2023-01-01',
+      end_date: sessionData?.end_date ? String(sessionData.end_date).slice(0, 10) : '2024-01-01',
+      initial_cash: sessionData?.initial_cash || 100000000,
+    });
+  }, [createMutation, sessionData]);
+
   useEffect(() => () => indicatorRequests.cancelAll(), [indicatorRequests]);
   return {
     sessionId, chartRef, symbolName, sessionStatus: sessionData?.status, sessionData, sourceContext, currentDate, currentCandle, candleCount: candlesData?.length ?? 0,
     targetTimeframe, setTargetTimeframe,
     handleCreateSession, handleResumeSession, isCreatingSession: createMutation.isPending, handleClearSession, isValidating,
+    onSwitchSymbol: handleQuickSwitchSymbol,
     indicatorDefinitions, indicatorDocument, indicatorRuntime, addIndicatorInstance, updateIndicatorInstance,
     removeIndicatorInstance, toggleIndicatorInstance, moveIndicatorInstance,
     playSpeed, setPlaySpeed, isPlaying, setIsPlaying,
     handlePrev, handleNext, navigationPending: prevMutation.isPending || nextMutation.isPending,
     drawing, selectedDrawing, handleDrawingTool, formattedCandles, volumeData, markers,
-    practiceData, practiceLoading, practiceError,
+    practiceData, practiceLoading, practiceError, handleResetPractice,
     journalData, journalLoading, journalError, handleSaveJournal, handleSubmitDecision,
   };
 };

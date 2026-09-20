@@ -37,6 +37,8 @@ export interface IndicatorSeriesData {
   name: string;
   data: Array<LineData | HistogramData | Record<string, unknown>>;
   color?: string;
+  upColor?: string;
+  downColor?: string;
   type?: 'line' | 'histogram' | 'ichimoku-cloud';
   references?: Array<{ value: number; label: string; color?: string }>;
   scale?: { minimum: number; maximum: number };
@@ -80,6 +82,7 @@ export interface ChartWorkspaceRef {
   cancelDrawing: () => void;
   getDrawingInteractionState: () => DrawingInteractionSnapshot | null;
   updateIndicatorData: (input: IndicatorRenderInput) => void;
+  refreshCandles: () => void;
   setPositionLines: (position: { average_price: number }, trade: { initial_stop_loss?: number | null; target_price?: number | null } | null) => void;
   clearPositionLines: () => void;
 }

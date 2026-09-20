@@ -245,4 +245,61 @@ describe('StrategyLabPage', () => {
     expect(screen.getByText('Low Sample (0)')).toBeInTheDocument();
     expect(screen.getByText('Not rankable (Low sample)')).toBeInTheDocument();
   });
+
+  it('supports quick symbol and date presets, and renders multi-strategy equity curve chart with star ratings', async () => {
+    vi.mocked(backtestApi.runBacktest).mockResolvedValueOnce({
+      status: 'succeeded',
+      analytics: {
+        total_net_pnl: 25000000,
+        win_rate: 0.60,
+        total_trades: 12,
+        profit_factor: 1.8,
+        expectancy: 2000000,
+        average_win: 2500000,
+        average_loss: 1000000,
+        max_drawdown_pct: 12.5,
+        equity_curve: [
+          { timestamp: '2023-01-01', equity: 100000000, cash: 100000000, holdings_value: 0, drawdown: 0, drawdown_pct: 0 },
+          { timestamp: '2023-06-01', equity: 115000000, cash: 115000000, holdings_value: 0, drawdown: 0, drawdown_pct: 0 },
+          { timestamp: '2023-12-31', equity: 125000000, cash: 125000000, holdings_value: 0, drawdown: 0, drawdown_pct: 0 },
+        ],
+        metrics: {
+          win_rate: { value: 0.60, status: 'valid', sample_size: 12 },
+          profit_factor: { value: 1.8, status: 'valid', sample_size: 12 },
+          total_net_pnl: { value: 25000000, status: 'valid', sample_size: 12 },
+        },
+      },
+    });
+
+    renderWithClient(<StrategyLabPage />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText('Trend Strategy').length).toBeGreaterThan(0);
+    });
+
+    // Test quick symbol selection
+    fireEvent.click(screen.getByRole('button', { name: 'HPG' }));
+    const symbolInput = screen.getByLabelText(/Symbols/i) as HTMLInputElement;
+    expect(symbolInput.value).toBe('HPG');
+
+    // Test quick date preset
+    fireEvent.click(screen.getByRole('button', { name: '3 Năm (2023–2026)' }));
+    const startInput = screen.getByLabelText(/In-Sample Start Date/i) as HTMLInputElement;
+    expect(startInput.value).toBe('2023-01-01');
+
+    // Run comparison
+    const checkboxes = screen.getAllByRole('checkbox');
+    fireEvent.click(checkboxes[0]);
+    fireEvent.click(screen.getByRole('button', { name: /Compare Strategies/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Comparison')).toBeInTheDocument();
+      expect(screen.getByTestId('multi-strategy-equity-chart')).toBeInTheDocument();
+    });
+
+    expect(screen.getByText('+25.0%')).toBeInTheDocument();
+    expect(screen.getByText('-12.5%')).toBeInTheDocument();
+    expect(screen.getByText('⭐⭐⭐⭐⭐')).toBeInTheDocument();
+    expect(screen.getByText(/Tối ưu xuất sắc/i)).toBeInTheDocument();
+  });
 });

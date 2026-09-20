@@ -16,7 +16,6 @@ export const SessionSetup: React.FC<SessionSetupProps> = ({ onCreateSession, onR
   const [search, setSearch] = useState('');
   const [startDate, setStartDate] = useState('2023-01-01');
   const [endDate, setEndDate] = useState('2024-01-01');
-  const [initialCash, setInitialCash] = useState('100000000');
   const [showDropdown, setShowDropdown] = useState(false);
 
   const { data: symbols } = useQuery({
@@ -38,7 +37,7 @@ export const SessionSetup: React.FC<SessionSetupProps> = ({ onCreateSession, onR
       symbol,
       start_date: startDate,
       end_date: endDate,
-      initial_cash: parseFloat(initialCash) || 100000000,
+      initial_cash: 100000000,
     });
   };
 
@@ -105,14 +104,28 @@ export const SessionSetup: React.FC<SessionSetupProps> = ({ onCreateSession, onR
           </div>
         </div>
 
-        <div style={{ marginBottom: '1.5rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem', color: 'var(--text-muted)', fontSize: '13px' }}>Initial Cash (VND)</label>
-          <input
-            type="number"
-            value={initialCash}
-            onChange={(e) => setInitialCash(e.target.value)}
-            style={{ width: '100%' }}
-          />
+        <div style={{ display: 'flex', gap: '8px', marginBottom: '1.5rem' }}>
+          <button
+            type="button"
+            onClick={() => { setStartDate('2015-01-01'); setEndDate('2026-12-31'); }}
+            style={{ padding: '4px 8px', fontSize: '12px', background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border-color)', borderRadius: '4px', cursor: 'pointer' }}
+          >
+            2015 – 2026
+          </button>
+          <button
+            type="button"
+            onClick={() => { setStartDate('2020-01-01'); setEndDate('2026-12-31'); }}
+            style={{ padding: '4px 8px', fontSize: '12px', background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border-color)', borderRadius: '4px', cursor: 'pointer' }}
+          >
+            5 năm
+          </button>
+          <button
+            type="button"
+            onClick={() => { setStartDate('2023-01-01'); setEndDate('2026-12-31'); }}
+            style={{ padding: '4px 8px', fontSize: '12px', background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border-color)', borderRadius: '4px', cursor: 'pointer' }}
+          >
+            3 năm
+          </button>
         </div>
 
         <button

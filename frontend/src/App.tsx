@@ -1,4 +1,4 @@
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, useState } from 'react';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'react-hot-toast';
@@ -22,11 +22,31 @@ const PageFallback = () => (
 );
 
 function App() {
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem('sumi-sidebar-collapsed') === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  const handleToggleSidebar = () => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('sumi-sidebar-collapsed', String(next));
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  };
+
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <div className="app-shell">
-          <Sidebar />
+        <div className={`app-shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
+          <Sidebar isCollapsed={sidebarCollapsed} onToggleCollapse={handleToggleSidebar} />
           <main className="app-main">
             <ErrorBoundary>
               <Suspense fallback={<PageFallback />}>

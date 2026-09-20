@@ -37,12 +37,16 @@ describe('integrated practice workflow UI', () => {
     resolveSubmit?.({ ok: true, message: 'BUY executed.' });
   });
 
-  it('disables SELL button due to T+2 constraints and blocks historical actions', async () => {
+  it('enables immediate SELL for open positions without T+2 lock and blocks historical actions', async () => {
     const onSubmit = vi.fn();
-    const { rerender } = render(<TradeControls snapshot={snapshot({ positions: [{ id: 1, symbol: 'FPT', quantity: 100, average_price: 90, total_cost: 9000, current_price: 100, realized_pnl: 0, unrealized_pnl: 1000, available_quantity: 0, opened_at: '2024-01-01' }] })} onSubmitDecision={onSubmit} />);
+    const { rerender } = render(<TradeControls snapshot={snapshot({ positions: [] })} onSubmitDecision={onSubmit} />);
+    const noPosSellBtn = screen.getByRole('button', { name: 'SELL' });
+    expect(noPosSellBtn).toBeDisabled();
+    expect(noPosSellBtn).toHaveAttribute('title', 'No open position');
+
+    rerender(<TradeControls snapshot={snapshot({ positions: [{ id: 1, symbol: 'FPT', quantity: 100, average_price: 90, total_cost: 9000, current_price: 100, realized_pnl: 0, unrealized_pnl: 1000, available_quantity: 100, opened_at: '2024-01-01' }] })} onSubmitDecision={onSubmit} />);
     const sellBtn = screen.getByRole('button', { name: 'SELL' });
-    expect(sellBtn).toBeDisabled();
-    expect(sellBtn).toHaveAttribute('title', 'T+2: Cổ phiếu chưa về tài khoản');
+    expect(sellBtn).toBeEnabled();
 
     rerender(<TradeControls snapshot={snapshot({ can_trade: false, historical: true, latest_activity_index: 15, trade_block_reason: 'Advance to bar #16.' })} onSubmitDecision={onSubmit} />);
     expect(screen.getByTestId('historical-trade-block')).toHaveTextContent('Advance to bar #16');
@@ -67,14 +71,12 @@ describe('integrated practice workflow UI', () => {
     expect(JSON.parse(onSave.mock.calls[1][0].content).context.candleIndex).toBe(10);
   });
 
-  it('keeps all workflow surfaces in one rail and opens Drawing on selection', async () => {
+  it('keeps workflow surfaces in one rail (Trade and Decisions)', async () => {
     const user = userEvent.setup();
-    const { rerender } = render(<PracticeRail trade="trade-view" journal="journal-view" decisions="decision-view" drawing="drawing-view" />);
+    render(<PracticeRail trade="trade-view" decisions="decision-view" />);
     expect(screen.getByTestId('practice-tab-trade')).toHaveTextContent('trade-view');
-    await user.click(screen.getByRole('tab', { name: 'Journal' }));
-    expect(screen.getByTestId('practice-tab-journal')).toHaveTextContent('journal-view');
-    rerender(<PracticeRail key="drawing-1" trade="trade-view" journal="journal-view" decisions="decision-view" drawing="drawing-view" selectedDrawingId="drawing-1" />);
-    expect(await screen.findByTestId('practice-tab-drawing')).toHaveTextContent('drawing-view');
+    await user.click(screen.getByRole('tab', { name: 'Decisions' }));
+    expect(screen.getByTestId('practice-tab-decisions')).toHaveTextContent('decision-view');
   });
 
   it('contains trade-dialog focus, closes on Escape and returns focus to the opener', async () => {
@@ -105,13 +107,13 @@ describe('integrated practice workflow UI', () => {
 
   it('links tabs to the active panel and supports arrow-key navigation', async () => {
     const user = userEvent.setup();
-    render(<PracticeRail trade="trade-view" journal="journal-view" decisions="decision-view" drawing="drawing-view" />);
+    render(<PracticeRail trade="trade-view" decisions="decision-view" />);
     const trade = screen.getByRole('tab', { name: 'Trade' });
     expect(trade).toHaveAttribute('aria-controls', 'practice-panel-trade');
     expect(screen.getByRole('tabpanel')).toHaveAttribute('aria-labelledby', 'practice-tab-trade');
     trade.focus();
     await user.keyboard('{ArrowRight}');
-    expect(screen.getByRole('tab', { name: 'Journal' })).toHaveFocus();
-    expect(screen.getByRole('tab', { name: 'Journal' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: 'Decisions' })).toHaveFocus();
+    expect(screen.getByRole('tab', { name: 'Decisions' })).toHaveAttribute('aria-selected', 'true');
   });
 });

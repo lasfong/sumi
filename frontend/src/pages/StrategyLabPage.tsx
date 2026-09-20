@@ -16,6 +16,21 @@ import type {
   SweepParameter,
 } from '../api/strategyLabApi';
 import { MetricResultValue } from '../components/analytics/MetricResultValue';
+import { MultiStrategyEquityChart, type StrategyEquitySeries } from '../components/strategy/MultiStrategyEquityChart';
+
+import { MultiPhaseBatchPanel } from '../components/strategy/MultiPhaseBatchPanel';
+import { SignalCatalog } from '../components/signals/SignalCatalog';
+import { StrategyRuleBuilder } from '../components/strategy/StrategyRuleBuilder';
+import { TechnicalFlowBBViewer } from '../components/chart/TechnicalFlowBBViewer';
+
+const QUICK_SYMBOLS = ['FPT', 'SSI', 'HPG', 'VCI', 'TCB', 'VNINDEX'];
+
+const DATE_PRESETS = [
+  { label: '2010–2026 (Toàn bộ)', start: '2010-01-01', end: '2026-03-01' },
+  { label: '5 Năm (2021–2026)', start: '2021-01-01', end: '2026-03-01' },
+  { label: '3 Năm (2023–2026)', start: '2023-01-01', end: '2026-03-01' },
+  { label: '2020–2022 (Sóng lớn)', start: '2020-01-01', end: '2022-12-31' },
+];
 
 interface LabResult {
   filename: string;
@@ -65,6 +80,7 @@ const saveHistory = (entries: LabHistoryEntry[]) => {
 };
 
 export const StrategyLabPage: React.FC = () => {
+  const [activeLabTab, setActiveLabTab] = useState<'battle' | 'multiphase' | 'catalog' | 'builder' | 'flow'>('battle');
   const [symbolsInput, setSymbolsInput] = useState('FPT, SSI, VCI');
   const [startDate, setStartDate] = useState('2020-01-01');
   const [endDate, setEndDate] = useState('2022-12-31');
@@ -664,6 +680,91 @@ export const StrategyLabPage: React.FC = () => {
     }));
   const displayHistory = [...history, ...savedHistory];
 
+  const selectCoreBattle = () => {
+    if (!strategies) return;
+    const coreFiles = ['macd_rsi_momentum.yaml', 'ichimoku_cloud.yaml', 'ema_crossover.yaml'];
+    const matched = strategies.filter(s => coreFiles.includes(s.filename)).map(s => s.filename);
+    if (matched.length > 0) {
+      setSelectedFilenames(matched);
+    } else {
+      setSelectedFilenames(strategies.slice(0, 3).map(s => s.filename));
+    }
+  };
+
+  const getStrategyRating = (response: BacktestResponse) => {
+    const trades = response.summary?.total_trades ?? response.analytics?.total_trades ?? 0;
+    const netPnl = response.summary?.total_net_pnl ?? response.analytics?.total_net_pnl ?? 0;
+    const winRate = response.summary?.win_rate ?? response.analytics?.win_rate ?? 0;
+    const pf = response.analytics?.profit_factor ?? 0;
+    const maxDd = response.analytics?.max_drawdown_pct ?? 0;
+    const retPct = initialCash > 0 ? (netPnl / initialCash) * 100 : 0;
+
+    if (trades < 5) {
+      return {
+        stars: '⭐⭐',
+        rating: 2,
+        recommendation: 'Chưa đủ mẫu giao dịch (< 5 lệnh)',
+        tone: 'neutral',
+      };
+    }
+    if (retPct > 20 && winRate >= 0.50 && pf >= 1.4 && maxDd < 25) {
+      return {
+        stars: '⭐⭐⭐⭐⭐',
+        rating: 5,
+        recommendation: 'Tối ưu xuất sắc: Rất phù hợp với xu hướng & biên độ mã này',
+        tone: 'bullish',
+      };
+    }
+    if (retPct > 8 && winRate >= 0.45 && pf >= 1.2) {
+      return {
+        stars: '⭐⭐⭐⭐',
+        rating: 4,
+        recommendation: 'Hiệu quả tốt: Lợi nhuận ổn định trên thị trường VN',
+        tone: 'bullish',
+      };
+    }
+    if (retPct > 0) {
+      return {
+        stars: '⭐⭐⭐',
+        rating: 3,
+        recommendation: 'Trung bình: Lãi nhẹ, nên kết hợp thêm bộ lọc xu hướng',
+        tone: 'neutral',
+      };
+    }
+    if (retPct <= 0 && maxDd > 20) {
+      return {
+        stars: '⭐',
+        rating: 1,
+        recommendation: 'Cảnh báo: Sụt giảm vốn sâu, không khuyến nghị áp dụng',
+        tone: 'bearish',
+      };
+    }
+    return {
+      stars: '⭐⭐',
+      rating: 2,
+      recommendation: 'Rủi ro whipsaw: Thường xuyên dính bẫy sideway đi ngang',
+      tone: 'bearish',
+    };
+  };
+
+  const chartSeries: StrategyEquitySeries[] = useMemo(() => {
+    const palette = ['#00E676', '#2962FF', '#BB86FC', '#FFB74D', '#00E5FF', '#FF1744'];
+    return results.map((item, idx) => {
+      const curve = item.response.analytics?.equity_curve || [];
+      const initCash = initialCash > 0 ? initialCash : 100000000;
+      return {
+        filename: item.filename,
+        name: item.name,
+        color: palette[idx % palette.length],
+        points: curve.map(pt => ({
+          timestamp: pt.timestamp,
+          returnPct: initCash > 0 ? ((pt.equity - initCash) / initCash) * 100 : 0,
+          equity: pt.equity,
+        })),
+      };
+    });
+  }, [results, initialCash]);
+
   return (
     <div className="animate-fade-in" style={{ maxWidth: '1280px', margin: '0 auto', paddingBottom: '40px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
@@ -672,29 +773,156 @@ export const StrategyLabPage: React.FC = () => {
             style={{
               margin: 0,
               fontSize: '28px',
-              background: 'linear-gradient(90deg, #fff, #8B949E)',
+              background: 'linear-gradient(90deg, #fff, #58A6FF)',
               WebkitBackgroundClip: 'text',
               WebkitTextFillColor: 'transparent',
             }}
           >
-            Strategy Lab
+            ⚔️ Strategy Tester — 1-Click Strategy Battle
           </h2>
-          <p style={{ margin: '4px 0 0', color: 'var(--text-muted)', fontSize: '13px' }}>
-            Declarative strategy research, bounded parameter sweeps & out-of-sample robustness validation.
+          <p style={{ margin: '4px 0 0', color: 'var(--text-muted)', fontSize: '14px' }}>
+            Chiến lược chỉ báo nào phù hợp nhất với mã <span style={{ color: '#58A6FF', fontWeight: 600 }}>{symbolsInput}</span> trong lịch sử thị trường Việt Nam?
           </p>
         </div>
       </div>
 
-      {/* Strategy Selection Catalog (Rendered First for Clean Access) */}
-      <div className="glass-panel" style={{ padding: '20px', marginBottom: '24px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+      {/* Navigation Tabs for Unified Research Validation Surface */}
+      <div
+        data-testid="strategy-lab-tabs"
+        style={{
+          display: 'flex',
+          gap: '8px',
+          marginBottom: '20px',
+          borderBottom: '1px solid var(--border-color)',
+          paddingBottom: '12px',
+          overflowX: 'auto',
+        }}
+      >
+        <button
+          type="button"
+          data-testid="lab-tab-battle"
+          onClick={() => setActiveLabTab('battle')}
+          style={{
+            padding: '8px 16px',
+            fontSize: '13px',
+            borderRadius: '6px',
+            border: activeLabTab === 'battle' ? '1px solid var(--color-primary)' : '1px solid transparent',
+            background: activeLabTab === 'battle' ? 'rgba(41, 98, 255, 0.2)' : 'rgba(255, 255, 255, 0.04)',
+            color: activeLabTab === 'battle' ? 'var(--color-primary)' : 'var(--text-muted)',
+            cursor: 'pointer',
+            fontWeight: activeLabTab === 'battle' ? 600 : 400,
+          }}
+        >
+          ⚔️ Đối Đầu & Tối Ưu (Battle & Sweep)
+        </button>
+        <button
+          type="button"
+          data-testid="lab-tab-multiphase"
+          onClick={() => setActiveLabTab('multiphase')}
+          style={{
+            padding: '8px 16px',
+            fontSize: '13px',
+            borderRadius: '6px',
+            border: activeLabTab === 'multiphase' ? '1px solid var(--color-primary)' : '1px solid transparent',
+            background: activeLabTab === 'multiphase' ? 'rgba(41, 98, 255, 0.2)' : 'rgba(255, 255, 255, 0.04)',
+            color: activeLabTab === 'multiphase' ? 'var(--color-primary)' : 'var(--text-muted)',
+            cursor: 'pointer',
+            fontWeight: activeLabTab === 'multiphase' ? 600 : 400,
+          }}
+        >
+          📊 Ma Trận Đa Pha & Vũ Trụ (Multi-Phase Batch)
+        </button>
+        <button
+          type="button"
+          data-testid="lab-tab-catalog"
+          onClick={() => setActiveLabTab('catalog')}
+          style={{
+            padding: '8px 16px',
+            fontSize: '13px',
+            borderRadius: '6px',
+            border: activeLabTab === 'catalog' ? '1px solid var(--color-primary)' : '1px solid transparent',
+            background: activeLabTab === 'catalog' ? 'rgba(41, 98, 255, 0.2)' : 'rgba(255, 255, 255, 0.04)',
+            color: activeLabTab === 'catalog' ? 'var(--color-primary)' : 'var(--text-muted)',
+            cursor: 'pointer',
+            fontWeight: activeLabTab === 'catalog' ? 600 : 400,
+          }}
+        >
+          📚 Danh Mục Tín Hiệu (Signal Catalog)
+        </button>
+        <button
+          type="button"
+          data-testid="lab-tab-builder"
+          onClick={() => setActiveLabTab('builder')}
+          style={{
+            padding: '8px 16px',
+            fontSize: '13px',
+            borderRadius: '6px',
+            border: activeLabTab === 'builder' ? '1px solid var(--color-primary)' : '1px solid transparent',
+            background: activeLabTab === 'builder' ? 'rgba(41, 98, 255, 0.2)' : 'rgba(255, 255, 255, 0.04)',
+            color: activeLabTab === 'builder' ? 'var(--color-primary)' : 'var(--text-muted)',
+            cursor: 'pointer',
+            fontWeight: activeLabTab === 'builder' ? 600 : 400,
+          }}
+        >
+          🛠️ Soạn Quy Tắc (Rule Builder)
+        </button>
+        <button
+          type="button"
+          data-testid="lab-tab-flow"
+          onClick={() => setActiveLabTab('flow')}
+          style={{
+            padding: '8px 16px',
+            fontSize: '13px',
+            borderRadius: '6px',
+            border: activeLabTab === 'flow' ? '1px solid var(--color-primary)' : '1px solid transparent',
+            background: activeLabTab === 'flow' ? 'rgba(41, 98, 255, 0.2)' : 'rgba(255, 255, 255, 0.04)',
+            color: activeLabTab === 'flow' ? 'var(--color-primary)' : 'var(--text-muted)',
+            cursor: 'pointer',
+            fontWeight: activeLabTab === 'flow' ? 600 : 400,
+          }}
+        >
+          🌊 Dòng Tiền BB (OHLCV Proxy)
+        </button>
+      </div>
+
+      {activeLabTab === 'multiphase' && <MultiPhaseBatchPanel />}
+      {activeLabTab === 'catalog' && (
+        <div className="glass-panel" style={{ padding: '24px', borderRadius: '8px' }}>
+          <SignalCatalog />
+        </div>
+      )}
+      {activeLabTab === 'builder' && <StrategyRuleBuilder />}
+      {activeLabTab === 'flow' && <TechnicalFlowBBViewer />}
+
+      {activeLabTab === 'battle' && (
+        <>
+          {/* Strategy Selection Catalog (Rendered First for Clean Access) */}
+          <div className="glass-panel" style={{ padding: '20px', marginBottom: '24px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '10px' }}>
           <div>
             <h3 style={{ margin: 0, fontSize: '16px' }}>Strategies</h3>
             <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>
-              Select strategies to compare or pick a base strategy for parameter tuning.
+              Chọn các chiến lược để đối đầu so sánh hoặc kiểm định độ ổn định tham số.
             </span>
           </div>
-          <div style={{ display: 'flex', gap: '8px' }}>
+          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+            <button
+              type="button"
+              onClick={selectCoreBattle}
+              style={{
+                padding: '6px 12px',
+                fontSize: '12px',
+                fontWeight: 600,
+                background: 'linear-gradient(135deg, rgba(41, 98, 255, 0.25), rgba(88, 166, 255, 0.15))',
+                color: '#58A6FF',
+                border: '1px solid rgba(88, 166, 255, 0.4)',
+                borderRadius: '4px',
+                cursor: 'pointer',
+              }}
+              title="Tự động chọn 3 chiến lược cốt lõi: MACD Momentum, Ichimoku Breakout, EMA Trend Following"
+            >
+              ⚔️ Chọn 3 Chiến Lược Đối Đầu (MACD + Ichimoku + EMA)
+            </button>
             <button type="button" onClick={selectAll} style={{ padding: '6px 10px', fontSize: '12px' }}>
               Select All
             </button>
@@ -784,6 +1012,28 @@ export const StrategyLabPage: React.FC = () => {
                 style={{ width: '100%', padding: '10px' }}
                 required
               />
+              <div style={{ display: 'flex', gap: '4px', marginTop: '6px', flexWrap: 'wrap', alignItems: 'center' }}>
+                <span style={{ fontSize: '11px', color: 'var(--text-muted)', marginRight: '2px' }}>Gợi ý:</span>
+                {QUICK_SYMBOLS.map(sym => (
+                  <button
+                    key={sym}
+                    type="button"
+                    onClick={() => setSymbolsInput(sym)}
+                    style={{
+                      padding: '2px 7px',
+                      fontSize: '11px',
+                      fontWeight: 600,
+                      background: symbolsInput === sym ? 'rgba(88, 166, 255, 0.25)' : 'rgba(255,255,255,0.05)',
+                      color: symbolsInput === sym ? '#58A6FF' : 'var(--text-muted)',
+                      border: `1px solid ${symbolsInput === sym ? 'rgba(88, 166, 255, 0.5)' : 'var(--border-color)'}`,
+                      borderRadius: '3px',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {sym}
+                  </button>
+                ))}
+              </div>
             </div>
             <div>
               <label htmlFor="lab-cash" style={{ display: 'block', marginBottom: '6px', color: 'var(--text-muted)', fontSize: '13px' }}>
@@ -822,7 +1072,7 @@ export const StrategyLabPage: React.FC = () => {
               marginBottom: '20px',
             }}
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap', gap: '8px' }}>
               <span style={{ fontWeight: 600, fontSize: '14px', color: 'var(--text-main)' }}>
                 Evaluation Periods (In-Sample / Out-of-Sample Split)
               </span>
@@ -835,6 +1085,31 @@ export const StrategyLabPage: React.FC = () => {
                 />
                 Enable Out-of-Sample (OOS) Validation
               </label>
+            </div>
+
+            <div style={{ display: 'flex', gap: '6px', marginBottom: '12px', flexWrap: 'wrap' }}>
+              {DATE_PRESETS.map(preset => {
+                const isActive = startDate === preset.start && endDate === preset.end;
+                return (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    onClick={() => { setStartDate(preset.start); setEndDate(preset.end); }}
+                    style={{
+                      padding: '3px 8px',
+                      fontSize: '11px',
+                      fontWeight: 500,
+                      background: isActive ? 'rgba(0, 230, 118, 0.15)' : 'rgba(255,255,255,0.05)',
+                      color: isActive ? 'var(--color-buy)' : 'var(--text-muted)',
+                      border: `1px solid ${isActive ? 'rgba(0, 230, 118, 0.4)' : 'var(--border-color)'}`,
+                      borderRadius: '4px',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {preset.label}
+                  </button>
+                );
+              })}
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px' }}>
@@ -903,10 +1178,16 @@ export const StrategyLabPage: React.FC = () => {
               id="btn-compare-strategies"
               type="submit"
               className="btn-primary"
-              style={{ height: '42px', minWidth: '180px' }}
+              style={{
+                height: '44px',
+                minWidth: '220px',
+                fontSize: '14px',
+                fontWeight: 600,
+                background: 'linear-gradient(135deg, #2962FF, #00B0FF)',
+              }}
               disabled={isRunning || isSweeping || isLoadingStrategies}
             >
-              {isRunning ? 'Running Comparison...' : 'Compare Strategies'}
+              {isRunning ? 'Running Comparison...' : '⚔️ So Sánh Hiệu Quả (Compare Strategies)'}
             </button>
           </div>
         </form>
@@ -1067,6 +1348,11 @@ export const StrategyLabPage: React.FC = () => {
         </form>
       </div>
 
+      {/* Multi-Strategy Equity Curve Chart */}
+      {results.length > 0 && chartSeries.some(s => s.points.length > 0) && (
+        <MultiStrategyEquityChart series={chartSeries} />
+      )}
+
       {/* Comparison Results Section */}
       {sortedResults.length > 0 && (
         <div className="glass-panel" style={{ padding: '20px', marginBottom: '24px' }}>
@@ -1086,6 +1372,8 @@ export const StrategyLabPage: React.FC = () => {
                   <th style={{ padding: '10px 8px', fontWeight: 500, textAlign: 'right' }}>IS Trades</th>
                   <th style={{ padding: '10px 8px', fontWeight: 500, textAlign: 'right' }}>IS Win %</th>
                   <th style={{ padding: '10px 8px', fontWeight: 500, textAlign: 'right' }}>IS Net PnL</th>
+                  <th style={{ padding: '10px 8px', fontWeight: 500, textAlign: 'right' }}>IS Return %</th>
+                  <th style={{ padding: '10px 8px', fontWeight: 500, textAlign: 'right' }}>IS Max DD</th>
                   <th style={{ padding: '10px 8px', fontWeight: 500, textAlign: 'right' }}>IS Profit Factor</th>
                   {enableOos && (
                     <>
@@ -1095,6 +1383,7 @@ export const StrategyLabPage: React.FC = () => {
                     </>
                   )}
                   <th style={{ padding: '10px 8px', fontWeight: 500, textAlign: 'right' }}>Expectancy</th>
+                  <th style={{ padding: '10px 8px', fontWeight: 500, minWidth: '180px' }}>Đánh Giá & Khuyến Nghị</th>
                 </tr>
               </thead>
               <tbody>
@@ -1103,6 +1392,9 @@ export const StrategyLabPage: React.FC = () => {
                   const isEligible = isRankingEligible(item.response);
                   const isBest = item.filename === bestFilename;
                   const tradeCount = getTrades(item.response);
+                  const retPct = initialCash > 0 ? (netPnl / initialCash) * 100 : 0;
+                  const maxDd = item.response.analytics?.max_drawdown_pct;
+                  const rating = getStrategyRating(item.response);
 
                   const oosTrades = item.oosResponse ? getTrades(item.oosResponse) : null;
                   const oosNetPnl = item.oosResponse ? getNetPnl(item.oosResponse) : null;
@@ -1165,6 +1457,19 @@ export const StrategyLabPage: React.FC = () => {
                       >
                         {formatMoney(netPnl)}
                       </td>
+                      <td
+                        style={{
+                          padding: '12px 8px',
+                          textAlign: 'right',
+                          fontWeight: 600,
+                          color: retPct >= 0 ? 'var(--color-buy)' : 'var(--color-sell)',
+                        }}
+                      >
+                        {retPct >= 0 ? `+${retPct.toFixed(1)}%` : `${retPct.toFixed(1)}%`}
+                      </td>
+                      <td style={{ padding: '12px 8px', textAlign: 'right', color: 'var(--text-muted)' }}>
+                        {maxDd != null ? `-${maxDd.toFixed(1)}%` : '—'}
+                      </td>
                       <td style={{ padding: '12px 8px', textAlign: 'right' }}>
                         <MetricResultValue metric={item.response.analytics?.metrics?.profit_factor} />
                       </td>
@@ -1189,6 +1494,20 @@ export const StrategyLabPage: React.FC = () => {
                         </>
                       )}
                       <td style={{ padding: '12px 8px', textAlign: 'right' }}>{formatMoney(getExpectancy(item.response))}</td>
+                      <td style={{ padding: '12px 8px' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                          <span style={{ fontSize: '12px' }}>{rating.stars}</span>
+                          <span
+                            style={{
+                              fontSize: '11px',
+                              color: rating.tone === 'bullish' ? 'var(--color-buy)' : rating.tone === 'bearish' ? 'var(--color-sell)' : 'var(--text-muted)',
+                              fontWeight: 500,
+                            }}
+                          >
+                            {rating.recommendation}
+                          </span>
+                        </div>
+                      </td>
                     </tr>
                   );
                 })}
@@ -1353,6 +1672,8 @@ export const StrategyLabPage: React.FC = () => {
             ))}
           </div>
         </div>
+      )}
+        </>
       )}
     </div>
   );

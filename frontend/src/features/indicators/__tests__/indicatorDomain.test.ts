@@ -89,7 +89,7 @@ describe('indicator domain', () => {
     expect(stInst.paneId).toBe('price');
     expect(ichiInst.placement).toBe('price');
     expect(ichiInst.paneId).toBe('price');
-    expect(Object.keys(ichiInst.styles)).toEqual(['tenkan', 'kijun', 'spanA', 'spanB', 'chikou']);
+    expect(Object.keys(ichiInst.styles)).toEqual(['tenkan', 'kijun', 'spanA', 'spanB', 'chikou', 'cloudUp', 'cloudDown']);
     expect(atrInst.placement).toBe('oscillator');
     expect(atrInst.paneId).toBe(`indicator:${ids[2]}`);
     expect(vmaInst.placement).toBe('volume');

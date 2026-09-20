@@ -53,13 +53,55 @@ export const PracticeJournal: React.FC<PracticeJournalProps> = ({ snapshot, entr
       {checklist ? <><div style={{ color: 'var(--text-muted)', fontSize: 11 }}>Bar {checklist.context.candleIndex + 1} · {checklist.context.date}</div><div style={{ fontSize: 12, marginTop: 6 }}>{CHECKLIST_FIELDS.filter(field => checklist.checks[field]).map(field => LABELS[field]).join(' · ') || 'No boxes checked'}</div><p style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>{checklist.observation || 'No observation text.'}</p></> : <p style={{ whiteSpace: 'pre-wrap' }}>{entry.content}</p>}
     </article>)}
 
-    {editing && <div ref={setDialogElement} role="dialog" aria-modal="true" aria-label="Practice checklist" data-testid="practice-checklist-dialog" style={{ position: 'fixed', inset: 0, zIndex: 1200, background: 'rgba(0,0,0,.72)', display: 'grid', placeItems: 'center', padding: 16 }}>
-      <div className="glass-panel-solid" style={{ width: 'min(480px, 100%)', maxHeight: '90vh', overflowY: 'auto', padding: 20, display: 'grid', gap: 10 }}>
-        <h3 style={{ margin: 0 }}>Checklist · {snapshot.symbol} · bar {snapshot.visible_bar}/{snapshot.total_bars}</h3>
-        {CHECKLIST_FIELDS.map(field => <label key={field} style={{ display: 'flex', gap: 8 }}><input type="checkbox" checked={checks[field]} onChange={event => setChecks(previous => ({ ...previous, [field]: event.target.checked }))} />{LABELS[field]}</label>)}
-        <label>Observation<textarea aria-label="Checklist observation" rows={5} value={observation} onChange={event => setObservation(event.target.value)} /></label>
-        {feedback && !feedback.ok && <div role="alert" style={{ color: 'var(--color-sell)' }}>{feedback.message}</div>}
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}><button disabled={saving} onClick={closeEditor}>Cancel</button><button className="btn-primary" disabled={saving} onClick={save}>{saving ? 'Saving…' : 'Save checklist'}</button></div>
+    {editing && <div
+      ref={setDialogElement}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Practice checklist"
+      data-testid="practice-checklist-dialog"
+      className="glass-panel-solid"
+      style={{
+        padding: 14,
+        display: 'grid',
+        gap: 10,
+        background: 'rgba(19, 23, 34, 0.95)',
+        border: '1px solid rgba(41, 98, 255, 0.4)',
+        borderRadius: 8,
+        boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
+      }}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <h3 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Checklist · bar {snapshot.visible_bar}/{snapshot.total_bars}</h3>
+        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{snapshot.symbol}</span>
+      </div>
+      <div style={{ display: 'grid', gap: 6, fontSize: 12 }}>
+        {CHECKLIST_FIELDS.map(field => (
+          <label key={field} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+            <input
+              aria-label={LABELS[field]}
+              type="checkbox"
+              checked={checks[field]}
+              onChange={event => setChecks(previous => ({ ...previous, [field]: event.target.checked }))}
+            />
+            <span>{LABELS[field]}</span>
+          </label>
+        ))}
+      </div>
+      <label style={{ fontSize: 12, display: 'grid', gap: 4 }}>
+        <span>Observation</span>
+        <textarea
+          aria-label="Checklist observation"
+          rows={3}
+          value={observation}
+          onChange={event => setObservation(event.target.value)}
+          placeholder="Nhận định hỗ trợ/kháng cự, mô hình giá, kế hoạch rủi ro..."
+          style={{ width: '100%', boxSizing: 'border-box', resize: 'vertical' }}
+        />
+      </label>
+      {feedback && !feedback.ok && <div role="alert" style={{ color: 'var(--color-sell)', fontSize: 12 }}>{feedback.message}</div>}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+        <button disabled={saving} onClick={closeEditor}>Cancel</button>
+        <button className="btn-primary" disabled={saving} onClick={save}>{saving ? 'Saving…' : 'Save checklist'}</button>
       </div>
     </div>}
   </section>;

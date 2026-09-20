@@ -210,15 +210,51 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
-            <label>Stop loss
-              <input aria-label="Stop loss" type="number" step="100" value={stopLoss} onChange={event => setStopLoss(event.target.value)} />
-            </label>
-            <label>Target
-              <input aria-label="Target price" type="number" step="100" value={targetPrice} onChange={event => setTargetPrice(event.target.value)} />
-            </label>
-            <label>Risk %
-              <input aria-label="Risk percent" type="number" step="0.25" min="0.1" max="10" value={riskPercent} onChange={event => setRiskPercent(event.target.value)} />
-            </label>
+            <div>
+              <label htmlFor="order-sl">Stop loss</label>
+              <input id="order-sl" aria-label="Stop loss" type="number" step="100" value={stopLoss} onChange={event => setStopLoss(event.target.value)} />
+              <div style={{ display: 'flex', gap: 4, marginTop: 4 }}>
+                <button type="button" onClick={() => {
+                  const entry = (orderType === 'LIMIT' && limitPrice !== '') ? Number(limitPrice) : snapshot.current_price;
+                  if (entry > 0) {
+                    setStopLoss(String(Math.round(entry * 0.95)));
+                  }
+                }} style={{ fontSize: 10, padding: '2px 6px' }}>-5%</button>
+                <button type="button" onClick={() => {
+                  const entry = (orderType === 'LIMIT' && limitPrice !== '') ? Number(limitPrice) : snapshot.current_price;
+                  if (entry > 0) {
+                    setStopLoss(String(Math.round(entry * 0.93)));
+                  }
+                }} style={{ fontSize: 10, padding: '2px 6px' }}>-7%</button>
+              </div>
+            </div>
+            <div>
+              <label htmlFor="order-tp">Target</label>
+              <input id="order-tp" aria-label="Target price" type="number" step="100" value={targetPrice} onChange={event => setTargetPrice(event.target.value)} />
+              <div style={{ display: 'flex', gap: 4, marginTop: 4 }}>
+                <button type="button" onClick={() => {
+                  const entry = (orderType === 'LIMIT' && limitPrice !== '') ? Number(limitPrice) : snapshot.current_price;
+                  const sl = Number(stopLoss) || Math.round(entry * 0.95);
+                  if (entry > 0 && sl > 0) {
+                    if (!stopLoss) setStopLoss(String(sl));
+                    setTargetPrice(String(Math.round(entry + 2.0 * (entry - sl))));
+                  }
+                }} style={{ fontSize: 10, padding: '2px 6px' }}>2R</button>
+                <button type="button" onClick={() => {
+                  const entry = (orderType === 'LIMIT' && limitPrice !== '') ? Number(limitPrice) : snapshot.current_price;
+                  const sl = Number(stopLoss) || Math.round(entry * 0.95);
+                  if (entry > 0 && sl > 0) {
+                    if (!stopLoss) setStopLoss(String(sl));
+                    setTargetPrice(String(Math.round(entry + 3.0 * (entry - sl))));
+                  }
+                }} style={{ fontSize: 10, padding: '2px 6px' }}>3R</button>
+              </div>
+            </div>
+            <div>
+              <label>Risk %
+                <input aria-label="Risk percent" type="number" step="0.25" min="0.1" max="10" value={riskPercent} onChange={event => setRiskPercent(event.target.value)} />
+              </label>
+            </div>
           </div>
 
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '2px 0' }}>
@@ -233,7 +269,7 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
           {sizingCalc && (
             <div data-testid="position-sizing-panel" style={{ padding: 10, background: 'rgba(41,98,255,.08)', border: '1px solid rgba(41,98,255,.3)', borderRadius: 6, display: 'grid', gap: 4, fontSize: 12 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span>Expected R: <strong style={{ color: '#00E676' }}>{sizingCalc.grossR.toFixed(2)}R</strong> (Net {sizingCalc.netR.toFixed(2)}R)</span>
+                <span>Expected R: <strong style={{ color: '#00E676' }}>1 : {sizingCalc.grossR.toFixed(1)}</strong> ({sizingCalc.grossR.toFixed(2)}R, Net {sizingCalc.netR.toFixed(2)}R)</span>
                 <span>Max Risk: <strong>{sizingCalc.maxRiskAmt.toLocaleString()} VND</strong></span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
