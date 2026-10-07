@@ -51,8 +51,8 @@ def test_explicit_accept_and_weekly_derivation(db_session):
     # Verify 1W weekly candle auto-derived
     weekly_candles = db_session.query(Candle).filter(Candle.symbol == "HPG", Candle.timeframe == "1W").all()
     assert len(weekly_candles) == 1
-    assert weekly_candles[0].open == 25.0
-    assert weekly_candles[0].close == 26.0
+    assert weekly_candles[0].open == 25000.0
+    assert weekly_candles[0].close == 26000.0
 
 def test_idempotent_reaccept(db_session):
     csv_content = b"<Ticker>,<DTYYYYMMDD>,<Open>,<High>,<Low>,<Close>,<Volume>\nHPG,20260105,25.0,26.0,24.5,25.5,500000\n"

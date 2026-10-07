@@ -3,8 +3,17 @@ import { useQuery } from '@tanstack/react-query';
 import { getSignalRegistry } from '../../api/signalsApi';
 import type { SignalDefinition } from '../../types/signals';
 
+export interface StrategyRulePayload {
+  ruleName: string;
+  expression: string;
+  yaml: string;
+  signalsRequired: string[];
+  createdAt: string;
+}
+
 export interface StrategyRuleBuilderProps {
   onRuleGenerated?: (ruleExpression: string) => void;
+  onExecuteRule?: (payload: StrategyRulePayload) => void;
   className?: string;
 }
 
@@ -26,6 +35,7 @@ const COMPARISON_OPERATORS = [
 
 export const StrategyRuleBuilder: React.FC<StrategyRuleBuilderProps> = ({
   onRuleGenerated,
+  onExecuteRule,
   className = '',
 }) => {
   const { data: registryData } = useQuery({
@@ -52,6 +62,11 @@ export const StrategyRuleBuilder: React.FC<StrategyRuleBuilderProps> = ({
 
   const [ruleName, setRuleName] = useState<string>('Bo_Dieu_Kien_Mau');
   const [copied, setCopied] = useState<boolean>(false);
+  const [executionStatus, setExecutionStatus] = useState<{
+    active: boolean;
+    message: string;
+    payload?: StrategyRulePayload;
+  } | null>(null);
 
   // Group signals by category for convenient dropdown grouping
   const signalsByCategory = useMemo(() => {
@@ -116,6 +131,105 @@ ${Array.from(new Set(clauses.map((c) => `  - ${c.signalAlias}`))).join('\n')}
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
     onRuleGenerated?.(generatedExpression);
+  };
+
+  const handleExecuteRule = () => {
+    if (!generatedExpression) return;
+    const payload: StrategyRulePayload = {
+      ruleName: ruleName.trim() || 'Bo_Dieu_Kien_Mau',
+      expression: generatedExpression,
+      yaml: generatedYaml,
+      signalsRequired: Array.from(new Set(clauses.map((c) => c.signalAlias))),
+      createdAt: new Date().toISOString(),
+    };
+
+    try {
+      if (typeof window !== 'undefined' && window.sessionStorage) {
+        window.sessionStorage.setItem('sumi_pending_strategy_rule', JSON.stringify(payload));
+      }
+    } catch {
+      // ignore storage error
+    }
+
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.setItem('sumi_pending_strategy_rule', JSON.stringify(payload));
+      }
+    } catch {
+      // ignore storage error
+    }
+
+    try {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('sumi:run-strategy-rule', { detail: payload }));
+      }
+    } catch {
+      // ignore event error
+    }
+
+    onExecuteRule?.(payload);
+    onRuleGenerated?.(generatedExpression);
+
+    setExecutionStatus({
+      active: true,
+      message: `Đã kích hoạt kiểm định cho quy tắc "${payload.ruleName}"! Cấu hình AST đã được lưu và sẵn sàng thực thi.`,
+      payload,
+    });
+
+    // Seamless tab transition if mounted inside StrategyLabPage
+    try {
+      const battleTabBtn = document.querySelector<HTMLButtonElement>('[data-testid="lab-tab-battle"]');
+      if (battleTabBtn) {
+        battleTabBtn.click();
+      }
+    } catch {
+      // ignore DOM error
+    }
+  };
+
+  const handleSwitchToBattle = () => {
+    if (!generatedExpression) return;
+    const payload: StrategyRulePayload = {
+      ruleName: ruleName.trim() || 'Bo_Dieu_Kien_Mau',
+      expression: generatedExpression,
+      yaml: generatedYaml,
+      signalsRequired: Array.from(new Set(clauses.map((c) => c.signalAlias))),
+      createdAt: new Date().toISOString(),
+    };
+
+    try {
+      if (typeof window !== 'undefined' && window.sessionStorage) {
+        window.sessionStorage.setItem('sumi_pending_strategy_rule', JSON.stringify(payload));
+      }
+    } catch {
+      // ignore storage error
+    }
+
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.setItem('sumi_pending_strategy_rule', JSON.stringify(payload));
+      }
+    } catch {
+      // ignore storage error
+    }
+
+    onExecuteRule?.(payload);
+    onRuleGenerated?.(generatedExpression);
+
+    setExecutionStatus({
+      active: true,
+      message: `Đã chuyển tiếp quy tắc "${payload.ruleName}" sang Đấu Trường Chiến Lược (Battle).`,
+      payload,
+    });
+
+    try {
+      const battleTabBtn = document.querySelector<HTMLButtonElement>('[data-testid="lab-tab-battle"]');
+      if (battleTabBtn) {
+        battleTabBtn.click();
+      }
+    } catch {
+      // ignore DOM error
+    }
   };
 
   return (
@@ -351,6 +465,104 @@ ${Array.from(new Set(clauses.map((c) => `  - ${c.signalAlias}`))).join('\n')}
           {generatedExpression || '(Chưa có điều kiện)'}
         </div>
       </div>
+
+      {/* Execution Actions Toolbar (ST-04) */}
+      <div
+        data-testid="rule-action-toolbar"
+        style={{
+          display: 'flex',
+          gap: '12px',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          marginBottom: '16px',
+        }}
+      >
+        <button
+          type="button"
+          data-testid="execute-rule-btn"
+          onClick={handleExecuteRule}
+          style={{
+            padding: '10px 18px',
+            fontSize: '13px',
+            fontWeight: 600,
+            borderRadius: '6px',
+            background: 'linear-gradient(135deg, #00E676 0%, #00B0FF 100%)',
+            color: '#0D1117',
+            border: 'none',
+            cursor: 'pointer',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '8px',
+            boxShadow: '0 2px 8px rgba(0, 230, 118, 0.3)',
+          }}
+        >
+          🚀 Chạy Kiểm Định Với Quy Tắc Này
+        </button>
+
+        <button
+          type="button"
+          data-testid="switch-to-battle-btn"
+          onClick={handleSwitchToBattle}
+          style={{
+            padding: '10px 16px',
+            fontSize: '13px',
+            fontWeight: 600,
+            borderRadius: '6px',
+            background: 'rgba(41, 98, 255, 0.2)',
+            border: '1px solid var(--color-primary)',
+            color: 'var(--color-primary)',
+            cursor: 'pointer',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '6px',
+          }}
+        >
+          ⚔️ Chuyển Sang Đối Đầu (Battle)
+        </button>
+      </div>
+
+      {/* Execution Feedback Notification Banner (ST-04) */}
+      {executionStatus && (
+        <div
+          data-testid="execution-feedback-banner"
+          style={{
+            marginBottom: '16px',
+            padding: '12px 16px',
+            borderRadius: '6px',
+            background: 'rgba(0, 230, 118, 0.1)',
+            border: '1px solid #00E676',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '12px',
+          }}
+        >
+          <div>
+            <div style={{ color: '#00E676', fontWeight: 600, fontSize: '13px' }}>
+              {executionStatus.message}
+            </div>
+            <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
+              Biểu thức AST: <code style={{ color: '#58A6FF' }}>{executionStatus.payload?.expression}</code>
+            </div>
+          </div>
+          <button
+            type="button"
+            data-testid="dismiss-feedback-btn"
+            onClick={() => setExecutionStatus(null)}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: 'var(--text-muted)',
+              cursor: 'pointer',
+              fontSize: '14px',
+              padding: '4px',
+            }}
+            title="Đóng thông báo"
+          >
+            ✕
+          </button>
+        </div>
+      )}
     </div>
   );
 };

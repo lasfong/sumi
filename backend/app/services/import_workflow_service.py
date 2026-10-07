@@ -336,7 +336,8 @@ class ImportWorkflowService:
             # Ensure Symbol exists
             sym_rec = db.query(Symbol).filter(Symbol.symbol == item.symbol).first()
             if not sym_rec:
-                sym_rec = Symbol(symbol=item.symbol, asset_type="stock", is_active=True)
+                asset_type = "index" if CafeFImporter.is_index_symbol(item.symbol) else "stock"
+                sym_rec = Symbol(symbol=item.symbol, asset_type=asset_type, is_active=True)
                 db.add(sym_rec)
                 db.flush()
 

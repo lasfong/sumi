@@ -1,6 +1,7 @@
+import logging
 import pandas as pd
 import zipfile
-from typing import List, Tuple
+from typing import List, Tuple, Set, Optional
 from io import BytesIO
 from sqlalchemy.orm import Session
 
@@ -8,9 +9,31 @@ from app.models.candle import Candle
 from app.models.symbol import Symbol
 from app.schemas.import_schema import ImportResponse, ImportWarning
 
+logger = logging.getLogger(__name__)
+
 class CafeFImporter:
-    @staticmethod
-    def parse_file(file_content: bytes, filename: str) -> pd.DataFrame:
+    PRICE_SCALE_FACTOR = 1000.0
+
+    KNOWN_INDEX_SYMBOLS: Set[str] = {
+        "VNINDEX", "VN-INDEX", "HNX-INDEX", "HNXINDEX", "UPCOM-INDEX", "UPCOMINDEX",
+        "VN30", "VN100", "VNALL", "VNMID", "VNSML",
+        "HNX30", "HNXLCAP", "HNXSMCAP", "HNXFIN", "HNXCON", "HNXMAN",
+        "VNX50", "VNXALL", "VN30F1M", "VN30F2M",
+        "VNSI", "VNHEAL", "VNFIN", "VNREAL", "VNMAT", "VNIT", "VNIND", "VNENE",
+        "VNDIAMOND", "VNFINLEAD", "VNFINSELECT",
+    }
+
+    @classmethod
+    def is_index_symbol(cls, symbol: Optional[str]) -> bool:
+        if not symbol:
+            return False
+        s = str(symbol).strip().upper()
+        if s.startswith("^") or "INDEX" in s:
+            return True
+        return s in cls.KNOWN_INDEX_SYMBOLS
+
+    @classmethod
+    def parse_file(cls, file_content: bytes, filename: str) -> pd.DataFrame:
         try:
             df = pd.read_csv(BytesIO(file_content))
         except Exception:
@@ -36,6 +59,9 @@ class CafeFImporter:
 
         df.rename(columns=col_map, inplace=True)
 
+        if 'symbol' in df.columns:
+            df['symbol'] = df['symbol'].astype(str).str.strip().str.upper()
+
         if 'timestamp' in df.columns:
             try:
                 df['timestamp'] = pd.to_datetime(df['timestamp'], format='%Y%m%d').dt.date
@@ -45,24 +71,52 @@ class CafeFImporter:
                 except Exception:
                     pass
 
+        # Sort chronologically by symbol, timestamp ascending (fixing DF-01)
+        if 'symbol' in df.columns and 'timestamp' in df.columns:
+            temp_dt = pd.to_datetime(df['timestamp'], errors='coerce')
+            df['__sort_dt__'] = temp_dt
+            df.sort_values(by=['symbol', '__sort_dt__'], ascending=[True, True], inplace=True)
+            df.drop(columns=['__sort_dt__'], inplace=True)
+            df.reset_index(drop=True, inplace=True)
+
+        # Scale equities by 1,000 to convert CafeF quoted prices to actual VND,
+        # while preserving index values (VNINDEX, HNX-INDEX, VN30, etc.) as point values (fixing FIN-01)
+        price_cols = [c for c in ['open', 'high', 'low', 'close'] if c in df.columns]
+        if price_cols and 'symbol' in df.columns:
+            is_index_mask = df['symbol'].apply(cls.is_index_symbol)
+            equity_mask = ~is_index_mask
+            for col in price_cols:
+                numeric_vals = pd.to_numeric(df[col], errors='coerce')
+                scaled_series = df[col].copy()
+                valid_equity = equity_mask & numeric_vals.notna()
+                scaled_series.loc[valid_equity] = (numeric_vals.loc[valid_equity] * cls.PRICE_SCALE_FACTOR).round(4)
+                df[col] = scaled_series
+
         return df
 
-    @staticmethod
-    def parse_zip(file_content: bytes) -> pd.DataFrame:
+    @classmethod
+    def parse_zip(cls, file_content: bytes) -> pd.DataFrame:
         frames = []
         with zipfile.ZipFile(BytesIO(file_content)) as zf:
             for name in zf.namelist():
                 if name.lower().endswith(('.csv', '.txt')) and not name.startswith('__MACOSX'):
                     with zf.open(name) as f:
                         content = f.read()
-                        df = CafeFImporter.parse_file(content, name)
+                        df = cls.parse_file(content, name)
                         frames.append(df)
         if not frames:
             raise ValueError("No CSV/TXT files found inside ZIP archive")
-        return pd.concat(frames, ignore_index=True)
+        combined_df = pd.concat(frames, ignore_index=True)
+        if 'symbol' in combined_df.columns and 'timestamp' in combined_df.columns:
+            temp_dt = pd.to_datetime(combined_df['timestamp'], errors='coerce')
+            combined_df['__sort_dt__'] = temp_dt
+            combined_df.sort_values(by=['symbol', '__sort_dt__'], ascending=[True, True], inplace=True)
+            combined_df.drop(columns=['__sort_dt__'], inplace=True)
+            combined_df.reset_index(drop=True, inplace=True)
+        return combined_df
 
     @staticmethod
-    def _detect_exchange_from_filename(filename: str) -> str:
+    def _detect_exchange_from_filename(filename: str) -> Optional[str]:
         filename_upper = filename.upper()
         if "HSX" in filename_upper or "HOSE" in filename_upper:
             return "HOSE"
@@ -70,6 +124,8 @@ class CafeFImporter:
             return "HNX"
         elif "UPCOM" in filename_upper:
             return "UPCOM"
+        elif "INDEX" in filename_upper:
+            return "INDEX"
         return None
 
     @staticmethod

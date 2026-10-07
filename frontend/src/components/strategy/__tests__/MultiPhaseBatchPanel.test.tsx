@@ -267,4 +267,21 @@ describe('MultiPhaseBatchPanel Component (FR-CORE-010, FR-CORE-012, Master F.5)'
     expect(warningsPanel).toHaveTextContent('T+2.5/T+2');
     expect(warningsPanel).toHaveTextContent('Zero Lookahead');
   });
+
+  it('validates default initial cash (100M VND) without HTML5 stepMismatch error (ST-02)', async () => {
+    renderWithClient(<MultiPhaseBatchPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('batch-initial-cash-input')).toBeInTheDocument();
+    });
+
+    const cashInput = screen.getByTestId('batch-initial-cash-input') as HTMLInputElement;
+    expect(cashInput.value).toBe('100000000');
+    expect(cashInput.validity.stepMismatch).toBe(false);
+    expect(cashInput.validity.valid).toBe(true);
+
+    const form = cashInput.closest('form');
+    expect(form).not.toBeNull();
+    expect(form?.checkValidity()).toBe(true);
+  });
 });

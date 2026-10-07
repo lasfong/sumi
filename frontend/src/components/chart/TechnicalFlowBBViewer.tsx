@@ -9,6 +9,23 @@ export interface TechnicalFlowBBViewerProps {
 
 const ALL_HORIZONS = ['T03', 'T05', 'T10', 'T20', 'T50', 'T200'];
 
+const getHorizonValue = (data: unknown): number | null => {
+  if (typeof data === 'number' && !isNaN(data)) return data;
+  if (data && typeof data === 'object') {
+    const obj = data as Record<string, unknown>;
+    if (typeof obj.bb_value === 'number' && !isNaN(obj.bb_value)) return obj.bb_value;
+    if (typeof obj.value === 'number' && !isNaN(obj.value)) return obj.value;
+  }
+  return null;
+};
+
+const formatSafeNumber = (val: unknown, decimals = 2, fallback = '-'): string => {
+  if (typeof val === 'number' && !isNaN(val)) {
+    return val.toFixed(decimals);
+  }
+  return fallback;
+};
+
 export const TechnicalFlowBBViewer: React.FC<TechnicalFlowBBViewerProps> = ({
   defaultSymbol = 'FPT',
   className = '',
@@ -34,6 +51,8 @@ export const TechnicalFlowBBViewer: React.FC<TechnicalFlowBBViewerProps> = ({
     enabled: !!symbol,
   });
 
+  const [selectedHorizon, setSelectedHorizon] = useState<string>('T20');
+
   const toggleHorizon = (h: string) => {
     setActiveHorizons((prev) => {
       if (prev.includes(h)) {
@@ -42,10 +61,27 @@ export const TechnicalFlowBBViewer: React.FC<TechnicalFlowBBViewerProps> = ({
       }
       return [...prev, h];
     });
+    setSelectedHorizon(h);
   };
 
   const points = bbData?.points || [];
   const latestPoint = points.length > 0 ? points[points.length - 1] : null;
+
+  const activeInspectionHorizon = activeHorizons.includes(selectedHorizon)
+    ? selectedHorizon
+    : (activeHorizons[0] || 'T20');
+
+  const horizonPoint = latestPoint?.horizons?.[activeInspectionHorizon]
+    || (latestPoint?.horizons ? Object.values(latestPoint.horizons)[0] : undefined);
+
+  // Safely extract flow metrics with fallbacks to avoid toFixed crashes (ST-05)
+  const extractedHorizonVal = getHorizonValue(latestPoint?.horizons?.[activeInspectionHorizon])
+    ?? getHorizonValue(horizonPoint);
+  const flowValue = latestPoint?.value ?? extractedHorizonVal ?? null;
+  const basisValue = latestPoint?.basis ?? (typeof horizonPoint?.raw_denominator === 'number' ? horizonPoint.raw_denominator : null);
+  const bandwidthValue = typeof latestPoint?.bandwidth === 'number' ? latestPoint.bandwidth : null;
+  const percentBValue = typeof latestPoint?.percent_b === 'number' ? latestPoint.percent_b : null;
+  const regimeValue = horizonPoint?.regime ?? latestPoint?.regime ?? 'NEUTRAL';
 
   return (
     <div
@@ -199,34 +235,120 @@ export const TechnicalFlowBBViewer: React.FC<TechnicalFlowBBViewerProps> = ({
         >
           <div>
             <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Ngày quan sát:</div>
-            <div style={{ fontSize: '13px', fontWeight: 600, marginTop: '2px' }}>{latestPoint.date}</div>
+            <div style={{ fontSize: '13px', fontWeight: 600, marginTop: '2px' }}>{latestPoint?.date ?? 'N/A'}</div>
           </div>
           <div>
-            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Giá trị Dòng tiền (Value):</div>
-            <div style={{ fontSize: '13px', fontWeight: 700, marginTop: '2px', color: latestPoint.value >= 0 ? 'var(--color-buy)' : 'var(--color-sell)' }}>
-              {latestPoint.value.toFixed(2)}
+            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+              Giá trị Dòng tiền (Value{latestPoint?.horizons && activeInspectionHorizon ? ` ${activeInspectionHorizon}` : ''}):
+            </div>
+            <div
+              style={{
+                fontSize: '13px',
+                fontWeight: 700,
+                marginTop: '2px',
+                color: (flowValue ?? 0) >= 0 ? 'var(--color-buy)' : 'var(--color-sell)',
+              }}
+            >
+              {formatSafeNumber(flowValue, 2, 'N/A')}
             </div>
           </div>
           <div>
             <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Trục giữa (Basis):</div>
-            <div style={{ fontSize: '13px', fontWeight: 600, marginTop: '2px' }}>{latestPoint.basis.toFixed(2)}</div>
+            <div style={{ fontSize: '13px', fontWeight: 600, marginTop: '2px' }}>
+              {formatSafeNumber(basisValue, 2, 'N/A')}
+            </div>
           </div>
           <div>
             <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Độ rộng dải (Bandwidth):</div>
-            <div style={{ fontSize: '13px', fontWeight: 600, marginTop: '2px' }}>{latestPoint.bandwidth.toFixed(2)}</div>
+            <div style={{ fontSize: '13px', fontWeight: 600, marginTop: '2px' }}>
+              {formatSafeNumber(bandwidthValue, 2, 'N/A')}
+            </div>
           </div>
           <div>
             <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Vị trí %B:</div>
-            <div style={{ fontSize: '13px', fontWeight: 700, marginTop: '2px', color: latestPoint.percent_b >= 1 ? '#FFD166' : latestPoint.percent_b <= 0 ? 'var(--color-sell)' : 'var(--text-main)' }}>
-              {(latestPoint.percent_b * 100).toFixed(1)}%
+            <div
+              style={{
+                fontSize: '13px',
+                fontWeight: 700,
+                marginTop: '2px',
+                color:
+                  percentBValue !== null && percentBValue !== undefined
+                    ? percentBValue >= 1
+                      ? '#FFD166'
+                      : percentBValue <= 0
+                      ? 'var(--color-sell)'
+                      : 'var(--text-main)'
+                    : 'var(--text-muted)',
+              }}
+            >
+              {percentBValue !== null && percentBValue !== undefined && !isNaN(Number(percentBValue))
+                ? `${(Number(percentBValue) * 100).toFixed(1)}%`
+                : 'N/A'}
             </div>
           </div>
           <div>
             <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Vùng trạng thái (Regime):</div>
-            <div style={{ fontSize: '13px', fontWeight: 600, marginTop: '2px', color: latestPoint.regime === 'POSITIVE' ? 'var(--color-buy)' : 'var(--text-muted)' }}>
-              {latestPoint.regime}
+            <div
+              style={{
+                fontSize: '13px',
+                fontWeight: 600,
+                marginTop: '2px',
+                color:
+                  regimeValue === 'POSITIVE'
+                    ? 'var(--color-buy)'
+                    : regimeValue === 'NEGATIVE'
+                    ? 'var(--color-sell)'
+                    : 'var(--text-muted)',
+              }}
+            >
+              {regimeValue}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Horizons Quick Breakdown with Safe Access (ST-05) */}
+      {!isLoading && !error && latestPoint && (
+        <div
+          data-testid="bb-horizons-breakdown"
+          style={{
+            display: 'flex',
+            gap: '8px',
+            flexWrap: 'wrap',
+            marginBottom: '16px',
+            alignItems: 'center',
+          }}
+        >
+          <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Chi tiết các kỳ hạn (Horizons):</span>
+          {activeHorizons.map((h) => {
+            const hRaw = latestPoint?.horizons?.[h];
+            const hVal = getHorizonValue(hRaw);
+            const isSelected = selectedHorizon === h;
+            return (
+              <button
+                key={h}
+                type="button"
+                data-testid={`horizon-badge-${h}`}
+                onClick={() => setSelectedHorizon(h)}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '3px 8px',
+                  borderRadius: '4px',
+                  background: isSelected ? 'rgba(41, 98, 255, 0.25)' : 'rgba(255, 255, 255, 0.03)',
+                  border: isSelected ? '1px solid var(--color-primary)' : '1px solid var(--border-color)',
+                  cursor: 'pointer',
+                  fontSize: '11px',
+                }}
+              >
+                <span style={{ fontWeight: 600, color: isSelected ? 'var(--color-primary)' : 'var(--text-muted)' }}>{h}:</span>
+                <span style={{ color: hVal !== null ? (hVal >= 0 ? 'var(--color-buy)' : 'var(--color-sell)') : 'var(--text-muted)' }}>
+                  {formatSafeNumber(hVal, 2, '-')}
+                </span>
+              </button>
+            );
+          })}
         </div>
       )}
 

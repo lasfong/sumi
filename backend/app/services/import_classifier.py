@@ -1,8 +1,11 @@
 import math
 import hashlib
+import logging
 from datetime import datetime, date, timedelta
 from typing import List, Dict, Tuple, Optional, Any, Set
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 class ClassifiedRow:
     def __init__(
@@ -143,12 +146,14 @@ class ImportClassifier:
             if pd.isna(raw_sym) or not str(raw_sym).strip():
                 items.append(ClassifiedRow(row_num, "", timeframe, date.today(), adjustment_type, None, None, None, None, None, "rejected", "Mã chứng khoán bị trống"))
                 counts["rejected"] += 1
+                logger.warning("Bỏ qua dòng %d: Mã chứng khoán bị trống", row_num)
                 continue
             
             sym = str(raw_sym).strip().upper()
             if not sym.isalnum() and not all(c in "._-" or c.isalnum() for c in sym) or len(sym) > 20:
                 items.append(ClassifiedRow(row_num, sym, timeframe, date.today(), adjustment_type, None, None, None, None, None, "rejected", f"Mã chứng khoán không đúng định dạng ({sym})"))
                 counts["rejected"] += 1
+                logger.warning("Bỏ qua dòng %d: Mã chứng khoán không đúng định dạng (%s)", row_num, sym)
                 continue
 
 
@@ -177,12 +182,14 @@ class ImportClassifier:
             if parsed_date is None:
                 items.append(ClassifiedRow(row_num, sym, timeframe, date.today(), adjustment_type, None, None, None, None, None, "rejected", f"Ngày giao dịch không hợp lệ ({raw_ts})"))
                 counts["rejected"] += 1
+                logger.warning("Bỏ qua dòng %d (%s): Ngày giao dịch không hợp lệ (%s)", row_num, sym, raw_ts)
                 continue
 
             # Weekend check (Saturday=5, Sunday=6)
             if parsed_date.weekday() >= 5:
                 items.append(ClassifiedRow(row_num, sym, timeframe, parsed_date, adjustment_type, None, None, None, None, None, "rejected", f"Ngày giao dịch rơi vào cuối tuần ({parsed_date.strftime('%Y-%m-%d')})"))
                 counts["rejected"] += 1
+                logger.warning("Bỏ qua dòng %d (%s): Ngày giao dịch rơi vào cuối tuần (%s)", row_num, sym, parsed_date.strftime('%Y-%m-%d'))
                 continue
 
             # 3. OHLCV check
@@ -195,32 +202,37 @@ class ImportClassifier:
             except (ValueError, TypeError):
                 items.append(ClassifiedRow(row_num, sym, timeframe, parsed_date, adjustment_type, None, None, None, None, None, "rejected", "Dữ liệu giá OHLCV không phải số"))
                 counts["rejected"] += 1
+                logger.warning("Bỏ qua dòng %d (%s, %s): Dữ liệu giá OHLCV không phải số", row_num, sym, parsed_date)
                 continue
 
             if any(math.isnan(x) or math.isinf(x) for x in (o_val, h_val, l_val, c_val, v_val)):
                 items.append(ClassifiedRow(row_num, sym, timeframe, parsed_date, adjustment_type, None, None, None, None, None, "rejected", "Dữ liệu giá OHLCV chứa giá trị NaN/Inf"))
                 counts["rejected"] += 1
+                logger.warning("Bỏ qua dòng %d (%s, %s): Dữ liệu giá OHLCV chứa giá trị NaN/Inf", row_num, sym, parsed_date)
                 continue
 
             if o_val <= 0 or h_val <= 0 or l_val <= 0 or c_val <= 0 or v_val < 0:
                 items.append(ClassifiedRow(row_num, sym, timeframe, parsed_date, adjustment_type, o_val, h_val, l_val, c_val, v_val, "rejected", "Giá phải dương và khối lượng không âm"))
                 counts["rejected"] += 1
+                logger.warning("Bỏ qua dòng %d (%s, %s): Giá phải dương và khối lượng không âm", row_num, sym, parsed_date)
                 continue
 
             if l_val > h_val:
                 items.append(ClassifiedRow(row_num, sym, timeframe, parsed_date, adjustment_type, o_val, h_val, l_val, c_val, v_val, "rejected", f"Giá thấp nhất ({l_val}) lớn hơn giá cao nhất ({h_val})"))
                 counts["rejected"] += 1
+                logger.warning("Bỏ qua dòng %d (%s, %s): Giá thấp nhất (%s) lớn hơn giá cao nhất (%s)", row_num, sym, parsed_date, l_val, h_val)
                 continue
 
             if not (l_val <= o_val <= h_val) or not (l_val <= c_val <= h_val):
                 items.append(ClassifiedRow(row_num, sym, timeframe, parsed_date, adjustment_type, o_val, h_val, l_val, c_val, v_val, "rejected", "Giá Mở/Đóng nằm ngoài khoảng [Thấp nhất, Cao nhất]"))
                 counts["rejected"] += 1
+                logger.warning("Bỏ qua dòng %d (%s, %s): Giá Mở/Đóng nằm ngoài khoảng [Thấp nhất, Cao nhất]", row_num, sym, parsed_date)
                 continue
 
             # 4. Out of order check
             is_out_of_order = False
             if sym in last_timestamp_by_symbol:
-                if parsed_date <= last_timestamp_by_symbol[sym]:
+                if parsed_date < last_timestamp_by_symbol[sym]:
                     is_out_of_order = True
             
             if not is_out_of_order:
@@ -286,18 +298,24 @@ class ImportClassifier:
         can_accept = True
         block_reasons = []
 
-        if counts["rejected"] > 0:
-            can_accept = False
-            block_reasons.append(f"Có {counts['rejected']} dòng dữ liệu không hợp lệ hoặc sai định dạng")
         if counts["conflicting"] > 0:
             can_accept = False
             block_reasons.append(f"Có {counts['conflicting']} dòng dữ liệu xung đột với giá trị đã lưu")
         if counts["out_of_order"] > 0:
             can_accept = False
             block_reasons.append(f"Có {counts['out_of_order']} dòng dữ liệu sai thứ tự thời gian")
+
         if counts["parsed"] == 0 and counts["duplicate"] == 0:
             can_accept = False
+            if counts["rejected"] > 0:
+                block_reasons.append(f"Tất cả {counts['rejected']} dòng dữ liệu đều không hợp lệ hoặc sai định dạng")
             block_reasons.append("Không có dữ liệu hợp lệ nào để nhập")
+        elif counts["rejected"] > 0:
+            # Gracefully skip invalid or weekend anomaly rows with logged warnings rather than blocking import (DF-02)
+            logger.warning(
+                "Bỏ qua %d dòng dữ liệu không hợp lệ hoặc rơi vào ngày nghỉ/cuối tuần. Vẫn cho phép nạp %d dòng hợp lệ.",
+                counts["rejected"], counts["parsed"]
+            )
 
         block_reason_str = "; ".join(block_reasons) if block_reasons else None
         return items, counts, can_accept, block_reason_str

@@ -126,4 +126,79 @@ describe('StrategyRuleBuilder Component (FR-CORE-006, F.4)', () => {
       expect.stringContaining('health__favorable == True and bb__direction_rising == True')
     );
   });
+
+  it('executes rule trigger, saves to sessionStorage, invokes callback, and shows feedback banner (ST-04)', async () => {
+    const onExecuteRule = vi.fn();
+    const onRuleGenerated = vi.fn();
+
+    const sessionMap = new Map<string, string>();
+    const sessionMock = {
+      getItem: vi.fn((key: string) => sessionMap.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => sessionMap.set(key, value)),
+      removeItem: vi.fn((key: string) => sessionMap.delete(key)),
+      clear: vi.fn(() => sessionMap.clear()),
+    };
+    Object.defineProperty(window, 'sessionStorage', {
+      value: sessionMock,
+      writable: true,
+      configurable: true,
+    });
+
+    renderWithClient(
+      <StrategyRuleBuilder onExecuteRule={onExecuteRule} onRuleGenerated={onRuleGenerated} />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('execute-rule-btn')).toBeInTheDocument();
+      expect(screen.getByTestId('switch-to-battle-btn')).toBeInTheDocument();
+    });
+
+    const executeBtn = screen.getByTestId('execute-rule-btn');
+    fireEvent.click(executeBtn);
+
+    // Verify callback was invoked with structured payload
+    expect(onExecuteRule).toHaveBeenCalledTimes(1);
+    const payload = onExecuteRule.mock.calls[0][0];
+    expect(payload.ruleName).toBe('Bo_Dieu_Kien_Mau');
+    expect(payload.expression).toBe('health__favorable == True and bb__direction_rising == True');
+    expect(payload.signalsRequired).toEqual(['health__favorable', 'bb__direction_rising']);
+
+    // Verify sessionStorage received the payload
+    expect(sessionMock.setItem).toHaveBeenCalledWith(
+      'sumi_pending_strategy_rule',
+      expect.stringContaining('health__favorable == True')
+    );
+
+    // Verify feedback banner is visible with AST expression
+    expect(screen.getByTestId('execution-feedback-banner')).toBeInTheDocument();
+    expect(screen.getByTestId('execution-feedback-banner')).toHaveTextContent(
+      'Đã kích hoạt kiểm định cho quy tắc "Bo_Dieu_Kien_Mau"'
+    );
+
+    // Verify dismiss button hides the banner
+    const dismissBtn = screen.getByTestId('dismiss-feedback-btn');
+    fireEvent.click(dismissBtn);
+    expect(screen.queryByTestId('execution-feedback-banner')).not.toBeInTheDocument();
+  });
+
+  it('switches to battle tab on switch-to-battle button click (ST-04)', async () => {
+    const battleTabMock = document.createElement('button');
+    battleTabMock.setAttribute('data-testid', 'lab-tab-battle');
+    const clickSpy = vi.fn();
+    battleTabMock.addEventListener('click', clickSpy);
+    document.body.appendChild(battleTabMock);
+
+    renderWithClient(<StrategyRuleBuilder />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('switch-to-battle-btn')).toBeInTheDocument();
+    });
+
+    const switchBtn = screen.getByTestId('switch-to-battle-btn');
+    fireEvent.click(switchBtn);
+
+    expect(clickSpy).toHaveBeenCalled();
+
+    document.body.removeChild(battleTabMock);
+  });
 });

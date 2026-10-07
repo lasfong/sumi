@@ -389,10 +389,11 @@ export const MultiPhaseBatchPanel: React.FC<MultiPhaseBatchPanelProps> = ({ clas
                 <label htmlFor="batch-initial-cash" style={{ fontSize: '11px', color: 'var(--text-muted)', marginRight: '6px' }}>Vốn mỗi mã:</label>
                 <input
                   id="batch-initial-cash"
+                  data-testid="batch-initial-cash-input"
                   type="number"
                   value={initialCash}
                   onChange={(e) => setInitialCash(Number(e.target.value))}
-                  step="10000000"
+                  step="1000000"
                   min="1000000"
                   style={{
                     padding: '6px 10px',

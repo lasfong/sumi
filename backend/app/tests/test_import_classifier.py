@@ -93,3 +93,15 @@ def test_metadata_validation_fail_closed():
     assert ImportClassifier.validate_metadata("cafef", "1D", "unadjusted", "Asia/Ho_Chi_Minh") is None
     assert ImportClassifier.validate_metadata("manual_upload", "1D", "adjusted", "Asia/Ho_Chi_Minh") is None
 
+def test_classifier_allows_accept_when_valid_rows_exist_alongside_rejected_weekend():
+    # Mon 2026-01-05 (valid), Sat 2026-01-03 (weekend)
+    df = pd.DataFrame([
+        {"symbol": "SSI", "timestamp": "2026-01-05", "open": 30.0, "high": 31.0, "low": 29.5, "close": 30.5, "volume": 100000},
+        {"symbol": "SSI", "timestamp": "2026-01-03", "open": 30.0, "high": 31.0, "low": 29.5, "close": 30.5, "volume": 100000},
+    ])
+    items, counts, can_accept, block_reason = ImportClassifier.classify_records(df, {})
+    assert can_accept is True
+    assert block_reason is None
+    assert counts["parsed"] == 1
+    assert counts["rejected"] == 1
+

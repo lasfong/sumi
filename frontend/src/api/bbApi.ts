@@ -11,20 +11,39 @@ export interface BBHorizonsResponse {
   methodology: string;
 }
 
+export interface BBHorizonPointData {
+  horizon?: string;
+  bb_value?: number | null;
+  oib_raw?: number | null;
+  raw_numerator?: number | null;
+  raw_denominator?: number | null;
+  is_warmup?: boolean;
+  direction?: string;
+  regime?: string;
+  regime_run_length?: number;
+  value_source?: string;
+  quality?: string;
+}
+
 export interface BBPoint {
-  bar_index: number;
+  bar_index?: number;
   date: string;
-  close: number;
-  volume: number;
-  value: number;
-  lower: number;
-  upper: number;
-  basis: number;
-  bandwidth: number;
-  percent_b: number;
-  regime: string;
-  data_quality: string;
-  is_valid: boolean;
+  close?: number;
+  volume?: number;
+  value?: number;
+  lower?: number;
+  upper?: number;
+  basis?: number;
+  bandwidth?: number;
+  percent_b?: number;
+  regime?: string;
+  data_quality?: string;
+  is_valid?: boolean;
+  horizons?: Record<string, BBHorizonPointData>;
+  daily_pressure?: number;
+  daily_trading_value?: number;
+  daily_value_source?: string;
+  daily_quality?: string;
 }
 
 export interface BBSymbolSeriesResponse {
