@@ -85,6 +85,7 @@ export const ReplayWorkspace: React.FC = () => {
   const [isRightPanelOpen, setIsRightPanelOpen] = useState(true);
   const [isSignalCatalogOpen, setIsSignalCatalogOpen] = useState(false);
   const [showExtendedInspector, setShowExtendedInspector] = useState(false);
+  const [selectedInspectorSignal, setSelectedInspectorSignal] = useState<string>('health.score');
 
 
   useEffect(() => {
@@ -651,6 +652,7 @@ export const ReplayWorkspace: React.FC = () => {
                       cursor: 'pointer',
                       fontWeight: 600,
                     }}
+                    title="Tra cứu 72 tín hiệu định lượng chuẩn hóa"
                   >
                     📚 Danh Mục Tín Hiệu (72)
                   </button>
@@ -668,9 +670,9 @@ export const ReplayWorkspace: React.FC = () => {
                       cursor: 'pointer',
                       fontWeight: 600,
                     }}
-                    title="Bật/tắt bộ kiểm tra & giải thích 72 tín hiệu, Sức khỏe kỹ thuật và Dòng tiền BB"
+                    title="Bật/tắt bộ soi chi tiết 72 tín hiệu, Sức khỏe kỹ thuật và Dòng tiền BB tại nến hiện tại"
                   >
-                    {showExtendedInspector ? '🔬 Thu Gọn' : '🔬 Mở Rộng'}
+                    {showExtendedInspector ? '🔬 Đóng Soi Chi Tiết' : '🔬 Soi Tín Hiệu Nến'}
                   </button>
                 </div>
                 {showExtendedInspector && (
@@ -679,6 +681,7 @@ export const ReplayWorkspace: React.FC = () => {
                     currentIndex={sessionData?.current_index ?? candleCount - 1}
                     timeframe={sessionData?.timeframe || '1D'}
                     currentTimestamp={currentCandle?.timestamp}
+                    initialSignalName={selectedInspectorSignal}
                     onOpenCatalog={() => setIsSignalCatalogOpen(true)}
                   />
                 )}
@@ -749,6 +752,12 @@ export const ReplayWorkspace: React.FC = () => {
       <SignalCatalogModal
         isOpen={isSignalCatalogOpen}
         onClose={() => setIsSignalCatalogOpen(false)}
+        selectedSignalName={selectedInspectorSignal}
+        onSelectSignal={(sig) => {
+          setSelectedInspectorSignal(sig.name);
+          setShowExtendedInspector(true);
+          setIsSignalCatalogOpen(false);
+        }}
       />
     </div>
   );

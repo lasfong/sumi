@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getSignalRegistry, calculateReplaySignals } from '../../api/signalsApi';
 import type {
@@ -13,6 +13,7 @@ export interface SignalExplanationInspectorProps {
   currentTimestamp?: string;
   onOpenCatalog?: () => void;
   className?: string;
+  initialSignalName?: string;
 }
 
 export const SignalExplanationInspector: React.FC<SignalExplanationInspectorProps> = ({
@@ -22,9 +23,17 @@ export const SignalExplanationInspector: React.FC<SignalExplanationInspectorProp
   currentTimestamp,
   onOpenCatalog,
   className = '',
+  initialSignalName,
 }) => {
-  const [selectedSignalName, setSelectedSignalName] = useState<string>('health.score');
+  const [selectedSignalName, setSelectedSignalName] = useState<string>(initialSignalName || 'health.score');
   const [customParams, setCustomParams] = useState<Record<string, number>>({});
+
+  useEffect(() => {
+    if (initialSignalName) {
+      setSelectedSignalName(initialSignalName);
+      setCustomParams({});
+    }
+  }, [initialSignalName]);
 
   // Load registered signals
   const { data: registryData } = useQuery({
@@ -330,6 +339,22 @@ export const SignalExplanationInspector: React.FC<SignalExplanationInspectorProp
                 <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Không có lý do cấu thành đặc biệt.</div>
               )}
             </div>
+
+            {activeCalculation.quality === 'INSUFFICIENT_HISTORY' && (
+              <div
+                style={{
+                  marginTop: '8px',
+                  padding: '6px 10px',
+                  borderRadius: '4px',
+                  background: 'rgba(255, 209, 102, 0.1)',
+                  border: '1px solid rgba(255, 209, 102, 0.3)',
+                  fontSize: '11px',
+                  color: '#FFD166',
+                }}
+              >
+                ℹ️ Chưa đủ dữ liệu nến lịch sử để tính toán chỉ báo này. Hãy bấm phát (▶) hoặc bước tới vài phiên tiếp theo.
+              </div>
+            )}
 
             {/* Availability / Causal Verification Info */}
             <div

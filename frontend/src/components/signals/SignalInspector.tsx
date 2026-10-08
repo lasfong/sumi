@@ -621,6 +621,22 @@ export const SignalInspector: React.FC<SignalInspectorProps> = ({
                 </div>
               </div>
 
+              {activePoint.quality === 'INSUFFICIENT_HISTORY' && (
+                <div
+                  style={{
+                    padding: '6px 8px',
+                    borderRadius: '4px',
+                    background: 'rgba(210, 153, 34, 0.1)',
+                    border: '1px solid rgba(210, 153, 34, 0.3)',
+                    color: '#d29922',
+                    fontSize: '10px',
+                    lineHeight: '1.4',
+                  }}
+                >
+                  ℹ️ Đang tích lũy dữ liệu: Cần tối thiểu {activeResolvedPeriod ?? 20} nến lịch sử để tính khối lượng trung bình. Bấm Play (▶) hoặc bước tới để nạp thêm nến.
+                </div>
+              )}
+
               {/* Row 2: RVOL & Threshold */}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <span style={{ fontSize: '11px', color: 'var(--text-muted, #8b949e)' }}>

@@ -1,4 +1,5 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { getAvailableStrategies, runBacktest } from '../api/backtestApi';
 import type { BacktestRequest, BacktestResponse, AvailableStrategy } from '../api/backtestApi';
@@ -80,7 +81,40 @@ const saveHistory = (entries: LabHistoryEntry[]) => {
 };
 
 export const StrategyLabPage: React.FC = () => {
-  const [activeLabTab, setActiveLabTab] = useState<'battle' | 'multiphase' | 'catalog' | 'builder' | 'flow'>('battle');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const initialTab = useMemo(() => {
+    const t = searchParams.get('tab');
+    if (t && ['battle', 'multiphase', 'catalog', 'builder', 'flow'].includes(t)) {
+      return t as 'battle' | 'multiphase' | 'catalog' | 'builder' | 'flow';
+    }
+    return 'battle';
+  }, [searchParams]);
+
+  const [activeLabTab, setActiveLabTab] = useState<'battle' | 'multiphase' | 'catalog' | 'builder' | 'flow'>(initialTab);
+
+  // Sync tab with URL search parameter
+  useEffect(() => {
+    const t = searchParams.get('tab');
+    if (t && ['battle', 'multiphase', 'catalog', 'builder', 'flow'].includes(t)) {
+      setActiveLabTab(t as any);
+    } else if (!t) {
+      setActiveLabTab('battle');
+    }
+  }, [searchParams]);
+
+  const handleTabChange = (tab: 'battle' | 'multiphase' | 'catalog' | 'builder' | 'flow') => {
+    setActiveLabTab(tab);
+    if (tab === 'battle') {
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.delete('tab');
+      setSearchParams(nextParams);
+    } else {
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.set('tab', tab);
+      setSearchParams(nextParams);
+    }
+  };
+
   const [symbolsInput, setSymbolsInput] = useState('FPT, SSI, VCI');
   const [startDate, setStartDate] = useState('2020-01-01');
   const [endDate, setEndDate] = useState('2022-12-31');
@@ -111,6 +145,14 @@ export const StrategyLabPage: React.FC = () => {
     queryKey: ['strategies'],
     queryFn: getAvailableStrategies,
   });
+
+  // Auto-select 3 strategies by default when loaded so user doesn't get empty error
+  useEffect(() => {
+    if (strategies && strategies.length > 0 && selectedFilenames.length === 0) {
+      const defaultPicks = strategies.slice(0, 3).map((s) => s.filename);
+      setSelectedFilenames(defaultPicks);
+    }
+  }, [strategies, selectedFilenames.length]);
 
   const { data: savedRuns } = useQuery({
     queryKey: ['strategy-lab-runs'],
@@ -619,17 +661,17 @@ export const StrategyLabPage: React.FC = () => {
     void Promise.all((savedRuns || []).map(run => deleteStrategyLabRun(run.id)));
   };
 
-  const getTrades = (response: BacktestResponse) =>
-    response.summary?.total_trades ?? response.analytics?.total_trades ?? 0;
-  const getNetPnl = (response: BacktestResponse) =>
-    response.summary?.total_net_pnl ?? response.analytics?.total_net_pnl ?? 0;
-  const getExpectancy = (response: BacktestResponse) => response.analytics?.expectancy ?? null;
+  const getTrades = (response?: BacktestResponse | null) =>
+    response?.summary?.total_trades ?? response?.analytics?.total_trades ?? 0;
+  const getNetPnl = (response?: BacktestResponse | null) =>
+    response?.summary?.total_net_pnl ?? response?.analytics?.total_net_pnl ?? 0;
+  const getExpectancy = (response?: BacktestResponse | null) => response?.analytics?.expectancy ?? null;
 
   // Minimum 5 trades required for ranking eligibility (PRO-STRAT-05)
-  const isRankingEligible = (response: BacktestResponse) =>
-    response.status === 'succeeded' &&
+  const isRankingEligible = (response?: BacktestResponse | null) =>
+    response?.status === 'succeeded' &&
     getTrades(response) >= 5 &&
-    response.analytics?.metrics?.total_net_pnl?.status === 'valid';
+    response?.analytics?.metrics?.total_net_pnl?.status === 'valid';
 
   const formatMoney = (value?: number | null) =>
     value != null
@@ -801,7 +843,7 @@ export const StrategyLabPage: React.FC = () => {
         <button
           type="button"
           data-testid="lab-tab-battle"
-          onClick={() => setActiveLabTab('battle')}
+          onClick={() => handleTabChange('battle')}
           style={{
             padding: '8px 16px',
             fontSize: '13px',
@@ -818,7 +860,7 @@ export const StrategyLabPage: React.FC = () => {
         <button
           type="button"
           data-testid="lab-tab-multiphase"
-          onClick={() => setActiveLabTab('multiphase')}
+          onClick={() => handleTabChange('multiphase')}
           style={{
             padding: '8px 16px',
             fontSize: '13px',
@@ -835,7 +877,7 @@ export const StrategyLabPage: React.FC = () => {
         <button
           type="button"
           data-testid="lab-tab-catalog"
-          onClick={() => setActiveLabTab('catalog')}
+          onClick={() => handleTabChange('catalog')}
           style={{
             padding: '8px 16px',
             fontSize: '13px',
@@ -852,7 +894,7 @@ export const StrategyLabPage: React.FC = () => {
         <button
           type="button"
           data-testid="lab-tab-builder"
-          onClick={() => setActiveLabTab('builder')}
+          onClick={() => handleTabChange('builder')}
           style={{
             padding: '8px 16px',
             fontSize: '13px',
@@ -869,7 +911,7 @@ export const StrategyLabPage: React.FC = () => {
         <button
           type="button"
           data-testid="lab-tab-flow"
-          onClick={() => setActiveLabTab('flow')}
+          onClick={() => handleTabChange('flow')}
           style={{
             padding: '8px 16px',
             fontSize: '13px',

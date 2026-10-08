@@ -2,6 +2,7 @@ import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { MemoryRouter } from 'react-router-dom';
 import { StrategyLabPage } from '../StrategyLabPage';
 import * as backtestApi from '../../api/backtestApi';
 import * as strategyLabApi from '../../api/strategyLabApi';
@@ -28,7 +29,9 @@ const renderWithClient = (ui: React.ReactElement) => {
   });
   return render(
     <QueryClientProvider client={queryClient}>
-      {ui}
+      <MemoryRouter>
+        {ui}
+      </MemoryRouter>
     </QueryClientProvider>
   );
 };
