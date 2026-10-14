@@ -28,7 +28,8 @@ class SSIProviderAdapter(MarketDataProviderAdapter):
             supported_adjustments=["unadjusted", "adjusted"],
             rate_limit_rps=10,
             description="Official Broker API provided by SSI Securities Corporation (Chứng khoán SSI).",
-            auth_fields=["consumer_id", "consumer_secret"]
+            auth_fields=["consumer_id", "consumer_secret"],
+            is_synthetic=True
         )
 
     def get_metadata(self) -> ProviderMetadata:

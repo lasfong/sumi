@@ -14,6 +14,15 @@ from app.services.data_providers.base_provider import (
 )
 from app.services.sync_workflow_service import SyncWorkflowService
 from app.schemas.sync_schema import SyncPreviewRequest
+from app.config import settings
+
+@pytest.fixture(autouse=True)
+def allow_synthetic_for_workflow_tests(monkeypatch):
+    """Enable synthetic provider execution in quarantine mode for sync workflow tests and ensure clean registry."""
+    monkeypatch.setattr(settings, "SUMI_ALLOW_SYNTHETIC_PROVIDERS", True)
+    ProviderRegistry.reset_instance()
+    yield
+    ProviderRegistry.reset_instance()
 
 def test_provider_registry_and_metadata():
     registry = ProviderRegistry.get_instance()
@@ -26,6 +35,7 @@ def test_provider_registry_and_metadata():
     assert ssi_meta.provider_id == "ssi"
     assert ssi_meta.is_official is True
     assert ssi_meta.requires_auth is True
+    assert ssi_meta.is_synthetic is True
     assert "1D" in ssi_meta.supported_timeframes
     assert "consumer_id" in ssi_meta.auth_fields
 
@@ -35,6 +45,7 @@ def test_provider_registry_and_metadata():
     assert vnstock_meta.provider_id == "vnstock"
     assert vnstock_meta.is_official is False
     assert vnstock_meta.requires_auth is False
+    assert vnstock_meta.is_synthetic is True
 
 
 def test_ssi_and_vnstock_adapters_normalization():
@@ -168,21 +179,28 @@ def test_sync_execute_atomic_and_weekly_derivation(client, db_session):
     assert manifest["symbol"] == "FPT"
     assert manifest["counts"]["accepted"] == 5
 
-    # Verify 1D candles committed
-    daily_candles = db_session.query(Candle).filter(Candle.symbol == "FPT", Candle.timeframe == "1D").all()
+    # Verify 1D candles committed to quarantine dataset
+    daily_candles = db_session.query(Candle).execution_options(include_quarantine=True).filter(Candle.symbol == "FPT", Candle.timeframe == "1D").all()
     assert len(daily_candles) == 5
     for c in daily_candles:
-        assert c.source == f"sync:{sync_id}"
+        assert c.source == f"quarantine:sync:{sync_id}"
 
-    # Verify 1W candles derived automatically by WeeklyAggregator
-    weekly_candles = db_session.query(Candle).filter(Candle.symbol == "FPT", Candle.timeframe == "1W").all()
+    # Verify canonical query does NOT see quarantine candles
+    assert len(db_session.query(Candle).filter(Candle.symbol == "FPT", Candle.timeframe == "1D").all()) == 0
+
+    # Verify 1W candles derived automatically by WeeklyAggregator with quarantine provenance
+    weekly_candles = db_session.query(Candle).execution_options(include_quarantine=True).filter(Candle.symbol == "FPT", Candle.timeframe == "1W").all()
     assert len(weekly_candles) == 1
     assert weekly_candles[0].symbol == "FPT"
+    assert weekly_candles[0].source == "quarantine:VN_TRADING_WEEK_V1"
 
-    # Verify WeeklyCandleProvenance record created
+    # Verify canonical 1W query does NOT see quarantine weekly candles
+    assert len(db_session.query(Candle).filter(Candle.symbol == "FPT", Candle.timeframe == "1W").all()) == 0
+
+    # Verify WeeklyCandleProvenance record created with quarantine rule_version
     prov = db_session.query(WeeklyCandleProvenance).filter(WeeklyCandleProvenance.symbol == "FPT").first()
     assert prov is not None
-    assert prov.rule_version == "VN_TRADING_WEEK_V1"
+    assert prov.rule_version == "quarantine:VN_TRADING_WEEK_V1"
 
 
 def test_sync_execute_idempotent(client, db_session):
@@ -267,9 +285,11 @@ def test_sync_rollback_success(client, db_session):
     checksum = prev_resp.json()["content_sha256"]
     client.post("/api/sync/execute", json={"sync_id": sync_id, "content_sha256": checksum})
 
-    # Verify candles exist
-    assert db_session.query(Candle).filter(Candle.symbol == "MWG", Candle.timeframe == "1D").count() == 5
-    assert db_session.query(Candle).filter(Candle.symbol == "MWG", Candle.timeframe == "1W").count() == 1
+    # Verify quarantine candles exist
+    assert db_session.query(Candle).execution_options(include_quarantine=True).filter(Candle.symbol == "MWG", Candle.timeframe == "1D").count() == 5
+    assert db_session.query(Candle).execution_options(include_quarantine=True).filter(Candle.symbol == "MWG", Candle.timeframe == "1W").count() == 1
+    # Canonical reader sees 0
+    assert db_session.query(Candle).filter(Candle.symbol == "MWG", Candle.timeframe == "1D").count() == 0
 
     # 2. Rollback
     rb_resp = client.post("/api/sync/rollback", json={"sync_id": sync_id})
@@ -279,8 +299,8 @@ def test_sync_rollback_success(client, db_session):
     assert rb_data["restored_mutations_count"] == 5
 
     # Verify candles removed and weekly series cleared
-    assert db_session.query(Candle).filter(Candle.symbol == "MWG", Candle.timeframe == "1D").count() == 0
-    assert db_session.query(Candle).filter(Candle.symbol == "MWG", Candle.timeframe == "1W").count() == 0
+    assert db_session.query(Candle).execution_options(include_quarantine=True).filter(Candle.symbol == "MWG", Candle.timeframe == "1D").count() == 0
+    assert db_session.query(Candle).execution_options(include_quarantine=True).filter(Candle.symbol == "MWG", Candle.timeframe == "1W").count() == 0
 
     # Verify sync_run record updated
     run = db_session.query(SyncRun).filter(SyncRun.id == sync_id).first()

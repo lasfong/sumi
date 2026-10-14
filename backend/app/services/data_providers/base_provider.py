@@ -27,6 +27,7 @@ class ProviderMetadata(BaseModel):
     rate_limit_rps: int = 10
     description: str
     auth_fields: List[str] = []
+    is_synthetic: bool = False
 
 
 class ProviderException(Exception):

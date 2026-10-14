@@ -29,6 +29,7 @@ scratch/
 test-results/
 .agents/
 ORIGINAL_REQUEST.md
+artifacts/local/
 
 # OS metadata
 .DS_Store

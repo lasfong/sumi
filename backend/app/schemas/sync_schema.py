@@ -12,6 +12,7 @@ class ProviderMetadataSchema(BaseModel):
     description: str
     auth_fields: List[str]
     is_configured: bool = False
+    is_synthetic: bool = False
 
 
 class TestConnectionRequest(BaseModel):
@@ -68,6 +69,8 @@ class SyncPreviewResponse(BaseModel):
     can_accept: bool
     block_reason: Optional[str] = None
     content_sha256: str
+    is_synthetic: bool = False
+    warning: Optional[str] = None
     items: List[SyncRunItemSchema] = []
 
 
@@ -85,6 +88,8 @@ class SyncExecuteResponse(BaseModel):
     adjustment_type: str
     duration_ms: float
     message: str
+    is_synthetic: bool = False
+    warning: Optional[str] = None
     manifest: Optional[Dict[str, Any]] = None
 
 

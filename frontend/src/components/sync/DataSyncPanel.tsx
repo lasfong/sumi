@@ -220,11 +220,34 @@ export const DataSyncPanel: React.FC = () => {
             >
               {(providersQuery.data || []).map((p) => (
                 <option key={p.provider_id} value={p.provider_id}>
-                  {p.display_name} {p.is_official ? '⭐ (Chính thức)' : '🌐 (Cộng đồng)'}
+                  {p.display_name} {p.is_synthetic ? '⚠️ (Môi trường giả lập / Stub)' : p.is_official ? '⭐ (Chính thức)' : '🌐 (Cộng đồng)'}
                 </option>
               ))}
             </select>
           </div>
+
+          {currentProviderMeta?.is_synthetic && (
+            <div
+              id="sync-synthetic-provider-banner"
+              style={{
+                gridColumn: '1 / -1',
+                padding: '0.65rem 0.9rem',
+                background: 'rgba(255, 171, 0, 0.12)',
+                color: '#ffab00',
+                border: '1px solid rgba(255, 171, 0, 0.3)',
+                borderRadius: '6px',
+                fontSize: '13px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.5rem',
+              }}
+            >
+              <span>⚠️</span>
+              <div>
+                <strong>Cảnh báo nhà cung cấp giả lập (Synthetic/Stub):</strong> Dữ liệu phát sinh từ thuật toán mô phỏng. Thao tác ghi chuẩn bị chặn mặc định để bảo vệ tập dữ liệu CSDL.
+              </div>
+            </div>
+          )}
 
           {/* Symbol Input & Presets */}
           <div>
@@ -558,6 +581,28 @@ export const DataSyncPanel: React.FC = () => {
               <div style={{ fontSize: '11px', color: '#ef5350' }}>Không hợp lệ</div>
             </div>
           </div>
+
+          {(preview.warning || preview.is_synthetic) && (
+            <div
+              id="sync-preview-synthetic-banner"
+              style={{
+                padding: '8px 12px',
+                background: 'rgba(255, 171, 0, 0.15)',
+                color: '#ffab00',
+                border: '1px solid rgba(255, 171, 0, 0.3)',
+                borderRadius: '4px',
+                fontSize: '13px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.5rem',
+              }}
+            >
+              <span>⚠️</span>
+              <div>
+                <strong>Cảnh báo dữ liệu giả lập:</strong> {preview.warning || 'Dữ liệu xem trước từ nhà cung cấp mô phỏng (quarantine dataset).'}
+              </div>
+            </div>
+          )}
 
           {preview.block_reason && (
             <div style={{ padding: '8px 12px', background: 'rgba(239, 83, 80, 0.15)', color: '#ef5350', borderRadius: '4px', fontSize: '13px' }}>

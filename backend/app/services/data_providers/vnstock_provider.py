@@ -28,7 +28,8 @@ class VnstockProviderAdapter(MarketDataProviderAdapter):
             supported_adjustments=["unadjusted", "adjusted"],
             rate_limit_rps=3,
             description="Open-source community aggregator fallback for Vietnam market data (MIT License).",
-            auth_fields=[]
+            auth_fields=[],
+            is_synthetic=True
         )
 
     def get_metadata(self) -> ProviderMetadata:

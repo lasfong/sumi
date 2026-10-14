@@ -1,4 +1,5 @@
 import uuid
+from collections import defaultdict
 from datetime import datetime, timezone, date
 from typing import List, Dict, Tuple, Optional, Set
 from fastapi import HTTPException
@@ -8,6 +9,7 @@ from sqlalchemy import func
 from app.models.candle import Candle
 from app.models.symbol import Symbol
 from app.models.import_run import ImportRun, ImportRunItem, ImportRunMutation
+from app.models.sync_run import SyncRun
 from app.schemas.import_schema import (
     ImportPreviewResponse,
     ImportRunItemSchema,
@@ -49,8 +51,12 @@ class ImportWorkflowService:
                 can_accept=False,
                 block_reason=metadata_err
             )
-            db.add(run)
-            db.commit()
+            try:
+                db.add(run)
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
             return ImportPreviewResponse(
                 run_id=run.id,
                 file_name=filename,
@@ -97,8 +103,12 @@ class ImportWorkflowService:
                 can_accept=False,
                 block_reason=f"Không thể đọc hoặc giải mã tập tin: {str(e)}"
             )
-            db.add(run)
-            db.commit()
+            try:
+                db.add(run)
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
             return ImportPreviewResponse(
                 run_id=run.id,
                 file_name=filename,
@@ -175,43 +185,47 @@ class ImportWorkflowService:
             can_accept=can_accept,
             block_reason=block_reason
         )
-        db.add(run)
+        try:
+            db.add(run)
 
-        # Add preview items
-        item_schemas: List[ImportRunItemSchema] = []
-        for it in classified_items:
-            db_item = ImportRunItem(
-                run_id=run_id,
-                row_index=it.row_index,
-                symbol=it.symbol,
-                timeframe=it.timeframe,
-                timestamp=datetime.combine(it.timestamp, datetime.min.time()) if isinstance(it.timestamp, date) else it.timestamp,
-                adjustment_type=it.adjustment_type,
-                open=it.open,
-                high=it.high,
-                low=it.low,
-                close=it.close,
-                volume=it.volume,
-                classification=it.classification,
-                reject_reason=it.reject_reason
-            )
-            db.add(db_item)
-            item_schemas.append(ImportRunItemSchema(
-                row_index=it.row_index,
-                symbol=it.symbol,
-                timeframe=it.timeframe,
-                timestamp=it.timestamp.strftime("%Y-%m-%d") if isinstance(it.timestamp, (date, datetime)) else str(it.timestamp),
-                adjustment_type=it.adjustment_type,
-                open=it.open,
-                high=it.high,
-                low=it.low,
-                close=it.close,
-                volume=it.volume,
-                classification=it.classification,
-                reject_reason=it.reject_reason
-            ))
+            # Add preview items
+            item_schemas: List[ImportRunItemSchema] = []
+            for it in classified_items:
+                db_item = ImportRunItem(
+                    run_id=run_id,
+                    row_index=it.row_index,
+                    symbol=it.symbol,
+                    timeframe=it.timeframe,
+                    timestamp=datetime.combine(it.timestamp, datetime.min.time()) if isinstance(it.timestamp, date) else it.timestamp,
+                    adjustment_type=it.adjustment_type,
+                    open=it.open,
+                    high=it.high,
+                    low=it.low,
+                    close=it.close,
+                    volume=it.volume,
+                    classification=it.classification,
+                    reject_reason=it.reject_reason
+                )
+                db.add(db_item)
+                item_schemas.append(ImportRunItemSchema(
+                    row_index=it.row_index,
+                    symbol=it.symbol,
+                    timeframe=it.timeframe,
+                    timestamp=it.timestamp.strftime("%Y-%m-%d") if isinstance(it.timestamp, (date, datetime)) else str(it.timestamp),
+                    adjustment_type=it.adjustment_type,
+                    open=it.open,
+                    high=it.high,
+                    low=it.low,
+                    close=it.close,
+                    volume=it.volume,
+                    classification=it.classification,
+                    reject_reason=it.reject_reason
+                ))
 
-        db.commit()
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
         return ImportPreviewResponse(
             run_id=run.id,
@@ -276,8 +290,12 @@ class ImportWorkflowService:
 
         if not parsed_items and run.duplicate_count > 0:
             # All items were duplicates -> noop
-            run.status = "noop"
-            db.commit()
+            try:
+                run.status = "noop"
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
             return ImportAcceptResponse(
                 run_id=run_id,
                 status="noop",
@@ -322,61 +340,144 @@ class ImportWorkflowService:
                     f"Bản xem trước đã hết hạn: Dữ liệu nến cho mã {first_item.symbol} ngày {dt_str} "
                     f"đã được tạo hoặc thay đổi sau khi xem trước. Vui lòng tạo lại bản xem trước."
                 )
-                run.status = "blocked"
-                run.can_accept = False
-                run.block_reason = block_reason
-                db.commit()
+                try:
+                    run.status = "blocked"
+                    run.can_accept = False
+                    run.block_reason = block_reason
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    raise
                 raise HTTPException(status_code=400, detail=block_reason)
 
-        affected_symbols: Set[str] = set()
+        try:
+            affected_symbols: Set[str] = set(item.symbol for item in parsed_items)
 
-        for item in parsed_items:
-            affected_symbols.add(item.symbol)
-
-            # Ensure Symbol exists
-            sym_rec = db.query(Symbol).filter(Symbol.symbol == item.symbol).first()
-            if not sym_rec:
-                asset_type = "index" if CafeFImporter.is_index_symbol(item.symbol) else "stock"
-                sym_rec = Symbol(symbol=item.symbol, asset_type=asset_type, is_active=True)
-                db.add(sym_rec)
-                db.flush()
-
-            item_ts = item.timestamp
-            mutation = ImportRunMutation(
-                run_id=run_id,
-                action="INSERT",
-                symbol=item.symbol,
-                timeframe=item.timeframe,
-                timestamp=item_ts,
-                adjustment_type=item.adjustment_type,
-                before_open=None, before_high=None, before_low=None, before_close=None, before_volume=None,
-                after_open=item.open, after_high=item.high, after_low=item.low, after_close=item.close, after_volume=item.volume
+            # Query existing quarantine candles for affected symbols to allow atomic takeover
+            existing_quarantine_candles = (
+                db.query(Candle)
+                .execution_options(include_quarantine=True)
+                .filter(
+                    Candle.symbol.in_(list(affected_symbols)),
+                    Candle.timeframe == run.timeframe,
+                    Candle.adjustment_type == run.adjustment_type
+                )
+                .all()
             )
-            new_candle = Candle(
-                symbol=item.symbol,
-                timeframe=item.timeframe,
-                timestamp=item_ts,
-                open=item.open,
-                high=item.high,
-                low=item.low,
-                close=item.close,
-                volume=item.volume,
-                source=run_id,
-                adjustment_type=item.adjustment_type
-            )
-            db.add(new_candle)
-            db.add(mutation)
+            # Group existing quarantine candles by date key to detect ambiguous collisions (Finding R2)
+            quarantine_groups = defaultdict(list)
+            for c in existing_quarantine_candles:
+                if c.source and c.source.startswith("quarantine:"):
+                    c_date = c.timestamp.date() if isinstance(c.timestamp, datetime) else c.timestamp
+                    key = (c.symbol, c.timeframe, c_date, c.adjustment_type)
+                    quarantine_groups[key].append(c)
 
-        run.status = "accepted"
-        run.accepted_at = datetime.now(timezone.utc)
-        run.accepted_count = len(parsed_items)
+            # Pre-validate all parsed candidates against quarantine ambiguity (Finding R2)
+            ambiguous_items = []
+            for item in parsed_items:
+                item_date = item.timestamp.date() if isinstance(item.timestamp, datetime) else item.timestamp
+                item_key = (item.symbol, item.timeframe, item_date, item.adjustment_type)
+                candidates = quarantine_groups.get(item_key, [])
+                if len(candidates) > 1:
+                    ambiguous_items.append((item.symbol, item_date, len(candidates)))
 
-        db.flush()
+            if ambiguous_items:
+                sym, dt, count = ambiguous_items[0]
+                dt_str = dt.strftime("%Y-%m-%d") if isinstance(dt, (date, datetime)) else str(dt)
+                detail_msg = (
+                    f"Ambiguous quarantine candidates detected: {count} nến cách ly (quarantine) trùng ngày {dt_str} cho mã {sym}. "
+                    f"Không thể thay thế tự động do dữ liệu không rõ ràng."
+                )
+                db.rollback()
+                raise HTTPException(status_code=400, detail=detail_msg)
 
-        # Trigger Weekly Candle derivation
-        WeeklyAggregator.derive_weekly_candles(db, affected_symbols, {run.adjustment_type})
+            # Unambiguous candidates map (single quarantine candle per key)
+            quarantine_map = {
+                k: v[0] for k, v in quarantine_groups.items() if len(v) == 1
+            }
 
-        db.commit()
+            for item in parsed_items:
+                # Ensure Symbol exists
+                sym_rec = db.query(Symbol).filter(Symbol.symbol == item.symbol).first()
+                if not sym_rec:
+                    asset_type = "index" if CafeFImporter.is_index_symbol(item.symbol) else "stock"
+                    sym_rec = Symbol(symbol=item.symbol, asset_type=asset_type, is_active=True)
+                    db.add(sym_rec)
+                    db.flush()
+
+                item_ts = item.timestamp
+                item_date = item_ts.date() if isinstance(item_ts, datetime) else item_ts
+                item_key = (item.symbol, item.timeframe, item_date, item.adjustment_type)
+
+                quar_candle = quarantine_map.get(item_key)
+                if quar_candle:
+                    # Canonical data supersedes quarantine placeholder row atomically (Option A)
+                    quar_ts_str = quar_candle.timestamp.isoformat() if hasattr(quar_candle.timestamp, 'isoformat') else str(quar_candle.timestamp)
+                    mutation = ImportRunMutation(
+                        run_id=run_id,
+                        action=f"UPDATE:{quar_candle.source}|{quar_ts_str}",
+                        symbol=item.symbol,
+                        timeframe=item.timeframe,
+                        timestamp=item_ts,
+                        adjustment_type=item.adjustment_type,
+                        before_open=quar_candle.open,
+                        before_high=quar_candle.high,
+                        before_low=quar_candle.low,
+                        before_close=quar_candle.close,
+                        before_volume=quar_candle.volume,
+                        after_open=item.open,
+                        after_high=item.high,
+                        after_low=item.low,
+                        after_close=item.close,
+                        after_volume=item.volume
+                    )
+                    quar_candle.open = item.open
+                    quar_candle.high = item.high
+                    quar_candle.low = item.low
+                    quar_candle.close = item.close
+                    quar_candle.volume = item.volume
+                    quar_candle.timestamp = item_ts
+                    quar_candle.source = run_id
+                    db.add(mutation)
+                else:
+                    mutation = ImportRunMutation(
+                        run_id=run_id,
+                        action="INSERT",
+                        symbol=item.symbol,
+                        timeframe=item.timeframe,
+                        timestamp=item_ts,
+                        adjustment_type=item.adjustment_type,
+                        before_open=None, before_high=None, before_low=None, before_close=None, before_volume=None,
+                        after_open=item.open, after_high=item.high, after_low=item.low, after_close=item.close, after_volume=item.volume
+                    )
+                    new_candle = Candle(
+                        symbol=item.symbol,
+                        timeframe=item.timeframe,
+                        timestamp=item_ts,
+                        open=item.open,
+                        high=item.high,
+                        low=item.low,
+                        close=item.close,
+                        volume=item.volume,
+                        source=run_id,
+                        adjustment_type=item.adjustment_type
+                    )
+                    db.add(new_candle)
+                    db.add(mutation)
+
+            run.status = "accepted"
+            run.accepted_at = datetime.now(timezone.utc)
+            run.accepted_count = len(parsed_items)
+
+            db.flush()
+
+            # Trigger Weekly Candle derivation
+            WeeklyAggregator.derive_weekly_candles(db, affected_symbols, {run.adjustment_type})
+
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
 
         return ImportAcceptResponse(
@@ -400,9 +501,13 @@ class ImportWorkflowService:
 
         mutations = db.query(ImportRunMutation).filter(ImportRunMutation.run_id == run_id).all()
         if not mutations:
-            run.status = "rolled_back"
-            run.rolled_back_at = datetime.now(timezone.utc)
-            db.commit()
+            try:
+                run.status = "rolled_back"
+                run.rolled_back_at = datetime.now(timezone.utc)
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
             return ImportRollbackResponse(
                 run_id=run_id,
                 status="rolled_back",
@@ -432,41 +537,122 @@ class ImportWorkflowService:
                     detail=f"Hoàn tác bị từ chối: Đã có lượt nhập dữ liệu mới hơn ({sub_run.file_name}) thay đổi các mã {', '.join(overlap)}"
                 )
 
-        restored_count = 0
-        for m in mutations:
-            candle = (
-                db.query(Candle)
-                .filter(
-                    Candle.symbol == m.symbol,
-                    Candle.timeframe == m.timeframe,
-                    Candle.timestamp == m.timestamp,
-                    Candle.adjustment_type == m.adjustment_type
-                )
-                .first()
+        # Safety check: ensure no subsequent accepted sync run modified these symbols
+        subsequent_syncs = (
+            db.query(SyncRun)
+            .filter(
+                SyncRun.status == "accepted",
+                SyncRun.symbol.in_(list(affected_symbols)),
+                SyncRun.accepted_at > run.accepted_at
+            )
+            .all()
+        )
+        if subsequent_syncs:
+            overlap = affected_symbols.intersection(set(s.symbol for s in subsequent_syncs))
+            raise HTTPException(
+                status_code=400,
+                detail=f"Hoàn tác bị từ chối: Đã có lượt đồng bộ mới hơn ({subsequent_syncs[0].id}) thay đổi các mã {', '.join(overlap)}"
             )
 
-            if m.action == "INSERT":
-                if candle:
+        try:
+            restored_count = 0
+            for m in mutations:
+                candle = (
+                    db.query(Candle)
+                    .execution_options(include_quarantine=True)
+                    .filter(
+                        Candle.symbol == m.symbol,
+                        Candle.timeframe == m.timeframe,
+                        Candle.timestamp == m.timestamp,
+                        Candle.adjustment_type == m.adjustment_type
+                    )
+                    .first()
+                )
+                if not candle and m.timeframe in ("1D", "D"):
+                    m_date = m.timestamp.date() if isinstance(m.timestamp, datetime) else m.timestamp
+                    candidates = (
+                        db.query(Candle)
+                        .execution_options(include_quarantine=True)
+                        .filter(
+                            Candle.symbol == m.symbol,
+                            Candle.timeframe == m.timeframe,
+                            Candle.adjustment_type == m.adjustment_type
+                        )
+                        .all()
+                    )
+                    matching = [
+                        c for c in candidates
+                        if (c.timestamp.date() if isinstance(c.timestamp, datetime) else c.timestamp) == m_date
+                    ]
+                    if len(matching) > 1:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Hoàn tác bị từ chối: Tìm thấy nhiều cây nến trùng ngày ({len(matching)}) cho mã {m.symbol} ngày {m_date} (Ambiguous rollback target)"
+                        )
+                    if len(matching) == 1:
+                        candle = matching[0]
+
+                if not candle:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Hoàn tác bị từ chối: Không tìm thấy cây nến cần khôi phục cho mã {m.symbol} lúc {m.timestamp} (Missing rollback target)"
+                    )
+
+                if m.action == "INSERT":
                     db.delete(candle)
                     restored_count += 1
-            elif m.action == "UPDATE":
-                if candle:
+                elif m.action.startswith("UPDATE"):
                     candle.open = m.before_open
                     candle.high = m.before_high
                     candle.low = m.before_low
                     candle.close = m.before_close
                     candle.volume = m.before_volume
+                    if ":" in m.action:
+                        parts = m.action.split(":", 1)[1]
+                        if "|" in parts:
+                            src, prior_ts_str = parts.rsplit("|", 1)
+                            prior_ts_str = prior_ts_str.strip()
+                            if not prior_ts_str:
+                                raise HTTPException(
+                                    status_code=400,
+                                    detail=f"Hoàn tác bị từ chối: Dữ liệu nguồn gốc thời gian bị trống cho mã {m.symbol} (Empty provenance timestamp)"
+                                )
+                            try:
+                                prior_ts = datetime.fromisoformat(prior_ts_str)
+                            except (ValueError, TypeError) as exc:
+                                raise HTTPException(
+                                    status_code=400,
+                                    detail=f"Hoàn tác bị từ chối: Dữ liệu nguồn gốc thời gian không hợp lệ '{prior_ts_str}' cho mã {m.symbol} (Malformed provenance timestamp)"
+                                ) from exc
+                            candle.source = src
+                            candle.timestamp = prior_ts
+                        else:
+                            candle.source = parts
                     restored_count += 1
+                else:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Hoàn tác bị từ chối: Thao tác mutation không xác định '{m.action}' cho mã {m.symbol}"
+                    )
 
-        run.status = "rolled_back"
-        run.rolled_back_at = datetime.now(timezone.utc)
+            if restored_count != len(mutations):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Hoàn tác chưa hoàn tất: chỉ khôi phục {restored_count}/{len(mutations)} điểm dữ liệu"
+                )
 
-        db.flush()
+            run.status = "rolled_back"
+            run.rolled_back_at = datetime.now(timezone.utc)
 
-        # Re-derive Weekly candles
-        WeeklyAggregator.derive_weekly_candles(db, affected_symbols, {run.adjustment_type})
+            db.flush()
 
-        db.commit()
+            # Re-derive Weekly candles
+            WeeklyAggregator.derive_weekly_candles(db, affected_symbols, {run.adjustment_type})
+
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
 
         return ImportRollbackResponse(

@@ -11,6 +11,7 @@ export interface ProviderMetadata {
   description: string;
   auth_fields: string[];
   is_configured: boolean;
+  is_synthetic?: boolean;
 }
 
 export interface TestConnectionResponse {
@@ -53,6 +54,8 @@ export interface SyncPreviewResponse {
   can_accept: boolean;
   block_reason?: string | null;
   content_sha256: string;
+  is_synthetic?: boolean;
+  warning?: string | null;
   items: SyncRunItem[];
 }
 
@@ -65,6 +68,8 @@ export interface SyncExecuteResponse {
   adjustment_type: string;
   duration_ms: number;
   message: string;
+  is_synthetic?: boolean;
+  warning?: string | null;
   manifest?: Record<string, unknown> | null;
 }
 

@@ -22,6 +22,11 @@ class ProviderRegistry:
             cls._instance = cls()
         return cls._instance
 
+    @classmethod
+    def reset_instance(cls):
+        """Resets singleton instance back to default registered providers (for testing isolation)."""
+        cls._instance = None
+
     def _register_default_providers(self):
         self.register_provider(SSIProviderAdapter())
         self.register_provider(VnstockProviderAdapter())

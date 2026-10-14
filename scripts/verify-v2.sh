@@ -14,18 +14,38 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   exit 1
 fi
 
-echo "[1/6] Backend tests"
+VERIFY_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/sumi-verify-v2.XXXXXX")"
+
+cleanup() {
+  unset DATABASE_URL || true
+  if [[ -n "${VERIFY_TMP_DIR:-}" && -d "$VERIFY_TMP_DIR" ]]; then
+    rm -rf "$VERIFY_TMP_DIR"
+  fi
+}
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+trap 'cleanup; exit 129' HUP
+
+echo "[1/6] Backend tests (isolated database)"
+VERIFY_DB="$VERIFY_TMP_DIR/sumi-verify.db"
+VERIFY_DB_NATIVE="$VERIFY_DB"
+if command -v cygpath >/dev/null 2>&1; then
+  VERIFY_DB_NATIVE="$(cygpath -m "$VERIFY_DB")"
+fi
+export DATABASE_URL="sqlite:///$VERIFY_DB_NATIVE"
 (cd "$ROOT_DIR/backend" && "$PYTHON_BIN" -m pytest -q)
 
-echo "[2/6] Fresh database migration"
-MIGRATION_DB="$(mktemp "${TMPDIR:-/tmp}/sumi-migration.XXXXXX.db")"
-trap 'rm -f "$MIGRATION_DB"' EXIT
+echo "[2/6] Fresh database migration (distinct temporary database)"
+MIGRATION_DB="$VERIFY_TMP_DIR/sumi-migration.db"
 MIGRATION_DB_NATIVE="$MIGRATION_DB"
 if command -v cygpath >/dev/null 2>&1; then
   MIGRATION_DB_NATIVE="$(cygpath -m "$MIGRATION_DB")"
 fi
 (cd "$ROOT_DIR/backend" && DATABASE_URL="sqlite:///$MIGRATION_DB_NATIVE" "$PYTHON_BIN" -m alembic upgrade head)
 
+# DATABASE_URL remains exported to VERIFY_DB_NATIVE for stages 3-6 to guarantee
+# that any subsequent tool, test, or smoke run cannot fall back to production DB.
 echo "[3/6] Frontend lint"
 (cd "$ROOT_DIR/frontend" && npm run lint)
 

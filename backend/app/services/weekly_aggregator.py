@@ -19,6 +19,18 @@ class WeeklyAggregator:
         Derives and updates Weekly (1W) candles from accepted Daily (1D) candles using VN_TRADING_WEEK_V1.
         Returns the count of weekly candles updated/inserted.
         """
+        try:
+            return WeeklyAggregator._derive_weekly_candles_impl(db, symbols, adjustment_types)
+        except Exception:
+            db.rollback()
+            raise
+
+    @staticmethod
+    def _derive_weekly_candles_impl(
+        db: Session,
+        symbols: Set[str],
+        adjustment_types: Set[str]
+    ) -> int:
         updated_count = 0
 
         for symbol in symbols:
@@ -26,6 +38,7 @@ class WeeklyAggregator:
                 # Fetch all 1D candles for (symbol, adj_type)
                 daily_candles = (
                     db.query(Candle)
+                    .execution_options(include_quarantine=True)
                     .filter(
                         Candle.symbol == symbol,
                         Candle.timeframe == "1D",
@@ -81,23 +94,40 @@ class WeeklyAggregator:
                         key=lambda x: x.timestamp.date() if isinstance(x.timestamp, datetime) else x.timestamp
                     )
 
-                    first_c = members_sorted[0]
-                    last_c = members_sorted[-1]
+                    # Partition members into canonical vs quarantine to avoid contaminating production 1W candles (ADR-PROV-001)
+                    canonical_members = [c for c in members_sorted if not (c.source and c.source.startswith("quarantine:"))]
+                    quarantine_members = [c for c in members_sorted if c.source and c.source.startswith("quarantine:")]
+
+                    # If canonical members exist, derive canonical 1W candle strictly from canonical 1D candles
+                    # If only quarantine members exist, derive quarantine 1W candle tagged with quarantine:VN_TRADING_WEEK_V1
+                    if canonical_members:
+                        target_members = canonical_members
+                        w_source = "VN_TRADING_WEEK_V1"
+                        w_rule_version = WeeklyAggregator.RULE_VERSION
+                    elif quarantine_members:
+                        target_members = quarantine_members
+                        w_source = "quarantine:VN_TRADING_WEEK_V1"
+                        w_rule_version = f"quarantine:{WeeklyAggregator.RULE_VERSION}"
+                    else:
+                        continue
+
+                    first_c = target_members[0]
+                    last_c = target_members[-1]
 
                     w_open = float(first_c.open)
-                    w_high = max(float(c.high) for c in members_sorted)
-                    w_low = min(float(c.low) for c in members_sorted)
+                    w_high = max(float(c.high) for c in target_members)
+                    w_low = min(float(c.low) for c in target_members)
                     w_close = float(last_c.close)
-                    w_volume = sum(float(c.volume) for c in members_sorted)
+                    w_volume = sum(float(c.volume) for c in target_members)
 
                     last_date = last_c.timestamp.date() if isinstance(last_c.timestamp, datetime) else last_c.timestamp
                     w_timestamp = datetime.combine(last_date, time.min)
 
                     member_keys = [
                         (c.timestamp.date() if isinstance(c.timestamp, datetime) else c.timestamp).strftime("%Y-%m-%d")
-                        for c in members_sorted
+                        for c in target_members
                     ]
-                    source_runs = list(set([c.source for c in members_sorted if c.source]))
+                    source_runs = list(set([c.source for c in target_members if c.source]))
 
                     # Find existing weekly candle for this symbol/adj_type/week_start
                     prov = existing_weeks.get(week_start_str)
@@ -106,6 +136,7 @@ class WeeklyAggregator:
                     week_end = week_start + timedelta(days=6)
                     old_candles = (
                         db.query(Candle)
+                        .execution_options(include_quarantine=True)
                         .filter(
                             Candle.symbol == symbol,
                             Candle.timeframe == "1W",
@@ -120,6 +151,7 @@ class WeeklyAggregator:
 
                     weekly_candle = (
                         db.query(Candle)
+                        .execution_options(include_quarantine=True)
                         .filter(
                             Candle.symbol == symbol,
                             Candle.timeframe == "1W",
@@ -139,7 +171,7 @@ class WeeklyAggregator:
                             low=w_low,
                             close=w_close,
                             volume=w_volume,
-                            source="VN_TRADING_WEEK_V1",
+                            source=w_source,
                             adjustment_type=adj_type
                         )
                         db.add(weekly_candle)
@@ -149,6 +181,7 @@ class WeeklyAggregator:
                         weekly_candle.low = w_low
                         weekly_candle.close = w_close
                         weekly_candle.volume = w_volume
+                        weekly_candle.source = w_source
 
                     if not prov:
                         prov = WeeklyCandleProvenance(
@@ -156,13 +189,14 @@ class WeeklyAggregator:
                             adjustment_type=adj_type,
                             week_start_date=week_start_str,
                             weekly_timestamp=w_timestamp,
-                            rule_version=WeeklyAggregator.RULE_VERSION,
+                            rule_version=w_rule_version,
                             daily_member_keys_json=json.dumps(member_keys),
                             source_run_ids_json=json.dumps(source_runs)
                         )
                         db.add(prov)
                     else:
                         prov.weekly_timestamp = w_timestamp
+                        prov.rule_version = w_rule_version
                         prov.daily_member_keys_json = json.dumps(member_keys)
                         prov.source_run_ids_json = json.dumps(source_runs)
 

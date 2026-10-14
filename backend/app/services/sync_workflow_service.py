@@ -1,6 +1,7 @@
 import os
 import time
 import uuid
+from collections import defaultdict
 from datetime import datetime, timezone, date
 from typing import List, Dict, Tuple, Optional, Set, Any
 import pandas as pd
@@ -30,6 +31,7 @@ from app.services.data_providers.base_provider import (
     ProviderDataError,
     ProviderException,
 )
+from app.config import settings
 from app.services.import_classifier import ImportClassifier
 from app.services.weekly_aggregator import WeeklyAggregator
 
@@ -44,7 +46,7 @@ class SyncWorkflowService:
         for meta in metadata_list:
             is_configured = False
             if meta.provider_id == "ssi":
-                is_configured = bool(os.getenv("SUMI_DATA_PROVIDER_KEY") or os.getenv("SUMI_SSI_CONSUMER_ID"))
+                is_configured = bool(settings.SUMI_DATA_PROVIDER_KEY or settings.SUMI_SSI_CONSUMER_ID)
             elif not meta.requires_auth:
                 is_configured = True
             
@@ -58,7 +60,8 @@ class SyncWorkflowService:
                 rate_limit_rps=meta.rate_limit_rps,
                 description=meta.description,
                 auth_fields=meta.auth_fields,
-                is_configured=is_configured
+                is_configured=is_configured,
+                is_synthetic=meta.is_synthetic
             ))
         return result
 
@@ -167,10 +170,18 @@ class SyncWorkflowService:
             })
         raw_df = pd.DataFrame(raw_rows)
 
+        is_synthetic = adapter.get_metadata().is_synthetic if adapter else False
+
         # Build existing candles map for classification
         existing_candles_map: Dict[Tuple[str, str, date, str], Tuple[float, float, float, float, float]] = {}
+        candle_query = db.query(Candle)
+        # Synthetic providers must not overwrite quarantine or canonical candles.
+        # Canonical real providers exclude quarantine candles so quarantine rows do not act
+        # as comparison baseline for duplicate/conflict detection.
+        if is_synthetic:
+            candle_query = candle_query.execution_options(include_quarantine=True)
         db_candles = (
-            db.query(Candle)
+            candle_query
             .filter(
                 Candle.symbol == sym,
                 Candle.timeframe == "1D",
@@ -214,42 +225,52 @@ class SyncWorkflowService:
             content_sha256=content_sha256,
             duration_ms=0.0
         )
-        db.add(sync_run)
+        try:
+            db.add(sync_run)
 
-        item_schemas: List[SyncRunItemSchema] = []
-        for it in classified_items:
-            db_item = SyncRunItem(
-                sync_id=sync_id,
-                row_index=it.row_index,
-                symbol=it.symbol,
-                timeframe=it.timeframe,
-                timestamp=datetime.combine(it.timestamp, datetime.min.time()) if isinstance(it.timestamp, date) else it.timestamp,
-                adjustment_type=it.adjustment_type,
-                open=it.open,
-                high=it.high,
-                low=it.low,
-                close=it.close,
-                volume=it.volume,
-                classification=it.classification,
-                reject_reason=it.reject_reason
-            )
-            db.add(db_item)
-            item_schemas.append(SyncRunItemSchema(
-                row_index=it.row_index,
-                symbol=it.symbol,
-                timeframe=it.timeframe,
-                timestamp=it.timestamp.strftime("%Y-%m-%d") if isinstance(it.timestamp, (date, datetime)) else str(it.timestamp),
-                adjustment_type=it.adjustment_type,
-                open=it.open,
-                high=it.high,
-                low=it.low,
-                close=it.close,
-                volume=it.volume,
-                classification=it.classification,
-                reject_reason=it.reject_reason
-            ))
+            item_schemas: List[SyncRunItemSchema] = []
+            for it in classified_items:
+                db_item = SyncRunItem(
+                    sync_id=sync_id,
+                    row_index=it.row_index,
+                    symbol=it.symbol,
+                    timeframe=it.timeframe,
+                    timestamp=datetime.combine(it.timestamp, datetime.min.time()) if isinstance(it.timestamp, date) else it.timestamp,
+                    adjustment_type=it.adjustment_type,
+                    open=it.open,
+                    high=it.high,
+                    low=it.low,
+                    close=it.close,
+                    volume=it.volume,
+                    classification=it.classification,
+                    reject_reason=it.reject_reason
+                )
+                db.add(db_item)
+                item_schemas.append(SyncRunItemSchema(
+                    row_index=it.row_index,
+                    symbol=it.symbol,
+                    timeframe=it.timeframe,
+                    timestamp=it.timestamp.strftime("%Y-%m-%d") if isinstance(it.timestamp, (date, datetime)) else str(it.timestamp),
+                    adjustment_type=it.adjustment_type,
+                    open=it.open,
+                    high=it.high,
+                    low=it.low,
+                    close=it.close,
+                    volume=it.volume,
+                    classification=it.classification,
+                    reject_reason=it.reject_reason
+                ))
 
-        db.commit()
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+        is_synthetic = adapter.get_metadata().is_synthetic if adapter else False
+        warning = (
+            "Cảnh báo: Dữ liệu giả lập (synthetic/stub). Thao tác ghi dữ liệu bị chặn mặc định để bảo vệ tập dữ liệu chuẩn."
+            if is_synthetic else None
+        )
 
         return SyncPreviewResponse(
             sync_id=sync_run.id,
@@ -269,6 +290,8 @@ class SyncWorkflowService:
             can_accept=can_accept,
             block_reason=block_reason,
             content_sha256=content_sha256,
+            is_synthetic=is_synthetic,
+            warning=warning,
             items=item_schemas
         )
 
@@ -310,6 +333,27 @@ class SyncWorkflowService:
         if run.content_sha256 != content_sha256:
             raise HTTPException(status_code=400, detail="Mã kiểm tra bản xem trước không khớp. Vui lòng tạo lại bản xem trước")
 
+        # Check provider synthetic status (GAP-DB-04 / ADR-PROV-001)
+        registry = ProviderRegistry.get_instance()
+        adapter = registry.get_provider(run.provider_id)
+        if not adapter:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Thao tác đồng bộ bị từ chối: Nhà cung cấp dữ liệu '{run.provider_id}' không tồn tại trong hệ thống."
+            )
+        provider_meta = adapter.get_metadata()
+        is_synthetic = provider_meta.is_synthetic
+
+        if is_synthetic and not settings.SUMI_ALLOW_SYNTHETIC_PROVIDERS:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"Thao tác đồng bộ bị từ chối: Nhà cung cấp dữ liệu '{run.provider_id}' là môi trường giả lập (synthetic/stub). "
+                    f"Thao tác ghi bị chặn mặc định để bảo vệ tập dữ liệu chuẩn. "
+                    f"Cần bật cấu hình SUMI_ALLOW_SYNTHETIC_PROVIDERS=1 để ghi vào vùng cách ly (quarantine)."
+                )
+            )
+
         parsed_items = (
             db.query(SyncRunItem)
             .filter(SyncRunItem.sync_id == sync_id, SyncRunItem.classification == "parsed")
@@ -317,8 +361,12 @@ class SyncWorkflowService:
         )
 
         if not parsed_items and run.duplicate_count > 0:
-            run.status = "noop"
-            db.commit()
+            try:
+                run.status = "noop"
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
             return SyncExecuteResponse(
                 sync_id=sync_id,
                 status="noop",
@@ -328,13 +376,18 @@ class SyncWorkflowService:
                 adjustment_type=run.adjustment_type,
                 duration_ms=0.0,
                 message="Tất cả dòng dữ liệu đã tồn tại trong hệ thống (Idempotent no-op)",
+                is_synthetic=is_synthetic,
+                warning="Dữ liệu giả lập (quarantine dataset)" if is_synthetic else None,
                 manifest=None
             )
 
         # Fail-closed check against stale preview
         if parsed_items:
+            stale_query = db.query(Candle)
+            if is_synthetic:
+                stale_query = stale_query.execution_options(include_quarantine=True)
             existing_candles = (
-                db.query(Candle)
+                stale_query
                 .filter(
                     Candle.symbol == run.symbol,
                     Candle.timeframe == run.timeframe,
@@ -366,84 +419,178 @@ class SyncWorkflowService:
                     f"Bản xem trước đã hết hạn: Dữ liệu nến cho mã {first_item.symbol} ngày {dt_str} "
                     f"đã được tạo hoặc thay đổi sau khi xem trước. Vui lòng tạo lại bản xem trước."
                 )
-                run.status = "blocked"
-                run.can_accept = False
-                run.block_reason = block_reason
-                db.commit()
+                try:
+                    run.status = "blocked"
+                    run.can_accept = False
+                    run.block_reason = block_reason
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    raise
                 raise HTTPException(status_code=400, detail=block_reason)
 
-        # Ensure Symbol exists
-        sym_rec = db.query(Symbol).filter(Symbol.symbol == run.symbol).first()
-        if not sym_rec:
-            sym_rec = Symbol(symbol=run.symbol, asset_type="stock", is_active=True)
-            db.add(sym_rec)
+        candle_source = f"quarantine:sync:{sync_id}" if is_synthetic else f"sync:{sync_id}"
+        dataset_type = "quarantine" if is_synthetic else "canonical"
+        warning_msg = "Dữ liệu giả lập (quarantine dataset)" if is_synthetic else None
+
+        try:
+            # Ensure Symbol exists
+            sym_rec = db.query(Symbol).filter(Symbol.symbol == run.symbol).first()
+            if not sym_rec:
+                sym_rec = Symbol(symbol=run.symbol, asset_type="stock", is_active=True)
+                db.add(sym_rec)
+                db.flush()
+
+            # For canonical real sync, query existing quarantine rows to supersede them
+            quarantine_map = {}
+            if not is_synthetic:
+                existing_quarantine_candles = (
+                    db.query(Candle)
+                    .execution_options(include_quarantine=True)
+                    .filter(
+                        Candle.symbol == run.symbol,
+                        Candle.timeframe == run.timeframe,
+                        Candle.adjustment_type == run.adjustment_type
+                    )
+                    .all()
+                )
+                # Group existing quarantine candles by date key to detect ambiguous collisions (Finding R2)
+                quarantine_groups = defaultdict(list)
+                for c in existing_quarantine_candles:
+                    if c.source and c.source.startswith("quarantine:"):
+                        c_date = c.timestamp.date() if isinstance(c.timestamp, datetime) else c.timestamp
+                        key = (c.symbol, c.timeframe, c_date, c.adjustment_type)
+                        quarantine_groups[key].append(c)
+
+                # Pre-validate all parsed candidates against quarantine ambiguity (Finding R2)
+                ambiguous_items = []
+                for item in parsed_items:
+                    item_date = item.timestamp.date() if isinstance(item.timestamp, datetime) else item.timestamp
+                    item_key = (item.symbol, item.timeframe, item_date, item.adjustment_type)
+                    candidates = quarantine_groups.get(item_key, [])
+                    if len(candidates) > 1:
+                        ambiguous_items.append((item.symbol, item_date, len(candidates)))
+
+                if ambiguous_items:
+                    sym, dt, count = ambiguous_items[0]
+                    dt_str = dt.strftime("%Y-%m-%d") if isinstance(dt, (date, datetime)) else str(dt)
+                    detail_msg = (
+                        f"Ambiguous quarantine candidates detected: {count} nến cách ly (quarantine) trùng ngày {dt_str} cho mã {sym}. "
+                        f"Không thể thay thế tự động do dữ liệu không rõ ràng."
+                    )
+                    db.rollback()
+                    raise HTTPException(status_code=400, detail=detail_msg)
+
+                # Unambiguous candidates map (single quarantine candle per key)
+                quarantine_map = {
+                    k: v[0] for k, v in quarantine_groups.items() if len(v) == 1
+                }
+
+            for item in parsed_items:
+                item_ts = item.timestamp
+                item_date = item_ts.date() if isinstance(item_ts, datetime) else item_ts
+                item_key = (item.symbol, item.timeframe, item_date, item.adjustment_type)
+
+                quar_candle = quarantine_map.get(item_key) if not is_synthetic else None
+                if quar_candle:
+                    # Canonical real sync supersedes quarantine placeholder row atomically (Option A)
+                    quar_ts_str = quar_candle.timestamp.isoformat() if hasattr(quar_candle.timestamp, 'isoformat') else str(quar_candle.timestamp)
+                    mutation = SyncRunMutation(
+                        sync_id=sync_id,
+                        action=f"UPDATE:{quar_candle.source}|{quar_ts_str}",
+                        symbol=item.symbol,
+                        timeframe=item.timeframe,
+                        timestamp=item_ts,
+                        adjustment_type=item.adjustment_type,
+                        before_open=quar_candle.open,
+                        before_high=quar_candle.high,
+                        before_low=quar_candle.low,
+                        before_close=quar_candle.close,
+                        before_volume=quar_candle.volume,
+                        after_open=item.open,
+                        after_high=item.high,
+                        after_low=item.low,
+                        after_close=item.close,
+                        after_volume=item.volume
+                    )
+                    quar_candle.open = item.open
+                    quar_candle.high = item.high
+                    quar_candle.low = item.low
+                    quar_candle.close = item.close
+                    quar_candle.volume = item.volume
+                    quar_candle.timestamp = item_ts
+                    quar_candle.source = candle_source  # sync:{sync_id}
+                    db.add(mutation)
+                else:
+                    mutation = SyncRunMutation(
+                        sync_id=sync_id,
+                        action="INSERT",
+                        symbol=item.symbol,
+                        timeframe=item.timeframe,
+                        timestamp=item_ts,
+                        adjustment_type=item.adjustment_type,
+                        before_open=None, before_high=None, before_low=None, before_close=None, before_volume=None,
+                        after_open=item.open, after_high=item.high, after_low=item.low, after_close=item.close, after_volume=item.volume
+                    )
+                    new_candle = Candle(
+                        symbol=item.symbol,
+                        timeframe=item.timeframe,
+                        timestamp=item_ts,
+                        open=item.open,
+                        high=item.high,
+                        low=item.low,
+                        close=item.close,
+                        volume=item.volume,
+                        source=candle_source,
+                        adjustment_type=item.adjustment_type
+                    )
+                    db.add(new_candle)
+                    db.add(mutation)
+
             db.flush()
 
-        for item in parsed_items:
-            item_ts = item.timestamp
-            mutation = SyncRunMutation(
-                sync_id=sync_id,
-                action="INSERT",
-                symbol=item.symbol,
-                timeframe=item.timeframe,
-                timestamp=item_ts,
-                adjustment_type=item.adjustment_type,
-                before_open=None, before_high=None, before_low=None, before_close=None, before_volume=None,
-                after_open=item.open, after_high=item.high, after_low=item.low, after_close=item.close, after_volume=item.volume
-            )
-            new_candle = Candle(
-                symbol=item.symbol,
-                timeframe=item.timeframe,
-                timestamp=item_ts,
-                open=item.open,
-                high=item.high,
-                low=item.low,
-                close=item.close,
-                volume=item.volume,
-                source=f"sync:{sync_id}",
-                adjustment_type=item.adjustment_type
-            )
-            db.add(new_candle)
-            db.add(mutation)
+            # Trigger Weekly Candle derivation
+            WeeklyAggregator.derive_weekly_candles(db, {run.symbol}, {run.adjustment_type})
 
-        db.flush()
+            duration_ms = (time.perf_counter() - t_start) * 1000.0
 
-        # Trigger Weekly Candle derivation
-        WeeklyAggregator.derive_weekly_candles(db, {run.symbol}, {run.adjustment_type})
+            run.status = "accepted"
+            run.accepted_at = datetime.now(timezone.utc)
+            run.accepted_count = len(parsed_items)
+            run.duration_ms = round(duration_ms, 2)
 
-        duration_ms = (time.perf_counter() - t_start) * 1000.0
+            # Build immutable audit manifest
+            manifest = {
+                "sync_id": run.id,
+                "audit_version": "SUMI_SYNC_MANIFEST_V1",
+                "provider_id": run.provider_id,
+                "symbol": run.symbol,
+                "start_date": run.start_date,
+                "end_date": run.end_date,
+                "timeframe": run.timeframe,
+                "adjustment_type": run.adjustment_type,
+                "status": "accepted",
+                "counts": {
+                    "parsed": run.parsed_count,
+                    "duplicate": run.duplicate_count,
+                    "conflicting": run.conflicting_count,
+                    "rejected": run.rejected_count,
+                    "accepted": run.accepted_count,
+                },
+                "content_sha256": run.content_sha256,
+                "created_at": run.created_at.isoformat(),
+                "accepted_at": run.accepted_at.isoformat(),
+                "duration_ms": run.duration_ms,
+                "is_synthetic": is_synthetic,
+                "dataset": dataset_type,
+                "provenance": candle_source,
+            }
+            run.manifest_json = manifest
 
-        run.status = "accepted"
-        run.accepted_at = datetime.now(timezone.utc)
-        run.accepted_count = len(parsed_items)
-        run.duration_ms = round(duration_ms, 2)
-
-        # Build immutable audit manifest
-        manifest = {
-            "sync_id": run.id,
-            "audit_version": "SUMI_SYNC_MANIFEST_V1",
-            "provider_id": run.provider_id,
-            "symbol": run.symbol,
-            "start_date": run.start_date,
-            "end_date": run.end_date,
-            "timeframe": run.timeframe,
-            "adjustment_type": run.adjustment_type,
-            "status": "accepted",
-            "counts": {
-                "parsed": run.parsed_count,
-                "duplicate": run.duplicate_count,
-                "conflicting": run.conflicting_count,
-                "rejected": run.rejected_count,
-                "accepted": run.accepted_count,
-            },
-            "content_sha256": run.content_sha256,
-            "created_at": run.created_at.isoformat(),
-            "accepted_at": run.accepted_at.isoformat(),
-            "duration_ms": run.duration_ms,
-        }
-        run.manifest_json = manifest
-
-        db.commit()
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
         return SyncExecuteResponse(
             sync_id=sync_id,
@@ -454,6 +601,8 @@ class SyncWorkflowService:
             adjustment_type=run.adjustment_type,
             duration_ms=run.duration_ms,
             message=f"Đã đồng bộ và lưu thành công {len(parsed_items)} nến cho {run.symbol}",
+            is_synthetic=is_synthetic,
+            warning=warning_msg,
             manifest=manifest
         )
 
@@ -471,9 +620,13 @@ class SyncWorkflowService:
 
         mutations = db.query(SyncRunMutation).filter(SyncRunMutation.sync_id == sync_id).all()
         if not mutations:
-            run.status = "rolled_back"
-            run.rolled_back_at = datetime.now(timezone.utc)
-            db.commit()
+            try:
+                run.status = "rolled_back"
+                run.rolled_back_at = datetime.now(timezone.utc)
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
             return SyncRollbackResponse(
                 sync_id=sync_id,
                 status="rolled_back",
@@ -514,40 +667,105 @@ class SyncWorkflowService:
                 detail=f"Hoàn tác bị từ chối: Đã có lượt nhập tập tin mới hơn ({subsequent_imports[0].file_name}) thay đổi mã {run.symbol}"
             )
 
-        restored_count = 0
-        for m in mutations:
-            candle = (
-                db.query(Candle)
-                .filter(
-                    Candle.symbol == m.symbol,
-                    Candle.timeframe == m.timeframe,
-                    Candle.timestamp == m.timestamp,
-                    Candle.adjustment_type == m.adjustment_type
+        try:
+            restored_count = 0
+            for m in mutations:
+                candle = (
+                    db.query(Candle)
+                    .execution_options(include_quarantine=True)
+                    .filter(
+                        Candle.symbol == m.symbol,
+                        Candle.timeframe == m.timeframe,
+                        Candle.timestamp == m.timestamp,
+                        Candle.adjustment_type == m.adjustment_type
+                    )
+                    .first()
                 )
-                .first()
-            )
-            if m.action == "INSERT":
-                if candle:
+                if not candle and m.timeframe in ("1D", "D"):
+                    m_date = m.timestamp.date() if isinstance(m.timestamp, datetime) else m.timestamp
+                    candidates = (
+                        db.query(Candle)
+                        .execution_options(include_quarantine=True)
+                        .filter(
+                            Candle.symbol == m.symbol,
+                            Candle.timeframe == m.timeframe,
+                            Candle.adjustment_type == m.adjustment_type
+                        )
+                        .all()
+                    )
+                    matching = [
+                        c for c in candidates
+                        if (c.timestamp.date() if isinstance(c.timestamp, datetime) else c.timestamp) == m_date
+                    ]
+                    if len(matching) > 1:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Hoàn tác bị từ chối: Tìm thấy nhiều cây nến trùng ngày ({len(matching)}) cho mã {m.symbol} ngày {m_date} (Ambiguous rollback target)"
+                        )
+                    if len(matching) == 1:
+                        candle = matching[0]
+
+                if not candle:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Hoàn tác bị từ chối: Không tìm thấy cây nến cần khôi phục cho mã {m.symbol} lúc {m.timestamp} (Missing rollback target)"
+                    )
+
+                if m.action == "INSERT":
                     db.delete(candle)
                     restored_count += 1
-            elif m.action == "UPDATE":
-                if candle:
+                elif m.action.startswith("UPDATE"):
                     candle.open = m.before_open
                     candle.high = m.before_high
                     candle.low = m.before_low
                     candle.close = m.before_close
                     candle.volume = m.before_volume
+                    if ":" in m.action:
+                        parts = m.action.split(":", 1)[1]
+                        if "|" in parts:
+                            src, prior_ts_str = parts.rsplit("|", 1)
+                            prior_ts_str = prior_ts_str.strip()
+                            if not prior_ts_str:
+                                raise HTTPException(
+                                    status_code=400,
+                                    detail=f"Hoàn tác bị từ chối: Dữ liệu nguồn gốc thời gian bị trống cho mã {m.symbol} (Empty provenance timestamp)"
+                                )
+                            try:
+                                prior_ts = datetime.fromisoformat(prior_ts_str)
+                            except (ValueError, TypeError) as exc:
+                                raise HTTPException(
+                                    status_code=400,
+                                    detail=f"Hoàn tác bị từ chối: Dữ liệu nguồn gốc thời gian không hợp lệ '{prior_ts_str}' cho mã {m.symbol} (Malformed provenance timestamp)"
+                                ) from exc
+                            candle.source = src
+                            candle.timestamp = prior_ts
+                        else:
+                            candle.source = parts
                     restored_count += 1
+                else:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Hoàn tác bị từ chối: Thao tác mutation không xác định '{m.action}' cho mã {m.symbol}"
+                    )
 
-        run.status = "rolled_back"
-        run.rolled_back_at = datetime.now(timezone.utc)
+            if restored_count != len(mutations):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Hoàn tác chưa hoàn tất: chỉ khôi phục {restored_count}/{len(mutations)} điểm dữ liệu"
+                )
 
-        db.flush()
+            run.status = "rolled_back"
+            run.rolled_back_at = datetime.now(timezone.utc)
 
-        # Re-derive Weekly candles
-        WeeklyAggregator.derive_weekly_candles(db, {run.symbol}, {run.adjustment_type})
+            db.flush()
 
-        db.commit()
+            # Re-derive Weekly candles
+            WeeklyAggregator.derive_weekly_candles(db, {run.symbol}, {run.adjustment_type})
+
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
         return SyncRollbackResponse(
             sync_id=sync_id,

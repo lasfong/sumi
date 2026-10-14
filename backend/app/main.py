@@ -3,13 +3,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import health, import_data, replay, decisions, analytics, symbols, journal
 from app.db import Base, engine
 
-from app.config import settings
+from app.config import settings, verify_database_path_security
 import app.models  # ensure models are registered
 from contextlib import asynccontextmanager
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Guard against insecure or unanchored database paths
+    verify_database_path_security(str(engine.url))
     if settings.AUTO_CREATE_TABLES:
         Base.metadata.create_all(bind=engine)
     yield

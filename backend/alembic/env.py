@@ -8,7 +8,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.config import settings
+from app.config import settings, verify_database_path_security
 from app.db import Base
 # Import all models to ensure they are registered with Base.metadata
 from app.models.candle import Candle
@@ -34,6 +34,7 @@ if config.config_file_name is not None:
 # add your model's MetaData object here
 # for 'autogenerate' support
 target_metadata = Base.metadata
+verify_database_path_security(settings.DATABASE_URL)
 config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
 
 # other values from the config, defined by the needs of env.py,
