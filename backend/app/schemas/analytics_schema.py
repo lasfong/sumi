@@ -59,6 +59,9 @@ class AnalyticsResponse(BaseModel):
     average_win: float
     average_loss: float
     profit_factor: Optional[float] = None
+    profit_factor_display: Optional[str] = "N/A"
+    low_sample_warning: Optional[bool] = False
+    low_sample_message: Optional[str] = None
     average_r: Optional[float] = None
     expectancy: Optional[float] = None
     largest_win: Optional[float] = None

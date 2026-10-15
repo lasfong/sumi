@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
-  previewImportData,
   acceptImportRun,
   rollbackImportRun,
   getDataCatalog,
@@ -10,6 +9,7 @@ import {
   type CatalogItem,
   type ImportRunSummary
 } from '../api/importApi';
+import { apiClient } from '../api/client';
 import { DataSyncPanel } from '../components/sync/DataSyncPanel';
 import toast from 'react-hot-toast';
 
@@ -19,6 +19,11 @@ interface ApiError {
       detail?: string;
     };
   };
+  message?: string;
+}
+
+export interface ExtendedImportPreviewResponse extends ImportPreviewResponse {
+  staged?: boolean;
 }
 
 export const ImportPage: React.FC = () => {
@@ -26,7 +31,7 @@ export const ImportPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'sync' | 'import' | 'catalog' | 'history'>('sync');
   const [file, setFile] = useState<File | null>(null);
   const [adjustmentType, setAdjustmentType] = useState<string>('unadjusted');
-  const [preview, setPreview] = useState<ImportPreviewResponse | null>(null);
+  const [preview, setPreview] = useState<ExtendedImportPreviewResponse | null>(null);
   const [itemFilter, setItemFilter] = useState<string>('all');
   const [error, setError] = useState<string | null>(null);
 
@@ -42,9 +47,24 @@ export const ImportPage: React.FC = () => {
     queryFn: getImportRuns,
   });
 
-  // Preview mutation
+  // Preview mutation (strictly read-only preview before user consent)
   const previewMutation = useMutation({
-    mutationFn: (fileObj: File) => previewImportData(fileObj, adjustmentType),
+    mutationFn: async (fileObj: File) => {
+      const formData = new FormData();
+      formData.append('file', fileObj);
+      formData.append('adjustment_type', adjustmentType);
+      formData.append('source_type', 'cafef');
+      formData.append('timeframe', '1D');
+      formData.append('timezone', 'Asia/Ho_Chi_Minh');
+      formData.append('confirm', 'false');
+
+      const response = await apiClient.post<ExtendedImportPreviewResponse>('/import/preview', formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+      });
+      return response.data;
+    },
     onSuccess: (data) => {
       setPreview(data);
       setError(null);
@@ -55,16 +75,48 @@ export const ImportPage: React.FC = () => {
       }
     },
     onError: (err: ApiError) => {
-      const errMsg = err?.response?.data?.detail || 'Không thể xem trước dữ liệu.';
+      const errMsg = err?.response?.data?.detail || err?.message || 'Không thể xem trước dữ liệu.';
       setError(errMsg);
       setPreview(null);
       toast.error(errMsg);
     },
   });
 
-  // Accept mutation
+  // Accept mutation (stages with confirm=true upon explicit user consent if unstaged, then accepts)
   const acceptMutation = useMutation({
-    mutationFn: ({ runId, checksum }: { runId: string; checksum: string }) => acceptImportRun(runId, checksum),
+    mutationFn: async () => {
+      if (!preview || !preview.can_accept) {
+        throw new Error('Không có bản xem trước hợp lệ để chấp nhận.');
+      }
+      let targetRunId = preview.run_id;
+      let targetChecksum = preview.content_sha256;
+
+      if (!preview.staged) {
+        if (!file) {
+          throw new Error('Tập tin không còn tồn tại trong bộ nhớ. Vui lòng chọn lại tập tin.');
+        }
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('adjustment_type', adjustmentType);
+        formData.append('source_type', preview.source_type || 'cafef');
+        formData.append('timeframe', preview.timeframe || '1D');
+        formData.append('timezone', preview.timezone || 'Asia/Ho_Chi_Minh');
+        formData.append('confirm', 'true');
+
+        const stageRes = await apiClient.post<ExtendedImportPreviewResponse>('/import/preview', formData, {
+          headers: {
+            'Content-Type': 'multipart/form-data',
+          },
+        });
+        if (!stageRes.data.can_accept) {
+          throw new Error(stageRes.data.block_reason || 'Tập tin bị từ chối khi xác nhận.');
+        }
+        targetRunId = stageRes.data.run_id;
+        targetChecksum = stageRes.data.content_sha256;
+      }
+
+      return acceptImportRun(targetRunId, targetChecksum);
+    },
     onSuccess: (data) => {
       toast.success(data.message);
       setPreview(null);
@@ -73,7 +125,7 @@ export const ImportPage: React.FC = () => {
       queryClient.invalidateQueries({ queryKey: ['importRuns'] });
     },
     onError: (err: ApiError) => {
-      const errMsg = err?.response?.data?.detail || 'Không thể chấp nhận nhập dữ liệu.';
+      const errMsg = err?.response?.data?.detail || err?.message || 'Không thể chấp nhận nhập dữ liệu.';
       toast.error(errMsg);
     },
   });
@@ -100,7 +152,7 @@ export const ImportPage: React.FC = () => {
 
   const handleAccept = () => {
     if (preview && preview.can_accept) {
-      acceptMutation.mutate({ runId: preview.run_id, checksum: preview.content_sha256 });
+      acceptMutation.mutate();
     }
   };
 
@@ -365,7 +417,7 @@ export const ImportPage: React.FC = () => {
                     borderRadius: '6px', cursor: preview.can_accept ? 'pointer' : 'not-allowed'
                   }}
                 >
-                  {acceptMutation.isPending ? '⏳ Đang lưu...' : '✅ Chấp nhận & Lưu dữ liệu vào hệ thống'}
+                  {acceptMutation.isPending ? '⏳ Đang lưu...' : '✅ Xác nhận & Nhập dữ liệu vào hệ thống'}
                 </button>
               </div>
             </div>

@@ -285,11 +285,12 @@ def test_partial_reduce_keeps_trade_open_and_updates_cash(db_session):
     initial_cash = 100_000_000.0
     closes = [100.0, 101.0, 110.0, 111.0]
 
+    # Monday 2024-03-04 through Thursday 2024-03-07 (4 consecutive trading weekdays)
     for i, close in enumerate(closes):
         db_session.add(Candle(
             symbol=symbol,
             timeframe="1D",
-            timestamp=date(2024, 3, 1) + timedelta(days=i),
+            timestamp=date(2024, 3, 4) + timedelta(days=i),
             open=close,
             high=close + 1,
             low=close - 1,
@@ -303,8 +304,8 @@ def test_partial_reduce_keeps_trade_open_and_updates_cash(db_session):
         db_session,
         ReplaySessionCreate(
             symbol=symbol,
-            start_date=date(2024, 3, 1),
-            end_date=date(2024, 3, 4),
+            start_date=date(2024, 3, 4),
+            end_date=date(2024, 3, 7),
             initial_cash=initial_cash,
         ),
     )
@@ -416,12 +417,21 @@ def test_multiple_round_trips_same_session_symbol_have_independent_net_pnl(db_se
     symbol = "ROUNDTRIP_TEST"
     initial_cash = 100_000_000.0
     closes = [100.0, 101.0, 102.0, 101.0, 100.0, 99.0, 98.0]
+    trading_dates = [
+        date(2024, 3, 4),   # Mon
+        date(2024, 3, 5),   # Tue
+        date(2024, 3, 6),   # Wed
+        date(2024, 3, 7),   # Thu
+        date(2024, 3, 8),   # Fri
+        date(2024, 3, 11),  # Mon
+        date(2024, 3, 12),  # Tue
+    ]
 
-    for i, close in enumerate(closes):
+    for ts_date, close in zip(trading_dates, closes):
         db_session.add(Candle(
             symbol=symbol,
             timeframe="1D",
-            timestamp=date(2024, 2, 1) + timedelta(days=i),
+            timestamp=ts_date,
             open=close,
             high=close + 1,
             low=close - 1,
@@ -432,8 +442,8 @@ def test_multiple_round_trips_same_session_symbol_have_independent_net_pnl(db_se
 
     session_in = ReplaySessionCreate(
         symbol=symbol,
-        start_date=date(2024, 2, 1),
-        end_date=date(2024, 2, 7),
+        start_date=trading_dates[0],
+        end_date=trading_dates[-1],
         initial_cash=initial_cash,
     )
     session = ReplayService.create_session(db_session, session_in)
@@ -635,9 +645,10 @@ def test_t2_settlement_detailed_rejection_feedback(db_session):
     available quantity, and release date.
     """
     symbol = "T2_FEEDBACK_TEST"
+    # Monday 2024-06-03 through Friday 2024-06-07 (5 trading weekdays)
     for i in range(5):
         db_session.add(Candle(
-            symbol=symbol, timeframe="1D", timestamp=date(2024, 6, 1) + timedelta(days=i),
+            symbol=symbol, timeframe="1D", timestamp=date(2024, 6, 3) + timedelta(days=i),
             open=100.0, high=101.0, low=99.0, close=100.0, volume=1000000,
             adjustment_type="unadjusted"
         ))
@@ -645,12 +656,12 @@ def test_t2_settlement_detailed_rejection_feedback(db_session):
 
     session = ReplayService.create_session(
         db_session,
-        ReplaySessionCreate(symbol=symbol, start_date=date(2024, 6, 1), end_date=date(2024, 6, 5), initial_cash=100_000_000.0)
+        ReplaySessionCreate(symbol=symbol, start_date=date(2024, 6, 3), end_date=date(2024, 6, 7), initial_cash=100_000_000.0)
     )
 
-    # Buy 200 at Bar 1 (T0)
+    # Buy 200 at Bar 1 (T0 = Monday 2024-06-03)
     TradeLifecycleService.process_decision(db_session, session.id, DecisionCreate(action=DecisionAction.BUY, quantity=200))
-    # Step to Bar 2 (T1)
+    # Step to Bar 2 (T1 = Tuesday 2024-06-04)
     ReplayService.next_candle(db_session, session.id)
 
     # Attempt to sell at T1 -> Rejected with detailed message
@@ -662,7 +673,7 @@ def test_t2_settlement_detailed_rejection_feedback(db_session):
     assert "T+2 constraint" in detail
     assert "Available: 0" in detail
     assert "Blocked: 200" in detail
-    assert "Earliest release date: 2024-06-03" in detail
+    assert "Earliest release date: 2024-06-05" in detail
 
 
 def test_journal_json_and_csv_export(db_session):

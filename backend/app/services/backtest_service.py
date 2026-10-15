@@ -1,3 +1,4 @@
+from typing import Any, Dict, List, Optional, Union
 import pandas as pd
 import hashlib
 import json
@@ -18,7 +19,10 @@ import uuid
 from app.domain.strategy.rule_evaluator import RuleEvaluationError
 from app.utils.date_range import end_before, start_at
 from app.domain.accounting import BUY_FEE_RATE, SELL_FEE_RATE, SELL_TAX_RATE
+from app.domain.market.rules import DEFAULT_VN_MARKET_PROFILE
 from app.domain.backtest.batch_runner import BatchBacktestRunner, PhaseDefinition
+from app.domain.backtest.execution import BacktestExecutionKernel
+from app.domain.backtest.persistence_adapter import BacktestPersistenceAdapter
 from app.schemas.analytics_trust_schema import DataCoverage, ExecutionAssumptions, RunManifest
 
 class BacktestService:
@@ -262,23 +266,7 @@ class BacktestService:
             benchmark_symbol=benchmark_symbol,
         )
         
-        # 2. Create virtual session
-        session = ReplaySession(
-            symbol=symbol,
-            timeframe="1D",
-            start_date=candles[0].timestamp,
-            end_date=candles[-1].timestamp,
-            current_index=0,
-            initial_cash=initial_cash,
-            current_cash=initial_cash,
-            mode="backtest",
-            status="active"
-        )
-        session.source_payload = json.dumps({"benchmark_symbol": benchmark_symbol})
-        db.add(session)
-        db.flush()
-        
-        # 3. Precompute indicators
+        # 2. Precompute indicators
         df = pd.DataFrame([{
             "timestamp": c.timestamp,
             "open": c.open,
@@ -299,83 +287,31 @@ class BacktestService:
                 "analytics": None,
             }
         
-        # 4. Iterate candles
-        has_position = False
-        buy_candle_index = None
-        
-        for i in range(1, len(df)):  # Start from 1 to have previous values
-            session.current_index = i
-            
-            current = StrategyRuleEvaluator.indicator_snapshot(indicator_values, i)
-            previous = StrategyRuleEvaluator.indicator_snapshot(indicator_values, i - 1)
-            
-            close_price = float(df.iloc[i]["close"])
-            
-            if not has_position:
-                # Check entry signals
-                if StrategyRuleEvaluator.evaluate_rules(strategy.entry_rules, current, previous):
-                    # BUY
-                    try:
-                        quantity = self._calculate_quantity(
-                            strategy.position_sizing, session, close_price
-                        )
-                        from app.schemas.decision_schema import DecisionCreate
-                        from app.domain.enums import DecisionAction
-                        
-                        decision = DecisionCreate(
-                            action=DecisionAction.BUY,
-                            price=close_price,
-                            quantity=quantity,
-                            order_type="MARKET_AT_CLOSE"
-                        )
-                        TradeLifecycleService.process_decision(db, session.id, decision)
-                        has_position = True
-                        buy_candle_index = i
-                    except Exception as e:
-                        import traceback
-                        return {
-                            "status": "failed",
-                            "error_code": "TRADE_EXECUTION_FAILED",
-                            "message": str(e),
-                            "bar_index": i,
-                            "analytics": None,
-                        }
-            
-            else:
-                # Check T+2 first
-                if i - buy_candle_index < 2:
-                    continue  # Can't sell yet
-                
-                # Check exit signals
-                if StrategyRuleEvaluator.evaluate_rules(strategy.exit_rules, current, previous):
-                    # SELL
-                    try:
-                        from app.schemas.decision_schema import DecisionCreate
-                        from app.domain.enums import DecisionAction
-                        
-                        decision = DecisionCreate(
-                            action=DecisionAction.CLOSE,
-                            order_type="MARKET_AT_CLOSE"
-                        )
-                        TradeLifecycleService.process_decision(db, session.id, decision)
-                        has_position = False
-                        buy_candle_index = None
-                    except Exception as e:
-                        import traceback
-                        return {
-                            "status": "failed",
-                            "error_code": "TRADE_EXECUTION_FAILED",
-                            "message": str(e),
-                            "bar_index": i,
-                            "analytics": None,
-                        }
-        
-        # Persist the final analyzed boundary. Trade lifecycle commits at fills,
-        # but a run can continue beyond its last fill; Analytics must reproduce
-        # the same periodic-return sample after this request/session is reopened.
-        db.add(session)
-        db.commit()
-        db.refresh(session)
+        # 3. Canonical in-memory execution via BacktestExecutionKernel (ADR-EXEC-001, B20)
+        kernel = BacktestExecutionKernel(
+            fee_rate=DEFAULT_VN_MARKET_PROFILE.fee_buy,
+            tax_rate=DEFAULT_VN_MARKET_PROFILE.tax_sell,
+            slippage_rate=DEFAULT_VN_MARKET_PROFILE.slippage,
+            min_holding_bars=2,
+            profile=DEFAULT_VN_MARKET_PROFILE,
+            sl_tp_execution_mode="next_open",
+            sizing_basis=DEFAULT_VN_MARKET_PROFILE.sizing_basis,
+        )
+        kernel_result = kernel.run(
+            df=df,
+            indicator_values=indicator_values,
+            strategy=strategy,
+            symbol=symbol,
+            initial_cash=float(initial_cash),
+            timeframe="1D",
+        )
+
+        # 4. Atomically persist result into ReplaySession for backward compatibility
+        session = BacktestPersistenceAdapter.persist_result(
+            db=db,
+            result=kernel_result,
+            benchmark_symbol=benchmark_symbol,
+        )
 
         # 5. Return analytics
         analytics = AnalyticsService.get_analytics(db, session.id, benchmark_symbol=benchmark_symbol)
@@ -398,7 +334,59 @@ class BacktestService:
             "data_coverage": coverage.model_dump(),
             "execution_assumptions": assumptions.model_dump(),
             "run_manifest": manifest.model_dump(mode="json"),
+            "kernel_result": kernel_result,
         }
+
+    def _run_legacy_same_close_loop(
+        self,
+        db: Session,
+        session: ReplaySession,
+        df: pd.DataFrame,
+        indicator_values: dict,
+        strategy: Any,
+    ) -> None:
+        """DEPRECATED: Legacy same-bar close execution loop.
+
+        @deprecated: True
+        Deprecated per ADR-EXEC-001 (Train 02 Batch B20).
+        Canonical execution routes through BacktestExecutionKernel with Open[T+1] fills.
+        """
+        has_position = False
+        buy_candle_index = None
+
+        for i in range(1, len(df)):
+            session.current_index = i
+            current = StrategyRuleEvaluator.indicator_snapshot(indicator_values, i)
+            previous = StrategyRuleEvaluator.indicator_snapshot(indicator_values, i - 1)
+            close_price = float(df.iloc[i]["close"])
+
+            if not has_position:
+                if StrategyRuleEvaluator.evaluate_rules(strategy.entry_rules, current, previous):
+                    quantity = self._calculate_quantity(strategy.position_sizing, session, close_price)
+                    from app.schemas.decision_schema import DecisionCreate
+                    from app.domain.enums import DecisionAction
+                    decision = DecisionCreate(
+                        action=DecisionAction.BUY,
+                        price=close_price,
+                        quantity=quantity,
+                        order_type="MARKET_AT_CLOSE",
+                    )
+                    TradeLifecycleService.process_decision(db, session.id, decision)
+                    has_position = True
+                    buy_candle_index = i
+            else:
+                if i - buy_candle_index < 2:
+                    continue
+                if StrategyRuleEvaluator.evaluate_rules(strategy.exit_rules, current, previous):
+                    from app.schemas.decision_schema import DecisionCreate
+                    from app.domain.enums import DecisionAction
+                    decision = DecisionCreate(
+                        action=DecisionAction.CLOSE,
+                        order_type="MARKET_AT_CLOSE",
+                    )
+                    TradeLifecycleService.process_decision(db, session.id, decision)
+                    has_position = False
+                    buy_candle_index = None
 
     def _build_coverage(self, candles, symbol, start_date, end_date, strategy) -> DataCoverage:
         timestamps = [c.timestamp for c in candles]
@@ -439,8 +427,8 @@ class BacktestService:
 
     def _build_assumptions(self, strategy) -> ExecutionAssumptions:
         return ExecutionAssumptions(
-            fees={"buy_rate": BUY_FEE_RATE, "sell_rate": SELL_FEE_RATE},
-            taxes={"sell_tax_rate": SELL_TAX_RATE},
+            fees={"buy_rate": DEFAULT_VN_MARKET_PROFILE.fee_buy, "sell_rate": DEFAULT_VN_MARKET_PROFILE.fee_sell},
+            taxes={"sell_tax_rate": DEFAULT_VN_MARKET_PROFILE.tax_sell},
             position_sizing=strategy.position_sizing.model_dump(),
         )
 
@@ -563,8 +551,9 @@ class BacktestService:
             if sizing.percent:
                 amount = session.current_cash * (sizing.percent / 100.0)
                 # Need to account for fees approximately
-                fee_rate = 0.0015
+                fee_rate = DEFAULT_VN_MARKET_PROFILE.fee_buy
+                lot_size = DEFAULT_VN_MARKET_PROFILE.lot_size
                 max_buyable = int((amount / (1 + fee_rate)) / price)
-                # Round down to nearest 100 for Vietnam stocks
-                return (max_buyable // 100) * 100
+                # Round down to nearest lot size for Vietnam stocks
+                return (max_buyable // lot_size) * lot_size
         return 0

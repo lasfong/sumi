@@ -415,4 +415,52 @@ describe('IndicatorRenderRegistry', () => {
     // Mismatched parameters fail closed
     expect(IndicatorRenderRegistry.mapBackendData(customData, ichiInstance)).toEqual([]);
   });
+
+  it('supports mapBackendDataWithResult and preserves typed MappingResult contract', () => {
+    const smaInstance = instance('sma');
+
+    // 1. Success case without explicit meta
+    const validData = [{ timestamp: '2026-01-02', SMA_20: 105.4 }];
+    const okResult = IndicatorRenderRegistry.mapBackendDataWithResult(validData, smaInstance);
+    expect(okResult.status).toBe('OK');
+    expect(okResult.series.length).toBe(1);
+    expect(okResult.series[0].name).toBe('SMA 20');
+
+    // 2. Empty warming case (no columns)
+    const warmingData = [{ timestamp: '2026-01-02' }];
+    const warmingResult = IndicatorRenderRegistry.mapBackendDataWithResult(warmingData, smaInstance);
+    expect(warmingResult.status).toBe('EMPTY_WARMING');
+    expect(warmingResult.series).toEqual([]);
+
+    // 3. Unmapped column case
+    const unmappedData = [{ timestamp: '2026-01-02', OTHER_COL: 100 }];
+    const unmappedResult = IndicatorRenderRegistry.mapBackendDataWithResult(unmappedData, smaInstance);
+    expect(unmappedResult.status).toBe('UNMAPPED_COLUMN');
+    expect(unmappedResult.series).toEqual([]);
+
+    // 4. Invalid spec (unsupported indicator)
+    const invalidInstance: IndicatorInstanceV1 = {
+      ...smaInstance,
+      definitionId: 'unsupported_foo' as any,
+    };
+    const invalidResult = IndicatorRenderRegistry.mapBackendDataWithResult(validData, invalidInstance);
+    expect(invalidResult.status).toBe('INVALID_SPEC');
+    expect(invalidResult.series).toEqual([]);
+
+    // 5. Backend meta propagation
+    const metaResult = IndicatorRenderRegistry.mapBackendDataWithResult(
+      warmingData,
+      smaInstance,
+      {
+        status: 'EMPTY_WARMING',
+        warmup_bars: 50,
+        available_bars: 11,
+        is_projected_clamped: false,
+      }
+    );
+    expect(metaResult.status).toBe('EMPTY_WARMING');
+    expect(metaResult.warmup_bars).toBe(50);
+    expect(metaResult.available_bars).toBe(11);
+    expect(metaResult.is_projected_clamped).toBe(false);
+  });
 });

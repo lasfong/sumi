@@ -6,8 +6,14 @@ Implements statutory pricing and tick constraints per HOSE/HNX/UPCoM regulations
 - Locked ceiling / floor detection (TEST-BT-004).
 """
 
+from dataclasses import dataclass, field
 import math
-from typing import Dict, Tuple
+from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.domain.market.calendar import TradingCalendar
+    from app.domain.market.settlement import SettlementEngine
+
 
 
 class MarketRules:
@@ -192,3 +198,92 @@ class MarketRules:
         floor, ceiling = MarketRules.calculate_price_limits(reference_price, exchange=exchange)
         price = self_or_price if not isinstance(self_or_price, MarketRules) else reference_price
         return floor <= price <= ceiling
+
+
+@dataclass
+class MarketProfile:
+    """Single authoritative parameterization of Vietnam equity market rules."""
+    market: str = "VN"
+    lot_size: int = 100
+    fee_buy: float = 0.0015
+    fee_sell: float = 0.0015
+    tax_sell: float = 0.0010
+    slippage: float = 0.0
+    settlement_days: int = 2
+    settlement_mode: str = "T+1.5_CALENDAR"
+    settlement_label: str = "T+1 · về sau 1 phiên"
+    settlement_release_phase: str = "open"
+    sizing_basis: str = "fill_estimate"
+    default_exchange: str = "HOSE"
+    name: str = "vietnam_default_conservative"
+    version: str = "VN_EQUITY_DAILY_V1"
+    conservative_locked_limits: bool = True
+    conservative_1d_settlement: bool = True
+    calendar: Optional[Any] = None
+    settlement_engine: Optional[Any] = None
+    rules: Optional[MarketRules] = None
+
+    def __post_init__(self):
+        from app.domain.market.calendar import TradingCalendar
+        from app.domain.market.settlement import SettlementEngine
+
+        if self.calendar is None:
+            self.calendar = TradingCalendar()
+        if self.settlement_engine is None:
+            self.settlement_engine = SettlementEngine(
+                calendar=self.calendar,
+                settlement_days=self.settlement_days,
+                conservative_mode=self.conservative_1d_settlement,
+            )
+        if self.rules is None:
+            self.rules = MarketRules(
+                exchange=self.default_exchange,
+                allow_buy_on_ceiling_lock=not self.conservative_locked_limits,
+                allow_sell_on_floor_lock=not self.conservative_locked_limits,
+                lot_size=self.lot_size,
+            )
+
+    @property
+    def symbol(self) -> str:
+        return self.market
+
+    @property
+    def fee_rate(self) -> float:
+        return self.fee_buy
+
+    @property
+    def tax_rate(self) -> float:
+        return self.tax_sell
+
+    @property
+    def slippage_rate(self) -> float:
+        return self.slippage
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert profile metadata to dictionary for analytics and manifest."""
+        return {
+            "market": self.market,
+            "name": self.name,
+            "version": self.version,
+            "calendar_version": getattr(self.calendar, "VERSION", "VN_CALENDAR_2018_2026_V1"),
+            "settlement_days": self.settlement_days,
+            "settlement_mode": self.settlement_mode,
+            "settlement_label": self.settlement_label,
+            "settlement_release_phase": self.settlement_release_phase,
+            "sizing_basis": self.sizing_basis,
+            "conservative_mode": self.conservative_1d_settlement,
+            "conservative_locked_limits": self.conservative_locked_limits,
+            "lot_size": self.lot_size,
+            "default_exchange": self.default_exchange,
+            "fee_buy": self.fee_buy,
+            "fee_sell": self.fee_sell,
+            "tax_sell": self.tax_sell,
+            "fee_rate": self.fee_rate,
+            "tax_rate": self.tax_rate,
+            "slippage": self.slippage,
+            "slippage_rate": self.slippage_rate,
+        }
+
+
+DEFAULT_VN_MARKET_PROFILE: MarketProfile = MarketProfile()
+DEFAULT_MARKET_PROFILE: MarketProfile = DEFAULT_VN_MARKET_PROFILE

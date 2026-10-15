@@ -1,8 +1,19 @@
-import type { IndicatorDataPoint } from '../../api/indicatorsApi';
+import type { IndicatorDataPoint, IndicatorMeta, MappingStatus } from '../../api/indicatorsApi';
 import type { Time } from 'lightweight-charts';
 import { SUPPORTED_INDICATORS, type IndicatorInstanceV1 } from '../../features/indicators/indicatorDomain';
 import { toDateKey } from '../../utils/date';
 import type { IndicatorSeriesData, VolumeData } from './workspaceTypes';
+
+export type { MappingStatus };
+
+export interface MappingResult {
+  status: MappingStatus;
+  warmup_bars?: number;
+  available_bars?: number;
+  is_projected_clamped?: boolean;
+  series: IndicatorSeriesData[];
+  message?: string;
+}
 
 const finitePoints = (data: IndicatorDataPoint[], column: string) => data.flatMap(row => {
   const raw = row[column]; if (raw === null || raw === '') return [];
@@ -395,6 +406,52 @@ export class IndicatorRenderRegistry {
       }];
     }
     return [];
+  }
+
+  static mapBackendDataWithResult(
+    data: IndicatorDataPoint[],
+    instance: IndicatorInstanceV1,
+    meta?: IndicatorMeta
+  ): MappingResult {
+    if (!(SUPPORTED_INDICATORS as readonly string[]).includes(instance.definitionId)) {
+      return {
+        status: 'INVALID_SPEC',
+        series: [],
+        message: `Unsupported indicator: ${instance.definitionId}`,
+      };
+    }
+
+    const series = this.mapBackendData(data, instance);
+
+    if (meta) {
+      return {
+        status: meta.status,
+        warmup_bars: meta.warmup_bars,
+        available_bars: meta.available_bars,
+        is_projected_clamped: meta.is_projected_clamped,
+        series,
+      };
+    }
+
+    if (series.length > 0) {
+      return {
+        status: 'OK',
+        series,
+      };
+    }
+
+    const available = columns(data);
+    if (!available.length) {
+      return {
+        status: 'EMPTY_WARMING',
+        series: [],
+      };
+    }
+
+    return {
+      status: 'UNMAPPED_COLUMN',
+      series: [],
+    };
   }
 
   static mapVolume(data: VolumeData[], instance: IndicatorInstanceV1): IndicatorSeriesData[] {

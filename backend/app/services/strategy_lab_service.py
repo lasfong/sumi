@@ -7,11 +7,18 @@ from typing import Any, Dict, List, Optional
 import uuid
 from sqlalchemy.orm import Session
 
+import pandas as pd
+from app.domain.accounting import BUY_FEE_RATE, SELL_TAX_RATE
+from app.domain.market.rules import DEFAULT_VN_MARKET_PROFILE
+from app.domain.backtest.execution import BacktestExecutionKernel
+from app.domain.backtest.models import BacktestKernelResult
 from app.domain.strategy.rule_evaluator import RuleEvaluationError
 from app.domain.strategy.strategy_loader import load_strategy_from_dict
 from app.domain.strategy.strategy_rule_evaluator import StrategyRuleEvaluator
 from app.domain.engine.strategy_indicator_adapter import StrategyIndicatorAdapter
+from app.models.candle import Candle
 from app.services.backtest_service import BacktestService
+from app.utils.date_range import end_before, start_at
 
 
 class SweepCancellationManager:
@@ -273,39 +280,140 @@ class StrategyLabService:
             results = []
             is_cancelled = False
 
+            symbol = config.get("symbol") or (config.get("symbols")[0] if config.get("symbols") else None)
+            initial_cash = float(config.get("initial_cash", 100000000))
+            benchmark_symbol = config.get("benchmark_symbol", "VNINDEX")
+
+            # Pre-load in-sample candles once (GAP-EXEC-01, B20)
+            is_candles = db.query(Candle).filter(
+                Candle.symbol == symbol,
+                Candle.timestamp >= start_at(start_date),
+                Candle.timestamp < end_before(end_date)
+            ).order_by(Candle.timestamp).all()
+
+            if not is_candles:
+                return {
+                    "status": "failed",
+                    "error_code": "NO_CANDLES",
+                    "message": f"No candles found for {symbol}",
+                    "variants": [],
+                }
+
+            is_df = pd.DataFrame([{
+                "timestamp": c.timestamp,
+                "open": c.open,
+                "high": c.high,
+                "low": c.low,
+                "close": c.close,
+                "volume": c.volume
+            } for c in is_candles])
+
+            oos_candles = None
+            oos_df = None
+            if oos_start_date and oos_end_date:
+                oos_candles = db.query(Candle).filter(
+                    Candle.symbol == symbol,
+                    Candle.timestamp >= start_at(oos_start_date),
+                    Candle.timestamp < end_before(oos_end_date)
+                ).order_by(Candle.timestamp).all()
+                if oos_candles:
+                    oos_df = pd.DataFrame([{
+                        "timestamp": c.timestamp,
+                        "open": c.open,
+                        "high": c.high,
+                        "low": c.low,
+                        "close": c.close,
+                        "volume": c.volume
+                    } for c in oos_candles])
+
             for variant in variants:
                 if SweepCancellationManager.is_cancelled(sweep_id):
                     is_cancelled = True
                     break
 
-                # 1. In-Sample Backtest
-                is_run_config = {
-                    "symbol": config.get("symbol"),
-                    "symbols": config.get("symbols"),
-                    "start_date": start_date,
-                    "end_date": end_date,
-                    "initial_cash": config.get("initial_cash", 100000000),
-                    "benchmark_symbol": config.get("benchmark_symbol", "VNINDEX"),
-                    "strategy": variant["strategy"],
-                }
-                is_response = await self.backtest_service.run_backtest(db, is_run_config)
+                # 1. In-Sample Execution via BacktestExecutionKernel in-memory
+                strategy_obj = load_strategy_from_dict(variant["strategy"])
+                is_indicators = StrategyIndicatorAdapter.compute(is_df, strategy_obj.indicators)
+                try:
+                    StrategyRuleEvaluator.validate_strategy_rules(strategy_obj, set(is_indicators.keys()))
+                except RuleEvaluationError as exc:
+                    is_response = {
+                        "status": "failed",
+                        "error_code": "INVALID_RULE",
+                        "message": str(exc),
+                        "analytics": None,
+                    }
+                else:
+                    kernel = BacktestExecutionKernel(
+                        fee_rate=DEFAULT_VN_MARKET_PROFILE.fee_buy,
+                        tax_rate=DEFAULT_VN_MARKET_PROFILE.tax_sell,
+                        slippage_rate=DEFAULT_VN_MARKET_PROFILE.slippage,
+                        min_holding_bars=2,
+                        profile=DEFAULT_VN_MARKET_PROFILE,
+                        sl_tp_execution_mode="next_open",
+                        sizing_basis=DEFAULT_VN_MARKET_PROFILE.sizing_basis,
+                    )
+                    kernel_res = kernel.run(
+                        df=is_df,
+                        indicator_values=is_indicators,
+                        strategy=strategy_obj,
+                        symbol=symbol,
+                        initial_cash=initial_cash,
+                        timeframe="1D",
+                    )
+                    is_response = self._format_kernel_response(
+                        kernel_res=kernel_res,
+                        strategy_obj=strategy_obj,
+                        symbol=symbol,
+                        df=is_df,
+                        candles=is_candles,
+                        initial_cash=initial_cash,
+                        benchmark_symbol=benchmark_symbol,
+                    )
 
                 # 2. Out-of-Sample Backtest if configured
                 oos_response = None
-                if oos_start_date and oos_end_date:
+                if oos_start_date and oos_end_date and oos_df is not None and not oos_df.empty:
                     if SweepCancellationManager.is_cancelled(sweep_id):
                         is_cancelled = True
                         break
-                    oos_run_config = {
-                        "symbol": config.get("symbol"),
-                        "symbols": config.get("symbols"),
-                        "start_date": oos_start_date,
-                        "end_date": oos_end_date,
-                        "initial_cash": config.get("initial_cash", 100000000),
-                        "benchmark_symbol": config.get("benchmark_symbol", "VNINDEX"),
-                        "strategy": variant["strategy"],
-                    }
-                    oos_response = await self.backtest_service.run_backtest(db, oos_run_config)
+                    oos_indicators = StrategyIndicatorAdapter.compute(oos_df, strategy_obj.indicators)
+                    try:
+                        StrategyRuleEvaluator.validate_strategy_rules(strategy_obj, set(oos_indicators.keys()))
+                    except RuleEvaluationError as exc:
+                        oos_response = {
+                            "status": "failed",
+                            "error_code": "INVALID_RULE",
+                            "message": str(exc),
+                            "analytics": None,
+                        }
+                    else:
+                        oos_kernel = BacktestExecutionKernel(
+                            fee_rate=DEFAULT_VN_MARKET_PROFILE.fee_buy,
+                            tax_rate=DEFAULT_VN_MARKET_PROFILE.tax_sell,
+                            slippage_rate=DEFAULT_VN_MARKET_PROFILE.slippage,
+                            min_holding_bars=2,
+                            profile=DEFAULT_VN_MARKET_PROFILE,
+                            sl_tp_execution_mode="next_open",
+                            sizing_basis=DEFAULT_VN_MARKET_PROFILE.sizing_basis,
+                        )
+                        oos_kernel_res = oos_kernel.run(
+                            df=oos_df,
+                            indicator_values=oos_indicators,
+                            strategy=strategy_obj,
+                            symbol=symbol,
+                            initial_cash=initial_cash,
+                            timeframe="1D",
+                        )
+                        oos_response = self._format_kernel_response(
+                            kernel_res=oos_kernel_res,
+                            strategy_obj=strategy_obj,
+                            symbol=symbol,
+                            df=oos_df,
+                            candles=oos_candles,
+                            initial_cash=initial_cash,
+                            benchmark_symbol=benchmark_symbol,
+                        )
 
                 metrics = self._extract_metrics(is_response, oos_response)
                 results.append({
@@ -626,6 +734,109 @@ class StrategyLabService:
             "execution_assumptions": response.get("execution_assumptions"),
             "run_manifest": response.get("run_manifest"),
         }
+        if response.get("kernel_result"):
+            compact["kernel_result"] = response["kernel_result"]
         if response.get("message"):
             compact["message"] = response["message"]
         return compact
+
+    def _format_kernel_response(
+        self,
+        kernel_res: BacktestKernelResult,
+        strategy_obj: Any,
+        symbol: str,
+        df: pd.DataFrame,
+        candles: list,
+        initial_cash: float,
+        benchmark_symbol: str,
+    ) -> dict:
+        closed_trades = [t for t in kernel_res.trades if getattr(t, "status", "") == "closed"]
+        trade_count = len(closed_trades)
+        total_net_pnl = round(sum(t.net_pnl for t in closed_trades), 2) if trade_count else 0.0
+        winning_trades = [t for t in closed_trades if (t.net_pnl or 0) > 0 and not math.isclose(t.net_pnl or 0, 0.0, abs_tol=1e-9)]
+        win_rate = (len(winning_trades) / trade_count) if trade_count else 0.0
+
+        gross_profit = sum(t.net_pnl for t in closed_trades if (t.net_pnl or 0) > 0 and not math.isclose(t.net_pnl or 0, 0.0, abs_tol=1e-9))
+        gross_loss = abs(sum(t.net_pnl for t in closed_trades if (t.net_pnl or 0) < 0 and not math.isclose(t.net_pnl or 0, 0.0, abs_tol=1e-9)))
+        if gross_loss > 0:
+            profit_factor = round(gross_profit / gross_loss, 2)
+            profit_factor_display = f"{profit_factor:.2f}"
+        elif gross_profit > 0:
+            profit_factor = None
+            profit_factor_display = "N/A (chưa có lệnh thua)"
+        else:
+            profit_factor = None
+            profit_factor_display = "N/A"
+
+        low_sample_warning = trade_count < 30
+        low_sample_message = "mẫu nhỏ (<30), độ tin cậy thấp" if low_sample_warning else None
+
+        expectancy = round(total_net_pnl / trade_count, 2) if trade_count else None
+
+        min_sample = 30
+        metric_results = {
+            "total_net_pnl": {
+                "value": total_net_pnl if trade_count else None,
+                "status": "valid" if trade_count else "not_applicable",
+                "sample_size": trade_count,
+                "period": "closed_trades",
+            },
+            "win_rate": {
+                "value": round(win_rate * 100.0, 2) if trade_count else None,
+                "status": "valid" if trade_count else "not_applicable",
+                "sample_size": trade_count,
+                "period": "closed_trades",
+            },
+            "profit_factor": {
+                "value": profit_factor,
+                "status": "valid" if (trade_count and gross_loss > 0) else "not_applicable",
+                "sample_size": trade_count,
+                "period": "closed_trades",
+            },
+            "expectancy": {
+                "value": expectancy,
+                "status": "valid" if trade_count >= min_sample else "insufficient_sample",
+                "sample_size": trade_count,
+                "period": "closed_trades",
+            },
+        }
+
+        assumptions = self.backtest_service._build_assumptions(strategy_obj)
+        coverage = self.backtest_service._build_coverage(
+            candles, symbol, df.iloc[0]["timestamp"], df.iloc[-1]["timestamp"], strategy_obj
+        )
+        manifest = self.backtest_service._build_manifest(
+            strategy_obj, symbol, candles, assumptions,
+            initial_cash=initial_cash, benchmark_symbol=benchmark_symbol,
+        )
+
+        return {
+            "status": "succeeded",
+            "strategy": strategy_obj.name,
+            "symbol": symbol,
+            "total_candles": len(df),
+            "analytics": {
+                "total_trades": trade_count,
+                "win_rate": win_rate,
+                "total_net_pnl": total_net_pnl,
+                "profit_factor": profit_factor,
+                "profit_factor_display": profit_factor_display,
+                "low_sample_warning": low_sample_warning,
+                "low_sample_message": low_sample_message,
+                "expectancy": expectancy,
+                "metrics": metric_results,
+            },
+            "summary": {
+                "total_trades": trade_count,
+                "win_rate": win_rate,
+                "total_net_pnl": total_net_pnl,
+                "profit_factor": profit_factor,
+                "profit_factor_display": profit_factor_display,
+                "low_sample_warning": low_sample_warning,
+                "low_sample_message": low_sample_message,
+            },
+            "data_coverage": coverage.model_dump(),
+            "execution_assumptions": assumptions.model_dump(),
+            "run_manifest": manifest.model_dump(mode="json"),
+            "kernel_result": kernel_res,
+        }

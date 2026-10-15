@@ -97,11 +97,13 @@ def calculate_indicator(
     # Prepare response
     response_data = []
     # Reset index to include timestamp in response
+    result_df.index.name = "timestamp"
     result_df.reset_index(inplace=True)
     
     for _, row in result_df.iterrows():
         # Only return timestamp and the indicator values to save bandwidth
-        record = {"timestamp": row["timestamp"].isoformat()}
+        row_ts = row["timestamp"] if "timestamp" in row else row["index"]
+        record = {"timestamp": row_ts.isoformat() if hasattr(row_ts, "isoformat") else str(row_ts)}
         for col in new_cols:
             val = row[col]
             record[col] = None if pd.isna(val) else val

@@ -11,12 +11,15 @@ from app.models.symbol import Symbol
 from app.models.import_run import ImportRun, ImportRunItem, ImportRunMutation
 from app.models.sync_run import SyncRun
 from app.schemas.import_schema import (
-    ImportPreviewResponse,
+    ImportPreviewResponse as BaseImportPreviewResponse,
     ImportRunItemSchema,
     ImportAcceptResponse,
     ImportRollbackResponse,
     CatalogItemSchema
 )
+
+class ImportPreviewResponse(BaseImportPreviewResponse):
+    staged: bool = False
 from app.services.cafef_importer import CafeFImporter
 from app.services.import_classifier import ImportClassifier, ClassifiedRow
 from app.services.weekly_aggregator import WeeklyAggregator
@@ -30,35 +33,38 @@ class ImportWorkflowService:
         source_type: str = "cafef",
         timeframe: str = "1D",
         adjustment_type: str = "unadjusted",
-        timezone_str: str = "Asia/Ho_Chi_Minh"
+        timezone_str: str = "Asia/Ho_Chi_Minh",
+        confirm: bool = True
     ) -> ImportPreviewResponse:
         file_sha256 = ImportClassifier.compute_sha256(file_content)
 
         # 1. Metadata validation fail-closed check
         metadata_err = ImportClassifier.validate_metadata(source_type, timeframe, adjustment_type, timezone_str)
         if metadata_err:
-            run = ImportRun(
-                id=str(uuid.uuid4()),
-                file_name=filename,
-                file_sha256=file_sha256,
-                content_sha256=file_sha256,
-                parser_version="cafef_v1",
-                source_type=source_type,
-                timeframe=timeframe,
-                adjustment_type=adjustment_type,
-                timezone=timezone_str,
-                status="blocked",
-                can_accept=False,
-                block_reason=metadata_err
-            )
-            try:
-                db.add(run)
-                db.commit()
-            except Exception:
-                db.rollback()
-                raise
+            run_id = str(uuid.uuid4())
+            if confirm:
+                run = ImportRun(
+                    id=run_id,
+                    file_name=filename,
+                    file_sha256=file_sha256,
+                    content_sha256=file_sha256,
+                    parser_version="cafef_v1",
+                    source_type=source_type,
+                    timeframe=timeframe,
+                    adjustment_type=adjustment_type,
+                    timezone=timezone_str,
+                    status="blocked",
+                    can_accept=False,
+                    block_reason=metadata_err
+                )
+                try:
+                    db.add(run)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    raise
             return ImportPreviewResponse(
-                run_id=run.id,
+                run_id=run_id,
                 file_name=filename,
                 file_sha256=file_sha256,
                 content_sha256=file_sha256,
@@ -77,7 +83,8 @@ class ImportWorkflowService:
                 accepted_count=0,
                 can_accept=False,
                 block_reason=metadata_err,
-                items=[]
+                items=[],
+                staged=bool(confirm)
             )
 
         # Parse file into DataFrame
@@ -87,30 +94,31 @@ class ImportWorkflowService:
             else:
                 raw_df = CafeFImporter.parse_file(file_content, filename)
         except Exception as e:
-
-            # Create a blocked run record for unparseable file
-            run = ImportRun(
-                id=str(uuid.uuid4()),
-                file_name=filename,
-                file_sha256=file_sha256,
-                content_sha256=file_sha256,
-                parser_version="cafef_v1",
-                source_type=source_type,
-                timeframe=timeframe,
-                adjustment_type=adjustment_type,
-                timezone=timezone_str,
-                status="blocked",
-                can_accept=False,
-                block_reason=f"Không thể đọc hoặc giải mã tập tin: {str(e)}"
-            )
-            try:
-                db.add(run)
-                db.commit()
-            except Exception:
-                db.rollback()
-                raise
+            run_id = str(uuid.uuid4())
+            block_msg = f"Không thể đọc hoặc giải mã tập tin: {str(e)}"
+            if confirm:
+                run = ImportRun(
+                    id=run_id,
+                    file_name=filename,
+                    file_sha256=file_sha256,
+                    content_sha256=file_sha256,
+                    parser_version="cafef_v1",
+                    source_type=source_type,
+                    timeframe=timeframe,
+                    adjustment_type=adjustment_type,
+                    timezone=timezone_str,
+                    status="blocked",
+                    can_accept=False,
+                    block_reason=block_msg
+                )
+                try:
+                    db.add(run)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    raise
             return ImportPreviewResponse(
-                run_id=run.id,
+                run_id=run_id,
                 file_name=filename,
                 file_sha256=file_sha256,
                 content_sha256=file_sha256,
@@ -128,8 +136,9 @@ class ImportWorkflowService:
                 out_of_order_count=0,
                 accepted_count=0,
                 can_accept=False,
-                block_reason=run.block_reason,
-                items=[]
+                block_reason=block_msg,
+                items=[],
+                staged=bool(confirm)
             )
 
         # Build existing candles map for conflict/duplicate detection
@@ -164,71 +173,73 @@ class ImportWorkflowService:
         run_id = str(uuid.uuid4())
         status_str = "previewed" if can_accept else "blocked"
 
-        run = ImportRun(
-            id=run_id,
-            file_name=filename,
-            file_sha256=file_sha256,
-            content_sha256=content_sha256,
-            parser_version="cafef_v1",
-            source_type=source_type,
-            timeframe=timeframe,
-            adjustment_type=adjustment_type,
-            timezone=timezone_str,
-            status=status_str,
-            parsed_count=counts["parsed"],
-            rejected_count=counts["rejected"],
-            duplicate_count=counts["duplicate"],
-            conflicting_count=counts["conflicting"],
-            missing_count=counts["missing"],
-            out_of_order_count=counts["out_of_order"],
-            accepted_count=0,
-            can_accept=can_accept,
-            block_reason=block_reason
-        )
-        try:
-            db.add(run)
+        item_schemas: List[ImportRunItemSchema] = []
+        for it in classified_items:
+            item_schemas.append(ImportRunItemSchema(
+                row_index=it.row_index,
+                symbol=it.symbol,
+                timeframe=it.timeframe,
+                timestamp=it.timestamp.strftime("%Y-%m-%d") if isinstance(it.timestamp, (date, datetime)) else str(it.timestamp),
+                adjustment_type=it.adjustment_type,
+                open=it.open,
+                high=it.high,
+                low=it.low,
+                close=it.close,
+                volume=it.volume,
+                classification=it.classification,
+                reject_reason=it.reject_reason
+            ))
 
-            # Add preview items
-            item_schemas: List[ImportRunItemSchema] = []
-            for it in classified_items:
-                db_item = ImportRunItem(
-                    run_id=run_id,
-                    row_index=it.row_index,
-                    symbol=it.symbol,
-                    timeframe=it.timeframe,
-                    timestamp=datetime.combine(it.timestamp, datetime.min.time()) if isinstance(it.timestamp, date) else it.timestamp,
-                    adjustment_type=it.adjustment_type,
-                    open=it.open,
-                    high=it.high,
-                    low=it.low,
-                    close=it.close,
-                    volume=it.volume,
-                    classification=it.classification,
-                    reject_reason=it.reject_reason
-                )
-                db.add(db_item)
-                item_schemas.append(ImportRunItemSchema(
-                    row_index=it.row_index,
-                    symbol=it.symbol,
-                    timeframe=it.timeframe,
-                    timestamp=it.timestamp.strftime("%Y-%m-%d") if isinstance(it.timestamp, (date, datetime)) else str(it.timestamp),
-                    adjustment_type=it.adjustment_type,
-                    open=it.open,
-                    high=it.high,
-                    low=it.low,
-                    close=it.close,
-                    volume=it.volume,
-                    classification=it.classification,
-                    reject_reason=it.reject_reason
-                ))
+        if confirm:
+            run = ImportRun(
+                id=run_id,
+                file_name=filename,
+                file_sha256=file_sha256,
+                content_sha256=content_sha256,
+                parser_version="cafef_v1",
+                source_type=source_type,
+                timeframe=timeframe,
+                adjustment_type=adjustment_type,
+                timezone=timezone_str,
+                status=status_str,
+                parsed_count=counts["parsed"],
+                rejected_count=counts["rejected"],
+                duplicate_count=counts["duplicate"],
+                conflicting_count=counts["conflicting"],
+                missing_count=counts["missing"],
+                out_of_order_count=counts["out_of_order"],
+                accepted_count=0,
+                can_accept=can_accept,
+                block_reason=block_reason
+            )
+            try:
+                db.add(run)
 
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
+                for it in classified_items:
+                    db_item = ImportRunItem(
+                        run_id=run_id,
+                        row_index=it.row_index,
+                        symbol=it.symbol,
+                        timeframe=it.timeframe,
+                        timestamp=datetime.combine(it.timestamp, datetime.min.time()) if isinstance(it.timestamp, date) else it.timestamp,
+                        adjustment_type=it.adjustment_type,
+                        open=it.open,
+                        high=it.high,
+                        low=it.low,
+                        close=it.close,
+                        volume=it.volume,
+                        classification=it.classification,
+                        reject_reason=it.reject_reason
+                    )
+                    db.add(db_item)
+
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
 
         return ImportPreviewResponse(
-            run_id=run.id,
+            run_id=run_id,
             file_name=filename,
             file_sha256=file_sha256,
             content_sha256=content_sha256,
@@ -247,7 +258,8 @@ class ImportWorkflowService:
             accepted_count=0,
             can_accept=can_accept,
             block_reason=block_reason,
-            items=item_schemas
+            items=item_schemas,
+            staged=bool(confirm)
         )
 
     @staticmethod
@@ -258,7 +270,10 @@ class ImportWorkflowService:
     ) -> ImportAcceptResponse:
         run = db.query(ImportRun).filter(ImportRun.id == run_id).first()
         if not run:
-            raise HTTPException(status_code=404, detail=f"Không tìm thấy lượt nhập dữ liệu {run_id}")
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot accept unstaged preview. Staged run required before acceptance."
+            )
 
         # Idempotent repeat check
         if run.status == "accepted":

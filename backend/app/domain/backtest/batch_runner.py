@@ -508,6 +508,8 @@ class BatchBacktestRunner:
                     min_holding_bars=2,
                     profile=profile,
                     exchange=exchange,
+                    sl_tp_execution_mode="next_open",
+                    sizing_basis="fill_estimate",
                 )
 
                 try:
@@ -546,6 +548,7 @@ class BatchBacktestRunner:
                         open_position_quantity=open_qty,
                         open_position_value=open_val,
                         max_drawdown=kernel_res.ledger.max_drawdown,
+                        equity_curve=getattr(kernel_res, "equity_curve", getattr(kernel_res.ledger, "equity_curve", None)),
                     )
 
                     phase_results.append(
@@ -616,6 +619,9 @@ class BatchBacktestRunner:
         total_initial_capital = sum(r.initial_cash for r in succeeded)
         overall_return = total_pnl / total_initial_capital if total_initial_capital > 0 else 0.0
 
+        low_sample_warning = (total_trades < 30)
+        low_sample_message = "mẫu nhỏ (<30), độ tin cậy thấp" if low_sample_warning else None
+
         summary = {
             "total_symbols": len(clean_symbols),
             "total_phases": len(phases),
@@ -625,6 +631,8 @@ class BatchBacktestRunner:
             "total_trades": total_trades,
             "total_net_pnl": round(total_pnl, 2),
             "overall_net_return_pct": round(overall_return, 4),
+            "low_sample_warning": low_sample_warning,
+            "low_sample_message": low_sample_message,
             "feature_compute_count": feature_compute_count,
             "simulation_run_count": simulation_run_count,
         }

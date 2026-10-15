@@ -6,13 +6,12 @@ from app.dependencies import get_db
 from app.schemas.import_schema import (
     ImportResponse,
     ImportWarning,
-    ImportPreviewResponse,
     ImportAcceptRequest,
     ImportAcceptResponse,
     ImportRollbackResponse,
     CatalogItemSchema
 )
-from app.services.import_workflow_service import ImportWorkflowService
+from app.services.import_workflow_service import ImportWorkflowService, ImportPreviewResponse
 from app.services.event_logging_service import EventLoggingService
 
 router = APIRouter()
@@ -25,6 +24,7 @@ async def preview_import_data(
     adjustment_type: str = Form("unadjusted"),
     timezone: str = Form("Asia/Ho_Chi_Minh"),
     timezone_str: Optional[str] = Form(None),
+    confirm: bool = Form(False),
     db: Session = Depends(get_db)
 ):
     """Preview an import file without mutating accepted candle data."""
@@ -40,7 +40,8 @@ async def preview_import_data(
         source_type=source_type,
         timeframe=timeframe,
         adjustment_type=adjustment_type,
-        timezone_str=selected_timezone
+        timezone_str=selected_timezone,
+        confirm=confirm
     )
     return response
 

@@ -163,7 +163,8 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
   const openPosition = snapshot.positions.find(p => p.quantity > 0);
   const availableQty = openPosition?.available_quantity || 0;
   const sellDisabled = actionsDisabled || !openPosition || availableQty <= 0;
-  const sellTitle = !openPosition ? "No open position" : (availableQty <= 0 ? "T+2: Cổ phiếu chưa về tài khoản" : undefined);
+  const settlementLabel = (snapshot as any).settlement_label || "T+1 · về sau 1 phiên";
+  const sellTitle = !openPosition ? "No open position" : (availableQty <= 0 ? `${settlementLabel}: Cổ phiếu chưa về tài khoản` : undefined);
 
   useModalFocus(pendingAction !== null, close, dialogElement);
   return <section className="panel" data-testid="trade-controls" style={{ padding: 12, display: 'grid', gap: 10 }}>

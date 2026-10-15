@@ -17,10 +17,19 @@ def test_import_accept_api(client: TestClient):
     csv_bytes = b"<Ticker>,<DTYYYYMMDD>,<Open>,<High>,<Low>,<Close>,<Volume>\nVNM,20260105,65.0,66.0,64.5,65.5,400000\n"
     files = {"file": ("VNM.csv", csv_bytes, "text/csv")}
     preview_res = client.post("/api/import/preview", files=files, data={"adjustment_type": "unadjusted"}).json()
-    
-    run_id = preview_res["run_id"]
-    checksum = preview_res["content_sha256"]
-    
+    assert preview_res["staged"] is False
+    assert preview_res["can_accept"] is True
+
+    stage_files = {"file": ("VNM.csv", csv_bytes, "text/csv")}
+    stage_res = client.post(
+        "/api/import/preview",
+        files=stage_files,
+        data={"adjustment_type": "unadjusted", "confirm": "true"},
+    ).json()
+    assert stage_res["staged"] is True
+    run_id = stage_res["run_id"]
+    checksum = stage_res["content_sha256"]
+
     accept_res = client.post(f"/api/import/runs/{run_id}/accept", json={"content_sha256": checksum})
     assert accept_res.status_code == 200
     accept_data = accept_res.json()
@@ -43,9 +52,15 @@ def test_import_rollback_api(client: TestClient):
     csv_bytes = b"<Ticker>,<DTYYYYMMDD>,<Open>,<High>,<Low>,<Close>,<Volume>\nTCB,20260105,22.0,23.0,21.5,22.5,800000\n"
     files = {"file": ("TCB.csv", csv_bytes, "text/csv")}
     preview_res = client.post("/api/import/preview", files=files).json()
-    run_id = preview_res["run_id"]
-    checksum = preview_res["content_sha256"]
-    client.post(f"/api/import/runs/{run_id}/accept", json={"content_sha256": checksum})
+    assert preview_res["staged"] is False
+
+    stage_files = {"file": ("TCB.csv", csv_bytes, "text/csv")}
+    stage_res = client.post("/api/import/preview", files=stage_files, data={"confirm": "true"}).json()
+    assert stage_res["staged"] is True
+    run_id = stage_res["run_id"]
+    checksum = stage_res["content_sha256"]
+    accept_res = client.post(f"/api/import/runs/{run_id}/accept", json={"content_sha256": checksum})
+    assert accept_res.status_code == 200
 
     rollback_res = client.post(f"/api/import/runs/{run_id}/rollback")
     assert rollback_res.status_code == 200
@@ -92,21 +107,32 @@ def test_legacy_cafef_route_disabled(client: TestClient):
 
 
 def test_stale_preview_accept_api_contract(client: TestClient):
-    # 1. Preview candidate
+    # 1. Preview and stage candidate 1
     csv_bytes = b"<Ticker>,<DTYYYYMMDD>,<Open>,<High>,<Low>,<Close>,<Volume>\nAPI_STALE,20231010,10.0,11.0,9.5,10.5,10000\n"
     files = {"file": ("API_STALE.csv", csv_bytes, "text/csv")}
-    preview_res = client.post("/api/import/preview", files=files, data={"adjustment_type": "unadjusted"}).json()
+    preview_res = client.post(
+        "/api/import/preview",
+        files=files,
+        data={"adjustment_type": "unadjusted", "confirm": "true"},
+    ).json()
+    assert preview_res["staged"] is True
 
     run_id = preview_res["run_id"]
     checksum = preview_res["content_sha256"]
 
-    # 2. Intervening accept of another preview for the same candle key
+    # 2. Intervening stage and accept of another preview for the same candle key
     csv_bytes_2 = b"<Ticker>,<DTYYYYMMDD>,<Open>,<High>,<Low>,<Close>,<Volume>\nAPI_STALE,20231010,10.0,12.0,9.5,11.5,20000\n"
     files_2 = {"file": ("API_STALE_2.csv", csv_bytes_2, "text/csv")}
-    p2 = client.post("/api/import/preview", files=files_2, data={"adjustment_type": "unadjusted"}).json()
-    client.post(f"/api/import/runs/{p2['run_id']}/accept", json={"content_sha256": p2["content_sha256"]})
+    p2 = client.post(
+        "/api/import/preview",
+        files=files_2,
+        data={"adjustment_type": "unadjusted", "confirm": "true"},
+    ).json()
+    assert p2["staged"] is True
+    accept_p2 = client.post(f"/api/import/runs/{p2['run_id']}/accept", json={"content_sha256": p2["content_sha256"]})
+    assert accept_p2.status_code == 200
 
-    # 3. Attempt accept of original preview -> fails with 400 detail stating stale preview
+    # 3. Attempt accept of original staged preview -> fails with 400 detail stating stale preview
     accept_res = client.post(f"/api/import/runs/{run_id}/accept", json={"content_sha256": checksum})
     assert accept_res.status_code == 400
     assert "Bản xem trước đã hết hạn" in accept_res.json()["detail"]

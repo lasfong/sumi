@@ -355,19 +355,16 @@ def test_replay_indicator_projection_tagging():
         assert res.status_code == 200, res.text
         data = res.json()["data"]
 
-        # Assert data points have is_projected
-        assert len(data) > 0
+        # Assert data points are strictly clamped to visible horizon (GAP-REPLAY-02)
+        assert len(data) == 80
         visible_points = [p for p in data if not p.get("is_projected")]
         projected_points = [p for p in data if p.get("is_projected")]
 
         # Visible points must equal 80 (visible candles count)
         assert len(visible_points) == 80
 
-        # Future projected points must exist (pandas-ta extends Span A & B forward by 26 bars)
-        assert len(projected_points) == 26
-        for p in projected_points:
-            assert p.get("is_projected") is True
-
-
+        # Future projected points must be dropped completely in replay mode
+        assert len(projected_points) == 0
+        assert res.json()["meta"]["is_projected_clamped"] is True
     finally:
         app.dependency_overrides.pop(get_db, None)

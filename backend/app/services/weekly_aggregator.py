@@ -3,6 +3,7 @@ from datetime import datetime, date, time, timedelta
 from typing import List, Dict, Tuple, Optional, Set
 from sqlalchemy.orm import Session
 
+from app.domain.market.calendar import TradingCalendar
 from app.models.candle import Candle
 from app.models.import_run import WeeklyCandleProvenance
 
@@ -32,6 +33,7 @@ class WeeklyAggregator:
         adjustment_types: Set[str]
     ) -> int:
         updated_count = 0
+        cal = TradingCalendar()
 
         for symbol in symbols:
             for adj_type in adjustment_types:
@@ -65,8 +67,8 @@ class WeeklyAggregator:
                 weeks_map: Dict[date, List[Candle]] = {}
                 for c in daily_candles:
                     c_date = c.timestamp.date() if isinstance(c.timestamp, datetime) else c.timestamp
-                    # Only accept Monday-Friday (0-4)
-                    if c_date.weekday() < 5:
+                    # Only accept valid trading days (Monday-Friday, not exchange holidays)
+                    if cal.is_trading_day(c_date):
                         week_start = c_date - timedelta(days=c_date.weekday())
                         if week_start not in weeks_map:
                             weeks_map[week_start] = []

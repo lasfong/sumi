@@ -155,11 +155,15 @@ class AnalyticsService:
         return periods
 
     @staticmethod
-    def _calculate_sharpe_ratio(equity_curve: list, rf_annual: float = 0.045) -> float:
+    def _calculate_sharpe_ratio(equity_curve: list, rf_annual: float = 0.0) -> float:
         if len(equity_curve) < 2:
             return 0.0
 
-        equities = [p["equity"] for p in equity_curve]
+        equities = [
+            (p.get("equity", p.get("portfolio_value", 0.0)) if isinstance(p, dict)
+             else getattr(p, "equity", getattr(p, "portfolio_value", p)))
+            for p in equity_curve
+        ]
         returns = []
         for i in range(1, len(equities)):
             if equities[i-1] > 0:
@@ -169,11 +173,11 @@ class AnalyticsService:
             return 0.0
 
         returns_arr = np.array(returns)
-        rf_daily = (1 + rf_annual) ** (1/252) - 1
+        rf_daily = ((1 + rf_annual) ** (1/252) - 1) if rf_annual > 0 else 0.0
         excess = returns_arr - rf_daily
 
         std = np.std(excess, ddof=1) if len(excess) > 1 else 0
-        if std == 0:
+        if std == 0 or np.isnan(std):
             return 0.0
 
         sharpe = (np.mean(excess) / std) * np.sqrt(252)
@@ -183,17 +187,22 @@ class AnalyticsService:
     def _periodic_returns(equity_curve: list) -> list[float]:
         returns = []
         for previous, current in zip(equity_curve, equity_curve[1:]):
-            previous_equity = float(previous["equity"])
+            prev_eq = (previous.get("equity", previous.get("portfolio_value", 0.0)) if isinstance(previous, dict)
+                       else getattr(previous, "equity", getattr(previous, "portfolio_value", previous)))
+            curr_eq = (current.get("equity", current.get("portfolio_value", 0.0)) if isinstance(current, dict)
+                       else getattr(current, "equity", getattr(current, "portfolio_value", current)))
+            previous_equity = float(prev_eq)
             if previous_equity > 0:
-                returns.append(float(current["equity"]) / previous_equity - 1)
+                returns.append(float(curr_eq) / previous_equity - 1)
         return returns
 
     @staticmethod
-    def _build_metric_results(trades: list, equity_curve: list) -> dict[str, MetricResult]:
+    def _build_metric_results(trades: list, equity_curve: list, rf_annual: float = 0.0) -> dict[str, MetricResult]:
         trade_count = len(trades)
         pnl_values = [float(trade.net_pnl or 0.0) for trade in trades]
-        winners = [value for value in pnl_values if value > 0]
-        losses = [value for value in pnl_values if value <= 0]
+        winners = [value for value in pnl_values if value > 0 and not math.isclose(value, 0.0, abs_tol=1e-9)]
+        losses = [value for value in pnl_values if value < 0 and not math.isclose(value, 0.0, abs_tol=1e-9)]
+        breakevens = [value for value in pnl_values if math.isclose(value, 0.0, abs_tol=1e-9)]
         returns = AnalyticsService._periodic_returns(equity_curve)
         min_sample = AnalyticsService.MIN_STATISTICAL_SAMPLE
 
@@ -277,7 +286,7 @@ class AnalyticsService:
             )
         else:
             returns_arr = np.array(returns)
-            rf_daily = (1 + 0.045) ** (1 / 252) - 1
+            rf_daily = ((1 + rf_annual) ** (1 / 252) - 1) if rf_annual > 0 else 0.0
             excess = returns_arr - rf_daily
             sample_std = float(np.std(excess, ddof=1))
             if sample_std == 0:
@@ -377,7 +386,7 @@ class AnalyticsService:
                 grouped[key] = {"trades": 0, "wins": 0, "pnl": []}
             pnl = trade.net_pnl or 0.0
             grouped[key]["trades"] += 1
-            grouped[key]["wins"] += 1 if pnl > 0 else 0
+            grouped[key]["wins"] += 1 if (pnl > 0 and not math.isclose(pnl, 0.0, abs_tol=1e-9)) else 0
             grouped[key]["pnl"].append(pnl)
 
         rows = []
@@ -424,7 +433,7 @@ class AnalyticsService:
 
     @staticmethod
     def get_analytics(
-        db: Session, session_id: int, benchmark_symbol: str | None = None,
+        db: Session, session_id: int, benchmark_symbol: str | None = None, rf_annual: float = 0.0,
     ) -> AnalyticsResponse:
         session = db.query(ReplaySession).filter(ReplaySession.id == session_id).first()
         if session is None:
@@ -446,7 +455,7 @@ class AnalyticsService:
         benchmark_curve = AnalyticsService._get_benchmark_curve(db, session, benchmark_symbol)
 
         total_trades = len(trades)
-        metric_results = AnalyticsService._build_metric_results(trades, equity_curve)
+        metric_results = AnalyticsService._build_metric_results(trades, equity_curve, rf_annual=rf_annual)
         metric_results["benchmark"] = MetricResult(
             value=(benchmark_curve[-1].value / benchmark_curve[0].value - 1) if len(benchmark_curve) >= 2 and benchmark_curve[0].value else None,
             status="valid" if len(benchmark_curve) >= 2 and benchmark_curve[0].value else "not_applicable",
@@ -459,6 +468,9 @@ class AnalyticsService:
                 benchmark_symbol=benchmark_symbol,
                 total_trades=0, win_rate=0.0, total_net_pnl=0.0,
                 average_win=0.0, average_loss=0.0, profit_factor=None,
+                profit_factor_display="N/A",
+                low_sample_warning=True,
+                low_sample_message="mẫu nhỏ (<30), độ tin cậy thấp",
                 expectancy=0.0,
                 largest_win=0.0,
                 largest_loss=0.0,
@@ -478,10 +490,10 @@ class AnalyticsService:
                 metrics=metric_results,
             )
 
-        winning_trades = [t for t in trades if t.net_pnl and t.net_pnl > 0]
-        losing_trades = [t for t in trades if t.net_pnl and t.net_pnl <= 0]
+        winning_trades = [t for t in trades if (t.net_pnl or 0) > 0 and not math.isclose(t.net_pnl or 0, 0.0, abs_tol=1e-9)]
+        losing_trades = [t for t in trades if (t.net_pnl or 0) < 0 and not math.isclose(t.net_pnl or 0, 0.0, abs_tol=1e-9)]
 
-        win_rate = len(winning_trades) / total_trades
+        win_rate = len(winning_trades) / total_trades if total_trades else 0.0
         total_net_pnl = sum(t.net_pnl or 0 for t in trades)
 
         gross_profit = sum(t.net_pnl or 0 for t in winning_trades)
@@ -493,6 +505,15 @@ class AnalyticsService:
         # Retain the legacy scalar for stored-history/API compatibility. The typed
         # metric result is authoritative for evidence and presentation.
         profit_factor = round(gross_profit / gross_loss, 4) if gross_loss > 0 else None
+        if gross_loss > 0:
+            profit_factor_display = f"{profit_factor:.2f}"
+        elif gross_profit > 0:
+            profit_factor_display = "N/A (chưa có lệnh thua)"
+        else:
+            profit_factor_display = "N/A"
+
+        low_sample_warning = total_trades < 30
+        low_sample_message = "mẫu nhỏ (<30), độ tin cậy thấp" if low_sample_warning else None
 
         largest_win = max([t.net_pnl or 0 for t in trades]) if trades else 0
         largest_loss = min([t.net_pnl or 0 for t in trades]) if trades else 0
@@ -508,7 +529,7 @@ class AnalyticsService:
             if setup not in setup_stats:
                 setup_stats[setup] = {"trades": 0, "wins": 0, "net_pnl": 0.0}
             setup_stats[setup]["trades"] += 1
-            if t.net_pnl and t.net_pnl > 0:
+            if t.net_pnl and t.net_pnl > 0 and not math.isclose(t.net_pnl, 0.0, abs_tol=1e-9):
                 setup_stats[setup]["wins"] += 1
             setup_stats[setup]["net_pnl"] += (t.net_pnl or 0)
 
@@ -562,6 +583,9 @@ class AnalyticsService:
             average_win=average_win,
             average_loss=average_loss,
             profit_factor=profit_factor,
+            profit_factor_display=profit_factor_display,
+            low_sample_warning=low_sample_warning,
+            low_sample_message=low_sample_message,
             average_r=average_r,
             expectancy=expectancy,
             largest_win=largest_win,
@@ -578,6 +602,6 @@ class AnalyticsService:
             trade_distribution=trade_distribution,
             symbol_performance=symbol_performance,
             mistake_performance=mistake_performance,
-            outlier_impact=outlier_impact
-            ,metrics=metric_results
+            outlier_impact=outlier_impact,
+            metrics=metric_results
         )

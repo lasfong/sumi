@@ -4,8 +4,22 @@ import logging
 from datetime import datetime, date, timedelta
 from typing import List, Dict, Tuple, Optional, Any, Set
 import pandas as pd
+from app.domain.market.calendar import TradingCalendar
 
 logger = logging.getLogger(__name__)
+
+
+def are_candles_close(
+    t1: Tuple[float, ...],
+    t2: Tuple[float, ...],
+    rel_tol: float = 1e-9,
+    abs_tol: float = 1e-6,
+) -> bool:
+    """Return True if candle OHLCV tuples match within float tolerance (GAP-DB-08)."""
+    if len(t1) != len(t2):
+        return False
+    return all(math.isclose(float(a), float(b), rel_tol=rel_tol, abs_tol=abs_tol) for a, b in zip(t1, t2))
+
 
 class ClassifiedRow:
     def __init__(
@@ -119,6 +133,7 @@ class ImportClassifier:
             "out_of_order": 0,
             "accepted": 0
         }
+        cal = TradingCalendar()
 
         if raw_df is None or raw_df.empty:
             return [], counts, False, "Tập tin rỗng hoặc không có dữ liệu hợp lệ"
@@ -249,7 +264,7 @@ class ImportClassifier:
                 counts["out_of_order"] += 1
             elif key in seen_file_keys:
                 prev_tuple = seen_file_keys[key]
-                if prev_tuple == candle_tuple:
+                if are_candles_close(prev_tuple, candle_tuple):
                     items.append(ClassifiedRow(row_num, sym, timeframe, parsed_date, adjustment_type, o_val, h_val, l_val, c_val, v_val, "duplicate", "Dữ liệu trùng lặp trong tập tin"))
                     counts["duplicate"] += 1
                 else:
@@ -257,7 +272,7 @@ class ImportClassifier:
                     counts["conflicting"] += 1
             elif key in existing_candles_map:
                 existing_tuple = existing_candles_map[key]
-                if existing_tuple == candle_tuple:
+                if are_candles_close(existing_tuple, candle_tuple):
                     items.append(ClassifiedRow(row_num, sym, timeframe, parsed_date, adjustment_type, o_val, h_val, l_val, c_val, v_val, "duplicate", "Dữ liệu trùng khớp với dữ liệu đã lưu trong hệ thống"))
                     counts["duplicate"] += 1
                 else:
@@ -278,7 +293,7 @@ class ImportClassifier:
                 max_d = max(dates_set)
                 curr = min_d + timedelta(days=1)
                 while curr < max_d:
-                    if curr.weekday() < 5:  # Mon-Fri
+                    if cal.is_trading_day(curr):  # Mon-Fri excluding exchange holidays
                         key = (sym, timeframe, curr, adjustment_type)
                         if curr not in dates_set and key not in existing_candles_map:
                             items.append(ClassifiedRow(

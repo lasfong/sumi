@@ -17,6 +17,8 @@ from app.domain.accounting import (
     calculate_pnl_percent,
     calculate_sell_amounts,
 )
+from app.domain.market.rules import DEFAULT_VN_MARKET_PROFILE
+from app.domain.market.settlement import SettlementLockDetail
 from app.services.event_logging_service import EventLoggingService
 
 class TradeLifecycleService:
@@ -278,28 +280,30 @@ class TradeLifecycleService:
         from app.services.practice_workflow_service import PracticeWorkflowService
         all_candles = PracticeWorkflowService._candles(db, session)
 
+        profile = DEFAULT_VN_MARKET_PROFILE
+        engine = profile.settlement_engine
+        cur_candle = all_candles[session.current_index] if session.current_index < len(all_candles) else None
+        cur_date = cur_candle.timestamp.date() if cur_candle and hasattr(cur_candle.timestamp, 'date') else (date.date() if hasattr(date, 'date') else date)
+
         settled_bought = 0.0
         earliest_unsettled_release_date = None
+        phase = "open" if getattr(decision_in, "order_type", None) == OrderType.MARKET_NEXT_OPEN.value else "close"
 
         for exc in buy_executions:
             exc_bar_idx = exc.execution_candle_index
-            if exc_bar_idx is None:
-                exc_date = exc.execution_date.date() if hasattr(exc.execution_date, 'date') else exc.execution_date
-                for idx, c in enumerate(all_candles):
-                    c_date = c.timestamp.date() if hasattr(c.timestamp, 'date') else c.timestamp
-                    if c_date == exc_date:
-                        exc_bar_idx = idx
-                        break
+            exc_candle = all_candles[exc_bar_idx] if exc_bar_idx is not None and exc_bar_idx < len(all_candles) else None
+            exc_date = exc_candle.timestamp.date() if exc_candle and hasattr(exc_candle.timestamp, 'date') else (exc.execution_date.date() if hasattr(exc.execution_date, 'date') else exc.execution_date)
 
-            release_bar_idx = (exc_bar_idx + 2) if exc_bar_idx is not None else None
+            is_settled = False
+            if exc_date and cur_date:
+                is_settled = engine.is_sellable(exc_date, cur_date, phase)
 
-            if release_bar_idx is not None and session.current_index >= release_bar_idx:
+            if is_settled:
                 settled_bought += exc.quantity
             else:
-                if release_bar_idx is not None and release_bar_idx < len(all_candles):
-                    rel_date = all_candles[release_bar_idx].timestamp.date() if hasattr(all_candles[release_bar_idx].timestamp, 'date') else all_candles[release_bar_idx].timestamp
-                    if earliest_unsettled_release_date is None or rel_date < earliest_unsettled_release_date:
-                        earliest_unsettled_release_date = rel_date
+                rel_d = engine.calculate_sellable_date(exc_date) if exc_date else None
+                if rel_d and (earliest_unsettled_release_date is None or rel_d < earliest_unsettled_release_date):
+                    earliest_unsettled_release_date = rel_d
 
         # 2. Calculate total quantity already sold (which naturally uses up the settled bought quantity first)
         total_sold = db.query(func.sum(Execution.quantity)) \
@@ -315,9 +319,21 @@ class TradeLifecycleService:
         if available_qty < qty:
             blocked_qty = position.quantity - available_qty
             release_date_str = earliest_unsettled_release_date.isoformat() if hasattr(earliest_unsettled_release_date, 'isoformat') else str(earliest_unsettled_release_date) if earliest_unsettled_release_date else "T+2"
+            settlement_label = profile.settlement_label
             raise HTTPException(
                 status_code=400,
-                detail=f"Cannot sell: T+2 constraint. Available: {available_qty:g}, Blocked: {blocked_qty:g}, Earliest release date: {release_date_str}"
+                detail=SettlementLockDetail(
+                    error_code="LOT_SETTLEMENT_LOCKED",
+                    status="REJECTED_SETTLEMENT_LOCK",
+                    message=f"Cannot sell: T+2 constraint. Shares locked under {settlement_label}. Available: {available_qty:g}, Blocked: {blocked_qty:g}, Earliest release date: {release_date_str}",
+                    available_qty=available_qty,
+                    available_quantity=available_qty,
+                    blocked_qty=blocked_qty,
+                    blocked_quantity=blocked_qty,
+                    available_on=release_date_str,
+                    earliest_release_date=release_date_str,
+                    settlement_label=settlement_label,
+                )
             )
 
 

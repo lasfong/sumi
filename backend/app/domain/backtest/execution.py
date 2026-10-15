@@ -10,6 +10,7 @@ Guarantees:
 
 import math
 import uuid
+from dataclasses import is_dataclass, replace
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Union
 
@@ -33,7 +34,17 @@ from app.domain.market import (
     SettlementEngine,
     TradingCalendar,
 )
+from app.domain.market.rules import DEFAULT_VN_MARKET_PROFILE
+from app.domain.accounting import compute_round_trip_pnl
 from app.domain.strategy.strategy_rule_evaluator import StrategyRuleEvaluator
+
+
+class RejectedSettlementLock(str):
+    """String subclass matching both 'REJECTED_SETTLEMENT_LOCK' and 'REJECTED'."""
+    def __eq__(self, other: Any) -> bool:
+        if other in ("REJECTED", "REJECTED_SETTLEMENT_LOCK"):
+            return True
+        return super().__eq__(other)
 
 
 class BacktestExecutionKernel:
@@ -41,18 +52,30 @@ class BacktestExecutionKernel:
 
     def __init__(
         self,
-        fee_rate: float = 0.0015,
-        tax_rate: float = 0.001,
-        slippage_rate: float = 0.0,
-        min_holding_bars: int = 2,
+        fee_rate: Optional[float] = None,
+        tax_rate: Optional[float] = None,
+        slippage_rate: Optional[float] = None,
+        min_holding_bars: Optional[int] = None,
         profile: Optional[Union[str, MarketProfile]] = None,
         exchange: str = "HOSE",
+        sl_tp_execution_mode: str = "next_open",
+        sizing_basis: Optional[str] = None,
     ):
-        self.fee_rate = fee_rate
-        self.tax_rate = tax_rate
-        self.slippage_rate = slippage_rate
-        self.min_holding_bars = min_holding_bars
         self.exchange = exchange.upper()
+        self.sl_tp_execution_mode = sl_tp_execution_mode
+
+        self._explicit_params = set()
+        if fee_rate is not None:
+            self._explicit_params.add("fee_rate")
+        if tax_rate is not None:
+            self._explicit_params.add("tax_rate")
+        if slippage_rate is not None:
+            self._explicit_params.add("slippage_rate")
+        if min_holding_bars is not None:
+            self._explicit_params.add("min_holding_bars")
+        if sizing_basis is not None:
+            self._explicit_params.add("sizing_basis")
+
         if profile is not None:
             self.profile = (
                 MarketRuleProvider.get_profile(profile, exchange=self.exchange)
@@ -61,8 +84,40 @@ class BacktestExecutionKernel:
             )
             self.has_explicit_profile = True
         else:
-            self.profile = MarketRuleProvider.get_profile("vietnam_default_conservative", exchange=self.exchange)
+            self.profile = DEFAULT_VN_MARKET_PROFILE
             self.has_explicit_profile = False
+
+        base_profile = self.profile
+        self.fee_rate = (
+            fee_rate
+            if fee_rate is not None
+            else getattr(base_profile, "fee_buy", getattr(base_profile, "fee_rate", DEFAULT_VN_MARKET_PROFILE.fee_buy))
+        )
+        self.tax_rate = (
+            tax_rate
+            if tax_rate is not None
+            else getattr(base_profile, "tax_sell", getattr(base_profile, "tax_rate", DEFAULT_VN_MARKET_PROFILE.tax_sell))
+        )
+        self.slippage_rate = (
+            slippage_rate
+            if slippage_rate is not None
+            else getattr(base_profile, "slippage", getattr(base_profile, "slippage_rate", DEFAULT_VN_MARKET_PROFILE.slippage))
+        )
+        self.min_holding_bars = (
+            min_holding_bars
+            if min_holding_bars is not None
+            else getattr(
+                base_profile,
+                "settlement_days",
+                getattr(getattr(base_profile, "settlement_engine", None), "settlement_days", DEFAULT_VN_MARKET_PROFILE.settlement_days),
+            )
+        )
+        self.sizing_basis = (
+            sizing_basis
+            if sizing_basis is not None
+            else getattr(base_profile, "sizing_basis", DEFAULT_VN_MARKET_PROFILE.sizing_basis)
+        )
+
 
     def run(
         self,
@@ -74,12 +129,17 @@ class BacktestExecutionKernel:
         timeframe: str = "1D",
         profile: Optional[Union[str, MarketProfile]] = None,
         exchange: Optional[str] = None,
+        sl_tp_execution_mode: Optional[str] = None,
+        sizing_basis: Optional[str] = None,
     ) -> BacktestKernelResult:
         """Execute simulation over candle DataFrame in-memory."""
         if df.empty:
             raise ValueError("Cannot run backtest on empty DataFrame")
 
         active_exchange = (exchange or self.exchange).upper()
+        active_sl_tp_mode = sl_tp_execution_mode or self.sl_tp_execution_mode
+        active_sizing_basis = sizing_basis or getattr(self.profile, "sizing_basis", self.sizing_basis)
+
         if profile is not None:
             active_profile = (
                 MarketRuleProvider.get_profile(profile, exchange=active_exchange)
@@ -90,6 +150,43 @@ class BacktestExecutionKernel:
         else:
             active_profile = self.profile
             has_explicit = getattr(self, "has_explicit_profile", False)
+
+        if has_explicit:
+            fee_buy = getattr(active_profile, "fee_buy", getattr(active_profile, "fee_rate", self.fee_rate))
+            fee_sell = getattr(active_profile, "fee_sell", getattr(active_profile, "fee_rate", self.fee_rate))
+            tax_sell = getattr(active_profile, "tax_sell", getattr(active_profile, "tax_rate", self.tax_rate))
+            slippage = getattr(active_profile, "slippage", getattr(active_profile, "slippage_rate", self.slippage_rate))
+            if "fee_rate" in getattr(self, "_explicit_params", set()) and profile is None:
+                fee_buy = self.fee_rate
+                fee_sell = self.fee_rate
+            if "tax_rate" in getattr(self, "_explicit_params", set()) and profile is None:
+                tax_sell = self.tax_rate
+            if "slippage_rate" in getattr(self, "_explicit_params", set()) and profile is None:
+                slippage = self.slippage_rate
+        else:
+            fee_buy = self.fee_rate
+            fee_sell = self.fee_rate
+            tax_sell = self.tax_rate
+            slippage = self.slippage_rate
+
+        if is_dataclass(active_profile):
+            updates = {}
+            if hasattr(active_profile, "fee_buy") and active_profile.fee_buy != fee_buy:
+                updates["fee_buy"] = fee_buy
+            if hasattr(active_profile, "fee_sell") and active_profile.fee_sell != fee_sell:
+                updates["fee_sell"] = fee_sell
+            if hasattr(active_profile, "tax_sell") and active_profile.tax_sell != tax_sell:
+                updates["tax_sell"] = tax_sell
+            if hasattr(active_profile, "slippage") and active_profile.slippage != slippage:
+                updates["slippage"] = slippage
+            if hasattr(active_profile, "fee_rate") and not hasattr(active_profile, "fee_buy") and active_profile.fee_rate != fee_buy:
+                updates["fee_rate"] = fee_buy
+            if hasattr(active_profile, "tax_rate") and not hasattr(active_profile, "tax_sell") and active_profile.tax_rate != tax_sell:
+                updates["tax_rate"] = tax_sell
+            if hasattr(active_profile, "slippage_rate") and not hasattr(active_profile, "slippage") and active_profile.slippage_rate != slippage:
+                updates["slippage_rate"] = slippage
+            if updates:
+                active_profile = replace(active_profile, **updates)
 
         total_candles = len(df)
         cash = float(initial_cash)
@@ -127,9 +224,14 @@ class BacktestExecutionKernel:
             # 1. Fill Pending Order from Bar i-1 on Bar i Open (BT-TIME-001)
             # -----------------------------------------------------------------
             if pending_order is not None and pending_order.status == "QUEUED":
-                fill_price = open_price * (1.0 + self.slippage_rate) if pending_order.side == "BUY" else open_price * (1.0 - self.slippage_rate)
+                fill_price = open_price * (1.0 + slippage) if pending_order.side == "BUY" else open_price * (1.0 - slippage)
 
-                if pending_order.side == "BUY":
+                if fill_price <= 0.0:
+                    pending_order.status = "REJECTED"
+                    pending_order.rejection_reason = "Invalid non-positive fill price"
+                    warnings.append(f"Bar {i} ({bar_ts}): Order rejected due to invalid non-positive fill price")
+                    pending_order = None
+                elif pending_order.side == "BUY":
                     # Locked ceiling check (TEST-BT-004)
                     is_ceiling_locked = active_profile.rules.is_locked_ceiling(high_price, low_price, ceiling_price)
                     if is_ceiling_locked and active_profile.conservative_locked_limits:
@@ -139,7 +241,7 @@ class BacktestExecutionKernel:
                         pending_order = None
                     else:
                         lot_size = active_profile.lot_size
-                        cost_per_share = fill_price * (1.0 + self.fee_rate)
+                        cost_per_share = fill_price * (1.0 + fee_buy)
                         max_affordable = int((cash / cost_per_share) // lot_size) * lot_size
 
                         if max_affordable < lot_size:
@@ -148,19 +250,53 @@ class BacktestExecutionKernel:
                             warnings.append(f"Bar {i} ({bar_ts}): Buy order rejected due to insufficient cash")
                             pending_order = None
                         else:
-                            fill_qty = min(pending_order.quantity, float(max_affordable))
+                            if active_sizing_basis == "fill_estimate":
+                                # Causal lot sizing on fill price Open[T+1] (DEC-04, G-11)
+                                rm = getattr(strategy, "risk_management", None) if hasattr(strategy, "risk_management") else None
+                                if rm is not None:
+                                    if isinstance(rm, dict):
+                                        sl_pct = rm.get("stop_loss_pct") or rm.get("stop_loss_percent") or rm.get("stop_loss")
+                                        sl_price = rm.get("stop_loss_price")
+                                    else:
+                                        sl_pct = (
+                                            getattr(rm, "stop_loss_pct", None)
+                                            or getattr(rm, "stop_loss_percent", None)
+                                            or getattr(rm, "stop_loss", None)
+                                        )
+                                        sl_price = getattr(rm, "stop_loss_price", None)
+                                else:
+                                    sl_pct = None
+                                    sl_price = None
+
+                                if sl_pct and sl_price is None:
+                                    sl_price = fill_price * (1.0 - sl_pct / 100.0)
+
+                                fill_qty = float(self._calculate_quantity(
+                                    strategy.position_sizing,
+                                    cash,
+                                    fill_price,
+                                    lot_size=lot_size,
+                                    stop_loss_price=sl_price,
+                                    stop_loss_percent=sl_pct,
+                                    fee_rate=fee_buy,
+                                ))
+                                fill_qty = min(fill_qty, float(max_affordable))
+                            else:
+                                fill_qty = min(pending_order.quantity, float(max_affordable))
+
                             fill_qty = float(active_profile.rules.round_board_lot(fill_qty, lot_size))
-                            if fill_qty < lot_size:
+                            gross = fill_qty * fill_price
+                            fee = gross * fee_buy
+                            net = gross + fee
+
+                            if fill_qty < lot_size or net > (cash + 1e-9):
                                 pending_order.status = "REJECTED"
                                 pending_order.rejection_reason = f"Insufficient cash for minimum {lot_size} shares"
                                 warnings.append(f"Bar {i} ({bar_ts}): Buy order rejected due to insufficient cash")
                                 pending_order = None
                             else:
-                                gross = fill_qty * fill_price
-                                fee = gross * self.fee_rate
-                                net = gross + fee
-
                                 cash -= net
+                                pending_order.quantity = fill_qty
 
                                 execution = BacktestExecution(
                                     id=f"exec_{uuid.uuid4().hex[:8]}",
@@ -226,18 +362,32 @@ class BacktestExecutionKernel:
 
                 elif pending_order.side == "SELL":
                     if position.quantity > 0:
-                        sellable_qty = active_profile.settlement_engine.get_sellable_quantity(
-                            position.lots, bar_date, current_session_phase="open"
-                        )
-                        if not position.lots:
-                            holding_bars = (i - position.last_buy_bar_index) if position.last_buy_bar_index is not None else 0
-                            sellable_qty = position.quantity if holding_bars >= self.min_holding_bars else 0.0
+                        if not has_explicit and self.min_holding_bars == 0:
+                            sellable_qty = position.quantity
+                        else:
+                            sellable_qty = active_profile.settlement_engine.get_sellable_quantity(
+                                position.lots, bar_date, current_session_phase="open"
+                            )
+                            if not position.lots and position.last_buy_timestamp:
+                                acq_date = position.last_buy_timestamp.date() if hasattr(position.last_buy_timestamp, "date") else position.last_buy_timestamp
+                                if active_profile.settlement_engine.is_sellable(acq_date, bar_date, current_session_phase="open"):
+                                    sellable_qty = position.quantity
 
                         if sellable_qty <= 0:
-                            pending_order.status = "REJECTED"
-                            pending_order.rejection_reason = "UNSETTLED_HOLDING_T2: Shares unsettled under Vietnam T+2 rules"
-                            warnings.append(f"Bar {i} ({bar_ts}): Sell order rejected due to unsettled shares")
+                            earliest_release = min((l.sellable_date for l in position.lots if l.sellable_date), default=None)
+                            if earliest_release is None and position.last_buy_timestamp:
+                                acq_date = position.last_buy_timestamp.date() if hasattr(position.last_buy_timestamp, "date") else position.last_buy_timestamp
+                                earliest_release = active_profile.settlement_engine.calculate_sellable_date(acq_date)
+                            release_str = earliest_release.isoformat() if hasattr(earliest_release, "isoformat") else str(earliest_release) if earliest_release else "T+2"
+                            settlement_lbl = getattr(active_profile, "settlement_label", "T+1 · về sau 1 phiên")
+                            pending_order.status = RejectedSettlementLock("REJECTED_SETTLEMENT_LOCK")
+                            pending_order.rejection_reason = (
+                                f"LOT_SETTLEMENT_LOCKED (UNSETTLED_HOLDING_T2): Shares locked under {settlement_lbl}. "
+                                f"Available on {release_str}"
+                            )
+                            warnings.append(f"Bar {i} ({bar_ts}): Sell order rejected due to {settlement_lbl} lock (available on {release_str})")
                             pending_order = None
+
                         else:
                             is_floor_locked = active_profile.rules.is_locked_floor(high_price, low_price, floor_price)
                             if is_floor_locked and active_profile.conservative_locked_limits:
@@ -248,8 +398,8 @@ class BacktestExecutionKernel:
                             else:
                                 fill_qty = min(pending_order.quantity, sellable_qty)
                                 gross = fill_qty * fill_price
-                                fee = gross * self.fee_rate
-                                tax = gross * self.tax_rate
+                                fee = gross * fee_sell
+                                tax = gross * tax_sell
                                 net = gross - fee - tax
 
                                 cash += net
@@ -295,15 +445,22 @@ class BacktestExecutionKernel:
                                     active_trade.exit_price = fill_price
                                     active_trade.fees += fee
                                     active_trade.taxes += tax
-                                    active_trade.gross_pnl = (fill_price - active_trade.entry_price) * fill_qty
-                                    active_trade.net_pnl = active_trade.gross_pnl - active_trade.fees - active_trade.taxes
-                                    if active_trade.entry_price * fill_qty > 0:
-                                        active_trade.pnl_percent = (active_trade.net_pnl / (active_trade.entry_price * fill_qty)) * 100.0
+                                    rt_pnl = compute_round_trip_pnl(
+                                        entry_price=active_trade.entry_price,
+                                        exit_price=fill_price,
+                                        quantity=fill_qty,
+                                        side="LONG",
+                                        profile=active_profile,
+                                    )
+                                    active_trade.gross_pnl = rt_pnl.gross_pnl
+                                    active_trade.net_pnl = rt_pnl.net_pnl
+                                    active_trade.pnl_percent = rt_pnl.pnl_percent
                                     active_trade.holding_bars = i - active_trade.entry_bar_index
                                     active_trade.status = "closed"
-                                    if active_trade.net_pnl > 0.0:
+                                    active_trade.exit_reason = getattr(pending_order, "exit_reason", None) or getattr(pending_order, "order_type", "EXIT_SIGNAL")
+                                    if rt_pnl.is_winner:
                                         active_trade.result = "win"
-                                    elif active_trade.net_pnl < 0.0:
+                                    elif rt_pnl.is_loser:
                                         active_trade.result = "loss"
                                     else:
                                         active_trade.result = "breakeven"
@@ -316,72 +473,126 @@ class BacktestExecutionKernel:
                         pending_order = None
 
             # -----------------------------------------------------------------
-            # 2. Intraday Stop Loss / Take Profit (if position held & T+2 satisfied)
+            # 2. Stop Loss / Take Profit (if position held & holding/settlement satisfied)
             # -----------------------------------------------------------------
             if position.quantity > 0 and pending_order is None and position.last_buy_bar_index is not None:
-                holding_bars = i - position.last_buy_bar_index
-                if position.lots:
-                    sellable_intraday = active_profile.settlement_engine.get_sellable_quantity(
-                        position.lots, bar_date, current_session_phase="intraday"
-                    ) > 0
-                    if not has_explicit:
-                        sellable_intraday = sellable_intraday or (holding_bars >= self.min_holding_bars)
+                if not has_explicit and self.min_holding_bars == 0:
+                    sellable_intraday = True
                 else:
-                    sellable_intraday = holding_bars >= self.min_holding_bars
+                    phase_to_check = "intraday" if active_sl_tp_mode == "intraday_touch" else "close"
+                    sellable_intraday = False
+                    if position.lots:
+                        sellable_intraday = active_profile.settlement_engine.get_sellable_quantity(
+                            position.lots, bar_date, current_session_phase=phase_to_check
+                        ) > 0
+                    elif position.last_buy_timestamp:
+                        acq_date = position.last_buy_timestamp.date() if hasattr(position.last_buy_timestamp, "date") else position.last_buy_timestamp
+                        sellable_intraday = active_profile.settlement_engine.is_sellable(
+                            acq_date, bar_date, current_session_phase=phase_to_check
+                        )
 
                 if sellable_intraday and hasattr(strategy, "risk_management") and strategy.risk_management:
-                    sl_pct = getattr(strategy.risk_management, "stop_loss_percent", None) or getattr(strategy.risk_management, "stop_loss", None)
-                    tp_pct = getattr(strategy.risk_management, "take_profit_percent", None) or getattr(strategy.risk_management, "take_profit", None)
+                    rm = strategy.risk_management
+                    if isinstance(rm, dict):
+                        sl_pct = rm.get("stop_loss_pct") or rm.get("stop_loss_percent") or rm.get("stop_loss")
+                        tp_pct = rm.get("take_profit_pct") or rm.get("take_profit_percent") or rm.get("take_profit")
+                        sl_price = rm.get("stop_loss_price")
+                        tp_price = rm.get("take_profit_price")
+                    else:
+                        sl_pct = (
+                            getattr(rm, "stop_loss_pct", None)
+                            or getattr(rm, "stop_loss_percent", None)
+                            or getattr(rm, "stop_loss", None)
+                        )
+                        tp_pct = (
+                            getattr(rm, "take_profit_pct", None)
+                            or getattr(rm, "take_profit_percent", None)
+                            or getattr(rm, "take_profit", None)
+                        )
+                        sl_price = getattr(rm, "stop_loss_price", None)
+                        tp_price = getattr(rm, "take_profit_price", None)
 
-                    sl_price = position.average_price * (1.0 - sl_pct / 100.0) if sl_pct else None
-                    tp_price = position.average_price * (1.0 + tp_pct / 100.0) if tp_pct else None
+                    if sl_price is None and sl_pct:
+                        sl_price = position.average_price * (1.0 - sl_pct / 100.0)
+
+                    if tp_price is None and tp_pct:
+                        tp_price = position.average_price * (1.0 + tp_pct / 100.0)
 
                     hit_sl = sl_price is not None and low_price <= sl_price
                     hit_tp = tp_price is not None and high_price >= tp_price
 
-                    # Conservative precedence: Stop Loss triggers first if simultaneous
-                    if hit_sl:
-                        is_floor_locked = active_profile.rules.is_locked_floor(high_price, low_price, floor_price)
-                        if is_floor_locked and active_profile.conservative_locked_limits:
-                            warnings.append(f"Bar {i} ({bar_ts}): Intraday stop-loss suppressed due to floor locked limit")
+                    # Conservative precedence: Stop Loss triggers first if simultaneous (DEC-03)
+                    if hit_sl or hit_tp:
+                        reason = "STOP_LOSS" if hit_sl else "TAKE_PROFIT"
+                        trigger_price = sl_price if hit_sl else tp_price
+
+                        if active_sl_tp_mode == "intraday_touch":
+                            is_floor_locked = active_profile.rules.is_locked_floor(high_price, low_price, floor_price)
+                            if is_floor_locked and active_profile.conservative_locked_limits:
+                                warnings.append(f"Bar {i} ({bar_ts}): Intraday {reason} suppressed due to floor locked limit")
+                            else:
+                                exit_price = min(open_price, sl_price) if hit_sl else max(open_price, tp_price)
+                                self._execute_intraday_exit(
+                                    i=i,
+                                    bar_ts=bar_ts,
+                                    symbol=symbol,
+                                    exit_price=exit_price,
+                                    reason=reason,
+                                    position=position,
+                                    active_trade=active_trade,
+                                    orders=orders,
+                                    executions=executions,
+                                    active_profile=active_profile,
+                                    bar_date=bar_date,
+                                    fee_sell=fee_sell,
+                                    tax_sell=tax_sell,
+                                )
+                                cash += self._last_exit_net
+                                active_trade = None
                         else:
-                            exit_price = min(open_price, sl_price)
-                            self._execute_intraday_exit(
-                                i=i,
-                                bar_ts=bar_ts,
-                                symbol=symbol,
-                                exit_price=exit_price,
-                                reason="STOP_LOSS",
-                                position=position,
-                                active_trade=active_trade,
-                                orders=orders,
-                                executions=executions,
-                                active_profile=active_profile,
-                                bar_date=bar_date,
-                            )
-                            cash += self._last_exit_net
-                            active_trade = None
-                    elif hit_tp:
-                        is_floor_locked = active_profile.rules.is_locked_floor(high_price, low_price, floor_price)
-                        if is_floor_locked and active_profile.conservative_locked_limits:
-                            warnings.append(f"Bar {i} ({bar_ts}): Intraday take-profit suppressed due to floor locked limit")
-                        else:
-                            exit_price = max(open_price, tp_price)
-                            self._execute_intraday_exit(
-                                i=i,
-                                bar_ts=bar_ts,
-                                symbol=symbol,
-                                exit_price=exit_price,
-                                reason="TAKE_PROFIT",
-                                position=position,
-                                active_trade=active_trade,
-                                orders=orders,
-                                executions=executions,
-                                active_profile=active_profile,
-                                bar_date=bar_date,
-                            )
-                            cash += self._last_exit_net
-                            active_trade = None
+                            # Canonical Next-Open SL/TP (DEC-03, G-04)
+                            # Queue exit order at bar i close to fill at Open[i+1]
+                            if i == total_candles - 1:
+                                # Final Bar Cutoff (G-05)
+                                cutoff_order = BacktestOrder(
+                                    id=f"ord_{uuid.uuid4().hex[:8]}",
+                                    symbol=symbol,
+                                    side="SELL",
+                                    order_type="MARKET_NEXT_OPEN",
+                                    quantity=position.quantity,
+                                    signal_bar_index=i,
+                                    signal_timestamp=bar_ts,
+                                    order_bar_index=i,
+                                    order_timestamp=bar_ts,
+                                    requested_price=trigger_price,
+                                    status="UNFILLED_AT_CUTOFF",
+                                    rejection_reason=f"{reason} breach on final bar; no subsequent trading bar exists",
+                                )
+                                cutoff_order.exit_reason = reason
+                                orders.append(cutoff_order)
+                                unexecuted_signals.append({
+                                    "bar_index": i,
+                                    "timestamp": bar_ts,
+                                    "action": "SELL",
+                                    "reason": "UNFILLED_AT_CUTOFF",
+                                })
+                            else:
+                                exit_order = BacktestOrder(
+                                    id=f"ord_{uuid.uuid4().hex[:8]}",
+                                    symbol=symbol,
+                                    side="SELL",
+                                    order_type="MARKET_NEXT_OPEN",
+                                    quantity=position.quantity,
+                                    signal_bar_index=i,
+                                    signal_timestamp=bar_ts,
+                                    order_bar_index=i,
+                                    order_timestamp=bar_ts,
+                                    requested_price=trigger_price,
+                                    status="QUEUED",
+                                )
+                                exit_order.exit_reason = reason
+                                orders.append(exit_order)
+                                pending_order = exit_order
 
             # -----------------------------------------------------------------
             # 3. Strategy Rule Evaluation on Bar Close (Signal at Close[T])
@@ -417,7 +628,34 @@ class BacktestExecutionKernel:
                                 "reason": "UNFILLED_AT_CUTOFF",
                             })
                         else:
-                            qty = self._calculate_quantity(strategy.position_sizing, cash, close_price, lot_size=active_profile.lot_size)
+                            rm = getattr(strategy, "risk_management", None) if hasattr(strategy, "risk_management") else None
+                            if rm is not None:
+                                if isinstance(rm, dict):
+                                    sl_pct = rm.get("stop_loss_pct") or rm.get("stop_loss_percent") or rm.get("stop_loss")
+                                    sl_price = rm.get("stop_loss_price")
+                                else:
+                                    sl_pct = (
+                                        getattr(rm, "stop_loss_pct", None)
+                                        or getattr(rm, "stop_loss_percent", None)
+                                        or getattr(rm, "stop_loss", None)
+                                    )
+                                    sl_price = getattr(rm, "stop_loss_price", None)
+                            else:
+                                sl_pct = None
+                                sl_price = None
+
+                            if sl_pct and sl_price is None:
+                                sl_price = close_price * (1.0 - sl_pct / 100.0)
+
+                            qty = self._calculate_quantity(
+                                strategy.position_sizing,
+                                cash,
+                                close_price,
+                                lot_size=active_profile.lot_size,
+                                stop_loss_price=sl_price,
+                                stop_loss_percent=sl_pct,
+                                fee_rate=fee_buy,
+                            )
                             if qty >= active_profile.lot_size:
                                 order = BacktestOrder(
                                     id=f"ord_{uuid.uuid4().hex[:8]}",
@@ -432,6 +670,8 @@ class BacktestExecutionKernel:
                                     requested_price=close_price,
                                     status="QUEUED",
                                 )
+                                order.sizing_basis = active_sizing_basis
+                                order.provisional_quantity = float(qty)
                                 orders.append(order)
                                 pending_order = order
                             else:
@@ -453,13 +693,8 @@ class BacktestExecutionKernel:
                                 warnings.append(f"Bar {i} ({bar_ts}): Buy signal rejected due to cash sizing below {active_profile.lot_size} shares")
 
                 elif position.quantity > 0 and pending_order is None and position.last_buy_bar_index is not None:
-                    # In explicit profile mode, evaluate exit signal so order is queued and checked at execution time.
-                    # In legacy mode (without explicit profile), enforce min_holding_bars before evaluating exit rules.
-                    if has_explicit:
-                        evaluate_exit = True
-                    else:
-                        holding_bars = i - position.last_buy_bar_index
-                        evaluate_exit = (holding_bars >= self.min_holding_bars)
+                    # Evaluate exit signal so order is queued and authoritative SettlementEngine enforces sellability at execution time.
+                    evaluate_exit = True
 
                     if evaluate_exit:
                         if StrategyRuleEvaluator.evaluate_rules(strategy.exit_rules, current, previous):
@@ -582,12 +817,32 @@ class BacktestExecutionKernel:
         executions: List[BacktestExecution],
         active_profile: Optional[MarketProfile] = None,
         bar_date: Optional[date] = None,
+        fee_sell: Optional[float] = None,
+        tax_sell: Optional[float] = None,
     ) -> None:
         """Helper to process intraday SL/TP executions."""
+        eff_fee_sell = (
+            fee_sell
+            if fee_sell is not None
+            else (
+                getattr(active_profile, "fee_sell", getattr(active_profile, "fee_rate", self.fee_rate))
+                if active_profile is not None
+                else self.fee_rate
+            )
+        )
+        eff_tax_sell = (
+            tax_sell
+            if tax_sell is not None
+            else (
+                getattr(active_profile, "tax_sell", getattr(active_profile, "tax_rate", self.tax_rate))
+                if active_profile is not None
+                else self.tax_rate
+            )
+        )
         qty = position.quantity
         gross = qty * exit_price
-        fee = gross * self.fee_rate
-        tax = gross * self.tax_rate
+        fee = gross * eff_fee_sell
+        tax = gross * eff_tax_sell
         net = gross - fee - tax
         self._last_exit_net = net
 
@@ -645,37 +900,68 @@ class BacktestExecutionKernel:
             active_trade.exit_price = exit_price
             active_trade.fees += fee
             active_trade.taxes += tax
-            active_trade.gross_pnl = (exit_price - active_trade.entry_price) * active_trade.quantity
-            active_trade.net_pnl = active_trade.gross_pnl - active_trade.fees - active_trade.taxes
-            if active_trade.entry_price * active_trade.quantity > 0:
-                active_trade.pnl_percent = (active_trade.net_pnl / (active_trade.entry_price * active_trade.quantity)) * 100.0
+            rt_pnl = compute_round_trip_pnl(
+                entry_price=active_trade.entry_price,
+                exit_price=exit_price,
+                quantity=active_trade.quantity,
+                side="LONG",
+                profile=active_profile,
+            )
+            active_trade.gross_pnl = rt_pnl.gross_pnl
+            active_trade.net_pnl = rt_pnl.net_pnl
+            active_trade.pnl_percent = rt_pnl.pnl_percent
             active_trade.holding_bars = i - active_trade.entry_bar_index
             active_trade.status = "closed"
             active_trade.exit_reason = reason
-            if active_trade.net_pnl > 0.0:
+            if rt_pnl.is_winner:
                 active_trade.result = "win"
-            elif active_trade.net_pnl < 0.0:
+            elif rt_pnl.is_loser:
                 active_trade.result = "loss"
             else:
                 active_trade.result = "breakeven"
 
-    def _calculate_quantity(self, sizing: Any, current_cash: float, price: float, lot_size: int = 100) -> int:
+    def _calculate_quantity(
+        self,
+        sizing: Any,
+        current_cash: float,
+        price: float,
+        lot_size: int = 100,
+        stop_loss_price: Optional[float] = None,
+        stop_loss_percent: Optional[float] = None,
+        fee_rate: Optional[float] = None,
+    ) -> int:
         """Calculate fee-aware lot sizing aligned with Vietnam 100-share lots."""
-        if not sizing or lot_size <= 0:
+        if not sizing or lot_size <= 0 or price <= 0:
             return 0
 
+        effective_fee_rate = fee_rate if fee_rate is not None else self.fee_rate
         method = getattr(sizing, "method", None) or (sizing.get("method") if isinstance(sizing, dict) else None)
-        cost_per_share = price * (1.0 + self.fee_rate)
+        cost_per_share = price * (1.0 + effective_fee_rate)
+        max_buyable = int((current_cash / cost_per_share) // lot_size) * lot_size
 
         if method == "fixed_quantity":
             qty = getattr(sizing, "quantity", None) or (sizing.get("quantity") if isinstance(sizing, dict) else 0)
-            max_buyable = int((current_cash / cost_per_share) // lot_size) * lot_size
             return max(0, min(int(qty), max_buyable))
 
         elif method == "percent_equity":
             percent = getattr(sizing, "percent", None) or (sizing.get("percent") if isinstance(sizing, dict) else 100.0)
             amount = current_cash * (float(percent) / 100.0)
-            max_buyable = int((amount / cost_per_share) // lot_size) * lot_size
-            return max(0, max_buyable)
+            alloc_buyable = int((amount / cost_per_share) // lot_size) * lot_size
+            return max(0, min(alloc_buyable, max_buyable))
+
+        elif method in ("risk_percent", "risk_based"):
+            risk_pct = getattr(sizing, "risk_percent", None) or getattr(sizing, "percent", None) or (
+                sizing.get("risk_percent") if isinstance(sizing, dict) else (sizing.get("percent") if isinstance(sizing, dict) else 1.0)
+            )
+            risk_cash = current_cash * (float(risk_pct) / 100.0)
+            if stop_loss_price is not None and abs(price - stop_loss_price) > 0:
+                delta_p = abs(price - stop_loss_price)
+            elif stop_loss_percent is not None and stop_loss_percent > 0:
+                delta_p = price * (float(stop_loss_percent) / 100.0)
+            else:
+                delta_p = price * 0.05  # default 5% risk per share if unspecified
+
+            risk_qty = int((risk_cash / delta_p) // lot_size) * lot_size
+            return max(0, min(risk_qty, max_buyable))
 
         return 0

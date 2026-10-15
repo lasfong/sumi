@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 import csv
 import io
 import math
+import numpy as np
 
 from app.domain.backtest.models import BacktestTrade
 
@@ -52,12 +53,16 @@ class BenchmarkMetricRow:
     # 8. L. Avg % Loss (Section 22.9): Mean return_pct of losing trades, N/A if 0 losers. PRESERVES NEGATIVE SIGN.
     loss_avg_loss_pct: Optional[float] = None
 
-    # Auxiliary metrics & holding integrity (Section 24, TEST-BT-005)
+    # Auxiliary metrics & holding integrity (Section 24, TEST-BT-005, DEC-05, G-08, G-09, G-10)
     num_winners: int = 0
     num_losers: int = 0
     num_breakeven: int = 0
     profit_factor: Optional[float] = None
-    max_drawdown: float = 0.0
+    profit_factor_display: str = "N/A"
+    low_sample_warning: bool = False
+    low_sample_message: Optional[str] = None
+    sharpe_ratio: Optional[float] = None
+    max_drawdown: Optional[float] = 0.0
     open_position_quantity: float = 0.0
     open_position_value: float = 0.0
 
@@ -83,10 +88,102 @@ class BenchmarkMetricRow:
             "num_losers": self.num_losers,
             "num_breakeven": self.num_breakeven,
             "profit_factor": self.profit_factor,
+            "profit_factor_display": self.profit_factor_display,
+            "low_sample_warning": self.low_sample_warning,
+            "low_sample_message": self.low_sample_message,
+            "sharpe_ratio": self.sharpe_ratio,
             "max_drawdown": self.max_drawdown,
             "open_position_quantity": self.open_position_quantity,
             "open_position_value": self.open_position_value,
         }
+
+
+def calculate_daily_returns_from_equity_curve(equity_curve: List[Any]) -> List[float]:
+    """Extract arithmetic daily simple returns r_t = (E_t - E_{t-1}) / E_{t-1}."""
+    if not equity_curve:
+        return []
+
+    equities: List[float] = []
+    for point in equity_curve:
+        if isinstance(point, dict):
+            val = point.get("equity", point.get("portfolio_value", 0.0))
+        elif hasattr(point, "equity"):
+            val = getattr(point, "equity")
+        elif hasattr(point, "portfolio_value"):
+            val = getattr(point, "portfolio_value")
+        else:
+            try:
+                val = float(point)
+            except (ValueError, TypeError):
+                continue
+        if val is not None:
+            equities.append(float(val))
+
+    if len(equities) < 2:
+        return []
+
+    returns: List[float] = []
+    for i in range(1, len(equities)):
+        prev = equities[i - 1]
+        if prev > 0:
+            returns.append((equities[i] - prev) / prev)
+    return returns
+
+
+def calculate_sharpe_ratio(equity_curve: List[Any], rf_annual: float = 0.0) -> float:
+    """Annualized daily Sharpe ratio with rf=0.0 default, ddof=1, sqrt(252).
+
+    If len(returns) < 2 or sample std == 0: returns 0.0.
+    """
+    returns = calculate_daily_returns_from_equity_curve(equity_curve)
+    if len(returns) < 2:
+        return 0.0
+
+    r_arr = np.array(returns, dtype=float)
+    rf_daily = ((1.0 + rf_annual) ** (1.0 / 252.0) - 1.0) if rf_annual > 0 else 0.0
+    excess = r_arr - rf_daily
+    std = float(np.std(excess, ddof=1))
+    if std == 0.0 or math.isnan(std):
+        return 0.0
+
+    sharpe = (float(np.mean(excess)) / std) * math.sqrt(252.0)
+    return round(float(sharpe), 4)
+
+
+def calculate_max_drawdown(equity_curve: List[Any]) -> float:
+    """Close-based maximum drawdown: max_t (peak_t - E_t) / peak_t."""
+    if not equity_curve:
+        return 0.0
+
+    equities: List[float] = []
+    for point in equity_curve:
+        if isinstance(point, dict):
+            val = point.get("equity", point.get("portfolio_value", 0.0))
+        elif hasattr(point, "equity"):
+            val = getattr(point, "equity")
+        elif hasattr(point, "portfolio_value"):
+            val = getattr(point, "portfolio_value")
+        else:
+            try:
+                val = float(point)
+            except (ValueError, TypeError):
+                continue
+        if val is not None:
+            equities.append(float(val))
+
+    if not equities:
+        return 0.0
+
+    peak = equities[0]
+    max_dd = 0.0
+    for eq in equities:
+        if eq > peak:
+            peak = eq
+        if peak > 0:
+            dd = (peak - eq) / peak
+            if dd > max_dd:
+                max_dd = dd
+    return round(float(max_dd), 6)
 
 
 def calculate_benchmark_metrics(
@@ -100,20 +197,37 @@ def calculate_benchmark_metrics(
     final_equity: Optional[float] = None,
     open_position_quantity: float = 0.0,
     open_position_value: float = 0.0,
-    max_drawdown: float = 0.0,
+    max_drawdown: Optional[float] = None,
+    equity_curve: Optional[List[Any]] = None,
+    sharpe_ratio: Optional[float] = None,
+    rf_annual: float = 0.0,
 ) -> BenchmarkMetricRow:
     """Calculate exact Master 9 benchmark metrics without intermediate rounding.
 
     Invariants:
     - Only CLOSED trades are evaluated (TEST-BT-005).
-    - Break-even trades (return_pct >= 0.0) count as WINNERS (Section 22.7).
+    - Strict winner rule: net_pnl > 0. Breakeven is counted in denominator, NOT in numerator (DEC-05, G-02).
     - Losing trade averages retain negative signs (Section 22.9).
-    - Edge cases (0 trades, 0 winners, 0 losers) evaluate to None (TEST-MET-002).
+    - Net Profit Factor: gross_wins_net / gross_losses_net, None on 0 loss (DEC-05, G-08).
+    - Low-sample warning gate: N < 30 (G-09).
+    - Annualized daily Sharpe & Close-based Max Drawdown (G-10).
     """
     closed_trades = [t for t in trades if getattr(t, "status", "") == "closed"]
 
     actual_final_cash = final_cash if final_cash is not None else initial_cash
     actual_final_equity = final_equity if final_equity is not None else (actual_final_cash + open_position_value)
+
+    if equity_curve:
+        if sharpe_ratio is None:
+            sharpe_ratio = calculate_sharpe_ratio(equity_curve, rf_annual=rf_annual)
+        if max_drawdown is None or max_drawdown == 0.0:
+            mdd = calculate_max_drawdown(equity_curve)
+            if mdd > 0:
+                max_drawdown = mdd
+    if max_drawdown is None:
+        max_drawdown = 0.0
+    if sharpe_ratio is None:
+        sharpe_ratio = 0.0
 
     if not closed_trades:
         # Zero trades edge case (TEST-MET-002)
@@ -137,13 +251,17 @@ def calculate_benchmark_metrics(
             num_losers=0,
             num_breakeven=0,
             profit_factor=None,
+            profit_factor_display="N/A",
+            low_sample_warning=True,
+            low_sample_message="mẫu nhỏ (<30), độ tin cậy thấp",
+            sharpe_ratio=sharpe_ratio,
             max_drawdown=max_drawdown,
             open_position_quantity=open_position_quantity,
             open_position_value=open_position_value,
         )
 
     # 1. Net Profit (Section 22.2)
-    net_profit = sum(t.net_pnl for t in closed_trades)
+    net_profit = sum(getattr(t, "net_pnl", 0.0) for t in closed_trades)
 
     # 2. % Net Profit (Section 22.3)
     net_profit_pct = (100.0 * net_profit / initial_cash) if initial_cash > 0 else 0.0
@@ -152,44 +270,91 @@ def calculate_benchmark_metrics(
     num_trades = len(closed_trades)
 
     # 4. Avg % Profit/Loss (Section 22.5)
-    trade_returns = [t.pnl_percent for t in closed_trades]
+    trade_returns = [getattr(t, "pnl_percent", 0.0) for t in closed_trades]
     avg_profit_loss_pct = sum(trade_returns) / num_trades
 
     # 5. Avg Bars Held (Section 22.6)
     bars_held_list = [
         (t.exit_bar_index - t.entry_bar_index)
-        if (t.exit_bar_index is not None and t.entry_bar_index is not None)
-        else t.holding_bars
+        if (getattr(t, "exit_bar_index", None) is not None and getattr(t, "entry_bar_index", None) is not None)
+        else getattr(t, "holding_bars", 0)
         for t in closed_trades
     ]
     avg_bars_held = sum(bars_held_list) / num_trades
 
-    # 6. Winners / Losers Classification (Section 22.7, break-even is winner: return_pct >= 0)
-    winners = [t for t in closed_trades if t.pnl_percent >= 0.0]
-    losers = [t for t in closed_trades if t.pnl_percent < 0.0]
-    breakevens = [t for t in closed_trades if t.pnl_percent == 0.0]
+    # 6. Winners / Losers Classification (DEC-05 & G-02 strict winner rule: net_pnl > 0)
+    def _is_be(t: Any) -> bool:
+        val = getattr(t, "net_pnl", None)
+        if val is None:
+            val = getattr(t, "pnl_percent", 0.0)
+        return math.isclose(float(val), 0.0, abs_tol=1e-9)
+
+    def _is_win(t: Any) -> bool:
+        if _is_be(t):
+            return False
+        val = getattr(t, "net_pnl", None)
+        if val is None:
+            val = getattr(t, "pnl_percent", 0.0)
+        return float(val) > 0.0
+
+    def _is_loss(t: Any) -> bool:
+        if _is_be(t):
+            return False
+        val = getattr(t, "net_pnl", None)
+        if val is None:
+            val = getattr(t, "pnl_percent", 0.0)
+        return float(val) < 0.0
+
+    winners = [t for t in closed_trades if _is_win(t)]
+    breakevens = [t for t in closed_trades if _is_be(t)]
+    losers = [t for t in closed_trades if _is_loss(t)]
 
     num_winners = len(winners)
-    num_losers = len(losers)
     num_breakeven = len(breakevens)
+    num_losers = len(losers)
 
-    win_rate_pct = 100.0 * num_winners / num_trades
+    win_rate_pct = (100.0 * num_winners / num_trades) if num_trades > 0 else None
 
-    # 7. W. Avg % Profit (Section 22.8)
-    win_avg_profit_pct = (sum(t.pnl_percent for t in winners) / num_winners) if num_winners > 0 else None
+    # 7. W. Avg % Profit (Section 22.8) - Only true winners
+    win_avg_profit_pct = (sum(getattr(t, "pnl_percent", 0.0) for t in winners) / num_winners) if num_winners > 0 else None
 
-    # 8. L. Avg % Loss (Section 22.9 - PRESERVES NEGATIVE SIGN)
-    loss_avg_loss_pct = (sum(t.pnl_percent for t in losers) / num_losers) if num_losers > 0 else None
+    # 8. L. Avg % Loss (Section 22.9 - PRESERVES NEGATIVE SIGN) - Only true losers
+    loss_avg_loss_pct = (sum(getattr(t, "pnl_percent", 0.0) for t in losers) / num_losers) if num_losers > 0 else None
 
-    # Auxiliary Profit Factor
-    gross_profit = sum(t.gross_pnl for t in closed_trades if t.gross_pnl > 0)
-    gross_loss = sum(abs(t.gross_pnl) for t in closed_trades if t.gross_pnl < 0)
-    if gross_loss > 0:
-        profit_factor = gross_profit / gross_loss
-    elif gross_profit > 0:
-        profit_factor = float("inf")
+    # Net Profit Factor (DEC-05 & G-08)
+    def _trade_net_pnl(t: Any) -> float:
+        if hasattr(t, "net_pnl") and t.net_pnl is not None:
+            return float(t.net_pnl)
+        if hasattr(t, "gross_pnl") and t.gross_pnl is not None:
+            return float(t.gross_pnl)
+        if hasattr(t, "pnl_percent") and t.pnl_percent is not None:
+            return float(t.pnl_percent)
+        return 0.0
+
+    gross_wins_net = sum(
+        _trade_net_pnl(t)
+        for t in closed_trades
+        if _trade_net_pnl(t) > 0.0 and not math.isclose(_trade_net_pnl(t), 0.0, abs_tol=1e-9)
+    )
+    gross_losses_net = abs(sum(
+        _trade_net_pnl(t)
+        for t in closed_trades
+        if _trade_net_pnl(t) < 0.0 and not math.isclose(_trade_net_pnl(t), 0.0, abs_tol=1e-9)
+    ))
+
+    if gross_losses_net > 0:
+        profit_factor = gross_wins_net / gross_losses_net
+        profit_factor_display = f"{profit_factor:.2f}"
+    elif gross_wins_net > 0:
+        profit_factor = None
+        profit_factor_display = "N/A (chưa có lệnh thua)"
     else:
         profit_factor = None
+        profit_factor_display = "N/A"
+
+    # Low-Sample Warning Gate (G-09)
+    low_sample_warning = (num_trades < 30)
+    low_sample_message = "mẫu nhỏ (<30), độ tin cậy thấp" if low_sample_warning else None
 
     return BenchmarkMetricRow(
         ticker=ticker,
@@ -211,6 +376,10 @@ def calculate_benchmark_metrics(
         num_losers=num_losers,
         num_breakeven=num_breakeven,
         profit_factor=profit_factor,
+        profit_factor_display=profit_factor_display,
+        low_sample_warning=low_sample_warning,
+        low_sample_message=low_sample_message,
+        sharpe_ratio=sharpe_ratio,
         max_drawdown=max_drawdown,
         open_position_quantity=open_position_quantity,
         open_position_value=open_position_value,
@@ -283,7 +452,7 @@ def compare_phases(
     elif degradation_pct is not None and degradation_pct <= degradation_threshold_pct:
         is_degraded = True
 
-    drawdown_delta = target_row.max_drawdown - base_row.max_drawdown
+    drawdown_delta = (target_row.max_drawdown or 0.0) - (base_row.max_drawdown or 0.0)
 
     return CrossPhaseComparison(
         ticker=target_row.ticker,
@@ -400,6 +569,12 @@ def build_phase_metric_matrix(
             num_winners=tot_winners,
             num_losers=tot_losers,
             num_breakeven=tot_breakeven,
+            profit_factor=None,
+            profit_factor_display="N/A",
+            low_sample_warning=(tot_trades < 30),
+            low_sample_message="mẫu nhỏ (<30), độ tin cậy thấp" if (tot_trades < 30) else None,
+            sharpe_ratio=None,
+            max_drawdown=max((r.max_drawdown for r in phase_rows if r.max_drawdown is not None), default=0.0),
             open_position_quantity=tot_open_qty,
             open_position_value=tot_open_val,
         )
@@ -490,6 +665,10 @@ class BenchmarkTableRenderer:
             "% of Winners": cls._format_value(row.win_rate_pct, is_percent=True, decimals=decimals),
             "W. Avg % Profit": cls._format_value(row.win_avg_profit_pct, is_percent=True, decimals=decimals),
             "L. Avg % Loss": cls._format_value(row.loss_avg_loss_pct, is_percent=True, decimals=decimals),
+            "Profit Factor": row.profit_factor_display,
+            "Low Sample Warning": str(row.low_sample_warning),
+            "Sharpe Ratio": cls._format_value(row.sharpe_ratio, decimals=decimals),
+            "Max Drawdown": cls._format_value(row.max_drawdown, is_percent=True, decimals=decimals) if row.max_drawdown is not None else "N/A",
         }
 
     @classmethod

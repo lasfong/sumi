@@ -1,8 +1,26 @@
 import { apiClient } from './client';
 
+export type MappingStatus = 'OK' | 'EMPTY_WARMING' | 'UNMAPPED_COLUMN' | 'INVALID_SPEC';
+
+export interface IndicatorMeta {
+  status: MappingStatus;
+  warmup_bars: number;
+  available_bars: number;
+  is_projected_clamped: boolean;
+}
+
+export interface ReplayIndicatorResponse {
+  session_id: number;
+  timeframe: string;
+  indicator: string;
+  data: IndicatorDataPoint[];
+  meta: IndicatorMeta;
+}
+
 export interface IndicatorDataPoint {
   timestamp: string;
-  [key: string]: string | number | null;
+  is_projected?: boolean;
+  [key: string]: string | number | boolean | null | undefined;
 }
 
 export interface IndicatorParamDefinition {
@@ -40,9 +58,19 @@ export const getIndicatorData = async (symbol: string, indicator: string, params
 export const getSessionIndicatorData = async (sessionId: number, indicator: string, params: Record<string, string | number | boolean> = {}, signal?: AbortSignal, timeframe?: string): Promise<IndicatorDataPoint[]> => {
   const queryParams: Record<string, string | number | boolean> = { indicator, ...params };
   if (timeframe) queryParams.timeframe = timeframe;
-  const response = await apiClient.get(`/replay/sessions/${sessionId}/indicators`, {
+  const response = await apiClient.get<ReplayIndicatorResponse>(`/replay/sessions/${sessionId}/indicators`, {
     signal,
     params: queryParams
   });
   return response.data.data;
+};
+
+export const getSessionIndicatorResponse = async (sessionId: number, indicator: string, params: Record<string, string | number | boolean> = {}, signal?: AbortSignal, timeframe?: string): Promise<ReplayIndicatorResponse> => {
+  const queryParams: Record<string, string | number | boolean> = { indicator, ...params };
+  if (timeframe) queryParams.timeframe = timeframe;
+  const response = await apiClient.get<ReplayIndicatorResponse>(`/replay/sessions/${sessionId}/indicators`, {
+    signal,
+    params: queryParams
+  });
+  return response.data;
 };

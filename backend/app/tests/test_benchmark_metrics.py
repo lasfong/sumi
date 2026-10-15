@@ -68,7 +68,7 @@ def _make_closed_trade(
         taxes=10.0,
         pnl_percent=pnl_percent,
         status="closed",
-        result="win" if pnl_percent >= 0 else "loss",
+        result="win" if pnl_percent > 0 else ("breakeven" if pnl_percent == 0 else "loss"),
     )
 
 
@@ -187,14 +187,14 @@ def test_golden_trade_ledger_exact_nine_metrics():
     # 6. Avg Bars Held: (5 + 2 + 3 + 4) / 4 = 14 / 4 = 3.5
     assert metrics.avg_bars_held == 3.5
 
-    # 7. % of Winners: 3 winners (T1, T3, and break-even T4) out of 4 = 75.0%
-    assert metrics.num_winners == 3
+    # 7. % of Winners (DEC-05 & G-02): 2 winners (T1, T3), T4 is break-even (not-winner) out of 4 closed = 50.0%
+    assert metrics.num_winners == 2
     assert metrics.num_breakeven == 1
     assert metrics.num_losers == 1
-    assert metrics.win_rate_pct == 75.0
+    assert metrics.win_rate_pct == 50.0
 
-    # 8. W. Avg % Profit: (10.0 + 10.0 + 0.0) / 3 = 20.0 / 3 = 6.666666666666667
-    assert pytest.approx(metrics.win_avg_profit_pct, rel=1e-6) == 20.0 / 3.0
+    # 8. W. Avg % Profit: arithmetic mean of true winners (10.0 + 10.0) / 2 = 10.0%
+    assert metrics.win_avg_profit_pct == 10.0
 
     # 9. L. Avg % Loss: -5.0 (PRESERVING NEGATIVE SIGN!)
     assert metrics.loss_avg_loss_pct == -5.0
@@ -289,7 +289,7 @@ def test_edge_cases_all_losers_zero_winners():
 
 
 def test_break_even_convention():
-    """Verify break-even trades (return == 0.0) strictly count as winners."""
+    """Verify break-even trades (return == 0.0) strictly count as not-winners (DEC-05, G-02)."""
     trades = [
         _make_closed_trade("T1", "FPT", 0, 2, 0.0, 0.0),
     ]
@@ -300,11 +300,18 @@ def test_break_even_convention():
     )
 
     assert metrics.num_trades == 1
-    assert metrics.num_winners == 1
+    assert metrics.num_winners == 0
+    assert metrics.num_breakeven == 1
     assert metrics.num_losers == 0
-    assert metrics.win_rate_pct == 100.0
-    assert metrics.win_avg_profit_pct == 0.0
+    assert metrics.win_rate_pct == 0.0
+    assert metrics.win_avg_profit_pct is None
     assert metrics.loss_avg_loss_pct is None
+
+    # Table rendering checks:
+    formatted = BenchmarkTableRenderer.format_row_dict(metrics)
+    assert formatted["% of Winners"] == "0.0%"
+    assert formatted["W. Avg % Profit"] == "N/A"
+    assert formatted["L. Avg % Loss"] == "N/A"
 
 
 # ============================================================================

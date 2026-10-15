@@ -1,5 +1,5 @@
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 from fastapi import HTTPException
 from sqlalchemy import and_
@@ -19,12 +19,31 @@ from app.schemas.practice_workflow_schema import (
     PracticeTrade,
     PracticeWorkflowSnapshot,
 )
+from app.domain.market.rules import DEFAULT_VN_MARKET_PROFILE
+from app.domain.accounting import (
+    compute_round_trip_pnl,
+    calculate_net_pnl,
+    calculate_pnl_percent,
+)
+from pydantic.fields import FieldInfo
 from app.services.replay_service import ReplayService
-from app.utils.date_range import end_before, start_at
+from app.utils.date_range import end_before, start_at, normalize_datetime
+
+if "settlement_label" not in PracticeWorkflowSnapshot.model_fields:
+    PracticeWorkflowSnapshot.model_fields["settlement_label"] = FieldInfo.from_annotation(str)
+    PracticeWorkflowSnapshot.model_fields["settlement_label"].default = DEFAULT_VN_MARKET_PROFILE.settlement_label
+    PracticeWorkflowSnapshot.model_rebuild(force=True)
 
 
-def _date_key(value: date | datetime) -> date:
-    return value.date() if isinstance(value, datetime) else value
+
+def _date_key(value: date | datetime | str) -> date:
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            value = value.astimezone(timezone.utc)
+        return value.date()
+    return value
 
 
 class PracticeWorkflowService:
@@ -58,7 +77,10 @@ class PracticeWorkflowService:
         decisions, _, executions, _ = PracticeWorkflowService._ledger(db, session_id)
         indices = [decision.candle_index for decision in decisions]
         for execution in executions:
-            index = index_by_date.get(_date_key(execution.execution_date))
+            if execution.execution_candle_index is not None and 0 <= execution.execution_candle_index < len(candles):
+                index = execution.execution_candle_index
+            else:
+                index = index_by_date.get(_date_key(execution.execution_date))
             if index is None:
                 raise HTTPException(status_code=409, detail="Execution cannot be mapped to the replay candle timeline")
             indices.append(index)
@@ -89,7 +111,10 @@ class PracticeWorkflowService:
 
         execution_indices: dict[int, int] = {}
         for execution in executions:
-            index = index_by_date.get(_date_key(execution.execution_date))
+            if execution.execution_candle_index is not None and 0 <= execution.execution_candle_index < len(candles):
+                index = execution.execution_candle_index
+            else:
+                index = index_by_date.get(_date_key(execution.execution_date))
             if index is None:
                 raise HTTPException(status_code=409, detail="Execution cannot be mapped to the replay candle timeline")
             execution_indices[execution.id] = index
@@ -188,7 +213,14 @@ class PracticeWorkflowService:
                 current_cash -= execution.net_amount
             else:
                 average_price = total_cost / quantity if quantity else 0.0
-                realized_pnl += (execution.execution_price - average_price) * execution.quantity
+                rt_pnl = compute_round_trip_pnl(
+                    entry_price=average_price,
+                    exit_price=execution.execution_price,
+                    quantity=execution.quantity,
+                    side="LONG",
+                    profile=DEFAULT_VN_MARKET_PROFILE,
+                )
+                realized_pnl += rt_pnl.net_pnl
                 quantity -= execution.quantity
                 total_cost = max(0.0, average_price * quantity)
                 current_cash += execution.net_amount
@@ -198,11 +230,26 @@ class PracticeWorkflowService:
                 return execution.execution_candle_index
             return decision_by_id[order_by_id[execution.order_id].decision_id].candle_index
 
-        settled_bought = sum(
-            execution.quantity for execution in visible_executions
-            if order_by_id[execution.order_id].side == "BUY"
-            and get_exc_bar_idx(execution) <= current_index - 2
-        )
+        profile = DEFAULT_VN_MARKET_PROFILE
+        engine = profile.settlement_engine
+        cur_candle = current_candle if current_candle else (candles[current_index] if current_index < len(candles) else None)
+        cur_date = cur_candle.timestamp.date() if cur_candle and hasattr(cur_candle.timestamp, 'date') else (cur_candle.timestamp if cur_candle else None)
+
+        settled_bought = 0.0
+        for execution in visible_executions:
+            order = order_by_id[execution.order_id]
+            if order.side == "BUY":
+                exc_bar = get_exc_bar_idx(execution)
+                exc_candle = candles[exc_bar] if exc_bar is not None and exc_bar < len(candles) else None
+                exc_date = exc_candle.timestamp.date() if exc_candle and hasattr(exc_candle.timestamp, 'date') else (execution.execution_date.date() if hasattr(execution.execution_date, 'date') else execution.execution_date)
+
+                is_settled = False
+                if exc_date and cur_date:
+                    is_settled = engine.is_sellable(exc_date, cur_date, current_session_phase="close")
+
+                if is_settled:
+                    settled_bought += execution.quantity
+
         visible_sold = sum(
             execution.quantity for execution in visible_executions
             if order_by_id[execution.order_id].side == "SELL"
@@ -212,18 +259,36 @@ class PracticeWorkflowService:
 
         earliest_release_date = None
         if blocked_quantity > 0:
-            unsettled_buy_indices = [
-                get_exc_bar_idx(execution)
-                for execution in visible_executions
-                if order_by_id[execution.order_id].side == "BUY"
-                and get_exc_bar_idx(execution) > current_index - 2
-            ]
-            if unsettled_buy_indices:
-                earliest_buy_idx = min(unsettled_buy_indices)
-                release_bar = earliest_buy_idx + 2
-                all_session_candles = PracticeWorkflowService._candles(db, session)
-                if all_session_candles and release_bar < len(all_session_candles):
-                    earliest_release_date = all_session_candles[release_bar].timestamp
+            unsettled_buys = []
+            for execution in visible_executions:
+                order = order_by_id[execution.order_id]
+                if order.side == "BUY":
+                    exc_bar = get_exc_bar_idx(execution)
+                    exc_candle = candles[exc_bar] if exc_bar is not None and exc_bar < len(candles) else None
+                    exc_date = exc_candle.timestamp.date() if exc_candle and hasattr(exc_candle.timestamp, 'date') else (execution.execution_date.date() if hasattr(execution.execution_date, 'date') else execution.execution_date)
+
+                    is_settled = False
+                    if exc_date and cur_date:
+                        is_settled = engine.is_sellable(exc_date, cur_date, current_session_phase="close")
+
+                    if not is_settled:
+                        unsettled_buys.append((exc_bar, exc_date))
+
+            if unsettled_buys:
+                earliest_buy_idx, earliest_buy_date = min(unsettled_buys, key=lambda x: x[0] if x[0] is not None else 999999)
+                if not earliest_buy_date and earliest_buy_idx is not None and candles and earliest_buy_idx < len(candles):
+                    c_buy = candles[earliest_buy_idx]
+                    earliest_buy_date = c_buy.timestamp.date() if hasattr(c_buy.timestamp, 'date') else c_buy.timestamp
+
+                if earliest_buy_date:
+                    rel_d = engine.calculate_sellable_date(earliest_buy_date)
+                    max_candle_date = candles[-1].timestamp.date() if (candles and hasattr(candles[-1].timestamp, 'date')) else (candles[-1].timestamp if candles else None)
+                    session_end_date = _date_key(session.end_date) if session.end_date else None
+                    if (max_candle_date and rel_d > max_candle_date) or (session_end_date and rel_d > session_end_date):
+                        earliest_release_date = None
+                    else:
+                        earliest_release_date = datetime.combine(rel_d, datetime.min.time())
+
 
         average_price = total_cost / quantity if quantity > 0 else 0.0
         stored_position = db.query(Position).filter(Position.session_id == session_id).order_by(Position.id).first()
@@ -258,8 +323,10 @@ class PracticeWorkflowService:
             bought_qty = sum(execution.quantity for execution in buys)
             sold_qty = sum(execution.quantity for execution in sells)
             closed = sold_qty >= bought_qty and bool(sells)
-            net_pnl = sum(execution.net_amount for execution in sells) - sum(execution.net_amount for execution in buys) if closed else None
             buy_cash = sum(execution.net_amount for execution in buys)
+            sell_cash = sum(execution.net_amount for execution in sells)
+            net_pnl = calculate_net_pnl(buy_cash, sell_cash) if closed else None
+            pnl_percent = calculate_pnl_percent(net_pnl, buy_cash) if (closed and net_pnl is not None and buy_cash > 0) else None
             r_multiple = (net_pnl / trade.initial_risk) if (closed and net_pnl is not None and trade.initial_risk and trade.initial_risk > 0) else None
             entry_drift = (trade.entry_price - trade.planned_entry_price) if (trade.planned_entry_price is not None) else None
             size_variance = (bought_qty - trade.planned_quantity) if (trade.planned_quantity is not None) else None
@@ -274,7 +341,7 @@ class PracticeWorkflowService:
                 exit_date=sells[-1].execution_date if closed else None,
                 exit_price=sells[-1].execution_price if closed else None,
                 net_pnl=net_pnl,
-                pnl_percent=(net_pnl / buy_cash * 100) if closed and buy_cash else None,
+                pnl_percent=pnl_percent,
                 initial_stop_loss=trade.initial_stop_loss,
                 target_price=trade.target_price,
                 initial_risk=trade.initial_risk,
@@ -322,6 +389,7 @@ class PracticeWorkflowService:
             executions=projected_executions,
             positions=positions,
             trades=projected_trades,
+            settlement_label=DEFAULT_VN_MARKET_PROFILE.settlement_label,
         )
 
     @staticmethod

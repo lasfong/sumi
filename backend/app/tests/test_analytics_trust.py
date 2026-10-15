@@ -48,8 +48,7 @@ def test_thirty_trade_sqn_matches_hand_calculation():
 def test_periodic_sharpe_and_sortino_match_documented_daily_returns():
     returns = [0.01, -0.005, 0.004, -0.002, 0.003] * 6
     metrics = AnalyticsService._build_metric_results(_trades([100.0, -50.0] * 15), _curve_from_returns(returns))
-    rf_daily = (1 + 0.045) ** (1 / 252) - 1
-    excess = np.array(returns) - rf_daily
+    excess = np.array(returns)
     expected_sharpe = np.mean(excess) / np.std(excess, ddof=1) * np.sqrt(252)
     downside = [value for value in returns if value < 0]
     expected_sortino = np.mean(returns) / np.sqrt(np.mean(np.square(downside))) * np.sqrt(252)
@@ -58,6 +57,21 @@ def test_periodic_sharpe_and_sortino_match_documented_daily_returns():
     assert metrics["sharpe_ratio"].value == pytest.approx(expected_sharpe, abs=1e-4)
     assert metrics["sortino_ratio"].status == "valid"
     assert metrics["sortino_ratio"].value == pytest.approx(expected_sortino, abs=1e-4)
+
+
+def test_periodic_sharpe_supports_explicit_rf_annual():
+    returns = [0.01, -0.005, 0.004, -0.002, 0.003] * 6
+    metrics = AnalyticsService._build_metric_results(
+        _trades([100.0, -50.0] * 15),
+        _curve_from_returns(returns),
+        rf_annual=0.045,
+    )
+    rf_daily = (1 + 0.045) ** (1 / 252) - 1
+    excess = np.array(returns) - rf_daily
+    expected_sharpe = np.mean(excess) / np.std(excess, ddof=1) * np.sqrt(252)
+
+    assert metrics["sharpe_ratio"].status == "valid"
+    assert metrics["sharpe_ratio"].value == pytest.approx(expected_sharpe, abs=1e-4)
 
 
 def test_flat_and_all_win_cases_refuse_false_precision():

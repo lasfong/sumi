@@ -78,7 +78,11 @@ class BenchmarkMetricRowResponse(BaseModel):
     num_losers: int = 0
     num_breakeven: int = 0
     profit_factor: Optional[float] = None
-    max_drawdown: float = 0.0
+    profit_factor_display: Optional[str] = "N/A"
+    low_sample_warning: Optional[bool] = False
+    low_sample_message: Optional[str] = None
+    sharpe_ratio: Optional[float] = None
+    max_drawdown: Optional[float] = 0.0
     open_position_quantity: float = 0.0
     open_position_value: float = 0.0
 

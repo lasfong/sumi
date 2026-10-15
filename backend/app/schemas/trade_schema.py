@@ -34,4 +34,5 @@ class TradeResponse(BaseModel):
     entry_drift: Optional[float] = None
     size_variance: Optional[float] = None
     r_variance: Optional[float] = None
+    unrealized_pnl: Optional[float] = None
     model_config = ConfigDict(from_attributes=True)

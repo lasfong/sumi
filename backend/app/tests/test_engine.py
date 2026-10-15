@@ -2,10 +2,11 @@ import pytest
 from datetime import datetime
 from app.domain.engine.events import EventDispatcher, OrderEvent, MarketEvent, EventType
 from app.domain.engine.broker import BrokerSimulation
+from app.domain.market.rules import MarketProfile
 
 def test_market_order_fill():
     dispatcher = EventDispatcher()
-    broker = BrokerSimulation(dispatcher, initial_capital=10000.0)
+    broker = BrokerSimulation(dispatcher, initial_capital=10000.0, profile=MarketProfile(slippage=0.001))
     
     # Send a Market Buy Order
     order_event = OrderEvent(symbol="AAPL", order_type="MKT", quantity=10, direction="BUY")
@@ -41,7 +42,7 @@ def test_market_order_fill():
 
 def test_limit_order_gap():
     dispatcher = EventDispatcher()
-    broker = BrokerSimulation(dispatcher, initial_capital=10000.0)
+    broker = BrokerSimulation(dispatcher, initial_capital=10000.0, profile=MarketProfile(slippage=0.001))
     
     # Send a Buy Limit Order at 100.0
     order_event = OrderEvent(symbol="TSLA", order_type="LMT", quantity=5, direction="BUY", price=100.0)
@@ -67,7 +68,7 @@ def test_limit_order_gap():
     
 def test_long_position_unrealized_pnl():
     dispatcher = EventDispatcher()
-    broker = BrokerSimulation(dispatcher, initial_capital=10000.0)
+    broker = BrokerSimulation(dispatcher, initial_capital=10000.0, profile=MarketProfile(slippage=0.001))
     
     # Buy 10 shares at Market (assume open is 150.0)
     order_event = OrderEvent(symbol="MSFT", order_type="MKT", quantity=10, direction="BUY")

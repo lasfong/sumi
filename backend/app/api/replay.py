@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
-from typing import List
+from typing import Any, List, Optional
 from app.dependencies import get_db
 from app.schemas.replay_schema import ReplaySessionCreate, ReplaySessionResponse
 from app.schemas.candle_schema import CandleResponse
@@ -69,28 +69,107 @@ def update_drawings(session_id: int, update_in: DrawingStateUpdate, db: Session 
     return state
 
 from fastapi import Query, Request
+import numpy as np
 import pandas as pd
 from app.models.candle import Candle
 from app.domain.engine.indicator_engine import IndicatorEngine
 
-@router.get("/sessions/{session_id}/indicators")
-def get_session_indicators(
-    request: Request,
+
+def get_indicator_warmup_bars(indicator_id: str, params: dict[str, Any]) -> int:
+    try:
+        norm_id = IndicatorEngine.normalize_indicator_id(indicator_id)
+    except Exception:
+        norm_id = indicator_id.lower().strip()
+
+    warmup_table = {
+        "sma": lambda p: int(p.get("length", 20)),
+        "ema": lambda p: int(p.get("length", 20)),
+        "wma": lambda p: int(p.get("length", 20)),
+        "rsi": lambda p: int(p.get("length", 14)),
+        "macd": lambda p: int(p.get("slow", 26)) + int(p.get("signal", 9)),
+        "bbands": lambda p: int(p.get("length", 20)),
+        "stoch": lambda p: int(p.get("k", 14)) + int(p.get("smooth_k", 3)),
+        "adx": lambda p: 2 * int(p.get("length", 14)),
+        "atr": lambda p: int(p.get("length", 14)),
+        "cci": lambda p: int(p.get("length", 20)),
+        "ichimoku": lambda p: int(p.get("senkou", 52)),
+        "supertrend": lambda p: int(p.get("length", 7)),
+        "volume_sma": lambda p: int(p.get("length", 20)),
+        "relative_strength": lambda p: int(p.get("length", 20)),
+        "kc": lambda p: int(p.get("length", 20)),
+        "mfi": lambda p: int(p.get("length", 14)),
+        "psar": lambda p: 1,
+    }
+    calc = warmup_table.get(norm_id)
+    if calc:
+        try:
+            return max(1, calc(params))
+        except Exception:
+            return 1
+    if "length" in params:
+        try:
+            return max(1, int(params["length"]))
+        except Exception:
+            pass
+    return 1
+
+
+def compute_indicator_for_replay(
+    db: Session,
     session_id: int,
-    indicator: str = Query(..., description="Name of the indicator (e.g., rsi, macd, ema)"),
-    timeframe: str = Query("1D", description="Timeframe (e.g., 1D, 1H)"),
-    db: Session = Depends(get_db)
-):
-    """
-    Calculate an indicator dynamically for a replay session.
-    Crucially, this uses ReplayService.get_candles to ensure no future data is leaked.
-    """
-    # Fetch visible candles ONLY
-    candles = ReplayService.get_candles(db, session_id, timeframe)
-    
+    indicator: str,
+    timeframe: str = "1D",
+    params: dict[str, Any] | None = None,
+    candles: list[Candle] | None = None,
+) -> dict[str, Any]:
+    raw_params = dict(params or {})
+    kwargs: dict[str, Any] = {}
+    for key, value in raw_params.items():
+        if key not in ['indicator', 'timeframe']:
+            if isinstance(value, str):
+                try:
+                    kwargs[key] = int(value)
+                except ValueError:
+                    try:
+                        kwargs[key] = float(value)
+                    except ValueError:
+                        if value.lower() == 'true':
+                            kwargs[key] = True
+                        elif value.lower() == 'false':
+                            kwargs[key] = False
+                        else:
+                            kwargs[key] = value
+            else:
+                kwargs[key] = value
+
+    if candles is None:
+        candles = ReplayService.get_candles(db, session_id, timeframe)
+
     if not candles:
         raise HTTPException(status_code=404, detail=f"No visible candles found for session {session_id}")
-        
+
+    available_bars = len(candles)
+    max_visible_ts = candles[-1].timestamp
+    max_visible_dt = pd.to_datetime(max_visible_ts)
+
+    try:
+        norm_indicator = IndicatorEngine.normalize_indicator_id(indicator)
+    except ValueError:
+        return {
+            "session_id": session_id,
+            "timeframe": timeframe,
+            "indicator": indicator,
+            "data": [],
+            "meta": {
+                "status": "INVALID_SPEC",
+                "warmup_bars": 0,
+                "available_bars": available_bars,
+                "is_projected_clamped": False,
+            }
+        }
+
+    warmup_bars = get_indicator_warmup_bars(norm_indicator, kwargs)
+
     # Convert to DataFrame
     data = []
     for c in candles:
@@ -104,79 +183,117 @@ def get_session_indicators(
         })
     df = pd.DataFrame(data)
     df.set_index("timestamp", inplace=True)
-    
-    # Calculate Indicator
+
+    if norm_indicator in ("relative_strength", "rs", "rs_vnindex"):
+        benchmark_symbol = kwargs.get("benchmark", "VNINDEX")
+        if db is not None:
+            bench_candles = db.query(Candle).filter(
+                Candle.symbol == benchmark_symbol,
+                Candle.timeframe == timeframe,
+                Candle.timestamp <= max_visible_ts
+            ).order_by(Candle.timestamp.asc()).all()
+            if bench_candles:
+                b_data = [{"timestamp": c.timestamp, "close": float(c.close)} for c in bench_candles]
+                b_df = pd.DataFrame(b_data).set_index("timestamp")
+                kwargs["benchmark_df"] = b_df
+
     try:
-        kwargs = {}
-        for key, value in request.query_params.items():
-            if key not in ['indicator', 'timeframe']:
-                try:
-                    kwargs[key] = int(value)
-                except ValueError:
-                    try:
-                        kwargs[key] = float(value)
-                    except ValueError:
-                        if value.lower() == 'true':
-                            kwargs[key] = True
-                        elif value.lower() == 'false':
-                            kwargs[key] = False
-                        else:
-                            kwargs[key] = value
+        result_df = IndicatorEngine.compute(df, norm_indicator, clamp_to_last_candle=True, **kwargs)
+    except ValueError:
+        return {
+            "session_id": session_id,
+            "timeframe": timeframe,
+            "indicator": indicator,
+            "data": [],
+            "meta": {
+                "status": "INVALID_SPEC",
+                "warmup_bars": warmup_bars,
+                "available_bars": available_bars,
+                "is_projected_clamped": False,
+            }
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
-        if indicator in ("relative_strength", "rs", "rs_vnindex"):
-            benchmark_symbol = kwargs.get("benchmark", "VNINDEX")
-            if candles:
-                max_ts = candles[-1].timestamp
-                bench_candles = db.query(Candle).filter(
-                    Candle.symbol == benchmark_symbol,
-                    Candle.timeframe == timeframe,
-                    Candle.timestamp <= max_ts
-                ).order_by(Candle.timestamp.asc()).all()
-                if bench_candles:
-                    b_data = [{"timestamp": c.timestamp, "close": float(c.close)} for c in bench_candles]
-                    b_df = pd.DataFrame(b_data).set_index("timestamp")
-                    kwargs["benchmark_df"] = b_df
-
-        result_df = IndicatorEngine.compute(df, indicator, **kwargs)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-        
-    # Find the new columns added by pandas-ta
     original_cols = set(df.columns)
-    new_cols = set(result_df.columns) - original_cols
-    
-    # Prepare response
+    new_cols = [c for c in result_df.columns if c not in original_cols]
+
     response_data = []
     result_df.index.name = "timestamp"
     result_df.reset_index(inplace=True)
-    max_visible_ts = candles[-1].timestamp if candles else None
+
+    is_projected_clamped = False
+    if norm_indicator == "ichimoku":
+        is_projected_clamped = True
+
     for _, row in result_df.iterrows():
         row_ts = row["timestamp"]
-        is_projected = False
-        if max_visible_ts is not None:
-            try:
-                is_projected = bool(pd.to_datetime(row_ts) > pd.to_datetime(max_visible_ts))
-            except Exception:
-                is_projected = False
+        try:
+            if pd.to_datetime(row_ts) > max_visible_dt:
+                is_projected_clamped = True
+                continue  # Drop projected future rows completely from Replay
+        except Exception:
+            pass
 
         record = {
-            "timestamp": row_ts.isoformat(),
+            "timestamp": row_ts.isoformat() if hasattr(row_ts, "isoformat") else str(row_ts),
         }
-        if is_projected:
-            record["is_projected"] = True
-
         for col in new_cols:
             val = row[col]
             record[col] = None if pd.isna(val) else val
         response_data.append(record)
 
-        
+    # Determine status
+    if available_bars < warmup_bars:
+        status = "EMPTY_WARMING"
+    elif not new_cols:
+        status = "UNMAPPED_COLUMN"
+    else:
+        has_finite_value = False
+        for record in response_data:
+            for col in new_cols:
+                val = record.get(col)
+                if val is not None and not (isinstance(val, float) and (np.isnan(val) or np.isinf(val))):
+                    has_finite_value = True
+                    break
+            if has_finite_value:
+                break
+        status = "OK" if has_finite_value else "EMPTY_WARMING"
+
     return {
         "session_id": session_id,
         "timeframe": timeframe,
         "indicator": indicator,
-        "data": response_data
+        "data": response_data,
+        "meta": {
+            "status": status,
+            "warmup_bars": warmup_bars,
+            "available_bars": available_bars,
+            "is_projected_clamped": is_projected_clamped,
+        }
     }
+
+
+@router.get("/sessions/{session_id}/indicators")
+def get_session_indicators(
+    request: Request,
+    session_id: int,
+    indicator: str = Query(..., description="Name of the indicator (e.g., rsi, macd, ema)"),
+    timeframe: str = Query("1D", description="Timeframe (e.g., 1D, 1H)"),
+    db: Session = Depends(get_db)
+):
+    """
+    Calculate an indicator dynamically for a replay session.
+    Crucially, this uses ReplayService.get_candles to ensure no future data is leaked,
+    and server-side clamps all projected future points.
+    """
+    return compute_indicator_for_replay(
+        db=db,
+        session_id=session_id,
+        indicator=indicator,
+        timeframe=timeframe,
+        params=dict(request.query_params),
+    )
 
 
 @router.post("/sessions/{session_id}/reset-practice")

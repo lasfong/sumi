@@ -9,8 +9,37 @@ from datetime import date, datetime, timedelta
 from typing import FrozenSet, Optional, Set, Union
 
 
-# Immutable official exchange holidays and observed makeup days (2020–2026+)
+# Immutable official exchange holidays and observed makeup days (2018–2026+)
 VIETNAM_HOLIDAYS_V1: FrozenSet[date] = frozenset({
+    # -------------------------------------------------------------------------
+    # 2018 (10 holiday weekdays)
+    # -------------------------------------------------------------------------
+    date(2018, 1, 1),    # Tet Duong lich (Mon)
+    date(2018, 2, 14),   # Tet Mau Tuat (29 Tet - Wed)
+    date(2018, 2, 15),   # Tet Mau Tuat (30 Tet - Thu)
+    date(2018, 2, 16),   # Tet Mau Tuat (Mung 1 Tet - Fri)
+    date(2018, 2, 19),   # Nghi bu Tet Mau Tuat (Mung 2 on Sat - Mon)
+    date(2018, 2, 20),   # Nghi bu Tet Mau Tuat (Mung 3 on Sun - Tue)
+    date(2018, 4, 25),   # Gio To Hung Vuong (10/3 AL - Wed)
+    date(2018, 4, 30),   # Giai phong mien Nam (Mon)
+    date(2018, 5, 1),    # Quoc te Lao dong (Tue)
+    date(2018, 9, 3),    # Nghi bu Quoc khanh (02/09 on Sun - Mon)
+
+    # -------------------------------------------------------------------------
+    # 2019 (11 holiday weekdays)
+    # -------------------------------------------------------------------------
+    date(2019, 1, 1),    # Tet Duong lich (Tue)
+    date(2019, 2, 4),    # Tet Ky Hoi (30 Tet - Mon)
+    date(2019, 2, 5),    # Tet Ky Hoi (Mung 1 Tet - Tue)
+    date(2019, 2, 6),    # Tet Ky Hoi (Mung 2 Tet - Wed)
+    date(2019, 2, 7),    # Tet Ky Hoi (Mung 3 Tet - Thu)
+    date(2019, 2, 8),    # Tet Ky Hoi (Mung 4 Tet - Fri)
+    date(2019, 4, 15),   # Nghi bu Gio To Hung Vuong (10/3 AL on Sun 14/04 - Mon)
+    date(2019, 4, 29),   # Hoan doi ngay lam viec cau noi (Mon; Sat 04/05 did not trade)
+    date(2019, 4, 30),   # Giai phong mien Nam (Tue)
+    date(2019, 5, 1),    # Quoc te Lao dong (Wed)
+    date(2019, 9, 2),    # Quoc khanh (Mon)
+
     # -------------------------------------------------------------------------
     # 2020 (10 holiday weekdays)
     # -------------------------------------------------------------------------
@@ -123,7 +152,7 @@ VIETNAM_HOLIDAYS_V1: FrozenSet[date] = frozenset({
 class TradingCalendar:
     """Authoritative Vietnam exchange trading calendar engine."""
 
-    VERSION: str = "VN_CALENDAR_2020_2026_V1"
+    VERSION: str = "VN_CALENDAR_2018_2026_V1"
 
     def __init__(self, holidays: Optional[Union[Set[date], FrozenSet[date]]] = None):
         self.holidays: FrozenSet[date] = frozenset(holidays) if holidays is not None else VIETNAM_HOLIDAYS_V1

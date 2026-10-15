@@ -225,29 +225,40 @@ def test_vietnam_lot_sizing_and_insufficient_cash():
 
 def test_simultaneous_sl_tp_precedence():
     """Verify conservative Stop Loss precedence when both SL and TP are hit on the same bar."""
-    base_date = date(2024, 1, 1)
+    # Valid Vietnam trading days (Mon 2024-01-08 to Tue 2024-01-16, skipping weekend Jan 13-14)
+    trading_dates = [
+        date(2024, 1, 8),   # Bar 0 (Mon): initial warmup
+        date(2024, 1, 9),   # Bar 1 (Tue): Entry signal on Close
+        date(2024, 1, 10),  # Bar 2 (Wed): Buy fills at Open 102.0 (Day T)
+        date(2024, 1, 11),  # Bar 3 (Thu): Holding (Day T+1)
+        date(2024, 1, 12),  # Bar 4 (Fri): Holding (Day T+2; conservative intraday touch locked until T+3)
+        date(2024, 1, 15),  # Bar 5 (Mon): (Day T+3) Wild bar: Low drops to 80 (hits 5% SL at 96.9) and High surges to 120 (hits 5% TP at 107.1)
+        date(2024, 1, 16),  # Bar 6 (Tue): End
+    ]
     candles = [
         # Bar 0: initial
-        {"timestamp": datetime.combine(base_date, datetime.min.time()), "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100_000},
+        {"timestamp": datetime.combine(trading_dates[0], datetime.min.time()), "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100_000},
         # Bar 1: Entry signal on Close
-        {"timestamp": datetime.combine(base_date + timedelta(days=1), datetime.min.time()), "open": 100.0, "high": 101.0, "low": 99.0, "close": 102.0, "volume": 100_000},
-        # Bar 2: Buy fills at Open 102.0
-        {"timestamp": datetime.combine(base_date + timedelta(days=2), datetime.min.time()), "open": 102.0, "high": 103.0, "low": 101.0, "close": 102.5, "volume": 100_000},
-        # Bar 3: Holding (T+1)
-        {"timestamp": datetime.combine(base_date + timedelta(days=3), datetime.min.time()), "open": 102.5, "high": 103.0, "low": 102.0, "close": 102.8, "volume": 100_000},
-        # Bar 4: (T+2) Wild bar with massive range: Low drops to 80 (hits 5% SL at 96.9) and High surges to 120 (hits 5% TP at 107.1)
-        {"timestamp": datetime.combine(base_date + timedelta(days=4), datetime.min.time()), "open": 102.8, "high": 120.0, "low": 80.0, "close": 90.0, "volume": 100_000},
-        # Bar 5: End
-        {"timestamp": datetime.combine(base_date + timedelta(days=5), datetime.min.time()), "open": 90.0, "high": 91.0, "low": 89.0, "close": 90.0, "volume": 100_000},
+        {"timestamp": datetime.combine(trading_dates[1], datetime.min.time()), "open": 100.0, "high": 101.0, "low": 99.0, "close": 102.0, "volume": 100_000},
+        # Bar 2: Buy fills at Open 102.0 (Day T)
+        {"timestamp": datetime.combine(trading_dates[2], datetime.min.time()), "open": 102.0, "high": 103.0, "low": 101.0, "close": 102.5, "volume": 100_000},
+        # Bar 3: Holding (Day T+1)
+        {"timestamp": datetime.combine(trading_dates[3], datetime.min.time()), "open": 102.5, "high": 103.0, "low": 102.0, "close": 102.8, "volume": 100_000},
+        # Bar 4: Holding (Day T+2)
+        {"timestamp": datetime.combine(trading_dates[4], datetime.min.time()), "open": 102.8, "high": 103.2, "low": 102.2, "close": 102.8, "volume": 100_000},
+        # Bar 5: (Day T+3) Wild bar with massive range: Low drops to 80 (hits 5% SL at 96.9) and High surges to 120 (hits 5% TP at 107.1)
+        {"timestamp": datetime.combine(trading_dates[5], datetime.min.time()), "open": 102.8, "high": 120.0, "low": 80.0, "close": 90.0, "volume": 100_000},
+        # Bar 6: End
+        {"timestamp": datetime.combine(trading_dates[6], datetime.min.time()), "open": 90.0, "high": 91.0, "low": 89.0, "close": 90.0, "volume": 100_000},
     ]
     df = pd.DataFrame(candles)
 
-    fast_ma = np.array([10.0, 30.0, 30.0, 30.0, 30.0, 30.0])
-    slow_ma = np.array([20.0] * 6)
+    fast_ma = np.array([10.0, 30.0, 30.0, 30.0, 30.0, 30.0, 30.0])
+    slow_ma = np.array([20.0] * 7)
     indicator_values = {"fast_ma": fast_ma, "slow_ma": slow_ma}
 
     strategy = make_sample_strategy(stop_loss=5.0, take_profit=5.0)
-    kernel = BacktestExecutionKernel()
+    kernel = BacktestExecutionKernel(sl_tp_execution_mode="intraday_touch")
     result = kernel.run(
         df=df,
         indicator_values=indicator_values,

@@ -1,6 +1,6 @@
 from pydantic import BaseModel, ConfigDict
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Union
 from app.domain.enums import OrderSide, OrderType, OrderStatus
 
 class OrderBase(BaseModel):
@@ -18,6 +18,8 @@ class OrderResponse(OrderBase):
     session_id: int
     decision_id: int
     symbol: str
-    status: OrderStatus
+    status: Union[OrderStatus, str]
     created_at: datetime
+    filled_price: Optional[float] = None
+    filled_at: Optional[datetime] = None
     model_config = ConfigDict(from_attributes=True)

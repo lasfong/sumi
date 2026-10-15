@@ -262,7 +262,7 @@ class IndicatorEngine:
         return indicator_id
 
     @staticmethod
-    def compute(df: pd.DataFrame, indicator: str, **kwargs) -> pd.DataFrame:
+    def compute(df: pd.DataFrame, indicator: str, clamp_to_last_candle: bool = False, **kwargs) -> pd.DataFrame:
         """
         Compute a registered indicator and append its output columns.
         """
@@ -292,7 +292,19 @@ class IndicatorEngine:
                 ta_params["lower_std"] = std
                 ta_params["upper_std"] = std
             result = getattr(df_copy.ta, definition.method)(**ta_params)
-            df_copy = IndicatorEngine._append_indicator_result(df_copy, result)
+            df_copy = IndicatorEngine._append_indicator_result(
+                df_copy, result, clamp_to_last_candle=clamp_to_last_candle
+            )
+            if clamp_to_last_candle and len(df) > 0:
+                if "timestamp" in df.columns and "timestamp" in df_copy.columns:
+                    max_ts = df["timestamp"].iloc[-1]
+                    df_copy = df_copy[df_copy["timestamp"] <= max_ts]
+                if len(df.index) > 0:
+                    max_idx = df.index[-1]
+                    try:
+                        df_copy = df_copy.loc[df_copy.index <= max_idx]
+                    except Exception:
+                        df_copy = df_copy.loc[df_copy.index.isin(df.index)]
             return df_copy
         except AttributeError:
             raise ValueError(f"Indicator '{definition.id}' is not supported by pandas-ta.")
@@ -302,7 +314,7 @@ class IndicatorEngine:
     @staticmethod
     def _normalize_params(definition: IndicatorDefinition, kwargs: dict[str, Any]) -> dict[str, Any]:
         allowed_params = {param.name: param for param in definition.params}
-        unknown_params = set(kwargs) - set(allowed_params) - {"benchmark_df"}
+        unknown_params = set(kwargs) - set(allowed_params) - {"benchmark_df", "clamp_to_last_candle"}
         if unknown_params:
             names = ", ".join(sorted(unknown_params))
             raise ValueError(f"Unsupported parameter(s) for indicator '{definition.id}': {names}")
@@ -337,15 +349,29 @@ class IndicatorEngine:
         return coerced
 
     @staticmethod
-    def _append_indicator_result(df_copy: pd.DataFrame, result: Any) -> pd.DataFrame:
+    def _append_indicator_result(
+        df_copy: pd.DataFrame,
+        result: Any,
+        clamp_to_last_candle: bool = False,
+    ) -> pd.DataFrame:
         if isinstance(result, tuple):
             for item in result:
-                df_copy = IndicatorEngine._append_indicator_result(df_copy, item)
+                df_copy = IndicatorEngine._append_indicator_result(
+                    df_copy, item, clamp_to_last_candle=clamp_to_last_candle
+                )
             return df_copy
 
         if isinstance(result, (pd.DataFrame, pd.Series)):
-            # Combine axes so df_copy index is extended if result has future dates
-            new_index = df_copy.index.union(result.index)
+            if clamp_to_last_candle and len(df_copy.index) > 0:
+                max_idx = df_copy.index[-1]
+                try:
+                    result = result.loc[result.index <= max_idx]
+                except Exception:
+                    result = result.loc[result.index.isin(df_copy.index)]
+                new_index = df_copy.index
+            else:
+                new_index = df_copy.index.union(result.index)
+
             df_copy = df_copy.reindex(new_index)
 
             if isinstance(result, pd.DataFrame):

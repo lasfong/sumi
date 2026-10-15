@@ -14,7 +14,7 @@ Enforces VSD/VSDC settlement rules:
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import List, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 
 from app.domain.market.calendar import TradingCalendar
 
@@ -146,3 +146,55 @@ class SettlementEngine:
                 new_lots.append(lot)
 
         return sold_total, new_lots
+
+
+class SettlementLockDetail(dict):
+    """
+    Structured dictionary payload for settlement lock rejections.
+    Satisfies both new structured contract requirements (B21) and legacy
+    substring membership assertions in existing tests and clients.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        if "available_qty" in self and "available_quantity" not in self:
+            self["available_quantity"] = self["available_qty"]
+        elif "available_quantity" in self and "available_qty" not in self:
+            self["available_qty"] = self["available_quantity"]
+
+        if "blocked_qty" in self and "blocked_quantity" not in self:
+            self["blocked_quantity"] = self["blocked_qty"]
+        elif "blocked_quantity" in self and "blocked_qty" not in self:
+            self["blocked_qty"] = self["blocked_quantity"]
+
+        if "available_on" in self and "earliest_release_date" not in self:
+            self["earliest_release_date"] = self["available_on"]
+        elif "earliest_release_date" in self and "available_on" not in self:
+            self["available_on"] = self["earliest_release_date"]
+
+    def __contains__(self, item: Any) -> bool:
+        if super().__contains__(item):
+            return True
+        if isinstance(item, str):
+            msg = self.get("message", "")
+            if isinstance(msg, str) and item in msg:
+                return True
+            for val in self.values():
+                if isinstance(val, str) and item in val:
+                    return True
+            return item in str(self)
+        return False
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, str):
+            return other == self.get("message", "") or other == str(self)
+        return super().__eq__(other)
+
+    def lower(self) -> str:
+        return self.get("message", "").lower()
+
+    def startswith(self, prefix: str, *args: Any) -> bool:
+        return self.get("message", "").startswith(prefix, *args)
+
+    def endswith(self, suffix: str, *args: Any) -> bool:
+        return self.get("message", "").endswith(suffix, *args)

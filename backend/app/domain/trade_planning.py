@@ -2,15 +2,18 @@ import math
 from typing import Optional
 from pydantic import BaseModel, Field
 
+from app.domain.market.rules import DEFAULT_VN_MARKET_PROFILE
+
 
 class TradePlanInput(BaseModel):
     risk_percent: float = Field(default=1.0, ge=0.01, le=100.0, description="Risk as a percentage of account equity")
     entry_price: float = Field(..., gt=0, description="Planned entry price per share")
     stop_loss: float = Field(..., gt=0, description="Planned stop loss price per share")
     target_price: float = Field(..., gt=0, description="Planned target price per share")
-    lot_size: int = Field(default=100, ge=1, description="Standard lot size increment (Vietnam market default is 100)")
-    fee_rate: float = Field(default=0.0015, ge=0.0, description="Transaction fee rate per trade side (0.15% default)")
-    tax_rate: float = Field(default=0.001, ge=0.0, description="Tax rate on selling (0.1% default)")
+    lot_size: int = Field(default=DEFAULT_VN_MARKET_PROFILE.lot_size, ge=1, description="Standard lot size increment (Vietnam market default is 100)")
+    fee_rate: float = Field(default=DEFAULT_VN_MARKET_PROFILE.fee_buy, ge=0.0, description="Transaction fee rate per trade side (0.15% default)")
+    tax_rate: float = Field(default=DEFAULT_VN_MARKET_PROFILE.tax_sell, ge=0.0, description="Tax rate on selling (0.1% default)")
+
 
 
 class TradePlanResult(BaseModel):

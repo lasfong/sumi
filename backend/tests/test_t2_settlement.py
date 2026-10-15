@@ -18,12 +18,23 @@ from app.services.trade_lifecycle_service import TradeLifecycleService
 from app.schemas.decision_schema import DecisionCreate
 from app.domain.enums import DecisionAction, OrderType, OrderSide
 
+from app.domain.market.calendar import TradingCalendar
+
+_TEST_CALENDAR = TradingCalendar()
+_BASE_TRADING_DATE = datetime(2024, 3, 4)  # Monday
+_TRADING_TIMESTAMPS = [
+    datetime.combine(_TEST_CALENDAR.add_trading_days(_BASE_TRADING_DATE.date(), i), datetime.min.time())
+    for i in range(20)
+]
+
 # Test models/mock objects
 class MockCandle:
     def __init__(self, index, close=100.0, timestamp=None):
         self.index = index
         self.close = close
-        self.timestamp = timestamp or datetime.now()
+        self.timestamp = timestamp or (
+            _TRADING_TIMESTAMPS[index] if 0 <= index < len(_TRADING_TIMESTAMPS) else datetime.now()
+        )
 
 class MockSession:
     def __init__(self, id, symbol="FPT", current_cash=100000000, current_index=0):
@@ -49,15 +60,15 @@ def db_session():
 from app.models.candle import Candle
 
 def create_mock_setup(db, session_id=1):
-    start_d = datetime.now() - timedelta(days=30)
-    end_d = datetime.now() + timedelta(days=30)
+    start_d = _TRADING_TIMESTAMPS[0]
+    end_d = _TRADING_TIMESTAMPS[-1]
     # Just need the records in DB
     replay_session = ReplaySession(id=session_id, symbol="FPT", timeframe="1D", adjustment_type="unadjusted", start_date=start_d, end_date=end_d, initial_cash=100000000, current_cash=100000000, current_index=0)
     db.add(replay_session)
     
-    # Add dummy candles
-    for i in range(20):
-        c = Candle(symbol="FPT", timeframe="1D", timestamp=start_d + timedelta(days=i), open=100, high=100, low=100, close=100, volume=1000, adjustment_type="unadjusted")
+    # Add dummy candles on official trading days (excluding weekends and holidays)
+    for ts in _TRADING_TIMESTAMPS:
+        c = Candle(symbol="FPT", timeframe="1D", timestamp=ts, open=100, high=100, low=100, close=100, volume=1000, adjustment_type="unadjusted")
         db.add(c)
         
     db.commit()
