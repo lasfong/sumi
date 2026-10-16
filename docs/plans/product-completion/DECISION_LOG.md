@@ -220,3 +220,14 @@ Concise record of architectural, governance, and commit-gate decisions across De
   - Focused R1–R6 + adversarial regression suites: **78/78 passed, 0 failed**.
   - Production database `backend/sumi.db`: SHA-256 `234206fc75259f091337d4feb5f41575d0fe5ac02d6c10ba0de8fad68cbcee86` (`188,416` bytes, 0 byte delta).
   - Status: `FULL REGRESSION CLOSED — READY FOR TRAIN 01+02 BASELINE ACCEPTANCE`.
+
+---
+
+### `DEC-06` — W0–W2 Baseline Closure Commit (`c331dc3`), Persistent Project Execution Charter & Train 03 Authorization (`APPROVED`)
+- **Date**: 2026-10-16
+- **Phase**: W0–W2 Baseline Closure & Development Train 03 (`B30`, `B31`, `B32`)
+- **Status**: **`APPROVED / RATIFIED`** (Authorized by Product Owner, 2026-10-16)
+- **Outcome**:
+  - Committed the complete `W0–W2` technical and financial baseline (`B03`, `B10`, `B11`, `B20`, `B21`, `B22`, remediation `R1–R6`, and final 8 legacy test fixture alignments — 70 files) as commit `c331dc3250937a664625b1ebb9e7fac6170b0ae3` (`feat(v3): complete W0-W2 execution and financial correctness baseline`).
+  - Established the persistent Sumi V3 Project Execution Charter in `AGENTS.md` linking canonical governance records (`SUMI_V3_PRODUCT_COMPLETION_MASTER_PLAN_PROPOSED.md`, `SUMI_V3_BATCH_DEPENDENCY_AND_STATUS_PROPOSED.md`, `EXECUTION_STATE.md`, `DECISION_LOG.md`, `FINANCIAL_GOLDEN_CASES.md`, and ratified ADRs) and reconciled `W0–W2` statuses on the Batch Board.
+  - Authorized Development Train 03 (`B30` first, followed by `B31` and `B32` with strict file-ownership discipline), keeping Train 03 implementation uncommitted until separate Product Owner authorization.

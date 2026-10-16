@@ -35,7 +35,7 @@ To prevent status inflation and distinguish between code in the working tree, co
 5. **Product Acceptance Status**: `NOT_ACCEPTED` | `HISTORICAL_ACCEPTED_SUPERSEDED` | `ACCEPTED_V3_COMPLETE`
 
 > [!IMPORTANT]
-> **Strict Non-Inflation Rule**: No batch in the `B00–B51` program is marked `ACCEPTED_V3_COMPLETE`. Specifically, `B00`, `B01`, and `B02` are `IN_WORKTREE_UNCOMMITTED` (`UNCOMMITTED_IN_WORKTREE`) and `PENDING_ARCHITECT_REVIEW`, and `B03` through `B51` are `NOT_STARTED` (`NOT_IN_WORKTREE`). `B03` remains strictly **BLOCKED** until the `W0-A` gate (`B00–B02` + 3 ADR Addenda ratification and baseline commit) is cleared.
+> **Strict Non-Inflation Rule**: No batch in the `B00–B51` program is marked `ACCEPTED_V3_COMPLETE` until full `W5-UAT` browser verification passes. Waves `W0–W2` (`B00–B03`, `B10–B11`, `B20–B22`, plus remediation `R1–R6`) are `COMPLETE_VERIFIED`, `UNIT_INTEGRATION_VERIFIED`, `APPROVED`, and `COMMITTED_ON_MASTER` (`e34516c`, `2151f34`, `c331dc3`), while `Product Acceptance Status` remains `NOT_ACCEPTED` pending `W5-UAT`. Batches `B30` through `B51` are `NOT_STARTED` (`NOT_IN_WORKTREE`) entering Development Train 03 (`W3`).
 
 ---
 
@@ -46,7 +46,7 @@ Before examining `B00–B51`, it is critical to distinguish the **completed hist
 | Lineage | Batches | Scope | Commit / Tree State | Current Standing |
 |---|---|---|---|---|
 | **P-Lineage** (`docs/dev-program/STATE.json`) | `P1` through `P10` (`P10` reviewed `2026-09-14`) | Signal Engine Foundation (`P1`), Signal Families & Liquidity (`P2`), Multi-Horizon Outcome Lab (`P3`), Regime Segmentation (`P4`), Parameter Stability (`P5`), Cost/Turnover Realism (`P6`), Portfolio Constraints (`P7`), Walk-Forward Validation (`P8`), Research UI & Presets (`P9`), Final Research Pack (`P10`). | `COMMITTED_ON_MASTER` (`HISTORICAL` / `VERIFIED` in `backend/app/domain/` and `backend/app/services/`) | **`HISTORICAL_ACCEPTED_SUPERSEDED`**: Domain and research modules remain in the repository and provide the foundation for Scanner, Signals, and Strategy Lab, but the broader application requires `B00–B51` to resolve the P0/P1 architectural, financial, contract, and UX gaps documented in [`SUMI_GAP_REGISTER.md`](../../architecture/SUMI_GAP_REGISTER.md). |
-| **B-Lineage** ([`DEV_BATCHES.md`](../DEV_BATCHES.md)) | `B00–B03`, `B10–B11`, `B20–B22`, `B30–B32`, `B40–B41`, `B50–B51` + `W5` | 16 product-completion batches closing all P0/P1 gaps across DB safety, Replay zero-lookahead, Financial execution/settlement/metrics parity, Frontend state/WS/ChartKernel, API contracts, and UX completion. | `B00–B02` `UNCOMMITTED_IN_WORKTREE` (`VERIFIED`); `B03–B51` `NOT_IN_WORKTREE` (`VERIFIED`). | **Active Product Completion Program** tracked in Sections 3–6 below. |
+| **B-Lineage** ([`DEV_BATCHES.md`](../DEV_BATCHES.md)) | `B00–B03`, `B10–B11`, `B20–B22`, `B30–B32`, `B40–B41`, `B50–B51` + `W5` | 16 product-completion batches closing all P0/P1 gaps across DB safety, Replay zero-lookahead, Financial execution/settlement/metrics parity, Frontend state/WS/ChartKernel, API contracts, and UX completion. | `B00–B22` `COMMITTED_ON_MASTER` (`e34516c`, `2151f34`, `c331dc3`); `B30–B51` `NOT_IN_WORKTREE` (`VERIFIED`). | **Active Product Completion Program** tracked in Sections 3–6 below. |
 
 ---
 
@@ -56,29 +56,29 @@ Before examining `B00–B51`, it is critical to distinguish the **completed hist
 
 ```mermaid
 flowchart TD
-    subgraph W0["Wave W0: Baseline Closure & Schema Hygiene"]
-        B00["B00: DB Path Resolution & CWD Guard<br/>[UNCOMMITTED_IN_WORKTREE - PENDING REVIEW]"]
-        B01["B01: Transaction Atomic & FK Enforcement<br/>[UNCOMMITTED_IN_WORKTREE - PENDING REVIEW]"]
-        B02["B02: Synthetic Guard, Quarantine Promotion,<br/>Mutation Provenance & Cross-Workflow Rollback<br/>[UNCOMMITTED_IN_WORKTREE - PENDING REVIEW]"]
-        GW0A{"Gate G-W0A:<br/>Owner/Architect Ratifies B00-B02<br/>+ 3 ADR Addenda & Commits W0-A"}
-        B03["B03: Alembic 20-Model Registry, Migration Compat<br/>& Multi-Table Preview Isolation<br/>[NOT_STARTED - BLOCKED ON G-W0A]"]
+    subgraph W0["Wave W0: Baseline Closure & Schema Hygiene (COMMITTED)"]
+        B00["B00: DB Path Resolution & CWD Guard<br/>[COMMITTED_ON_MASTER - e34516c]"]
+        B01["B01: Transaction Atomic & FK Enforcement<br/>[COMMITTED_ON_MASTER - e34516c]"]
+        B02["B02: Synthetic Guard, Quarantine Promotion,<br/>Mutation Provenance & Cross-Workflow Rollback<br/>[COMMITTED_ON_MASTER - e34516c]"]
+        GW0A{"Gate G-W0A:<br/>RATIFIED & COMMITTED<br/>(e34516c / 2151f34)"}
+        B03["B03: Alembic 20-Model Registry, Migration Compat<br/>& Multi-Table Preview Isolation (+ R1/R6)<br/>[COMMITTED_ON_MASTER - c331dc3]"]
         OPDB["W0-OP-DB: Optional Re-seed of backend/sumi.db<br/>from CafeF CSV Archive (Owner Convenience)"]
     end
 
-    subgraph W1["Wave W1: Replay & Zero-Lookahead Lockdown (Sequential After B03)"]
-        B10["B10: Replay Ledger Filter (<= current_index),<br/>Future-State Masking & Horizon Clamp<br/>[SEQUENTIAL 2ND AFTER B03]"]
-        B11["B11: Server-Side Replay Indicator Cut (<= max_visible_ts)<br/>& MappingResult Contract<br/>[SEQUENTIAL 3RD AFTER B10]"]
+    subgraph W1["Wave W1: Replay & Zero-Lookahead Lockdown (COMMITTED)"]
+        B10["B10: Replay Ledger Filter (<= current_index),<br/>Future-State Masking & Horizon Clamp (+ R4)<br/>[COMMITTED_ON_MASTER - c331dc3]"]
+        B11["B11: Server-Side Replay Indicator Cut (<= max_visible_ts)<br/>& MappingResult Contract<br/>[COMMITTED_ON_MASTER - c331dc3]"]
     end
 
-    subgraph W2["Wave W2: Financial Execution, Settlement & Metric Parity"]
-        GDEC{"Architect Decisions:<br/>DEC-03 (SL/TP Timing)<br/>DEC-04 (Sizing Anchor)<br/>DEC-05 (Breakeven/PF)"}
-        B20["B20: Execution Kernel Parity<br/>(Next-Open T+1 Across All Paths)<br/>[DEPENDS ON B01 + DEC-03/04]"]
-        B21["B21: MarketProfile Single Source,<br/>T+1.5 Settlement & VN Calendar<br/>[DEPENDS ON B20]"]
-        B22["B22: Net PnL, WinRate (net>0),<br/>PF (N/A on 0 Loss) & Sharpe 252<br/>[DEPENDS ON B21 + DEC-05]"]
+    subgraph W2["Wave W2: Financial Execution, Settlement & Metric Parity (COMMITTED)"]
+        GDEC{"Architect Decisions:<br/>DEC-03, DEC-04, DEC-05<br/>[RATIFIED]"}
+        B20["B20: Execution Kernel Parity<br/>(Next-Open T+1 Across All Paths + R5)<br/>[COMMITTED_ON_MASTER - c331dc3]"]
+        B21["B21: MarketProfile Single Source,<br/>T+1.5 Settlement & VN Calendar (+ R2)<br/>[COMMITTED_ON_MASTER - c331dc3]"]
+        B22["B22: Net PnL, WinRate (net>0),<br/>PF (N/A on 0 Loss) & Sharpe 252 (+ R3)<br/>[COMMITTED_ON_MASTER - c331dc3]"]
     end
 
-    subgraph W3["Wave W3: Frontend State, WebSocket & ChartKernel"]
-        B30["B30: TanStack Query Keys, Abort Tokens<br/>& Session Switch Cleanup<br/>[DEPENDS ON B10]"]
+    subgraph W3["Wave W3: Frontend State, WebSocket & ChartKernel (ACTIVE TRAIN 03)"]
+        B30["B30: TanStack Query Keys, Abort Tokens<br/>& Session Switch Cleanup<br/>[READY - DEPENDS ON B10]"]
         B31["B31: WS Replay State Machine, Seq/Error<br/>Envelopes & Backoff Reconnect<br/>[DEPENDS ON B30]"]
         B32["B32: ChartKernel Facade, ReplayWorkspace<br/>Decomp & Legacy Drawing Removal<br/>[DEPENDS ON B30 + B11]"]
     end
@@ -118,18 +118,18 @@ flowchart TD
 
 | Batch ID | Wave | Title / Core Capability | Dependencies | Implementation Status | Test Evidence Status | Arch Approval Status | Commit / Merge Status | Product Acceptance Status | Complexity (`PROPOSED`) |
 |---|---|---|---|---|---|---|---|---|---|
-| **`B00`** | W0-A | DB Path Resolution & CWD Guard | None | `IN_WORKTREE_UNCOMMITTED` (`VERIFIED`) | `UNIT_INTEGRATION_REPORTED` (7 CWD + 30 safeguard tests in `artifacts/local/W0-A/`; `537` BE / `239` FE total) | `PENDING_ARCHITECT_REVIEW` | `UNCOMMITTED_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `LOW` |
-| **`B01`** | W0-A | Transaction `atomic()` & SQLite FK Enforcement | `B00` | `IN_WORKTREE_UNCOMMITTED` (`VERIFIED`) | `UNIT_INTEGRATION_REPORTED` (15 tests in `test_b01_transaction_fk.py`) | `PENDING_ARCHITECT_REVIEW` (`ADR-TX-001`) | `UNCOMMITTED_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `MEDIUM` |
-| **`B02`** | W0-A | Synthetic Provider Deny, Quarantine Promotion, Mutation Provenance & Cross-Workflow Rollback | `B01` | `IN_WORKTREE_UNCOMMITTED` (`VERIFIED`) | `UNIT_INTEGRATION_REPORTED` (`test_b02_*.py`, `test_adversarial_challenger.py`, `test_w0a_final_adversarial.py`) | `PENDING_ARCHITECT_REVIEW` (`ADR-PROV-001-ADDENDUM-01`, `ADR-TX-001-ADDENDUM-01`, `ADR-TX-001-ADDENDUM-02`) | `UNCOMMITTED_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `HIGH` |
-| **`B03`** | W0-B | Alembic 20-Model Registry, Migration-Chain Compatibility & Multi-Table Preview Isolation | `B01` + **Gate `G-W0A`** (`B02` ratification & commit) | `NOT_STARTED` (`VERIFIED` **BLOCKED**) | `NONE` | `NOT_SUBMITTED` (Spec in `DEV_BATCHES.md`) | `NOT_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `MEDIUM` |
-| **`B10`** | W1 | Replay Ledger Filter (`<= current_index`), Future-State Masking & Horizon Clamp | `B03` (Sequential 2nd in Wave `W0-B + W1`) | `NOT_STARTED` (`VERIFIED`) | `NONE` | `NOT_SUBMITTED` (Prompt in `B10_replay-ledger.md`) | `NOT_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `LOW` |
-| **`B11`** | W1 | Server-Side Replay Indicator Cut (`<= max_visible_ts`) & `MappingResult` Contract | `B10` (Sequential 3rd in Wave `W0-B + W1`) | `NOT_STARTED` (`VERIFIED`) | `NONE` | `NOT_SUBMITTED` (Prompt in `B11_projected.md`) | `NOT_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `MEDIUM` |
-| **`B20`** | W2 | Execution Kernel Unification (`Open[T+1]` Across All Paths) | `B01` + `DEC-03`, `DEC-04` | `NOT_STARTED` (`VERIFIED`) | `NONE` | `GATED_ON_ARCHITECT_DECISION` (`DEC-03`, `DEC-04`) | `NOT_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `HIGH` |
-| **`B21`** | W2 | `MarketProfile` Single Source, `T+1.5` Settlement & VN Calendar | `B20` | `NOT_STARTED` (`VERIFIED`) | `NONE` | `NOT_SUBMITTED` (Prompt in `B21_marketprofile.md`) | `NOT_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `MEDIUM` |
-| **`B22`** | W2 | Metrics Unification (Net PnL, Breakeven Rule, PF `N/A`, Sharpe 252) | `B21` + `DEC-05` | `NOT_STARTED` (`VERIFIED`) | `NONE` | `GATED_ON_ARCHITECT_DECISION` (`DEC-05`) | `NOT_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `MEDIUM` |
-| **`B30`** | W3 | Frontend Query Keys, Navigation Token & Session Switch Cleanup | `B10` | `NOT_STARTED` (`VERIFIED`) | `NONE` | `NOT_SUBMITTED` (Prompt in `B30_fe-state.md`) | `NOT_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `MEDIUM` |
-| **`B31`** | W3 | WebSocket Replay State Machine, Sequence Envelope & Auto-Reconnect | `B30` | `NOT_STARTED` (`VERIFIED`) | `NONE` | `NOT_SUBMITTED` (Prompt in `B31_ws.md`) | `NOT_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `MEDIUM` |
-| **`B32`** | W3 | `ChartKernel` Facade, `ReplayWorkspace` Split & Dead Drawing Removal | `B30`, `B11` | `NOT_STARTED` (`VERIFIED`) | `NONE` | `NOT_SUBMITTED` (Prompt in `B32_chart.md`) | `NOT_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `HIGH` |
+| **`B00`** | W0-A | DB Path Resolution & CWD Guard | None | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (7 CWD + 30 safeguard tests; `828` BE / `240` FE total) | `APPROVED` (`DEC-01`) | `COMMITTED_ON_MASTER` (`e34516c`) | `NOT_ACCEPTED` | `LOW` |
+| **`B01`** | W0-A | Transaction `atomic()` & SQLite FK Enforcement | `B00` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (15 tests in `test_b01_transaction_fk.py`) | `APPROVED` (`DEC-01`, `ADR-TX-001`) | `COMMITTED_ON_MASTER` (`e34516c`) | `NOT_ACCEPTED` | `MEDIUM` |
+| **`B02`** | W0-A | Synthetic Provider Deny, Quarantine Promotion, Mutation Provenance & Cross-Workflow Rollback | `B01` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`test_b02_*.py`, `test_adversarial_challenger.py`, `test_w0a_final_adversarial.py`) | `APPROVED` (`DEC-01`, `ADR-PROV-001-ADDENDUM-01`, `ADR-TX-001-ADDENDUM-01/02`) | `COMMITTED_ON_MASTER` (`e34516c`, `2151f34`) | `NOT_ACCEPTED` | `HIGH` |
+| **`B03`** | W0-B | Alembic 20-Model Registry, Migration-Chain Compatibility & Multi-Table Preview Isolation (+ `R1`, `R6`) | `B01` + **Gate `G-W0A`** | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`test_b03_*.py`, `test_r1_alembic_stamping.py`, `test_r6_import_contract.py`) | `APPROVED` (`DEC-02`, `DEC-REM-01`, `DEC-REM-06`) | `COMMITTED_ON_MASTER` (`c331dc3`) | `NOT_ACCEPTED` | `MEDIUM` |
+| **`B10`** | W1 | Replay Ledger Filter (`<= current_index`), Future-State Masking & Horizon Clamp (+ `R4`) | `B03` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`test_b10_*.py`, `test_r4_replay_future_state.py`) | `APPROVED` (`DEC-02`, `DEC-REM-04`) | `COMMITTED_ON_MASTER` (`c331dc3`) | `NOT_ACCEPTED` | `LOW` |
+| **`B11`** | W1 | Server-Side Replay Indicator Cut (`<= max_visible_ts`) & `MappingResult` Contract | `B10` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`test_b11_*.py`, `IndicatorRenderRegistry.test.ts`) | `APPROVED` (`DEC-02`) | `COMMITTED_ON_MASTER` (`c331dc3`) | `NOT_ACCEPTED` | `MEDIUM` |
+| **`B20`** | W2 | Execution Kernel Unification (`Open[T+1]` Across All Paths + `R5`) | `B01` + `DEC-03`, `DEC-04` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`test_b20_*.py`, `test_r5_market_profile_coherence.py`) | `APPROVED` (`DEC-03`, `DEC-04`, `DEC-TRAIN02-02`, `DEC-REM-05`) | `COMMITTED_ON_MASTER` (`c331dc3`) | `NOT_ACCEPTED` | `HIGH` |
+| **`B21`** | W2 | `MarketProfile` Single Source, `T+1.5` Settlement & VN Calendar (+ `R2`) | `B20` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`test_b21_*.py`, `test_r2_settlement_calendar.py`) | `APPROVED` (`DEC-TRAIN02-03`, `DEC-REM-02`) | `COMMITTED_ON_MASTER` (`c331dc3`) | `NOT_ACCEPTED` | `MEDIUM` |
+| **`B22`** | W2 | Metrics Unification (Net PnL, Breakeven Rule, PF `N/A`, Sharpe 252 + `R3`) | `B21` + `DEC-05` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`test_b22_*.py`, `test_r3_sharpe_coherence.py`, `test_benchmark_metrics.py`) | `APPROVED` (`DEC-05`, `DEC-TRAIN02-04`, `DEC-REM-03`) | `COMMITTED_ON_MASTER` (`c331dc3`) | `NOT_ACCEPTED` | `MEDIUM` |
+| **`B30`** | W3 | Frontend Query Keys, Navigation Token & Session Switch Cleanup | `B10` | `NOT_STARTED` (`VERIFIED`) | `NONE` | `APPROVED` (Spec in `B30_fe-state.md` & `ADR-FE-001`) | `NOT_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `MEDIUM` |
+| **`B31`** | W3 | WebSocket Replay State Machine, Sequence Envelope & Auto-Reconnect | `B30` | `NOT_STARTED` (`VERIFIED`) | `NONE` | `APPROVED` (Spec in `B31_ws.md` & `ADR-WS-001`) | `NOT_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `MEDIUM` |
+| **`B32`** | W3 | `ChartKernel` Facade, `ReplayWorkspace` Split & Dead Drawing Removal | `B30`, `B11` | `NOT_STARTED` (`VERIFIED`) | `NONE` | `APPROVED` (Spec in `B32_chart.md` & `ADR-CHART-001`) | `NOT_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `HIGH` |
 | **`B40`** | W4 | OpenAPI Contract Snapshot, Error Envelope & Dead Endpoint Removal | `B20` | `NOT_STARTED` (`VERIFIED`) | `NONE` | `NOT_SUBMITTED` (Prompt in `B40_contracts.md`) | `NOT_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `MEDIUM` |
 | **`B41`** | W4 | Money Flow BB Envelope Unification & Degraded State Display | `B40` | `NOT_STARTED` (`VERIFIED`) | `NONE` | `NOT_SUBMITTED` (Prompt in `B41_bb.md`) | `NOT_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `LOW` |
 | **`B50`** | W4 | Trading Practice UX (`T+1` Wording, SL/TP Alert, SHORT R:R, Limit Cancel) | `B21` | `NOT_STARTED` (`VERIFIED`) | `NONE` | `NOT_SUBMITTED` (Prompt in `B50_trading-ux.md`) | `NOT_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `MEDIUM` |
@@ -139,41 +139,23 @@ flowchart TD
 
 ## 4. Operational Readiness Classification (What Is Where Right Now)
 
-### 4.1 Complete & Committed on `master` (`HISTORICAL` / `VERIFIED`)
+### 4.1 Complete & Committed on `master` (`VERIFIED`)
 - **P-Lineage Research & Domain Foundation (`P1–P10`)**: Signal engine, liquidity filters, multi-horizon outcome lab, regime segmentation, parameter stability, cost/turnover realism, portfolio constraints, walk-forward validation, and research presets (`backend/app/domain/*`, `backend/app/services/*`).
+- **Wave `W0-A` Stabilization & Architecture Baseline (`e34516c`, `2151f34`)**: `B00`, `B01`, `B02`, plus ratified `ADR-PROV-001-ADDENDUM-01`, `ADR-TX-001-ADDENDUM-01`, and `ADR-TX-001-ADDENDUM-02`.
+- **Wave `W0-B + W1 + W2` Execution, Zero-Lookahead & Financial Correctness Baseline (`c331dc3`)**: `B03`, `B10`, `B11`, `B20`, `B21`, `B22`, remediation `R1–R6`, and final 8 legacy test fixture alignments (`828 passed, 1 skipped, 0 failed` backend; `240 passed` frontend).
 
-### 4.2 Uncommitted in the Working Tree & Pending Owner/Architect Approval (`W0-A`: `B00`, `B01`, `B02`)
-- **19 Modified Tracked Files (`VERIFIED` via `git status`)**:
-  - `.gitignore`, `backend/alembic/env.py`, `backend/app/config.py`, `backend/app/db.py`, `backend/app/dependencies.py`, `backend/app/main.py`, `backend/app/schemas/sync_schema.py`, `backend/app/services/data_providers/{base_provider,provider_registry,ssi_provider,vnstock_provider}.py`, `backend/app/services/{import_workflow_service,sync_workflow_service,weekly_aggregator}.py`, `backend/app/tests/conftest.py`, `backend/app/tests/test_sync_workflow.py`, `frontend/src/api/syncApi.ts`, `frontend/src/components/sync/DataSyncPanel.tsx`, `scripts/verify-v2.sh`.
-- **10 Untracked Safeguard & Test Files (`VERIFIED`)**:
-  - `backend/conftest.py`, `backend/tests_safety.py`, `backend/tests/{test_cwd_database_isolation,test_database_safeguard,test_adversarial_challenger,test_w0a_final_adversarial}.py`, `backend/app/tests/{test_b01_transaction_fk,test_b02_synthetic_deny,test_b02_quarantine_isolation,test_b02_quarantine_write_collision}.py`.
-- **3 Proposed ADR Addenda Pending Ratification (`VERIFIED` in `docs/architecture/decisions/`)**:
-  - [`ADR-PROV-001-ADDENDUM-01-quarantine-promotion.md`](../../architecture/decisions/ADR-PROV-001-ADDENDUM-01-quarantine-promotion.md): **Option A Quarantine Promotion & Precedence** (In-place promotion of a single unambiguous quarantine candle when canonical data arrives; atomic pre-validation rejection with `HTTP 400` + `db.rollback()` when multiple quarantine candidates share the same calendar date; synthetic sync never overwrites canonical data).
-  - [`ADR-TX-001-ADDENDUM-01-mutation-provenance.md`](../../architecture/decisions/ADR-TX-001-ADDENDUM-01-mutation-provenance.md): **Mutation Provenance Encoding & State Reconstruction** (`UPDATE:{prior_source}|{prior_timestamp_iso}` encoding in `ImportRunMutation.action` / `SyncRunMutation.action`, right-split parsing `rsplit("|", 1)`, fail-closed `HTTP 400` validation on empty/malformed ISO timestamps or missing/ambiguous rollback target candles, and transactional `db.rollback()` atomicity).
-  - [`ADR-TX-001-ADDENDUM-02-cross-workflow-rollback.md`](../../architecture/decisions/ADR-TX-001-ADDENDUM-02-cross-workflow-rollback.md): **Cross-Workflow Symmetrical Rollback Conflict Resolution** (`ImportWorkflowService.rollback_import` checks for subsequent accepted `SyncRun`s on affected symbols and aborts with `HTTP 400`; `SyncWorkflowService.rollback_sync` checks for subsequent accepted `ImportRun`s on the symbol and aborts with `HTTP 400`; non-accepted runs do not block rollback).
-  - Package overview: [`ADR_ADDENDA_W0A_PROPOSALS.md`](../../architecture/ADR_ADDENDA_W0A_PROPOSALS.md).
-  - See [SUMI_V3_PRODUCT_COMPLETION_MASTER_PLAN_PROPOSED.md §I.4](SUMI_V3_PRODUCT_COMPLETION_MASTER_PLAN_PROPOSED.md) for the complete `W0-A` Git Baseline Readiness Assessment and exact staged-file proposal.
+### 4.2 Uncommitted in the Working Tree
+- **None (`0` files)** at the `W0–W2` baseline boundary (`c331dc3`).
 
-### 4.3 Blocked (`B03` and Downstream Execution Waves)
-- **`B03`** is blocked on **Gate `G-W0A`**: Product Owner & GPT-6 Technical Architect ratification of `W0-A` (`B00`, `B01`, `B02` + 3 ADR Addenda) and committing `W0-A` to Git so `B03` edits (`backend/alembic/env.py`, `backend/app/services/import_workflow_service.py`) start from a clean working tree.
-- **`B20` and `B22`** additionally require GPT-6 / Product Owner resolution of **`DEC-03`** (intraday vs next-open SL/TP), **`DEC-04`** (sizing on `Close[T]` vs `Open[T+1]`), and **`DEC-05`** (`net_pnl > 0` breakeven rule and `N/A` Profit Factor display).
+### 4.3 Active Next Execution Wave (`W3`: Development Train 03 — `B30`, `B31`, `B32`)
+- **`B30` first**: Frontend Replay State, TanStack Query Keys (`sessionId, symbol, timeframe, adjustmentType, currentIndex`), navigation race protection (`AbortController` + monotonic token), session-switch cleanup checklist (`cancelQueries -> removeQueries -> closeWS -> single chart clear`), and `replayStore.ts` reduction (`ADR-FE-001`).
+- **`B31` and `B32` after `B30`** (parallel only where file ownership is strictly disjoint; sequence shared `ReplayWorkspace` / chart integration files):
+  - **`B31`**: WebSocket playback state machine, monotonic `seq` envelope, speed clamping (`0.25x–10x`), heartbeat `ping`/`pong`, exponential backoff auto-reconnect, and deterministic server state resynchronization (`ADR-WS-001`).
+  - **`B32`**: `ChartKernel` facade wrapping Lightweight Charts v5, `ReplayWorkspace` / `ReplayWorkspaceController` decomposition, `MappingResult` UI status rendering, drawing/indicator lifecycle stability, and dead legacy drawing file removal (`ADR-CHART-001`).
 
-### 4.4 What Can Run Next (Immediately After Gate `G-W0A`)
-- **Primary Next Execution Wave (`W0-B + W1`: Sequential `B03` → `B10` → `B11`)**:
-  - Once `W0-A` is ratified and committed, Wave `W0-B + W1` executes with a **strictly sequential default implementation and batch-acceptance order**:
-    1. **`B03` first** (Alembic 20-model registry, migration-chain compatibility assessment & additive corrective migration, multi-table preview read-only isolation).
-    2. **`B10` second** (Replay ledger `<= current_index` enforcement without an active-Replay `include_future=true` bypass, full future-state masking of persisted orders/trades, explicit post-session audit eligibility rules, and horizon clamping).
-    3. **`B11` third** (Server-side Replay indicator projection clamping `<= max_visible_ts`, preservation of non-Replay forward projection, and typed `MappingResult` warming/error metadata compatibility).
-  - See [SUMI_V3_NEXT_WAVE_TEAMWORK_PROMPT_PROPOSED.md](SUMI_V3_NEXT_WAVE_TEAMWORK_PROMPT_PROPOSED.md) for the complete ready-to-launch prompt.
-
-### 4.5 What Can Run in Parallel (Read-Only / Non-Overlapping Roles)
-- **Within Wave `W0-B + W1` (`B03 → B10 → B11`)**:
-  - Implementation writes and batch acceptance are **strictly sequential** (`B03` → `B10` → `B11`).
-  - However, **Reviewers, Specification Investigators, and Test Designers** may work in parallel (e.g., auditing migration chains, designing `B10` future-masking test fixtures, or verifying `B11` Ichimoku `+26` Replay vs. non-Replay vectors) without modifying shared application files.
-- **Across Subsequent Waves (`W2` and `W3` After `W1` Completes)**:
-  - **Backend Financial Stream (`W2`: `B20 → B21 → B22`)** touches `backend/app/domain/{backtest,market,accounting}*` and `backend/app/services/{backtest,strategy_lab,trade_lifecycle,analytics}_service.py`.
-  - **Frontend State & Chart Stream (`W3`: `B30 → B31` and `B32`)** touches `frontend/src/hooks/*`, `frontend/src/components/replay/*`, `frontend/src/chart/*`, and `backend/app/api/ws_replay.py`.
-  - Because `W2` and `W3` have disjoint file ownership, `W2` and `W3` can execute in parallel once `B11` is committed and `DEC-03..05` are ratified.
+### 4.4 Downstream Execution Waves (`W4` and `W5`)
+- **Wave `W4` (`B40`, `B41`, `B50`, `B51`)**: OpenAPI contracts & error envelopes (`B40`), Money Flow BB unification (`B41`), Trading Practice UX (`B50`), and Strategy Lab Single Tab integration & 1280px UX (`B51`).
+- **Wave `W5` (`W5-UAT`)**: Full browser E2E UAT across Journeys 1–5 at `1440×1000` and `1280×800` on isolated deterministic fixtures.
 
 ---
 
@@ -189,10 +171,10 @@ flowchart TD
 - **Product Benefit**: Prevents accidental creation of empty `./sumi.db` ghost files when starting uvicorn, Alembic, or scripts from the repo root instead of `backend/`, ensuring user sessions and imported market data are consistently found.
 - **Dependencies**: None.
 - **Five-Dimensional Status**:
-  - *Implementation Status*: `IN_WORKTREE_UNCOMMITTED` (`VERIFIED` in `backend/app/config.py`, `backend/app/db.py`, `backend/app/main.py`, `backend/alembic/env.py`, `.gitignore`)
-  - *Test Evidence Status*: `UNIT_INTEGRATION_REPORTED` (`backend/tests/test_cwd_database_isolation.py` [7 tests], `backend/tests/test_database_safeguard.py` [30 tests]; raw logs `VERIFIED` on disk in `artifacts/local/W0-A/final-remediation/logs/`, test execution `REPORTED`)
-  - *Architectural Approval Status*: `PENDING_ARCHITECT_REVIEW` (Retrospective in [`EXECPLAN_B00_RETROSPECTIVE.md`](../EXECPLAN_B00_RETROSPECTIVE.md))
-  - *Commit / Merge Status*: `UNCOMMITTED_IN_WORKTREE` (`VERIFIED`)
+  - *Implementation Status*: `COMPLETE_VERIFIED` (`VERIFIED` in `backend/app/config.py`, `backend/app/db.py`, `backend/app/main.py`, `backend/alembic/env.py`, `.gitignore`)
+  - *Test Evidence Status*: `UNIT_INTEGRATION_VERIFIED` (`backend/tests/test_cwd_database_isolation.py` [7 tests], `backend/tests/test_database_safeguard.py` [30 tests])
+  - *Architectural Approval Status*: `APPROVED` (`DEC-01`; Retrospective in [`EXECPLAN_B00_RETROSPECTIVE.md`](../EXECPLAN_B00_RETROSPECTIVE.md))
+  - *Commit / Merge Status*: `COMMITTED_ON_MASTER` (`e34516c`)
   - *Product Acceptance Status*: `NOT_ACCEPTED`
 - **Entry Criteria**: Repository at baseline commit `1ff5f04`.
 - **Expected Deliverables**:
@@ -217,10 +199,10 @@ flowchart TD
 - **Product Benefit**: Prevents half-written candle imports, orphaned child rows, and corrupted session state when a multi-step import or sync fails mid-flight.
 - **Dependencies**: `B00`.
 - **Five-Dimensional Status**:
-  - *Implementation Status*: `IN_WORKTREE_UNCOMMITTED` (`VERIFIED` in `backend/app/db.py`, `backend/app/dependencies.py`, `backend/app/services/{import_workflow_service,sync_workflow_service,weekly_aggregator}.py`)
-  - *Test Evidence Status*: `UNIT_INTEGRATION_REPORTED` (`backend/app/tests/test_b01_transaction_fk.py` [15 tests]; raw logs `VERIFIED` on disk in `artifacts/local/W0-A/final-remediation/logs/`, execution `REPORTED`)
-  - *Architectural Approval Status*: `PENDING_ARCHITECT_REVIEW` ([`EXECPLAN_B01_RETROSPECTIVE.md`](../EXECPLAN_B01_RETROSPECTIVE.md))
-  - *Commit / Merge Status*: `UNCOMMITTED_IN_WORKTREE` (`VERIFIED`)
+  - *Implementation Status*: `COMPLETE_VERIFIED` (`VERIFIED` in `backend/app/db.py`, `backend/app/dependencies.py`, `backend/app/services/{import_workflow_service,sync_workflow_service,weekly_aggregator}.py`)
+  - *Test Evidence Status*: `UNIT_INTEGRATION_VERIFIED` (`backend/app/tests/test_b01_transaction_fk.py` [15 tests])
+  - *Architectural Approval Status*: `APPROVED` (`DEC-01`; [`EXECPLAN_B01_RETROSPECTIVE.md`](../EXECPLAN_B01_RETROSPECTIVE.md))
+  - *Commit / Merge Status*: `COMMITTED_ON_MASTER` (`e34516c`)
   - *Product Acceptance Status*: `NOT_ACCEPTED`
 - **Entry Criteria**: `B00` in place.
 - **Expected Deliverables**:
@@ -244,10 +226,10 @@ flowchart TD
 - **Product Benefit**: Guarantees that Sumi's charts, scanners, and backtests are never silently polluted by fake stub candles, and makes canonical takeover and batch rollback lossless and fail-closed across both CSV imports and provider syncs.
 - **Dependencies**: `B01`.
 - **Five-Dimensional Status**:
-  - *Implementation Status*: `IN_WORKTREE_UNCOMMITTED` (`VERIFIED` in `backend/app/services/data_providers/*`, `backend/app/services/{sync_workflow_service,import_workflow_service,weekly_aggregator}.py`, `backend/app/schemas/sync_schema.py`, `frontend/src/api/syncApi.ts`, `frontend/src/components/sync/DataSyncPanel.tsx`)
-  - *Test Evidence Status*: `UNIT_INTEGRATION_REPORTED` (`test_b02_synthetic_deny.py` [13], `test_b02_quarantine_isolation.py` [12], `test_b02_quarantine_write_collision.py` [31], `test_adversarial_challenger.py` [14], `test_w0a_final_adversarial.py` [18]; `537` BE / `239` FE reported passing in `artifacts/local/W0-A/final-remediation/logs/`)
-  - *Architectural Approval Status*: `PENDING_ARCHITECT_REVIEW` ([`EXECPLAN_B02_RETROSPECTIVE.md`](../EXECPLAN_B02_RETROSPECTIVE.md) + [`ADR-PROV-001-ADDENDUM-01`](../../architecture/decisions/ADR-PROV-001-ADDENDUM-01-quarantine-promotion.md), [`ADR-TX-001-ADDENDUM-01`](../../architecture/decisions/ADR-TX-001-ADDENDUM-01-mutation-provenance.md), [`ADR-TX-001-ADDENDUM-02`](../../architecture/decisions/ADR-TX-001-ADDENDUM-02-cross-workflow-rollback.md))
-  - *Commit / Merge Status*: `UNCOMMITTED_IN_WORKTREE` (`VERIFIED`)
+  - *Implementation Status*: `COMPLETE_VERIFIED` (`VERIFIED` in `backend/app/services/data_providers/*`, `backend/app/services/{sync_workflow_service,import_workflow_service,weekly_aggregator}.py`, `backend/app/schemas/sync_schema.py`, `frontend/src/api/syncApi.ts`, `frontend/src/components/sync/DataSyncPanel.tsx`)
+  - *Test Evidence Status*: `UNIT_INTEGRATION_VERIFIED` (`test_b02_synthetic_deny.py` [13], `test_b02_quarantine_isolation.py` [12], `test_b02_quarantine_write_collision.py` [31], `test_adversarial_challenger.py` [14], `test_w0a_final_adversarial.py` [18])
+  - *Architectural Approval Status*: `APPROVED` (`DEC-01`; [`EXECPLAN_B02_RETROSPECTIVE.md`](../EXECPLAN_B02_RETROSPECTIVE.md) + ratified Addenda)
+  - *Commit / Merge Status*: `COMMITTED_ON_MASTER` (`e34516c`, `2151f34`)
   - *Product Acceptance Status*: `NOT_ACCEPTED`
 - **Entry Criteria**: `B01` in place.
 - **Expected Deliverables**:
@@ -275,10 +257,10 @@ flowchart TD
 - **Product Benefit**: Guarantees that schema migrations work reliably on both empty and pre-existing databases, and ensures that previewing a CSV file never leaves unintended committed records across any database table.
 - **Dependencies**: `B01` and **Gate `G-W0A`** (`B00–B02` ratification and clean git commit).
 - **Five-Dimensional Status**:
-  - *Implementation Status*: `NOT_STARTED` (`VERIFIED` — **BLOCKED** pending Gate `G-W0A`)
-  - *Test Evidence Status*: `NONE`
-  - *Architectural Approval Status*: `NOT_SUBMITTED` (Batch scope ratified in `DEV_BATCHES.md` & Task 2 review)
-  - *Commit / Merge Status*: `NOT_IN_WORKTREE` (`VERIFIED`)
+  - *Implementation Status*: `COMPLETE_VERIFIED` (`VERIFIED` in `backend/alembic/env.py`, `backend/alembic/versions/20261014_0001_b03_composite_indexes.py`, `backend/app/api/import_data.py`, `backend/app/services/import_workflow_service.py`, `frontend/src/pages/ImportPage.tsx`)
+  - *Test Evidence Status*: `UNIT_INTEGRATION_VERIFIED` (`test_b03_alembic_and_preview_isolation.py`, `test_b03_challenger_stress.py`, `test_r1_alembic_stamping.py`, `test_r6_import_contract.py`)
+  - *Architectural Approval Status*: `APPROVED` (`DEC-02`, `DEC-REM-01`, `DEC-REM-06`)
+  - *Commit / Merge Status*: `COMMITTED_ON_MASTER` (`c331dc3`)
   - *Product Acceptance Status*: `NOT_ACCEPTED`
 - **Entry Criteria**:
   1. `W0-A` (`B00`, `B01`, `B02` + 3 ADR Addenda) ratified by GPT-6 / Product Owner and committed to Git.
@@ -305,10 +287,10 @@ flowchart TD
 - **Product Benefit**: Eliminates future trade/order/decision leakage—including future fills of earlier orders or future exits of open trades—when a user steps backward or reviews an active Replay session, and prevents leaking future bar counts or settlement dates.
 - **Dependencies**: `B03` (Sequential 2nd in Wave `W0-B + W1` after `B03` acceptance).
 - **Five-Dimensional Status**:
-  - *Implementation Status*: `NOT_STARTED` (`VERIFIED`)
-  - *Test Evidence Status*: `NONE`
-  - *Architectural Approval Status*: `NOT_SUBMITTED` (Prompt in `B10_replay-ledger.md` & Task 2 review)
-  - *Commit / Merge Status*: `NOT_IN_WORKTREE` (`VERIFIED`)
+  - *Implementation Status*: `COMPLETE_VERIFIED` (`VERIFIED` in `backend/app/api/decisions.py`, `backend/app/services/practice_workflow_service.py`, `backend/app/utils/date_range.py`)
+  - *Test Evidence Status*: `UNIT_INTEGRATION_VERIFIED` (`test_b10_replay_lookahead_lock.py`, `test_b10_challenger_stress.py`, `test_r4_replay_future_state.py`)
+  - *Architectural Approval Status*: `APPROVED` (`DEC-02`, `DEC-REM-04`)
+  - *Commit / Merge Status*: `COMMITTED_ON_MASTER` (`c331dc3`)
   - *Product Acceptance Status*: `NOT_ACCEPTED`
 - **Entry Criteria**: Gate `G-W0A` cleared and `B03` completed/verified.
 - **Expected Deliverables**:
@@ -338,10 +320,10 @@ flowchart TD
 - **Product Benefit**: Guarantees that the backend Replay API never transmits indicator timestamps beyond `candles[current_index].timestamp` (strict zero-lookahead), while preserving standard forward cloud projection on non-Replay charts and giving the frontend typed warming/error states.
 - **Dependencies**: `B10` (Sequential 3rd in Wave `W0-B + W1` after `B10` acceptance).
 - **Five-Dimensional Status**:
-  - *Implementation Status*: `NOT_STARTED` (`VERIFIED`)
-  - *Test Evidence Status*: `NONE`
-  - *Architectural Approval Status*: `NOT_SUBMITTED` (Prompt in `B11_projected.md` & Task 2 review)
-  - *Commit / Merge Status*: `NOT_IN_WORKTREE` (`VERIFIED`)
+  - *Implementation Status*: `COMPLETE_VERIFIED` (`VERIFIED` in `backend/app/domain/engine/indicator_engine.py`, `backend/app/api/{replay,indicators}.py`, `frontend/src/components/chart/IndicatorRenderRegistry.ts`)
+  - *Test Evidence Status*: `UNIT_INTEGRATION_VERIFIED` (`test_b11_indicator_projection_lock.py`, `test_b11_challenger_stress.py`, `IndicatorRenderRegistry.test.ts`)
+  - *Architectural Approval Status*: `APPROVED` (`DEC-02`)
+  - *Commit / Merge Status*: `COMMITTED_ON_MASTER` (`c331dc3`)
   - *Product Acceptance Status*: `NOT_ACCEPTED`
 - **Entry Criteria**: `B10` completed and verified.
 - **Expected Deliverables**:
@@ -365,10 +347,10 @@ flowchart TD
 - **Product Benefit**: Eliminates the critical financial defect where Strategy Lab Sweep fills on same-bar `Close[T]` while Batch/Battle fills on `Open[T+1]`, ensuring that a strategy tested in Strategy Lab produces the exact same trades and PnL when opened in Single Backtest or Sweep.
 - **Dependencies**: `B01` + **Architect Decisions `DEC-03` (SL/TP fill timing) and `DEC-04` (Position sizing anchor `Close[T]` vs `Open[T+1]`)**.
 - **Five-Dimensional Status**:
-  - *Implementation Status*: `NOT_STARTED` (`VERIFIED`)
-  - *Test Evidence Status*: `NONE`
-  - *Architectural Approval Status*: `GATED_ON_ARCHITECT_DECISION` (`DEC-03` and `DEC-04` must be resolved before coding)
-  - *Commit / Merge Status*: `NOT_IN_WORKTREE` (`VERIFIED`)
+  - *Implementation Status*: `COMPLETE_VERIFIED` (`VERIFIED` in `backend/app/domain/backtest/execution.py`, `backend/app/services/{strategy_lab_service,backtest_service,trade_lifecycle_service}.py`)
+  - *Test Evidence Status*: `UNIT_INTEGRATION_VERIFIED` (`test_b20_execution_kernel_parity.py`, `test_b20_challenger_stress.py`, `test_b20_challenger_stress_boundary.py`, `test_r5_market_profile_coherence.py`)
+  - *Architectural Approval Status*: `APPROVED` (`DEC-03`, `DEC-04`, `DEC-TRAIN02-02`, `DEC-REM-05`)
+  - *Commit / Merge Status*: `COMMITTED_ON_MASTER` (`c331dc3`)
   - *Product Acceptance Status*: `NOT_ACCEPTED`
 - **Entry Criteria**:
   1. Gate `G-W0A` cleared.
@@ -394,10 +376,10 @@ flowchart TD
 - **Product Benefit**: Models real Vietnamese market settlement across weekends and public holidays (`2020–2026`) and ensures every screen and engine uses identical fee (`0.15%`), sell tax (`0.10%`), slippage (`0.0` default), and exchange price-limit (`HOSE ±7%`, `HNX ±10%`, `UPCOM ±15%`) rules.
 - **Dependencies**: `B20`.
 - **Five-Dimensional Status**:
-  - *Implementation Status*: `NOT_STARTED` (`VERIFIED`)
-  - *Test Evidence Status*: `NONE`
-  - *Architectural Approval Status*: `NOT_SUBMITTED` (Prompt in `B21_marketprofile.md` & `ADR-SETTLE-001` ratified)
-  - *Commit / Merge Status*: `NOT_IN_WORKTREE` (`VERIFIED`)
+  - *Implementation Status*: `COMPLETE_VERIFIED` (`VERIFIED` in `backend/app/domain/market/{rules,settlement,calendar}.py`, `backend/app/services/cafef/classifier.py`, `frontend/src/components/replay/TradeControls.tsx`)
+  - *Test Evidence Status*: `UNIT_INTEGRATION_VERIFIED` (`test_b21_settlement_and_calendar.py`, `test_b21_challenger_*.py`, `test_r2_settlement_calendar.py`)
+  - *Architectural Approval Status*: `APPROVED` (`DEC-TRAIN02-03`, `DEC-REM-02`)
+  - *Commit / Merge Status*: `COMMITTED_ON_MASTER` (`c331dc3`)
   - *Product Acceptance Status*: `NOT_ACCEPTED`
 - **Entry Criteria**: `B20` completed.
 - **Expected Deliverables**:
@@ -421,10 +403,10 @@ flowchart TD
 - **Product Benefit**: Eliminates contradictory Win Rate, Profit Factor, and Sharpe numbers between Strategy Lab, Single Backtest, Practice Scoreboard, and Analytics Page.
 - **Dependencies**: `B21` + **Architect Decision `DEC-05` (Breakeven `net_pnl == 0` winner classification and Net vs Gross Profit Factor with `GL == 0 -> N/A`)**.
 - **Five-Dimensional Status**:
-  - *Implementation Status*: `NOT_STARTED` (`VERIFIED`)
-  - *Test Evidence Status*: `NONE`
-  - *Architectural Approval Status*: `GATED_ON_ARCHITECT_DECISION` (`DEC-05` must be resolved before changing `metrics.py` and `TEST-MET-002`)
-  - *Commit / Merge Status*: `NOT_IN_WORKTREE` (`VERIFIED`)
+  - *Implementation Status*: `COMPLETE_VERIFIED` (`VERIFIED` in `backend/app/domain/accounting.py`, `backend/app/domain/backtest/{metrics,batch_runner}.py`, `backend/app/services/analytics_service.py`)
+  - *Test Evidence Status*: `UNIT_INTEGRATION_VERIFIED` (`test_b22_metrics_unification.py`, `test_b22_challenger_*.py`, `test_r3_sharpe_coherence.py`, `test_benchmark_metrics.py`)
+  - *Architectural Approval Status*: `APPROVED` (`DEC-05`, `DEC-TRAIN02-04`, `DEC-REM-03`)
+  - *Commit / Merge Status*: `COMMITTED_ON_MASTER` (`c331dc3`)
   - *Product Acceptance Status*: `NOT_ACCEPTED`
 - **Entry Criteria**: `B21` completed and `DEC-05` ratified by GPT-6 / Product Owner.
 - **Expected Deliverables**:

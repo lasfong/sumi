@@ -1,27 +1,27 @@
 # SUMI V3 — DEVELOPMENT EXECUTION STATE
 
-- **Active Train**: **Development Train 01+02 Remediation Mission (`R1 → R2 → R3 → R4 → R5 → R6 → R7`)**
-- **Prior Train Status**: **Development Train 01 (`W0-A Closure → B03 → B10 → B11`) & Train 02 (`B20 → B21 → B22`) COMPLETE & VERIFIED**
-- **Current Phase**: **FULL REGRESSION CLOSED — READY FOR TRAIN 01+02 BASELINE ACCEPTANCE**
+- **Active Train**: **Development Train 03 (`Wave W3`: `B30 → B31 + B32`)**
+- **Prior Train Status**: **Development Train 01 (`W0-A`, `B03`, `B10`, `B11`), Train 02 (`B20`, `B21`, `B22`), & Remediation (`R1–R7`) COMPLETE & COMMITTED (`c331dc3`)**
+- **Current Phase**: **GOVERNANCE CHARTER ESTABLISHED — ENTERING DEVELOPMENT TRAIN 03 (`B30`, `B31`, `B32`)**
 - **Baseline Git Commits**:
   - Base: `1ff5f04ed7a26969130eaba75da50b20684e763e` (`master`)
   - Commit 1 (`W0-A` Stabilization, 38 files): `e34516c`
   - Commit 2 (Architecture Baseline & Master Plan, 46 files): `2151f34`
-  - Post-Commit 2 Commits: **0 (Strictly No Additional Commits — Train 01, Train 02, and Remediation R1–R7 Remain Uncommitted in Working Tree)**
+  - Commit 3 (`W0–W2` Execution & Financial Correctness Baseline, 70 files): `c331dc3` (`c331dc3250937a664625b1ebb9e7fac6170b0ae3`)
 - **Production DB Invariant (`backend/sumi.db`)**: `234206fc75259f091337d4feb5f41575d0fe5ac02d6c10ba0de8fad68cbcee86` (`188,416` bytes — verified bit-exact, `0` byte delta)
 
 ---
 
-## Development Train 01 Summary (`COMPLETE`)
+## Development Train 01 Summary (`COMPLETE & COMMITTED`)
 
 1. **Phase A — `W0-A` (`B00`, `B01`, `B02` + `DB-SAFETY`)**: `COMPLETE_COMMITTED` (`e34516c`, `2151f34`; `151/151` tests passed in `artifacts/local/development-train-01/w0a_140_regression.log`).
-2. **Phase B — `B03` (`Schema, Migration Compatibility & Preview Isolation`)**: `COMPLETE_UNCOMMITTED` (`14/14` tests passed in `artifacts/local/development-train-01/b03_tests.log`).
-3. **Phase C — `B10` (`Replay Ledger, Horizon & Eligibility Zero-Lookahead Lock`)**: `COMPLETE_UNCOMMITTED` (`8/8` tests passed in `artifacts/local/development-train-01/b10_tests.log`).
-4. **Phase D — `B11` (`Indicator Forward Projection Clamping & Typed Metadata Contract`)**: `COMPLETE_UNCOMMITTED` (`9/9` tests passed in `artifacts/local/development-train-01/b11_tests.log`).
+2. **Phase B — `B03` (`Schema, Migration Compatibility & Preview Isolation`)**: `COMPLETE_COMMITTED` (`c331dc3`; `14/14` tests passed in `artifacts/local/development-train-01/b03_tests.log`).
+3. **Phase C — `B10` (`Replay Ledger, Horizon & Eligibility Zero-Lookahead Lock`)**: `COMPLETE_COMMITTED` (`c331dc3`; `8/8` tests passed in `artifacts/local/development-train-01/b10_tests.log`).
+4. **Phase D — `B11` (`Indicator Forward Projection Clamping & Typed Metadata Contract`)**: `COMPLETE_COMMITTED` (`c331dc3`; `9/9` tests passed in `artifacts/local/development-train-01/b11_tests.log`).
 
 ---
 
-## Development Train 02 Batch Status (`Wave W2`: `B20 → B21 → B22` — `COMPLETE & VERIFIED`)
+## Development Train 02 Batch Status (`Wave W2`: `B20 → B21 → B22` — `COMPLETE & COMMITTED`)
 
 ### 1. Phase A (Train 02) — `B20` (`Execution Kernel Parity: Next-Open Across All Paths & Fill-Estimate Sizing`)
 - **Scope**:

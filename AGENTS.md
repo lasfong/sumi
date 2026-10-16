@@ -82,3 +82,37 @@ A product batch is done only when:
 5. No unrelated working-tree changes are included.
 6. The ExecPlan progress, decisions, and verification evidence are updated.
 7. The reviewer/orchestrator has inspected the diff and evidence.
+
+## Sumi V3 Project Execution Charter & Governance
+
+All Antigravity sessions and Development Trains must recover and follow the established Sumi V3 product completion strategy from these canonical governance records:
+
+### Canonical V3 Governance & Architecture References
+
+- **Master Plan**: [`docs/plans/product-completion/SUMI_V3_PRODUCT_COMPLETION_MASTER_PLAN_PROPOSED.md`](docs/plans/product-completion/SUMI_V3_PRODUCT_COMPLETION_MASTER_PLAN_PROPOSED.md)
+- **Batch Dependency & Status Board**: [`docs/plans/product-completion/SUMI_V3_BATCH_DEPENDENCY_AND_STATUS_PROPOSED.md`](docs/plans/product-completion/SUMI_V3_BATCH_DEPENDENCY_AND_STATUS_PROPOSED.md)
+- **Live Execution State**: [`docs/plans/product-completion/EXECUTION_STATE.md`](docs/plans/product-completion/EXECUTION_STATE.md)
+- **Decision Log**: [`docs/plans/product-completion/DECISION_LOG.md`](docs/plans/product-completion/DECISION_LOG.md)
+- **Financial Golden Cases (`G-01..G-12`)**: [`docs/testing/FINANCIAL_GOLDEN_CASES.md`](docs/testing/FINANCIAL_GOLDEN_CASES.md)
+- **Ratified Architecture Decision Records (`docs/architecture/decisions/`)**:
+  - [`ADR-TX-001`](docs/architecture/decisions/ADR-TX-001-transaction-boundary.md) (+ [`ADDENDUM-01`](docs/architecture/decisions/ADR-TX-001-ADDENDUM-01-mutation-provenance.md), [`ADDENDUM-02`](docs/architecture/decisions/ADR-TX-001-ADDENDUM-02-cross-workflow-rollback.md))
+  - [`ADR-PROV-001`](docs/architecture/decisions/ADR-PROV-001-synthetic-policy.md) (+ [`ADDENDUM-01`](docs/architecture/decisions/ADR-PROV-001-ADDENDUM-01-quarantine-promotion.md))
+  - [`ADR-EXEC-001`](docs/architecture/decisions/ADR-EXEC-001-execution-semantics.md)
+  - [`ADR-SETTLE-001`](docs/architecture/decisions/ADR-SETTLE-001-settlement-market-rules.md)
+  - [`ADR-FE-001`](docs/architecture/decisions/ADR-FE-001-state-ownership.md)
+  - [`ADR-WS-001`](docs/architecture/decisions/ADR-WS-001-ws-reliability.md)
+  - [`ADR-CHART-001`](docs/architecture/decisions/ADR-CHART-001-chart-kernel.md)
+  - [`ADR-API-001`](docs/architecture/decisions/ADR-API-001-contract-governance.md)
+
+### Mandatory Development Train Protocol
+
+Every new Development Train and session must:
+
+1. **Recover Context First**: Read the product goals, roadmap, batch dependencies, and current execution state (`SUMI_V3_PRODUCT_COMPLETION_MASTER_PLAN_PROPOSED.md`, `SUMI_V3_BATCH_DEPENDENCY_AND_STATUS_PROPOSED.md`, `EXECUTION_STATE.md`, `DECISION_LOG.md`) before planning or coding.
+2. **Maintain Full Traceability**: Trace every task explicitly across `Product Requirement → Gap ID → Batch ID → Acceptance Criteria / Golden Case`.
+3. **Honor Ratified Decisions**: Respect all previously approved architectural and financial decisions in `DECISION_LOG.md` and `docs/architecture/decisions/`.
+4. **Enforce Orthogonal Status Discipline**: Strictly distinguish between `Implementation Complete`, `Test Verified`, `Git Committed`, and `Product Accepted` (including browser E2E UAT). Never conflate unit/integration pass with full product acceptance.
+5. **Single Source of Execution Truth**: Update the central execution records (`EXECUTION_STATE.md`, `DECISION_LOG.md`, and `SUMI_V3_BATCH_DEPENDENCY_AND_STATUS_PROPOSED.md`) in place without creating parallel or duplicate roadmaps.
+6. **Bounded Escalation**: Resolve routine engineering bugs and test regressions autonomously; escalate only genuine Product Owner or Technical Architect policy decisions.
+7. **Self-Contained Subagent Prompts**: Never assume a newly spawned subagent remembers any prior Antigravity session; always provide explicit file paths, ratified contracts, invariants, and verification commands.
+8. **Strict Git & Workspace Safety**: Never perform destructive git/file cleanup (`git reset --hard`, `git checkout --`, `git clean`) or create Git commits without explicit Product Owner authorization.
