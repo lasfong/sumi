@@ -69,6 +69,22 @@ export const ScannerSourceContext: React.FC<ScannerSourceContextProps> = ({ cont
               <span style={{ color: 'var(--text-muted)' }}>Signal Price</span>
               <span style={{ fontFamily: 'monospace' }}>{signal.price.toLocaleString()}</span>
             </div>
+            <div style={{ marginTop: '6px', paddingTop: '6px', borderTop: '1px solid rgba(255,255,255,0.08)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <a
+                href="/scanner"
+                data-testid="scanner-back-link"
+                style={{ color: '#58A6FF', fontSize: '11px', fontWeight: 600 }}
+              >
+                ← Quay lại Scanner
+              </a>
+              <a
+                href="/strategy-lab?tab=flow"
+                data-testid="scanner-flow-link"
+                style={{ color: '#00E676', fontSize: '11px', fontWeight: 600 }}
+              >
+                🌊 Dòng tiền BB
+              </a>
+            </div>
           </div>
     </section>
   );

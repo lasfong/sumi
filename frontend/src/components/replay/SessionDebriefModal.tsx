@@ -44,12 +44,13 @@ export const SessionDebriefModal: React.FC<SessionDebriefModalProps> = ({
     if (!practiceData) return null;
     const trades = practiceData.trades || [];
     const closedTrades = trades.filter(t => t.status === 'closed');
-    const winningTrades = closedTrades.filter(t => (t.net_pnl ?? 0) > 0);
+    const winningTrades = closedTrades.filter(t => t.result === 'win' || (t.result == null && (t.net_pnl ?? 0) > 1000));
+    const losingTrades = closedTrades.filter(t => t.result === 'loss' || (t.result == null && (t.net_pnl ?? 0) < -1000));
     const winRate = closedTrades.length > 0 ? winningTrades.length / closedTrades.length : 0;
     const totalPnl = closedTrades.reduce((sum, t) => sum + (t.net_pnl ?? 0), 0);
     const grossWin = winningTrades.reduce((sum, t) => sum + (t.net_pnl ?? 0), 0);
-    const grossLoss = Math.abs(closedTrades.filter(t => (t.net_pnl ?? 0) < 0).reduce((sum, t) => sum + (t.net_pnl ?? 0), 0));
-    const profitFactor = grossLoss > 0 ? grossWin / grossLoss : grossWin > 0 ? 99 : 0;
+    const grossLoss = Math.abs(losingTrades.reduce((sum, t) => sum + (t.net_pnl ?? 0), 0));
+    const profitFactor = grossLoss > 0 ? grossWin / grossLoss : null;
 
     // Discipline metric: % of trades with Stop Loss defined
     const tradesWithSl = trades.filter(t => t.initial_stop_loss != null && t.initial_stop_loss > 0).length;
@@ -67,7 +68,7 @@ export const SessionDebriefModal: React.FC<SessionDebriefModalProps> = ({
       totalTrades: trades.length,
       closedTradesCount: closedTrades.length,
       winningTradesCount: winningTrades.length,
-      losingTradesCount: closedTrades.length - winningTrades.length,
+      losingTradesCount: losingTrades.length,
       winRate,
       totalPnl,
       profitFactor,
@@ -80,10 +81,14 @@ export const SessionDebriefModal: React.FC<SessionDebriefModalProps> = ({
 
   const totalPnl = analytics?.total_net_pnl ?? localStats?.totalPnl ?? 0;
   const isProfitable = totalPnl >= 0;
-  const winRate = analytics?.metrics?.win_rate?.value ?? localStats?.winRate ?? 0;
-  const profitFactor = analytics?.metrics?.profit_factor?.value ?? localStats?.profitFactor ?? 0;
   const totalTrades = analytics?.total_trades ?? localStats?.totalTrades ?? 0;
   const closedTrades = localStats?.closedTradesCount ?? analytics?.total_trades ?? 0;
+  const winRate = analytics?.win_rate ?? analytics?.metrics?.win_rate?.value ?? localStats?.winRate ?? 0;
+  const profitFactor = analytics?.profit_factor ?? analytics?.metrics?.profit_factor?.value ?? localStats?.profitFactor ?? null;
+  const profitFactorDisplay =
+    profitFactor != null
+      ? profitFactor.toFixed(2)
+      : (analytics?.profit_factor_display ?? (closedTrades > 0 ? 'N/A (chưa có lệnh thua)' : '0.00'));
   const maxDrawdownPct = analytics?.max_drawdown_pct != null ? analytics.max_drawdown_pct / 100 : 0;
   const slAdherence = localStats?.slAdherenceRate ?? 1.0;
 
@@ -153,14 +158,14 @@ export const SessionDebriefModal: React.FC<SessionDebriefModalProps> = ({
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12 }}>
           <div style={{ background: 'rgba(255, 255, 255, 0.03)', padding: 12, borderRadius: 8, border: '1px solid var(--border-color)' }}>
             <span style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase' }}>Tổng P&amp;L</span>
-            <div style={{ fontSize: 18, fontWeight: 700, color: isProfitable ? 'var(--color-buy)' : 'var(--color-sell)', marginTop: 4 }}>
+            <div data-testid="debrief-total-pnl" style={{ fontSize: 18, fontWeight: 700, color: isProfitable ? 'var(--color-buy)' : 'var(--color-sell)', marginTop: 4 }}>
               {isProfitable ? '+' : ''}{formatVnd(totalPnl)}
             </div>
           </div>
 
           <div style={{ background: 'rgba(255, 255, 255, 0.03)', padding: 12, borderRadius: 8, border: '1px solid var(--border-color)' }}>
             <span style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase' }}>Win Rate (Tỷ lệ thắng)</span>
-            <div style={{ fontSize: 18, fontWeight: 700, color: winRate >= 0.5 ? 'var(--color-buy)' : 'var(--text-main)', marginTop: 4 }}>
+            <div data-testid="debrief-win-rate" style={{ fontSize: 18, fontWeight: 700, color: winRate >= 0.5 ? 'var(--color-buy)' : 'var(--text-main)', marginTop: 4 }}>
               {formatVietnamesePercent(winRate)}
             </div>
             <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
@@ -170,8 +175,8 @@ export const SessionDebriefModal: React.FC<SessionDebriefModalProps> = ({
 
           <div style={{ background: 'rgba(255, 255, 255, 0.03)', padding: 12, borderRadius: 8, border: '1px solid var(--border-color)' }}>
             <span style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase' }}>Profit Factor</span>
-            <div style={{ fontSize: 18, fontWeight: 700, color: profitFactor >= 1.5 ? 'var(--color-buy)' : profitFactor >= 1.0 ? '#FFD166' : 'var(--color-sell)', marginTop: 4 }}>
-              {profitFactor.toFixed(2)}
+            <div data-testid="debrief-profit-factor" style={{ fontSize: profitFactor != null ? 18 : 13, fontWeight: 700, color: profitFactor != null ? (profitFactor >= 1.5 ? 'var(--color-buy)' : profitFactor >= 1.0 ? '#FFD166' : 'var(--color-sell)') : '#FFD166', marginTop: 4 }}>
+              {profitFactorDisplay}
             </div>
             <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>{closedTrades} đóng / {totalTrades} lệnh</span>
           </div>

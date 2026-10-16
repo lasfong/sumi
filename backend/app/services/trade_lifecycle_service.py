@@ -536,11 +536,36 @@ class TradeLifecycleService:
 
     @staticmethod
     def execute_pending_order(db: Session, session, order: Order, exec_price: float, current_candle) -> None:
-        """Executes a pending LIMIT order"""
+        """Executes a pending LIMIT or MARKET_NEXT_OPEN order"""
+        orig_decision = db.query(Decision).filter(Decision.id == order.decision_id).first()
+        planned_price = (
+            orig_decision.price
+            if (orig_decision and orig_decision.price is not None)
+            else (order.requested_price if order.requested_price is not None else exec_price)
+        )
         dummy_decision = DecisionCreate(
             action=DecisionAction.BUY if order.side == "BUY" else DecisionAction.SELL,
-            price=exec_price,
-            quantity=order.quantity
+            order_type=order.order_type or OrderType.MARKET_NEXT_OPEN.value,
+            price=planned_price,
+            quantity=order.quantity,
+            stop_loss=orig_decision.stop_loss if orig_decision else None,
+            target_price=orig_decision.target_price if orig_decision else None,
+            planned_quantity=(
+                orig_decision.planned_quantity
+                if (orig_decision and orig_decision.planned_quantity is not None)
+                else order.quantity
+            ),
+            planned_risk=orig_decision.planned_risk if orig_decision else None,
+            planned_r=orig_decision.planned_r if orig_decision else None,
+            setup_type=orig_decision.setup_type if orig_decision else None,
+            confidence_score=orig_decision.confidence_score if orig_decision else None,
+            market_context=orig_decision.market_context if orig_decision else None,
+            market_regime=orig_decision.market_regime if orig_decision else None,
+            emotion=orig_decision.emotion if orig_decision else None,
+            mistake_tag=orig_decision.mistake_tag if orig_decision else None,
+            rule_violation=orig_decision.rule_violation if orig_decision else None,
+            reason=orig_decision.reason if orig_decision else None,
+            note=orig_decision.note if orig_decision else None,
         )
 
         if order.side == "BUY":

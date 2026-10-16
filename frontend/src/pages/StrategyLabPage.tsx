@@ -886,7 +886,10 @@ export const StrategyLabPage: React.FC = () => {
   const chartSeries: StrategyEquitySeries[] = useMemo(() => {
     const palette = ['#00E676', '#2962FF', '#BB86FC', '#FFB74D', '#00E5FF', '#FF1744'];
     return results.map((item, idx) => {
-      const curve = item.response.analytics?.equity_curve || [];
+      const curve =
+        item.response.analytics?.equity_curve ||
+        item.response.runs?.find((r) => (r.analytics?.equity_curve || []).length > 0)?.analytics?.equity_curve ||
+        [];
       const initCash = initialCash > 0 ? initialCash : 100000000;
       return {
         filename: item.filename,
@@ -1038,6 +1041,30 @@ export const StrategyLabPage: React.FC = () => {
         </button>
       </div>
 
+      {activeLabTab !== 'single' && (
+        <div
+          data-testid="market-assumptions-banner"
+          style={{
+            padding: '8px 14px',
+            marginBottom: '16px',
+            background: 'rgba(255, 255, 255, 0.03)',
+            border: '1px solid var(--border-color)',
+            borderRadius: '6px',
+            fontSize: '12px',
+            color: 'var(--text-muted)',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: '8px',
+          }}
+        >
+          <span>
+            ⚙️ <strong>Giả định thực thi chuẩn HOSE (MarketProfile):</strong> Phí mua <strong>0.15%</strong> · Phí bán <strong>0.15%</strong> · Thuế bán <strong>0.10%</strong> · Lô chẵn <strong>100 CP</strong> · Khớp lệnh Mở cửa nến kế tiếp (<strong>Next-Open</strong>) · Chu kỳ thanh toán <strong>T+1.5</strong>
+          </span>
+        </div>
+      )}
+
       {activeLabTab === 'single' && <BacktestPage embedded />}
       {activeLabTab === 'multiphase' && <MultiPhaseBatchPanel />}
       {activeLabTab === 'catalog' && (
@@ -1151,29 +1178,6 @@ export const StrategyLabPage: React.FC = () => {
               </div>
             </div>
           )}
-
-          {/* MarketProfile Execution Assumptions Banner (GAP-U-11) */}
-          <div
-            data-testid="market-assumptions-banner"
-            style={{
-              padding: '8px 14px',
-              marginBottom: '16px',
-              background: 'rgba(255, 255, 255, 0.03)',
-              border: '1px solid var(--border-color)',
-              borderRadius: '6px',
-              fontSize: '12px',
-              color: 'var(--text-muted)',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              flexWrap: 'wrap',
-              gap: '8px',
-            }}
-          >
-            <span>
-              ⚙️ <strong>Giả định thực thi chuẩn HOSE (MarketProfile):</strong> Phí mua <strong>0.15%</strong> · Phí bán <strong>0.15%</strong> · Thuế bán <strong>0.10%</strong> · Lô chẵn <strong>100 CP</strong> · Khớp lệnh Mở cửa nến kế tiếp (<strong>Next-Open</strong>) · Chu kỳ thanh toán <strong>T+1.5</strong>
-            </span>
-          </div>
 
           {/* Strategy Selection Catalog (Rendered First for Clean Access) */}
           <div className="glass-panel" style={{ padding: '20px', marginBottom: '24px' }}>

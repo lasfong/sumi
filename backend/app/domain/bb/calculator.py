@@ -76,11 +76,15 @@ class ProxyBBCalculator:
             )
 
         # Enforce chronological ordering
-        sorted_bars = sorted(bars, key=lambda b: (b.session_date, b.timestamp))
+        sorted_bars = sorted(bars, key=lambda b: (str(b.session_date), str(b.timestamp)))
 
         # Enforce as_of cutoff if requested (AT07 future invariance)
         if as_of is not None:
-            sorted_bars = [b for b in sorted_bars if b.session_date <= as_of]
+            as_of_str = as_of.isoformat() if hasattr(as_of, "isoformat") else str(as_of)
+            sorted_bars = [
+                b for b in sorted_bars
+                if (b.session_date.isoformat() if hasattr(b.session_date, "isoformat") else str(b.session_date)) <= as_of_str
+            ]
 
         if not sorted_bars:
             return BBSymbolSeriesResult(
@@ -253,7 +257,7 @@ class ProxyBBCalculator:
                 horizon_points_dict[h.value] = pt
 
             sym_pt = BBSymbolPoint(
-                date=current_bar.session_date,
+                date=current_bar.session_date.isoformat() if hasattr(current_bar.session_date, "isoformat") else str(current_bar.session_date),
                 horizons=horizon_points_dict,
                 daily_pressure=pressures[t],
                 daily_trading_value=trading_values[t],

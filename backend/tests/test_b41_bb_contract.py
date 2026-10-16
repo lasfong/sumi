@@ -113,3 +113,11 @@ def test_b41_bb_horizons_and_symbol_series_vs_chart_contracts(client: TestClient
     assert last_chart_pt["t03"] == latest_pt["horizons"]["T03"]["bb_value"]
     assert last_chart_pt["t20"] == latest_pt["horizons"]["T20"]["bb_value"]
     assert last_chart_pt["t50"] is None
+
+    # 4. GET /api/bb/symbol/B41_SYM with as_of date parameter (DEF-W5-02 regression check)
+    res_as_of = client.get("/api/bb/symbol/B41_SYM?horizons=T03,T05&as_of=2025-01-15&format=series")
+    assert res_as_of.status_code == 200
+    as_of_json = res_as_of.json()
+    assert len(as_of_json["points"]) == 14
+    assert as_of_json["points"][-1]["date"] == "2025-01-15"
+    assert all(pt["date"] <= "2025-01-15" for pt in as_of_json["points"])

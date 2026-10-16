@@ -32,10 +32,10 @@ To prevent status inflation and distinguish between code in the working tree, co
 2. **Test Evidence Status**: `NONE` | `UNIT_INTEGRATION_REPORTED` | `UNIT_INTEGRATION_VERIFIED` | `FULL_GATES_AND_UAT_VERIFIED`
 3. **Architectural Approval Status**: `NOT_SUBMITTED` | `PENDING_ARCHITECT_REVIEW` | `GATED_ON_ARCHITECT_DECISION` | `APPROVED`
 4. **Commit / Merge Status**: `NOT_IN_WORKTREE` | `UNCOMMITTED_IN_WORKTREE` | `COMMITTED_ON_MASTER`
-5. **Product Acceptance Status**: `NOT_ACCEPTED` | `HISTORICAL_ACCEPTED_SUPERSEDED` | `ACCEPTED_V3_COMPLETE`
+5. **Product Acceptance Status**: `NOT_ACCEPTED` | `HISTORICAL_ACCEPTED_SUPERSEDED` | `AUTOMATED_UAT_PASS` (`READY_FOR_OWNER_UAT`) | `ACCEPTED_V3_COMPLETE` (`OWNER_ACCEPTED`)
 
 > [!IMPORTANT]
-> **Strict Non-Inflation Rule**: No batch in the `B00–B51` program is marked `ACCEPTED_V3_COMPLETE` until full `W5-UAT` browser verification passes. Waves `W0–W3` (`B00–B03`, `B10–B11`, `B20–B22`, `B30–B32`, plus remediation `R1–R6`) are `COMPLETE_VERIFIED`, `UNIT_INTEGRATION_VERIFIED`, `APPROVED`, and `COMMITTED_ON_MASTER` (`e34516c`, `2151f34`, `c331dc3`, `0732ca0`, `12e166a`), while `Product Acceptance Status` remains `NOT_ACCEPTED` pending `W5-UAT`. Wave `W4` (`B40`, `B41`, `B50`, `B51`) is `COMPLETE_VERIFIED`, `UNIT_INTEGRATION_VERIFIED`, and `UNCOMMITTED_IN_WORKTREE` awaiting GPT-6 review and Product Owner commit authorization before `W5-UAT`.
+> **Strict Non-Inflation Rule**: No batch in the `B00–B51` program is marked `ACCEPTED_V3_COMPLETE` (`OWNER_ACCEPTED`) until the Product Owner completes interactive review and explicitly signs off. All 16 batches (`B00–B51`) across Waves `W0–W4` and the `W5` UAT remediation baseline (`DEF-W5-01..05`) are `COMPLETE_VERIFIED`, `FULL_GATES_AND_UAT_VERIFIED` (`844` BE / `268` FE / `101/101` W5 Playwright UAT checks), `APPROVED`, and `COMMITTED_ON_MASTER` (`e34516c`, `2151f34`, `c331dc3`, `0732ca0`, `12e166a`, `40f6563`, plus the W5 baseline closure commit), with `Product Acceptance Status` at `AUTOMATED_UAT_PASS` (`READY_FOR_OWNER_UAT`).
 
 ---
 
@@ -46,7 +46,7 @@ Before examining `B00–B51`, it is critical to distinguish the **completed hist
 | Lineage | Batches | Scope | Commit / Tree State | Current Standing |
 |---|---|---|---|---|
 | **P-Lineage** (`docs/dev-program/STATE.json`) | `P1` through `P10` (`P10` reviewed `2026-09-14`) | Signal Engine Foundation (`P1`), Signal Families & Liquidity (`P2`), Multi-Horizon Outcome Lab (`P3`), Regime Segmentation (`P4`), Parameter Stability (`P5`), Cost/Turnover Realism (`P6`), Portfolio Constraints (`P7`), Walk-Forward Validation (`P8`), Research UI & Presets (`P9`), Final Research Pack (`P10`). | `COMMITTED_ON_MASTER` (`HISTORICAL` / `VERIFIED` in `backend/app/domain/` and `backend/app/services/`) | **`HISTORICAL_ACCEPTED_SUPERSEDED`**: Domain and research modules remain in the repository and provide the foundation for Scanner, Signals, and Strategy Lab, but the broader application requires `B00–B51` to resolve the P0/P1 architectural, financial, contract, and UX gaps documented in [`SUMI_GAP_REGISTER.md`](../../architecture/SUMI_GAP_REGISTER.md). |
-| **B-Lineage** ([`DEV_BATCHES.md`](../DEV_BATCHES.md)) | `B00–B03`, `B10–B11`, `B20–B22`, `B30–B32`, `B40–B41`, `B50–B51` + `W5` | 16 product-completion batches closing all P0/P1 gaps across DB safety, Replay zero-lookahead, Financial execution/settlement/metrics parity, Frontend state/WS/ChartKernel, API contracts, and UX completion. | `B00–B32` `COMMITTED_ON_MASTER` (`e34516c`, `2151f34`, `c331dc3`, `12e166a`); `B40–B51` `UNCOMMITTED_IN_WORKTREE` (`VERIFIED`). | **Active Product Completion Program** tracked in Sections 3–6 below. |
+| **B-Lineage** ([`DEV_BATCHES.md`](../DEV_BATCHES.md)) | `B00–B03`, `B10–B11`, `B20–B22`, `B30–B32`, `B40–B41`, `B50–B51` + `W5` | 16 product-completion batches closing all P0/P1 gaps across DB safety, Replay zero-lookahead, Financial execution/settlement/metrics parity, Frontend state/WS/ChartKernel, API contracts, and UX completion. | `B00–B51` + `W5` `COMMITTED_ON_MASTER` (`e34516c`, `2151f34`, `c331dc3`, `12e166a`, `40f6563`, plus W5 closure commit). | **Active Product Completion Program** (`AUTOMATED_UAT_PASS` — awaiting Product Owner UAT) tracked in Sections 3–6 below. |
 
 ---
 
@@ -83,15 +83,15 @@ flowchart TD
         B32["B32: ChartKernel Facade, ReplayWorkspace<br/>Decomp & Legacy Drawing Removal<br/>[COMMITTED_ON_MASTER - 12e166a]"]
     end
 
-    subgraph W4["Wave W4: API Contracts, Money Flow BB & Trading/Lab UX (COMPLETE IN WORKTREE)"]
-        B40["B40: OpenAPI Snapshot, Error Envelope,<br/>Enum Alignment & Dead Endpoint Removal<br/>[COMPLETE_VERIFIED - UNCOMMITTED]"]
-        B41["B41: Money Flow BB Envelope Unification<br/>& Explicit Degraded States<br/>[COMPLETE_VERIFIED - UNCOMMITTED]"]
-        B50["B50: Trading UX (T+1 Wording, SL/TP Alert,<br/>SHORT R:R & Limit Cancel)<br/>[COMPLETE_VERIFIED - UNCOMMITTED]"]
-        B51["B51: Strategy Lab Single Tab Integration,<br/>Rule Hand-off, /backtest Redirect & 1280px UX<br/>[COMPLETE_VERIFIED - UNCOMMITTED]"]
+    subgraph W4["Wave W4: API Contracts, Money Flow BB & Trading/Lab UX (COMMITTED)"]
+        B40["B40: OpenAPI Snapshot, Error Envelope,<br/>Enum Alignment & Dead Endpoint Removal<br/>[COMMITTED_ON_MASTER - 40f6563]"]
+        B41["B41: Money Flow BB Envelope Unification<br/>& Explicit Degraded States<br/>[COMMITTED_ON_MASTER - 40f6563]"]
+        B50["B50: Trading UX (T+1 Wording, SL/TP Alert,<br/>SHORT R:R & Limit Cancel)<br/>[COMMITTED_ON_MASTER - 40f6563]"]
+        B51["B51: Strategy Lab Single Tab Integration,<br/>Rule Hand-off, /backtest Redirect & 1280px UX<br/>[COMMITTED_ON_MASTER - 40f6563]"]
     end
 
-    subgraph W5["Wave W5: Product Acceptance & Release Readiness"]
-        UAT["W5-UAT: Journeys 1-5 Browser E2E UAT on<br/>Isolated Deterministic Fixtures (1440x1000 & 1280x800)"]
+    subgraph W5["Wave W5: Product Acceptance & Release Readiness (AUTOMATED_UAT_PASS)"]
+        UAT["W5-UAT: Journeys 1-5 Browser E2E UAT on<br/>Isolated Deterministic Fixtures (101/101 PASS)<br/>[COMMITTED_ON_MASTER - AWAITING OWNER UAT]"]
     end
 
     B00 --> B01 --> B02 --> GW0A
@@ -118,22 +118,22 @@ flowchart TD
 
 | Batch ID | Wave | Title / Core Capability | Dependencies | Implementation Status | Test Evidence Status | Arch Approval Status | Commit / Merge Status | Product Acceptance Status | Complexity (`PROPOSED`) |
 |---|---|---|---|---|---|---|---|---|---|
-| **`B00`** | W0-A | DB Path Resolution & CWD Guard | None | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (7 CWD + 30 safeguard tests; `843` BE / `268` FE total) | `APPROVED` (`DEC-01`) | `COMMITTED_ON_MASTER` (`e34516c`) | `NOT_ACCEPTED` | `LOW` |
-| **`B01`** | W0-A | Transaction `atomic()` & SQLite FK Enforcement | `B00` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (15 tests in `test_b01_transaction_fk.py`) | `APPROVED` (`DEC-01`, `ADR-TX-001`) | `COMMITTED_ON_MASTER` (`e34516c`) | `NOT_ACCEPTED` | `MEDIUM` |
-| **`B02`** | W0-A | Synthetic Provider Deny, Quarantine Promotion, Mutation Provenance & Cross-Workflow Rollback | `B01` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`test_b02_*.py`, `test_adversarial_challenger.py`, `test_w0a_final_adversarial.py`) | `APPROVED` (`DEC-01`, `ADR-PROV-001-ADDENDUM-01`, `ADR-TX-001-ADDENDUM-01/02`) | `COMMITTED_ON_MASTER` (`e34516c`, `2151f34`) | `NOT_ACCEPTED` | `HIGH` |
-| **`B03`** | W0-B | Alembic 20-Model Registry, Migration-Chain Compatibility & Multi-Table Preview Isolation (+ `R1`, `R6`) | `B01` + **Gate `G-W0A`** | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`test_b03_*.py`, `test_r1_alembic_stamping.py`, `test_r6_import_contract.py`) | `APPROVED` (`DEC-02`, `DEC-REM-01`, `DEC-REM-06`) | `COMMITTED_ON_MASTER` (`c331dc3`) | `NOT_ACCEPTED` | `MEDIUM` |
-| **`B10`** | W1 | Replay Ledger Filter (`<= current_index`), Future-State Masking & Horizon Clamp (+ `R4`) | `B03` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`test_b10_*.py`, `test_r4_replay_future_state.py`) | `APPROVED` (`DEC-02`, `DEC-REM-04`) | `COMMITTED_ON_MASTER` (`c331dc3`) | `NOT_ACCEPTED` | `LOW` |
-| **`B11`** | W1 | Server-Side Replay Indicator Cut (`<= max_visible_ts`) & `MappingResult` Contract | `B10` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`test_b11_*.py`, `IndicatorRenderRegistry.test.ts`) | `APPROVED` (`DEC-02`) | `COMMITTED_ON_MASTER` (`c331dc3`) | `NOT_ACCEPTED` | `MEDIUM` |
-| **`B20`** | W2 | Execution Kernel Unification (`Open[T+1]` Across All Paths + `R5`) | `B01` + `DEC-03`, `DEC-04` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`test_b20_*.py`, `test_r5_market_profile_coherence.py`) | `APPROVED` (`DEC-03`, `DEC-04`, `DEC-TRAIN02-02`, `DEC-REM-05`) | `COMMITTED_ON_MASTER` (`c331dc3`) | `NOT_ACCEPTED` | `HIGH` |
-| **`B21`** | W2 | `MarketProfile` Single Source, `T+1.5` Settlement & VN Calendar (+ `R2`) | `B20` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`test_b21_*.py`, `test_r2_settlement_calendar.py`) | `APPROVED` (`DEC-TRAIN02-03`, `DEC-REM-02`) | `COMMITTED_ON_MASTER` (`c331dc3`) | `NOT_ACCEPTED` | `MEDIUM` |
-| **`B22`** | W2 | Metrics Unification (Net PnL, Breakeven Rule, PF `N/A`, Sharpe 252 + `R3`) | `B21` + `DEC-05` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`test_b22_*.py`, `test_r3_sharpe_coherence.py`, `test_benchmark_metrics.py`) | `APPROVED` (`DEC-05`, `DEC-TRAIN02-04`, `DEC-REM-03`) | `COMMITTED_ON_MASTER` (`c331dc3`) | `NOT_ACCEPTED` | `MEDIUM` |
-| **`B30`** | W3 | Frontend Query Keys, Navigation Token & Session Switch Cleanup | `B10` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`b30_fe_state_race.test.tsx` [6 tests]) | `APPROVED` (`DEC-07`, `ADR-FE-001`) | `COMMITTED_ON_MASTER` (`12e166a`) | `NOT_ACCEPTED` | `MEDIUM` |
-| **`B31`** | W3 | WebSocket Replay State Machine, Sequence Envelope & Auto-Reconnect | `B30` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`test_b31_ws_replay.py` [6], `b31_ws_chaos_matrix.test.tsx` [7], Gate A1 live smoke) | `APPROVED` (`DEC-07`, `ADR-WS-001`) | `COMMITTED_ON_MASTER` (`12e166a`) | `NOT_ACCEPTED` | `MEDIUM` |
-| **`B32`** | W3 | `ChartKernel` Facade, `ReplayWorkspace` Split & Dead Drawing Removal | `B30`, `B11` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`ChartKernel.test.tsx` [3], `IndicatorContract.test.ts` [6], `ReplayPage.test.tsx` [9]) | `APPROVED` (`DEC-07`, `ADR-CHART-001`) | `COMMITTED_ON_MASTER` (`12e166a`) | `NOT_ACCEPTED` | `HIGH` |
-| **`B40`** | W4 | OpenAPI Contract Snapshot, Error Envelope & Dead Endpoint Removal | `B20` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`test_b40_openapi_contract_snapshot.py` [11], `b40_contract_alignment.test.ts` [7]) | `PENDING_ARCHITECT_REVIEW` (`ADR-API-001` ratified) | `UNCOMMITTED_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `MEDIUM` |
-| **`B41`** | W4 | Money Flow BB Envelope Unification & Degraded State Display | `B40` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`test_b41_bb_contract.py` [4], `TechnicalFlowBBViewer.test.tsx` [5]) | `PENDING_ARCHITECT_REVIEW` (`ADR-API-001` ratified) | `UNCOMMITTED_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `LOW` |
-| **`B50`** | W4 | Trading Practice UX (`T+1` Wording, SL/TP Alert, SHORT R:R, Limit Cancel) | `B21` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`test_b50_trading_practice_ux.py` [4], `b50_trading_practice_ux.test.tsx` [4], W4 live smoke) | `PENDING_ARCHITECT_REVIEW` (`ADR-SETTLE-001`, `ADR-EXEC-001`) | `UNCOMMITTED_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `MEDIUM` |
-| **`B51`** | W4 | Strategy Lab Single Tab Integration, Rule Hand-off, `/backtest` Redirect & 1280px UX | `B50`, `B32`, `B40` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`b51_strategy_lab_ux.test.tsx` [5], W4 live smoke at `1440×1000` & `1280×800`) | `PENDING_ARCHITECT_REVIEW` (Spec in `B51_lab-ux.md`) | `UNCOMMITTED_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `MEDIUM` |
+| **`B00`** | W0-A | DB Path Resolution & CWD Guard | None | `COMPLETE_VERIFIED` (`VERIFIED`) | `FULL_GATES_AND_UAT_VERIFIED` (7 CWD + 30 safeguard tests; `844` BE / `268` FE / `101/101` UAT) | `APPROVED` (`DEC-01`) | `COMMITTED_ON_MASTER` (`e34516c`) | `AUTOMATED_UAT_PASS` (`READY_FOR_OWNER_UAT`) | `LOW` |
+| **`B01`** | W0-A | Transaction `atomic()` & SQLite FK Enforcement | `B00` | `COMPLETE_VERIFIED` (`VERIFIED`) | `FULL_GATES_AND_UAT_VERIFIED` (15 tests in `test_b01_transaction_fk.py` + `W5-UAT`) | `APPROVED` (`DEC-01`, `ADR-TX-001`) | `COMMITTED_ON_MASTER` (`e34516c`) | `AUTOMATED_UAT_PASS` (`READY_FOR_OWNER_UAT`) | `MEDIUM` |
+| **`B02`** | W0-A | Synthetic Provider Deny, Quarantine Promotion, Mutation Provenance & Cross-Workflow Rollback | `B01` | `COMPLETE_VERIFIED` (`VERIFIED`) | `FULL_GATES_AND_UAT_VERIFIED` (`test_b02_*.py`, `test_adversarial_challenger.py`, `SYNC-001..002`) | `APPROVED` (`DEC-01`, `ADR-PROV-001-ADDENDUM-01`, `ADR-TX-001-ADDENDUM-01/02`) | `COMMITTED_ON_MASTER` (`e34516c`, `2151f34`) | `AUTOMATED_UAT_PASS` (`READY_FOR_OWNER_UAT`) | `HIGH` |
+| **`B03`** | W0-B | Alembic 20-Model Registry, Migration-Chain Compatibility & Multi-Table Preview Isolation (+ `R1`, `R6`) | `B01` + **Gate `G-W0A`** | `COMPLETE_VERIFIED` (`VERIFIED`) | `FULL_GATES_AND_UAT_VERIFIED` (`test_b03_*.py`, `test_r1_alembic_stamping.py`, `test_r6_import_contract.py`, `IMP-001..003`) | `APPROVED` (`DEC-02`, `DEC-REM-01`, `DEC-REM-06`) | `COMMITTED_ON_MASTER` (`c331dc3`) | `AUTOMATED_UAT_PASS` (`READY_FOR_OWNER_UAT`) | `MEDIUM` |
+| **`B10`** | W1 | Replay Ledger Filter (`<= current_index`), Future-State Masking & Horizon Clamp (+ `R4`) | `B03` | `COMPLETE_VERIFIED` (`VERIFIED`) | `FULL_GATES_AND_UAT_VERIFIED` (`test_b10_*.py`, `test_r4_replay_future_state.py`, `R-01`, `REPLAY-005`) | `APPROVED` (`DEC-02`, `DEC-REM-04`) | `COMMITTED_ON_MASTER` (`c331dc3`) | `AUTOMATED_UAT_PASS` (`READY_FOR_OWNER_UAT`) | `LOW` |
+| **`B11`** | W1 | Server-Side Replay Indicator Cut (`<= max_visible_ts`) & `MappingResult` Contract | `B10` | `COMPLETE_VERIFIED` (`VERIFIED`) | `FULL_GATES_AND_UAT_VERIFIED` (`test_b11_*.py`, `IndicatorRenderRegistry.test.ts`, `I-01..13`) | `APPROVED` (`DEC-02`) | `COMMITTED_ON_MASTER` (`c331dc3`) | `AUTOMATED_UAT_PASS` (`READY_FOR_OWNER_UAT`) | `MEDIUM` |
+| **`B20`** | W2 | Execution Kernel Unification (`Open[T+1]` Across All Paths + `R5`) | `B01` + `DEC-03`, `DEC-04` | `COMPLETE_VERIFIED` (`VERIFIED`) | `FULL_GATES_AND_UAT_VERIFIED` (`test_b20_*.py`, `test_r5_market_profile_coherence.py`, `FG-01..12`) | `APPROVED` (`DEC-03`, `DEC-04`, `DEC-TRAIN02-02`, `DEC-REM-05`) | `COMMITTED_ON_MASTER` (`c331dc3`) | `AUTOMATED_UAT_PASS` (`READY_FOR_OWNER_UAT`) | `HIGH` |
+| **`B21`** | W2 | `MarketProfile` Single Source, `T+1.5` Settlement & VN Calendar (+ `R2`) | `B20` | `COMPLETE_VERIFIED` (`VERIFIED`) | `FULL_GATES_AND_UAT_VERIFIED` (`test_b21_*.py`, `test_r2_settlement_calendar.py`, `FG-06..07`, `REPLAY-013`) | `APPROVED` (`DEC-TRAIN02-03`, `DEC-REM-02`) | `COMMITTED_ON_MASTER` (`c331dc3`) | `AUTOMATED_UAT_PASS` (`READY_FOR_OWNER_UAT`) | `MEDIUM` |
+| **`B22`** | W2 | Metrics Unification (Net PnL, Breakeven Rule, PF `N/A`, Sharpe 252 + `R3`) | `B21` + `DEC-05` | `COMPLETE_VERIFIED` (`VERIFIED`) | `FULL_GATES_AND_UAT_VERIFIED` (`test_b22_*.py`, `test_r3_sharpe_coherence.py`, `FG-02`, `FG-08..10`) | `APPROVED` (`DEC-05`, `DEC-TRAIN02-04`, `DEC-REM-03`) | `COMMITTED_ON_MASTER` (`c331dc3`) | `AUTOMATED_UAT_PASS` (`READY_FOR_OWNER_UAT`) | `MEDIUM` |
+| **`B30`** | W3 | Frontend Query Keys, Navigation Token & Session Switch Cleanup | `B10` | `COMPLETE_VERIFIED` (`VERIFIED`) | `FULL_GATES_AND_UAT_VERIFIED` (`b30_fe_state_race.test.tsx` [6 tests], `REPLAY-006`, `REPLAY-015`) | `APPROVED` (`DEC-07`, `ADR-FE-001`) | `COMMITTED_ON_MASTER` (`12e166a`) | `AUTOMATED_UAT_PASS` (`READY_FOR_OWNER_UAT`) | `MEDIUM` |
+| **`B31`** | W3 | WebSocket Replay State Machine, Sequence Envelope & Auto-Reconnect | `B30` | `COMPLETE_VERIFIED` (`VERIFIED`) | `FULL_GATES_AND_UAT_VERIFIED` (`test_b31_ws_replay.py` [6], `b31_ws_chaos_matrix.test.tsx` [7], `WS-01..10`) | `APPROVED` (`DEC-07`, `ADR-WS-001`) | `COMMITTED_ON_MASTER` (`12e166a`) | `AUTOMATED_UAT_PASS` (`READY_FOR_OWNER_UAT`) | `MEDIUM` |
+| **`B32`** | W3 | `ChartKernel` Facade, `ReplayWorkspace` Split & Dead Drawing Removal | `B30`, `B11` | `COMPLETE_VERIFIED` (`VERIFIED`) | `FULL_GATES_AND_UAT_VERIFIED` (`ChartKernel.test.tsx` [3], `IndicatorContract.test.ts` [6], `D-01..11`) | `APPROVED` (`DEC-07`, `ADR-CHART-001`) | `COMMITTED_ON_MASTER` (`12e166a`) | `AUTOMATED_UAT_PASS` (`READY_FOR_OWNER_UAT`) | `HIGH` |
+| **`B40`** | W4 | OpenAPI Contract Snapshot, Error Envelope & Dead Endpoint Removal | `B20` | `COMPLETE_VERIFIED` (`VERIFIED`) | `FULL_GATES_AND_UAT_VERIFIED` (`test_b40_openapi_contract_snapshot.py` [5/11], `b40_contract_alignment.test.ts` [7]) | `APPROVED` (`DEC-08`, `ADR-API-001`) | `COMMITTED_ON_MASTER` (`40f6563`) | `AUTOMATED_UAT_PASS` (`READY_FOR_OWNER_UAT`) | `MEDIUM` |
+| **`B41`** | W4 | Money Flow BB Envelope Unification & Degraded State Display | `B40` | `COMPLETE_VERIFIED` (`VERIFIED`) | `FULL_GATES_AND_UAT_VERIFIED` (`test_b41_bb_contract.py`, `TechnicalFlowBBViewer.test.tsx` [5], `LAB-006`) | `APPROVED` (`DEC-08`, `ADR-API-001`, `DEC-09`) | `COMMITTED_ON_MASTER` (`40f6563` + `W5`) | `AUTOMATED_UAT_PASS` (`READY_FOR_OWNER_UAT`) | `LOW` |
+| **`B50`** | W4 | Trading Practice UX (`T+1` Wording, SL/TP Alert, SHORT R:R, Limit Cancel) | `B21` | `COMPLETE_VERIFIED` (`VERIFIED`) | `FULL_GATES_AND_UAT_VERIFIED` (`test_b50_trading_practice_ux.py`, `b50_trading_practice_ux.test.tsx` [4], `Journey 5`) | `APPROVED` (`DEC-08`, `ADR-SETTLE-001`, `ADR-EXEC-001`, `DEC-09`) | `COMMITTED_ON_MASTER` (`40f6563` + `W5`) | `AUTOMATED_UAT_PASS` (`READY_FOR_OWNER_UAT`) | `MEDIUM` |
+| **`B51`** | W4 | Strategy Lab Single Tab Integration, Rule Hand-off, `/backtest` Redirect & 1280px UX | `B50`, `B32`, `B40` | `COMPLETE_VERIFIED` (`VERIFIED`) | `FULL_GATES_AND_UAT_VERIFIED` (`b51_strategy_lab_ux.test.tsx` [5], W5 UAT at `1440×1000` & `1280×800`) | `APPROVED` (`DEC-08`, `B51_lab-ux.md`, `DEC-09`) | `COMMITTED_ON_MASTER` (`40f6563` + `W5`) | `AUTOMATED_UAT_PASS` (`READY_FOR_OWNER_UAT`) | `MEDIUM` |
 
 ---
 
@@ -144,16 +144,13 @@ flowchart TD
 - **Wave `W0-A` Stabilization & Architecture Baseline (`e34516c`, `2151f34`)**: `B00`, `B01`, `B02`, plus ratified `ADR-PROV-001-ADDENDUM-01`, `ADR-TX-001-ADDENDUM-01`, and `ADR-TX-001-ADDENDUM-02`.
 - **Wave `W0-B + W1 + W2` Execution, Zero-Lookahead & Financial Correctness Baseline (`c331dc3`, `0732ca0`)**: `B03`, `B10`, `B11`, `B20`, `B21`, `B22`, remediation `R1–R6`, and Persistent Project Execution Charter in `AGENTS.md`.
 - **Wave `W3` Replay State, WebSocket & Chart Integration Baseline (`12e166a`)**: `B30`, `B31` (including Gate A1 real WebSocket disconnect/reconnect verification), and `B32` (31 paths committed).
+- **Wave `W4` API Contracts, Money Flow BB, Trading Practice & Strategy Lab UX Baseline (`40f6563`)**: `B40`, `B41`, `B50`, and `B51` (63 verified paths committed).
+- **Wave `W5` Product UAT Remediation & Governance Baseline (`DEC-09`)**:
+  - Executed all 5 authoritative user journeys (`Journey 1..5`) and Cross-Journey Quality Gates (`1440×1000`, `1280×800`, and `1024×768`) on isolated deterministic fixtures (`./artifacts/local/development-train-05/run_train05_uat.sh`).
+  - **`101/101` UAT checks PASSING**, **`0` console/page errors**, **`0` external network requests**, **`38` UAT artifact entries retained** (`36` PNG screenshots + `train05-uat-results.json` + `fixtures/`) in `artifacts/local/development-train-05/uat/`.
+  - Reconciled the prior report's "13 modified files" header label against the actual **14 modified tracked files** (`11` source/test paths + `3` governance docs) and committed as `fix(v3): complete W5 product UAT remediation and governance records`.
+  - Automated technical acceptance is complete (`AUTOMATED_UAT_PASS`); final product sign-off (`OWNER_ACCEPTED` / `ACCEPTED_V3_COMPLETE`) remains reserved for the Product Owner.
 
-### 4.2 Complete & Verified in Working Tree (Awaiting GPT-6 Review & Commit Authorization)
-- **Wave `W4` (`B40`, `B41`, `B50`, `B51` — Development Train 04)**:
-  - **`B40`**: Standardized `{code, message, field_errors, detail}` error envelope, HTTP 422 array normalization (`extractErrorMessage`), `CreateSessionMode` vs `SessionMode` separation, enum/DTO alignment (`BANKRUPT`, `CUSTOM_PRICE`, `TradePlanResult` 7 fields, `AnalyticsReport`, `checklist_snapshot`, `Candle.source`, `/api/scanner/*` `response_model`), client-side signal contract validation, and removal/isolation of dead `/api/import/catalog`, `importCafefData`, and `DataFeedService` (`ADR-API-001`).
-  - **`B41`**: Explicit Pydantic `response_model` declarations on `/api/bb/*`, unified `series` and `chart` (`format=chart`) contracts, and explicit warming (`is_warmup`), degraded (`UNAVAILABLE_DEGRADED` / low data quality / low coverage), invalid, and empty UI banners in `TechnicalFlowBBViewer.tsx` (`ADR-API-001`).
-  - **`B50`**: Inline `T+1 · về sau 1 phiên` settlement notice & `Khả dụng` vs `Chờ về` columns in `PositionPanel.tsx` / `TradeControls.tsx`, inline Vietnamese SL/TP geometry alert keeping sizing preview visible, symmetric `SHORT` PnL / R-multiple / `Risk-Reward` drawing sync, `DELETE /api/replay/sessions/{id}/orders/{order_id}` + `Hủy lệnh` button in `PendingOrdersPanel.tsx`, and `MarketProfile` assumptions in the Trade dialog (`ADR-SETTLE-001`, `ADR-EXEC-001`).
-  - **`B51`**: Unified `Kiểm Định Đơn Lẻ (Single Backtest)` tab (`?tab=single`) inside `StrategyLabPage.tsx` with `/backtest` redirect, lossless `StrategyRuleBuilder` → `StrategyLabPage` (`Single` & `Battle`) custom AST rule handoff (`sumi_pending_strategy_rule`), high-contrast Undo/Redo with `Ctrl+Z`/`Ctrl+Y` shortcuts & Spacebar focus guard, visible `↑`/`↓` indicator order controls & warming badges, dedicated `Signals` tab in `PracticeRail.tsx` keeping `BUY`/`SELL` above the fold at `1440×1000` and `1280×800`, contextual `📘 Nhật ký` / `📊 Phân tích` links, and unified `< 1280px` desktop warning and `MarketProfile` assumptions.
-
-### 4.3 Downstream Acceptance Wave (`W5`)
-- **Wave `W5` (`W5-UAT`)**: Full browser E2E UAT across Journeys 1–5 at `1440×1000` and `1280×800` on isolated deterministic fixtures.
 
 
 ---
@@ -512,10 +509,10 @@ flowchart TD
 - **Dependencies**: `B20`.
 - **Five-Dimensional Status**:
   - *Implementation Status*: `COMPLETE_VERIFIED` (`VERIFIED` in `backend/app/main.py`, `backend/app/api/{analytics,import_data,indicators,scanner,universe,decisions}.py`, `backend/app/schemas/{decision_schema,replay_schema}.py`, `backend/app/services/{data_service,trade_lifecycle_service}.py`, `frontend/src/api/{client,importApi,replayApi,signalsApi}.ts`, `frontend/src/types/{analytics,candle,decision,journal,replay,signals}.ts`, `frontend/src/components/signals/{SignalExplanationInspector,SignalInspector}.tsx`)
-  - *Test Evidence Status*: `UNIT_INTEGRATION_VERIFIED` (`backend/tests/test_b40_openapi_contract_snapshot.py` [11 tests], `frontend/src/api/__tests__/b40_contract_alignment.test.ts` [7 tests], live browser smoke)
-  - *Architectural Approval Status*: `PENDING_ARCHITECT_REVIEW` (`ADR-API-001` ratified; awaiting GPT-6 Train 04 review)
-  - *Commit / Merge Status*: `UNCOMMITTED_IN_WORKTREE` (`VERIFIED`)
-  - *Product Acceptance Status*: `NOT_ACCEPTED`
+  - *Test Evidence Status*: `UNIT_INTEGRATION_VERIFIED` (`backend/tests/test_b40_openapi_contract_snapshot.py` [5/11], `frontend/src/api/__tests__/b40_contract_alignment.test.ts` [7], W5 UAT)
+  - *Architectural Approval Status*: `APPROVED` (`DEC-08`, `ADR-API-001`)
+  - *Commit / Merge Status*: `COMMITTED_ON_MASTER` (`40f6563`)
+  - *Product Acceptance Status*: `READY_FOR_OWNER_UAT` (`W5-UAT` `101/101`)
 - **Entry Criteria**: `B20` completed.
 - **Expected Deliverables**:
   - Global FastAPI exception handlers in `backend/app/main.py` emitting `{code, message, field_errors[]}` and stripping raw `str(e)` internal stack traces.
@@ -541,10 +538,10 @@ flowchart TD
 - **Dependencies**: `B40`.
 - **Five-Dimensional Status**:
   - *Implementation Status*: `COMPLETE_VERIFIED` (`VERIFIED` in `backend/app/api/bb.py`, `backend/app/schemas/bb_schema.py`, `frontend/src/api/bbApi.ts`, `frontend/src/components/chart/TechnicalFlowBBViewer.tsx`)
-  - *Test Evidence Status*: `UNIT_INTEGRATION_VERIFIED` (`backend/tests/test_b41_bb_contract.py` [4 tests], `frontend/src/components/chart/__tests__/TechnicalFlowBBViewer.test.tsx` [5 tests], live browser smoke)
-  - *Architectural Approval Status*: `PENDING_ARCHITECT_REVIEW` (`ADR-API-001` ratified; awaiting GPT-6 Train 04 review)
-  - *Commit / Merge Status*: `UNCOMMITTED_IN_WORKTREE` (`VERIFIED`)
-  - *Product Acceptance Status*: `NOT_ACCEPTED`
+  - *Test Evidence Status*: `UNIT_INTEGRATION_VERIFIED` (`backend/tests/test_b41_bb_contract.py`, `frontend/src/components/chart/__tests__/TechnicalFlowBBViewer.test.tsx` [5], W5 UAT `LAB-006`)
+  - *Architectural Approval Status*: `APPROVED` (`DEC-08`, `ADR-API-001`)
+  - *Commit / Merge Status*: `COMMITTED_ON_MASTER` (`40f6563`)
+  - *Product Acceptance Status*: `READY_FOR_OWNER_UAT` (`W5-UAT` `101/101`)
 - **Entry Criteria**: `B40` completed.
 - **Expected Deliverables**:
   - `response_model` annotations on all GET endpoints in `backend/app/api/bb.py`.
@@ -567,10 +564,10 @@ flowchart TD
 - **Dependencies**: `B21`.
 - **Five-Dimensional Status**:
   - *Implementation Status*: `COMPLETE_VERIFIED` (`VERIFIED` in `backend/app/domain/trade_planning.py`, `backend/app/services/trade_lifecycle_service.py`, `backend/app/api/decisions.py`, `frontend/src/api/decisionApi.ts`, `frontend/src/features/practice/practiceDomain.ts`, `frontend/src/components/replay/{PositionPanel,PendingOrdersPanel,TradeControls,ReplayRightPanel,ReplayWorkspace,ReplayWorkspaceController}.tsx`)
-  - *Test Evidence Status*: `UNIT_INTEGRATION_VERIFIED` (`backend/tests/test_b50_trading_practice_ux.py` [4 tests], `frontend/src/components/replay/__tests__/b50_trading_practice_ux.test.tsx` [4 tests], live browser smoke)
-  - *Architectural Approval Status*: `PENDING_ARCHITECT_REVIEW` (`ADR-SETTLE-001` & `ADR-EXEC-001` ratified; awaiting GPT-6 Train 04 review)
-  - *Commit / Merge Status*: `UNCOMMITTED_IN_WORKTREE` (`VERIFIED`)
-  - *Product Acceptance Status*: `NOT_ACCEPTED`
+  - *Test Evidence Status*: `UNIT_INTEGRATION_VERIFIED` (`backend/tests/test_b50_trading_practice_ux.py`, `frontend/src/components/replay/__tests__/b50_trading_practice_ux.test.tsx` [4], W5 UAT `Journey 5`)
+  - *Architectural Approval Status*: `APPROVED` (`DEC-08`, `ADR-SETTLE-001`, `ADR-EXEC-001`)
+  - *Commit / Merge Status*: `COMMITTED_ON_MASTER` (`40f6563`)
+  - *Product Acceptance Status*: `READY_FOR_OWNER_UAT` (`W5-UAT` `101/101`)
 - **Entry Criteria**: `B21` completed.
 - **Expected Deliverables**:
   - `PositionPanel.tsx` and `TradeControls.tsx` displaying `Khả dụng` vs `Chờ về (T+1 · về sau 1 phiên)` and showing inline reason below disabled `SELL`/`CLOSE` buttons.
@@ -598,10 +595,10 @@ flowchart TD
 - **Dependencies**: `B50`, `B32`, and `B40`.
 - **Five-Dimensional Status**:
   - *Implementation Status*: `COMPLETE_VERIFIED` (`VERIFIED` in `frontend/src/App.tsx`, `frontend/src/components/layout/Sidebar.tsx`, `frontend/src/pages/{StrategyLabPage,BacktestPage,DashboardPage}.tsx`, `frontend/src/components/strategy/StrategyRuleBuilder.tsx`, `frontend/src/components/chart/{DrawingToolbar,IndicatorPaneChrome,ChartLegendOverlay}.tsx`, `frontend/src/components/replay/{KeyboardShortcutsModal,PracticeRail,ReplayRightPanel,ReplayWorkspace,ReplayWorkspaceController}.tsx`)
-  - *Test Evidence Status*: `UNIT_INTEGRATION_VERIFIED` (`frontend/src/pages/__tests__/b51_strategy_lab_ux.test.tsx` [5 tests], live browser smoke at `1440×1000` & `1280×800`)
-  - *Architectural Approval Status*: `PENDING_ARCHITECT_REVIEW` (Spec in `B51_lab-ux.md`; awaiting GPT-6 Train 04 review)
-  - *Commit / Merge Status*: `UNCOMMITTED_IN_WORKTREE` (`VERIFIED`)
-  - *Product Acceptance Status*: `NOT_ACCEPTED`
+  - *Test Evidence Status*: `UNIT_INTEGRATION_VERIFIED` (`frontend/src/pages/__tests__/b51_strategy_lab_ux.test.tsx` [5], W5 UAT `Journey 3` at `1440×1000` & `1280×800`)
+  - *Architectural Approval Status*: `APPROVED` (`DEC-08`, `B51_lab-ux.md`)
+  - *Commit / Merge Status*: `COMMITTED_ON_MASTER` (`40f6563`)
+  - *Product Acceptance Status*: `READY_FOR_OWNER_UAT` (`W5-UAT` `101/101`)
 - **Entry Criteria**: `B50`, `B32`, and `B40` completed.
 - **Expected Deliverables**:
   - Real `Single` Backtest tab (`?tab=single`) integrated inside `StrategyLabPage.tsx`, followed by route redirect in `frontend/src/App.tsx` from `/backtest` to `/strategy-lab?tab=single` with Single-vs-Battle guidance banner.
@@ -624,8 +621,8 @@ In addition to the 16 `B00–B51` implementation batches, two explicit operation
 | Milestone ID | Timing | Purpose & Exact Scope | Entry Gate | Deliverable / Evidence |
 |---|---|---|---|---|
 | **`W0-OP-DB`** (`PROPOSED` Optional Owner Convenience Step) | Optional after `B03` completes (**NOT** a mandatory release or UAT gate) | If desired by the Product Owner for local interactive exploration, re-seed `backend/sumi.db` from the repository's existing CafeF CSV archives (`docs/CafeF.SolieuGD.Upto05102026/CafeF.{HSX,HNX,UPCOM,INDEX}.Upto05.10.2026.csv`) and record the new post-seed SHA-256 baseline hash. All automated test gates and `W5` UAT remain strictly decoupled from `backend/sumi.db` and use isolated deterministic test fixtures. | `B03` verified passing on temp DB + explicit Product Owner authorization (`DEC-02`). | Populated local `backend/sumi.db` for manual use; updated hash record in `artifacts/local/w0b_db_reseed_proof.txt`. |
-| **`W5-UAT`** (`PROPOSED` Product Acceptance Wave) | After `B03`, `B22`, `B31`, `B32`, `B41`, and `B51` complete | Execute full technical gate (`./scripts/verify-v2.sh`), Golden Financial Suite (`G-01` through `G-12`), and Playwright Browser E2E UAT across Journeys 1–5 at `1440×1000` and `1280×800` against **isolated deterministic test fixtures** on a temporary SQLite database (with `0` bytes delta on `backend/sumi.db`). | All 16 batches (`B00–B51`) implemented, tested, and committed on `master`. | Screenshot gallery (`1440×1000` & `1280×800`), zero console/page error report, Golden Suite parity report, and updated [`docs/release/V3_ACCEPTANCE_MATRIX_AND_LIMITATIONS.md`](../../release/V3_ACCEPTANCE_MATRIX_AND_LIMITATIONS.md) elevating all 16 batches to `ACCEPTED_V3_COMPLETE`. |
+| **`W5-UAT`** (`AUTOMATED_UAT_PASS` — Committed & Awaiting Owner UAT) | After `B03`, `B22`, `B31`, `B32`, `B41`, and `B51` complete (`40f6563`) | Executed full technical gate (`844 passed, 1 skipped` backend; `268 passed` frontend), Golden Financial Suite (`G-01` through `G-12`), and Playwright Browser E2E UAT across Journeys 1–5 at `1440×1000`, `1280×800`, and `1024×768` against **isolated deterministic test fixtures** on a temporary SQLite database (with `0` bytes delta on `backend/sumi.db`). Reconciled and committed the 14 W5 remediation/governance paths (`DEC-09`). | All 16 batches (`B00–B51`) implemented, tested, and committed on `master` (`40f6563` + W5 commit). | `101/101` UAT checks passed (`artifacts/local/development-train-05/uat/train05-uat-results.json`), `38` UAT artifact entries (`36` PNG screenshots + JSON results + CSV fixtures), `0` console/page errors, `0` external network requests, plus `OWNER_UAT_GUIDE.md`. Awaiting Product Owner acceptance (`OWNER_ACCEPTED`). |
 
 ---
 
-`SUMI V3 PLAN RECONCILED — W4 COMPLETE IN WORKTREE, READY FOR GPT-6 REVIEW`
+`SUMI V3 TECHNICAL BASELINE COMPLETE — AWAITING OWNER UAT`

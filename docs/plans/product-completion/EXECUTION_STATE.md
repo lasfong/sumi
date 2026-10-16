@@ -1,8 +1,8 @@
 # SUMI V3 — DEVELOPMENT EXECUTION STATE
 
-- **Active Train**: **Development Train 04 (`Wave W4`: `B40 → B41`, `B50 → B51`) — COMPLETE & VERIFIED IN WORKING TREE**
-- **Prior Train Status**: **Development Train 01 (`W0-A`, `B03`, `B10`, `B11`), Train 02 (`B20`, `B21`, `B22`), Remediation (`R1–R7`), & Train 03 (`B30`, `B31`, `B32`) COMPLETE & COMMITTED (`e34516c`, `2151f34`, `c331dc3`, `0732ca0`, `12e166a`)**
-- **Current Phase**: **DEVELOPMENT TRAIN 04 COMPLETE — READY FOR GPT-6 REVIEW**
+- **Active Train**: **Development Train 05 (`Wave W5`: `W4` Baseline Commit Closure + `W5-UAT` Full Product Acceptance) — `AUTOMATED_UAT_PASS` (`COMPLETE & COMMITTED`, AWAITING OWNER UAT)**
+- **Prior Train Status**: **Development Train 01 (`W0-A`, `B03`, `B10`, `B11`), Train 02 (`B20`, `B21`, `B22`), Remediation (`R1–R7`), Train 03 (`B30`, `B31`, `B32`), & Train 04 (`B40`, `B41`, `B50`, `B51`) COMPLETE & COMMITTED (`e34516c`, `2151f34`, `c331dc3`, `0732ca0`, `12e166a`, `40f6563`)**
+- **Current Phase**: **SUMI V3 TECHNICAL BASELINE COMPLETE (`AUTOMATED_UAT_PASS`) — AWAITING OWNER UAT (`OWNER_ACCEPTED` RESERVED FOR PRODUCT OWNER)**
 - **Baseline Git Commits**:
   - Base: `1ff5f04ed7a26969130eaba75da50b20684e763e` (`master`)
   - Commit 1 (`W0-A` Stabilization, 38 files): `e34516c`
@@ -10,7 +10,10 @@
   - Commit 3 (`W0–W2` Execution & Financial Correctness Baseline, 70 files): `c331dc3` (`c331dc3250937a664625b1ebb9e7fac6170b0ae3`)
   - Commit 4 (Persistent Project Execution Charter, 4 files): `0732ca0` (`0732ca07cd2cb3fcf6f45bef85d93f8fd8bdcb21`)
   - Commit 5 (`W3` Replay State, WebSocket & Chart Integration Baseline, 31 files): `12e166a` (`12e166ad323437b43607c6ba739f4b273a7a4d21`)
+  - Commit 6 (`W4` API Contracts, Money Flow BB, Trading Practice & Strategy Lab UX, 63 files): `40f6563` (`40f6563ecc6ef4ce0c37ace90626e3380074c75c`)
+  - Commit 7 (`W5` Product UAT Remediation & Governance Records, 14 files): `fix(v3): complete W5 product UAT remediation and governance records` (authorized per `DEC-09`)
 - **Production DB Invariant (`backend/sumi.db`)**: `234206fc75259f091337d4feb5f41575d0fe5ac02d6c10ba0de8fad68cbcee86` (`188,416` bytes — verified bit-exact, `0` byte delta)
+
 
 ---
 
@@ -80,7 +83,7 @@
 
 ---
 
-## Development Train 04 Batch Status (`Wave W4`: `B40 → B41`, `B50 → B51` — `COMPLETE & VERIFIED IN WORKING TREE`)
+## Development Train 04 Batch Status (`Wave W4`: `B40 → B41`, `B50 → B51` — `COMPLETE & COMMITTED`)
 
 ### 1. Batch `B40` — `API Contract & TypeScript Alignment`
 - **Scope & Traceability**:
@@ -90,9 +93,9 @@
   - Aligned enums & DTOs across backend/frontend: `SessionStatus` includes `'bankrupt'`; `DecisionCreate` validator permits `OrderType.CUSTOM_PRICE`; `CreateSessionMode` (`normal | random | blind_symbol | blind_date`) is strictly separated from `SessionMode` (which adds `backtest` for read/response DTOs) with a client-side guard in `replayApi.createSession` and HTTP 422 rejection on `POST /api/replay/sessions`; `TradePlanResult` includes all 7 risk fields (`entry_price`, `stop_loss`, `target_price`, `direction`, `account_equity`, `available_cash`, `risk_percent`); `AnalyticsReport` optionality aligned; `checklist_snapshot` supports structured dict or legacy JSON string across `decision_schema.py`, `trade_lifecycle_service.py`, `decision.ts`, and `journal.ts`; `Candle.source: string | null` added; explicit `response_model` annotations added on `/api/scanner/*` (`ScannerRunResponse`, `ScannerHistoryItemResponse`).
   - Enforced client-side signal contract invariants (`1..2` signals max, unique signal names, non-null `params`, pinned `version`, no extra fields) in `frontend/src/api/signalsApi.ts`, `SignalExplanationInspector.tsx`, and `SignalInspector.tsx`.
   - Removed duplicate unannotated `GET /api/import/catalog` in `backend/app/api/import_data.py` (retaining canonical `GET /api/data/catalog` in `symbols.py`), removed dead `importCafefData` in `frontend/src/api/importApi.ts`, and isolated legacy `DataFeedService` in `backend/app/services/data_service.py`.
-- **Implementation Status**: `COMPLETE_VERIFIED` (`UNCOMMITTED_IN_WORKTREE`)
+- **Implementation Status**: `COMPLETE_COMMITTED` (`40f6563`)
 - **Test Evidence**:
-  - Backend: `11/11 passed` in `backend/tests/test_b40_openapi_contract_snapshot.py`.
+  - Backend: `5/5 passed` (`11` sub-assertions) in `backend/tests/test_b40_openapi_contract_snapshot.py`.
   - Frontend: `17/17 passed` in `frontend/src/api/__tests__/b40_contract_alignment.test.ts`, `SignalExplanationInspector.test.tsx`, and `SignalInspector.test.tsx`.
   - Browser Smoke: `b40.openapi-and-error-envelope-contract` passed.
 
@@ -104,7 +107,7 @@
   - Added explicit Pydantic `response_model` declarations (`BBHorizonsResponseSchema`, `Union[BBSymbolResponseSchema, BBChartFormatResponseSchema]`, `MarketBBResponseSchema`) to all `/api/bb/*` GET routes in `backend/app/api/bb.py` and `backend/app/schemas/bb_schema.py`.
   - Unified `series` (`format=series` default) and `chart` (`format=chart` flattened `ChartAdapter.to_chart_series`) contracts in `frontend/src/api/bbApi.ts` (`fetchSymbolBB`, `fetchSymbolBBChart`) and `frontend/src/components/chart/TechnicalFlowBBViewer.tsx`.
   - Distinguished warming (`is_warmup`), degraded (`UNAVAILABLE_DEGRADED` / low data quality / breadth `< 50%`), invalid (`ERROR`), and genuinely empty states with explicit Vietnamese banners and reasons in `TechnicalFlowBBViewer.tsx`, while rendering valid BB series through `ChartKernel` (`CandleChart`).
-- **Implementation Status**: `COMPLETE_VERIFIED` (`UNCOMMITTED_IN_WORKTREE`)
+- **Implementation Status**: `COMPLETE_COMMITTED` (`40f6563`)
 - **Test Evidence**:
   - Backend: `32/32 passed` in `backend/tests/test_b41_bb_contract.py`, `backend/app/tests/test_bb_calculator.py`, and `backend/app/tests/test_market_bb.py`.
   - Frontend: `5/5 passed` in `frontend/src/components/chart/__tests__/TechnicalFlowBBViewer.test.tsx`.
@@ -120,9 +123,9 @@
   - Made `SHORT` PnL, R-multiple, and bidirectional `Risk-Reward` chart drawing sync symmetric across `practiceDomain.ts`, `PositionPanel.tsx`, `TradeControls.tsx`, `ReplayWorkspace.tsx`, and `ReplayWorkspaceController.tsx`.
   - Implemented `DELETE /api/replay/sessions/{session_id}/orders/{order_id}` (`cancel_pending_order` in `backend/app/services/trade_lifecycle_service.py` and `backend/app/api/decisions.py`) and wired a visible `Hủy lệnh` (`Cancel`) button in `PendingOrdersPanel.tsx`.
   - Displayed Vietnam `MarketProfile` assumptions (`Phí mua 0.15% · Phí bán 0.15% · Thuế bán 0.10% · Lô chẵn 100 CP · T+1 · về sau 1 phiên`) inside the `TradeControls.tsx` order dialog (`data-testid="trade-dialog-market-assumptions"`).
-- **Implementation Status**: `COMPLETE_VERIFIED` (`UNCOMMITTED_IN_WORKTREE`)
+- **Implementation Status**: `COMPLETE_COMMITTED` (`40f6563`)
 - **Test Evidence**:
-  - Backend: `4/4 passed` in `backend/tests/test_b50_trading_practice_ux.py`.
+  - Backend: `2/2 passed` (`4` sub-assertions) in `backend/tests/test_b50_trading_practice_ux.py`.
   - Frontend: `4/4 passed` in `frontend/src/components/replay/__tests__/b50_trading_practice_ux.test.tsx`.
   - Browser Smoke: `b50.replay-above-the-fold-layout-1440x1000-and-1280x800`, `b50.trade-dialog-assumptions-and-inline-sl-tp-validation`, `b50.pending-limit-order-submission-and-cancellation`, and `b50.market-buy-and-t1-settlement-inline-feedback` passed.
 
@@ -137,17 +140,49 @@
   - Updated `Sidebar.tsx` active state matching for `/strategy-lab` query tabs (`single`, `battle`, `multiphase`, `flow` vs `catalog` vs `builder`).
   - Added visible `↑`/`↓` indicator order controls and warming progress badges (`warming (N/X)`) in `IndicatorPaneChrome.tsx` and `ChartLegendOverlay.tsx`.
   - Extracted `Signals` into a dedicated 5th tab in `PracticeRail.tsx` (`Trade`, `Journal`, `Decisions`, `Drawing`, `Signals`) so `BUY`/`SELL`/`CLOSE` stay above the fold at both `1440×1000` (`y=337`) and `1280×800` (`y=337`), added contextual `📘 Nhật ký` / `📊 Phân tích` session links in `ReplayRightPanel.tsx`, and aligned `< 1280px` desktop limitation warnings (`xl:hidden`) and `MarketProfile` assumptions across pages.
-- **Implementation Status**: `COMPLETE_VERIFIED` (`UNCOMMITTED_IN_WORKTREE`)
+- **Implementation Status**: `COMPLETE_COMMITTED` (`40f6563`)
 - **Test Evidence**:
+  - Backend: `2/2 passed` in `backend/tests/test_b51_strategy_rule_builder_handoff.py`.
   - Frontend: `5/5 passed` in `frontend/src/pages/__tests__/b51_strategy_lab_ux.test.tsx` + `23/23 passed` across `StrategyLabPage.test.tsx`, `BacktestPage.test.tsx`, `StrategyRuleBuilder.test.tsx`, `PracticeWorkflow.test.tsx`, and `ChartKernel.test.tsx`.
   - Browser Smoke: `b51.backtest-redirect-and-single-tab-ux`, `b51.strategy-builder-to-single-and-battle-handoff`, and `b51.indicator-order-controls-and-undo-redo-ux` passed.
 
 ---
 
-### 5. Train 04 Full Regression & Live Browser Smoke Summary (`COMPLETE`)
-- **Full Backend Pytest Suite (`PYTHONPATH=backend ./.venv/bin/pytest backend/tests backend/app/tests -q`)**: **`843 passed, 1 skipped, 0 failed`** (`844 collected`).
-- **Full Frontend Vitest Suite (`npm --prefix frontend run test -- --run`)**: **`268 passed, 0 failed`** across **`43/43` test files**.
-- **Frontend Production Build (`npm --prefix frontend run build`)**: **`0 TypeScript/Vite errors`**, built in `275ms`.
-- **Live Browser Smoke Suite (`Playwright Chromium`, `1440×1000` & `1280×800`)**: **`12/12 checks PASSED`**, **`0 consoleErrors`**, **`0 pageErrors`** (`artifacts/local/development-train-04/smoke/train04-smoke-results.json`, `strategy-lab-1440x1000.png`, `strategy-lab-1280x800.png`, `replay-w4-1440x1000.png`, `replay-w4-1280x800.png`).
-- **Production Database Checksum (`backend/sumi.db`)**: `234206fc75259f091337d4feb5f41575d0fe5ac02d6c10ba0de8fad68cbcee86` (`188,416` bytes, `0` byte delta).
-- **Status**: **`DEVELOPMENT TRAIN 04 COMPLETE — READY FOR GPT-6 REVIEW`**
+## Development Train 05 Status (`Wave W5`: `W4` Baseline Closure + `W5-UAT` Full Product Acceptance — `COMPLETE & COMMITTED`)
+
+### 1. Phase A — `W4` Controlled Baseline Closure (`COMPLETE & COMMITTED`)
+- **Backend Test Collection Reconciliation**:
+  - `PYTHONPATH=backend ./.venv/bin/pytest backend/tests backend/app/tests --import-mode=importlib` collects **843 test items** + **1 module-level skip** (`backend/tests/e2e_test.py`) = **`843 passed, 1 skipped, 0 failed`**.
+  - `PYTHONPATH=backend ./.venv/bin/pytest backend --import-mode=importlib` collects **844 test items** (`843` + `backend/scripts/test_connectors.py::test_feeds`) + **1 module-level skip** = **`844 passed, 1 skipped, 0 failed`**.
+  - Reconciled `W3` (`833/834`) vs `W4` (`843/844`): `W4` added **10 new backend pytest functions** across 4 new files (`test_b40_openapi_contract_snapshot.py` [5], `test_b41_bb_contract.py` [1], `test_b50_trading_practice_ux.py` [2], `test_b51_strategy_rule_builder_handoff.py` [2]) and **15 new frontend Vitest tests** (`253 → 268`); the `W4` handoff's "21 new backend tests" counted multi-assertion sub-checks across `B40`/`B41`/`B50`/`B51`.
+- **W4 Baseline Commit (`A2`)**:
+  - **Commit Hash**: `40f6563ecc6ef4ce0c37ace90626e3380074c75c` (`feat(v3): complete W4 API contracts trading practice and strategy UX`) — exact 63 verified `W4` paths (`56` modified tracked + `7` new test files).
+
+### 2. Phase B & C — `W5-UAT` Full Browser E2E Product Acceptance & Cross-Journey Quality Gates (`101/101 PASSED`)
+- **Execution Environment**: Isolated temporary SQLite database migrated via `alembic upgrade head` (`cdf80254e9dc → 20261014_0001`), seeded with deterministic trading-day fixtures (`FPT`, `SSI`, `VCI`, `VNINDEX`, `WARM_SYM`, `DEG_SYM`, `QUAR_ONLY`) + real CafeF CSV upload fixtures (`valid_cafef_uat.csv`, `corrupt_cafef_uat.csv`), executed via headless Chromium (`./artifacts/local/development-train-05/run_train05_uat.sh`).
+- **Journeys & Quality Gates**:
+  - **Journey 1 (`journey1_import_chart_indicators`)**: **`22/22 PASS`** (`IMP-001..003`, `SYNC-001..002`, `G-02`, `G-05`, `R-02`, `I-01..13`, `REPLAY-007..008`).
+  - **Journey 2 (`journey2_replay_drawing_timeframe_resume`)**: **`33/33 PASS`** (`REPLAY-001..006`, `REPLAY-009`, `REPLAY-015`, `NAV-003..004`, `R-01`, `R-03..05`, `WS-01..10`, `D-01..11`).
+  - **Journey 3 (`journey3_strategy_builder_backtest_compare`)**: **`20/20 PASS`** (`BACK-001..002`, `LAB-001..005`, `LAB-007`, `FG-01..12`).
+  - **Journey 4 (`journey4_scanner_signal_explanation_replay`)**: **`4/4 PASS`** (`LAB-006`, `SCAN-001..002`, `REPLAY-014`).
+  - **Journey 5 (`journey5_trading_practice_journal_analytics`)**: **`13/13 PASS`** (`REPLAY-010..013`, `T-01..05`, `JOUR-001..002`, `ANAL-001..002`).
+  - **Cross-Journey Viewports & Quality Gates (`cross_journey_viewports_and_gates`)**: **`6/6 PASS`** (`G-01`, `G-03`, `G-04`, `NAV-001`, `NAV-002`, `NAV-005` across `1440×1000`, `1280×800`, and `1024×768`).
+- **Total Acceptance Checks**: **`101/101 PASS`** (`98` distinct acceptance IDs across `101` journey checks), **`0` console errors**, **`0` page errors**, **`0` external network requests**, **`38` retained UAT artifact entries** (`36` PNG screenshots + `train05-uat-results.json` + `fixtures/`) in `artifacts/local/development-train-05/uat/`.
+
+### 3. Phase D & E — Defect Remediation, Inventory Reconciliation & W5 Technical Baseline Closure (`COMPLETE & COMMITTED`)
+- **Defects Discovered & Resolved During W5 UAT (`5/5 Resolved`, `0 Outstanding`)**:
+  - `DEF-W5-01` (`Medium`, `frontend/src/pages/StrategyLabPage.tsx`): Multi-symbol Strategy Battle runs stored equity curves under `response.runs[].analytics.equity_curve`, leaving `MultiStrategyEquityChart` blank when `response.analytics` was undefined; added fallback to `response.runs` equity curves and added `data-testid="market-assumptions-banner"` across Strategy Lab tabs.
+  - `DEF-W5-02` (`Medium`, `backend/app/domain/bb/calculator.py`): `ProxyBBCalculator.calculate_series` compared `datetime.date` against ISO `str` when `as_of` was supplied (`TypeError`); normalized `session_date` and `as_of` to ISO strings.
+  - `DEF-W5-03` (`Low`, `frontend/src/pages/AnalyticsPage.tsx`, `frontend/src/pages/BacktestPage.tsx`): Surfaced canonical Golden Case `G-08` (`"N/A (chưa có lệnh thua)"` with tooltip) and `G-09` (`"mẫu nhỏ (<30), độ tin cậy thấp"`) banners alongside `MarketProfile` assumptions (`GAP-U-11`).
+  - `DEF-W5-04` (`Low`, `frontend/src/components/replay/SessionDebriefModal.tsx`, `ScannerSourceContext.tsx`, `ReplayRightPanel.tsx`, `App.tsx`): Unified `SessionDebriefModal` win/loss and profit factor display with `AnalyticsService` (`t.result === 'win' | 'loss'`), added reverse navigation links to `/scanner` and `/strategy-lab?tab=flow`, and rendered `.limited-workstation-warning` on non-`/replay` routes when viewport `< 1280px`.
+  - `DEF-W5-05` (`Medium`, `backend/app/services/trade_lifecycle_service.py`): `TradeLifecycleService.execute_pending_order` created a blank `dummy_decision` when filling pending `MARKET_NEXT_OPEN` / `LIMIT` orders, dropping `setup_type`, `market_regime`, `emotion`, `stop_loss`, `target_price`, `planned_entry_price`, and `planned_r` on the resulting `Trade`; populated `dummy_decision` from the originating `Decision` record.
+- **W5 Modified File Inventory Reconciliation (`14` Tracked Files)**:
+  - Reconciled the prior report's header label ("13 modified files") against the actual **14 modified tracked files** in `git status`: **11 source/test files** (`backend/app/domain/bb/calculator.py`, `backend/app/services/trade_lifecycle_service.py`, `backend/tests/test_b41_bb_contract.py`, `backend/tests/test_b50_trading_practice_ux.py`, `frontend/src/App.tsx`, `frontend/src/components/replay/ReplayRightPanel.tsx`, `frontend/src/components/replay/ScannerSourceContext.tsx`, `frontend/src/components/replay/SessionDebriefModal.tsx`, `frontend/src/pages/AnalyticsPage.tsx`, `frontend/src/pages/BacktestPage.tsx`, `frontend/src/pages/StrategyLabPage.tsx`) + **3 governance records** (`DECISION_LOG.md`, `EXECUTION_STATE.md`, `SUMI_V3_BATCH_DEPENDENCY_AND_STATUS_PROPOSED.md`).
+- **Final Regression Verification**:
+  - **Backend (`PYTHONPATH=backend ./.venv/bin/pytest backend --import-mode=importlib -q`)**: **`844 passed, 1 skipped, 0 failed`**.
+  - **Frontend (`npm --prefix frontend run test -- --run`)**: **`268 passed, 0 failed`** (`43/43` test files).
+  - **Production Build (`npm --prefix frontend run build`)**: **`0 TypeScript/Vite errors`**.
+  - **Financial Golden Cases (`G-01..G-12`)**: **`12/12 PASS`** (verified in both backend golden tests and browser UAT `FG-01..12`).
+  - **Production DB (`backend/sumi.db`)**: `234206fc75259f091337d4feb5f41575d0fe5ac02d6c10ba0de8fad68cbcee86` (`188,416` bytes, `0` byte delta).
+  - **Owner Acceptance Guide**: Prepared at `artifacts/local/development-train-05/OWNER_UAT_GUIDE.md`.
+- **Status**: **`AUTOMATED_UAT_PASS` — `SUMI V3 TECHNICAL BASELINE COMPLETE — AWAITING OWNER UAT` (`OWNER_ACCEPTED` / `ACCEPTED_V3_COMPLETE` reserved for Product Owner)**

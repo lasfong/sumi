@@ -1,5 +1,5 @@
 import { lazy, Suspense, useState } from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider, type QueryClientConfig } from '@tanstack/react-query';
 import { Toaster } from 'react-hot-toast';
 import { Sidebar } from './components/layout/Sidebar';
@@ -36,6 +36,16 @@ const PageFallback = () => (
   </div>
 );
 
+const GlobalViewportWarning = () => {
+  const location = useLocation();
+  if (location.pathname.startsWith('/replay')) return null;
+  return (
+    <div className="limited-workstation-warning" role="status">
+      Read-only / limited viewport below 1280px. Expand to a desktop workstation width for full trading practice.
+    </div>
+  );
+};
+
 function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {
@@ -63,6 +73,7 @@ function App() {
         <div className={`app-shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
           <Sidebar isCollapsed={sidebarCollapsed} onToggleCollapse={handleToggleSidebar} />
           <main className="app-main">
+            <GlobalViewportWarning />
             <ErrorBoundary>
               <Suspense fallback={<PageFallback />}>
                 <Routes>

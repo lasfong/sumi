@@ -136,7 +136,7 @@ def test_b50_cancel_pending_limit_order(client: TestClient, db_session):
         initial_cash=100_000_000.0,
         current_cash=100_000_000.0,
         status="active",
-        mode="practice",
+        mode="normal",
     )
     db_session.add(session)
     db_session.commit()
@@ -176,3 +176,34 @@ def test_b50_cancel_pending_limit_order(client: TestClient, db_session):
     # Second cancellation attempt fails with 400
     res_cancel_again = client.delete(f"/api/replay/sessions/{session.id}/orders/{order_id}")
     assert res_cancel_again.status_code == 400
+
+    # Create a MARKET_NEXT_OPEN BUY order with taxonomy + SL/TP and step 1 bar to verify Trade retains metadata (DEF-W5-05)
+    res_buy = client.post(
+        f"/api/replay/sessions/{session.id}/decisions",
+        json={
+            "action": "BUY",
+            "order_type": "MARKET_NEXT_OPEN",
+            "price": 100.0,
+            "quantity": 200,
+            "stop_loss": 95.0,
+            "target_price": 110.0,
+            "setup_type": "Breakout",
+            "market_regime": "Bull Trend",
+            "emotion": "Calm / Disciplined",
+            "reason": "Breakout with volume",
+        },
+    )
+    assert res_buy.status_code == 200
+    res_next = client.post(f"/api/replay/sessions/{session.id}/next?steps=1")
+    assert res_next.status_code == 200
+    res_filled_state = client.get(f"/api/replay/sessions/{session.id}/practice-state")
+    assert res_filled_state.status_code == 200
+    trades = res_filled_state.json()["trades"]
+    assert len(trades) == 1
+    assert trades[0]["setup_type"] == "Breakout"
+    assert trades[0]["market_regime"] == "Bull Trend"
+    assert trades[0]["emotion"] == "Calm / Disciplined"
+    assert trades[0]["initial_stop_loss"] == 95.0
+    assert trades[0]["target_price"] == 110.0
+    assert trades[0]["planned_entry_price"] == 100.0
+    assert trades[0]["planned_r"] == 2.0

@@ -278,47 +278,76 @@ Concise record of architectural, governance, and commit-gate decisions across De
 
 ---
 
-### `DEC-TRAIN04-01` — B40 API Contract Alignment, Error Envelope & Dead Endpoint Disposition (`IMPLEMENTED / VERIFIED`)
+### `DEC-TRAIN04-01` — B40 API Contract Alignment, Error Envelope & Dead Endpoint Disposition (`APPROVED / COMMITTED`)
 - **Date**: 2026-10-16
 - **Phase**: Development Train 04 — Batch `B40` (`ADR-API-001`)
-- **Status**: **`IMPLEMENTED & TEST-VERIFIED (AWAITING GPT-6 REVIEW)`**
+- **Status**: **`APPROVED & COMMITTED (`40f6563`)`**
 - **Decision & Outcome**:
   - Standardized FastAPI global exception handlers in `backend/app/main.py` (`RequestValidationError`, `HTTPException`, `Exception`) emitting `{code, message, field_errors, detail}` and stripped raw `str(e)` exception leaks across API routers (`analytics.py`, `universe.py`, `indicators.py`), while adding `extractErrorMessage` in `frontend/src/api/client.ts` so HTTP 422 arrays and object details never render `[object Object]`.
   - Separated `CreateSessionMode` (`normal | random | blind_symbol | blind_date`) from `SessionMode` (which adds `backtest` for read/response DTOs) in `backend/app/schemas/replay_schema.py` and `frontend/src/types/replay.ts` (`GAP-API-03`), guarding `replayApi.createSession` on the client and preserving HTTP 422 rejection when `mode="backtest"` is sent to `POST /api/replay/sessions`.
   - Aligned `SessionStatus` (`'bankrupt'`), `DecisionCreate` validator (`OrderType.CUSTOM_PRICE`), `TradePlanResult` (all 7 risk fields), `AnalyticsReport` optionality, `checklist_snapshot` (`Record<string, unknown> | string | null` dual-read/write), `Candle.source: string | null`, and `/api/scanner/*` `response_model` annotations (`ScannerRunResponse`, `ScannerHistoryItemResponse`).
   - Enforced signal contract invariants (`1..2` signals max, unique names, non-null `params`, pinned `version`, no extra fields) in `frontend/src/api/signalsApi.ts`, `SignalExplanationInspector.tsx`, and `SignalInspector.tsx`.
-  - Removed duplicate unannotated `GET /api/import/catalog` in `backend/app/api/import_data.py` (retaining canonical `GET /api/data/catalog` in `backend/app/api/symbols.py`), removed dead `importCafefData` in `frontend/src/api/importApi.ts`, and isolated legacy `DataFeedService` in `backend/app/services/data_service.py` (`GAP-API-08`, `GAP-API-10`, `GAP-DB-13`). Verified by `11/11` backend tests in `test_b40_openapi_contract_snapshot.py` and `17/17` frontend tests.
+  - Removed duplicate unannotated `GET /api/import/catalog` in `backend/app/api/import_data.py` (retaining canonical `GET /api/data/catalog` in `backend/app/api/symbols.py`), removed dead `importCafefData` in `frontend/src/api/importApi.ts`, and isolated legacy `DataFeedService` in `backend/app/services/data_service.py` (`GAP-API-08`, `GAP-API-10`, `GAP-DB-13`). Verified by `5/5` backend tests (`11` sub-assertions) in `test_b40_openapi_contract_snapshot.py` and `17/17` frontend tests.
 
 ---
 
-### `DEC-TRAIN04-02` — B41 Money Flow BB Envelope Unification & Degraded/Warming State Contract (`IMPLEMENTED / VERIFIED`)
+### `DEC-TRAIN04-02` — B41 Money Flow BB Envelope Unification & Degraded/Warming State Contract (`APPROVED / COMMITTED`)
 - **Date**: 2026-10-16
 - **Phase**: Development Train 04 — Batch `B41` (`ADR-API-001`)
-- **Status**: **`IMPLEMENTED & TEST-VERIFIED (AWAITING GPT-6 REVIEW)`**
+- **Status**: **`APPROVED & COMMITTED (`40f6563`)`**
 - **Decision & Outcome**:
   - Added explicit Pydantic `response_model` declarations (`BBHorizonsResponseSchema`, `Union[BBSymbolResponseSchema, BBChartFormatResponseSchema]`, `MarketBBResponseSchema`) to all `/api/bb/*` GET endpoints in `backend/app/api/bb.py` and `backend/app/schemas/bb_schema.py` (`GAP-API-11`).
   - Unified `series` (`format=series`) and `chart` (`format=chart`) response contracts in `frontend/src/api/bbApi.ts` and `frontend/src/components/chart/TechnicalFlowBBViewer.tsx`, surfacing explicit warming (`is_warmup`), degraded (`UNAVAILABLE_DEGRADED` / low data quality / breadth `< 50%`), invalid, and empty states while rendering valid BB outputs through `ChartKernel` (`GAP-API-02`). Verified by `32/32` backend tests and `5/5` frontend tests.
 
 ---
 
-### `DEC-TRAIN04-03` — B50 Trading Practice UX: Inline T+1.5 Feedback, SL/TP Geometry Alert, Symmetric SHORT R:R & Pending Limit Cancel (`IMPLEMENTED / VERIFIED`)
+### `DEC-TRAIN04-03` — B50 Trading Practice UX: Inline T+1.5 Feedback, SL/TP Geometry Alert, Symmetric SHORT R:R & Pending Limit Cancel (`APPROVED / COMMITTED`)
 - **Date**: 2026-10-16
 - **Phase**: Development Train 04 — Batch `B50` (`ADR-SETTLE-001`, `ADR-EXEC-001`)
-- **Status**: **`IMPLEMENTED & TEST-VERIFIED (AWAITING GPT-6 REVIEW)`**
+- **Status**: **`APPROVED & COMMITTED (`40f6563`)`**
 - **Decision & Outcome**:
   - Displayed `Khả dụng` vs `Chờ về` share columns in `PositionPanel.tsx` and an always-visible inline `T+1 · về sau 1 phiên` settlement notice (`data-testid="settlement-inline-notice"`) below `SELL`/`CLOSE` in `TradeControls.tsx`, plus distinct tooltips for `SELL` vs `CLOSE` (`GAP-U-01`, `GAP-U-12`).
   - Added inline Vietnamese SL/TP geometry validation (`data-testid="sl-tp-validation-alert"`) in `TradeControls.tsx` and `backend/app/domain/trade_planning.py` (`BUY`: `SL < Entry < TP`; `SELL`/`SHORT`: `TP < Entry < SL`) keeping the sizing preview visible while blocking invalid order submission, and made `SHORT` PnL, R-multiple, and bidirectional `Risk-Reward` chart drawing sync symmetric (`GAP-U-02`).
   - Implemented `DELETE /api/replay/sessions/{session_id}/orders/{order_id}` (`cancel_pending_order`) in `backend/app/services/trade_lifecycle_service.py` and `backend/app/api/decisions.py` and wired a visible `Hủy lệnh` button in `PendingOrdersPanel.tsx` (`GAP-U-04`).
-  - Added `MarketProfile` assumptions (`Phí mua 0.15% · Phí bán 0.15% · Thuế bán 0.10% · Lô chẵn 100 CP · T+1 · về sau 1 phiên`) inside the `TradeControls.tsx` order dialog (`GAP-U-11`). Verified by `4/4` backend tests in `test_b50_trading_practice_ux.py`, `4/4` frontend tests in `b50_trading_practice_ux.test.tsx`, and live browser smoke checks.
+  - Added `MarketProfile` assumptions (`Phí mua 0.15% · Phí bán 0.15% · Thuế bán 0.10% · Lô chẵn 100 CP · T+1 · về sau 1 phiên`) inside the `TradeControls.tsx` order dialog (`GAP-U-11`). Verified by `2/2` backend tests (`4` sub-assertions) in `test_b50_trading_practice_ux.py`, `4/4` frontend tests in `b50_trading_practice_ux.test.tsx`, and live browser smoke checks.
 
 ---
 
-### `DEC-TRAIN04-04` — B51 Strategy Lab Single Tab Integration, Rule Builder Handoff & 1280px Desktop Layout (`IMPLEMENTED / VERIFIED`)
+### `DEC-TRAIN04-04` — B51 Strategy Lab Single Tab Integration, Rule Builder Handoff & 1280px Desktop Layout (`APPROVED / COMMITTED`)
 - **Date**: 2026-10-16
 - **Phase**: Development Train 04 — Batch `B51`
-- **Status**: **`IMPLEMENTED & TEST-VERIFIED (AWAITING GPT-6 REVIEW)`**
+- **Status**: **`APPROVED & COMMITTED (`40f6563`)`**
 - **Decision & Outcome**:
   - Integrated `BacktestPage` as the `Kiểm Định Đơn Lẻ (Single Backtest)` tab (`?tab=single`) inside `StrategyLabPage.tsx` with a `Single Backtest vs. Strategy Battle` guidance banner (`data-testid="single-vs-battle-banner"`), and redirected `/backtest` in `App.tsx` to `/strategy-lab?tab=single` (`GAP-U-05`).
   - Completed lossless `StrategyRuleBuilder` → `StrategyLabPage` (`Single` and `Battle`) handoff via `sumi_pending_strategy_rule` (`sessionStorage`), adding custom AST rule execution (`custom_ast_rule.yaml`) to `BacktestPage.tsx`, a prefill banner (`data-testid="custom-rule-prefill-banner"`), and toast feedback (`GAP-U-03`).
   - Upgraded Undo/Redo contrast and shortcut hints (`Ctrl+Z`/`Ctrl+Y`) in `DrawingToolbar.tsx`, `KeyboardShortcutsModal.tsx`, and `ReplayWorkspaceController.tsx` (with Spacebar interactive focus guard, `GAP-U-04`, `GAP-U-13`).
-  - Updated `Sidebar.tsx` active tab matching (`GAP-U-06`), added visible `↑`/`↓` indicator order controls and warming badges in `IndicatorPaneChrome.tsx` & `ChartLegendOverlay.tsx` (`GAP-U-07`, `GAP-U-09`), extracted `Signals` into a 5th `PracticeRail.tsx` tab so `BUY`/`SELL` remain above the fold at `1440×1000` and `1280×800` (`GAP-U-08`), added contextual `📘 Nhật ký` / `📊 Phân tích` links in `ReplayRightPanel.tsx` (`GAP-U-12`), and standardized `< 1280px` desktop warnings (`xl:hidden`) and `MarketProfile` assumptions across pages (`GAP-U-10`, `GAP-U-11`). Verified by `28/28` frontend tests and live Playwright browser smoke at `1440×1000` and `1280×800`.
+  - Updated `Sidebar.tsx` active tab matching (`GAP-U-06`), added visible `↑`/`↓` indicator order controls and warming badges in `IndicatorPaneChrome.tsx` & `ChartLegendOverlay.tsx` (`GAP-U-07`, `GAP-U-09`), extracted `Signals` into a 5th `PracticeRail.tsx` tab so `BUY`/`SELL` remain above the fold at `1440×1000` and `1280×800` (`GAP-U-08`), added contextual `📘 Nhật ký` / `📊 Phân tích` links in `ReplayRightPanel.tsx` (`GAP-U-12`), and standardized `< 1280px` desktop warnings (`xl:hidden`) and `MarketProfile` assumptions across pages (`GAP-U-10`, `GAP-U-11`). Verified by `2/2` backend tests in `test_b51_strategy_rule_builder_handoff.py`, `28/28` frontend tests, and live Playwright browser smoke at `1440×1000` and `1280×800`.
+
+---
+
+### `DEC-08` — W4 Baseline Closure Commit (`40f6563`) & Development Train 05 (`W5-UAT`) Full Product Acceptance Verification (`APPROVED / COMMITTED`)
+- **Date**: 2026-10-17
+- **Phase**: W4 Controlled Baseline Closure (`Phase A`) & Development Train 05 Full Product UAT (`Phase B–D`)
+- **Status**: **`APPROVED & COMMITTED`**
+- **Decision & Outcome**:
+  - Reconciled backend pytest collection counts between `pytest backend --import-mode=importlib` (`844` items + `1` skipped module; `W3=834`, `W4=844`) and `pytest backend/tests backend/app/tests --import-mode=importlib` (`843` items + `1` skipped module; `W3=833`, `W4=843`, difference = `backend/scripts/test_connectors.py::test_feeds`). Verified that `W4` added `10` new backend pytest functions across 4 files and `15` new frontend Vitest tests (`253 → 268`).
+  - Committed the verified 63-path `W4` (`B40`, `B41`, `B50`, `B51`) inventory as `40f6563ecc6ef4ce0c37ace90626e3380074c75c` (`feat(v3): complete W4 API contracts trading practice and strategy UX`).
+  - Executed the 5 authoritative user journeys (`Journey 1: CafeF Import → Chart → Indicators`, `Journey 2: Replay → Drawing → Timeframe → Resume`, `Journey 3: Strategy Builder → Backtest → Compare`, `Journey 4: Scanner → Signal Explanation → Replay`, `Journey 5: Trading Practice → Journal → Analytics`) and Cross-Journey Quality Gates (`1440×1000`, `1280×800`, and `< 1280px`) on an isolated temporary SQLite database (`./artifacts/local/development-train-05/run_train05_uat.sh`).
+  - Discovered and resolved 5 defects (`DEF-W5-01..05`) within accepted product scope without altering ratified financial/settlement formulas or touching `backend/sumi.db`:
+    1. `DEF-W5-01` (`StrategyLabPage.tsx`): Added fallback to `response.runs[].analytics.equity_curve` so `MultiStrategyEquityChart` renders on multi-symbol Strategy Battle runs.
+    2. `DEF-W5-02` (`backend/app/domain/bb/calculator.py`): Normalized `session_date` and `as_of` to ISO strings in `ProxyBBCalculator.calculate_series` to prevent `TypeError` when `as_of` is supplied.
+    3. `DEF-W5-03` (`AnalyticsPage.tsx`, `BacktestPage.tsx`): Surfaced canonical Golden Case `G-08` (`"N/A (chưa có lệnh thua)"` + tooltip) and `G-09` (`"mẫu nhỏ (<30), độ tin cậy thấp"`) banners alongside `MarketProfile` assumptions.
+    4. `DEF-W5-04` (`SessionDebriefModal.tsx`, `ScannerSourceContext.tsx`, `ReplayRightPanel.tsx`, `App.tsx`): Unified `SessionDebriefModal` win/loss/PF display with `AnalyticsService`, added reverse navigation links to `/scanner` and `/strategy-lab?tab=flow`, and rendered `.limited-workstation-warning` on non-`/replay` routes when viewport `< 1280px`.
+    5. `DEF-W5-05` (`backend/app/services/trade_lifecycle_service.py`): Populated `dummy_decision` from the originating `Decision` record in `TradeLifecycleService.execute_pending_order` so `Trade` rows created from pending `MARKET_NEXT_OPEN` or `LIMIT` orders retain `setup_type`, `market_regime`, `emotion`, `stop_loss`, `target_price`, `planned_entry_price`, and `planned_r`.
+  - Achieved **`101/101` UAT checks PASSING**, **`0` console/page errors**, **`0` external network requests**, **`844 passed, 1 skipped` backend tests**, **`268 passed` frontend tests**, clean production build, and bit-exact `backend/sumi.db` checksum (`234206fc75259f091337d4feb5f41575d0fe5ac02d6c10ba0de8fad68cbcee86`).
+
+---
+
+### `DEC-09` — W5 Technical Baseline Closure Commit & Owner Acceptance Handoff (`APPROVED`)
+- **Date**: 2026-10-17
+- **Phase**: Wave `W5` Technical Baseline Closure (`DEF-W5-01..05` + Governance Records)
+- **Status**: **`APPROVED / RATIFIED`** (Authorized by Product Owner, 2026-10-17)
+- **Decision & Outcome**:
+  - Reconciled the W5 report's "13 modified files" header label against the actual **14 modified tracked files** (`11` source/test files: `backend/app/domain/bb/calculator.py`, `backend/app/services/trade_lifecycle_service.py`, `backend/tests/test_b41_bb_contract.py`, `backend/tests/test_b50_trading_practice_ux.py`, `frontend/src/App.tsx`, `frontend/src/components/replay/ReplayRightPanel.tsx`, `frontend/src/components/replay/ScannerSourceContext.tsx`, `frontend/src/components/replay/SessionDebriefModal.tsx`, `frontend/src/pages/AnalyticsPage.tsx`, `frontend/src/pages/BacktestPage.tsx`, `frontend/src/pages/StrategyLabPage.tsx` + `3` governance files: `DECISION_LOG.md`, `EXECUTION_STATE.md`, `SUMI_V3_BATCH_DEPENDENCY_AND_STATUS_PROPOSED.md`).
+  - Authorized one controlled commit covering the exact 14 verified W5 paths with message `fix(v3): complete W5 product UAT remediation and governance records`, keeping local UAT artifacts (`artifacts/local/development-train-05/`) untracked and unpushed.
+  - Enforced strict distinction between **`AUTOMATED_UAT_PASS`** (achieved across all 16 batches `B00–B51`, `844` backend tests, `268` frontend tests, `G-01..G-12` Golden Cases, and `101/101` Playwright UAT checks) and **`OWNER_ACCEPTED`** (`ACCEPTED_V3_COMPLETE`), which remains strictly reserved for final Product Owner sign-off using `artifacts/local/development-train-05/OWNER_UAT_GUIDE.md`.

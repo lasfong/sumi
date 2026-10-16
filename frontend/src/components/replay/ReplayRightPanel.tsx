@@ -107,6 +107,13 @@ export const ReplayRightPanel: React.FC<ReplayRightPanelProps> = ({
             <span style={{ color: 'var(--text-muted)' }}>Phiên #{sessionId}</span>
             <div style={{ display: 'flex', gap: 8 }}>
               <a
+                href="/scanner"
+                data-testid="practice-link-scanner"
+                style={{ color: '#FFD166', fontWeight: 600 }}
+              >
+                🔎 Scanner
+              </a>
+              <a
                 href={`/journal?session=${sessionId}`}
                 data-testid="practice-link-journal"
                 style={{ color: '#58A6FF', fontWeight: 600 }}

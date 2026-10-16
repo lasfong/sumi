@@ -146,13 +146,49 @@ export const AnalyticsPage: React.FC = () => {
         analytics && (
           <>
             {session && (
-              <div className="glass-panel" style={{ padding: '12px 16px', marginBottom: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '13px' }}>
+              <div className="glass-panel" style={{ padding: '12px 16px', marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '13px' }}>
                 <div>
                   <strong>Session #{session.id}</strong> — <span style={{ fontWeight: 600 }}>{session.symbol}</span> ({session.timeframe || 'D'})
                 </div>
                 <div style={{ color: 'var(--text-muted)' }}>
                   Index: Bar #{session.current_index} | Start: {session.start_date ? formatVietnameseDate(session.start_date) : '—'}
                 </div>
+              </div>
+            )}
+
+            {/* MarketProfile Assumptions Footer (GAP-U-11, ANAL-001) */}
+            <div
+              data-testid="market-assumptions-banner"
+              style={{
+                padding: '8px 14px',
+                marginBottom: '16px',
+                background: 'rgba(255, 255, 255, 0.03)',
+                border: '1px solid var(--border-color)',
+                borderRadius: '6px',
+                fontSize: '12px',
+                color: 'var(--text-muted)',
+              }}
+            >
+              ⚙️ <strong>Giả định thực thi chuẩn HOSE (MarketProfile):</strong> Phí mua <strong>0.15%</strong> · Phí bán <strong>0.15%</strong> · Thuế bán <strong>0.10%</strong> · Lô chẵn <strong>100 CP</strong> · Khớp lệnh Mở cửa nến kế tiếp (<strong>Next-Open</strong>) · Chu kỳ thanh toán <strong>T+1.5</strong>
+            </div>
+
+            {/* Low Sample Statistical Confidence Warning (G-09, ANAL-001) */}
+            {(analytics.low_sample_warning || analytics.total_trades < 30) && (
+              <div
+                role="status"
+                data-testid="analytics-low-sample-banner"
+                style={{
+                  padding: '10px 14px',
+                  marginBottom: '16px',
+                  background: 'rgba(255, 209, 102, 0.1)',
+                  border: '1px solid rgba(255, 209, 102, 0.35)',
+                  borderRadius: '6px',
+                  fontSize: '12px',
+                  color: '#FFD166',
+                }}
+              >
+                ⚠️ <strong>Cảnh báo thống kê ({analytics.total_trades}/30 lệnh):</strong>{' '}
+                {analytics.low_sample_message || 'mẫu nhỏ (<30), độ tin cậy thấp'}
               </div>
             )}
 
@@ -218,6 +254,15 @@ export const AnalyticsPage: React.FC = () => {
               <div className="glass-panel" style={{ padding: '16px' }}>
                 <h4 style={{ color: 'var(--text-muted)', margin: '0 0 8px 0', fontSize: '13px' }}>Profit Factor</h4>
                 <MetricResultValue metric={analytics.metrics?.profit_factor} testId="analytics-profit-factor" />
+                {analytics.profit_factor_display && (
+                  <div
+                    data-testid="analytics-profit-factor-display"
+                    title="Profit Factor = Tổng lãi ròng / |Tổng lỗ ròng|. Khi chưa có lệnh thua, tỷ số không xác định (N/A)."
+                    style={{ fontSize: '12px', color: '#FFD166', marginTop: '4px', fontWeight: 600 }}
+                  >
+                    {analytics.profit_factor_display}
+                  </div>
+                )}
               </div>
               <div className="glass-panel" style={{ padding: '16px' }}>
                 <h4 style={{ color: 'var(--text-muted)', margin: '0 0 8px 0', fontSize: '13px' }}>Sortino Ratio</h4>

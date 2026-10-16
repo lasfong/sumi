@@ -388,6 +388,25 @@ export const BacktestPage: React.FC<BacktestPageProps> = ({ embedded = false }) 
             <span style={{ color: 'var(--text-muted)', fontSize: '14px' }}>Total Candles: {result.total_candles || 0}</span>
           </div>
 
+          {(analytics.low_sample_warning || analytics.total_trades < 30) && (
+            <div
+              role="status"
+              data-testid="backtest-low-sample-banner"
+              style={{
+                padding: '10px 14px',
+                marginBottom: '16px',
+                background: 'rgba(255, 209, 102, 0.1)',
+                border: '1px solid rgba(255, 209, 102, 0.35)',
+                borderRadius: '6px',
+                fontSize: '12px',
+                color: '#FFD166',
+              }}
+            >
+              ⚠️ <strong>Cảnh báo thống kê ({analytics.total_trades}/30 lệnh):</strong>{' '}
+              {analytics.low_sample_message || 'mẫu nhỏ (<30), độ tin cậy thấp'}
+            </div>
+          )}
+
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '16px', marginBottom: '24px' }}>
             <div className="glass-panel" style={{ padding: '20px' }}>
               <h4 style={{ color: 'var(--text-muted)', margin: '0 0 8px 0', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Net PnL</h4>
@@ -439,6 +458,15 @@ export const BacktestPage: React.FC<BacktestPageProps> = ({ embedded = false }) 
               <h4 style={{ color: 'var(--text-muted)', margin: '0 0 8px 0', fontSize: '13px' }}>Profit Factor</h4>
               <div style={{ margin: 0 }}>
                 <MetricResultValue metric={analytics.metrics?.profit_factor} testId="backtest-profit-factor" />
+                {analytics.profit_factor_display && (
+                  <div
+                    data-testid="backtest-profit-factor-display"
+                    title="Profit Factor = Tổng lãi ròng / |Tổng lỗ ròng|. Khi chưa có lệnh thua, tỷ số không xác định (N/A)."
+                    style={{ fontSize: '12px', color: '#FFD166', marginTop: '4px', fontWeight: 600 }}
+                  >
+                    {analytics.profit_factor_display}
+                  </div>
+                )}
               </div>
             </div>
             <div className="glass-panel" style={{ padding: '16px' }}>
