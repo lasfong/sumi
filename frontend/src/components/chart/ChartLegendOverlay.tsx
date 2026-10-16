@@ -196,8 +196,16 @@ export const ChartLegendOverlay: React.FC<ChartLegendOverlayProps> = ({
                     </span>
                   ))
                 ) : (
-                  <span style={{ color: state.status === 'error' ? '#f23645' : '#787b86', fontSize: '10px' }}>
-                    {state.error ?? (instance.visible ? 'warming' : 'hidden')}
+                  <span
+                    data-testid={state.errorKind === 'mapping' ? `legend-mapping-warning-${instance.id}` : undefined}
+                    style={{ color: state.status === 'error' ? '#f23645' : '#787b86', fontSize: '10px' }}
+                  >
+                    {state.error ??
+                      (instance.visible
+                        ? state.warmupBars
+                          ? `warming (${state.availableBars ?? 0}/${state.warmupBars})`
+                          : 'warming'
+                        : 'hidden')}
                   </span>
                 )}
               </div>

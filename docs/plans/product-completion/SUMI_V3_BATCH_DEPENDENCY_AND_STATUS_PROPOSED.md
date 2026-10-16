@@ -35,7 +35,7 @@ To prevent status inflation and distinguish between code in the working tree, co
 5. **Product Acceptance Status**: `NOT_ACCEPTED` | `HISTORICAL_ACCEPTED_SUPERSEDED` | `ACCEPTED_V3_COMPLETE`
 
 > [!IMPORTANT]
-> **Strict Non-Inflation Rule**: No batch in the `B00–B51` program is marked `ACCEPTED_V3_COMPLETE` until full `W5-UAT` browser verification passes. Waves `W0–W2` (`B00–B03`, `B10–B11`, `B20–B22`, plus remediation `R1–R6`) are `COMPLETE_VERIFIED`, `UNIT_INTEGRATION_VERIFIED`, `APPROVED`, and `COMMITTED_ON_MASTER` (`e34516c`, `2151f34`, `c331dc3`), while `Product Acceptance Status` remains `NOT_ACCEPTED` pending `W5-UAT`. Batches `B30` through `B51` are `NOT_STARTED` (`NOT_IN_WORKTREE`) entering Development Train 03 (`W3`).
+> **Strict Non-Inflation Rule**: No batch in the `B00–B51` program is marked `ACCEPTED_V3_COMPLETE` until full `W5-UAT` browser verification passes. Waves `W0–W2` (`B00–B03`, `B10–B11`, `B20–B22`, plus remediation `R1–R6`) are `COMPLETE_VERIFIED`, `UNIT_INTEGRATION_VERIFIED`, `APPROVED`, and `COMMITTED_ON_MASTER` (`e34516c`, `2151f34`, `c331dc3`, `0732ca0`), while `Product Acceptance Status` remains `NOT_ACCEPTED` pending `W5-UAT`. Wave `W3` (`B30`, `B31`, `B32`) is `COMPLETE_VERIFIED`, `UNIT_INTEGRATION_VERIFIED`, and `UNCOMMITTED_IN_WORKTREE` awaiting GPT-6 review and Product Owner commit authorization. Batches `B40` through `B51` are `NOT_STARTED` (`NOT_IN_WORKTREE`) entering Development Train 04 (`W4`).
 
 ---
 
@@ -46,7 +46,7 @@ Before examining `B00–B51`, it is critical to distinguish the **completed hist
 | Lineage | Batches | Scope | Commit / Tree State | Current Standing |
 |---|---|---|---|---|
 | **P-Lineage** (`docs/dev-program/STATE.json`) | `P1` through `P10` (`P10` reviewed `2026-09-14`) | Signal Engine Foundation (`P1`), Signal Families & Liquidity (`P2`), Multi-Horizon Outcome Lab (`P3`), Regime Segmentation (`P4`), Parameter Stability (`P5`), Cost/Turnover Realism (`P6`), Portfolio Constraints (`P7`), Walk-Forward Validation (`P8`), Research UI & Presets (`P9`), Final Research Pack (`P10`). | `COMMITTED_ON_MASTER` (`HISTORICAL` / `VERIFIED` in `backend/app/domain/` and `backend/app/services/`) | **`HISTORICAL_ACCEPTED_SUPERSEDED`**: Domain and research modules remain in the repository and provide the foundation for Scanner, Signals, and Strategy Lab, but the broader application requires `B00–B51` to resolve the P0/P1 architectural, financial, contract, and UX gaps documented in [`SUMI_GAP_REGISTER.md`](../../architecture/SUMI_GAP_REGISTER.md). |
-| **B-Lineage** ([`DEV_BATCHES.md`](../DEV_BATCHES.md)) | `B00–B03`, `B10–B11`, `B20–B22`, `B30–B32`, `B40–B41`, `B50–B51` + `W5` | 16 product-completion batches closing all P0/P1 gaps across DB safety, Replay zero-lookahead, Financial execution/settlement/metrics parity, Frontend state/WS/ChartKernel, API contracts, and UX completion. | `B00–B22` `COMMITTED_ON_MASTER` (`e34516c`, `2151f34`, `c331dc3`); `B30–B51` `NOT_IN_WORKTREE` (`VERIFIED`). | **Active Product Completion Program** tracked in Sections 3–6 below. |
+| **B-Lineage** ([`DEV_BATCHES.md`](../DEV_BATCHES.md)) | `B00–B03`, `B10–B11`, `B20–B22`, `B30–B32`, `B40–B41`, `B50–B51` + `W5` | 16 product-completion batches closing all P0/P1 gaps across DB safety, Replay zero-lookahead, Financial execution/settlement/metrics parity, Frontend state/WS/ChartKernel, API contracts, and UX completion. | `B00–B22` `COMMITTED_ON_MASTER` (`e34516c`, `2151f34`, `c331dc3`); `B30–B32` `UNCOMMITTED_IN_WORKTREE` (`VERIFIED`); `B40–B51` `NOT_IN_WORKTREE` (`VERIFIED`). | **Active Product Completion Program** tracked in Sections 3–6 below. |
 
 ---
 
@@ -77,16 +77,16 @@ flowchart TD
         B22["B22: Net PnL, WinRate (net>0),<br/>PF (N/A on 0 Loss) & Sharpe 252 (+ R3)<br/>[COMMITTED_ON_MASTER - c331dc3]"]
     end
 
-    subgraph W3["Wave W3: Frontend State, WebSocket & ChartKernel (ACTIVE TRAIN 03)"]
-        B30["B30: TanStack Query Keys, Abort Tokens<br/>& Session Switch Cleanup<br/>[READY - DEPENDS ON B10]"]
-        B31["B31: WS Replay State Machine, Seq/Error<br/>Envelopes & Backoff Reconnect<br/>[DEPENDS ON B30]"]
-        B32["B32: ChartKernel Facade, ReplayWorkspace<br/>Decomp & Legacy Drawing Removal<br/>[DEPENDS ON B30 + B11]"]
+    subgraph W3["Wave W3: Frontend State, WebSocket & ChartKernel (COMPLETE IN WORKTREE)"]
+        B30["B30: TanStack Query Keys, Abort Tokens<br/>& Session Switch Cleanup<br/>[COMPLETE_VERIFIED - UNCOMMITTED]"]
+        B31["B31: WS Replay State Machine, Seq/Error<br/>Envelopes & Backoff Reconnect<br/>[COMPLETE_VERIFIED - UNCOMMITTED]"]
+        B32["B32: ChartKernel Facade, ReplayWorkspace<br/>Decomp & Legacy Drawing Removal<br/>[COMPLETE_VERIFIED - UNCOMMITTED]"]
     end
 
     subgraph W4["Wave W4: API Contracts, Money Flow BB & Trading/Lab UX"]
-        B40["B40: OpenAPI Snapshot, Error Envelope,<br/>Enum Alignment & Dead Endpoint Removal<br/>[DEPENDS ON B20]"]
+        B40["B40: OpenAPI Snapshot, Error Envelope,<br/>Enum Alignment & Dead Endpoint Removal<br/>[READY - DEPENDS ON B20]"]
         B41["B41: Money Flow BB Envelope Unification<br/>& Explicit Degraded States<br/>[DEPENDS ON B40]"]
-        B50["B50: Trading UX (T+1 Wording, SL/TP Alert,<br/>SHORT R:R & Limit Cancel)<br/>[DEPENDS ON B21]"]
+        B50["B50: Trading UX (T+1 Wording, SL/TP Alert,<br/>SHORT R:R & Limit Cancel)<br/>[READY - DEPENDS ON B21]"]
         B51["B51: Strategy Lab Single Tab Integration,<br/>Rule Hand-off, /backtest Redirect & 1280px UX<br/>[DEPENDS ON B50 + B32 + B40]"]
     end
 
@@ -118,7 +118,7 @@ flowchart TD
 
 | Batch ID | Wave | Title / Core Capability | Dependencies | Implementation Status | Test Evidence Status | Arch Approval Status | Commit / Merge Status | Product Acceptance Status | Complexity (`PROPOSED`) |
 |---|---|---|---|---|---|---|---|---|---|
-| **`B00`** | W0-A | DB Path Resolution & CWD Guard | None | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (7 CWD + 30 safeguard tests; `828` BE / `240` FE total) | `APPROVED` (`DEC-01`) | `COMMITTED_ON_MASTER` (`e34516c`) | `NOT_ACCEPTED` | `LOW` |
+| **`B00`** | W0-A | DB Path Resolution & CWD Guard | None | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (7 CWD + 30 safeguard tests; `833` BE / `252` FE total) | `APPROVED` (`DEC-01`) | `COMMITTED_ON_MASTER` (`e34516c`) | `NOT_ACCEPTED` | `LOW` |
 | **`B01`** | W0-A | Transaction `atomic()` & SQLite FK Enforcement | `B00` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (15 tests in `test_b01_transaction_fk.py`) | `APPROVED` (`DEC-01`, `ADR-TX-001`) | `COMMITTED_ON_MASTER` (`e34516c`) | `NOT_ACCEPTED` | `MEDIUM` |
 | **`B02`** | W0-A | Synthetic Provider Deny, Quarantine Promotion, Mutation Provenance & Cross-Workflow Rollback | `B01` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`test_b02_*.py`, `test_adversarial_challenger.py`, `test_w0a_final_adversarial.py`) | `APPROVED` (`DEC-01`, `ADR-PROV-001-ADDENDUM-01`, `ADR-TX-001-ADDENDUM-01/02`) | `COMMITTED_ON_MASTER` (`e34516c`, `2151f34`) | `NOT_ACCEPTED` | `HIGH` |
 | **`B03`** | W0-B | Alembic 20-Model Registry, Migration-Chain Compatibility & Multi-Table Preview Isolation (+ `R1`, `R6`) | `B01` + **Gate `G-W0A`** | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`test_b03_*.py`, `test_r1_alembic_stamping.py`, `test_r6_import_contract.py`) | `APPROVED` (`DEC-02`, `DEC-REM-01`, `DEC-REM-06`) | `COMMITTED_ON_MASTER` (`c331dc3`) | `NOT_ACCEPTED` | `MEDIUM` |
@@ -127,13 +127,13 @@ flowchart TD
 | **`B20`** | W2 | Execution Kernel Unification (`Open[T+1]` Across All Paths + `R5`) | `B01` + `DEC-03`, `DEC-04` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`test_b20_*.py`, `test_r5_market_profile_coherence.py`) | `APPROVED` (`DEC-03`, `DEC-04`, `DEC-TRAIN02-02`, `DEC-REM-05`) | `COMMITTED_ON_MASTER` (`c331dc3`) | `NOT_ACCEPTED` | `HIGH` |
 | **`B21`** | W2 | `MarketProfile` Single Source, `T+1.5` Settlement & VN Calendar (+ `R2`) | `B20` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`test_b21_*.py`, `test_r2_settlement_calendar.py`) | `APPROVED` (`DEC-TRAIN02-03`, `DEC-REM-02`) | `COMMITTED_ON_MASTER` (`c331dc3`) | `NOT_ACCEPTED` | `MEDIUM` |
 | **`B22`** | W2 | Metrics Unification (Net PnL, Breakeven Rule, PF `N/A`, Sharpe 252 + `R3`) | `B21` + `DEC-05` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`test_b22_*.py`, `test_r3_sharpe_coherence.py`, `test_benchmark_metrics.py`) | `APPROVED` (`DEC-05`, `DEC-TRAIN02-04`, `DEC-REM-03`) | `COMMITTED_ON_MASTER` (`c331dc3`) | `NOT_ACCEPTED` | `MEDIUM` |
-| **`B30`** | W3 | Frontend Query Keys, Navigation Token & Session Switch Cleanup | `B10` | `NOT_STARTED` (`VERIFIED`) | `NONE` | `APPROVED` (Spec in `B30_fe-state.md` & `ADR-FE-001`) | `NOT_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `MEDIUM` |
-| **`B31`** | W3 | WebSocket Replay State Machine, Sequence Envelope & Auto-Reconnect | `B30` | `NOT_STARTED` (`VERIFIED`) | `NONE` | `APPROVED` (Spec in `B31_ws.md` & `ADR-WS-001`) | `NOT_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `MEDIUM` |
-| **`B32`** | W3 | `ChartKernel` Facade, `ReplayWorkspace` Split & Dead Drawing Removal | `B30`, `B11` | `NOT_STARTED` (`VERIFIED`) | `NONE` | `APPROVED` (Spec in `B32_chart.md` & `ADR-CHART-001`) | `NOT_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `HIGH` |
-| **`B40`** | W4 | OpenAPI Contract Snapshot, Error Envelope & Dead Endpoint Removal | `B20` | `NOT_STARTED` (`VERIFIED`) | `NONE` | `NOT_SUBMITTED` (Prompt in `B40_contracts.md`) | `NOT_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `MEDIUM` |
-| **`B41`** | W4 | Money Flow BB Envelope Unification & Degraded State Display | `B40` | `NOT_STARTED` (`VERIFIED`) | `NONE` | `NOT_SUBMITTED` (Prompt in `B41_bb.md`) | `NOT_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `LOW` |
-| **`B50`** | W4 | Trading Practice UX (`T+1` Wording, SL/TP Alert, SHORT R:R, Limit Cancel) | `B21` | `NOT_STARTED` (`VERIFIED`) | `NONE` | `NOT_SUBMITTED` (Prompt in `B50_trading-ux.md`) | `NOT_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `MEDIUM` |
-| **`B51`** | W4 | Strategy Lab Single Tab Integration, Rule Hand-off, `/backtest` Redirect & 1280px UX | `B50`, `B32`, `B40` | `NOT_STARTED` (`VERIFIED`) | `NONE` | `NOT_SUBMITTED` (Prompt in `B51_lab-ux.md`) | `NOT_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `MEDIUM` |
+| **`B30`** | W3 | Frontend Query Keys, Navigation Token & Session Switch Cleanup | `B10` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`b30_fe_state_race.test.tsx` [6 tests]) | `PENDING_ARCHITECT_REVIEW` (`ADR-FE-001` ratified) | `UNCOMMITTED_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `MEDIUM` |
+| **`B31`** | W3 | WebSocket Replay State Machine, Sequence Envelope & Auto-Reconnect | `B30` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`test_b31_ws_replay.py` [5], `b31_ws_chaos_matrix.test.tsx` [6]) | `PENDING_ARCHITECT_REVIEW` (`ADR-WS-001` ratified) | `UNCOMMITTED_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `MEDIUM` |
+| **`B32`** | W3 | `ChartKernel` Facade, `ReplayWorkspace` Split & Dead Drawing Removal | `B30`, `B11` | `COMPLETE_VERIFIED` (`VERIFIED`) | `UNIT_INTEGRATION_VERIFIED` (`ChartKernel.test.tsx` [3], `IndicatorContract.test.ts` [6], `ReplayPage.test.tsx` [9]) | `PENDING_ARCHITECT_REVIEW` (`ADR-CHART-001` ratified) | `UNCOMMITTED_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `HIGH` |
+| **`B40`** | W4 | OpenAPI Contract Snapshot, Error Envelope & Dead Endpoint Removal | `B20` | `NOT_STARTED` (`VERIFIED`) | `NONE` | `APPROVED` (Spec in `B40_contracts.md` & `ADR-API-001`) | `NOT_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `MEDIUM` |
+| **`B41`** | W4 | Money Flow BB Envelope Unification & Degraded State Display | `B40` | `NOT_STARTED` (`VERIFIED`) | `NONE` | `APPROVED` (Spec in `B41_bb.md` & `ADR-API-001`) | `NOT_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `LOW` |
+| **`B50`** | W4 | Trading Practice UX (`T+1` Wording, SL/TP Alert, SHORT R:R, Limit Cancel) | `B21` | `NOT_STARTED` (`VERIFIED`) | `NONE` | `APPROVED` (Spec in `B50_trading-ux.md`) | `NOT_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `MEDIUM` |
+| **`B51`** | W4 | Strategy Lab Single Tab Integration, Rule Hand-off, `/backtest` Redirect & 1280px UX | `B50`, `B32`, `B40` | `NOT_STARTED` (`VERIFIED`) | `NONE` | `APPROVED` (Spec in `B51_lab-ux.md`) | `NOT_IN_WORKTREE` (`VERIFIED`) | `NOT_ACCEPTED` | `MEDIUM` |
 
 ---
 
@@ -142,19 +142,21 @@ flowchart TD
 ### 4.1 Complete & Committed on `master` (`VERIFIED`)
 - **P-Lineage Research & Domain Foundation (`P1–P10`)**: Signal engine, liquidity filters, multi-horizon outcome lab, regime segmentation, parameter stability, cost/turnover realism, portfolio constraints, walk-forward validation, and research presets (`backend/app/domain/*`, `backend/app/services/*`).
 - **Wave `W0-A` Stabilization & Architecture Baseline (`e34516c`, `2151f34`)**: `B00`, `B01`, `B02`, plus ratified `ADR-PROV-001-ADDENDUM-01`, `ADR-TX-001-ADDENDUM-01`, and `ADR-TX-001-ADDENDUM-02`.
-- **Wave `W0-B + W1 + W2` Execution, Zero-Lookahead & Financial Correctness Baseline (`c331dc3`)**: `B03`, `B10`, `B11`, `B20`, `B21`, `B22`, remediation `R1–R6`, and final 8 legacy test fixture alignments (`828 passed, 1 skipped, 0 failed` backend; `240 passed` frontend).
+- **Wave `W0-B + W1 + W2` Execution, Zero-Lookahead & Financial Correctness Baseline (`c331dc3`, `0732ca0`)**: `B03`, `B10`, `B11`, `B20`, `B21`, `B22`, remediation `R1–R6`, and Persistent Project Execution Charter in `AGENTS.md`.
 
-### 4.2 Uncommitted in the Working Tree
-- **None (`0` files)** at the `W0–W2` baseline boundary (`c331dc3`).
+### 4.2 Complete & Verified in Working Tree (Awaiting GPT-6 Review & Commit Authorization)
+- **Wave `W3` (`B30`, `B31`, `B32` — Development Train 03)**:
+  - **`B30`**: Canonical `replayQueryKeys`, `ReplayNavigationCoordinator` (`AbortController` + monotonic token), 4-step session cleanup (`cleanupSessionQueries`), `QueryClient` defaults, and `replayStore.ts` reduction (`ADR-FE-001`).
+  - **`B31`**: WebSocket playback state machine (`PAUSED | PLAYING | COMPLETED | ERROR`), monotonic `seq` per connection (`WS-10`), speed clamping (`[100, 4000]ms`), dynamic `set_speed`, `ping`/`pong`, `sync`/`resume`, exponential backoff auto-reconnect, and closed-socket command queueing (`ADR-WS-001`).
+  - **`B32`**: `ChartKernel` facade wrapping Lightweight Charts v5 (sole caller of `createChart`), `ReplayHeader` + `ReplayRightPanel` decomposition (`ReplayWorkspace.tsx` reduced from `765` to `297` lines), `MappingResult` (`UNMAPPED_COLUMN` & `warming (available/warmup)`) UI badges, dev/test-gated debug DOM serialization, and deletion of 3 dead legacy drawing modules (`ADR-CHART-001`).
 
-### 4.3 Active Next Execution Wave (`W3`: Development Train 03 — `B30`, `B31`, `B32`)
-- **`B30` first**: Frontend Replay State, TanStack Query Keys (`sessionId, symbol, timeframe, adjustmentType, currentIndex`), navigation race protection (`AbortController` + monotonic token), session-switch cleanup checklist (`cancelQueries -> removeQueries -> closeWS -> single chart clear`), and `replayStore.ts` reduction (`ADR-FE-001`).
-- **`B31` and `B32` after `B30`** (parallel only where file ownership is strictly disjoint; sequence shared `ReplayWorkspace` / chart integration files):
-  - **`B31`**: WebSocket playback state machine, monotonic `seq` envelope, speed clamping (`0.25x–10x`), heartbeat `ping`/`pong`, exponential backoff auto-reconnect, and deterministic server state resynchronization (`ADR-WS-001`).
-  - **`B32`**: `ChartKernel` facade wrapping Lightweight Charts v5, `ReplayWorkspace` / `ReplayWorkspaceController` decomposition, `MappingResult` UI status rendering, drawing/indicator lifecycle stability, and dead legacy drawing file removal (`ADR-CHART-001`).
+### 4.3 Active Next Execution Wave (`W4`: Development Train 04 — `B40`, `B41`, `B50`, `B51`)
+- **`B40`**: OpenAPI contract snapshot, structured error envelope `{code, message, field_errors[]}`, HTTP 422 array normalization, schema/enum alignment, and dead endpoint removal (`ADR-API-001`).
+- **`B41`**: Money Flow BB response envelope unification and explicit degraded state display (`ADR-API-001`).
+- **`B50`**: Trading Practice UX (`T+1 · về sau 1 phiên` settlement wording, inline SL/TP geometry alert, symmetric `SHORT` R:R & drawing sync, pending `LIMIT` order cancellation).
+- **`B51`**: Strategy Lab Single Tab (`?tab=single`) integration, `StrategyRuleBuilder` hand-off (`sumi_pending_strategy_rule`), `/backtest` redirect, Undo/Redo discoverability, `<MarketAssumptionsFooter />`, and `1280×800` responsive UX.
 
-### 4.4 Downstream Execution Waves (`W4` and `W5`)
-- **Wave `W4` (`B40`, `B41`, `B50`, `B51`)**: OpenAPI contracts & error envelopes (`B40`), Money Flow BB unification (`B41`), Trading Practice UX (`B50`), and Strategy Lab Single Tab integration & 1280px UX (`B51`).
+### 4.4 Downstream Acceptance Wave (`W5`)
 - **Wave `W5` (`W5-UAT`)**: Full browser E2E UAT across Journeys 1–5 at `1440×1000` and `1280×800` on isolated deterministic fixtures.
 
 ---
@@ -431,10 +433,10 @@ flowchart TD
 - **Product Benefit**: Eliminates stale candles/indicators from a previous symbol or timeframe flashing on screen during fast switching or rapid stepping (`Space`/`ArrowRight`).
 - **Dependencies**: `B10`.
 - **Five-Dimensional Status**:
-  - *Implementation Status*: `NOT_STARTED` (`VERIFIED`)
-  - *Test Evidence Status*: `NONE`
-  - *Architectural Approval Status*: `NOT_SUBMITTED` (Prompt in `B30_fe-state.md` & `ADR-FE-001` ratified)
-  - *Commit / Merge Status*: `NOT_IN_WORKTREE` (`VERIFIED`)
+  - *Implementation Status*: `COMPLETE_VERIFIED` (`VERIFIED` in `frontend/src/features/replay/replayQueryKeys.ts`, `frontend/src/store/replayStore.ts`, `frontend/src/App.tsx`, `frontend/src/hooks/useSessionSelection.ts`, `frontend/src/api/{replayApi,decisionApi,journalApi}.ts`, `frontend/src/components/replay/ReplayWorkspaceController.tsx`)
+  - *Test Evidence Status*: `UNIT_INTEGRATION_VERIFIED` (`frontend/src/features/replay/__tests__/b30_fe_state_race.test.tsx` [6 tests])
+  - *Architectural Approval Status*: `PENDING_ARCHITECT_REVIEW` (`ADR-FE-001` ratified; awaiting GPT-6 Train 03 review)
+  - *Commit / Merge Status*: `UNCOMMITTED_IN_WORKTREE` (`VERIFIED`)
   - *Product Acceptance Status*: `NOT_ACCEPTED`
 - **Entry Criteria**: `B10` completed.
 - **Expected Deliverables**:
@@ -445,7 +447,7 @@ flowchart TD
 - **Tests & Acceptance Criteria**:
   - Step-`×20` rapid navigation race test and session-switch no-flash test pass in Vitest.
 - **Required Approval**: Orchestrator / Frontend Reviewer.
-- **Likely File Ownership**: `frontend/src/components/replay/ReplayWorkspaceController.tsx`, `frontend/src/hooks/useSessionSelection.ts`, `frontend/src/store/replayStore.ts`, `frontend/src/App.tsx` (`QueryClient` defaults).
+- **Likely File Ownership**: `frontend/src/features/replay/replayQueryKeys.ts`, `frontend/src/components/replay/ReplayWorkspaceController.tsx`, `frontend/src/hooks/useSessionSelection.ts`, `frontend/src/store/replayStore.ts`, `frontend/src/App.tsx` (`QueryClient` defaults).
 - **Estimated Complexity (`PROPOSED`)**: `MEDIUM`
 
 ---
@@ -458,10 +460,10 @@ flowchart TD
 - **Product Benefit**: Makes continuous Replay playback smooth and resilient—no silent freezes on malformed frames, clean auto-pause when reaching the final bar, and automatic recovery with a clear status banner if the local connection drops.
 - **Dependencies**: `B30`.
 - **Five-Dimensional Status**:
-  - *Implementation Status*: `NOT_STARTED` (`VERIFIED`)
-  - *Test Evidence Status*: `NONE`
-  - *Architectural Approval Status*: `NOT_SUBMITTED` (Prompt in `B31_ws.md` & `ADR-WS-001` ratified)
-  - *Commit / Merge Status*: `NOT_IN_WORKTREE` (`VERIFIED`)
+  - *Implementation Status*: `COMPLETE_VERIFIED` (`VERIFIED` in `backend/app/api/ws_replay.py`, `frontend/src/hooks/useWebSocket.ts`, `frontend/src/components/replay/ReplayWorkspaceController.tsx`)
+  - *Test Evidence Status*: `UNIT_INTEGRATION_VERIFIED` (`backend/tests/test_b31_ws_replay.py` [5 tests], `frontend/src/hooks/__tests__/b31_ws_chaos_matrix.test.tsx` [6 tests])
+  - *Architectural Approval Status*: `PENDING_ARCHITECT_REVIEW` (`ADR-WS-001` ratified; awaiting GPT-6 Train 03 review)
+  - *Commit / Merge Status*: `UNCOMMITTED_IN_WORKTREE` (`VERIFIED`)
   - *Product Acceptance Status*: `NOT_ACCEPTED`
 - **Entry Criteria**: `B30` completed.
 - **Expected Deliverables**:
@@ -471,7 +473,7 @@ flowchart TD
 - **Tests & Acceptance Criteria**:
   - All chaos scenarios in [`docs/testing/WEBSOCKET_TEST_MATRIX.md`](../../testing/WEBSOCKET_TEST_MATRIX.md) (`WS-01..WS-10`) pass.
 - **Required Approval**: Orchestrator / QA & Integration Reviewer.
-- **Likely File Ownership**: `backend/app/api/ws_replay.py`, `frontend/src/hooks/useWebSocket.ts`, `frontend/src/components/replay/ReplayWorkspaceController.tsx`, `backend/app/tests/test_b31_ws_replay.py`.
+- **Likely File Ownership**: `backend/app/api/ws_replay.py`, `frontend/src/hooks/useWebSocket.ts`, `frontend/src/components/replay/ReplayWorkspaceController.tsx`, `backend/tests/test_b31_ws_replay.py`, `frontend/src/hooks/__tests__/b31_ws_chaos_matrix.test.tsx`.
 - **Estimated Complexity (`PROPOSED`)**: `MEDIUM`
 
 ---
@@ -479,27 +481,27 @@ flowchart TD
 ### `B32` — `ChartKernel` Facade, `ReplayWorkspace` Decomposition & Dead Drawing Removal
 - **Wave**: `W3` (Phase 3: Frontend State, WebSocket & ChartKernel Integration)
 - **Prompt Spec**: [`docs/plans/prompts/B32_chart.md`](../prompts/B32_chart.md)
-- **Gap IDs Closed**: `GAP-FE-03`, `GAP-FE-04`, `GAP-FE-05`, `GAP-FE-07` ([`ADR-001`](../../ARCHITECTURE_DECISION_001_REPLAY_UI_REBUILD.md), [`ADR-CHART-001`](../../architecture/decisions/ADR-CHART-001-chart-kernel.md))
+- **Gap IDs Closed**: `GAP-FE-03`, `GAP-FE-04`, `GAP-FE-05`, `GAP-FE-07`, `GAP-FE-08` ([`ADR-001`](../../ARCHITECTURE_DECISION_001_REPLAY_UI_REBUILD.md), [`ADR-CHART-001`](../../architecture/decisions/ADR-CHART-001-chart-kernel.md))
 - **Original Goal**: Extract a thin `ChartKernel` TypeScript facade wrapping Lightweight Charts v5 (`createChart`, main candlestick/volume series, auxiliary sub-panes, primitive attachment, and coordinate conversion); split the `ReplayWorkspace.tsx` (`764` LOC) and `ReplayWorkspaceController.tsx` (`602` LOC) god-objects into focused sub-components and hooks; surface `MappingResult` indicator statuses in the UI; and delete the 3 dead legacy drawing files (`SumiDrawingAdapter.ts`, `DrawingToolRegistry.ts`, `WorkspacePersistence.ts`) while preserving `workspaceTypes.ts`.
-- **Product Benefit**: Eliminates multi-pane indicator disappearance and chart race conditions during timeframe/session changes, shows clear warming badges (`"Đang làm ấm (N/X nến)"`) when an indicator lacks bars, and makes the Replay workspace maintainable.
+- **Product Benefit**: Eliminates multi-pane indicator disappearance and chart race conditions during timeframe/session changes, shows clear warming badges (`"warming (N/X)"`) and `UNMAPPED_COLUMN` badges when an indicator lacks bars or unmapped columns, and makes the Replay workspace maintainable.
 - **Dependencies**: `B30` and `B11`.
 - **Five-Dimensional Status**:
-  - *Implementation Status*: `NOT_STARTED` (`VERIFIED`)
-  - *Test Evidence Status*: `NONE`
-  - *Architectural Approval Status*: `NOT_SUBMITTED` (Prompt in `B32_chart.md` & `ADR-CHART-001` ratified)
-  - *Commit / Merge Status*: `NOT_IN_WORKTREE` (`VERIFIED`)
+  - *Implementation Status*: `COMPLETE_VERIFIED` (`VERIFIED` in `frontend/src/components/chart/ChartKernel.ts`, `frontend/src/components/chart/CandleChart.tsx`, `frontend/src/components/analytics/EquityChart.tsx`, `frontend/src/components/chart/IndicatorRenderRegistry.ts`, `frontend/src/components/replay/{ReplayWorkspace,ReplayHeader,ReplayRightPanel,IndicatorManager,IndicatorPaneChrome,ChartLegendOverlay}.tsx`, plus removal of 3 dead drawing files)
+  - *Test Evidence Status*: `UNIT_INTEGRATION_VERIFIED` (`frontend/src/components/chart/__tests__/ChartKernel.test.tsx` [3 tests], `frontend/src/components/chart/__tests__/IndicatorContract.test.ts` [6 tests], `frontend/src/components/replay/__tests__/ReplayPage.test.tsx` [9 tests])
+  - *Architectural Approval Status*: `PENDING_ARCHITECT_REVIEW` (`ADR-CHART-001` ratified; awaiting GPT-6 Train 03 review)
+  - *Commit / Merge Status*: `UNCOMMITTED_IN_WORKTREE` (`VERIFIED`)
   - *Product Acceptance Status*: `NOT_ACCEPTED`
 - **Entry Criteria**: `B30` and `B11` completed.
 - **Expected Deliverables**:
   - `ChartKernel` facade owning LWC v5 lifecycle (`0` direct `createChart` calls outside `ChartKernel`).
-  - Decomposition of `ReplayWorkspace.tsx` and `ReplayWorkspaceController.tsx` into `ReplayHeader`, `ChartPanel`, `RightPanel`, `ReplayControlDock`, and focused hooks.
-  - UI badges in `IndicatorPaneChrome` / `IndicatorRenderRegistry` surfacing `MappingResult` states (`ok | warming | mapping-missing | server-error | projected-dropped | transport-error`).
+  - Decomposition of `ReplayWorkspace.tsx` into `ReplayHeader`, `ReplayRightPanel`, and `ReplayWorkspace` (`297` lines).
+  - UI badges in `IndicatorPaneChrome` / `ChartLegendOverlay` / `IndicatorRenderRegistry` surfacing `MappingResult` states (`OK | WARMING_UP | UNMAPPED_COLUMN | INVALID_SPEC | ERROR`).
   - Removal of `SumiDrawingAdapter.ts`, `DrawingToolRegistry.ts`, and `WorkspacePersistence.ts`.
 - **Tests & Acceptance Criteria**:
   - `grep createChart` confirms `ChartKernel` is the sole caller.
   - Component/UAT tests confirm pan, zoom, timeframe toggle (`1D ↔ 1W`), and stepping preserve drawings and indicator sub-panes without console errors.
 - **Required Approval**: Orchestrator / Frontend & Architecture Reviewer.
-- **Likely File Ownership**: `frontend/src/components/chart/{ChartKernel,CandleChart,PaneManager,SeriesManager,IndicatorRenderRegistry,EquityChart}.*`, `frontend/src/components/replay/{ReplayWorkspace,ReplayWorkspaceController,ReplayHeader,ChartPanel,RightPanel}.tsx`, deletion of 3 dead drawing files.
+- **Likely File Ownership**: `frontend/src/components/chart/{ChartKernel,CandleChart,PaneManager,SeriesManager,IndicatorRenderRegistry}.*`, `frontend/src/components/analytics/EquityChart.tsx`, `frontend/src/components/replay/{ReplayWorkspace,ReplayWorkspaceController,ReplayHeader,ReplayRightPanel,IndicatorManager,IndicatorPaneChrome,ChartLegendOverlay}.tsx`, deletion of 3 dead drawing files.
 - **Estimated Complexity (`PROPOSED`)**: `HIGH`
 
 ---

@@ -55,7 +55,13 @@ export const IndicatorPaneChrome: React.FC<Props> = ({ document, runtime, onSett
               <span data-testid={`pane-params-${instance.id}`} style={{ color: '#9DA7B3' }}>{formatIndicatorParams(instance)}</span>
               <span data-testid={instance.definitionId === 'macd' ? 'macd-components' : `pane-values-${instance.id}`} style={{ display: 'flex', gap: 6, fontFamily: 'monospace' }}>
                 {components.map(name => <span key={name}>{name}: {valueText(state.values[name])}</span>)}
-                {!components.length && <span>{state.status}</span>}
+                {!components.length && (
+                  <span>
+                    {state.status === 'warming' && state.warmupBars
+                      ? `warming (${state.availableBars ?? 0}/${state.warmupBars})`
+                      : state.status}
+                  </span>
+                )}
               </span>
               {!!references.length && <span aria-label={`${instance.label} reference levels`} style={{ display: 'flex', gap: 4, color: '#FFD166' }}>
                 <span>{instance.definitionId === 'macd' ? 'MACD ref: Zero' : `${instance.definitionId.toUpperCase()} refs:`}</span>
@@ -66,7 +72,15 @@ export const IndicatorPaneChrome: React.FC<Props> = ({ document, runtime, onSett
                 <button type="button" data-testid={`pane-toggle-${instance.id}`} aria-label={`Hide ${instance.label} pane`} onClick={() => onToggle(instance.id)} style={{ padding: '1px 4px', fontSize: 9 }}>Hide</button>
                 <button type="button" data-testid={`pane-remove-${instance.id}`} aria-label={`Close ${instance.label} pane`} onClick={() => onRemove(instance.id)} style={{ padding: '1px 4px', fontSize: 9 }}>Close</button>
               </span>
-              {state.status === 'error' && <span role="alert" style={{ color: '#FF7B72' }}>{state.error}</span>}
+              {state.status === 'error' && (
+                <span
+                  role="alert"
+                  data-testid={state.errorKind === 'mapping' ? `indicator-mapping-warning-${instance.id}` : `indicator-error-${instance.id}`}
+                  style={{ color: '#FF7B72' }}
+                >
+                  {state.error}
+                </span>
+              )}
             </div>;
           })}
         </div>

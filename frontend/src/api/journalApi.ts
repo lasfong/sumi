@@ -15,10 +15,12 @@ export const createJournalEntry = async (
 
 /** Get all journal entries for a session */
 export const getJournalEntries = async (
-  sessionId: number
+  sessionId: number,
+  signal?: AbortSignal,
 ): Promise<JournalEntry[]> => {
   const response = await apiClient.get(
-    `/replay/sessions/${sessionId}/journal`
+    `/replay/sessions/${sessionId}/journal`,
+    signal ? { signal } : undefined,
   );
   return response.data;
 };

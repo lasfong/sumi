@@ -422,14 +422,35 @@ export class IndicatorRenderRegistry {
     }
 
     const series = this.mapBackendData(data, instance);
+    const available = columns(data);
 
     if (meta) {
+      if (meta.status === 'OK' && series.length === 0) {
+        const fallbackStatus: MappingStatus = available.length > 0 ? 'UNMAPPED_COLUMN' : 'EMPTY_WARMING';
+        return {
+          status: fallbackStatus,
+          warmup_bars: meta.warmup_bars,
+          available_bars: meta.available_bars,
+          is_projected_clamped: meta.is_projected_clamped,
+          series: [],
+          message:
+            fallbackStatus === 'UNMAPPED_COLUMN'
+              ? `Indicator column mapping missing for ${instance.definitionId} (${available.join(', ')})`
+              : `Indicator warming up (${meta.available_bars ?? 0}/${meta.warmup_bars ?? '?'})`,
+        };
+      }
       return {
         status: meta.status,
         warmup_bars: meta.warmup_bars,
         available_bars: meta.available_bars,
         is_projected_clamped: meta.is_projected_clamped,
         series,
+        message:
+          meta.status === 'UNMAPPED_COLUMN'
+            ? `Indicator column mapping missing for ${instance.definitionId}`
+            : meta.status === 'EMPTY_WARMING'
+              ? `warming (${meta.available_bars ?? 0}/${meta.warmup_bars ?? '?'})`
+              : undefined,
       };
     }
 
@@ -440,17 +461,18 @@ export class IndicatorRenderRegistry {
       };
     }
 
-    const available = columns(data);
     if (!available.length) {
       return {
         status: 'EMPTY_WARMING',
         series: [],
+        message: 'warming',
       };
     }
 
     return {
       status: 'UNMAPPED_COLUMN',
       series: [],
+      message: `Indicator column mapping missing for ${instance.definitionId} (${available.join(', ')})`,
     };
   }
 

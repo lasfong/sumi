@@ -1,8 +1,9 @@
-import { useEffect, useCallback, useMemo } from 'react';
+import { useEffect, useCallback, useMemo, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useReplayStore } from '../store/replayStore';
 import { getReplaySession } from '../api/replayApi';
+import { cleanupSessionQueries, replayQueryKeys } from '../features/replay/replayQueryKeys';
 
 export interface SessionSelectionResult {
   sessionId: number | null;
@@ -50,9 +51,18 @@ export function useSessionSelection(): SessionSelectionResult {
     ? null
     : (urlSessionId !== null ? urlSessionId : storeSessionId);
 
+  const lastCandidateRef = useRef<number | null>(candidateId);
+  useEffect(() => {
+    const prev = lastCandidateRef.current;
+    if (prev !== null && prev !== candidateId) {
+      cleanupSessionQueries(queryClient, prev);
+    }
+    lastCandidateRef.current = candidateId;
+  }, [candidateId, queryClient]);
+
   // Validate candidate session ID against backend API
   const { data: sessionData, isError, isLoading } = useQuery({
-    queryKey: ['replay-session-validation', candidateId],
+    queryKey: replayQueryKeys.validation(candidateId),
     queryFn: () => getReplaySession(candidateId!),
     enabled: candidateId !== null,
     retry: false,
@@ -60,9 +70,9 @@ export function useSessionSelection(): SessionSelectionResult {
   });
 
   const clearSession = useCallback(() => {
+    cleanupSessionQueries(queryClient, candidateId ?? storeSessionId);
     queryClient.removeQueries({ queryKey: ['replay-session-validation'] });
     clearStoreSession();
-    useReplayStore.getState().clearSession();
     setSearchParams(
       (prev) => {
         const next = new URLSearchParams(prev);
@@ -71,7 +81,7 @@ export function useSessionSelection(): SessionSelectionResult {
       },
       { replace: true }
     );
-  }, [clearStoreSession, queryClient, setSearchParams]);
+  }, [candidateId, clearStoreSession, queryClient, setSearchParams, storeSessionId]);
 
   // Synchronize store & URL based on validation result
   useEffect(() => {
@@ -107,6 +117,10 @@ export function useSessionSelection(): SessionSelectionResult {
 
   const selectSession = useCallback(
     (id: number, options?: { replace?: boolean }) => {
+      const previousId = activeSessionId ?? candidateId ?? storeSessionId;
+      if (previousId !== null && previousId !== id) {
+        cleanupSessionQueries(queryClient, previousId);
+      }
       setStoreSession(id);
       setSearchParams(
         (prev) => {
@@ -117,7 +131,7 @@ export function useSessionSelection(): SessionSelectionResult {
         { replace: options?.replace ?? false }
       );
     },
-    [setStoreSession, setSearchParams]
+    [activeSessionId, candidateId, queryClient, setSearchParams, setStoreSession, storeSessionId]
   );
 
   const getSessionPath = useCallback(

@@ -223,11 +223,44 @@ Concise record of architectural, governance, and commit-gate decisions across De
 
 ---
 
-### `DEC-06` — W0–W2 Baseline Closure Commit (`c331dc3`), Persistent Project Execution Charter & Train 03 Authorization (`APPROVED`)
+### `DEC-06` — W0–W2 Baseline Closure Commit (`c331dc3`), Persistent Project Execution Charter (`0732ca0`) & Train 03 Authorization (`APPROVED`)
 - **Date**: 2026-10-16
 - **Phase**: W0–W2 Baseline Closure & Development Train 03 (`B30`, `B31`, `B32`)
 - **Status**: **`APPROVED / RATIFIED`** (Authorized by Product Owner, 2026-10-16)
 - **Outcome**:
   - Committed the complete `W0–W2` technical and financial baseline (`B03`, `B10`, `B11`, `B20`, `B21`, `B22`, remediation `R1–R6`, and final 8 legacy test fixture alignments — 70 files) as commit `c331dc3250937a664625b1ebb9e7fac6170b0ae3` (`feat(v3): complete W0-W2 execution and financial correctness baseline`).
-  - Established the persistent Sumi V3 Project Execution Charter in `AGENTS.md` linking canonical governance records (`SUMI_V3_PRODUCT_COMPLETION_MASTER_PLAN_PROPOSED.md`, `SUMI_V3_BATCH_DEPENDENCY_AND_STATUS_PROPOSED.md`, `EXECUTION_STATE.md`, `DECISION_LOG.md`, `FINANCIAL_GOLDEN_CASES.md`, and ratified ADRs) and reconciled `W0–W2` statuses on the Batch Board.
+  - Established the persistent Sumi V3 Project Execution Charter in `AGENTS.md` linking canonical governance records (`SUMI_V3_PRODUCT_COMPLETION_MASTER_PLAN_PROPOSED.md`, `SUMI_V3_BATCH_DEPENDENCY_AND_STATUS_PROPOSED.md`, `EXECUTION_STATE.md`, `DECISION_LOG.md`, `FINANCIAL_GOLDEN_CASES.md`, and ratified ADRs) and reconciled `W0–W2` statuses on the Batch Board as commit `0732ca07cd2cb3fcf6f45bef85d93f8fd8bdcb21` (`docs(governance): establish Sumi V3 execution charter`).
   - Authorized Development Train 03 (`B30` first, followed by `B31` and `B32` with strict file-ownership discipline), keeping Train 03 implementation uncommitted until separate Product Owner authorization.
+
+---
+
+### `DEC-TRAIN03-01` — B30 Replay Query Keys, Navigation Token & Session Switch Cleanup (`IMPLEMENTED / VERIFIED`)
+- **Date**: 2026-10-16
+- **Phase**: Development Train 03 — Batch `B30` (`ADR-FE-001`)
+- **Status**: **`IMPLEMENTED & TEST-VERIFIED (AWAITING GPT-6 REVIEW)`**
+- **Decision & Outcome**:
+  - Implemented `replayQueryKeys` in `frontend/src/features/replay/replayQueryKeys.ts` keying candle queries by `['replay', 'candles', sessionId, symbol, timeframe, adjustmentType, currentIndex]` and indicator queries by `['replay', 'indicators', sessionId, timeframe, adjustmentType, currentIndex, specHash]`.
+  - Implemented `ReplayNavigationCoordinator` (`AbortController` + monotonic `navigationToken`) and `cleanupSessionQueries` (`cancelQueries` → `removeQueries` → WebSocket teardown → single chart clear) to prevent out-of-order HTTP responses or stale session/timeframe caches from flashing on screen.
+  - Reduced `frontend/src/store/replayStore.ts` strictly to `{ sessionId, setSession, clearSession }` and configured explicit `QueryClient` defaults in `frontend/src/App.tsx`. Verified by `6/6` tests in `frontend/src/features/replay/__tests__/b30_fe_state_race.test.tsx`.
+
+---
+
+### `DEC-TRAIN03-02` — B31 WebSocket State Machine, Monotonic Sequence Envelope & Auto-Reconnect (`IMPLEMENTED / VERIFIED`)
+- **Date**: 2026-10-16
+- **Phase**: Development Train 03 — Batch `B31` (`ADR-WS-001`)
+- **Status**: **`IMPLEMENTED & TEST-VERIFIED (AWAITING GPT-6 REVIEW)`**
+- **Decision & Outcome**:
+  - Upgraded `backend/app/api/ws_replay.py` with per-connection `ClientConnection` state (`PAUSED | PLAYING | COMPLETED | ERROR`), independent monotonic `seq` counters per connection (`WS-10` multi-tab isolation), case-insensitive `_is_session_completed` check (`SessionStatus.COMPLETED.value == "completed"`), strict JSON/action validation (`INVALID_JSON`, `UNKNOWN_ACTION` error frames without dropping the socket, `WS-03`), speed clamping (`[100, 4000]ms`, `WS-04`), dynamic `set_speed` (`WS-05`), `completed` frame (`WS-09`), `ping`/`pong`, and `sync`/`resume` resynchronization (`WS-01`, `WS-02`), while preserving legacy `ConnectionManager.active_connections` and `data` envelope fields for backward compatibility.
+  - Upgraded `frontend/src/hooks/useWebSocket.ts` with `WebSocketStatus` (`CONNECTING | OPEN | RECONNECTING | DISCONNECTED`), exponential backoff (`[500, 1000, 2000, 4000, 8000]ms`), `online`/`offline` listeners (`WS-08`), heartbeat `ping` timer, monotonic `seq` deduplication (`WS-07`), closed-socket command queueing (`WS-06`), and automatic `{ action: 'sync' }` on reconnect. Verified by `5/5` backend tests in `backend/tests/test_b31_ws_replay.py` and `6/6` frontend chaos tests in `frontend/src/hooks/__tests__/b31_ws_chaos_matrix.test.tsx`.
+
+---
+
+### `DEC-TRAIN03-03` — B32 ChartKernel Facade, Indicator MappingResult UI & ReplayWorkspace Decomposition (`IMPLEMENTED / VERIFIED`)
+- **Date**: 2026-10-16
+- **Phase**: Development Train 03 — Batch `B32` (`ADR-CHART-001`)
+- **Status**: **`IMPLEMENTED & TEST-VERIFIED (AWAITING GPT-6 REVIEW)`**
+- **Decision & Outcome**:
+  - Created `frontend/src/components/chart/ChartKernel.ts` as the sole module calling `createChart` from `lightweight-charts` (`ChartKernel.createReplayKernel` and `ChartKernel.createEquityKernel`), refactoring `CandleChart.tsx` and `EquityChart.tsx` accordingly.
+  - Enhanced `IndicatorRenderRegistry.mapBackendDataWithResult` (`frontend/src/components/chart/IndicatorRenderRegistry.ts`) to return `status: 'UNMAPPED_COLUMN'` when `meta.status === 'OK'` but zero series map from non-empty backend rows, and wired `ReplayWorkspaceController.tsx`, `IndicatorManager.tsx`, `IndicatorPaneChrome.tsx`, and `ChartLegendOverlay.tsx` to display `warming (available/warmup)` and `UNMAPPED_COLUMN` / `INVALID_SPEC` badges.
+  - Deleted the 3 dead legacy drawing files (`SumiDrawingAdapter.ts`, `DrawingToolRegistry.ts`, `WorkspacePersistence.ts`) and their test (`SumiDrawingAdapter.test.ts`), preserving `workspaceTypes.ts` and `SumiPrimitiveDrawingProvider.ts`.
+  - Extracted `ReplayHeader.tsx` and `ReplayRightPanel.tsx` from `ReplayWorkspace.tsx` (reducing `ReplayWorkspace.tsx` from `765` lines to `297` lines) and gated hidden debug `<output>` DOM serialization behind `IS_DEV_OR_TEST` (`GAP-FE-08`). Verified by `ChartKernel.test.tsx` (`3/3`), `IndicatorContract.test.ts` (`6/6`), and `ReplayPage.test.tsx` (`9/9`).

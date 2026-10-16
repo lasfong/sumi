@@ -26,8 +26,11 @@ export const getTrades = async (sessionId: number): Promise<Trade[]> => {
   return response.data;
 };
 
-export const getPracticeState = async (sessionId: number): Promise<PracticeWorkflowSnapshot> => {
-  const response = await apiClient.get(`/replay/sessions/${sessionId}/practice-state`);
+export const getPracticeState = async (sessionId: number, signal?: AbortSignal): Promise<PracticeWorkflowSnapshot> => {
+  const response = await apiClient.get(
+    `/replay/sessions/${sessionId}/practice-state`,
+    signal ? { signal } : undefined,
+  );
   return response.data;
 };
 

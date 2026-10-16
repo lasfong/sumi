@@ -5,7 +5,7 @@ import type { SeriesMarker, Time, SeriesMarkerPosition, SeriesMarkerShape } from
 import { createReplaySession, getReplaySession, getSessionCandles, nextCandle, previousCandle, resetPracticeSession } from '../../api/replayApi';
 import { getPracticeState, submitDecision } from '../../api/decisionApi';
 import { createJournalEntry, getJournalEntries } from '../../api/journalApi';
-import { getIndicatorRegistry, getSessionIndicatorData, type IndicatorDefinition } from '../../api/indicatorsApi';
+import { getIndicatorRegistry, getSessionIndicatorResponse, type IndicatorDefinition, type ReplayIndicatorResponse } from '../../api/indicatorsApi';
 import toast from 'react-hot-toast';
 import type {
   Candle, ChartCandle, ChartVolume, DecisionCreate, CreateSessionRequest, JournalEntryCreate,
@@ -29,6 +29,14 @@ import type { IndicatorDataPoint } from '../../api/indicatorsApi';
 import type { IndicatorRuntimeState } from '../chart/IndicatorManager';
 import type { DrawingTool } from '../../features/drawings/drawingDomain';
 import { isGlobalShortcutEligible } from '../../features/replay/globalShortcutPolicy';
+import {
+  cleanupSessionQueries,
+  dedupeCandlesByTimestamp,
+  normalizeAdjustmentType,
+  normalizeReplayTimeframe,
+  replayQueryKeys,
+  ReplayNavigationCoordinator,
+} from '../../features/replay/replayQueryKeys';
 
 interface ApiError {
   response?: {
@@ -53,6 +61,12 @@ const isWebSocketCandle = (data: unknown): data is WebSocketCandle => {
   return ['time', 'open', 'high', 'low', 'close', 'volume'].every(key => typeof candidate[key] === 'number');
 };
 
+const isAbortError = (error: unknown): boolean => {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { name?: string; code?: string };
+  return candidate.name === 'AbortError' || candidate.name === 'CanceledError' || candidate.code === 'ERR_CANCELED';
+};
+
 export const buildScannerSignalMarker = (
   sourceContext: ReplaySourceContext | undefined,
   currentDate: string | null,
@@ -75,10 +89,12 @@ export const useReplayWorkspaceController = () => {
   const queryClient = useQueryClient();
 
   const [isPlaying, setIsPlaying] = useState(false);
-  const [playSpeed, setPlaySpeed] = useState(500); // ms per candle
+  const [playSpeed, setPlaySpeed] = useState(1000); // Canonical default 1000ms (1x) per ADR-WS-001
+  const [navigationPending, setNavigationPending] = useState(false);
 
+  const navCoordinator = useMemo(() => new ReplayNavigationCoordinator(), []);
   const indicatorRepository = useMemo(() => new IndicatorRepository(window.localStorage), []);
-  const indicatorRequests = useMemo(() => new IndicatorRequestCoordinator<IndicatorDataPoint[]>(), []);
+  const indicatorRequests = useMemo(() => new IndicatorRequestCoordinator<ReplayIndicatorResponse | IndicatorDataPoint[]>(), []);
   const indicatorHydratedSessionRef = useRef<number | null>(null);
   const { data: registry = [] } = useQuery({ queryKey: ['indicator-registry'], queryFn: getIndicatorRegistry, staleTime: Infinity });
   const indicatorDefinitions = useMemo(() => approvedDefinitions(registry), [registry]);
@@ -94,9 +110,84 @@ export const useReplayWorkspaceController = () => {
     setIndicatorRuntime({}); chartRef.current?.clearIndicators();
   }, [indicatorDefinitions, indicatorRepository, registry.length, sessionId]);
 
+  const [targetTimeframe, setTargetTimeframeState] = useState<string | undefined>(undefined);
+  const prevSessionIdRef = useRef<number | null | undefined>(sessionId);
+
+  useEffect(() => {
+    const prevSession = prevSessionIdRef.current;
+    if (prevSession !== sessionId) {
+      prevSessionIdRef.current = sessionId;
+      setIsPlaying(false);
+      setNavigationPending(false);
+      setTargetTimeframeState(undefined);
+      if (prevSession !== null && prevSession !== undefined) {
+        cleanupSessionQueries(queryClient, prevSession, {
+          abortNavigation: () => { navCoordinator.cancelAll(sessionId); },
+          cancelIndicators: () => indicatorRequests.cancelAll(),
+          clearChart: () => {
+            chartRef.current?.clearIndicators();
+            chartRef.current?.clearPositionLines();
+          },
+        });
+      } else {
+        navCoordinator.cancelAll(sessionId);
+      }
+    }
+  }, [indicatorRequests, navCoordinator, queryClient, sessionId]);
+
+  const setTargetTimeframe = useCallback((nextTimeframe: string | undefined) => {
+    navCoordinator.cancelAll(sessionId);
+    indicatorRequests.cancelAll();
+    chartRef.current?.clearIndicators();
+    setNavigationPending(false);
+    setTargetTimeframeState(nextTimeframe);
+  }, [indicatorRequests, navCoordinator, sessionId]);
+
+  const { data: sessionData, isError: isSessionError, refetch: refetchSession } = useQuery({
+    queryKey: replayQueryKeys.session(sessionId),
+    queryFn: () => getReplaySession(sessionId!),
+    enabled: !!sessionId,
+  });
+
+  const effectiveTimeframe = normalizeReplayTimeframe(targetTimeframe ?? sessionData?.timeframe ?? '1D');
+  const effectiveAdjustment = normalizeAdjustmentType(sessionData?.adjustment_type ?? 'unadjusted');
+  const effectiveSymbol = sessionData?.symbol ?? undefined;
+  const candlesQueryKey = useMemo(
+    () => replayQueryKeys.candles(sessionId, effectiveTimeframe, effectiveAdjustment, effectiveSymbol),
+    [effectiveAdjustment, effectiveSymbol, effectiveTimeframe, sessionId],
+  );
+
+  const { data: candlesData } = useQuery({
+    queryKey: candlesQueryKey,
+    queryFn: () => getSessionCandles(sessionId!, targetTimeframe),
+    enabled: !!sessionId,
+  });
+
+  const { data: practiceData, isLoading: practiceLoading, isError: practiceError, refetch: refetchPractice } = useQuery({
+    queryKey: replayQueryKeys.practiceState(sessionId),
+    queryFn: () => getPracticeState(sessionId!),
+    enabled: !!sessionId,
+  });
+
+  const { data: journalData, isLoading: journalLoading, isError: journalError, refetch: refetchJournal } = useQuery({
+    queryKey: replayQueryKeys.journal(sessionId),
+    queryFn: () => getJournalEntries(sessionId!),
+    enabled: !!sessionId,
+  });
+
   const createMutation = useMutation({
     mutationFn: createReplaySession,
     onSuccess: (data) => {
+      if (sessionId !== null) {
+        cleanupSessionQueries(queryClient, sessionId, {
+          abortNavigation: () => { navCoordinator.cancelAll(data.id); },
+          cancelIndicators: () => indicatorRequests.cancelAll(),
+          clearChart: () => {
+            chartRef.current?.clearIndicators();
+            chartRef.current?.clearPositionLines();
+          },
+        });
+      }
       indicatorHydratedSessionRef.current = data.id;
       const empty = emptyIndicatorDocument(data.id); setIndicatorDocument(empty); indicatorRepository.save(empty); setIndicatorRuntime({});
       selectSession(data.id);
@@ -107,70 +198,103 @@ export const useReplayWorkspaceController = () => {
     }
   });
 
-  const [targetTimeframe, setTargetTimeframe] = useState<string | undefined>(undefined);
-  const [prevSessionId, setPrevSessionId] = useState<number | null | undefined>(sessionId);
-  if (sessionId !== prevSessionId) {
-    setPrevSessionId(sessionId);
-    setTargetTimeframe(undefined);
-  }
-
-  const { data: candlesData, refetch: refetchCandles } = useQuery({
-    queryKey: ['candles', sessionId, targetTimeframe],
-    queryFn: () => getSessionCandles(sessionId!, targetTimeframe),
-    enabled: !!sessionId,
-  });
-
-  const { data: sessionData, isError: isSessionError, refetch: refetchSession } = useQuery({
-    queryKey: ['replay-session', sessionId],
-    queryFn: () => getReplaySession(sessionId!),
-    enabled: !!sessionId,
-  });
-
-  const { data: practiceData, isLoading: practiceLoading, isError: practiceError, refetch: refetchPractice } = useQuery({
-    queryKey: ['practice-state', sessionId],
-    queryFn: () => getPracticeState(sessionId!),
-    enabled: !!sessionId,
-  });
-
-  const { data: journalData, isLoading: journalLoading, isError: journalError, refetch: refetchJournal } = useQuery({
-    queryKey: ['journal', sessionId],
-    queryFn: () => getJournalEntries(sessionId!),
-    enabled: !!sessionId,
-  });
-
-  const synchronizeNavigation = useCallback(async () => {
-    await Promise.all([refetchCandles(), refetchSession(), refetchPractice(), refetchJournal()]);
-  }, [refetchCandles, refetchJournal, refetchPractice, refetchSession]);
-
-  const nextMutation = useMutation({
-    mutationFn: (steps: number) => nextCandle(sessionId!, steps),
-    onSuccess: synchronizeNavigation,
-    onError: () => {
-      setIsPlaying(false);
-      toast.error('End of data or error');
+  const executeStepNavigation = useCallback(
+    async (direction: 'next' | 'prev', steps: number) => {
+      if (!sessionId) return;
+      const ticket = navCoordinator.begin(sessionId);
+      setNavigationPending(true);
+      try {
+        const stepFn = direction === 'next' ? nextCandle : previousCandle;
+        const updatedSession = await stepFn(sessionId, steps, ticket.signal);
+        if (!navCoordinator.isCurrent(ticket.token, sessionId)) {
+          return;
+        }
+        if (updatedSession && typeof updatedSession.current_index === 'number') {
+          queryClient.setQueryData(replayQueryKeys.session(sessionId), updatedSession);
+          if (updatedSession.status?.toUpperCase() === 'COMPLETED') {
+            setIsPlaying(false);
+          }
+        }
+        const [freshCandles, freshPractice, freshJournal, freshSession] = await Promise.all([
+          getSessionCandles(sessionId, targetTimeframe, ticket.signal),
+          getPracticeState(sessionId, ticket.signal),
+          getJournalEntries(sessionId, ticket.signal),
+          updatedSession ? Promise.resolve(updatedSession) : getReplaySession(sessionId, ticket.signal),
+        ]);
+        if (!navCoordinator.isCurrent(ticket.token, sessionId)) {
+          return;
+        }
+        const resolvedSession = freshSession ?? updatedSession ?? sessionData;
+        const tfKey = normalizeReplayTimeframe(targetTimeframe ?? resolvedSession?.timeframe ?? '1D');
+        const adjKey = normalizeAdjustmentType(resolvedSession?.adjustment_type ?? effectiveAdjustment);
+        const symKey = resolvedSession?.symbol ?? effectiveSymbol;
+        if (resolvedSession) {
+          queryClient.setQueryData(replayQueryKeys.session(sessionId), resolvedSession);
+        }
+        queryClient.setQueryData(
+          replayQueryKeys.candles(sessionId, tfKey, adjKey, symKey),
+          dedupeCandlesByTimestamp(freshCandles ?? []),
+        );
+        if (freshPractice) {
+          queryClient.setQueryData(replayQueryKeys.practiceState(sessionId), freshPractice);
+        }
+        if (freshJournal) {
+          queryClient.setQueryData(replayQueryKeys.journal(sessionId), freshJournal);
+        }
+      } catch (err) {
+        if (isAbortError(err) || !navCoordinator.isCurrent(ticket.token, sessionId)) {
+          return;
+        }
+        if (direction === 'next') {
+          setIsPlaying(false);
+          toast.error('End of data or error');
+        } else {
+          toast.error('Start of data or error');
+        }
+      } finally {
+        if (navCoordinator.token === ticket.token) {
+          setNavigationPending(false);
+        }
+      }
     },
-  });
-
-  const prevMutation = useMutation({
-    mutationFn: (steps: number) => previousCandle(sessionId!, steps),
-    onSuccess: synchronizeNavigation,
-    onError: () => toast.error('Start of data or error'),
-  });
+    [effectiveAdjustment, effectiveSymbol, navCoordinator, queryClient, sessionData, sessionId, targetTimeframe],
+  );
 
   const handleCreateSession = useCallback((data: CreateSessionRequest) => {
     createMutation.mutate(data);
   }, [createMutation]);
 
   const handleResumeSession = useCallback((resumedId: number) => {
+    if (sessionId !== null && sessionId !== resumedId) {
+      setIsPlaying(false);
+      cleanupSessionQueries(queryClient, sessionId, {
+        abortNavigation: () => { navCoordinator.cancelAll(resumedId); },
+        cancelIndicators: () => indicatorRequests.cancelAll(),
+        clearChart: () => {
+          chartRef.current?.clearIndicators();
+          chartRef.current?.clearPositionLines();
+        },
+      });
+    }
     selectSession(resumedId);
     toast.success(`Session #${resumedId} resumed`);
-  }, [selectSession]);
+  }, [indicatorRequests, navCoordinator, queryClient, selectSession, sessionId]);
 
   const handleClearSession = useCallback(() => {
     setIsPlaying(false);
-    setIndicatorDocument(emptyIndicatorDocument(1)); setIndicatorRuntime({}); indicatorRequests.cancelAll(); chartRef.current?.clearIndicators();
+    setNavigationPending(false);
+    setIndicatorDocument(emptyIndicatorDocument(1));
+    setIndicatorRuntime({});
+    cleanupSessionQueries(queryClient, sessionId, {
+      abortNavigation: () => { navCoordinator.cancelAll(null); },
+      cancelIndicators: () => indicatorRequests.cancelAll(),
+      clearChart: () => {
+        chartRef.current?.clearIndicators();
+        chartRef.current?.clearPositionLines();
+      },
+    });
     clearSession();
-  }, [clearSession, indicatorRequests]);
+  }, [clearSession, indicatorRequests, navCoordinator, queryClient, sessionId]);
 
   const handleSubmitDecision = useCallback(async (decision: DecisionCreate) => {
     if (!sessionId) return { ok: false, message: 'No replay session is active.' };
@@ -216,7 +340,7 @@ export const useReplayWorkspaceController = () => {
     }
   }, [sessionId, refetchPractice, refetchSession, refetchJournal]);
 
-  const symbolName = candlesData?.[0]?.symbol || '—';
+  const symbolName = sessionData?.symbol || candlesData?.[0]?.symbol || '—';
   const currentCandle = candlesData?.length ? candlesData[candlesData.length - 1] : null;
   const sourceContext = sessionData?.source_context;
   const currentDate = toDateKey(currentCandle?.timestamp);
@@ -227,81 +351,236 @@ export const useReplayWorkspaceController = () => {
     drawing.setTool(tool);
   }, [drawing]);
 
-  const handleWebSocketMessage = useCallback((msg: WebSocketMessage) => {
-    if (msg.type === 'new_candle') {
-      const newCandle = msg.data;
-      if (!isWebSocketCandle(newCandle)) return;
-      const wsDateKey = unixSecondsToDateKey(newCandle.time);
-
-      // Update chart directly for smoothness
-      if (chartRef.current) {
-        const chartCandle = {
-          time: wsDateKey as Time,
-          open: newCandle.open,
-          high: newCandle.high,
-          low: newCandle.low,
-          close: newCandle.close,
-        };
-        chartRef.current.updateCandle(chartCandle, {
-          time: wsDateKey as Time,
-          value: newCandle.volume,
-          color: newCandle.close >= newCandle.open ? 'rgba(0, 230, 118, 0.5)' : 'rgba(255, 23, 68, 0.5)'
-        });
+  const resyncSessionCandles = useCallback(async () => {
+    if (!sessionId) return;
+    try {
+      const [freshCandles, freshSession, freshPractice] = await Promise.all([
+        getSessionCandles(sessionId, targetTimeframe),
+        getReplaySession(sessionId),
+        getPracticeState(sessionId),
+      ]);
+      if (prevSessionIdRef.current !== sessionId) return;
+      const tfKey = normalizeReplayTimeframe(targetTimeframe ?? freshSession?.timeframe ?? '1D');
+      const adjKey = normalizeAdjustmentType(freshSession?.adjustment_type ?? effectiveAdjustment);
+      const symKey = freshSession?.symbol ?? effectiveSymbol;
+      if (freshSession) {
+        queryClient.setQueryData(
+          replayQueryKeys.session(sessionId),
+          (old: ReplaySession | undefined) => {
+            if (!old) return freshSession;
+            if (typeof old.current_index === 'number' && old.current_index > freshSession.current_index) {
+              return old;
+            }
+            return freshSession;
+          },
+        );
       }
+      if (freshCandles) {
+        queryClient.setQueryData(
+          replayQueryKeys.candles(sessionId, tfKey, adjKey, symKey),
+          (old: Candle[] | undefined) => dedupeCandlesByTimestamp([...(old ?? []), ...freshCandles]),
+        );
+      }
+      if (freshPractice) {
+        queryClient.setQueryData(replayQueryKeys.practiceState(sessionId), freshPractice);
+      }
+    } catch {
+      // Ignore transient fetch errors during reconnect resync
+    }
+  }, [effectiveAdjustment, effectiveSymbol, queryClient, sessionId, targetTimeframe]);
 
-      // Update react-query cache to sync rest of UI
-      queryClient.setQueriesData(
-        { queryKey: ['candles', sessionId] },
-        (old: Candle[] | undefined) => {
-          if (!old) return old;
-          const dbCandle: Candle = {
-            id: old.length ? Math.max(...old.map(c => c.id)) + 1 : 0,
-            symbol: symbolName,
-            timeframe: targetTimeframe || 'D',
-            adjustment_type: 'split',
-            timestamp: wsDateKey,
-            open: newCandle.open,
-            high: newCandle.high,
-            low: newCandle.low,
-            close: newCandle.close,
-            volume: newCandle.volume,
-            source: 'websocket',
-          };
-          return [...old, dbCandle];
-        }
-      );
+  const handleWebSocketMessage = useCallback((msg: WebSocketMessage) => {
+    if (msg.session_id !== undefined && msg.session_id !== sessionId) {
+      return;
+    }
 
-      // Sync replay session current_index and source_context
+    if (msg.type === 'error') {
+      const errMessage = String(msg.payload?.message ?? msg.data?.message ?? 'WebSocket playback error');
+      toast.error(errMessage);
+      return;
+    }
+
+    if (msg.type === 'completed') {
+      setIsPlaying(false);
+      const serverIndex =
+        typeof msg.current_index === 'number'
+          ? msg.current_index
+          : typeof msg.payload?.current_index === 'number'
+            ? (msg.payload.current_index as number)
+            : undefined;
       queryClient.setQueryData(
-        ['replay-session', sessionId],
+        replayQueryKeys.session(sessionId),
         (old: ReplaySession | undefined) => {
           if (!old) return old;
           return {
             ...old,
-            current_index: old.current_index + 1,
-            ...(msg.source_context ? { source_context: msg.source_context } : {}),
+            status: 'completed',
+            current_index: serverIndex !== undefined ? serverIndex : old.current_index,
+          };
+        },
+      );
+      toast('Đã đến cuối dữ liệu phiên Replay');
+      return;
+    }
+
+    if (msg.type === 'playback_state' || msg.type === 'state') {
+      const echoedSpeed =
+        typeof msg.speed_ms === 'number'
+          ? msg.speed_ms
+          : typeof msg.payload?.speed_ms === 'number'
+            ? (msg.payload.speed_ms as number)
+            : undefined;
+      const hasExplicitSpeedEcho =
+        msg.payload !== undefined && 'clamped' in msg.payload;
+      if (echoedSpeed !== undefined && hasExplicitSpeedEcho) {
+        playSpeedRef.current = echoedSpeed;
+        setPlaySpeed(echoedSpeed);
+      }
+      if (msg.playback_state === 'COMPLETED') {
+        setIsPlaying(false);
+      }
+      const serverIndex =
+        typeof msg.current_index === 'number'
+          ? msg.current_index
+          : typeof msg.payload?.current_index === 'number'
+            ? (msg.payload.current_index as number)
+            : undefined;
+      const serverContext = (msg.payload?.source_context as ReplaySourceContext | undefined) ?? msg.source_context;
+      if (serverIndex !== undefined) {
+        let indexChanged = false;
+        queryClient.setQueryData(
+          replayQueryKeys.session(sessionId),
+          (old: ReplaySession | undefined) => {
+            if (!old) return old;
+            indexChanged = old.current_index !== serverIndex;
+            return {
+              ...old,
+              ...(msg.playback_state === 'COMPLETED' ? { status: 'completed' } : {}),
+              current_index: serverIndex,
+              ...(serverContext ? { source_context: serverContext } : {}),
+            };
+          },
+        );
+        if (indexChanged) {
+          void resyncSessionCandles();
+        }
+      }
+      return;
+    }
+
+    if (msg.type === 'new_candle' || msg.type === 'tick') {
+      const candlePayload = (msg.payload?.candle ?? msg.data) as unknown;
+      if (!isWebSocketCandle(candlePayload)) return;
+      const wsDateKey = unixSecondsToDateKey(candlePayload.time);
+      const baseTimeframe = normalizeReplayTimeframe(sessionData?.timeframe ?? '1D');
+      const baseAdjustment = normalizeAdjustmentType(sessionData?.adjustment_type ?? 'unadjusted');
+      const baseSymbol = sessionData?.symbol ?? symbolName;
+      const isViewingBaseTimeframe = effectiveTimeframe === baseTimeframe;
+
+      // Update chart directly only when viewing the session's base timeframe
+      if (chartRef.current && isViewingBaseTimeframe) {
+        const chartCandle = {
+          time: wsDateKey as Time,
+          open: candlePayload.open,
+          high: candlePayload.high,
+          low: candlePayload.low,
+          close: candlePayload.close,
+        };
+        chartRef.current.updateCandle(chartCandle, {
+          time: wsDateKey as Time,
+          value: candlePayload.volume,
+          color: candlePayload.close >= candlePayload.open ? 'rgba(0, 230, 118, 0.5)' : 'rgba(255, 23, 68, 0.5)'
+        });
+      }
+
+      // Sync replay session current_index from server authority (never blindly +1 when server echoes current_index)
+      const serverIndex =
+        typeof msg.current_index === 'number'
+          ? msg.current_index
+          : typeof msg.payload?.current_index === 'number'
+            ? (msg.payload.current_index as number)
+            : undefined;
+      const serverContext = (msg.payload?.source_context as ReplaySourceContext | undefined) ?? msg.source_context;
+
+      // Update react-query cache using the exact canonical key (never prefix ['candles', sessionId])
+      const baseCandleQueryKey = replayQueryKeys.candles(sessionId, baseTimeframe, baseAdjustment, baseSymbol);
+      let detectedCandleGap = false;
+      queryClient.setQueryData(
+        baseCandleQueryKey,
+        (old: Candle[] | undefined) => {
+          if (!old) return old;
+          const dbCandle: Candle = {
+            id: old.length ? Math.max(...old.map(c => c.id)) + 1 : 0,
+            symbol: baseSymbol,
+            timeframe: baseTimeframe,
+            adjustment_type: baseAdjustment,
+            timestamp: wsDateKey,
+            open: candlePayload.open,
+            high: candlePayload.high,
+            low: candlePayload.low,
+            close: candlePayload.close,
+            volume: candlePayload.volume,
+            source: 'websocket',
+          };
+          const merged = dedupeCandlesByTimestamp([...old, dbCandle]);
+          if (serverIndex !== undefined && merged.length < serverIndex + 1) {
+            detectedCandleGap = true;
+          }
+          return merged;
+        }
+      );
+
+      if (!isViewingBaseTimeframe || detectedCandleGap) {
+        void resyncSessionCandles();
+      }
+
+      if (msg.playback_state === 'COMPLETED') {
+        setIsPlaying(false);
+      }
+
+      let detectedIndexGap = false;
+      queryClient.setQueryData(
+        replayQueryKeys.session(sessionId),
+        (old: ReplaySession | undefined) => {
+          if (!old) return old;
+          if (serverIndex !== undefined && typeof old.current_index === 'number' && serverIndex > old.current_index + 1) {
+            detectedIndexGap = true;
+          }
+          return {
+            ...old,
+            ...(msg.playback_state === 'COMPLETED' ? { status: 'completed' } : {}),
+            current_index: serverIndex !== undefined ? serverIndex : old.current_index,
+            ...(serverContext ? { source_context: serverContext } : {}),
           };
         }
       );
 
-      // Sync positions and journal silently
-      queryClient.invalidateQueries({ queryKey: ['practice-state', sessionId] });
-      queryClient.invalidateQueries({ queryKey: ['journal', sessionId] });
-    }
-  }, [sessionId, queryClient, symbolName, targetTimeframe]);
+      if (detectedIndexGap && !detectedCandleGap) {
+        void resyncSessionCandles();
+      }
 
-  const { isConnected, sendCommand } = useWebSocket(sessionId, handleWebSocketMessage);
+      // Sync positions and journal silently
+      queryClient.invalidateQueries({ queryKey: replayQueryKeys.practiceState(sessionId) });
+      queryClient.invalidateQueries({ queryKey: replayQueryKeys.journal(sessionId) });
+    }
+  }, [effectiveTimeframe, queryClient, resyncSessionCandles, sessionData?.adjustment_type, sessionData?.symbol, sessionData?.timeframe, sessionId, symbolName]);
+
+  const { isConnected, status: wsStatus, reconnectAttempt: wsReconnectAttempt, sendCommand, closeSocket } = useWebSocket(
+    sessionId,
+    handleWebSocketMessage,
+    { onReconnected: () => { void resyncSessionCandles(); } },
+  );
   const handleNext = useCallback((steps: number = 1) => {
     if (sessionId) {
-      nextMutation.mutate(steps);
+      void executeStepNavigation('next', steps);
     }
-  }, [sessionId, nextMutation]);
+  }, [sessionId, executeStepNavigation]);
 
   const handlePrev = useCallback((steps: number = 1) => {
     if (sessionId) {
-      prevMutation.mutate(steps);
+      void executeStepNavigation('prev', steps);
     }
-  }, [sessionId, prevMutation]);
+  }, [sessionId, executeStepNavigation]);
 
   useEffect(() => {
     if (isSessionError) {
@@ -427,14 +706,27 @@ export const useReplayWorkspaceController = () => {
   const markers: SeriesMarker<Time>[] = [...decisionMarkers, ...signalMarker]
     .sort((a, b) => (a.time as string).localeCompare(b.time as string));
 
-  // Auto-play effect via WebSocket
+  const playSpeedRef = useRef(playSpeed);
+  useEffect(() => {
+    playSpeedRef.current = playSpeed;
+  }, [playSpeed]);
+
+  const handleSetPlaySpeed = useCallback((nextSpeed: number) => {
+    playSpeedRef.current = nextSpeed;
+    setPlaySpeed(nextSpeed);
+    if (sessionId) {
+      sendCommand('set_speed', { speed: nextSpeed });
+    }
+  }, [sendCommand, sessionId]);
+
+  // Auto-play start/pause effect via WebSocket
   useEffect(() => {
     if (isPlaying && isConnected) {
-      sendCommand('start', { speed: playSpeed });
+      sendCommand('start', { speed: playSpeedRef.current });
     } else if (!isPlaying && isConnected) {
       sendCommand('pause');
     }
-  }, [isPlaying, playSpeed, isConnected, sendCommand]);
+  }, [isPlaying, isConnected, sendCommand]);
 
   const commitIndicatorDocument = useCallback((next: IndicatorDocumentV1) => {
     indicatorRepository.save(next); setIndicatorDocument(next);
@@ -474,7 +766,11 @@ export const useReplayWorkspaceController = () => {
   }, [commitIndicatorDocument, indicatorDocument]);
 
   useEffect(() => {
-    if (!currentCandle || !sessionId) return;
+    if (!sessionId || indicatorDocument.sessionId !== sessionId) return;
+    if (!currentCandle) {
+      chartRef.current?.clearIndicators();
+      return;
+    }
     let effectActive = true;
     const visible = indicatorDocument.instances.filter(instance => instance.visible);
     indicatorDocument.instances.filter(instance => !instance.visible).forEach(instance => chartRef.current?.removeIndicator(instance.id));
@@ -514,33 +810,71 @@ export const useReplayWorkspaceController = () => {
       queueMicrotask(() => effectActive && setIndicatorRuntime(previous => ({
         ...previous, [instance.id]: { ...previous[instance.id], status: 'loading', values: previous[instance.id]?.values ?? {} },
       })));
-      const paramsKey = JSON.stringify(Object.entries(instance.params).sort(([a], [b]) => a.localeCompare(b)));
       const baseIndex = sessionData?.current_index ?? candlesData?.length ?? 0;
-      const workKey = `${sessionId}:${targetTimeframe ?? 'default'}:${baseIndex}:${instance.definitionId}:${paramsKey}`;
+      const workKey = replayQueryKeys.indicatorWorkKey({
+        sessionId,
+        symbol: effectiveSymbol,
+        timeframe: effectiveTimeframe,
+        adjustmentType: effectiveAdjustment,
+        currentIndex: baseIndex,
+        definitionId: instance.definitionId,
+        params: instance.params,
+      });
       void (async () => {
-        let result: { stale: boolean; data?: IndicatorDataPoint[] };
+        let result: { stale: boolean; data?: ReplayIndicatorResponse | IndicatorDataPoint[] };
         try {
-          result = await indicatorRequests.request(instance.id, workKey, signal => getSessionIndicatorData(sessionId!, instance.definitionId, instance.params, signal, targetTimeframe));
+          result = await indicatorRequests.request(instance.id, workKey, signal => getSessionIndicatorResponse(sessionId!, instance.definitionId, instance.params, signal, targetTimeframe));
         } catch (error) {
           if (!effectActive || (error as { code?: string }).code === 'ERR_CANCELED' || (error as { name?: string }).name === 'AbortError') return;
           publishFailure(instance.id, 'transport', 'Data request failed — retry by showing or editing this indicator.');
           return;
         }
         if (!effectActive || result.stale || !result.data) return;
-        const responseData = result.data;
+        const responsePayload = result.data;
+        const responseData = Array.isArray(responsePayload) ? responsePayload : (responsePayload.data ?? []);
+        const responseMeta = Array.isArray(responsePayload) ? undefined : responsePayload.meta;
 
-        let series;
+        let mapped;
         try {
-          series = IndicatorRenderRegistry.mapBackendData(responseData, instance);
+          mapped = IndicatorRenderRegistry.mapBackendDataWithResult(responseData, instance, responseMeta);
         } catch (error) {
           publishFailure(instance.id, 'mapping', `Indicator data could not be interpreted — the previous valid display was retained.${technicalDetail(error)}`);
           return;
         }
-        if (!series.length) {
+        if (mapped.status === 'UNMAPPED_COLUMN' || mapped.status === 'INVALID_SPEC') {
+          publishFailure(
+            instance.id,
+            'mapping',
+            mapped.message || 'Indicator data could not be interpreted — the previous valid display was retained.',
+          );
+          if (effectActive) {
+            setIndicatorRuntime(previous => ({
+              ...previous,
+              [instance.id]: {
+                ...previous[instance.id],
+                status: 'error',
+                errorKind: 'mapping',
+                mappingStatus: mapped.status,
+                error: mapped.message || 'Indicator column mapping missing.',
+                values: previous[instance.id]?.values ?? {},
+              },
+            }));
+          }
+          return;
+        }
+        const series = mapped.series;
+        if (!series.length || mapped.status === 'EMPTY_WARMING') {
           chartRef.current?.removeIndicator(instance.id);
           setIndicatorRuntime(previous => ({ ...previous, [instance.id]: {
-            status: 'warming', values: {}, inputMaxDate: currentDate,
-            responseMaxDate: toDateKey(responseData.at(-1)?.timestamp) || null, responseCount: responseData.length,
+            status: 'warming',
+            mappingStatus: 'EMPTY_WARMING',
+            warmupBars: mapped.warmup_bars,
+            availableBars: mapped.available_bars,
+            isProjectedClamped: mapped.is_projected_clamped,
+            values: {},
+            inputMaxDate: currentDate,
+            responseMaxDate: toDateKey(responseData.at(-1)?.timestamp) || null,
+            responseCount: responseData.length,
           } }));
           return;
         }
@@ -553,13 +887,20 @@ export const useReplayWorkspaceController = () => {
           return;
         }
         if (effectActive) setIndicatorRuntime(previous => ({ ...previous, [instance.id]: {
-          status: 'ready', values: IndicatorRenderRegistry.currentValues(series),
-          inputMaxDate: currentDate, responseMaxDate: toDateKey(responseData.at(-1)?.timestamp) || null, responseCount: responseData.length,
+          status: 'ready',
+          mappingStatus: 'OK',
+          warmupBars: mapped.warmup_bars,
+          availableBars: mapped.available_bars,
+          isProjectedClamped: mapped.is_projected_clamped,
+          values: IndicatorRenderRegistry.currentValues(series),
+          inputMaxDate: currentDate,
+          responseMaxDate: toDateKey(responseData.at(-1)?.timestamp) || null,
+          responseCount: responseData.length,
         } }));
       })();
     }
     return () => { effectActive = false; indicatorRequests.cancelAll(); };
-  }, [candlesData?.length, currentCandle, currentDate, indicatorDocument, indicatorRequests, sessionId, sessionData?.current_index, volumeData, targetTimeframe]);
+  }, [candlesData?.length, currentCandle, currentDate, effectiveAdjustment, effectiveSymbol, effectiveTimeframe, indicatorDocument, indicatorRequests, sessionId, sessionData?.current_index, volumeData, targetTimeframe]);
 
   useEffect(() => {
     if (!practiceData) return;
@@ -593,8 +934,9 @@ export const useReplayWorkspaceController = () => {
     onSwitchSymbol: handleQuickSwitchSymbol,
     indicatorDefinitions, indicatorDocument, indicatorRuntime, addIndicatorInstance, updateIndicatorInstance,
     removeIndicatorInstance, toggleIndicatorInstance, moveIndicatorInstance,
-    playSpeed, setPlaySpeed, isPlaying, setIsPlaying,
-    handlePrev, handleNext, navigationPending: prevMutation.isPending || nextMutation.isPending,
+    playSpeed, setPlaySpeed: handleSetPlaySpeed, isPlaying, setIsPlaying,
+    wsStatus, wsReconnectAttempt, isConnected, closeSocket,
+    handlePrev, handleNext, navigationPending,
     drawing, selectedDrawing, handleDrawingTool, formattedCandles, volumeData, markers,
     practiceData, practiceLoading, practiceError, handleResetPractice,
     journalData, journalLoading, journalError, handleSaveJournal, handleSubmitDecision,

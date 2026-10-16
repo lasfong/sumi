@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { IndicatorDefinition } from '../../api/indicatorsApi';
+import type { IndicatorDefinition, MappingStatus } from '../../api/indicatorsApi';
 import {
   defaultsFor, validateIndicatorParams,
   type IndicatorDocumentV1, type IndicatorInstanceV1, type IndicatorSeriesStyle,
@@ -11,6 +11,10 @@ export interface IndicatorRuntimeState {
   values: Record<string, number | null>;
   error?: string;
   errorKind?: 'transport' | 'mapping' | 'chart';
+  mappingStatus?: MappingStatus;
+  warmupBars?: number;
+  availableBars?: number;
+  isProjectedClamped?: boolean;
   inputMaxDate?: string | null;
   responseMaxDate?: string | null;
   responseCount?: number;

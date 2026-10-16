@@ -13,8 +13,8 @@ export const createReplaySession = async (data: CreateSessionRequest): Promise<R
   return response.data;
 };
 
-export const getReplaySession = async (sessionId: number): Promise<ReplaySession> => {
-  const response = await apiClient.get(`/replay/sessions/${sessionId}`);
+export const getReplaySession = async (sessionId: number, signal?: AbortSignal): Promise<ReplaySession> => {
+  const response = await apiClient.get(`/replay/sessions/${sessionId}`, signal ? { signal } : undefined);
   return response.data;
 };
 
@@ -23,19 +23,40 @@ export const listReplaySessions = async (limit: number = 10): Promise<ReplaySess
   return response.data;
 };
 
-export const getSessionCandles = async (sessionId: number, targetTimeframe?: string): Promise<Candle[]> => {
+export const getSessionCandles = async (
+  sessionId: number,
+  targetTimeframe?: string,
+  signal?: AbortSignal,
+): Promise<Candle[]> => {
   const params = targetTimeframe ? { target_timeframe: targetTimeframe } : undefined;
-  const response = await apiClient.get(`/replay/sessions/${sessionId}/candles`, { params });
+  const config = signal ? { params, signal } : { params };
+  const response = await apiClient.get(`/replay/sessions/${sessionId}/candles`, config);
   return response.data;
 };
 
-export const nextCandle = async (sessionId: number, steps: number = 1): Promise<ReplaySession> => {
-  const response = await apiClient.post(`/replay/sessions/${sessionId}/next?steps=${steps}`);
+export const nextCandle = async (
+  sessionId: number,
+  steps: number = 1,
+  signal?: AbortSignal,
+): Promise<ReplaySession> => {
+  const response = await apiClient.post(
+    `/replay/sessions/${sessionId}/next?steps=${steps}`,
+    undefined,
+    signal ? { signal } : undefined,
+  );
   return response.data;
 };
 
-export const previousCandle = async (sessionId: number, steps: number = 1): Promise<ReplaySession> => {
-  const response = await apiClient.post(`/replay/sessions/${sessionId}/previous`, null, { params: { steps } });
+export const previousCandle = async (
+  sessionId: number,
+  steps: number = 1,
+  signal?: AbortSignal,
+): Promise<ReplaySession> => {
+  const response = await apiClient.post(
+    `/replay/sessions/${sessionId}/previous`,
+    null,
+    signal ? { params: { steps }, signal } : { params: { steps } },
+  );
   return response.data;
 };
 
