@@ -38,11 +38,11 @@ export const AnalyticsPage: React.FC = () => {
     enabled: !!sessionId,
   });
 
-  const formatMoney = (val?: number) => (val !== undefined && val !== null ? formatVnd(val) : '—');
-  const formatPercent = (val?: number) => (val !== undefined && val !== null ? formatVietnamesePercent(val, 2) : '—');
-  const formatPctValue = (val?: number) => (val !== undefined && val !== null ? `${formatVietnameseNumber(val, 2)}%` : '—');
+  const formatMoney = (val?: number | null) => (val !== undefined && val !== null ? formatVnd(val) : '—');
+  const formatPercent = (val?: number | null) => (val !== undefined && val !== null ? formatVietnamesePercent(val, 2) : '—');
+  const formatPctValue = (val?: number | null) => (val !== undefined && val !== null ? `${formatVietnameseNumber(val, 2)}%` : '—');
 
-  const renderGroupPerformanceTable = (title: string, rows?: GroupPerformance[], emptyText = 'No data available.') => (
+  const renderGroupPerformanceTable = (title: string, rows?: GroupPerformance[] | null, emptyText = 'No data available.') => (
     <div className="glass-panel" style={{ padding: '20px' }}>
       <h3 style={{ marginTop: 0, marginBottom: '16px', fontSize: '16px' }}>{title}</h3>
       {rows && rows.length > 0 ? (

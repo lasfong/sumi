@@ -24,8 +24,10 @@ def list_universes() -> List[UniverseSummarySchema]:
     """List all registered universe definitions and metadata."""
     try:
         return UniverseService.list_universes()
+    except HTTPException:
+        raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail="Internal error while listing universes") from exc
 
 
 @router.get("/{universe_id}/definition", response_model=UniverseDetailSchema)
@@ -37,9 +39,11 @@ def get_universe_definition(
     try:
         return UniverseService.get_definition(universe_id, version=version)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=f"Universe not found: {universe_id}") from exc
+    except HTTPException:
+        raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail="Internal error while loading universe definition") from exc
 
 
 @router.get("/{universe_id}/resolve", response_model=UniverseResolutionSchema)
@@ -53,11 +57,13 @@ def resolve_universe(
     try:
         return UniverseService.resolve_universe(universe_id, as_of=as_of, version=version, mode=mode)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=f"Universe not found: {universe_id}") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail="Internal error while resolving universe") from exc
 
 
 @router.post("/{universe_id}/coverage", response_model=UniverseCoverageReportSchema)
@@ -79,8 +85,10 @@ def check_universe_coverage(
             threshold=payload.threshold,
         )
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=f"Universe not found: {universe_id}") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail="Internal error while evaluating universe coverage") from exc

@@ -87,6 +87,12 @@ class TradeLifecycleService:
             if decision_in.target_price and decision_in.target_price > exec_price:
                 planned_r = (decision_in.target_price - exec_price) / risk_unit
 
+        import json
+        serialized_checklist = (
+            json.dumps(decision_in.checklist_snapshot, ensure_ascii=False)
+            if isinstance(decision_in.checklist_snapshot, dict)
+            else decision_in.checklist_snapshot
+        )
         decision = Decision(
             session_id=session_id,
             symbol=session.symbol,
@@ -108,7 +114,7 @@ class TradeLifecycleService:
             market_regime=decision_in.market_regime,
             emotion=decision_in.emotion,
             rule_violation=decision_in.rule_violation,
-            checklist_snapshot=decision_in.checklist_snapshot,
+            checklist_snapshot=serialized_checklist,
         )
         db.add(decision)
         db.flush() # get decision.id
@@ -203,7 +209,12 @@ class TradeLifecycleService:
             order.status = OrderStatus.EXECUTED.value
             db.add(order)
         else:
-            order = Order(session_id=session.id, decision_id=decision_id, symbol=symbol, side=OrderSide.BUY.value, order_type=OrderType.MARKET_AT_CLOSE.value, requested_price=price, quantity=qty, status=OrderStatus.EXECUTED.value)
+            resolved_order_type = (
+                OrderType.CUSTOM_PRICE.value
+                if getattr(decision_in, "order_type", None) == OrderType.CUSTOM_PRICE.value
+                else OrderType.MARKET_AT_CLOSE.value
+            )
+            order = Order(session_id=session.id, decision_id=decision_id, symbol=symbol, side=OrderSide.BUY.value, order_type=resolved_order_type, requested_price=price, quantity=qty, status=OrderStatus.EXECUTED.value)
             db.add(order)
             db.flush()
 
@@ -536,3 +547,43 @@ class TradeLifecycleService:
             TradeLifecycleService._execute_buy(db, session, order.decision_id, dummy_decision, session.symbol, current_candle.timestamp, exec_price, order.quantity, pending_order=order)
         else:
             TradeLifecycleService._execute_sell(db, session, order.decision_id, dummy_decision, session.symbol, current_candle.timestamp, exec_price, order.quantity, pending_order=order)
+
+    @staticmethod
+    def cancel_pending_order(db: Session, session_id: int, order_id: int) -> Order:
+        """Cancel a pending order (e.g. LIMIT or MARKET_NEXT_OPEN) at the current replay bar."""
+        session = ReplayService.get_session(db, session_id)
+        from app.services.practice_workflow_service import PracticeWorkflowService
+        PracticeWorkflowService.assert_writable_tip(db, session_id)
+
+        order = (
+            db.query(Order)
+            .filter(Order.id == order_id, Order.session_id == session_id)
+            .first()
+        )
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found in session")
+
+        current_status = (order.status or "").lower()
+        if current_status != OrderStatus.PENDING.value.lower():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Only pending orders can be cancelled (current status: {order.status})",
+            )
+
+        order.status = OrderStatus.CANCELLED.value
+        db.add(order)
+
+        EventLoggingService.log_event(
+            db=db,
+            event_type="ORDER_CANCELLED",
+            message=f"Cancelled order #{order.id} ({order.side} {order.order_type} {order.quantity:g})",
+            session_id=session_id,
+            details={
+                "order_id": order.id,
+                "candle_index": session.current_index,
+                "cancellation_candle_index": session.current_index,
+            },
+        )
+        db.commit()
+        db.refresh(order)
+        return order

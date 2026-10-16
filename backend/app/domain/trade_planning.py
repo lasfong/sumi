@@ -10,6 +10,7 @@ class TradePlanInput(BaseModel):
     entry_price: float = Field(..., gt=0, description="Planned entry price per share")
     stop_loss: float = Field(..., gt=0, description="Planned stop loss price per share")
     target_price: float = Field(..., gt=0, description="Planned target price per share")
+    direction: Optional[str] = Field(default=None, description="LONG or SHORT (inferred from SL/TP if omitted)")
     lot_size: int = Field(default=DEFAULT_VN_MARKET_PROFILE.lot_size, ge=1, description="Standard lot size increment (Vietnam market default is 100)")
     fee_rate: float = Field(default=DEFAULT_VN_MARKET_PROFILE.fee_buy, ge=0.0, description="Transaction fee rate per trade side (0.15% default)")
     tax_rate: float = Field(default=DEFAULT_VN_MARKET_PROFILE.tax_sell, ge=0.0, description="Tax rate on selling (0.1% default)")
@@ -55,9 +56,10 @@ def calculate_position_size(
     """
     Deterministic position sizing according to Vietnam stock market rules:
     - 100-share standard lot size rounding (floor to multiple of 100).
-    - Long-only risk constraint: stop_loss < entry_price and target_price > entry_price.
+    - Supports both LONG (stop_loss < entry_price < target_price) and
+      SHORT (target_price < entry_price < stop_loss) risk geometry.
     - Risk per trade based on account equity and risk_percent.
-    - Cash ceiling constraint based on available cash and buy commissions.
+    - Cash ceiling constraint based on available cash and commissions.
     - Estimated fees (0.15% buy + 0.15% sell) and taxes (0.1% sell).
     - Expected gross and net R-multiples.
     """
@@ -67,13 +69,29 @@ def calculate_position_size(
         raise ValueError("Stop loss must be greater than zero")
     if plan.target_price <= 0:
         raise ValueError("Target price must be greater than zero")
-    if plan.stop_loss >= plan.entry_price:
-        raise ValueError("For long trades, stop loss must be strictly below entry price")
-    if plan.target_price <= plan.entry_price:
-        raise ValueError("For long trades, target price must be strictly above entry price")
 
-    risk_per_share = plan.entry_price - plan.stop_loss
-    reward_per_share = plan.target_price - plan.entry_price
+    resolved_direction = (plan.direction or "").strip().upper()
+    if resolved_direction not in ("LONG", "SHORT"):
+        if plan.stop_loss > plan.entry_price and plan.target_price < plan.entry_price:
+            resolved_direction = "SHORT"
+        else:
+            resolved_direction = "LONG"
+
+    if resolved_direction == "SHORT":
+        if plan.stop_loss <= plan.entry_price:
+            raise ValueError("For short trades, stop loss must be strictly above entry price")
+        if plan.target_price >= plan.entry_price:
+            raise ValueError("For short trades, target price must be strictly below entry price")
+        risk_per_share = plan.stop_loss - plan.entry_price
+        reward_per_share = plan.entry_price - plan.target_price
+    else:
+        if plan.stop_loss >= plan.entry_price:
+            raise ValueError("For long trades, stop loss must be strictly below entry price")
+        if plan.target_price <= plan.entry_price:
+            raise ValueError("For long trades, target price must be strictly above entry price")
+        risk_per_share = plan.entry_price - plan.stop_loss
+        reward_per_share = plan.target_price - plan.entry_price
+
     expected_r_multiple = reward_per_share / risk_per_share
 
     max_risk_amount = max(0.0, equity * (plan.risk_percent / 100.0))
@@ -89,19 +107,34 @@ def calculate_position_size(
     planned_quantity = max(0.0, min(lot_rounded_quantity, max_cash_quantity))
     planned_risk_amount = planned_quantity * risk_per_share
 
-    estimated_buy_gross = plan.entry_price * planned_quantity
-    estimated_buy_fee = estimated_buy_gross * plan.fee_rate
-    estimated_buy_net = estimated_buy_gross + estimated_buy_fee
+    if resolved_direction == "SHORT":
+        # Short entry sells at entry_price; exit buys back at target_price
+        estimated_sell_gross = plan.entry_price * planned_quantity
+        estimated_sell_fee = estimated_sell_gross * plan.fee_rate
+        estimated_sell_tax = estimated_sell_gross * plan.tax_rate
+        estimated_sell_net = estimated_sell_gross - estimated_sell_fee - estimated_sell_tax
 
-    estimated_sell_gross = plan.target_price * planned_quantity
-    estimated_sell_fee = estimated_sell_gross * plan.fee_rate
-    estimated_sell_tax = estimated_sell_gross * plan.tax_rate
-    estimated_sell_net = estimated_sell_gross - estimated_sell_fee - estimated_sell_tax
+        estimated_buy_gross = plan.target_price * planned_quantity
+        estimated_buy_fee = estimated_buy_gross * plan.fee_rate
+        estimated_buy_net = estimated_buy_gross + estimated_buy_fee
 
-    estimated_total_fees_and_taxes = estimated_buy_fee + estimated_sell_fee + estimated_sell_tax
-    estimated_net_profit = estimated_sell_net - estimated_buy_net if planned_quantity > 0 else 0.0
+        estimated_total_fees_and_taxes = estimated_buy_fee + estimated_sell_fee + estimated_sell_tax
+        estimated_net_profit = estimated_sell_net - estimated_buy_net if planned_quantity > 0 else 0.0
+        total_risk_outlay = planned_risk_amount + estimated_sell_fee + estimated_sell_tax
+    else:
+        estimated_buy_gross = plan.entry_price * planned_quantity
+        estimated_buy_fee = estimated_buy_gross * plan.fee_rate
+        estimated_buy_net = estimated_buy_gross + estimated_buy_fee
 
-    total_risk_outlay = planned_risk_amount + estimated_buy_fee
+        estimated_sell_gross = plan.target_price * planned_quantity
+        estimated_sell_fee = estimated_sell_gross * plan.fee_rate
+        estimated_sell_tax = estimated_sell_gross * plan.tax_rate
+        estimated_sell_net = estimated_sell_gross - estimated_sell_fee - estimated_sell_tax
+
+        estimated_total_fees_and_taxes = estimated_buy_fee + estimated_sell_fee + estimated_sell_tax
+        estimated_net_profit = estimated_sell_net - estimated_buy_net if planned_quantity > 0 else 0.0
+        total_risk_outlay = planned_risk_amount + estimated_buy_fee
+
     estimated_net_r = (estimated_net_profit / total_risk_outlay) if total_risk_outlay > 0 and planned_quantity > 0 else 0.0
 
     affordable = planned_quantity >= lot_size
@@ -119,7 +152,7 @@ def calculate_position_size(
         entry_price=plan.entry_price,
         stop_loss=plan.stop_loss,
         target_price=plan.target_price,
-        direction="LONG",
+        direction=resolved_direction,
         risk_per_share=round(risk_per_share, 4),
         reward_per_share=round(reward_per_share, 4),
         expected_r_multiple=round(expected_r_multiple, 4),

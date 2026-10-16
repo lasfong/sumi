@@ -9,6 +9,17 @@ export interface StrategyRulePayload {
   yaml: string;
   signalsRequired: string[];
   createdAt: string;
+  targetTab?: 'single' | 'battle';
+  strategyConfig?: {
+    name: string;
+    version: string;
+    description: string;
+    indicators: Array<{ name: string; type: string }>;
+    entry_rules: Array<{ condition: string }>;
+    exit_rules: Array<Record<string, unknown>>;
+    position_sizing: { method: string; quantity: number };
+    risk_management: { stop_loss_pct: number; take_profit_pct: number };
+  };
 }
 
 export interface StrategyRuleBuilderProps {
@@ -133,16 +144,30 @@ ${Array.from(new Set(clauses.map((c) => `  - ${c.signalAlias}`))).join('\n')}
     onRuleGenerated?.(generatedExpression);
   };
 
-  const handleExecuteRule = () => {
-    if (!generatedExpression) return;
-    const payload: StrategyRulePayload = {
-      ruleName: ruleName.trim() || 'Bo_Dieu_Kien_Mau',
+  const buildRulePayload = (targetTab: 'single' | 'battle' = 'battle'): StrategyRulePayload => {
+    const cleanName = ruleName.trim() || 'Bo_Dieu_Kien_Mau';
+    const signalsRequired = Array.from(new Set(clauses.map((c) => c.signalAlias)));
+    return {
+      ruleName: cleanName,
       expression: generatedExpression,
       yaml: generatedYaml,
-      signalsRequired: Array.from(new Set(clauses.map((c) => c.signalAlias))),
+      signalsRequired,
       createdAt: new Date().toISOString(),
+      targetTab,
+      strategyConfig: {
+        name: cleanName,
+        version: '1.0',
+        description: `Quy tắc AST tùy chỉnh: ${generatedExpression}`,
+        indicators: signalsRequired.map((alias) => ({ name: alias, type: 'signal' })),
+        entry_rules: [{ condition: generatedExpression }],
+        exit_rules: [],
+        position_sizing: { method: 'fixed_quantity', quantity: 1000 },
+        risk_management: { stop_loss_pct: 7.0, take_profit_pct: 15.0 },
+      },
     };
+  };
 
+  const persistAndDispatchRule = (payload: StrategyRulePayload) => {
     try {
       if (typeof window !== 'undefined' && window.sessionStorage) {
         window.sessionStorage.setItem('sumi_pending_strategy_rule', JSON.stringify(payload));
@@ -166,6 +191,12 @@ ${Array.from(new Set(clauses.map((c) => `  - ${c.signalAlias}`))).join('\n')}
     } catch {
       // ignore event error
     }
+  };
+
+  const handleExecuteRule = () => {
+    if (!generatedExpression) return;
+    const payload = buildRulePayload('battle');
+    persistAndDispatchRule(payload);
 
     onExecuteRule?.(payload);
     onRuleGenerated?.(generatedExpression);
@@ -189,29 +220,8 @@ ${Array.from(new Set(clauses.map((c) => `  - ${c.signalAlias}`))).join('\n')}
 
   const handleSwitchToBattle = () => {
     if (!generatedExpression) return;
-    const payload: StrategyRulePayload = {
-      ruleName: ruleName.trim() || 'Bo_Dieu_Kien_Mau',
-      expression: generatedExpression,
-      yaml: generatedYaml,
-      signalsRequired: Array.from(new Set(clauses.map((c) => c.signalAlias))),
-      createdAt: new Date().toISOString(),
-    };
-
-    try {
-      if (typeof window !== 'undefined' && window.sessionStorage) {
-        window.sessionStorage.setItem('sumi_pending_strategy_rule', JSON.stringify(payload));
-      }
-    } catch {
-      // ignore storage error
-    }
-
-    try {
-      if (typeof window !== 'undefined' && window.localStorage) {
-        window.localStorage.setItem('sumi_pending_strategy_rule', JSON.stringify(payload));
-      }
-    } catch {
-      // ignore storage error
-    }
+    const payload = buildRulePayload('battle');
+    persistAndDispatchRule(payload);
 
     onExecuteRule?.(payload);
     onRuleGenerated?.(generatedExpression);
@@ -226,6 +236,30 @@ ${Array.from(new Set(clauses.map((c) => `  - ${c.signalAlias}`))).join('\n')}
       const battleTabBtn = document.querySelector<HTMLButtonElement>('[data-testid="lab-tab-battle"]');
       if (battleTabBtn) {
         battleTabBtn.click();
+      }
+    } catch {
+      // ignore DOM error
+    }
+  };
+
+  const handleSwitchToSingle = () => {
+    if (!generatedExpression) return;
+    const payload = buildRulePayload('single');
+    persistAndDispatchRule(payload);
+
+    onExecuteRule?.(payload);
+    onRuleGenerated?.(generatedExpression);
+
+    setExecutionStatus({
+      active: true,
+      message: `Đã chuyển tiếp quy tắc "${payload.ruleName}" sang Single Backtest.`,
+      payload,
+    });
+
+    try {
+      const singleTabBtn = document.querySelector<HTMLButtonElement>('[data-testid="lab-tab-single"]');
+      if (singleTabBtn) {
+        singleTabBtn.click();
       }
     } catch {
       // ignore DOM error
@@ -518,6 +552,27 @@ ${Array.from(new Set(clauses.map((c) => `  - ${c.signalAlias}`))).join('\n')}
           }}
         >
           ⚔️ Chuyển Sang Đối Đầu (Battle)
+        </button>
+
+        <button
+          type="button"
+          data-testid="switch-to-single-btn"
+          onClick={handleSwitchToSingle}
+          style={{
+            padding: '10px 16px',
+            fontSize: '13px',
+            fontWeight: 600,
+            borderRadius: '6px',
+            background: 'rgba(88, 166, 255, 0.14)',
+            border: '1px solid rgba(88, 166, 255, 0.5)',
+            color: '#58A6FF',
+            cursor: 'pointer',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '6px',
+          }}
+        >
+          🎯 Đưa Sang Single Backtest
         </button>
       </div>
 

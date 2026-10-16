@@ -19,7 +19,7 @@ export interface PracticeDecision {
   note?: string | null;
   mistake_tag?: string | null;
   rule_violation?: string | null;
-  checklist_snapshot?: string | null;
+  checklist_snapshot?: Record<string, unknown> | string | null;
 }
 
 export interface PracticeOrder {
@@ -105,6 +105,7 @@ export interface PracticeWorkflowSnapshot {
   available_quantity: number;
   blocked_quantity?: number;
   earliest_release_date?: string | null;
+  settlement_label?: string;
   latest_activity_index: number;
   historical: boolean;
   can_trade: boolean;

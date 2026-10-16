@@ -50,12 +50,21 @@ export function Sidebar({ isCollapsed = false, onToggleCollapse }: SidebarProps)
 
   const isItemActive = (targetPath: string) => {
     const [baseRoute, query] = targetPath.split('?');
+    const searchParams = new URLSearchParams(location.search);
     if (query) {
+      const targetParams = new URLSearchParams(query);
+      const targetTab = targetParams.get('tab');
+      if (targetTab) {
+        return location.pathname === baseRoute && searchParams.get('tab') === targetTab;
+      }
       return location.pathname === baseRoute && location.search.includes(query);
     }
     if (location.pathname === baseRoute) {
-      if (baseRoute === '/strategy-lab' && location.search.includes('tab=')) {
-        return false;
+      if (baseRoute === '/strategy-lab') {
+        const activeTab = searchParams.get('tab');
+        if (activeTab === 'catalog' || activeTab === 'builder') {
+          return false;
+        }
       }
       return true;
     }
@@ -180,7 +189,7 @@ export function Sidebar({ isCollapsed = false, onToggleCollapse }: SidebarProps)
                     key={item.path}
                     to={targetPath}
                     data-testid={item.testId}
-                    className={`nav-item primary-nav-item ${active ? 'active' : ''}`}
+                    className={() => `nav-item primary-nav-item ${active ? 'active' : ''}`}
                     title={isCollapsed ? item.label : undefined}
                   >
                     <item.icon className="nav-icon" size={20} />

@@ -1,5 +1,5 @@
 import { lazy, Suspense, useState } from 'react';
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider, type QueryClientConfig } from '@tanstack/react-query';
 import { Toaster } from 'react-hot-toast';
 import { Sidebar } from './components/layout/Sidebar';
@@ -26,7 +26,6 @@ const DashboardPage = lazy(() => import('./pages/DashboardPage').then(module => 
 const ImportPage = lazy(() => import('./pages/ImportPage').then(module => ({ default: module.ImportPage })));
 const ReplayPage = lazy(() => import('./pages/ReplayPage').then(module => ({ default: module.ReplayPage })));
 const AnalyticsPage = lazy(() => import('./pages/AnalyticsPage').then(module => ({ default: module.AnalyticsPage })));
-const BacktestPage = lazy(() => import('./pages/BacktestPage').then(module => ({ default: module.BacktestPage })));
 const ScannerPage = lazy(() => import('./pages/ScannerPage').then(module => ({ default: module.ScannerPage })));
 const StrategyLabPage = lazy(() => import('./pages/StrategyLabPage').then(module => ({ default: module.StrategyLabPage })));
 const JournalPage = lazy(() => import('./pages/JournalPage').then(module => ({ default: module.JournalPage })));
@@ -70,7 +69,7 @@ function App() {
                   <Route path="/" element={<DashboardPage />} />
                   <Route path="/import" element={<ImportPage />} />
                   <Route path="/replay" element={<ReplayPage />} />
-                  <Route path="/backtest" element={<BacktestPage />} />
+                  <Route path="/backtest" element={<Navigate to="/strategy-lab?tab=single" replace />} />
                   <Route path="/strategy-lab" element={<StrategyLabPage />} />
                   <Route path="/scanner" element={<ScannerPage />} />
                   <Route path="/journal" element={<JournalPage />} />

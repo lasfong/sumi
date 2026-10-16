@@ -1,5 +1,5 @@
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -453,6 +453,37 @@ def get_orders(
 
     result.sort(key=lambda o: (normalize_datetime(o.created_at) or datetime.min, o.id), reverse=True)
     return result
+
+
+@router.delete("/sessions/{session_id}/orders/{order_id}", response_model=OrderResponse)
+@router.post("/sessions/{session_id}/orders/{order_id}/cancel", response_model=OrderResponse)
+def cancel_order(
+    session_id: int,
+    order_id: int,
+    db: Session = Depends(get_db),
+):
+    session = ReplayService.get_session(db, session_id)
+    order = TradeLifecycleService.cancel_pending_order(db, session_id, order_id)
+    register_order_cancellation(
+        order.id,
+        candle_index=session.current_index,
+        cancelled_at=datetime.now(timezone.utc),
+    )
+    return OrderResponse(
+        id=order.id,
+        session_id=order.session_id,
+        decision_id=order.decision_id,
+        symbol=order.symbol,
+        side=order.side,
+        order_type=order.order_type,
+        requested_price=order.requested_price,
+        quantity=order.quantity,
+        capital_percent=order.capital_percent,
+        status=order.status,
+        created_at=order.created_at,
+        filled_price=None,
+        filled_at=None,
+    )
 
 
 @router.get("/sessions/{session_id}/trades", response_model=List[TradeResponse])

@@ -148,7 +148,7 @@ class BBSymbolPoint:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "date": self.date,
+            "date": str(self.date),
             "horizons": {h: pt.to_dict() for h, pt in self.horizons.items()},
             "daily_pressure": round(self.daily_pressure, 4),
             "daily_trading_value": round(self.daily_trading_value, 2),
@@ -174,7 +174,7 @@ class BBSymbolSeriesResult:
             "symbol": self.symbol,
             "flow_method": self.flow_method.value,
             "methodology_version": self.methodology_version,
-            "as_of": self.as_of,
+            "as_of": str(self.as_of) if self.as_of is not None else None,
             "requested_horizons": [h.value for h in self.requested_horizons],
             "total_bars": self.total_bars,
             "coverage_ratio": round(self.coverage_ratio, 4),
@@ -286,7 +286,7 @@ class MarketBBSessionPoint:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "date": self.date,
+            "date": str(self.date),
             "horizons": {h: pt.to_dict() for h, pt in self.horizons.items()},
             "breadth": {h: pt.to_dict() for h, pt in self.breadth.items()},
             "symbol_coverage": round(self.symbol_coverage, 4),

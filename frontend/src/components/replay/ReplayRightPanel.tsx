@@ -41,6 +41,7 @@ export interface ReplayRightPanelProps {
   practiceError: boolean;
   onResetPractice: () => void;
   onSubmitDecision: (decision: DecisionCreate) => Promise<{ ok: boolean; message: string }>;
+  onCancelOrder?: (orderId: number) => void | Promise<void>;
   journalData?: JournalEntry[];
   journalLoading: boolean;
   journalError: boolean;
@@ -67,6 +68,7 @@ export const ReplayRightPanel: React.FC<ReplayRightPanelProps> = ({
   practiceError,
   onResetPractice,
   onSubmitDecision,
+  onCancelOrder,
   journalData,
   journalLoading,
   journalError,
@@ -87,7 +89,64 @@ export const ReplayRightPanel: React.FC<ReplayRightPanelProps> = ({
       }
       trade={
         <div style={{ display: 'grid', gap: 8 }}>
+          {/* Contextual Session Links (GAP-U-06) */}
+          <div
+            data-testid="practice-context-links"
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              gap: 6,
+              padding: '4px 8px',
+              background: 'rgba(255, 255, 255, 0.03)',
+              border: '1px solid var(--border-color)',
+              borderRadius: 6,
+              fontSize: 11,
+            }}
+          >
+            <span style={{ color: 'var(--text-muted)' }}>Phiên #{sessionId}</span>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <a
+                href={`/journal?session=${sessionId}`}
+                data-testid="practice-link-journal"
+                style={{ color: '#58A6FF', fontWeight: 600 }}
+              >
+                📓 Nhật ký
+              </a>
+              <a
+                href={`/analytics?session=${sessionId}`}
+                data-testid="practice-link-analytics"
+                style={{ color: '#00E676', fontWeight: 600 }}
+              >
+                📊 Phân tích
+              </a>
+            </div>
+          </div>
+
           {sourceContext && <ScannerSourceContext context={sourceContext} display="details" />}
+
+          {practiceData ? (
+            <>
+              <PracticeScoreboard
+                snapshot={practiceData}
+                onResetPractice={onResetPractice}
+              />
+              <TradeControls
+                snapshot={practiceData}
+                onSubmitDecision={onSubmitDecision}
+                disabled={practiceLoading || practiceError}
+              />
+              <PendingOrdersPanel orders={practiceData.orders} onCancelOrder={onCancelOrder} />
+              <PositionPanel positions={practiceData.positions} snapshot={practiceData} />
+            </>
+          ) : (
+            <div role={practiceError ? 'alert' : 'status'}>
+              {practiceError
+                ? 'Practice state could not be loaded.'
+                : 'Loading practice state…'}
+            </div>
+          )}
+
           <div style={{ display: 'flex', gap: 6 }}>
             <button
               type="button"
@@ -143,27 +202,6 @@ export const ReplayRightPanel: React.FC<ReplayRightPanelProps> = ({
             timeframe={sessionData?.timeframe || '1D'}
             currentTimestamp={currentCandle?.timestamp}
           />
-          {practiceData ? (
-            <>
-              <PracticeScoreboard
-                snapshot={practiceData}
-                onResetPractice={onResetPractice}
-              />
-              <TradeControls
-                snapshot={practiceData}
-                onSubmitDecision={onSubmitDecision}
-                disabled={practiceLoading || practiceError}
-              />
-              <PendingOrdersPanel orders={practiceData.orders} />
-              <PositionPanel positions={practiceData.positions} snapshot={practiceData} />
-            </>
-          ) : (
-            <div role={practiceError ? 'alert' : 'status'}>
-              {practiceError
-                ? 'Practice state could not be loaded.'
-                : 'Loading practice state…'}
-            </div>
-          )}
         </div>
       }
       journal={

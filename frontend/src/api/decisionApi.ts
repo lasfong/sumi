@@ -41,3 +41,8 @@ export const planTradeSizing = async (
   const response = await apiClient.post(`/replay/sessions/${sessionId}/plan-sizing`, plan);
   return response.data;
 };
+
+export const cancelPendingOrder = async (sessionId: number, orderId: number): Promise<Order> => {
+  const response = await apiClient.delete(`/replay/sessions/${sessionId}/orders/${orderId}`);
+  return response.data;
+};

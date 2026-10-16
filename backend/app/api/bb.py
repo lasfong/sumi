@@ -4,7 +4,7 @@ Exposes endpoints for calculating and retrieving symbol-level Technical Flow BB
 under the audited OHLCV_PROXY method.
 """
 
-from typing import List, Optional
+from typing import List, Optional, Union
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
@@ -14,6 +14,8 @@ from app.domain.bb.chart_adapter import BBChartAdapter
 from app.domain.universe.models import UniverseMode
 from app.schemas.bb_schema import (
     BBCalculateRequest,
+    BBChartSeriesResponse,
+    BBHorizonsResponse,
     BBSymbolSeriesResponse,
     MarketBBCalculateRequest,
     MarketBBSeriesResponse,
@@ -23,7 +25,7 @@ from app.services.bb_service import MoneyFlowBlackboxService
 router = APIRouter()
 
 
-@router.get("/horizons")
+@router.get("/horizons", response_model=BBHorizonsResponse)
 def get_bb_horizons():
     """List standard BB evaluation horizons and lookback bars."""
     return {
@@ -36,7 +38,7 @@ def get_bb_horizons():
     }
 
 
-@router.get("/symbol/{symbol}", response_model=None)
+@router.get("/symbol/{symbol}", response_model=Union[BBSymbolSeriesResponse, BBChartSeriesResponse])
 def get_symbol_bb(
     symbol: str,
     as_of: Optional[str] = Query(None, description="Historical as-of date cutoff (YYYY-MM-DD)"),
@@ -70,8 +72,10 @@ def get_symbol_bb(
     service = MoneyFlowBlackboxService()
     try:
         series_res = service.calculate_symbol_bb(req, db=db, limit=limit)
+    except HTTPException:
+        raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Error calculating BB for {symbol}: {exc}")
+        raise HTTPException(status_code=500, detail=f"Internal error calculating BB for {symbol}") from exc
 
     if format == "chart":
         return BBChartAdapter.to_chart_series(series_res)
@@ -110,7 +114,7 @@ def calculate_symbol_bb(
     return series_res.to_dict()
 
 
-@router.get("/market/{universe_id}", response_model=None)
+@router.get("/market/{universe_id}", response_model=MarketBBSeriesResponse)
 def get_market_bb(
     universe_id: str,
     as_of: Optional[str] = Query(None, description="Cutoff date (YYYY-MM-DD)"),
@@ -152,8 +156,10 @@ def get_market_bb(
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    except HTTPException:
+        raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Error calculating Market BB: {exc}")
+        raise HTTPException(status_code=500, detail="Internal error calculating Market BB") from exc
 
     return res.to_dict()
 
@@ -193,8 +199,9 @@ def calculate_market_bb(
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    except HTTPException:
+        raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Error calculating Market BB: {exc}")
+        raise HTTPException(status_code=500, detail="Internal error calculating Market BB") from exc
 
     return res.to_dict()
-

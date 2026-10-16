@@ -44,7 +44,7 @@ export interface SignalRegistryResponse {
 export interface SignalCalculationItemRequest {
   name: string;
   version?: string;
-  params?: Record<string, number>;
+  params?: Record<string, number | string | boolean>;
 }
 
 export interface SignalCalculationRequest {

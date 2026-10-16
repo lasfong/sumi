@@ -1,7 +1,18 @@
 """Pydantic schemas for Money Flow Blackbox (BB) API."""
 
 from typing import Dict, List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class BBHorizonInfoResponse(BaseModel):
+    id: str
+    lookback_bars: int
+
+
+class BBHorizonsResponse(BaseModel):
+    horizons: List[BBHorizonInfoResponse]
+    default_horizons: List[str]
+    methodology: str = "OHLCV_PROXY"
 
 
 class BBSymbolHorizonPointResponse(BaseModel):
@@ -35,7 +46,27 @@ class BBSymbolSeriesResponse(BaseModel):
     requested_horizons: List[str] = Field(default_factory=list)
     total_bars: int
     coverage_ratio: float
-    points: List[BBSymbolPointResponse] = Field(default_factory=list)
+    points: List[BBSymbolPointResponse]
+
+
+class BBChartPointResponse(BaseModel):
+    time: str
+    pressure: float
+    trading_value: float
+    value_source: str
+    quality: str
+    model_config = ConfigDict(extra="allow")
+
+
+class BBChartSeriesResponse(BaseModel):
+    symbol: str
+    flow_method: str = "OHLCV_PROXY"
+    methodology_version: str = "bb_v1_ohlcv_proxy"
+    label: str = "Technical Flow BB"
+    as_of: Optional[str] = None
+    total_bars: int
+    coverage_ratio: float
+    data: List[BBChartPointResponse]
 
 
 class BBCalculateRequest(BaseModel):

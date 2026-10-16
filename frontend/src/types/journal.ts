@@ -11,6 +11,7 @@ export interface JournalEntryCreate {
   emotion?: string;
   mistake_tag?: string;
   rule_violation?: string;
+  checklist_snapshot?: Record<string, unknown> | string | null;
 }
 
 /** Journal entry response from the backend */
@@ -28,6 +29,7 @@ export interface JournalEntry {
   emotion?: string;
   mistake_tag?: string;
   rule_violation?: string;
+  checklist_snapshot?: Record<string, unknown> | string | null;
   created_at: string;
   updated_at: string;
 }

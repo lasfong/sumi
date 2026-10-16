@@ -1,8 +1,9 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
+import toast from 'react-hot-toast';
 import { getAvailableStrategies, runBacktest } from '../api/backtestApi';
-import type { BacktestRequest, BacktestResponse, AvailableStrategy } from '../api/backtestApi';
+import type { BacktestRequest, BacktestResponse, AvailableStrategy, StrategyConfig } from '../api/backtestApi';
 import {
   cancelParameterSweep,
   deleteStrategyLabRun,
@@ -21,8 +22,51 @@ import { MultiStrategyEquityChart, type StrategyEquitySeries } from '../componen
 
 import { MultiPhaseBatchPanel } from '../components/strategy/MultiPhaseBatchPanel';
 import { SignalCatalog } from '../components/signals/SignalCatalog';
-import { StrategyRuleBuilder } from '../components/strategy/StrategyRuleBuilder';
+import { StrategyRuleBuilder, type StrategyRulePayload } from '../components/strategy/StrategyRuleBuilder';
 import { TechnicalFlowBBViewer } from '../components/chart/TechnicalFlowBBViewer';
+import { BacktestPage } from './BacktestPage';
+
+type LabTab = 'battle' | 'single' | 'multiphase' | 'catalog' | 'builder' | 'flow';
+const VALID_LAB_TABS: LabTab[] = ['battle', 'single', 'multiphase', 'catalog', 'builder', 'flow'];
+const CUSTOM_RULE_FILENAME = 'custom_ast_rule.yaml';
+
+function loadPendingRuleFromStorage(): StrategyRulePayload | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw =
+      window.sessionStorage?.getItem('sumi_pending_strategy_rule') ||
+      window.localStorage?.getItem('sumi_pending_strategy_rule');
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StrategyRulePayload;
+    if (parsed && parsed.expression) {
+      return parsed;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function buildCustomStrategyFromPayload(payload: StrategyRulePayload): AvailableStrategy {
+  const cleanName = payload.ruleName || 'Bo_Dieu_Kien_Mau';
+  const signals = payload.signalsRequired || [];
+  const config: StrategyConfig = payload.strategyConfig ?? {
+    name: cleanName,
+    version: '1.0',
+    description: `Quy tắc AST tùy chỉnh: ${payload.expression}`,
+    indicators: signals.map((alias) => ({ name: alias, type: 'signal' })),
+    entry_rules: [{ condition: payload.expression }],
+    exit_rules: [],
+    position_sizing: { method: 'fixed_quantity', quantity: 1000 },
+    risk_management: { stop_loss_pct: 7.0, take_profit_pct: 15.0 },
+  };
+  return {
+    filename: CUSTOM_RULE_FILENAME,
+    name: `${cleanName} (Custom AST)`,
+    description: `Biểu thức AST: ${payload.expression}`,
+    config,
+  };
+}
 
 const QUICK_SYMBOLS = ['FPT', 'SSI', 'HPG', 'VCI', 'TCB', 'VNINDEX'];
 
@@ -82,28 +126,33 @@ const saveHistory = (entries: LabHistoryEntry[]) => {
 
 export const StrategyLabPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
-  const initialTab = useMemo(() => {
+  const initialTab = useMemo<LabTab>(() => {
     const t = searchParams.get('tab');
-    if (t && ['battle', 'multiphase', 'catalog', 'builder', 'flow'].includes(t)) {
-      return t as 'battle' | 'multiphase' | 'catalog' | 'builder' | 'flow';
+    if (t && VALID_LAB_TABS.includes(t as LabTab)) {
+      return t as LabTab;
     }
     return 'battle';
   }, [searchParams]);
 
-  const [activeLabTab, setActiveLabTab] = useState<'battle' | 'multiphase' | 'catalog' | 'builder' | 'flow'>(initialTab);
+  const [activeLabTab, setActiveLabTab] = useState<LabTab>(initialTab);
+  const [pendingRule, setPendingRule] = useState<StrategyRulePayload | null>(() => loadPendingRuleFromStorage());
 
   // Sync tab with URL search parameter
   useEffect(() => {
     const t = searchParams.get('tab');
-    if (t && ['battle', 'multiphase', 'catalog', 'builder', 'flow'].includes(t)) {
-      setActiveLabTab(t as any);
+    if (t && VALID_LAB_TABS.includes(t as LabTab)) {
+      setActiveLabTab(t as LabTab);
     } else if (!t) {
       setActiveLabTab('battle');
     }
   }, [searchParams]);
 
-  const handleTabChange = (tab: 'battle' | 'multiphase' | 'catalog' | 'builder' | 'flow') => {
+  const handleTabChange = (tab: LabTab) => {
     setActiveLabTab(tab);
+    const storedRule = loadPendingRuleFromStorage();
+    if (storedRule) {
+      setPendingRule(storedRule);
+    }
     if (tab === 'battle') {
       const nextParams = new URLSearchParams(searchParams);
       nextParams.delete('tab');
@@ -123,7 +172,9 @@ export const StrategyLabPage: React.FC = () => {
   const [oosEndDate, setOosEndDate] = useState('2023-12-31');
   const [initialCash, setInitialCash] = useState(100000000);
   const [benchmarkSymbol, setBenchmarkSymbol] = useState('VNINDEX');
-  const [selectedFilenames, setSelectedFilenames] = useState<string[]>([]);
+  const [selectedFilenames, setSelectedFilenames] = useState<string[]>(() =>
+    loadPendingRuleFromStorage() ? [CUSTOM_RULE_FILENAME] : []
+  );
   const [isRunning, setIsRunning] = useState(false);
   const [isSweeping, setIsSweeping] = useState(false);
   const [activeSweepId, setActiveSweepId] = useState<string | null>(null);
@@ -141,10 +192,53 @@ export const StrategyLabPage: React.FC = () => {
   const [hiddenSavedRunIds, setHiddenSavedRunIds] = useState<number[]>([]);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    const handleRuleEvent = (e: Event) => {
+      const detail = (e as CustomEvent<StrategyRulePayload>).detail || loadPendingRuleFromStorage();
+      if (detail && detail.expression) {
+        setPendingRule(detail);
+        setSelectedFilenames((prev) =>
+          prev.includes(CUSTOM_RULE_FILENAME) ? prev : [...prev, CUSTOM_RULE_FILENAME]
+        );
+        const destTab: LabTab = detail.targetTab === 'single' ? 'single' : 'battle';
+        setActiveLabTab(destTab);
+        const nextParams = new URLSearchParams(window.location.search);
+        if (destTab === 'battle') {
+          nextParams.delete('tab');
+        } else {
+          nextParams.set('tab', destTab);
+        }
+        setSearchParams(nextParams);
+        toast.success(`Đã nạp quy tắc "${detail.ruleName}" vào Strategy Tester`);
+      }
+    };
+    window.addEventListener('sumi:run-strategy-rule', handleRuleEvent);
+    return () => window.removeEventListener('sumi:run-strategy-rule', handleRuleEvent);
+  }, [setSearchParams]);
+
+  const clearPendingRule = () => {
+    setPendingRule(null);
+    setSelectedFilenames((prev) => prev.filter((f) => f !== CUSTOM_RULE_FILENAME));
+    try {
+      window.sessionStorage?.removeItem('sumi_pending_strategy_rule');
+      window.localStorage?.removeItem('sumi_pending_strategy_rule');
+    } catch {
+      // ignore
+    }
+  };
+
   const { data: strategies, isLoading: isLoadingStrategies } = useQuery({
     queryKey: ['strategies'],
     queryFn: getAvailableStrategies,
   });
+
+  const allStrategies = useMemo<AvailableStrategy[]>(() => {
+    const base = strategies ? [...strategies] : [];
+    if (pendingRule) {
+      return [...base, buildCustomStrategyFromPayload(pendingRule)];
+    }
+    return base;
+  }, [strategies, pendingRule]);
 
   // Auto-select 3 strategies by default when loaded so user doesn't get empty error
   useEffect(() => {
@@ -161,17 +255,17 @@ export const StrategyLabPage: React.FC = () => {
 
   // Base strategy for parameter sweep
   const activeSweepStrategy = useMemo(() => {
-    if (!strategies || strategies.length === 0) return null;
+    if (allStrategies.length === 0) return null;
     if (selectedSweepStrategyFilename) {
-      const found = strategies.find(s => s.filename === selectedSweepStrategyFilename);
+      const found = allStrategies.find(s => s.filename === selectedSweepStrategyFilename);
       if (found) return found;
     }
     if (selectedFilenames.length > 0) {
-      const found = strategies.find(s => s.filename === selectedFilenames[0]);
+      const found = allStrategies.find(s => s.filename === selectedFilenames[0]);
       if (found) return found;
     }
-    return strategies[0];
-  }, [strategies, selectedSweepStrategyFilename, selectedFilenames]);
+    return allStrategies[0];
+  }, [allStrategies, selectedSweepStrategyFilename, selectedFilenames]);
 
   // Extract typed parameters for the selected base strategy
   const typedParameterOptions = useMemo<TypedParameterDefinition[]>(() => {
@@ -411,7 +505,7 @@ export const StrategyLabPage: React.FC = () => {
 
   const handleRun = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!strategies) return;
+    if (allStrategies.length === 0) return;
 
     const dateErr = validateDates();
     if (dateErr) {
@@ -419,7 +513,7 @@ export const StrategyLabPage: React.FC = () => {
       return;
     }
 
-    const selected = strategies.filter(strategy => selectedFilenames.includes(strategy.filename));
+    const selected = allStrategies.filter(strategy => selectedFilenames.includes(strategy.filename));
     if (selected.length === 0) {
       setError('Select at least one strategy.');
       return;
@@ -499,7 +593,7 @@ export const StrategyLabPage: React.FC = () => {
 
   const handleSweep = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!strategies || !activeSweepStrategy) {
+    if (allStrategies.length === 0 || !activeSweepStrategy) {
       setError('Select a base strategy.');
       return;
     }
@@ -600,7 +694,7 @@ export const StrategyLabPage: React.FC = () => {
   };
 
   const selectAll = () => {
-    setSelectedFilenames((strategies || []).map(strategy => strategy.filename));
+    setSelectedFilenames(allStrategies.map(strategy => strategy.filename));
   };
 
   const clearSelection = () => {
@@ -633,7 +727,7 @@ export const StrategyLabPage: React.FC = () => {
         sweepResults: entry.sweepResults,
       },
       metrics: {},
-    });
+    }).catch(() => {});
   };
 
   const restoreHistory = (entry: LabHistoryEntry) => {
@@ -658,7 +752,7 @@ export const StrategyLabPage: React.FC = () => {
     setHistory([]);
     saveHistory([]);
     setHiddenSavedRunIds((savedRuns || []).map(run => run.id));
-    void Promise.all((savedRuns || []).map(run => deleteStrategyLabRun(run.id)));
+    void Promise.all((savedRuns || []).map(run => deleteStrategyLabRun(run.id))).catch(() => {});
   };
 
   const getTrades = (response?: BacktestResponse | null) =>
@@ -859,6 +953,23 @@ export const StrategyLabPage: React.FC = () => {
         </button>
         <button
           type="button"
+          data-testid="lab-tab-single"
+          onClick={() => handleTabChange('single')}
+          style={{
+            padding: '8px 16px',
+            fontSize: '13px',
+            borderRadius: '6px',
+            border: activeLabTab === 'single' ? '1px solid var(--color-primary)' : '1px solid transparent',
+            background: activeLabTab === 'single' ? 'rgba(41, 98, 255, 0.2)' : 'rgba(255, 255, 255, 0.04)',
+            color: activeLabTab === 'single' ? 'var(--color-primary)' : 'var(--text-muted)',
+            cursor: 'pointer',
+            fontWeight: activeLabTab === 'single' ? 600 : 400,
+          }}
+        >
+          🎯 Kiểm Định Đơn Lẻ (Single Backtest)
+        </button>
+        <button
+          type="button"
           data-testid="lab-tab-multiphase"
           onClick={() => handleTabChange('multiphase')}
           style={{
@@ -927,6 +1038,7 @@ export const StrategyLabPage: React.FC = () => {
         </button>
       </div>
 
+      {activeLabTab === 'single' && <BacktestPage embedded />}
       {activeLabTab === 'multiphase' && <MultiPhaseBatchPanel />}
       {activeLabTab === 'catalog' && (
         <div className="glass-panel" style={{ padding: '24px', borderRadius: '8px' }}>
@@ -938,6 +1050,131 @@ export const StrategyLabPage: React.FC = () => {
 
       {activeLabTab === 'battle' && (
         <>
+          {/* Single Backtest vs Battle Guidance Banner (GAP-U-05) */}
+          <div
+            data-testid="single-vs-battle-banner"
+            style={{
+              padding: '10px 14px',
+              marginBottom: '12px',
+              background: 'rgba(88, 166, 255, 0.08)',
+              border: '1px solid rgba(88, 166, 255, 0.25)',
+              borderRadius: '6px',
+              fontSize: '12px',
+              color: 'var(--text-main)',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              gap: '8px',
+            }}
+          >
+            <span>
+              💡 <strong>Hướng dẫn chế độ kiểm định:</strong> Đang ở <strong>Battle &amp; Sweep</strong> (so sánh đồng thời nhiều chiến lược &amp; quét tham số In-Sample / Out-of-Sample). Dùng tab <strong>Single Backtest</strong> khi muốn soi chi tiết từng giao dịch và phân tích hậu kiểm của 1 chiến lược đơn lẻ.
+            </span>
+            <button
+              type="button"
+              data-testid="switch-to-single-tab-btn"
+              onClick={() => handleTabChange('single')}
+              style={{
+                padding: '4px 10px',
+                fontSize: '11px',
+                background: 'rgba(88, 166, 255, 0.15)',
+                color: '#58A6FF',
+                border: '1px solid rgba(88, 166, 255, 0.35)',
+                borderRadius: '4px',
+                cursor: 'pointer',
+              }}
+            >
+              Chuyển sang Single Backtest →
+            </button>
+          </div>
+
+          {/* Pending Strategy Rule Handoff Banner (GAP-U-03) */}
+          {pendingRule && (
+            <div
+              data-testid="pending-rule-prefill-banner"
+              style={{
+                padding: '12px 16px',
+                marginBottom: '14px',
+                background: 'rgba(0, 230, 118, 0.1)',
+                border: '1px solid rgba(0, 230, 118, 0.35)',
+                borderRadius: '6px',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                gap: '12px',
+                flexWrap: 'wrap',
+              }}
+            >
+              <div style={{ fontSize: '13px', color: 'var(--text-main)' }}>
+                <strong style={{ color: '#00E676' }}>🛠️ Đã nạp quy tắc từ Rule Builder:</strong>{' '}
+                <span>{pendingRule.ruleName}</span>
+                {pendingRule.expression ? <span style={{ color: 'var(--text-muted)' }}> — <code>{pendingRule.expression}</code></span> : null}
+                <span style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
+                  Quy tắc tùy chỉnh đã được thêm vào danh sách chiến lược bên dưới (<code>custom_ast_rule.yaml</code>) và tự động tích chọn để chạy đối đầu hoặc kiểm định đơn lẻ.
+                </span>
+              </div>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <button
+                  type="button"
+                  data-testid="switch-pending-rule-to-single-btn"
+                  onClick={() => handleTabChange('single')}
+                  style={{
+                    padding: '4px 10px',
+                    fontSize: '11px',
+                    background: 'rgba(0, 230, 118, 0.16)',
+                    color: '#00E676',
+                    border: '1px solid rgba(0, 230, 118, 0.4)',
+                    borderRadius: '4px',
+                    cursor: 'pointer',
+                    fontWeight: 600,
+                  }}
+                >
+                  🎯 Soi Chi Tiết ở Single Backtest
+                </button>
+                <button
+                  type="button"
+                  data-testid="clear-pending-rule-btn"
+                  onClick={clearPendingRule}
+                  style={{
+                    padding: '4px 10px',
+                    fontSize: '11px',
+                    background: 'rgba(255,255,255,0.06)',
+                    color: 'var(--text-muted)',
+                    border: '1px solid var(--border-color)',
+                    borderRadius: '4px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  Gỡ quy tắc tùy chỉnh
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* MarketProfile Execution Assumptions Banner (GAP-U-11) */}
+          <div
+            data-testid="market-assumptions-banner"
+            style={{
+              padding: '8px 14px',
+              marginBottom: '16px',
+              background: 'rgba(255, 255, 255, 0.03)',
+              border: '1px solid var(--border-color)',
+              borderRadius: '6px',
+              fontSize: '12px',
+              color: 'var(--text-muted)',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              gap: '8px',
+            }}
+          >
+            <span>
+              ⚙️ <strong>Giả định thực thi chuẩn HOSE (MarketProfile):</strong> Phí mua <strong>0.15%</strong> · Phí bán <strong>0.15%</strong> · Thuế bán <strong>0.10%</strong> · Lô chẵn <strong>100 CP</strong> · Khớp lệnh Mở cửa nến kế tiếp (<strong>Next-Open</strong>) · Chu kỳ thanh toán <strong>T+1.5</strong>
+            </span>
+          </div>
+
           {/* Strategy Selection Catalog (Rendered First for Clean Access) */}
           <div className="glass-panel" style={{ padding: '20px', marginBottom: '24px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '10px' }}>
@@ -974,9 +1211,9 @@ export const StrategyLabPage: React.FC = () => {
           </div>
         </div>
 
-        {strategies && strategies.length > 0 ? (
+        {allStrategies.length > 0 ? (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '12px' }}>
-            {strategies.map((strategy: AvailableStrategy) => {
+            {allStrategies.map((strategy: AvailableStrategy) => {
               const isSelected = selectedFilenames.includes(strategy.filename);
               return (
                 <label
@@ -1266,7 +1503,7 @@ export const StrategyLabPage: React.FC = () => {
                 onChange={e => setSelectedSweepStrategyFilename(e.target.value)}
                 style={{ width: '100%', padding: '9px', background: 'var(--bg-panel-solid)', color: 'var(--text-main)', border: '1px solid var(--border-color)', borderRadius: '4px' }}
               >
-                {(strategies || []).map(s => (
+                {allStrategies.map(s => (
                   <option key={s.filename} value={s.filename}>
                     {s.name}
                   </option>
@@ -1570,7 +1807,7 @@ export const StrategyLabPage: React.FC = () => {
               </span>
             </div>
             <div style={{ display: 'flex', gap: '12px', fontSize: '12px', color: 'var(--text-muted)' }}>
-              <span>Assumptions: 100-share lot, T+2, 0.15% fee, 0.10% tax</span>
+              <span>Giả định HOSE: Lô 100 CP · T+1.5 · Phí 0.15% · Thuế bán 0.10% · Next-Open</span>
             </div>
           </div>
 

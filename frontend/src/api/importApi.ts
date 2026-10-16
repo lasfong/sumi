@@ -139,16 +139,3 @@ export const getImportRuns = async (): Promise<ImportRunSummary[]> => {
   const response = await apiClient.get('/import/runs');
   return response.data;
 };
-
-export const importCafefData = async (file: File, adjustmentType: string = 'unadjusted'): Promise<ImportResult> => {
-  const formData = new FormData();
-  formData.append('file', file);
-  formData.append('adjustment_type', adjustmentType);
-  
-  const response = await apiClient.post('/import/cafef', formData, {
-    headers: {
-      'Content-Type': 'multipart/form-data',
-    },
-  });
-  return response.data;
-};

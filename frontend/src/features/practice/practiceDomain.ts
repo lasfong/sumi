@@ -77,8 +77,20 @@ export const validateDecision = (
   if (decision.target_price !== undefined && (!Number.isFinite(decision.target_price) || decision.target_price <= 0)) return 'Target price must be greater than zero.';
   const reference = decision.price ?? snapshot.current_price;
   if (['BUY', 'ADD'].includes(decision.action)) {
-    if (decision.stop_loss !== undefined && decision.stop_loss >= reference) return 'A long stop loss must be below the entry price.';
-    if (decision.target_price !== undefined && decision.target_price <= reference) return 'A long target must be above the entry price.';
+    if (decision.stop_loss !== undefined && decision.stop_loss >= reference) {
+      return 'Giá cắt lỗ (SL) phải thấp hơn giá mua cho vị thế Mua (LONG) — A long stop loss must be below the entry price.';
+    }
+    if (decision.target_price !== undefined && decision.target_price <= reference) {
+      return 'Giá chốt lời (TP) phải cao hơn giá mua cho vị thế Mua (LONG) — A long target must be above the entry price.';
+    }
+  }
+  if (['SELL', 'REDUCE'].includes(decision.action)) {
+    if (decision.stop_loss !== undefined && decision.stop_loss <= reference) {
+      return 'Giá cắt lỗ (SL) phải cao hơn giá bán cho vị thế Bán/Short (SHORT) — A short stop loss must be above the entry price.';
+    }
+    if (decision.target_price !== undefined && decision.target_price >= reference) {
+      return 'Giá chốt lời (TP) phải thấp hơn giá bán cho vị thế Bán/Short (SHORT) — A short target must be below the entry price.';
+    }
   }
   return null;
 };

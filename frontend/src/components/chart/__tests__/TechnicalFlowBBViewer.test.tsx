@@ -6,10 +6,14 @@ import { TechnicalFlowBBViewer } from '../TechnicalFlowBBViewer';
 import * as bbApi from '../../../api/bbApi';
 import '@testing-library/jest-dom';
 
-vi.mock('../../../api/bbApi', () => ({
-  getBBHorizons: vi.fn(),
-  getSymbolBB: vi.fn(),
-}));
+vi.mock('../../../api/bbApi', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../api/bbApi')>();
+  return {
+    ...actual,
+    getBBHorizons: vi.fn(),
+    getSymbolBB: vi.fn(),
+  };
+});
 
 const mockBBResponse = {
   symbol: 'FPT',
@@ -167,5 +171,50 @@ describe('TechnicalFlowBBViewer Component (Master Appendix F.3)', () => {
 
     const summary = screen.getByTestId('bb-latest-summary');
     expect(summary).toHaveTextContent('N/A');
+  });
+
+  it('unifies chart-format BB response (data[]) and surfaces warming/degraded notices (B41 / GAP-API-02)', async () => {
+    const chartAndDegradedResponse = {
+      symbol: 'FPT',
+      flow_method: 'OHLCV_PROXY',
+      methodology_version: 'bb_v1_ohlcv_proxy',
+      total_bars: 5,
+      coverage_ratio: 0.65,
+      publication_status: 'UNAVAILABLE_DEGRADED',
+      gate_reasons: ['CONSTITUENT_COVERAGE_BELOW_80_PCT'],
+      points: [],
+      data: [
+        {
+          time: '2026-03-02',
+          pressure: 0.42,
+          trading_value: 25000000000,
+          value_source: 'CLOSE_X_VOLUME',
+          quality: 'LOW',
+          t03: 58.25,
+          t03_dir: 'RISING',
+          t03_regime: 'POSITIVE',
+          t03_run: 2,
+          t20: null,
+          t20_dir: 'UNKNOWN',
+          t20_regime: 'UNKNOWN',
+          t20_run: 0,
+        },
+      ],
+    };
+
+    vi.mocked(bbApi.getSymbolBB).mockResolvedValue(
+      chartAndDegradedResponse as unknown as bbApi.BBSymbolSeriesResponse
+    );
+
+    renderWithClient(<TechnicalFlowBBViewer defaultSymbol="FPT" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('bb-warmup-notice')).toBeInTheDocument();
+      expect(screen.getByTestId('bb-degraded-notice')).toBeInTheDocument();
+    });
+
+    expect(screen.getByTestId('bb-warmup-notice')).toHaveTextContent(/Đang tích lũy dữ liệu/i);
+    expect(screen.getByTestId('bb-degraded-notice')).toHaveTextContent(/CONSTITUENT_COVERAGE_BELOW_80_PCT/i);
+    expect(screen.getByTestId('horizon-badge-T03')).toHaveTextContent('58.25');
   });
 });

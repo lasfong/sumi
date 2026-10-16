@@ -8,8 +8,12 @@ from app.domain.data_feeds.base import BaseFeed
 
 class DataFeedService:
     """
-    Service responsible for orchestrating data feeds and database persistence.
+    DEPRECATED (GAP-DB-13 / GAP-API-10 / ADR-TX-001):
+    Legacy data feed service isolated from production use. All market data ingestion
+    must flow through ImportWorkflowService or SyncWorkflowService with provenance tracking.
     """
+    DEPRECATED = True
+
     def __init__(self, db: Session, feed: BaseFeed):
         self.db = db
         self.feed = feed
@@ -19,11 +23,17 @@ class DataFeedService:
         symbol_name: str, 
         timeframe: str, 
         start_date: datetime, 
-        end_date: Optional[datetime] = None
+        end_date: Optional[datetime] = None,
+        allow_legacy_script: bool = False,
     ):
         """
-        Fetch historical data from feed and save to DB.
+        Fetch historical data from feed and save to DB (blocked unless allow_legacy_script=True).
         """
+        if not allow_legacy_script:
+            raise RuntimeError(
+                "DataFeedService is deprecated and prohibited by ADR-TX-001 / ADR-API-001. "
+                "Use ImportWorkflowService or SyncWorkflowService for audited data ingestion."
+            )
         # Ensure symbol exists
         symbol = self.db.query(Symbol).filter(Symbol.symbol == symbol_name).first()
         if not symbol:

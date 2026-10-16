@@ -61,6 +61,7 @@ export const ReplayWorkspace: React.FC = () => {
     practiceLoading,
     practiceError,
     handleResetPractice,
+    handleCancelOrder,
     journalData,
     journalLoading,
     journalError,
@@ -122,7 +123,7 @@ export const ReplayWorkspace: React.FC = () => {
       }}
     >
       <div className="limited-workstation-warning" role="status">
-        Limited layout below 1180px: trade submission is unavailable. Use a desktop-width workspace
+        Limited layout below 1280px: trade submission is unavailable. Use a desktop-width workspace (≥1280px)
         for full practice.
       </div>
 
@@ -239,32 +240,66 @@ export const ReplayWorkspace: React.FC = () => {
               <div
                 data-testid="indicator-order-controls"
                 style={{
-                  position: 'fixed',
-                  top: 120,
-                  right: 340,
-                  zIndex: 99,
+                  position: 'absolute',
+                  top: 10,
+                  right: 76,
+                  zIndex: 21,
                   display: 'flex',
+                  flexWrap: 'wrap',
                   gap: 4,
                   pointerEvents: 'none',
                 }}
               >
                 {indicatorDocument.instances.map((instance, index) => (
-                  <div key={instance.id} style={{ display: 'flex', gap: 2, pointerEvents: 'none' }}>
+                  <div
+                    key={instance.id}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 2,
+                      padding: '2px 5px',
+                      borderRadius: 4,
+                      background: 'rgba(19, 23, 34, 0.85)',
+                      border: '1px solid rgba(255, 255, 255, 0.14)',
+                      pointerEvents: 'auto',
+                    }}
+                  >
+                    <span style={{ fontSize: 10, color: '#9DA7B3', marginRight: 2 }}>
+                      {instance.label}
+                    </span>
                     <button
                       type="button"
                       aria-label={`Move ${instance.label} up`}
+                      title={`Di chuyển ${instance.label} lên trên`}
                       disabled={index === 0}
                       onClick={() => moveIndicatorInstance(instance.id, -1)}
-                      style={{ padding: '1px 3px', fontSize: 8, opacity: 0.15, pointerEvents: 'auto' }}
+                      style={{
+                        padding: '1px 5px',
+                        fontSize: 10,
+                        opacity: index === 0 ? 0.35 : 0.9,
+                        background: 'rgba(255, 255, 255, 0.08)',
+                        color: '#F0F6FC',
+                        borderRadius: 3,
+                        pointerEvents: 'auto',
+                      }}
                     >
                       ↑
                     </button>
                     <button
                       type="button"
                       aria-label={`Move ${instance.label} down`}
+                      title={`Di chuyển ${instance.label} xuống dưới`}
                       disabled={index === indicatorDocument.instances.length - 1}
                       onClick={() => moveIndicatorInstance(instance.id, 1)}
-                      style={{ padding: '1px 3px', fontSize: 8, opacity: 0.15, pointerEvents: 'auto' }}
+                      style={{
+                        padding: '1px 5px',
+                        fontSize: 10,
+                        opacity: index === indicatorDocument.instances.length - 1 ? 0.35 : 0.9,
+                        background: 'rgba(255, 255, 255, 0.08)',
+                        color: '#F0F6FC',
+                        borderRadius: 3,
+                        pointerEvents: 'auto',
+                      }}
                     >
                       ↓
                     </button>
@@ -354,6 +389,7 @@ export const ReplayWorkspace: React.FC = () => {
             practiceError={practiceError}
             onResetPractice={handleResetPractice}
             onSubmitDecision={handleSubmitDecision}
+            onCancelOrder={handleCancelOrder}
             journalData={journalData}
             journalLoading={journalLoading}
             journalError={journalError}

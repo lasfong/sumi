@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { getBBHorizons, getSymbolBB } from '../../api/bbApi';
+import { extractApiErrorMessage } from '../../api/client';
+import { getBBHorizons, getSymbolBB, normalizeBBSeriesEnvelope } from '../../api/bbApi';
 
 export interface TechnicalFlowBBViewerProps {
   defaultSymbol?: string;
@@ -39,7 +40,7 @@ export const TechnicalFlowBBViewer: React.FC<TechnicalFlowBBViewerProps> = ({
     queryFn: getBBHorizons,
   });
 
-  const { data: bbData, isLoading, error } = useQuery({
+  const { data: rawBbData, isLoading, error } = useQuery({
     queryKey: ['bb-symbol', symbol, activeHorizons.join(','), asOfDate],
     queryFn: () =>
       getSymbolBB(symbol, {
@@ -50,6 +51,12 @@ export const TechnicalFlowBBViewer: React.FC<TechnicalFlowBBViewerProps> = ({
       }),
     enabled: !!symbol,
   });
+
+  const bbData = rawBbData
+    ? typeof normalizeBBSeriesEnvelope === 'function'
+      ? normalizeBBSeriesEnvelope(rawBbData)
+      : rawBbData
+    : undefined;
 
   const [selectedHorizon, setSelectedHorizon] = useState<string>('T20');
 
@@ -83,6 +90,35 @@ export const TechnicalFlowBBViewer: React.FC<TechnicalFlowBBViewerProps> = ({
   const percentBValue = typeof latestPoint?.percent_b === 'number' ? latestPoint.percent_b : null;
   const regimeValue = horizonPoint?.regime ?? latestPoint?.regime ?? 'NEUTRAL';
 
+  const methodologyLabel = bbData?.flow_method || bbData?.methodology || 'OHLCV_PROXY';
+  const dataQuality =
+    horizonPoint?.quality ||
+    latestPoint?.daily_quality ||
+    latestPoint?.data_quality ||
+    'HIGH';
+
+  const isWarming = Boolean(horizonPoint?.is_warmup);
+  const isLowCoverage = typeof bbData?.coverage_ratio === 'number' && bbData.coverage_ratio < 0.8;
+  const isDegraded =
+    bbData?.publication_status === 'UNAVAILABLE_DEGRADED' ||
+    dataQuality === 'LOW' ||
+    dataQuality === 'UNAVAILABLE' ||
+    horizonPoint?.value_source === 'UNAVAILABLE' ||
+    isLowCoverage;
+
+  const degradedReasons: string[] = [];
+  if (bbData?.gate_reasons && bbData.gate_reasons.length > 0) {
+    degradedReasons.push(...bbData.gate_reasons);
+  }
+  if (isLowCoverage && typeof bbData?.coverage_ratio === 'number') {
+    degradedReasons.push(`Độ phủ dữ liệu thấp (${(bbData.coverage_ratio * 100).toFixed(1)}% < 80%)`);
+  }
+  if (horizonPoint?.value_source === 'UNAVAILABLE' || dataQuality === 'UNAVAILABLE') {
+    degradedReasons.push('Nguồn giá trị giao dịch không khả dụng (UNAVAILABLE)');
+  } else if (dataQuality === 'LOW') {
+    degradedReasons.push('Chất lượng dữ liệu ở mức thấp (LOW)');
+  }
+
   return (
     <div
       className={`glass-panel technical-flow-bb-viewer ${className}`}
@@ -110,7 +146,7 @@ export const TechnicalFlowBBViewer: React.FC<TechnicalFlowBBViewerProps> = ({
               }}
               title="Phương pháp Proxy: Ước tính từ biến động giá và khối lượng (OHLCV Proxy) — không đại diện cho dòng tiền khớp lệnh trực tiếp từ sở"
             >
-              PHƯƠNG PHÁP: OHLCV_PROXY
+              PHƯƠNG PHÁP: {methodologyLabel}
             </span>
           </div>
           <p style={{ margin: 0, fontSize: '12px', color: 'var(--text-muted)' }}>
@@ -126,13 +162,13 @@ export const TechnicalFlowBBViewer: React.FC<TechnicalFlowBBViewerProps> = ({
               fontSize: '11px',
               padding: '2px 8px',
               borderRadius: '4px',
-              background: 'rgba(0, 230, 118, 0.15)',
-              color: 'var(--color-buy)',
-              border: '1px solid rgba(0, 230, 118, 0.4)',
+              background: isDegraded ? 'rgba(255, 152, 0, 0.15)' : 'rgba(0, 230, 118, 0.15)',
+              color: isDegraded ? '#FF9800' : 'var(--color-buy)',
+              border: isDegraded ? '1px solid rgba(255, 152, 0, 0.4)' : '1px solid rgba(0, 230, 118, 0.4)',
               fontWeight: 600,
             }}
           >
-            CHẤT LƯỢNG DỮ LIỆU: HIGH
+            CHẤT LƯỢNG DỮ LIỆU: {dataQuality}
           </span>
         </div>
       </div>
@@ -213,8 +249,65 @@ export const TechnicalFlowBBViewer: React.FC<TechnicalFlowBBViewerProps> = ({
       )}
 
       {error && (
-        <div style={{ padding: '12px', background: 'rgba(255, 23, 68, 0.1)', color: 'var(--color-sell)', borderRadius: '6px', fontSize: '12px' }}>
-          Lỗi: {error instanceof Error ? error.message : 'Không thể tải dữ liệu BB'}
+        <div
+          data-testid="bb-error-notice"
+          style={{ padding: '12px', background: 'rgba(255, 23, 68, 0.1)', color: 'var(--color-sell)', borderRadius: '6px', fontSize: '12px', marginBottom: '12px' }}
+        >
+          Lỗi: {extractApiErrorMessage(error, 'Không thể tải dữ liệu BB')}
+        </div>
+      )}
+
+      {!isLoading && !error && !latestPoint && (
+        <div
+          data-testid="bb-empty-state"
+          style={{
+            padding: '16px',
+            background: 'rgba(255, 255, 255, 0.03)',
+            border: '1px solid var(--border-color)',
+            borderRadius: '6px',
+            fontSize: '12px',
+            color: 'var(--text-muted)',
+            marginBottom: '12px',
+          }}
+        >
+          Chưa có dữ liệu nến cho mã {symbol || 'được chọn'} trong khoảng thời gian yêu cầu.
+        </div>
+      )}
+
+      {!isLoading && !error && isWarming && (
+        <div
+          data-testid="bb-warmup-notice"
+          style={{
+            padding: '10px 14px',
+            background: 'rgba(255, 209, 102, 0.12)',
+            border: '1px solid rgba(255, 209, 102, 0.4)',
+            borderRadius: '6px',
+            fontSize: '12px',
+            color: '#FFD166',
+            marginBottom: '12px',
+          }}
+        >
+          ⏳ <strong>Đang tích lũy dữ liệu (Warming):</strong> Chu kỳ <code>{activeInspectionHorizon}</code> chưa đủ số phiên lịch sử để tính toán giá trị dòng tiền BB hợp lệ (<code>bb_value = N/A</code>).
+        </div>
+      )}
+
+      {!isLoading && !error && isDegraded && (
+        <div
+          data-testid="bb-degraded-notice"
+          style={{
+            padding: '10px 14px',
+            background: 'rgba(255, 152, 0, 0.12)',
+            border: '1px solid rgba(255, 152, 0, 0.4)',
+            borderRadius: '6px',
+            fontSize: '12px',
+            color: '#FF9800',
+            marginBottom: '12px',
+          }}
+        >
+          ⚠️ <strong>Dữ liệu suy giảm / Bị chặn xuất bản (UNAVAILABLE_DEGRADED):</strong>{' '}
+          {degradedReasons.length > 0
+            ? degradedReasons.join(' • ')
+            : 'Dữ liệu dòng tiền hiện chưa đạt ngưỡng chuẩn kiểm toán.'}
         </div>
       )}
 

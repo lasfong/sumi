@@ -46,8 +46,9 @@ export interface CreateSessionRequest {
   start_date: string;
   end_date: string;
   initial_cash?: number;
-  mode?: SessionMode;
+  mode?: CreateSessionMode;
 }
 
-export type SessionStatus = 'created' | 'active' | 'paused' | 'completed' | 'archived';
-export type SessionMode = 'normal' | 'random' | 'blind_symbol' | 'blind_date' | 'backtest';
+export type SessionStatus = 'created' | 'active' | 'paused' | 'completed' | 'archived' | 'bankrupt';
+export type CreateSessionMode = 'normal' | 'random' | 'blind_symbol' | 'blind_date';
+export type SessionMode = CreateSessionMode | 'backtest';

@@ -9,6 +9,9 @@ export interface DrawingStateResponse {
 }
 
 export const createReplaySession = async (data: CreateSessionRequest): Promise<ReplaySession> => {
+  if ((data.mode as string | undefined) === 'backtest') {
+    throw new Error('Cannot create manual replay session with mode="backtest"');
+  }
   const response = await apiClient.post('/replay/sessions', data);
   return response.data;
 };

@@ -3,20 +3,69 @@ from typing import Any
 import pandas as pd
 
 from app.domain.engine.indicator_engine import IndicatorEngine
+from app.domain.signals.models import CandleBar
+from app.domain.signals.registry import SignalRegistry
 
 
 SOURCE_COLUMNS = {"timestamp", "open", "high", "low", "close", "volume"}
 
 
 class StrategyIndicatorAdapter:
-    """Maps strategy indicator configs onto the shared IndicatorEngine output."""
+    """Maps strategy indicator configs onto the shared IndicatorEngine and SignalRegistry output."""
 
     @staticmethod
     def compute(df: pd.DataFrame, indicators_config) -> dict[str, Any]:
         values: dict[str, Any] = {}
+        candle_bars: list[CandleBar] | None = None
         for indicator in indicators_config:
-            indicator_id = IndicatorEngine.normalize_indicator_id(indicator.type)
+            sig_name = (
+                SignalRegistry.resolve_name_from_alias(indicator.name)
+                or (indicator.name if SignalRegistry.get_definition(indicator.name) else None)
+                or SignalRegistry.resolve_name_from_alias(indicator.name.replace("_", "__", 1))
+            )
+            if sig_name is not None:
+                if candle_bars is None:
+                    candle_bars = [
+                        CandleBar(
+                            index=idx,
+                            timestamp=row["timestamp"].isoformat()
+                            if hasattr(row["timestamp"], "isoformat")
+                            else str(row["timestamp"]),
+                            open=float(row["open"]),
+                            high=float(row["high"]),
+                            low=float(row["low"]),
+                            close=float(row["close"]),
+                            volume=float(row["volume"]) if row.get("volume") is not None else None,
+                        )
+                        for idx, row in enumerate(df.to_dict("records"))
+                    ]
+                resolved_params = SignalRegistry.resolve_and_validate_params(sig_name, None)
+                calc_result = SignalRegistry.calculate(
+                    name=sig_name,
+                    candles=candle_bars,
+                    params=resolved_params,
+                    session_id=0,
+                    observed_index=max(0, len(candle_bars) - 1),
+                )
+                values[indicator.name] = [
+                    pt.value if pt.quality.value == "VALID" else None
+                    for pt in calc_result.points
+                ]
+                continue
+
+            raw_type = indicator.type
+            inferred_length = getattr(indicator, "length", None)
+            if raw_type == "signal" and "_" in indicator.name:
+                prefix, suffix = indicator.name.rsplit("_", 1)
+                if suffix.isdigit():
+                    raw_type = prefix
+                    if inferred_length is None:
+                        inferred_length = int(suffix)
+
+            indicator_id = IndicatorEngine.normalize_indicator_id(raw_type)
             params = StrategyIndicatorAdapter._params_for(indicator)
+            if inferred_length is not None and "length" not in params:
+                params["length"] = inferred_length
             result_df = IndicatorEngine.compute(df, indicator_id, **params)
             output_columns = [
                 column for column in result_df.columns

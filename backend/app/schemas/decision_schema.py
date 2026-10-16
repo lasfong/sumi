@@ -27,10 +27,10 @@ class DecisionBase(BaseModel):
 class DecisionCreate(DecisionBase):
     @model_validator(mode='after')
     def check_limit_order(self):
-        if self.order_type not in ["MARKET_AT_CLOSE", "MARKET_NEXT_OPEN", "LIMIT"]:
-            raise ValueError("order_type must be MARKET_AT_CLOSE, MARKET_NEXT_OPEN or LIMIT")
-        if self.order_type == "LIMIT" and self.price is None:
-            raise ValueError("Limit order requires a price")
+        if self.order_type not in ["MARKET_AT_CLOSE", "MARKET_NEXT_OPEN", "LIMIT", "CUSTOM_PRICE"]:
+            raise ValueError("order_type must be MARKET_AT_CLOSE, MARKET_NEXT_OPEN, LIMIT or CUSTOM_PRICE")
+        if self.order_type in ("LIMIT", "CUSTOM_PRICE") and self.price is None:
+            raise ValueError(f"{self.order_type} order requires a price")
         if self.quantity is not None and self.quantity % 100 != 0:
             raise ValueError("Quantity must be a multiple of 100")
         return self

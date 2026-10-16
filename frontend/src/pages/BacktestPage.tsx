@@ -1,24 +1,107 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { getAvailableStrategies, runBacktest } from '../api/backtestApi';
-import type { BacktestRequest, BacktestResultSlice, StrategyConfig } from '../api/backtestApi';
+import type { AvailableStrategy, BacktestRequest, BacktestResultSlice, StrategyConfig } from '../api/backtestApi';
+import type { StrategyRulePayload } from '../components/strategy/StrategyRuleBuilder';
 import { EquityChart } from '../components/analytics/EquityChart';
 import { MetricResultValue } from '../components/analytics/MetricResultValue';
 
-export const BacktestPage: React.FC = () => {
+const CUSTOM_RULE_FILENAME = 'custom_ast_rule.yaml';
+
+function loadPendingRuleFromStorage(): StrategyRulePayload | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw =
+      window.sessionStorage?.getItem('sumi_pending_strategy_rule') ||
+      window.localStorage?.getItem('sumi_pending_strategy_rule');
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StrategyRulePayload;
+    if (parsed && parsed.expression) {
+      return parsed;
+    }
+  } catch {
+    // ignore storage parse error
+  }
+  return null;
+}
+
+function buildCustomStrategyFromPayload(payload: StrategyRulePayload): AvailableStrategy {
+  const cleanName = payload.ruleName || 'Bo_Dieu_Kien_Mau';
+  const signals = payload.signalsRequired || [];
+  const config: StrategyConfig = payload.strategyConfig ?? {
+    name: cleanName,
+    version: '1.0',
+    description: `Quy tắc AST tùy chỉnh: ${payload.expression}`,
+    indicators: signals.map((alias) => ({ name: alias, type: 'signal' })),
+    entry_rules: [{ condition: payload.expression }],
+    exit_rules: [],
+    position_sizing: { method: 'fixed_quantity', quantity: 1000 },
+    risk_management: { stop_loss_pct: 7.0, take_profit_pct: 15.0 },
+  };
+  return {
+    filename: CUSTOM_RULE_FILENAME,
+    name: `${cleanName} (Custom AST)`,
+    description: `Biểu thức AST: ${payload.expression}`,
+    config,
+  };
+}
+
+export interface BacktestPageProps {
+  embedded?: boolean;
+}
+
+export const BacktestPage: React.FC<BacktestPageProps> = ({ embedded = false }) => {
   const [symbol, setSymbol] = useState('FPT');
   const [startDate, setStartDate] = useState('2020-01-01');
   const [endDate, setEndDate] = useState('2023-12-31');
   const [initialCash, setInitialCash] = useState(100000000);
-  const [selectedStrategyFilename, setSelectedStrategyFilename] = useState('');
+  const [pendingRule, setPendingRule] = useState<StrategyRulePayload | null>(() => loadPendingRuleFromStorage());
+  const [selectedStrategyFilename, setSelectedStrategyFilename] = useState<string>(() =>
+    loadPendingRuleFromStorage() ? CUSTOM_RULE_FILENAME : ''
+  );
+
+  useEffect(() => {
+    const handleRuleEvent = (e: Event) => {
+      const detail = (e as CustomEvent<StrategyRulePayload>).detail || loadPendingRuleFromStorage();
+      if (detail && detail.expression) {
+        setPendingRule(detail);
+        setSelectedStrategyFilename(CUSTOM_RULE_FILENAME);
+      }
+    };
+    window.addEventListener('sumi:run-strategy-rule', handleRuleEvent);
+    return () => window.removeEventListener('sumi:run-strategy-rule', handleRuleEvent);
+  }, []);
+
+  const clearPendingRule = () => {
+    setPendingRule(null);
+    if (selectedStrategyFilename === CUSTOM_RULE_FILENAME) {
+      setSelectedStrategyFilename('');
+    }
+    try {
+      window.sessionStorage?.removeItem('sumi_pending_strategy_rule');
+      window.localStorage?.removeItem('sumi_pending_strategy_rule');
+    } catch {
+      // ignore
+    }
+  };
 
   const { data: strategies, isLoading: isLoadingStrategies } = useQuery({
     queryKey: ['strategies'],
     queryFn: getAvailableStrategies,
   });
 
-  const effectiveStrategyFilename = selectedStrategyFilename || strategies?.[0]?.filename || '';
-  const selectedStrategy = strategies?.find(s => s.filename === effectiveStrategyFilename);
+  const allStrategies = useMemo<AvailableStrategy[]>(() => {
+    const base = strategies ? [...strategies] : [];
+    if (pendingRule) {
+      return [buildCustomStrategyFromPayload(pendingRule), ...base];
+    }
+    return base;
+  }, [strategies, pendingRule]);
+
+  const effectiveStrategyFilename =
+    selectedStrategyFilename ||
+    (pendingRule ? CUSTOM_RULE_FILENAME : allStrategies[0]?.filename || '');
+  const selectedStrategy = allStrategies.find(s => s.filename === effectiveStrategyFilename);
   const selectedStrategyConfig = selectedStrategy?.config as StrategyConfig | undefined;
 
   const mutation = useMutation({
@@ -27,9 +110,9 @@ export const BacktestPage: React.FC = () => {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!strategies) return;
+    if (allStrategies.length === 0) return;
     
-    const strategy = strategies.find(s => s.filename === effectiveStrategyFilename);
+    const strategy = allStrategies.find(s => s.filename === effectiveStrategyFilename);
     if (!strategy) {
       alert("Vui lòng chọn một chiến lược (Strategy)!");
       return;
@@ -51,8 +134,8 @@ export const BacktestPage: React.FC = () => {
     mutation.mutate(request);
   };
 
-  const formatMoney = (val?: number) => val ? val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '0.00';
-  const formatPercent = (val?: number) => val ? `${(val * 100).toFixed(2)}%` : '0.00%';
+  const formatMoney = (val?: number | null) => val ? val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '0.00';
+  const formatPercent = (val?: number | null) => val ? `${(val * 100).toFixed(2)}%` : '0.00%';
 
   const { data: result, isPending } = mutation;
   const analytics = result?.analytics;
@@ -93,14 +176,76 @@ export const BacktestPage: React.FC = () => {
   );
 
   return (
-    <div className="animate-fade-in" style={{ maxWidth: '1200px', margin: '0 auto', paddingBottom: '40px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
-        <h2 style={{ margin: 0, fontSize: '28px', background: 'linear-gradient(90deg, #fff, #8B949E)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
-          Backtest Engine
-        </h2>
+    <div className="animate-fade-in" style={{ maxWidth: '1200px', margin: '0 auto', paddingBottom: '40px' }} data-testid="single-backtest-surface">
+      {!embedded && (
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
+          <h2 style={{ margin: 0, fontSize: '28px', background: 'linear-gradient(90deg, #fff, #8B949E)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
+            Backtest Engine
+          </h2>
+        </div>
+      )}
+
+      {/* Single vs Battle vs Sweep Explanatory Callout (DEC-06, GAP-U-05) */}
+      <div
+        data-testid="single-vs-battle-banner"
+        className="glass-panel"
+        style={{
+          padding: '12px 16px',
+          marginBottom: '16px',
+          borderColor: 'rgba(88, 166, 255, 0.35)',
+          background: 'rgba(41, 98, 255, 0.08)',
+          fontSize: '12px',
+          color: 'var(--text-muted)',
+          lineHeight: 1.5,
+        }}
+      >
+        <strong style={{ color: '#58A6FF' }}>🎯 Single Backtest vs. ⚔️ Strategy Battle:</strong>{' '}
+        Chế độ <strong>Single Backtest</strong> phân tích chuyên sâu 1 chiến lược đơn lẻ (đường cong vốn chi tiết, lát cắt theo Mã/Chu kỳ/Regime &amp; Run Manifest). Dùng tab <strong>Battle &amp; Sweep</strong> để đối đầu nhiều chiến lược cùng lúc hoặc quét tối ưu tham số IS/OOS.
       </div>
 
-      <div className="glass-panel" style={{ padding: '24px', marginBottom: '32px' }}>
+      {/* Pending Custom Rule Prefill Banner (GAP-U-03, LAB-002) */}
+      {pendingRule && (
+        <div
+          data-testid="pending-rule-prefill-banner"
+          className="glass-panel"
+          style={{
+            padding: '12px 16px',
+            marginBottom: '16px',
+            borderColor: '#00E676',
+            background: 'rgba(0, 230, 118, 0.08)',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: '12px',
+          }}
+        >
+          <div>
+            <div style={{ color: '#00E676', fontWeight: 600, fontSize: '13px' }}>
+              ✓ Đã nạp quy tắc từ Rule Builder: <strong>{pendingRule.ruleName}</strong>
+            </div>
+            <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>
+              Biểu thức AST: <code style={{ color: '#58A6FF' }}>{pendingRule.expression}</code>
+            </div>
+          </div>
+          <button
+            type="button"
+            data-testid="clear-pending-rule-btn"
+            onClick={clearPendingRule}
+            style={{
+              padding: '4px 10px',
+              fontSize: '11px',
+              background: 'rgba(255, 255, 255, 0.08)',
+              color: 'var(--text-muted)',
+              border: '1px solid var(--border-color)',
+              borderRadius: '4px',
+            }}
+          >
+            Gỡ quy tắc tùy chỉnh
+          </button>
+        </div>
+      )}
+
+      <div className="glass-panel" style={{ padding: '24px', marginBottom: '20px' }}>
         <form onSubmit={handleSubmit} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '20px', alignItems: 'end' }}>
           <div>
             <label htmlFor="symbol" style={{ display: 'block', marginBottom: '8px', color: 'var(--text-muted)', fontSize: '14px' }}>Symbol(s)</label>
@@ -156,7 +301,7 @@ export const BacktestPage: React.FC = () => {
               required
             >
               <option value="" disabled>Select a strategy</option>
-              {strategies?.map(s => (
+              {allStrategies.map(s => (
                 <option key={s.filename} value={s.filename}>{s.name} ({s.filename})</option>
               ))}
             </select>
@@ -167,6 +312,18 @@ export const BacktestPage: React.FC = () => {
             </button>
           </div>
         </form>
+        <div
+          data-testid="market-assumptions-banner"
+          style={{
+            marginTop: '14px',
+            paddingTop: '10px',
+            borderTop: '1px solid rgba(255, 255, 255, 0.08)',
+            fontSize: '11px',
+            color: 'var(--text-muted)',
+          }}
+        >
+          Giả định thị trường VN (MarketProfile): Phí mua 0.15% · Phí bán 0.15% · Thuế bán 0.10% · Lô chẵn 100 CP · Khớp giá Mở cửa phiên kế (Next-Open) · Thanh toán T+1.5 (bán khả dụng từ phiên kế theo lịch giao dịch VN)
+        </div>
       </div>
 
       {selectedStrategy && (

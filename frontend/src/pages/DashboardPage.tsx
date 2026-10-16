@@ -160,7 +160,7 @@ export const DashboardPage: React.FC = () => {
                 <span>Manual replay & position execution</span>
               </div>
             </Link>
-            <Link to="/backtest" className="quick-link">
+            <Link to="/strategy-lab?tab=single" className="quick-link" data-testid="dashboard-link-single-backtest">
               <Cpu className="link-icon" size={18} />
               <div className="link-content">
                 <strong>Backtest Engine</strong>

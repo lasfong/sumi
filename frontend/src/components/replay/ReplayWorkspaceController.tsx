@@ -3,7 +3,8 @@ import { useQuery, useMutation } from '@tanstack/react-query';
 import type { CandleChartRef } from '../chart/CandleChart';
 import type { SeriesMarker, Time, SeriesMarkerPosition, SeriesMarkerShape } from 'lightweight-charts';
 import { createReplaySession, getReplaySession, getSessionCandles, nextCandle, previousCandle, resetPracticeSession } from '../../api/replayApi';
-import { getPracticeState, submitDecision } from '../../api/decisionApi';
+import { extractApiErrorMessage } from '../../api/client';
+import { cancelPendingOrder, getPracticeState, submitDecision } from '../../api/decisionApi';
 import { createJournalEntry, getJournalEntries } from '../../api/journalApi';
 import { getIndicatorRegistry, getSessionIndicatorResponse, type IndicatorDefinition, type ReplayIndicatorResponse } from '../../api/indicatorsApi';
 import toast from 'react-hot-toast';
@@ -194,7 +195,7 @@ export const useReplayWorkspaceController = () => {
       toast.success(`Session #${data.id} created!`);
     },
     onError: (err: ApiError) => {
-      toast.error(err?.response?.data?.detail || 'Failed to create session');
+      toast.error(extractApiErrorMessage(err, 'Failed to create session'));
     }
   });
 
@@ -308,8 +309,7 @@ export const useReplayWorkspaceController = () => {
       toast.success(message);
       return { ok: true, message };
     } catch (err: unknown) {
-      const apiError = err as ApiError;
-      const message = apiError?.response?.data?.detail || 'Transport error: decision was not confirmed. Retry when the local API is available.';
+      const message = extractApiErrorMessage(err, 'Transport error: decision was not confirmed. Retry when the local API is available.');
       toast.error(message);
       await refetchPractice();
       return { ok: false, message };
@@ -323,8 +323,7 @@ export const useReplayWorkspaceController = () => {
       await refetchJournal();
       return { ok: true, message: 'Checklist saved for the current replay context.' };
     } catch (err: unknown) {
-      const apiError = err as ApiError;
-      return { ok: false, message: apiError?.response?.data?.detail || 'Transport error: journal draft was not saved.' };
+      return { ok: false, message: extractApiErrorMessage(err, 'Transport error: journal draft was not saved.') };
     }
   }, [refetchJournal, sessionId]);
 
@@ -339,6 +338,17 @@ export const useReplayWorkspaceController = () => {
       toast.error('Không thể reset trạng thái luyện tập');
     }
   }, [sessionId, refetchPractice, refetchSession, refetchJournal]);
+
+  const handleCancelOrder = useCallback(async (orderId: number) => {
+    if (!sessionId) return;
+    try {
+      await cancelPendingOrder(sessionId, orderId);
+      await refetchPractice();
+      toast.success(`Đã hủy lệnh chờ #${orderId}`);
+    } catch (err: unknown) {
+      toast.error(extractApiErrorMessage(err, 'Không thể hủy lệnh chờ'));
+    }
+  }, [sessionId, refetchPractice]);
 
   const symbolName = sessionData?.symbol || candlesData?.[0]?.symbol || '—';
   const currentCandle = candlesData?.length ? candlesData[candlesData.length - 1] : null;
@@ -593,6 +603,26 @@ export const useReplayWorkspaceController = () => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!isGlobalShortcutEligible(e)) return;
       if (!sessionId) return;
+
+      // Ctrl/Cmd-key combinations for drawing Undo / Redo (GAP-U-04)
+      if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+        if (e.code === 'KeyZ' && !e.shiftKey) {
+          if (drawing.canUndo) {
+            e.preventDefault();
+            drawing.undo();
+            toast('Đã hoàn tác hình vẽ (Undo)', { duration: 1500 });
+          }
+          return;
+        }
+        if ((e.code === 'KeyZ' && e.shiftKey) || (e.code === 'KeyY' && !e.shiftKey)) {
+          if (drawing.canRedo) {
+            e.preventDefault();
+            drawing.redo();
+            toast('Đã làm lại hình vẽ (Redo)', { duration: 1500 });
+          }
+          return;
+        }
+      }
 
       // Alt-key combinations for drawing tools
       if (e.altKey && !e.ctrlKey && !e.metaKey) {
@@ -938,7 +968,7 @@ export const useReplayWorkspaceController = () => {
     wsStatus, wsReconnectAttempt, isConnected, closeSocket,
     handlePrev, handleNext, navigationPending,
     drawing, selectedDrawing, handleDrawingTool, formattedCandles, volumeData, markers,
-    practiceData, practiceLoading, practiceError, handleResetPractice,
+    practiceData, practiceLoading, practiceError, handleResetPractice, handleCancelOrder,
     journalData, journalLoading, journalError, handleSaveJournal, handleSubmitDecision,
   };
 };

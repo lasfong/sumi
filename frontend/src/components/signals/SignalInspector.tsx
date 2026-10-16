@@ -1,6 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { extractApiErrorMessage } from '../../api/client';
 import { calculateReplaySignals } from '../../api/signalsApi';
 import type { SignalOutputPoint } from '../../types/signals';
+
+const PINNED_SIGNAL_VERSION = '1.0.0';
 
 const STRICT_DAILY_TIMESTAMP_REGEX =
   /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?(?:Z|([+-])(\d{2})(?::?(\d{2}))?)?)?$/;
@@ -200,7 +203,7 @@ export const SignalInspector: React.FC<SignalInspectorProps> = ({
       signals: [
         {
           name: 'volume.spike',
-          version: '1.0.0',
+          version: PINNED_SIGNAL_VERSION,
           params: { period: capturedPeriod, multiplier: capturedMultiplier },
         },
       ],
@@ -249,9 +252,9 @@ export const SignalInspector: React.FC<SignalInspectorProps> = ({
           failValidation('Thiếu kết quả tín hiệu volume.spike trong phản hồi');
           return;
         }
-        if (spikeResult.signal_version !== '1.0.0') {
+        if (spikeResult.signal_version !== PINNED_SIGNAL_VERSION) {
           failValidation(
-            `Phiên bản tín hiệu không khớp (yêu cầu 1.0.0, nhận ${spikeResult.signal_version})`
+            `Phiên bản tín hiệu không khớp (yêu cầu ${PINNED_SIGNAL_VERSION}, nhận ${spikeResult.signal_version})`
           );
           return;
         }
@@ -357,8 +360,7 @@ export const SignalInspector: React.FC<SignalInspectorProps> = ({
         if (generation !== requestIdRef.current) {
           return;
         }
-        const detail =
-          err.response?.data?.detail || err.message || 'Lỗi khi tính toán tín hiệu';
+        const detail = extractApiErrorMessage(err, 'Lỗi khi tính toán tín hiệu');
         setAcceptedData(null);
         setApiError({
           occurrenceToken: capturedOccurrenceToken,

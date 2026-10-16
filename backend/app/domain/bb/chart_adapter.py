@@ -19,7 +19,7 @@ class BBChartAdapter:
 
         for pt in series.points:
             rec: Dict[str, Any] = {
-                "time": pt.date,
+                "time": str(pt.date),
                 "pressure": round(pt.daily_pressure, 4),
                 "trading_value": round(pt.daily_trading_value, 2),
                 "value_source": pt.daily_value_source.value,
@@ -40,7 +40,7 @@ class BBChartAdapter:
             "flow_method": series.flow_method.value,
             "methodology_version": series.methodology_version,
             "label": "Technical Flow BB",
-            "as_of": series.as_of,
+            "as_of": str(series.as_of) if series.as_of is not None else None,
             "total_bars": series.total_bars,
             "coverage_ratio": round(series.coverage_ratio, 4),
             "data": records,

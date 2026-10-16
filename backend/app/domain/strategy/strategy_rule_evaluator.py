@@ -17,7 +17,16 @@ class StrategyRuleEvaluator:
         snapshot = {}
         for key, values in indicator_values.items():
             value = values[index]
-            snapshot[key] = float(value) if not np.isnan(value) else None
+            if value is None:
+                snapshot[key] = None
+            elif isinstance(value, (bool, np.bool_)):
+                snapshot[key] = bool(value)
+            elif isinstance(value, str):
+                snapshot[key] = value
+            elif isinstance(value, (float, np.floating)) and np.isnan(value):
+                snapshot[key] = None
+            else:
+                snapshot[key] = float(value)
         return snapshot
 
     @staticmethod

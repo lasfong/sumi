@@ -57,29 +57,63 @@ export const SignalExplanationInspector: React.FC<SignalExplanationInspectorProp
     error: queryError,
   } = useQuery<SignalCalculationResponse>({
     queryKey: ['signal-explanation', sessionId, currentIndex, selectedSignalName, params],
-    queryFn: () => {
+    queryFn: async () => {
       if (!sessionId) {
         throw new Error('No session ID');
       }
-      const signalsToRequest = [
+      const findVersion = (sigName: string): string =>
+        allSignals.find((s) => s.name === sigName)?.version || '1.0.0';
+
+      const primarySignals = [
         {
           name: selectedSignalName,
-          params,
+          version: currentSignalDef?.version || findVersion(selectedSignalName),
+          params: params || {},
         },
-        {
+      ];
+      if (selectedSignalName !== 'health.score') {
+        primarySignals.push({
           name: 'health.score',
+          version: findVersion('health.score'),
           params: {},
-        },
+        });
+      }
+
+      const primaryResponse = await calculateReplaySignals(sessionId, { signals: primarySignals });
+      const returnedNames = new Set((primaryResponse.results || []).map((r) => r.signal_name));
+
+      const missingBbSignals = [
         {
           name: 'bb.direction_rising',
+          version: findVersion('bb.direction_rising'),
           params: { horizon_bars: 20 },
         },
         {
           name: 'bb.regime_positive',
+          version: findVersion('bb.regime_positive'),
           params: { horizon_bars: 20 },
         },
-      ];
-      return calculateReplaySignals(sessionId, { signals: signalsToRequest });
+      ].filter((item) => !returnedNames.has(item.name));
+
+      if (missingBbSignals.length === 0) {
+        return primaryResponse;
+      }
+
+      try {
+        const bbResponse = await calculateReplaySignals(sessionId, { signals: missingBbSignals });
+        if (bbResponse?.results?.length) {
+          return {
+            ...primaryResponse,
+            results: [
+              ...(primaryResponse.results || []),
+              ...bbResponse.results.filter((r) => !returnedNames.has(r.signal_name)),
+            ],
+          };
+        }
+      } catch {
+        // Retain primary response if auxiliary BB flow signals are unavailable
+      }
+      return primaryResponse;
     },
     enabled: Boolean(sessionId && sessionId > 0 && currentSignalDef),
   });

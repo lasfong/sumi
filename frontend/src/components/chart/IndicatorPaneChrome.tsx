@@ -56,7 +56,14 @@ export const IndicatorPaneChrome: React.FC<Props> = ({ document, runtime, onSett
               <span data-testid={instance.definitionId === 'macd' ? 'macd-components' : `pane-values-${instance.id}`} style={{ display: 'flex', gap: 6, fontFamily: 'monospace' }}>
                 {components.map(name => <span key={name}>{name}: {valueText(state.values[name])}</span>)}
                 {!components.length && (
-                  <span>
+                  <span
+                    data-testid={state.status === 'warming' ? `indicator-warming-badge-${instance.id}` : undefined}
+                    title={
+                      state.status === 'warming' && state.warmupBars
+                        ? `Đang làm ấm chỉ báo: đã có ${state.availableBars ?? 0}/${state.warmupBars} nến cần thiết`
+                        : undefined
+                    }
+                  >
                     {state.status === 'warming' && state.warmupBars
                       ? `warming (${state.availableBars ?? 0}/${state.warmupBars})`
                       : state.status}

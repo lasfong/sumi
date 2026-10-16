@@ -16,6 +16,7 @@ import {
 import type { MagnetMode } from '../../features/drawings/drawingMagnet';
 import { TEXT_MAX_LENGTH, type DrawingTool } from '../../features/drawings/drawingDomain';
 import { useModalFocus } from '../../hooks/useModalFocus';
+import toast from 'react-hot-toast';
 
 interface Props {
   activeTool: DrawingTool;
@@ -184,20 +185,24 @@ export const DrawingToolbar: React.FC<Props> = (props) => {
         {/* Undo / Redo */}
         <button
           type="button"
-          title="Hoàn tác (Undo)"
+          title="Hoàn tác hình vẽ (Ctrl+Z / Cmd+Z)"
           aria-label="Undo drawing"
           data-testid="undo-drawing"
           disabled={!props.canUndo}
-          onClick={props.onUndo}
+          onClick={() => {
+            props.onUndo();
+            toast('Đã hoàn tác hình vẽ (Undo)', { duration: 1500 });
+          }}
           style={{
             width: 32,
             height: 32,
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            background: 'transparent',
-            border: 'none',
-            color: props.canUndo ? '#787b86' : '#363a45',
+            background: props.canUndo ? 'rgba(255, 255, 255, 0.05)' : 'transparent',
+            border: props.canUndo ? '1px solid rgba(255, 255, 255, 0.12)' : 'none',
+            color: props.canUndo ? '#d1d4dc' : '#434651',
+            opacity: props.canUndo ? 0.95 : 0.4,
             cursor: props.canUndo ? 'pointer' : 'not-allowed',
             borderRadius: 6,
           }}
@@ -207,20 +212,24 @@ export const DrawingToolbar: React.FC<Props> = (props) => {
 
         <button
           type="button"
-          title="Làm lại (Redo)"
+          title="Làm lại hình vẽ (Ctrl+Y / Cmd+Shift+Z)"
           aria-label="Redo drawing"
           data-testid="redo-drawing"
           disabled={!props.canRedo}
-          onClick={props.onRedo}
+          onClick={() => {
+            props.onRedo();
+            toast('Đã làm lại hình vẽ (Redo)', { duration: 1500 });
+          }}
           style={{
             width: 32,
             height: 32,
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            background: 'transparent',
-            border: 'none',
-            color: props.canRedo ? '#787b86' : '#363a45',
+            background: props.canRedo ? 'rgba(255, 255, 255, 0.05)' : 'transparent',
+            border: props.canRedo ? '1px solid rgba(255, 255, 255, 0.12)' : 'none',
+            color: props.canRedo ? '#d1d4dc' : '#434651',
+            opacity: props.canRedo ? 0.95 : 0.4,
             cursor: props.canRedo ? 'pointer' : 'not-allowed',
             borderRadius: 6,
           }}

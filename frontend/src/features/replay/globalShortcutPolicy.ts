@@ -10,6 +10,17 @@ const INTERACTIVE_OR_MODAL_TARGET = [
 export function isGlobalShortcutEligible(event: Pick<KeyboardEvent, 'defaultPrevented' | 'target'>): boolean {
   if (event.defaultPrevented) return false;
   const target = event.target;
-  if (!(target instanceof Element)) return true;
-  return target.closest(INTERACTIVE_OR_MODAL_TARGET) === null;
+  if (target instanceof Element && target.closest(INTERACTIVE_OR_MODAL_TARGET) !== null) {
+    return false;
+  }
+  if (typeof document !== 'undefined') {
+    const active = document.activeElement;
+    if (active instanceof Element && active !== document.body && active.closest(INTERACTIVE_OR_MODAL_TARGET) !== null) {
+      return false;
+    }
+    if (document.querySelector('[role="dialog"], [aria-modal="true"]') !== null) {
+      return false;
+    }
+  }
+  return true;
 }

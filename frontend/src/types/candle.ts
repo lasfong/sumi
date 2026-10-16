@@ -9,7 +9,7 @@ export interface Candle {
   low: number;
   close: number;
   volume: number;
-  source: string;
+  source: string | null;
   adjustment_type: string;
 }
 

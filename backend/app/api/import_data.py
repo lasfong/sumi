@@ -111,11 +111,6 @@ def rollback_import_run(
     )
     return res
 
-@router.get("/catalog", response_model=List[CatalogItemSchema])
-def get_data_catalog(db: Session = Depends(get_db)):
-    """Get complete market data catalog coverage and provenance."""
-    return ImportWorkflowService.get_catalog(db)
-
 @router.post("/cafef", response_model=ImportResponse)
 async def import_cafef_data(
     file: UploadFile = File(...),

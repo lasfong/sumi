@@ -10,5 +10,7 @@ router = APIRouter()
 def get_session_analytics(session_id: int, db: Session = Depends(get_db)):
     try:
         return AnalyticsService.get_analytics(db, session_id)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="Internal error while computing session analytics")

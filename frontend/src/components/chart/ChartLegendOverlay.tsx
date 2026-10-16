@@ -197,7 +197,18 @@ export const ChartLegendOverlay: React.FC<ChartLegendOverlayProps> = ({
                   ))
                 ) : (
                   <span
-                    data-testid={state.errorKind === 'mapping' ? `legend-mapping-warning-${instance.id}` : undefined}
+                    data-testid={
+                      state.errorKind === 'mapping'
+                        ? `legend-mapping-warning-${instance.id}`
+                        : state.status === 'warming'
+                          ? `legend-warming-badge-${instance.id}`
+                          : undefined
+                    }
+                    title={
+                      state.status === 'warming' && state.warmupBars
+                        ? `Đang làm ấm chỉ báo: đã có ${state.availableBars ?? 0}/${state.warmupBars} nến cần thiết`
+                        : undefined
+                    }
                     style={{ color: state.status === 'error' ? '#f23645' : '#787b86', fontSize: '10px' }}
                   >
                     {state.error ??

@@ -23,6 +23,13 @@ export interface TradePlanInput {
 
 /** Trade planning result from position sizing calculator */
 export interface TradePlanResult {
+  entry_price: number;
+  stop_loss: number;
+  target_price: number;
+  direction: string;
+  account_equity: number;
+  available_cash: number;
+  risk_percent: number;
   risk_per_share: number;
   reward_per_share: number;
   expected_r_multiple: number;
@@ -66,7 +73,7 @@ export interface DecisionCreate {
   note?: string;
   mistake_tag?: string;
   rule_violation?: string;
-  checklist_snapshot?: string;
+  checklist_snapshot?: Record<string, unknown> | string | null;
 }
 
 /** Decision response from the backend */
@@ -93,6 +100,6 @@ export interface Decision {
   note?: string;
   mistake_tag?: string;
   rule_violation?: string;
-  checklist_snapshot?: string;
+  checklist_snapshot?: Record<string, unknown> | string | null;
   created_at: string;
 }

@@ -20,7 +20,7 @@ const RULE_VIOLATIONS = ['None', 'Risk Limit Exceeded', 'Unconfirmed Setup', 'Tr
 export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmitDecision, disabled }) => {
   const [limitedViewport, setLimitedViewport] = useState(() =>
     typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-      ? window.matchMedia('(max-width: 1179px)').matches
+      ? window.matchMedia('(max-width: 1279px)').matches
       : false,
   );
   const [pendingAction, setPendingAction] = useState<DecisionAction | null>(null);
@@ -45,7 +45,7 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
 
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return undefined;
-    const query = window.matchMedia('(max-width: 1179px)');
+    const query = window.matchMedia('(max-width: 1279px)');
     const update = () => setLimitedViewport(query.matches);
     update();
     query.addEventListener('change', update);
@@ -61,8 +61,9 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
 
   const close = useCallback(() => { if (!submitting) setPendingAction(null); }, [submitting]);
   const isTradeAction = pendingAction !== null && ['BUY', 'SELL', 'ADD', 'REDUCE'].includes(pendingAction);
+  const isShortAction = pendingAction !== null && ['SELL', 'REDUCE'].includes(pendingAction);
 
-  // Sync entry, stop loss, and target price from active/latest risk-reward chart drawing
+  // Sync entry, stop loss, and target price from active/latest risk-reward chart drawing (both LONG and SHORT)
   const syncFromDrawing = useCallback(() => {
     try {
       const stateElement = document.querySelector('[data-drawing-interaction-state]');
@@ -78,10 +79,14 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
         const entry = rrDrawing.anchors[0].price;
         const stop = rrDrawing.anchors[1].price;
         const target = rrDrawing.anchors[2].price;
+        const drawingDir = stop > entry ? 'SHORT' : 'LONG';
         setStopLoss(String(stop));
         setTargetPrice(String(target));
         if (orderType === 'LIMIT') setLimitPrice(String(entry));
-        setFeedback({ ok: true, message: `Synced from chart drawing: Entry ${entry}, Stop ${stop}, Target ${target}` });
+        setFeedback({
+          ok: true,
+          message: `Synced ${drawingDir} from chart drawing: Entry ${entry}, Stop ${stop}, Target ${target}`,
+        });
       } else {
         setFeedback({ ok: false, message: 'No Risk-Reward drawing found on chart.' });
       }
@@ -90,17 +95,60 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
     }
   }, [orderType]);
 
-  // Sizing and Risk calculations
+  const entryPrice = useMemo(
+    () => (isTradeAction && orderType === 'LIMIT' && limitPrice !== '' ? Number(limitPrice) : snapshot.current_price),
+    [isTradeAction, orderType, limitPrice, snapshot.current_price],
+  );
+
+  // Inline SL/TP validation message (keeps sizing panel visible instead of disappearing silently)
+  const slTpValidationError = useMemo(() => {
+    if (!isTradeAction || entryPrice <= 0) return null;
+    const hasStop = stopLoss.trim() !== '';
+    const hasTarget = targetPrice.trim() !== '';
+    const stop = Number(stopLoss);
+    const target = Number(targetPrice);
+
+    if (hasStop && (!Number.isFinite(stop) || stop <= 0)) {
+      return 'Giá cắt lỗ (SL) phải lớn hơn 0.';
+    }
+    if (hasTarget && (!Number.isFinite(target) || target <= 0)) {
+      return 'Giá chốt lời (TP) phải lớn hơn 0.';
+    }
+
+    if (isShortAction) {
+      if (hasStop && stop <= entryPrice) {
+        return `Giá cắt lỗ (SL) phải cao hơn giá bán (${entryPrice.toLocaleString()}) cho vị thế Bán/Short (SHORT).`;
+      }
+      if (hasTarget && target >= entryPrice) {
+        return `Giá chốt lời (TP) phải thấp hơn giá bán (${entryPrice.toLocaleString()}) cho vị thế Bán/Short (SHORT).`;
+      }
+    } else {
+      if (hasStop && stop >= entryPrice) {
+        return `Giá cắt lỗ (SL) phải thấp hơn giá mua (${entryPrice.toLocaleString()}) cho vị thế Mua (LONG).`;
+      }
+      if (hasTarget && target <= entryPrice) {
+        return `Giá chốt lời (TP) phải cao hơn giá mua (${entryPrice.toLocaleString()}) cho vị thế Mua (LONG).`;
+      }
+    }
+    return null;
+  }, [entryPrice, isShortAction, isTradeAction, stopLoss, targetPrice]);
+
+  // Sizing and Risk calculations (symmetric for LONG and SHORT)
   const sizingCalc = useMemo(() => {
-    const entry = isTradeAction && orderType === 'LIMIT' && limitPrice !== '' ? Number(limitPrice) : snapshot.current_price;
+    const entry = entryPrice;
     const stop = Number(stopLoss);
     const target = Number(targetPrice);
     const riskPct = Number(riskPercent) || 1.0;
-    if (entry <= 0 || stop <= 0 || stop >= entry) {
+    if (entry <= 0 || stopLoss.trim() === '' || !Number.isFinite(stop) || stop <= 0 || slTpValidationError) {
       return null;
     }
-    const riskPerShare = entry - stop;
-    const rewardPerShare = target > entry ? target - entry : 0;
+    const riskPerShare = isShortAction ? stop - entry : entry - stop;
+    if (riskPerShare <= 0) return null;
+    const hasValidTarget =
+      targetPrice.trim() !== '' &&
+      Number.isFinite(target) &&
+      (isShortAction ? target > 0 && target < entry : target > entry);
+    const rewardPerShare = hasValidTarget ? (isShortAction ? entry - target : target - entry) : 0;
     const grossR = riskPerShare > 0 ? rewardPerShare / riskPerShare : 0;
     const maxRiskAmt = (snapshot.current_cash * riskPct) / 100;
     const rawQty = maxRiskAmt / riskPerShare;
@@ -108,20 +156,48 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
     const maxCashQty = Math.floor(snapshot.current_cash / (entry * 1.0015) / 100) * 100;
     const plannedQty = Math.min(lotRoundedQty, maxCashQty);
     const plannedRiskAmt = plannedQty * riskPerShare;
-    const grossBuy = plannedQty * entry;
-    const buyFee = grossBuy * 0.0015;
-    const grossSell = plannedQty * target;
-    const sellFee = grossSell * 0.0015;
-    const sellTax = grossSell * 0.0010;
-    const netProfit = (grossSell - sellFee - sellTax) - (grossBuy + buyFee);
-    const netR = (plannedRiskAmt + buyFee > 0) ? netProfit / (plannedRiskAmt + buyFee) : 0;
+
+    let grossBuy = 0;
+    let netProfit = 0;
+    let netR = 0;
+    if (isShortAction) {
+      const grossSell = plannedQty * entry;
+      const sellFee = grossSell * 0.0015;
+      const sellTax = grossSell * 0.0010;
+      grossBuy = hasValidTarget ? plannedQty * target : plannedQty * entry;
+      const buyFee = grossBuy * 0.0015;
+      netProfit = hasValidTarget ? (grossSell - sellFee - sellTax) - (grossBuy + buyFee) : 0;
+      const riskOutlay = plannedRiskAmt + sellFee + sellTax;
+      netR = riskOutlay > 0 ? netProfit / riskOutlay : 0;
+    } else {
+      grossBuy = plannedQty * entry;
+      const buyFee = grossBuy * 0.0015;
+      const grossSell = hasValidTarget ? plannedQty * target : plannedQty * entry;
+      const sellFee = grossSell * 0.0015;
+      const sellTax = grossSell * 0.0010;
+      netProfit = hasValidTarget ? (grossSell - sellFee - sellTax) - (grossBuy + buyFee) : 0;
+      const riskOutlay = plannedRiskAmt + buyFee;
+      netR = riskOutlay > 0 ? netProfit / riskOutlay : 0;
+    }
 
     return {
       entry, stop, target, riskPerShare, rewardPerShare, grossR, maxRiskAmt,
       plannedQty, plannedRiskAmt, grossBuy, netProfit, netR,
-      affordable: plannedQty > 0,
+      affordable: plannedQty >= 100,
     };
-  }, [isTradeAction, orderType, limitPrice, snapshot.current_price, snapshot.current_cash, stopLoss, targetPrice, riskPercent]);
+  }, [entryPrice, isShortAction, riskPercent, slTpValidationError, snapshot.current_cash, stopLoss, targetPrice]);
+
+  const slPctPreview = useMemo(() => {
+    const stop = Number(stopLoss);
+    if (stopLoss.trim() === '' || !Number.isFinite(stop) || stop <= 0 || entryPrice <= 0) return null;
+    return ((stop - entryPrice) / entryPrice) * 100;
+  }, [entryPrice, stopLoss]);
+
+  const tpPctPreview = useMemo(() => {
+    const target = Number(targetPrice);
+    if (targetPrice.trim() === '' || !Number.isFinite(target) || target <= 0 || entryPrice <= 0) return null;
+    return ((target - entryPrice) / entryPrice) * 100;
+  }, [entryPrice, targetPrice]);
 
   const submit = useCallback(async () => {
     if (!pendingAction || submittingRef.current) return;
@@ -161,10 +237,23 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
 
   const actionsDisabled = !snapshot.can_trade || submitting || disabled || limitedViewport;
   const openPosition = snapshot.positions.find(p => p.quantity > 0);
-  const availableQty = openPosition?.available_quantity || 0;
+  const availableQty = openPosition?.available_quantity ?? snapshot.available_quantity ?? 0;
+  const unsettledQty = openPosition
+    ? Math.max(0, openPosition.blocked_quantity ?? (openPosition.quantity - availableQty))
+    : Math.max(0, snapshot.blocked_quantity ?? 0);
+  const releaseDateStr = (openPosition?.earliest_release_date ?? snapshot.earliest_release_date)?.slice(0, 10) || null;
   const sellDisabled = actionsDisabled || !openPosition || availableQty <= 0;
-  const settlementLabel = (snapshot as any).settlement_label || "T+1 · về sau 1 phiên";
-  const sellTitle = !openPosition ? "No open position" : (availableQty <= 0 ? `${settlementLabel}: Cổ phiếu chưa về tài khoản` : undefined);
+  const settlementLabel = snapshot.settlement_label || 'T+1 · về sau 1 phiên';
+  const sellTitle = !openPosition
+    ? 'No open position'
+    : availableQty <= 0
+      ? `${settlementLabel}: Cổ phiếu chưa về tài khoản để bán`
+      : 'Bán một phần hoặc toàn bộ cổ phiếu khả dụng';
+  const closeTitle = !openPosition
+    ? 'No open position'
+    : availableQty <= 0
+      ? `${settlementLabel}: Cổ phiếu chưa về tài khoản để đóng vị thế`
+      : 'Đóng toàn bộ vị thế khả dụng hiện tại';
 
   useModalFocus(pendingAction !== null, close, dialogElement);
   return <section className="panel" data-testid="trade-controls" style={{ padding: 12, display: 'grid', gap: 10 }}>
@@ -178,10 +267,29 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
       <button className="btn-buy" disabled={actionsDisabled} onClick={() => open('BUY')}>BUY</button>
       <button className="btn-sell" disabled={sellDisabled} title={sellTitle} onClick={() => open('SELL')}>SELL</button>
-      <button disabled={sellDisabled} title={sellTitle} onClick={() => open('CLOSE')} style={{ color: 'var(--color-close)' }}>CLOSE</button>
+      <button disabled={sellDisabled} title={closeTitle} onClick={() => open('CLOSE')} style={{ color: 'var(--color-close)' }}>CLOSE</button>
       <button disabled={actionsDisabled} onClick={() => open('HOLD')}>HOLD</button>
       <button disabled={actionsDisabled} onClick={() => open('SKIP')}>SKIP</button>
     </div>
+    {openPosition && unsettledQty > 0 && (
+      <div
+        role="status"
+        data-testid="settlement-inline-notice"
+        style={{
+          fontSize: 11,
+          padding: '6px 8px',
+          borderRadius: 4,
+          background: 'rgba(255, 209, 102, 0.12)',
+          border: '1px solid rgba(255, 209, 102, 0.35)',
+          color: '#FFD166',
+        }}
+      >
+        ⏳ Đang chờ cổ phiếu về (<strong>{settlementLabel}</strong>) · Khả dụng:{' '}
+        <strong>{availableQty.toLocaleString()}</strong> / Chờ về:{' '}
+        <strong>{unsettledQty.toLocaleString()}</strong> CP
+        {releaseDateStr ? ` · Về ngày ${releaseDateStr}` : ''}
+      </div>
+    )}
     {feedback && !pendingAction && <div role="status" style={{ color: feedback.ok ? 'var(--color-buy)' : 'var(--color-sell)', fontSize: 12 }}>{feedback.message}</div>}
 
     {pendingAction && <div ref={setDialogElement} role="dialog" aria-modal="true" aria-label={`Record ${pendingAction}`} data-testid="trade-decision-dialog"
@@ -212,41 +320,47 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
             <div>
-              <label htmlFor="order-sl">Stop loss</label>
+              <label htmlFor="order-sl">
+                Stop loss {slPctPreview !== null ? <small style={{ color: 'var(--text-muted)' }}>({slPctPreview >= 0 ? '+' : ''}{slPctPreview.toFixed(1)}%)</small> : null}
+              </label>
               <input id="order-sl" aria-label="Stop loss" type="number" step="100" value={stopLoss} onChange={event => setStopLoss(event.target.value)} />
               <div style={{ display: 'flex', gap: 4, marginTop: 4 }}>
                 <button type="button" onClick={() => {
-                  const entry = (orderType === 'LIMIT' && limitPrice !== '') ? Number(limitPrice) : snapshot.current_price;
+                  const entry = entryPrice;
                   if (entry > 0) {
-                    setStopLoss(String(Math.round(entry * 0.95)));
+                    setStopLoss(String(Math.round(entry * (isShortAction ? 1.05 : 0.95))));
                   }
-                }} style={{ fontSize: 10, padding: '2px 6px' }}>-5%</button>
+                }} style={{ fontSize: 10, padding: '2px 6px' }}>{isShortAction ? '+5%' : '-5%'}</button>
                 <button type="button" onClick={() => {
-                  const entry = (orderType === 'LIMIT' && limitPrice !== '') ? Number(limitPrice) : snapshot.current_price;
+                  const entry = entryPrice;
                   if (entry > 0) {
-                    setStopLoss(String(Math.round(entry * 0.93)));
+                    setStopLoss(String(Math.round(entry * (isShortAction ? 1.07 : 0.93))));
                   }
-                }} style={{ fontSize: 10, padding: '2px 6px' }}>-7%</button>
+                }} style={{ fontSize: 10, padding: '2px 6px' }}>{isShortAction ? '+7%' : '-7%'}</button>
               </div>
             </div>
             <div>
-              <label htmlFor="order-tp">Target</label>
+              <label htmlFor="order-tp">
+                Target {tpPctPreview !== null ? <small style={{ color: 'var(--text-muted)' }}>({tpPctPreview >= 0 ? '+' : ''}{tpPctPreview.toFixed(1)}%)</small> : null}
+              </label>
               <input id="order-tp" aria-label="Target price" type="number" step="100" value={targetPrice} onChange={event => setTargetPrice(event.target.value)} />
               <div style={{ display: 'flex', gap: 4, marginTop: 4 }}>
                 <button type="button" onClick={() => {
-                  const entry = (orderType === 'LIMIT' && limitPrice !== '') ? Number(limitPrice) : snapshot.current_price;
-                  const sl = Number(stopLoss) || Math.round(entry * 0.95);
+                  const entry = entryPrice;
+                  const sl = Number(stopLoss) || Math.round(entry * (isShortAction ? 1.05 : 0.95));
                   if (entry > 0 && sl > 0) {
                     if (!stopLoss) setStopLoss(String(sl));
-                    setTargetPrice(String(Math.round(entry + 2.0 * (entry - sl))));
+                    const riskDist = Math.abs(entry - sl);
+                    setTargetPrice(String(Math.round(isShortAction ? Math.max(1, entry - 2.0 * riskDist) : entry + 2.0 * riskDist)));
                   }
                 }} style={{ fontSize: 10, padding: '2px 6px' }}>2R</button>
                 <button type="button" onClick={() => {
-                  const entry = (orderType === 'LIMIT' && limitPrice !== '') ? Number(limitPrice) : snapshot.current_price;
-                  const sl = Number(stopLoss) || Math.round(entry * 0.95);
+                  const entry = entryPrice;
+                  const sl = Number(stopLoss) || Math.round(entry * (isShortAction ? 1.05 : 0.95));
                   if (entry > 0 && sl > 0) {
                     if (!stopLoss) setStopLoss(String(sl));
-                    setTargetPrice(String(Math.round(entry + 3.0 * (entry - sl))));
+                    const riskDist = Math.abs(entry - sl);
+                    setTargetPrice(String(Math.round(isShortAction ? Math.max(1, entry - 3.0 * riskDist) : entry + 3.0 * riskDist)));
                   }
                 }} style={{ fontSize: 10, padding: '2px 6px' }}>3R</button>
               </div>
@@ -259,34 +373,60 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
           </div>
 
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '2px 0' }}>
-            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Trade Sizing &amp; Risk</span>
-            {pendingAction === 'BUY' && (
-              <button type="button" data-testid="sync-from-drawing" onClick={syncFromDrawing} style={{ fontSize: 11, padding: '3px 8px' }}>
-                📐 Sync from Drawing
-              </button>
-            )}
+            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Trade Sizing &amp; Risk ({isShortAction ? 'SHORT' : 'LONG'})</span>
+            <button type="button" data-testid="sync-from-drawing" onClick={syncFromDrawing} style={{ fontSize: 11, padding: '3px 8px' }}>
+              📐 Sync from Drawing
+            </button>
           </div>
 
-          {sizingCalc && (
-            <div data-testid="position-sizing-panel" style={{ padding: 10, background: 'rgba(41,98,255,.08)', border: '1px solid rgba(41,98,255,.3)', borderRadius: 6, display: 'grid', gap: 4, fontSize: 12 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span>Expected R: <strong style={{ color: '#00E676' }}>1 : {sizingCalc.grossR.toFixed(1)}</strong> ({sizingCalc.grossR.toFixed(2)}R, Net {sizingCalc.netR.toFixed(2)}R)</span>
-                <span>Max Risk: <strong>{sizingCalc.maxRiskAmt.toLocaleString()} VND</strong></span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span>Recommended Size: <strong>{sizingCalc.plannedQty.toLocaleString()} shares</strong></span>
-                <button
-                  type="button"
-                  data-testid="apply-sizing-qty"
-                  onClick={() => setQuantity(String(sizingCalc.plannedQty))}
-                  style={{ fontSize: 11, padding: '2px 8px' }}
-                >
-                  Use Size ({sizingCalc.plannedQty})
-                </button>
-              </div>
-              {!sizingCalc.affordable && <div style={{ color: '#FF8A80' }}>Calculated size is below 100-share minimum lot or exceeds available cash.</div>}
+          {slTpValidationError && (
+            <div
+              role="alert"
+              data-testid="sl-tp-validation-alert"
+              style={{
+                padding: '8px 10px',
+                borderRadius: 6,
+                background: 'rgba(255, 23, 68, 0.12)',
+                border: '1px solid rgba(255, 23, 68, 0.45)',
+                color: '#FF8A80',
+                fontSize: 12,
+              }}
+            >
+              ⚠️ {slTpValidationError}
             </div>
           )}
+
+          <div data-testid="position-sizing-panel" style={{ padding: 10, background: 'rgba(41,98,255,.08)', border: '1px solid rgba(41,98,255,.3)', borderRadius: 6, display: 'grid', gap: 4, fontSize: 12 }}>
+            {sizingCalc ? (
+              <>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span>Expected R: <strong style={{ color: '#00E676' }}>1 : {sizingCalc.grossR.toFixed(1)}</strong> ({sizingCalc.grossR.toFixed(2)}R, Net {sizingCalc.netR.toFixed(2)}R)</span>
+                  <span>Max Risk: <strong>{sizingCalc.maxRiskAmt.toLocaleString()} VND</strong></span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span>Recommended Size: <strong>{sizingCalc.plannedQty.toLocaleString()} shares</strong></span>
+                  <button
+                    type="button"
+                    data-testid="apply-sizing-qty"
+                    onClick={() => setQuantity(String(sizingCalc.plannedQty))}
+                    style={{ fontSize: 11, padding: '2px 8px' }}
+                  >
+                    Use Size ({sizingCalc.plannedQty})
+                  </button>
+                </div>
+                {!sizingCalc.affordable && <div style={{ color: '#FF8A80' }}>Calculated size is below 100-share minimum lot or exceeds available cash.</div>}
+              </>
+            ) : (
+              <div style={{ color: 'var(--text-muted)' }}>
+                {slTpValidationError
+                  ? 'Điều chỉnh lại SL/TP hợp lệ để tính khối lượng khuyến nghị theo rủi ro.'
+                  : 'Nhập giá Cắt lỗ (SL) và Chốt lời (TP) để xem tỷ lệ R:R và khối lượng khuyến nghị (lô chẵn 100 CP).'}
+              </div>
+            )}
+            <div data-testid="trade-market-assumptions" style={{ fontSize: 10, color: 'var(--text-muted)', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 4, marginTop: 2 }}>
+              Giả định thị trường: Phí mua 0.15% · Phí bán 0.15% · Thuế bán 0.10% · Lô chẵn 100 CP · {settlementLabel}
+            </div>
+          </div>
         </>}
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>

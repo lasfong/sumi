@@ -270,6 +270,6 @@ button:disabled {
   font-size: 12px;
 }
 
-@media (max-width: 1179px) {
+@media (max-width: 1279px) {
   .limited-workstation-warning { display: block; }
 }

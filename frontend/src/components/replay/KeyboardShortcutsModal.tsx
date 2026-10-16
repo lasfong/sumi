@@ -34,6 +34,8 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
   {
     category: 'Công cụ vẽ kỹ thuật (Drawings)',
     items: [
+      { keys: ['Ctrl', 'Z'], description: 'Hoàn tác hình vẽ (Undo)' },
+      { keys: ['Ctrl', 'Y'], description: 'Làm lại hình vẽ (Redo)' },
       { keys: ['Alt', 'T'], description: 'Đường xu hướng (Trendline)' },
       { keys: ['Alt', 'H'], description: 'Đường ngang (Horizontal Line)' },
       { keys: ['Alt', 'R'], description: 'Công cụ Risk-Reward' },

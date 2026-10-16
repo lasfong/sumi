@@ -44,7 +44,46 @@ class ScannerReplaySessionResponse(BaseModel):
     window_end: str
 
 
-@router.post("/run")
+class ScannerRankingSchema(BaseModel):
+    status: str = "not_applicable"
+    eligible: bool = False
+    metric: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class ScannerResultItemSchema(BaseModel):
+    symbol: str
+    timestamp: str
+    signal_type: str
+    strategy: str
+    price: float
+    regime: str
+    ranking: Optional[ScannerRankingSchema] = None
+
+
+class ScannerResponseSchema(BaseModel):
+    status: str
+    run_id: Optional[int] = None
+    total_results: Optional[int] = None
+    truncated: Optional[bool] = None
+    results: List[ScannerResultItemSchema] = []
+    warnings: List[str] = []
+    error_code: Optional[str] = None
+    message: Optional[str] = None
+    ranking_policy: Optional[str] = None
+
+
+class ScannerHistoryRunSchema(BaseModel):
+    id: int
+    label: str
+    status: str
+    total_results: int
+    request_config: Dict[str, Any]
+    result_payload: ScannerResponseSchema
+    created_at: str
+
+
+@router.post("/run", response_model=ScannerResponseSchema)
 def run_scanner(config: ScannerRequest, db: Session = Depends(get_db)):
     request_config = config.model_dump()
     result = scanner_service.run_scan(db, request_config)
@@ -52,12 +91,12 @@ def run_scanner(config: ScannerRequest, db: Session = Depends(get_db)):
     return {**result, "run_id": saved_run["id"]}
 
 
-@router.get("/runs")
+@router.get("/runs", response_model=List[ScannerHistoryRunSchema])
 def list_scanner_runs(limit: int = 30, db: Session = Depends(get_db)):
     return ScannerHistoryService.list_runs(db, limit)
 
 
-@router.get("/runs/{run_id}")
+@router.get("/runs/{run_id}", response_model=ScannerHistoryRunSchema)
 def get_scanner_run(run_id: int, db: Session = Depends(get_db)):
     run = ScannerHistoryService.get_run(db, run_id)
     if not run:
