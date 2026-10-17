@@ -1,9 +1,14 @@
-import { useEffect, useCallback, useMemo, useRef } from 'react';
+import { useEffect, useCallback, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useReplayStore } from '../store/replayStore';
 import { getReplaySession } from '../api/replayApi';
 import { cleanupSessionQueries, replayQueryKeys } from '../features/replay/replayQueryKeys';
+
+export interface InvalidatedSessionInfo {
+  id: number;
+  symbol: string;
+}
 
 export interface SessionSelectionResult {
   sessionId: number | null;
@@ -11,6 +16,7 @@ export interface SessionSelectionResult {
   clearSession: () => void;
   getSessionPath: (basePath: string, customId?: number | null) => string;
   isValidating: boolean;
+  invalidatedSession: InvalidatedSessionInfo | null;
 }
 
 /**
@@ -26,6 +32,7 @@ export function useSessionSelection(): SessionSelectionResult {
   const storeSessionId = useReplayStore((state) => state.sessionId);
   const setStoreSession = useReplayStore((state) => state.setSession);
   const clearStoreSession = useReplayStore((state) => state.clearSession);
+  const [invalidatedSession, setInvalidatedSession] = useState<InvalidatedSessionInfo | null>(null);
 
   const rawUrlParam = searchParams.get('session');
   const hasUrlParam = searchParams.has('session');
@@ -69,6 +76,12 @@ export function useSessionSelection(): SessionSelectionResult {
     staleTime: 30000,
   });
 
+  const isSessionWithoutCandles = Boolean(
+    sessionData &&
+      (sessionData.has_candles === false ||
+        (typeof sessionData.available_candles === 'number' && sessionData.available_candles <= 0)),
+  );
+
   const clearSession = useCallback(() => {
     cleanupSessionQueries(queryClient, candidateId ?? storeSessionId);
     queryClient.removeQueries({ queryKey: ['replay-session-validation'] });
@@ -97,7 +110,14 @@ export function useSessionSelection(): SessionSelectionResult {
       return;
     }
 
+    if (isSessionWithoutCandles && sessionData) {
+      setInvalidatedSession({ id: sessionData.id, symbol: sessionData.symbol });
+      clearSession();
+      return;
+    }
+
     if (sessionData && sessionData.id === candidateId) {
+      setInvalidatedSession(null);
       if (urlSessionId !== null && storeSessionId !== candidateId) {
         setStoreSession(candidateId);
       } else if (urlSessionId === null && storeSessionId === candidateId) {
@@ -111,9 +131,9 @@ export function useSessionSelection(): SessionSelectionResult {
         );
       }
     }
-  }, [candidateId, sessionData, isError, urlSessionId, storeSessionId, setStoreSession, setSearchParams, clearSession, isUrlParamInvalid]);
+  }, [candidateId, sessionData, isError, isSessionWithoutCandles, urlSessionId, storeSessionId, setStoreSession, setSearchParams, clearSession, isUrlParamInvalid]);
 
-  const activeSessionId = sessionData && !isError && !isUrlParamInvalid ? candidateId : null;
+  const activeSessionId = sessionData && !isError && !isUrlParamInvalid && !isSessionWithoutCandles ? candidateId : null;
 
   const selectSession = useCallback(
     (id: number, options?: { replace?: boolean }) => {
@@ -121,6 +141,7 @@ export function useSessionSelection(): SessionSelectionResult {
       if (previousId !== null && previousId !== id) {
         cleanupSessionQueries(queryClient, previousId);
       }
+      setInvalidatedSession(null);
       setStoreSession(id);
       setSearchParams(
         (prev) => {
@@ -150,5 +171,6 @@ export function useSessionSelection(): SessionSelectionResult {
     clearSession,
     getSessionPath,
     isValidating: isLoading,
+    invalidatedSession,
   };
 }

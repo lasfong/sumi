@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.dependencies import get_db
 from app.services.backtest_service import BacktestService
@@ -8,7 +8,8 @@ from app.schemas.backtest_schema import (
     BatchBacktestRequest,
     BatchBacktestResponse,
 )
-from pydantic import BaseModel
+from app.domain.strategy.strategy_loader import load_strategy_from_dict
+from pydantic import BaseModel, ValidationError
 from typing import Dict, Any, Optional, List
 
 router = APIRouter()
@@ -19,12 +20,43 @@ class BacktestCleanupRequest(BaseModel):
     older_than_days: Optional[int] = None
     dry_run: bool = False
 
+def _validate_strategy_dict_or_raise(strategy_dict: Dict[str, Any]) -> None:
+    try:
+        load_strategy_from_dict(strategy_dict or {})
+    except ValidationError as exc:
+        field_errors = [
+            {
+                "field": "strategy." + ".".join(str(p) for p in err.get("loc", [])),
+                "message": str(err.get("msg", "Validation error")),
+                "type": str(err.get("type", "validation_error")),
+            }
+            for err in exc.errors()
+        ]
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error_code": "VALIDATION_ERROR",
+                "message": "Invalid strategy configuration",
+                "field_errors": field_errors,
+            },
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error_code": "VALIDATION_ERROR",
+                "message": str(exc),
+            },
+        ) from exc
+
+
 @router.post("/run")
 async def run_backtest(config: BacktestRequest, db: Session = Depends(get_db)):
     """
     Chạy backtest cho strategy. Hỗ trợ single symbol, multi-symbol và multi-phase.
     """
     payload = config.model_dump() if hasattr(config, "model_dump") else config.dict()
+    _validate_strategy_dict_or_raise(payload.get("strategy") or {})
     result = await backtest_service.run_backtest(db, payload)
     return result
 
@@ -34,6 +66,7 @@ async def run_batch_backtest(config: BatchBacktestRequest, db: Session = Depends
     Execute multi-symbol, multi-phase backtest with compute-once caching and independent capital.
     """
     payload = config.model_dump() if hasattr(config, "model_dump") else config.dict()
+    _validate_strategy_dict_or_raise(payload.get("strategy") or {})
     result = await backtest_service.run_batch_backtest(db, payload)
     return result
 

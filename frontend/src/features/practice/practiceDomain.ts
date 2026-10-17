@@ -69,14 +69,19 @@ export const validateDecision = (
     if (!Number.isFinite(decision.quantity) || (decision.quantity ?? 0) <= 0) return 'Quantity must be greater than zero.';
     if (decision.order_type === 'LIMIT' && (!Number.isFinite(decision.price) || (decision.price ?? 0) <= 0)) return 'Limit price must be greater than zero.';
   }
-  if (['SELL', 'REDUCE'].includes(decision.action) && (decision.quantity ?? 0) > (snapshot.positions[0]?.quantity ?? 0)) {
+  const openLong = snapshot.positions.find(p => p.quantity > 0);
+  const openShort = !openLong ? snapshot.positions.find(p => p.quantity < 0) : undefined;
+  if (['SELL', 'REDUCE'].includes(decision.action) && !openShort && (decision.quantity ?? 0) > (openLong?.quantity ?? 0)) {
     return 'Sell quantity exceeds the projected open position.';
   }
   if (decision.action === 'CLOSE' && !snapshot.positions.length) return 'There is no open position to close.';
   if (decision.stop_loss !== undefined && (!Number.isFinite(decision.stop_loss) || decision.stop_loss <= 0)) return 'Stop loss must be greater than zero.';
   if (decision.target_price !== undefined && (!Number.isFinite(decision.target_price) || decision.target_price <= 0)) return 'Target price must be greater than zero.';
   const reference = decision.price ?? snapshot.current_price;
-  if (['BUY', 'ADD'].includes(decision.action)) {
+  const isShortDecision =
+    (decision.action as string) === 'SHORT' ||
+    Boolean(openShort && ['SELL', 'REDUCE'].includes(decision.action));
+  if (!isShortDecision && ['BUY', 'ADD', 'SELL', 'REDUCE'].includes(decision.action)) {
     if (decision.stop_loss !== undefined && decision.stop_loss >= reference) {
       return 'Giá cắt lỗ (SL) phải thấp hơn giá mua cho vị thế Mua (LONG) — A long stop loss must be below the entry price.';
     }
@@ -84,7 +89,7 @@ export const validateDecision = (
       return 'Giá chốt lời (TP) phải cao hơn giá mua cho vị thế Mua (LONG) — A long target must be above the entry price.';
     }
   }
-  if (['SELL', 'REDUCE'].includes(decision.action)) {
+  if (isShortDecision) {
     if (decision.stop_loss !== undefined && decision.stop_loss <= reference) {
       return 'Giá cắt lỗ (SL) phải cao hơn giá bán cho vị thế Bán/Short (SHORT) — A short stop loss must be above the entry price.';
     }

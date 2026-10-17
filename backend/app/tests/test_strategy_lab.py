@@ -297,3 +297,63 @@ async def test_parameter_sweep_rejects_missing_values(db_session):
 
     with pytest.raises(ValueError, match="values"):
         await StrategyLabService().run_parameter_sweep(db_session, config)
+
+
+@pytest.mark.asyncio
+async def test_def002_parameter_sweep_risk_management_across_builtin_strategies(db_session):
+    """
+    DEF-002 Regression Test:
+    Built-in strategies have risk_management=None. Sweeping stop_loss_pct and take_profit_pct
+    must initialize risk_management and succeed across all valid built-in strategies.
+    """
+    from app.domain.strategy.strategy_loader import list_available_strategies
+
+    base_date = date(2024, 1, 1)
+    seed_candles(db_session, "SWEEP_RM", base_date, count=80)
+    seed_candles(db_session, "VNINDEX", base_date, count=80)
+    db_session.commit()
+
+    builtin_strategies = list_available_strategies()
+    assert len(builtin_strategies) > 0
+
+    service = StrategyLabService()
+    for item in builtin_strategies:
+        strat_cfg = dict(item["config"])
+        # Built-in strategies default to risk_management=None
+        assert strat_cfg.get("risk_management") is None
+
+        # Test both stop_loss_pct and take_profit_pct via path and typed sweep definitions
+        sweep_cfg = {
+            "symbol": "SWEEP_RM",
+            "start_date": str(base_date),
+            "end_date": str(base_date + timedelta(days=80)),
+            "initial_cash": 100_000_000,
+            "benchmark_symbol": "VNINDEX",
+            "strategy": strat_cfg,
+            "sweep": [
+                {
+                    "target_type": "risk_management",
+                    "target_name": "risk_management",
+                    "parameter": "stop_loss_pct",
+                    "values": [5.0, 7.0],
+                },
+                {
+                    "path": "risk_management.take_profit_pct",
+                    "values": [10.0, 15.0],
+                },
+            ],
+        }
+        result = await service.run_parameter_sweep(db_session, sweep_cfg)
+        assert result["status"] == "succeeded", f"Failed on built-in strategy {item['name']}: {result}"
+        assert result["total_variants"] == 4
+
+    # Invalid negative stop_loss_pct or unknown risk parameter is rejected with ValueError
+    bad_cfg = {
+        "symbol": "SWEEP_RM",
+        "start_date": str(base_date),
+        "end_date": str(base_date + timedelta(days=80)),
+        "strategy": builtin_strategies[0]["config"],
+        "sweep": [{"path": "risk_management.stop_loss_pct", "values": [-5.0]}],
+    }
+    with pytest.raises(ValueError, match="must be > 0"):
+        await service.run_parameter_sweep(db_session, bad_cfg)

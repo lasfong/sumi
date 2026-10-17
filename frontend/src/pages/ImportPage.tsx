@@ -137,6 +137,10 @@ export const ImportPage: React.FC = () => {
       toast.success(data.message);
       queryClient.invalidateQueries({ queryKey: ['dataCatalog'] });
       queryClient.invalidateQueries({ queryKey: ['importRuns'] });
+      queryClient.invalidateQueries({ queryKey: ['symbols'] });
+      queryClient.invalidateQueries({ queryKey: ['replay-sessions'] });
+      queryClient.invalidateQueries({ queryKey: ['replay-session-validation'] });
+      queryClient.invalidateQueries({ queryKey: ['replay-session'] });
     },
     onError: (err: ApiError) => {
       const errMsg = err?.response?.data?.detail || 'Không thể hoàn tác lượt nhập.';

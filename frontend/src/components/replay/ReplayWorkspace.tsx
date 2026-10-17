@@ -33,6 +33,7 @@ export const ReplayWorkspace: React.FC = () => {
     handleResumeSession,
     isCreatingSession,
     handleClearSession,
+    invalidatedSession,
     onSwitchSymbol,
     indicatorDefinitions,
     indicatorDocument,
@@ -99,6 +100,7 @@ export const ReplayWorkspace: React.FC = () => {
         onCreateSession={handleCreateSession}
         onResumeSession={handleResumeSession}
         isLoading={isCreatingSession}
+        invalidatedSession={invalidatedSession}
       />
     );
   }

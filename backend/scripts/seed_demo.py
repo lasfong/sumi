@@ -7,8 +7,11 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from sqlalchemy.orm import Session
+
 from app.db import Base, SessionLocal, engine
 import app.models  # noqa: F401 - register the complete application schema
+from app.domain.market.calendar import TradingCalendar
 from app.models.candle import Candle
 from app.models.symbol import Symbol
 
@@ -54,10 +57,13 @@ DEMO_SYMBOLS = [
 ]
 
 
-def seed_symbol(config: dict, sessions: int = 520) -> int:
+def seed_symbol(config: dict, sessions: int = 520, db: Session | None = None) -> int:
     symbol = config["symbol"]
-    Base.metadata.create_all(bind=engine)
-    db = SessionLocal()
+    owns_db = db is None
+    if owns_db:
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+    calendar = TradingCalendar()
     try:
         existing = db.query(Candle).filter(
             Candle.symbol == symbol,
@@ -87,7 +93,7 @@ def seed_symbol(config: dict, sessions: int = 520) -> int:
         rows = []
         index = 0
         while len(rows) < sessions:
-            if day.weekday() < 5:
+            if calendar.is_trading_day(day.date()):
                 amplitude = max(base_price * 0.045, 120.0)
                 trend = index * trend_step
                 cycle = sin(index / 9 + phase) * amplitude + sin(index / 31 + phase) * amplitude * 1.6
@@ -115,11 +121,12 @@ def seed_symbol(config: dict, sessions: int = 520) -> int:
         db.commit()
         return len(rows)
     finally:
-        db.close()
+        if owns_db and db is not None:
+            db.close()
 
 
-def seed_demo(sessions: int = 520) -> dict[str, int]:
-    return {config["symbol"]: seed_symbol(config, sessions) for config in DEMO_SYMBOLS}
+def seed_demo(sessions: int = 520, db: Session | None = None) -> dict[str, int]:
+    return {config["symbol"]: seed_symbol(config, sessions, db=db) for config in DEMO_SYMBOLS}
 
 
 if __name__ == "__main__":

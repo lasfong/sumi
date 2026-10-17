@@ -361,11 +361,13 @@ class AnalyticsService:
         if not benchmark_symbol:
             return []
 
+        timeframe = str(session.timeframe or "1D").strip().upper()
         vnindex_candles = db.query(Candle).filter(
             Candle.symbol == benchmark_symbol,
+            Candle.timeframe == timeframe,
             Candle.timestamp >= start_at(session.start_date),
             Candle.timestamp < end_before(session.end_date)
-        ).order_by(Candle.timestamp).all()
+        ).order_by(Candle.timestamp.asc(), Candle.id.asc()).all()
 
         if not vnindex_candles:
             return []

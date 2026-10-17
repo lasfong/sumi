@@ -9,9 +9,15 @@ interface SessionSetupProps {
   onCreateSession: (data: CreateSessionRequest) => void;
   onResumeSession?: (sessionId: number) => void;
   isLoading?: boolean;
+  invalidatedSession?: { id: number; symbol: string } | null;
 }
 
-export const SessionSetup: React.FC<SessionSetupProps> = ({ onCreateSession, onResumeSession, isLoading }) => {
+export const SessionSetup: React.FC<SessionSetupProps> = ({
+  onCreateSession,
+  onResumeSession,
+  isLoading,
+  invalidatedSession,
+}) => {
   const [symbol, setSymbol] = useState('');
   const [search, setSearch] = useState('');
   const [startDate, setStartDate] = useState('2023-01-01');
@@ -49,6 +55,23 @@ export const SessionSetup: React.FC<SessionSetupProps> = ({ onCreateSession, onR
 
   return (
     <div style={{ maxWidth: '980px', margin: '2rem auto', display: 'grid', gridTemplateColumns: 'minmax(320px, 500px) minmax(280px, 1fr)', gap: '1rem', alignItems: 'start' }}>
+      {invalidatedSession && (
+        <div
+          role="status"
+          data-testid="invalidated-session-recovery-banner"
+          style={{
+            gridColumn: '1 / -1',
+            padding: '12px 16px',
+            borderRadius: '8px',
+            background: 'rgba(255, 209, 102, 0.12)',
+            border: '1px solid rgba(255, 209, 102, 0.45)',
+            color: '#FFD166',
+            fontSize: '13px',
+          }}
+        >
+          ⚠️ Phiên Replay <strong>#{invalidatedSession.id} ({invalidatedSession.symbol})</strong> không còn dữ liệu nến lịch sử khả dụng (ví dụ: sau khi hoàn tác nhập dữ liệu). Dữ liệu phiên lịch sử vẫn được bảo toàn — vui lòng chọn mã khác bên dưới hoặc tiếp tục một phiên hợp lệ.
+        </div>
+      )}
       <div className="panel" style={{ padding: '2rem' }}>
         <h2 style={{ marginTop: 0, marginBottom: '1.5rem', color: 'var(--color-primary)' }}>
           New Replay Session
@@ -155,27 +178,33 @@ export const SessionSetup: React.FC<SessionSetupProps> = ({ onCreateSession, onR
         )}
 
         <div style={{ display: 'grid', gap: '8px' }}>
-          {(recentSessions || []).map((session: ReplaySession) => (
-            <div key={session.id} style={{ border: '1px solid var(--border-color)', borderRadius: '6px', padding: '10px', background: 'rgba(255,255,255,0.02)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', marginBottom: '6px' }}>
-                <strong>{session.symbol}</strong>
-                <span style={{ color: session.status === 'completed' ? 'var(--color-buy)' : 'var(--color-primary)', fontSize: '12px', textTransform: 'uppercase' }}>
-                  {session.status}
-                </span>
+          {(recentSessions || []).map((session: ReplaySession) => {
+            const hasNoCandles =
+              session.has_candles === false ||
+              (typeof session.available_candles === 'number' && session.available_candles <= 0);
+            return (
+              <div key={session.id} style={{ border: '1px solid var(--border-color)', borderRadius: '6px', padding: '10px', background: 'rgba(255,255,255,0.02)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', marginBottom: '6px' }}>
+                  <strong>{session.symbol}</strong>
+                  <span style={{ color: hasNoCandles ? '#FFD166' : session.status === 'completed' ? 'var(--color-buy)' : 'var(--color-primary)', fontSize: '12px', textTransform: 'uppercase' }}>
+                    {hasNoCandles ? 'NO CANDLES' : session.status}
+                  </span>
+                </div>
+                <div style={{ display: 'grid', gap: '4px', color: 'var(--text-muted)', fontSize: '12px', marginBottom: '8px' }}>
+                  <span>{session.start_date ? formatVietnameseDate(session.start_date) : '—'} to {session.end_date ? formatVietnameseDate(session.end_date) : '—'}</span>
+                  <span>Updated {session.updated_at ? formatVietnameseDate(session.updated_at) : '—'}</span>
+                </div>
+                <button
+                  type="button"
+                  disabled={hasNoCandles}
+                  onClick={() => onResumeSession?.(session.id)}
+                  style={{ width: '100%', padding: '8px', fontSize: '13px', opacity: hasNoCandles ? 0.55 : 1 }}
+                >
+                  {hasNoCandles ? `Unavailable (0 candles) #${session.id}` : `Resume Session #${session.id}`}
+                </button>
               </div>
-              <div style={{ display: 'grid', gap: '4px', color: 'var(--text-muted)', fontSize: '12px', marginBottom: '8px' }}>
-                <span>{session.start_date ? formatVietnameseDate(session.start_date) : '—'} to {session.end_date ? formatVietnameseDate(session.end_date) : '—'}</span>
-                <span>Updated {session.updated_at ? formatVietnameseDate(session.updated_at) : '—'}</span>
-              </div>
-              <button
-                type="button"
-                onClick={() => onResumeSession?.(session.id)}
-                style={{ width: '100%', padding: '8px', fontSize: '13px' }}
-              >
-                Resume Session #{session.id}
-              </button>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
     </div>

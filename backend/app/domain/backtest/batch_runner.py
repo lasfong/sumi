@@ -267,7 +267,12 @@ class BatchBacktestRunner:
         if missing:
             raise ValueError(f"Candles DataFrame for {symbol} missing columns: {missing}")
 
-        sorted_df = candles_df.sort_values("timestamp").copy().reset_index(drop=True)
+        sorted_df = (
+            candles_df.sort_values("timestamp", kind="mergesort")
+            .drop_duplicates(subset=["timestamp"], keep="first")
+            .copy()
+            .reset_index(drop=True)
+        )
 
         active_cache = cache if cache is not None else default_domain_cache
         indicator_values = None

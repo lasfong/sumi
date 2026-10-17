@@ -60,8 +60,27 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
   }, []);
 
   const close = useCallback(() => { if (!submitting) setPendingAction(null); }, [submitting]);
+  const openLongPosition = snapshot.positions.find(p => p.quantity > 0);
+  const openShortPosition = !openLongPosition ? snapshot.positions.find(p => p.quantity < 0) : undefined;
+  const openPosition = openLongPosition ?? openShortPosition;
+  const availableQty = openPosition?.available_quantity ?? snapshot.available_quantity ?? 0;
+  const openPositionValue = useMemo(
+    () => snapshot.positions.reduce((sum, p) => sum + p.current_price * p.quantity, 0),
+    [snapshot.positions],
+  );
+  const accountEquity = snapshot.current_cash + openPositionValue;
+
   const isTradeAction = pendingAction !== null && ['BUY', 'SELL', 'ADD', 'REDUCE'].includes(pendingAction);
-  const isShortAction = pendingAction !== null && ['SELL', 'REDUCE'].includes(pendingAction);
+  const isClosingLong = Boolean(
+    openLongPosition && pendingAction !== null && ['SELL', 'REDUCE', 'CLOSE'].includes(pendingAction),
+  );
+  const isShortAction = Boolean(
+    !openLongPosition &&
+      pendingAction !== null &&
+      ((pendingAction as string) === 'SHORT' ||
+        (openShortPosition && ['SELL', 'REDUCE'].includes(pendingAction))),
+  );
+  const directionLabel = isShortAction ? 'SHORT' : isClosingLong ? 'LONG EXIT' : 'LONG';
 
   // Sync entry, stop loss, and target price from active/latest risk-reward chart drawing (both LONG and SHORT)
   const syncFromDrawing = useCallback(() => {
@@ -133,7 +152,7 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
     return null;
   }, [entryPrice, isShortAction, isTradeAction, stopLoss, targetPrice]);
 
-  // Sizing and Risk calculations (symmetric for LONG and SHORT)
+  // Sizing and Risk calculations (symmetric for LONG and SHORT, aligned with backend /plan-sizing equity formula)
   const sizingCalc = useMemo(() => {
     const entry = entryPrice;
     const stop = Number(stopLoss);
@@ -150,11 +169,13 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
       (isShortAction ? target > 0 && target < entry : target > entry);
     const rewardPerShare = hasValidTarget ? (isShortAction ? entry - target : target - entry) : 0;
     const grossR = riskPerShare > 0 ? rewardPerShare / riskPerShare : 0;
-    const maxRiskAmt = (snapshot.current_cash * riskPct) / 100;
+    const maxRiskAmt = Math.max(0, (accountEquity * riskPct) / 100);
     const rawQty = maxRiskAmt / riskPerShare;
     const lotRoundedQty = Math.floor(rawQty / 100) * 100;
-    const maxCashQty = Math.floor(snapshot.current_cash / (entry * 1.0015) / 100) * 100;
-    const plannedQty = Math.min(lotRoundedQty, maxCashQty);
+    const maxCashQty = Math.floor(Math.max(0, snapshot.current_cash) / (entry * 1.0015) / 100) * 100;
+    const maxSellableQty = Math.floor(Math.max(0, availableQty) / 100) * 100;
+    const capacityQty = isClosingLong ? maxSellableQty : maxCashQty;
+    const plannedQty = Math.max(0, Math.min(lotRoundedQty, capacityQty));
     const plannedRiskAmt = plannedQty * riskPerShare;
 
     let grossBuy = 0;
@@ -182,10 +203,12 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
 
     return {
       entry, stop, target, riskPerShare, rewardPerShare, grossR, maxRiskAmt,
+      accountEquity, availableCash: snapshot.current_cash,
+      lotRoundedQty, maxCashQty, capacityQty,
       plannedQty, plannedRiskAmt, grossBuy, netProfit, netR,
       affordable: plannedQty >= 100,
     };
-  }, [entryPrice, isShortAction, riskPercent, slTpValidationError, snapshot.current_cash, stopLoss, targetPrice]);
+  }, [accountEquity, availableQty, entryPrice, isClosingLong, isShortAction, riskPercent, slTpValidationError, snapshot.current_cash, stopLoss, targetPrice]);
 
   const slPctPreview = useMemo(() => {
     const stop = Number(stopLoss);
@@ -236,10 +259,8 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
   }, [confidenceScore, emotion, isTradeAction, limitPrice, marketRegime, mistakeTag, note, onSubmitDecision, orderType, pendingAction, quantity, reason, ruleViolation, setupType, sizingCalc, snapshot, stopLoss, targetPrice]);
 
   const actionsDisabled = !snapshot.can_trade || submitting || disabled || limitedViewport;
-  const openPosition = snapshot.positions.find(p => p.quantity > 0);
-  const availableQty = openPosition?.available_quantity ?? snapshot.available_quantity ?? 0;
   const unsettledQty = openPosition
-    ? Math.max(0, openPosition.blocked_quantity ?? (openPosition.quantity - availableQty))
+    ? Math.max(0, openPosition.blocked_quantity ?? (Math.abs(openPosition.quantity) - availableQty))
     : Math.max(0, snapshot.blocked_quantity ?? 0);
   const releaseDateStr = (openPosition?.earliest_release_date ?? snapshot.earliest_release_date)?.slice(0, 10) || null;
   const sellDisabled = actionsDisabled || !openPosition || availableQty <= 0;
@@ -298,6 +319,24 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
         <div>
           <h3 style={{ margin: 0 }}>Record {pendingAction}</h3>
           <small>{snapshot.symbol} · bar {snapshot.visible_bar}/{snapshot.total_bars} · {snapshot.current_date.slice(0, 10)}</small>
+          {isClosingLong && openLongPosition && (
+            <div
+              data-testid="closing-long-context"
+              style={{
+                marginTop: 6,
+                padding: '4px 8px',
+                borderRadius: 4,
+                background: 'rgba(0, 230, 118, 0.1)',
+                border: '1px solid rgba(0, 230, 118, 0.3)',
+                color: '#00E676',
+                fontSize: 11,
+              }}
+            >
+              Đóng/Giảm vị thế Mua (LONG) · Khả dụng: <strong>{availableQty.toLocaleString()}</strong> /{' '}
+              <strong>{openLongPosition.quantity.toLocaleString()}</strong> CP (Giá vốn TB:{' '}
+              {openLongPosition.average_price.toLocaleString()})
+            </div>
+          )}
         </div>
         {isTradeAction && <>
           <label>Quantity
@@ -373,7 +412,9 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
           </div>
 
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '2px 0' }}>
-            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Trade Sizing &amp; Risk ({isShortAction ? 'SHORT' : 'LONG'})</span>
+            <span data-testid="trade-sizing-direction-label" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+              Trade Sizing &amp; Risk ({directionLabel})
+            </span>
             <button type="button" data-testid="sync-from-drawing" onClick={syncFromDrawing} style={{ fontSize: 11, padding: '3px 8px' }}>
               📐 Sync from Drawing
             </button>
@@ -401,7 +442,11 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
               <>
                 <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                   <span>Expected R: <strong style={{ color: '#00E676' }}>1 : {sizingCalc.grossR.toFixed(1)}</strong> ({sizingCalc.grossR.toFixed(2)}R, Net {sizingCalc.netR.toFixed(2)}R)</span>
-                  <span>Max Risk: <strong>{sizingCalc.maxRiskAmt.toLocaleString()} VND</strong></span>
+                  <span data-testid="sizing-max-risk">Max Risk: <strong>{sizingCalc.maxRiskAmt.toLocaleString()} VND</strong></span>
+                </div>
+                <div data-testid="sizing-equity-basis" style={{ fontSize: 11, color: 'var(--text-muted)', display: 'flex', justifyContent: 'space-between' }}>
+                  <span>Equity: {sizingCalc.accountEquity.toLocaleString()} VND</span>
+                  <span>Cash: {sizingCalc.availableCash.toLocaleString()} VND</span>
                 </div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span>Recommended Size: <strong>{sizingCalc.plannedQty.toLocaleString()} shares</strong></span>
@@ -414,7 +459,7 @@ export const TradeControls: React.FC<TradeControlsProps> = ({ snapshot, onSubmit
                     Use Size ({sizingCalc.plannedQty})
                   </button>
                 </div>
-                {!sizingCalc.affordable && <div style={{ color: '#FF8A80' }}>Calculated size is below 100-share minimum lot or exceeds available cash.</div>}
+                {!sizingCalc.affordable && <div style={{ color: '#FF8A80' }}>Calculated size is below 100-share minimum lot or exceeds available {isClosingLong ? 'position' : 'cash'}.</div>}
               </>
             ) : (
               <div style={{ color: 'var(--text-muted)' }}>

@@ -71,7 +71,16 @@ def calculate_trade_plan(session_id: int, plan_in: TradePlanInput, db: Session =
     # Total equity = available cash + current value of open positions
     open_position_value = sum(p.current_price * p.quantity for p in snapshot.positions)
     equity = snapshot.current_cash + open_position_value
-    return calculate_position_size(equity=equity, available_cash=snapshot.current_cash, plan=plan_in)
+    try:
+        return calculate_position_size(equity=equity, available_cash=snapshot.current_cash, plan=plan_in)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error_code": "VALIDATION_ERROR",
+                "message": str(exc),
+            },
+        ) from exc
 
 
 @router.post("/sessions/{session_id}/decisions", response_model=DecisionResponse)

@@ -85,7 +85,7 @@ export const buildScannerSignalMarker = (
 
 /** Application controller boundary for replay queries, commands and workspace state. */
 export const useReplayWorkspaceController = () => {
-  const { sessionId, selectSession, clearSession, isValidating } = useSessionSelection();
+  const { sessionId, selectSession, clearSession, isValidating, invalidatedSession } = useSessionSelection();
   const chartRef = useRef<CandleChartRef>(null);
   const queryClient = useQueryClient();
 
@@ -150,6 +150,11 @@ export const useReplayWorkspaceController = () => {
     enabled: !!sessionId,
   });
 
+  const sessionHasCandles =
+    !sessionData ||
+    (sessionData.has_candles !== false &&
+      (sessionData.available_candles === undefined || sessionData.available_candles > 0));
+
   const effectiveTimeframe = normalizeReplayTimeframe(targetTimeframe ?? sessionData?.timeframe ?? '1D');
   const effectiveAdjustment = normalizeAdjustmentType(sessionData?.adjustment_type ?? 'unadjusted');
   const effectiveSymbol = sessionData?.symbol ?? undefined;
@@ -161,19 +166,19 @@ export const useReplayWorkspaceController = () => {
   const { data: candlesData } = useQuery({
     queryKey: candlesQueryKey,
     queryFn: () => getSessionCandles(sessionId!, targetTimeframe),
-    enabled: !!sessionId,
+    enabled: !!sessionId && sessionHasCandles,
   });
 
   const { data: practiceData, isLoading: practiceLoading, isError: practiceError, refetch: refetchPractice } = useQuery({
     queryKey: replayQueryKeys.practiceState(sessionId),
     queryFn: () => getPracticeState(sessionId!),
-    enabled: !!sessionId,
+    enabled: !!sessionId && sessionHasCandles,
   });
 
   const { data: journalData, isLoading: journalLoading, isError: journalError, refetch: refetchJournal } = useQuery({
     queryKey: replayQueryKeys.journal(sessionId),
     queryFn: () => getJournalEntries(sessionId!),
-    enabled: !!sessionId,
+    enabled: !!sessionId && sessionHasCandles,
   });
 
   const createMutation = useMutation({
@@ -305,7 +310,11 @@ export const useReplayWorkspaceController = () => {
 
       const message = decision.action === 'HOLD' || decision.action === 'SKIP'
         ? `${decision.action} decision recorded without an order.`
-        : decision.order_type === 'LIMIT' ? `${decision.action} LIMIT order recorded.` : `${decision.action} executed at the visible close.`;
+        : decision.order_type === 'LIMIT'
+          ? `${decision.action} LIMIT order recorded.`
+          : decision.order_type === 'MARKET_NEXT_OPEN'
+            ? `${decision.action} order queued for execution at next candle open.`
+            : `${decision.action} executed at the visible close.`;
       toast.success(message);
       return { ok: true, message };
     } catch (err: unknown) {
@@ -960,7 +969,7 @@ export const useReplayWorkspaceController = () => {
   return {
     sessionId, chartRef, symbolName, sessionStatus: sessionData?.status, sessionData, sourceContext, currentDate, currentCandle, candleCount: candlesData?.length ?? 0,
     targetTimeframe, setTargetTimeframe,
-    handleCreateSession, handleResumeSession, isCreatingSession: createMutation.isPending, handleClearSession, isValidating,
+    handleCreateSession, handleResumeSession, isCreatingSession: createMutation.isPending, handleClearSession, isValidating, invalidatedSession,
     onSwitchSymbol: handleQuickSwitchSymbol,
     indicatorDefinitions, indicatorDocument, indicatorRuntime, addIndicatorInstance, updateIndicatorInstance,
     removeIndicatorInstance, toggleIndicatorInstance, moveIndicatorInstance,

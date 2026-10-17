@@ -255,4 +255,163 @@ describe('SignalExplanationInspector Component (UI-EXP-001)', () => {
       expect(screen.getByText(/relative volume 1.82 ge 1.50/i)).toBeInTheDocument();
     });
   });
+
+  it('DEF-012: requests auxiliary bb.direction_rising and bb.regime_positive with registry-compliant { horizon: "T20", min_quality: "HIGH" } parameters', async () => {
+    vi.mocked(signalsApi.getSignalRegistry).mockResolvedValue({
+      signals: [
+        ...mockRegistry.signals,
+        {
+          name: 'bb.direction_rising',
+          version: '1.0.0',
+          category: 'flow',
+          label_vi: 'Dòng Tiền BB Chuyển Động Tăng',
+          description: 'Điểm Money Flow BB tăng',
+          output_type: 'bool',
+          parameters_schema: {
+            horizon: { type: 'string', default: 'T20', description: 'Khung thời gian' },
+            min_quality: { type: 'string', default: 'HIGH', description: 'Chất lượng' },
+          },
+          default_parameters: { horizon: 'T20', min_quality: 'HIGH' },
+          dependencies: [],
+          warmup_bars: 20,
+          causal_delay_bars: 0,
+          status: 'ACTIVE',
+          ast_alias: 'bb__direction_rising',
+        },
+        {
+          name: 'bb.regime_positive',
+          version: '1.0.0',
+          category: 'flow',
+          label_vi: 'Chế Độ Dòng Tiền BB Tích Cực',
+          description: 'Điểm Money Flow BB trên 50',
+          output_type: 'bool',
+          parameters_schema: {
+            horizon: { type: 'string', default: 'T20', description: 'Khung thời gian' },
+            min_quality: { type: 'string', default: 'HIGH', description: 'Chất lượng' },
+          },
+          default_parameters: { horizon: 'T20', min_quality: 'HIGH' },
+          dependencies: [],
+          warmup_bars: 20,
+          causal_delay_bars: 0,
+          status: 'ACTIVE',
+          ast_alias: 'bb__regime_positive',
+        },
+      ],
+    });
+
+    vi.mocked(signalsApi.calculateReplaySignals)
+      .mockResolvedValueOnce({
+        session_id: 1,
+        observed_current_index: 25,
+        timeframe: '1D',
+        results: [
+          {
+            signal_name: 'health.score',
+            signal_version: '1.0.0',
+            resolved_params: { warmup: 50 },
+            params_hash: 'h1',
+            points: [
+              {
+                bar_index: 25,
+                timestamp: '2026-03-01',
+                output_type: 'float',
+                value: 55.0,
+                quality: 'VALID',
+                reasons: ['trend_positive'],
+                baseline: null,
+                current_volume: 1000000,
+                relative_volume: 1.2,
+                threshold: 35.0,
+                availability_event: 'BAR_CLOSE',
+                available_at_index: 25,
+                available_at_timestamp: '2026-03-01',
+              },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        session_id: 1,
+        observed_current_index: 25,
+        timeframe: '1D',
+        results: [
+          {
+            signal_name: 'bb.direction_rising',
+            signal_version: '1.0.0',
+            resolved_params: { horizon: 'T20', min_quality: 'HIGH' },
+            params_hash: 'h2',
+            points: [
+              {
+                bar_index: 25,
+                timestamp: '2026-03-01',
+                output_type: 'bool',
+                value: true,
+                quality: 'VALID',
+                reasons: ['bb_proxy_slope_positive'],
+                baseline: null,
+                current_volume: null,
+                relative_volume: null,
+                threshold: null,
+                availability_event: 'BAR_CLOSE',
+                available_at_index: 25,
+                available_at_timestamp: '2026-03-01',
+              },
+            ],
+          },
+          {
+            signal_name: 'bb.regime_positive',
+            signal_version: '1.0.0',
+            resolved_params: { horizon: 'T20', min_quality: 'HIGH' },
+            params_hash: 'h3',
+            points: [
+              {
+                bar_index: 25,
+                timestamp: '2026-03-01',
+                output_type: 'bool',
+                value: true,
+                quality: 'VALID',
+                reasons: ['bb_proxy_value_above_50'],
+                baseline: null,
+                current_volume: null,
+                relative_volume: null,
+                threshold: null,
+                availability_event: 'BAR_CLOSE',
+                available_at_index: 25,
+                available_at_timestamp: '2026-03-01',
+              },
+            ],
+          },
+        ],
+      });
+
+    renderWithClient(
+      <SignalExplanationInspector
+        sessionId={1}
+        currentIndex={25}
+        timeframe="1D"
+        currentTimestamp="2026-03-01"
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('TĂNG ▲')).toBeInTheDocument();
+      expect(screen.getByText('DƯƠNG (> 50)')).toBeInTheDocument();
+    });
+
+    expect(signalsApi.calculateReplaySignals).toHaveBeenCalledTimes(2);
+    expect(signalsApi.calculateReplaySignals).toHaveBeenNthCalledWith(2, 1, {
+      signals: [
+        {
+          name: 'bb.direction_rising',
+          version: '1.0.0',
+          params: { horizon: 'T20', min_quality: 'HIGH' },
+        },
+        {
+          name: 'bb.regime_positive',
+          version: '1.0.0',
+          params: { horizon: 'T20', min_quality: 'HIGH' },
+        },
+      ],
+    });
+  });
 });

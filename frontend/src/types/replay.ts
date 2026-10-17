@@ -15,6 +15,8 @@ export interface ReplaySession {
   hide_date: number;
   source_type?: string | null;
   source_context: ReplaySourceContext;
+  available_candles?: number;
+  has_candles?: boolean;
   created_at: string;
   updated_at: string;
 }

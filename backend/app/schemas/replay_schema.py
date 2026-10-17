@@ -68,6 +68,8 @@ class ReplaySessionResponse(ReplaySessionBase):
     current_cash: float
     status: SessionStatus
     source_context: ReplaySourceContext
+    available_candles: int = 0
+    has_candles: bool = True
     created_at: datetime
     updated_at: datetime
     model_config = ConfigDict(from_attributes=True)

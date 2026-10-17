@@ -33,13 +33,14 @@ class ScannerService:
         start_date = config["start_date"]
         end_date = config["end_date"]
         benchmark_symbol = config.get("benchmark_symbol", "VNINDEX")
+        timeframe = str(config.get("timeframe") or "1D").strip().upper()
         max_results = int(config.get("max_results", 500))
         warnings = []
         results = []
-        regime_map = self._build_regime_map(db, benchmark_symbol, start_date, end_date)
+        regime_map = self._build_regime_map(db, benchmark_symbol, start_date, end_date, timeframe=timeframe)
 
         for symbol in symbols:
-            candles = self._load_candles(db, symbol, start_date, end_date)
+            candles = self._load_candles(db, symbol, start_date, end_date, timeframe=timeframe)
             if not candles:
                 warnings.append(f"No candles found for {symbol}")
                 continue
@@ -91,18 +92,19 @@ class ScannerService:
             "ranking_policy": "chronological_unranked",
         }
 
-    def _load_candles(self, db: Session, symbol: str, start_date: str, end_date: str) -> list[Candle]:
+    def _load_candles(self, db: Session, symbol: str, start_date: str, end_date: str, timeframe: str = "1D") -> list[Candle]:
         return db.query(Candle).filter(
             Candle.symbol == symbol,
+            Candle.timeframe == timeframe,
             Candle.timestamp >= start_at(start_date),
             Candle.timestamp < end_before(end_date),
-        ).order_by(Candle.timestamp).all()
+        ).order_by(Candle.timestamp.asc(), Candle.id.asc()).all()
 
-    def _build_regime_map(self, db: Session, benchmark_symbol: str | None, start_date: str, end_date: str) -> dict:
+    def _build_regime_map(self, db: Session, benchmark_symbol: str | None, start_date: str, end_date: str, timeframe: str = "1D") -> dict:
         if not benchmark_symbol:
             return {}
 
-        benchmark_candles = self._load_candles(db, benchmark_symbol, start_date, end_date)
+        benchmark_candles = self._load_candles(db, benchmark_symbol, start_date, end_date, timeframe=timeframe)
         return RegimeClassifier.build_regime_map(benchmark_candles) if benchmark_candles else {}
 
     def _lookup_regime(self, timestamp, regime_map: dict) -> str:

@@ -12,9 +12,11 @@ export type SignalOutputType = 'bool' | 'float' | 'enum';
 
 export type SignalStatus = 'ACTIVE' | 'EXPERIMENTAL' | 'DEPRECATED';
 
+export type SignalParameterValue = number | string | boolean;
+
 export interface SignalParameterSchema {
-  type: 'int' | 'float';
-  default: number;
+  type: 'int' | 'float' | 'string' | 'bool';
+  default: SignalParameterValue;
   minimum?: number;
   exclusiveMinimum?: number;
   maximum?: number;
@@ -29,7 +31,7 @@ export interface SignalDefinition {
   description: string;
   output_type: SignalOutputType;
   parameters_schema: Record<string, SignalParameterSchema>;
-  default_parameters: Record<string, number>;
+  default_parameters: Record<string, SignalParameterValue>;
   dependencies: string[];
   warmup_bars: number;
   causal_delay_bars: number;
@@ -44,7 +46,7 @@ export interface SignalRegistryResponse {
 export interface SignalCalculationItemRequest {
   name: string;
   version?: string;
-  params?: Record<string, number | string | boolean>;
+  params?: Record<string, SignalParameterValue>;
 }
 
 export interface SignalCalculationRequest {
@@ -70,7 +72,7 @@ export interface SignalOutputPoint {
 export interface SignalCalculationSeriesResponse {
   signal_name: string;
   signal_version: string;
-  resolved_params: Record<string, number>;
+  resolved_params: Record<string, SignalParameterValue>;
   params_hash: string;
   points: SignalOutputPoint[];
 }

@@ -151,4 +151,24 @@ describe('useSessionSelection controller (R02-01 / PRO-UX-02 / PRO-UX-03)', () =
     expect(result.current.getSessionPath('/analytics')).toBe('/analytics?session=42');
     expect(result.current.getSessionPath('/analytics', 10)).toBe('/analytics?session=10');
   });
+
+  it('DEF-006: session with 0 available candles after import rollback is rejected, clears store, and exposes invalidatedSession', async () => {
+    vi.mocked(replayApi.getReplaySession).mockResolvedValueOnce({
+      ...mockSession42,
+      id: 77,
+      symbol: 'QAROLL',
+      available_candles: 0,
+      has_candles: false,
+    } as ReplaySession);
+
+    useReplayStore.getState().setSession(77);
+    const wrapper = createWrapper('/replay');
+    const { result } = renderHook(() => useSessionSelection(), { wrapper });
+
+    await waitFor(() => {
+      expect(result.current.sessionId).toBeNull();
+      expect(useReplayStore.getState().sessionId).toBeNull();
+      expect(result.current.invalidatedSession).toEqual({ id: 77, symbol: 'QAROLL' });
+    });
+  });
 });

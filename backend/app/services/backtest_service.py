@@ -143,12 +143,15 @@ class BacktestService:
                 "summary": {},
             }
 
+        timeframe = str(config.get("timeframe") or "1D").strip().upper()
+
         def candle_provider(sym: str, start: str, end: str) -> pd.DataFrame:
             candles = db.query(Candle).filter(
                 Candle.symbol == sym,
+                Candle.timeframe == timeframe,
                 Candle.timestamp >= start_at(start),
                 Candle.timestamp < end_before(end),
-            ).order_by(Candle.timestamp).all()
+            ).order_by(Candle.timestamp.asc(), Candle.id.asc()).all()
             if not candles:
                 return pd.DataFrame()
             return pd.DataFrame([{
@@ -230,19 +233,32 @@ class BacktestService:
         """
         Chạy backtest cho 1 strategy trên 1 symbol.
         """
-        strategy = load_strategy_from_dict(config["strategy"])
+        from pydantic import ValidationError
+        try:
+            strategy = load_strategy_from_dict(config.get("strategy") or {})
+        except (ValidationError, ValueError) as exc:
+            return {
+                "status": "failed",
+                "error_code": "STRATEGY_LOAD_FAILED",
+                "message": str(exc),
+                "symbol": config.get("symbol"),
+                "total_candles": 0,
+                "analytics": None,
+            }
         symbol = config["symbol"]
         start_date = config["start_date"]
         end_date = config["end_date"]
         initial_cash = config.get("initial_cash", 100000000)
         benchmark_symbol = config.get("benchmark_symbol", "VNINDEX")
+        timeframe = str(config.get("timeframe") or "1D").strip().upper()
         
-        # 1. Load ALL candles for symbol
+        # 1. Load canonical candles for symbol and explicit timeframe
         candles = db.query(Candle).filter(
             Candle.symbol == symbol,
+            Candle.timeframe == timeframe,
             Candle.timestamp >= start_at(start_date),
             Candle.timestamp < end_before(end_date)
-        ).order_by(Candle.timestamp).all()
+        ).order_by(Candle.timestamp.asc(), Candle.id.asc()).all()
         
         if len(candles) == 0:
             return {
@@ -303,7 +319,7 @@ class BacktestService:
             strategy=strategy,
             symbol=symbol,
             initial_cash=float(initial_cash),
-            timeframe="1D",
+            timeframe=timeframe,
         )
 
         # 4. Atomically persist result into ReplaySession for backward compatibility
@@ -321,6 +337,7 @@ class BacktestService:
             benchmark_symbol=benchmark_symbol,
             start_date=start_date,
             end_date=end_date,
+            timeframe=timeframe,
         )
         
         return {
@@ -439,7 +456,7 @@ class BacktestService:
         strategy_payload = strategy.model_dump(mode="json")
         data_hasher = hashlib.sha256(json.dumps({
             "symbol": symbol,
-            "timeframe": "1D",
+            "timeframe": str(candles[0].timeframe),
             "adjustment_type": str(candles[0].adjustment_type),
             "first": str(candles[0].timestamp),
             "last": str(candles[-1].timestamp),
@@ -479,12 +496,13 @@ class BacktestService:
         benchmark_symbol: str | None = "VNINDEX",
         start_date=None,
         end_date=None,
+        timeframe: str = "1D",
     ) -> list[dict]:
         trades = db.query(Trade).filter(
             Trade.session_id == session_id,
             Trade.exit_date.isnot(None)
         ).all()
-        regime_map = self._build_regime_map(db, benchmark_symbol, start_date, end_date)
+        regime_map = self._build_regime_map(db, benchmark_symbol, start_date, end_date, timeframe=timeframe)
         return [
             *self._slice_trades(trades, "symbol", lambda trade: trade.symbol),
             *self._slice_trades(
@@ -499,17 +517,20 @@ class BacktestService:
             ),
         ]
 
-    def _build_regime_map(self, db: Session, benchmark_symbol: str | None, start_date, end_date) -> dict:
+    def _build_regime_map(self, db: Session, benchmark_symbol: str | None, start_date, end_date, timeframe: str = "1D") -> dict:
         if not benchmark_symbol:
             return {}
 
-        query = db.query(Candle).filter(Candle.symbol == benchmark_symbol)
+        query = db.query(Candle).filter(
+            Candle.symbol == benchmark_symbol,
+            Candle.timeframe == timeframe,
+        )
         if start_date:
             query = query.filter(Candle.timestamp >= start_at(start_date))
         if end_date:
             query = query.filter(Candle.timestamp < end_before(end_date))
 
-        benchmark_candles = query.order_by(Candle.timestamp).all()
+        benchmark_candles = query.order_by(Candle.timestamp.asc(), Candle.id.asc()).all()
         return RegimeClassifier.build_regime_map(benchmark_candles) if benchmark_candles else {}
 
     def _lookup_trade_regime(self, trade: Trade, regime_map: dict) -> str:

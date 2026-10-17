@@ -26,7 +26,7 @@ export const SignalExplanationInspector: React.FC<SignalExplanationInspectorProp
   initialSignalName,
 }) => {
   const [selectedSignalName, setSelectedSignalName] = useState<string>(initialSignalName || 'health.score');
-  const [customParams, setCustomParams] = useState<Record<string, number>>({});
+  const [customParams, setCustomParams] = useState<Record<string, number | string | boolean>>({});
 
   useEffect(() => {
     if (initialSignalName) {
@@ -61,8 +61,18 @@ export const SignalExplanationInspector: React.FC<SignalExplanationInspectorProp
       if (!sessionId) {
         throw new Error('No session ID');
       }
-      const findVersion = (sigName: string): string =>
-        allSignals.find((s) => s.name === sigName)?.version || '1.0.0';
+      const findDef = (sigName: string) => allSignals.find((s) => s.name === sigName);
+      const findVersion = (sigName: string): string => findDef(sigName)?.version || '1.0.0';
+      const resolveDefaultParams = (
+        sigName: string,
+        fallback: Record<string, number | string | boolean>,
+      ): Record<string, number | string | boolean> => {
+        const def = findDef(sigName);
+        if (def?.default_parameters && Object.keys(def.default_parameters).length > 0) {
+          return { ...def.default_parameters };
+        }
+        return fallback;
+      };
 
       const primarySignals = [
         {
@@ -75,7 +85,7 @@ export const SignalExplanationInspector: React.FC<SignalExplanationInspectorProp
         primarySignals.push({
           name: 'health.score',
           version: findVersion('health.score'),
-          params: {},
+          params: resolveDefaultParams('health.score', {}),
         });
       }
 
@@ -86,12 +96,12 @@ export const SignalExplanationInspector: React.FC<SignalExplanationInspectorProp
         {
           name: 'bb.direction_rising',
           version: findVersion('bb.direction_rising'),
-          params: { horizon_bars: 20 },
+          params: resolveDefaultParams('bb.direction_rising', { horizon: 'T20', min_quality: 'HIGH' }),
         },
         {
           name: 'bb.regime_positive',
           version: findVersion('bb.regime_positive'),
-          params: { horizon_bars: 20 },
+          params: resolveDefaultParams('bb.regime_positive', { horizon: 'T20', min_quality: 'HIGH' }),
         },
       ].filter((item) => !returnedNames.has(item.name));
 
@@ -123,7 +133,11 @@ export const SignalExplanationInspector: React.FC<SignalExplanationInspectorProp
     setCustomParams({});
   };
 
-  const handleParamChange = (pKey: string, rawVal: string) => {
+  const handleParamChange = (pKey: string, rawVal: string, paramType?: string) => {
+    if (paramType === 'string') {
+      setCustomParams((prev) => ({ ...prev, [pKey]: rawVal }));
+      return;
+    }
     const num = Number(rawVal);
     if (!Number.isNaN(num)) {
       setCustomParams((prev) => ({ ...prev, [pKey]: num }));
@@ -261,12 +275,12 @@ export const SignalExplanationInspector: React.FC<SignalExplanationInspectorProp
                   </label>
                   <input
                     id={`param-input-${pKey}`}
-                    type="number"
-                    value={params[pKey] ?? schema?.default ?? 0}
+                    type={schema?.type === 'string' ? 'text' : 'number'}
+                    value={String(params[pKey] ?? schema?.default ?? (schema?.type === 'string' ? '' : 0))}
                     step={schema?.type === 'float' ? '0.1' : '1'}
                     min={schema?.minimum}
                     max={schema?.maximum}
-                    onChange={(e) => handleParamChange(pKey, e.target.value)}
+                    onChange={(e) => handleParamChange(pKey, e.target.value, schema?.type)}
                     style={{
                       width: '100%',
                       padding: '4px 6px',

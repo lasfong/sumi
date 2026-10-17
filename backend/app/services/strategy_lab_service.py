@@ -283,13 +283,15 @@ class StrategyLabService:
             symbol = config.get("symbol") or (config.get("symbols")[0] if config.get("symbols") else None)
             initial_cash = float(config.get("initial_cash", 100000000))
             benchmark_symbol = config.get("benchmark_symbol", "VNINDEX")
+            timeframe = str(config.get("timeframe") or "1D").strip().upper()
 
             # Pre-load in-sample candles once (GAP-EXEC-01, B20)
             is_candles = db.query(Candle).filter(
                 Candle.symbol == symbol,
+                Candle.timeframe == timeframe,
                 Candle.timestamp >= start_at(start_date),
                 Candle.timestamp < end_before(end_date)
-            ).order_by(Candle.timestamp).all()
+            ).order_by(Candle.timestamp.asc(), Candle.id.asc()).all()
 
             if not is_candles:
                 return {
@@ -313,9 +315,10 @@ class StrategyLabService:
             if oos_start_date and oos_end_date:
                 oos_candles = db.query(Candle).filter(
                     Candle.symbol == symbol,
+                    Candle.timeframe == timeframe,
                     Candle.timestamp >= start_at(oos_start_date),
                     Candle.timestamp < end_before(oos_end_date)
-                ).order_by(Candle.timestamp).all()
+                ).order_by(Candle.timestamp.asc(), Candle.id.asc()).all()
                 if oos_candles:
                     oos_df = pd.DataFrame([{
                         "timestamp": c.timestamp,
@@ -359,7 +362,7 @@ class StrategyLabService:
                         strategy=strategy_obj,
                         symbol=symbol,
                         initial_cash=initial_cash,
-                        timeframe="1D",
+                        timeframe=timeframe,
                     )
                     is_response = self._format_kernel_response(
                         kernel_res=kernel_res,
@@ -403,7 +406,7 @@ class StrategyLabService:
                             strategy=strategy_obj,
                             symbol=symbol,
                             initial_cash=initial_cash,
-                            timeframe="1D",
+                            timeframe=timeframe,
                         )
                         oos_response = self._format_kernel_response(
                             kernel_res=oos_kernel_res,
@@ -549,6 +552,10 @@ class StrategyLabService:
             return f"position_sizing.{param}"
 
         if target_type == "risk_management":
+            if param not in {"stop_loss_pct", "take_profit_pct"}:
+                raise ValueError(
+                    f"Unsupported risk_management parameter '{param}'. Expected 'stop_loss_pct' or 'take_profit_pct'."
+                )
             return f"risk_management.{param}"
 
         raise ValueError(f"Unsupported target_type: {target_type}")
@@ -556,6 +563,18 @@ class StrategyLabService:
     def _set_path_value(self, target: dict, path: str, value) -> None:
         current = target
         parts = path.split(".")
+        if parts[0] == "risk_management":
+            if len(parts) != 2 or parts[1] not in {"stop_loss_pct", "take_profit_pct"}:
+                raise ValueError(
+                    f"Unsupported risk_management path '{path}'. Expected 'risk_management.stop_loss_pct' or 'risk_management.take_profit_pct'."
+                )
+            if value is not None:
+                try:
+                    numeric_val = float(value)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"Risk management parameter '{parts[1]}' must be numeric, got {value!r}.") from exc
+                if numeric_val <= 0:
+                    raise ValueError(f"Risk management parameter '{parts[1]}' must be > 0, got {value!r}.")
         for part in parts[:-1]:
             current = self._descend(current, part)
         final_key = parts[-1]
@@ -564,13 +583,26 @@ class StrategyLabService:
             key, index = self._parse_indexed_key(final_key)
             parent[key][index] = value
         else:
+            if not isinstance(current, dict):
+                raise ValueError(f"Cannot set parameter '{final_key}' on non-object target in path '{path}'.")
             current[final_key] = value
 
     def _descend(self, current, part: str, descend_to_parent: bool = False):
         key, index = self._parse_indexed_key(part)
+        if not isinstance(current, dict):
+            raise ValueError(f"Cannot descend into '{part}' on non-object target.")
         if index is None:
-            return current if descend_to_parent else current[key]
-        return current if descend_to_parent else current[key][index]
+            if descend_to_parent:
+                return current
+            if current.get(key) is None:
+                current[key] = {}
+            if not isinstance(current[key], dict):
+                raise ValueError(f"Path segment '{key}' is not a nested object.")
+            return current[key]
+        target_list = current.get(key)
+        if not isinstance(target_list, list) or index < 0 or index >= len(target_list):
+            raise ValueError(f"Invalid list index '{part}' in sweep path.")
+        return current if descend_to_parent else target_list[index]
 
     def _parse_indexed_key(self, part: str) -> tuple[str, int | None]:
         match = re.fullmatch(r"([A-Za-z0-9_]+)(?:\[(\d+)])?", part)

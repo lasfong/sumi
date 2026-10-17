@@ -14,7 +14,9 @@ from app.schemas.replay_schema import (
 from app.domain.enums import SessionMode, SessionStatus
 from app.services.event_logging_service import EventLoggingService
 from app.utils.date_range import end_before, start_at
+from datetime import datetime, timedelta
 from typing import List
+from app.domain.market.calendar import TradingCalendar
 
 class ReplayService:
     @staticmethod
@@ -27,7 +29,7 @@ class ReplayService:
                 Candle.timestamp >= start_at(session.start_date),
                 Candle.timestamp < end_before(session.end_date)
             )
-        ).order_by(Candle.timestamp.asc())
+        ).order_by(Candle.timestamp.asc(), Candle.id.asc())
 
     @staticmethod
     def _scanner_source_context(db: Session, session: ReplaySession) -> ReplaySourceContext:
@@ -88,6 +90,9 @@ class ReplayService:
         if session.source_type == "scanner_signal":
             values["source_payload"] = None
         values["source_context"] = ReplayService.source_context(db, session)
+        candle_count = ReplayService._session_candle_query(db, session).count()
+        values["available_candles"] = candle_count
+        values["has_candles"] = candle_count > 0
         return ReplaySessionResponse.model_validate(values)
 
     @staticmethod
@@ -188,7 +193,35 @@ class ReplayService:
                 Candle.timestamp >= start_at(session.start_date),
                 Candle.timestamp <= current_timestamp
             )
-        ).order_by(Candle.timestamp.asc()).all()
+        ).order_by(Candle.timestamp.asc(), Candle.id.asc()).all()
+
+        if target_timeframe == "1W" and session.timeframe == "1D" and mtf_candles:
+            cal = TradingCalendar()
+            current_date = current_timestamp.date() if isinstance(current_timestamp, datetime) else current_timestamp
+            causal_weekly: List[Candle] = []
+            for w in mtf_candles:
+                w_date = w.timestamp.date() if isinstance(w.timestamp, datetime) else w.timestamp
+                week_start = w_date - timedelta(days=w_date.weekday())
+                week_end = week_start + timedelta(days=6)
+                trading_days = [week_start + timedelta(days=i) for i in range(5) if cal.is_trading_day(week_start + timedelta(days=i))]
+                last_trading_day = max(trading_days) if trading_days else (week_start + timedelta(days=4))
+                if current_date < last_trading_day:
+                    continue
+                future_daily_in_week = db.execute(
+                    select(Candle.id).where(
+                        and_(
+                            Candle.symbol == session.symbol,
+                            Candle.timeframe == "1D",
+                            Candle.adjustment_type == session.adjustment_type,
+                            Candle.timestamp > current_timestamp,
+                            Candle.timestamp < end_before(week_end),
+                        )
+                    ).limit(1)
+                ).scalar()
+                if future_daily_in_week is not None:
+                    continue
+                causal_weekly.append(w)
+            return causal_weekly
 
         return mtf_candles
 
