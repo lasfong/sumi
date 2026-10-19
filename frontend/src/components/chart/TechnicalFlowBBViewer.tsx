@@ -86,25 +86,32 @@ export const TechnicalFlowBBViewer: React.FC<TechnicalFlowBBViewerProps> = ({
     ?? getHorizonValue(horizonPoint);
   const flowValue = latestPoint?.value ?? extractedHorizonVal ?? null;
   const basisValue = latestPoint?.basis ?? (typeof horizonPoint?.raw_denominator === 'number' ? horizonPoint.raw_denominator : null);
-  const bandwidthValue = typeof latestPoint?.bandwidth === 'number' ? latestPoint.bandwidth : null;
-  const percentBValue = typeof latestPoint?.percent_b === 'number' ? latestPoint.percent_b : null;
+  const dailyPressureValue = typeof latestPoint?.daily_pressure === 'number' ? latestPoint.daily_pressure : null;
+  const dailyTradingValue = typeof latestPoint?.daily_trading_value === 'number' ? latestPoint.daily_trading_value : null;
   const regimeValue = horizonPoint?.regime ?? latestPoint?.regime ?? 'NEUTRAL';
 
   const methodologyLabel = bbData?.flow_method || bbData?.methodology || 'OHLCV_PROXY';
+  const isZeroCoverage = bbData?.coverage_ratio === 0.0 || points.length === 0;
+  const isLowCoverage = typeof bbData?.coverage_ratio === 'number' && bbData.coverage_ratio < 0.8;
   const dataQuality =
-    horizonPoint?.quality ||
-    latestPoint?.daily_quality ||
-    latestPoint?.data_quality ||
-    'HIGH';
+    isZeroCoverage || points.length === 0
+      ? 'UNAVAILABLE'
+      : isLowCoverage
+      ? 'DEGRADED'
+      : (horizonPoint?.quality ||
+         latestPoint?.daily_quality ||
+         latestPoint?.data_quality ||
+         (bbData?.publication_status === 'UNAVAILABLE_DEGRADED' ? 'DEGRADED' : 'HIGH'));
 
   const isWarming = Boolean(horizonPoint?.is_warmup);
-  const isLowCoverage = typeof bbData?.coverage_ratio === 'number' && bbData.coverage_ratio < 0.8;
   const isDegraded =
     bbData?.publication_status === 'UNAVAILABLE_DEGRADED' ||
     dataQuality === 'LOW' ||
+    dataQuality === 'DEGRADED' ||
     dataQuality === 'UNAVAILABLE' ||
     horizonPoint?.value_source === 'UNAVAILABLE' ||
-    isLowCoverage;
+    isLowCoverage ||
+    isZeroCoverage;
 
   const degradedReasons: string[] = [];
   if (bbData?.gate_reasons && bbData.gate_reasons.length > 0) {
@@ -352,31 +359,26 @@ export const TechnicalFlowBBViewer: React.FC<TechnicalFlowBBViewerProps> = ({
             </div>
           </div>
           <div>
-            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Độ rộng dải (Bandwidth):</div>
-            <div style={{ fontSize: '13px', fontWeight: 600, marginTop: '2px' }}>
-              {formatSafeNumber(bandwidthValue, 2, 'N/A')}
+            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Áp lực dòng tiền (Daily Flow Pressure):</div>
+            <div
+              data-testid="bb-daily-pressure"
+              style={{
+                fontSize: '13px',
+                fontWeight: 600,
+                marginTop: '2px',
+                color: (dailyPressureValue ?? 0) >= 0 ? 'var(--color-buy)' : 'var(--color-sell)',
+              }}
+            >
+              {formatSafeNumber(dailyPressureValue, 2, 'N/A')}
             </div>
           </div>
           <div>
-            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Vị trí %B:</div>
+            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Giá trị giao dịch (Daily Trading Value):</div>
             <div
-              style={{
-                fontSize: '13px',
-                fontWeight: 700,
-                marginTop: '2px',
-                color:
-                  percentBValue !== null && percentBValue !== undefined
-                    ? percentBValue >= 1
-                      ? '#FFD166'
-                      : percentBValue <= 0
-                      ? 'var(--color-sell)'
-                      : 'var(--text-main)'
-                    : 'var(--text-muted)',
-              }}
+              data-testid="bb-daily-trading-value"
+              style={{ fontSize: '13px', fontWeight: 600, marginTop: '2px' }}
             >
-              {percentBValue !== null && percentBValue !== undefined && !isNaN(Number(percentBValue))
-                ? `${(Number(percentBValue) * 100).toFixed(1)}%`
-                : 'N/A'}
+              {dailyTradingValue !== null ? `${dailyTradingValue.toLocaleString('vi-VN')} đ` : 'N/A'}
             </div>
           </div>
           <div>

@@ -78,179 +78,187 @@ export const ReplayHeader: React.FC<ReplayHeaderProps> = ({
       }}
     >
       <div
+        className="replay-header-left"
         style={{
           display: 'flex',
           flexWrap: 'nowrap',
           alignItems: 'center',
-          gap: '8px',
+          gap: '6px',
           flex: '1 1 auto',
           minWidth: 0,
           overflow: 'hidden',
           whiteSpace: 'nowrap',
         }}
       >
-        <h2 style={{ margin: 0, fontSize: '15px', fontWeight: 600, whiteSpace: 'nowrap' }}>Sumi Replay</h2>
-        <button
-          type="button"
-          data-testid="symbol-switcher-button"
-          title="Đổi mã cổ phiếu (Phím tắt: /)"
-          onClick={onOpenSymbolSwitcher}
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 5,
-            padding: '2px 8px',
-            background: 'rgba(41, 98, 255, 0.15)',
-            color: '#58A6FF',
-            borderRadius: '4px',
-            fontWeight: 700,
-            fontSize: '13px',
-            border: '1px solid rgba(41, 98, 255, 0.4)',
-            cursor: 'pointer',
-            transition: 'all 0.15s ease',
-          }}
-        >
-          <Search size={12} />
-          <span>{symbolName}</span>
-          <span style={{ fontSize: '10px', opacity: 0.7 }}>▾</span>
-        </button>
-        {sessionData && (
-          <div style={{ display: 'flex', gap: '5px', fontSize: '12px', color: 'var(--text-muted)', alignItems: 'center' }}>
-            <select
-              value={targetTimeframe ?? sessionData.timeframe}
-              onChange={(e) => onChangeTimeframe(e.target.value === sessionData.timeframe ? undefined : e.target.value)}
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+          <h2 className="replay-header-brand" style={{ margin: 0, fontSize: '15px', fontWeight: 600, whiteSpace: 'nowrap' }}>Sumi Replay</h2>
+          <button
+            type="button"
+            data-testid="symbol-switcher-button"
+            title="Đổi mã cổ phiếu (Phím tắt: /)"
+            onClick={onOpenSymbolSwitcher}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 5,
+              padding: '2px 8px',
+              background: 'rgba(41, 98, 255, 0.15)',
+              color: '#58A6FF',
+              borderRadius: '4px',
+              fontWeight: 700,
+              fontSize: '13px',
+              border: '1px solid rgba(41, 98, 255, 0.4)',
+              cursor: 'pointer',
+              transition: 'all 0.15s ease',
+            }}
+          >
+            <Search size={12} />
+            <span>{symbolName}</span>
+            <span style={{ fontSize: '10px', opacity: 0.7 }}>▾</span>
+          </button>
+          {sessionData && (
+            <div style={{ display: 'flex', gap: '5px', fontSize: '12px', color: 'var(--text-muted)', alignItems: 'center' }}>
+              <select
+                value={targetTimeframe ?? sessionData.timeframe}
+                onChange={(e) => onChangeTimeframe(e.target.value === sessionData.timeframe ? undefined : e.target.value)}
+                style={{
+                  background: 'rgba(255,255,255,0.05)',
+                  padding: '2px 6px',
+                  borderRadius: '4px',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  color: 'var(--text-main)',
+                  outline: 'none',
+                  cursor: 'pointer',
+                  fontSize: '12px',
+                }}
+              >
+                {['1D', '1W'].map((tf) => (
+                  <option key={tf} value={tf} style={{ background: '#1e222d' }}>
+                    {tf}
+                  </option>
+                ))}
+              </select>
+              <span className="replay-header-meta-badges" style={{ background: 'rgba(255,255,255,0.05)', padding: '2px 5px', borderRadius: '4px', textTransform: 'capitalize', fontSize: '11px' }}>
+                {sessionData.adjustment_type}
+              </span>
+              <span className="replay-header-meta-badges" style={{ background: 'rgba(255,255,255,0.05)', padding: '2px 5px', borderRadius: '4px', textTransform: 'capitalize', fontSize: '11px' }}>
+                {sourceContext?.replay_intent?.replace('_', ' ') || sessionData.mode.replace('_', ' ')}
+              </span>
+            </div>
+          )}
+          <SessionPicker
+            selectedSessionId={sessionId}
+            onSelectSession={onResumeSession}
+            compact
+          />
+        </div>
+
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+          <button
+            type="button"
+            data-testid="open-add-indicator"
+            aria-label="Add indicator"
+            onClick={() => window.dispatchEvent(new CustomEvent('sumi:indicator-add-request'))}
+            style={{
+              padding: '3px 8px',
+              background: 'rgba(41, 98, 255, 0.1)',
+              color: '#58a6ff',
+              borderRadius: '4px',
+              fontSize: '11px',
+              fontWeight: 500,
+              border: '1px solid rgba(41, 98, 255, 0.3)',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '4px',
+              cursor: 'pointer',
+            }}
+          >
+            <span style={{ fontWeight: 700, fontSize: '12px', fontStyle: 'italic', fontFamily: 'serif' }}>fx</span>
+            <span>Indicators</span>
+          </button>
+          <button
+            type="button"
+            data-testid="open-session-debrief"
+            aria-label="Session debrief"
+            title="Tổng kết phiên (D)"
+            onClick={onOpenDebrief}
+            style={{
+              padding: '3px 7px',
+              background: 'rgba(255,255,255,0.05)',
+              color: 'var(--text-main)',
+              borderRadius: '4px',
+              fontSize: '11px',
+              border: '1px solid var(--border-color)',
+              cursor: 'pointer',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '4px',
+            }}
+          >
+            <span>📊</span>
+            <span>Debrief</span>
+          </button>
+          <button
+            type="button"
+            data-testid="open-keyboard-shortcuts"
+            aria-label="Keyboard shortcuts"
+            title="Phím tắt hệ thống (?)"
+            onClick={onOpenShortcuts}
+            style={{
+              padding: '3px 6px',
+              background: 'rgba(255,255,255,0.05)',
+              color: 'var(--text-muted)',
+              borderRadius: '4px',
+              fontSize: '11px',
+              border: '1px solid var(--border-color)',
+              cursor: 'pointer',
+              display: 'inline-flex',
+              alignItems: 'center',
+            }}
+          >
+            ⌨️
+          </button>
+          {sessionStatus && (
+            <span
+              data-testid="replay-session-status-badge"
+              className="replay-header-status-badge"
               style={{
-                background: 'rgba(255,255,255,0.05)',
                 padding: '2px 6px',
+                background: isCompleted ? 'rgba(255, 209, 102, 0.15)' : 'rgba(255, 255, 255, 0.05)',
+                color: isCompleted ? '#FFD166' : 'var(--text-muted)',
                 borderRadius: '4px',
-                border: '1px solid rgba(255,255,255,0.1)',
-                color: 'var(--text-main)',
-                outline: 'none',
-                cursor: 'pointer',
-                fontSize: '12px',
+                fontSize: '11px',
+                textTransform: 'uppercase',
+                border: `1px solid ${isCompleted ? 'rgba(255, 209, 102, 0.4)' : 'var(--border-color)'}`,
               }}
             >
-              {['5m', '15m', '1H', '1D', '1W', '1M'].map((tf) => (
-                <option key={tf} value={tf} style={{ background: '#1e222d' }}>
-                  {tf}
-                </option>
-              ))}
-            </select>
-            <span style={{ background: 'rgba(255,255,255,0.05)', padding: '2px 5px', borderRadius: '4px', textTransform: 'capitalize', fontSize: '11px' }}>
-              {sessionData.adjustment_type}
+              {sessionStatus}
             </span>
-            <span style={{ background: 'rgba(255,255,255,0.05)', padding: '2px 5px', borderRadius: '4px', textTransform: 'capitalize', fontSize: '11px' }}>
-              {sourceContext?.replay_intent?.replace('_', ' ') || sessionData.mode.replace('_', ' ')}
+          )}
+          {(wsStatus === 'OFFLINE' || wsStatus === 'RECONNECTING') && (
+            <span
+              role="status"
+              data-testid="replay-ws-status-badge"
+              style={{
+                padding: '2px 6px',
+                background: 'rgba(255, 123, 114, 0.15)',
+                color: '#FF7B72',
+                borderRadius: '4px',
+                fontSize: '11px',
+                border: '1px solid rgba(255, 123, 114, 0.4)',
+              }}
+            >
+              {wsStatus === 'OFFLINE'
+                ? 'Offline — waiting for network'
+                : `Reconnecting (${wsReconnectAttempt})…`}
             </span>
-          </div>
-        )}
-        <SessionPicker
-          selectedSessionId={sessionId}
-          onSelectSession={onResumeSession}
-          compact
-        />
-        <button
-          type="button"
-          data-testid="open-add-indicator"
-          aria-label="Add indicator"
-          onClick={() => window.dispatchEvent(new CustomEvent('sumi:indicator-add-request'))}
-          style={{
-            padding: '3px 8px',
-            background: 'rgba(41, 98, 255, 0.1)',
-            color: '#58a6ff',
-            borderRadius: '4px',
-            fontSize: '11px',
-            fontWeight: 500,
-            border: '1px solid rgba(41, 98, 255, 0.3)',
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '4px',
-            cursor: 'pointer',
-          }}
-        >
-          <span style={{ fontWeight: 700, fontSize: '12px', fontStyle: 'italic', fontFamily: 'serif' }}>fx</span>
-          <span>Indicators</span>
-        </button>
-        <button
-          type="button"
-          data-testid="open-session-debrief"
-          aria-label="Session debrief"
-          title="Tổng kết phiên (D)"
-          onClick={onOpenDebrief}
-          style={{
-            padding: '3px 7px',
-            background: 'rgba(255,255,255,0.05)',
-            color: 'var(--text-main)',
-            borderRadius: '4px',
-            fontSize: '11px',
-            border: '1px solid var(--border-color)',
-            cursor: 'pointer',
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '4px',
-          }}
-        >
-          <span>📊</span>
-          <span>Debrief</span>
-        </button>
-        <button
-          type="button"
-          data-testid="open-keyboard-shortcuts"
-          aria-label="Keyboard shortcuts"
-          title="Phím tắt hệ thống (?)"
-          onClick={onOpenShortcuts}
-          style={{
-            padding: '3px 6px',
-            background: 'rgba(255,255,255,0.05)',
-            color: 'var(--text-muted)',
-            borderRadius: '4px',
-            fontSize: '11px',
-            border: '1px solid var(--border-color)',
-            cursor: 'pointer',
-            display: 'inline-flex',
-            alignItems: 'center',
-          }}
-        >
-          ⌨️
-        </button>
-        {sessionStatus && (
-          <span
-            data-testid="replay-session-status-badge"
-            style={{
-              padding: '2px 6px',
-              background: isCompleted ? 'rgba(255, 209, 102, 0.15)' : 'rgba(255, 255, 255, 0.05)',
-              color: isCompleted ? '#FFD166' : 'var(--text-muted)',
-              borderRadius: '4px',
-              fontSize: '11px',
-              textTransform: 'uppercase',
-              border: `1px solid ${isCompleted ? 'rgba(255, 209, 102, 0.4)' : 'var(--border-color)'}`,
-            }}
-          >
-            {sessionStatus}
-          </span>
-        )}
-        {(wsStatus === 'OFFLINE' || wsStatus === 'RECONNECTING') && (
-          <span
-            role="status"
-            data-testid="replay-ws-status-badge"
-            style={{
-              padding: '2px 6px',
-              background: 'rgba(255, 123, 114, 0.15)',
-              color: '#FF7B72',
-              borderRadius: '4px',
-              fontSize: '11px',
-              border: '1px solid rgba(255, 123, 114, 0.4)',
-            }}
-          >
-            {wsStatus === 'OFFLINE'
-              ? 'Offline — waiting for network'
-              : `Reconnecting (${wsReconnectAttempt})…`}
-          </span>
-        )}
+          )}
+        </div>
         {sourceContext && <ScannerSourceContext context={sourceContext} />}
 
         {currentCandle && (
           <div
+            className="replay-header-ohlcv-summary"
             style={{
               display: 'flex',
               flexWrap: 'nowrap',
@@ -258,46 +266,51 @@ export const ReplayHeader: React.FC<ReplayHeaderProps> = ({
               fontSize: '11px',
               fontFamily: 'monospace',
               alignItems: 'center',
+              minWidth: 0,
+              flex: '0 1 auto',
             }}
           >
-            <span data-testid="replay-bar-context" style={{ color: 'var(--text-muted)' }}>
+            <span data-testid="replay-bar-context" style={{ color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
               Bar:{' '}
               <span style={{ color: 'white' }}>
                 #{practiceData?.visible_bar ?? candleCount}/{practiceData?.total_bars ?? '…'}
               </span>
             </span>
-            <span data-testid="current-candle-date" style={{ color: 'var(--text-muted)' }}>
+            <span data-testid="current-candle-date" className="replay-header-date" style={{ color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
               Date: <span style={{ color: 'white' }}>{formatVietnameseDate(currentCandle.timestamp)}</span>{' '}
               <span style={{ fontSize: '10px' }}>(Asia/Ho_Chi_Minh)</span>
             </span>
-            <span style={{ color: 'var(--text-muted)' }}>
-              O: <span style={{ color: 'white' }}>{formatVietnameseNumber(currentCandle.open, 2)}</span>
-            </span>
-            <span style={{ color: 'var(--text-muted)' }}>
-              H: <span style={{ color: 'white' }}>{formatVietnameseNumber(currentCandle.high, 2)}</span>
-            </span>
-            <span style={{ color: 'var(--text-muted)' }}>
-              L: <span style={{ color: 'white' }}>{formatVietnameseNumber(currentCandle.low, 2)}</span>
-            </span>
-            <span style={{ color: 'var(--text-muted)' }}>
-              C:{' '}
-              <span
-                style={{
-                  color:
-                    currentCandle.close >= currentCandle.open
-                      ? 'var(--color-buy)'
-                      : 'var(--color-sell)',
-                  fontWeight: 600,
-                }}
-              >
-                {formatVietnameseNumber(currentCandle.close, 2)}
+            <div className="replay-header-ohlcv-numbers" style={{ display: 'inline-flex', gap: '8px', alignItems: 'center', whiteSpace: 'nowrap' }}>
+              <span style={{ color: 'var(--text-muted)' }}>
+                O: <span style={{ color: 'white' }}>{formatVietnameseNumber(currentCandle.open, 2)}</span>
               </span>
-            </span>
-            <span style={{ color: 'var(--text-muted)' }}>
-              V: <span style={{ color: 'white' }}>{formatVietnameseVolume(currentCandle.volume)}</span>
-            </span>
+              <span style={{ color: 'var(--text-muted)' }}>
+                H: <span style={{ color: 'white' }}>{formatVietnameseNumber(currentCandle.high, 2)}</span>
+              </span>
+              <span style={{ color: 'var(--text-muted)' }}>
+                L: <span style={{ color: 'white' }}>{formatVietnameseNumber(currentCandle.low, 2)}</span>
+              </span>
+              <span style={{ color: 'var(--text-muted)' }}>
+                C:{' '}
+                <span
+                  style={{
+                    color:
+                      currentCandle.close >= currentCandle.open
+                        ? 'var(--color-buy)'
+                        : 'var(--color-sell)',
+                    fontWeight: 600,
+                  }}
+                >
+                  {formatVietnameseNumber(currentCandle.close, 2)}
+                </span>
+              </span>
+              <span style={{ color: 'var(--text-muted)' }}>
+                V: <span style={{ color: 'white' }}>{formatVietnameseVolume(currentCandle.volume)}</span>
+              </span>
+            </div>
             <span
               data-testid="replay-readiness-badge"
+              className="replay-header-readiness"
               style={{
                 padding: '2px 5px',
                 borderRadius: '4px',
@@ -306,6 +319,7 @@ export const ReplayHeader: React.FC<ReplayHeaderProps> = ({
                 color: 'var(--color-buy)',
                 border: '1px solid rgba(0, 230, 118, 0.2)',
                 fontFamily: 'sans-serif',
+                whiteSpace: 'nowrap',
               }}
             >
               Local Market Ready
@@ -329,7 +343,7 @@ export const ReplayHeader: React.FC<ReplayHeaderProps> = ({
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-          <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Speed:</span>
+          <span className="replay-header-speed-label" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Speed:</span>
           <select
             aria-label="Playback speed"
             value={playSpeed}
@@ -351,7 +365,7 @@ export const ReplayHeader: React.FC<ReplayHeaderProps> = ({
           </select>
         </div>
 
-        <div style={{ width: '1px', height: '16px', background: 'var(--border-color)' }}></div>
+        <div className="replay-header-divider" style={{ width: '1px', height: '16px', background: 'var(--border-color)' }}></div>
 
         <button
           type="button"
@@ -375,7 +389,7 @@ export const ReplayHeader: React.FC<ReplayHeaderProps> = ({
           ◫ Panel
         </button>
 
-        <div style={{ width: '1px', height: '16px', background: 'var(--border-color)' }}></div>
+        <div className="replay-header-divider" style={{ width: '1px', height: '16px', background: 'var(--border-color)' }}></div>
 
         <button
           onClick={onClearSession}
@@ -393,6 +407,33 @@ export const ReplayHeader: React.FC<ReplayHeaderProps> = ({
           New Session
         </button>
       </div>
+      <style>{`
+        @media (max-width: 1600px) {
+          .replay-header-ohlcv-numbers { display: none !important; }
+          .replay-header-readiness { display: none !important; }
+          .replay-header-date { display: none !important; }
+        }
+        @media (max-width: 1440px) {
+          .replay-header-ohlcv-summary { display: none !important; }
+          .replay-header-meta-badges { display: none !important; }
+        }
+        @media (max-width: 1439px) {
+          .replay-header-ohlcv-numbers { display: none !important; }
+        }
+        @media (max-width: 1360px) {
+          .replay-header-status-badge { display: none !important; }
+        }
+        @media (max-width: 1279px) {
+          .replay-header-ohlcv-summary { display: none !important; }
+          .replay-header-brand { display: none !important; }
+          .replay-header-speed-label { display: none !important; }
+        }
+        @media (max-width: 1150px) {
+          .replay-header { padding: 6px 8px !important; gap: 6px !important; }
+          .replay-header-left { gap: 4px !important; }
+          .replay-header-divider { display: none !important; }
+        }
+      `}</style>
     </header>
   );
 };

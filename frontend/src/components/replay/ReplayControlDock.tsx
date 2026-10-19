@@ -33,7 +33,7 @@ export const ReplayControlDock: React.FC<ReplayControlDockProps> = ({
       className="replay-control-dock"
       style={{
         position: 'absolute',
-        bottom: 24,
+        bottom: -48,
         left: '50%',
         transform: 'translateX(-50%)',
         zIndex: 10,
@@ -45,7 +45,7 @@ export const ReplayControlDock: React.FC<ReplayControlDockProps> = ({
         WebkitBackdropFilter: 'blur(16px)',
         border: '1px solid rgba(255, 255, 255, 0.12)',
         borderRadius: '32px',
-        padding: '6px 14px',
+        padding: '4px 12px',
         boxShadow: '0 8px 32px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255,255,255,0.05)',
         userSelect: 'none',
       }}

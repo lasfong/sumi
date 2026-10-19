@@ -7,6 +7,7 @@ import { ChartLegendOverlay } from '../ChartLegendOverlay';
 import { ReplayHeader } from '../../replay/ReplayHeader';
 import type { IndicatorDocumentV1, IndicatorInstanceV1 } from '../../../features/indicators/indicatorDomain';
 import type { IndicatorRuntimeState } from '../IndicatorManager';
+import type { Candle } from '../../../types';
 
 const rsiInstance: IndicatorInstanceV1 = {
   id: 'inst-rsi-14',
@@ -181,5 +182,96 @@ describe('B32 — ChartKernel Facade, MappingResult Contract & ReplayHeader Deco
 
     expect(screen.getByTestId('replay-ws-status-badge')).toHaveTextContent('Reconnecting (2)…');
     expect(screen.getByTestId('replay-session-status-badge')).toHaveTextContent('completed');
+  });
+
+  it('renders ChartLegendOverlay with VND unit badge (SQA-002) and no misleading x1,000 badge', () => {
+    const candle: Candle = {
+      id: 1,
+      symbol: 'FPT',
+      timeframe: '1D',
+      source: 'doraemon',
+      adjustment_type: 'unadjusted',
+      timestamp: '2024-02-06T00:00:00',
+      open: 99500,
+      high: 101000,
+      low: 99000,
+      close: 100500,
+      volume: 1250000,
+    };
+
+    render(
+      <ChartLegendOverlay
+        symbol="FPT"
+        timeframe="1D"
+        currentCandle={candle}
+        indicators={[]}
+        runtime={{}}
+        onToggle={vi.fn()}
+        onSettings={vi.fn()}
+        onRemove={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('VND')).toBeInTheDocument();
+    expect(screen.queryByText('x1,000 ₫')).toBeNull();
+    expect(screen.getByText('FPT')).toBeInTheDocument();
+  });
+
+  it('renders ReplayHeader action buttons and restricted 1D, 1W timeframes (SQA-001, SQA-004)', () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ReplayHeader
+          sessionId={42}
+          symbolName="FPT"
+          sessionStatus="active"
+          sessionData={{
+            id: 42,
+            symbol: 'FPT',
+            timeframe: '1D',
+            current_index: 10,
+            mode: 'practice',
+            adjustment_type: 'adjusted',
+            status: 'active',
+            initial_balance: 100000000,
+            current_cash: 100000000,
+            start_date: '2024-01-01',
+            end_date: '2024-03-01',
+            total_bars: 50,
+            is_active: true,
+            created_at: '2024-01-01T00:00:00',
+          } as any}
+          currentCandle={null}
+          candleCount={10}
+          onChangeTimeframe={vi.fn()}
+          onResumeSession={vi.fn()}
+          onOpenSymbolSwitcher={vi.fn()}
+          onOpenDebrief={vi.fn()}
+          onOpenShortcuts={vi.fn()}
+          playSpeed={1000}
+          onChangeSpeed={vi.fn()}
+          isRightPanelOpen={true}
+          onToggleRightPanel={vi.fn()}
+          onClearSession={vi.fn()}
+        />
+      </QueryClientProvider>,
+    );
+
+    // Primary action buttons must be present
+    expect(screen.getByTestId('open-add-indicator')).toBeInTheDocument();
+    expect(screen.getByTestId('open-session-debrief')).toBeInTheDocument();
+    expect(screen.getByTestId('open-keyboard-shortcuts')).toBeInTheDocument();
+
+    // Timeframe selector options must ONLY contain 1D and 1W
+    const options = screen.getAllByRole('option').map((o) => o.textContent);
+    expect(options).toContain('1D');
+    expect(options).toContain('1W');
+    expect(options).not.toContain('5m');
+    expect(options).not.toContain('15m');
+    expect(options).not.toContain('1H');
+    expect(options).not.toContain('1M');
   });
 });

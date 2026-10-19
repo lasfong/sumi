@@ -351,7 +351,7 @@ export const AnalyticsPage: React.FC = () => {
                             <td style={{ padding: '10px 0' }}>#{trade.trade_id}</td>
                             <td style={{ padding: '10px 0', fontWeight: 600 }}>{trade.symbol}</td>
                             <td style={{ padding: '10px 0', textAlign: 'right' }}>{trade.r_multiple == null ? 'N/A' : formatVietnameseNumber(trade.r_multiple, 2)}</td>
-                            <td style={{ padding: '10px 0', textAlign: 'right', color: trade.pnl_percent >= 0 ? 'var(--color-buy)' : 'var(--color-sell)' }}>{formatPercent(trade.pnl_percent)}</td>
+                            <td style={{ padding: '10px 0', textAlign: 'right', color: trade.pnl_percent >= 0 ? 'var(--color-buy)' : 'var(--color-sell)' }}>{formatPctValue(trade.pnl_percent)}</td>
                             <td style={{ padding: '10px 0', textAlign: 'right', color: trade.net_pnl >= 0 ? 'var(--color-buy)' : 'var(--color-sell)', fontWeight: 600 }}>{formatMoney(trade.net_pnl)}</td>
                           </tr>
                         ))}

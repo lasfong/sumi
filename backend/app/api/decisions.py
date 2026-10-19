@@ -44,6 +44,7 @@ def _check_audit_eligibility_or_raise(session: ReplaySession, total_bars: int, i
 
 
 _order_cancellation_registry: dict[int, dict] = {}
+_order_rejection_registry: dict[int, dict] = {}
 
 
 def register_order_cancellation(order_id: int, candle_index: Optional[int] = None, cancelled_at: Optional[datetime] = None) -> None:
@@ -57,6 +58,19 @@ def register_order_cancellation(order_id: int, candle_index: Optional[int] = Non
 def clear_order_cancellation_registry() -> None:
     """Clear registered runtime cancellation metadata."""
     _order_cancellation_registry.clear()
+
+
+def register_order_rejection(order_id: int, candle_index: Optional[int] = None, rejected_at: Optional[datetime] = None) -> None:
+    """Register runtime rejection metadata for an order when not persisted in table columns."""
+    _order_rejection_registry[order_id] = {
+        "rejection_candle_index": candle_index,
+        "rejected_at": rejected_at,
+    }
+
+
+def clear_order_rejection_registry() -> None:
+    """Clear registered runtime rejection metadata."""
+    _order_rejection_registry.clear()
 
 
 @router.get("/sessions/{session_id}/practice-state", response_model=PracticeWorkflowSnapshot)
@@ -302,51 +316,9 @@ def get_orders(
     current_candle = candles[current_index] if (candles and 0 <= current_index < len(candles)) else None
     current_candle_ts = normalize_datetime(current_candle.timestamp) if current_candle else None
 
-    # Track cancellation events from event logs and decisions
-    session_cancellation_metadata = {}
-    event_logs = db.query(EventLog).filter(EventLog.session_id == session_id).all()
-    for ev in event_logs:
-        if ev.event_type and ev.event_type.lower() in ("order_cancelled", "order_cancel", "cancel_order", "cancelled", "order_status"):
-            target_order_id = None
-            ev_candle_idx = None
-            ev_ts = normalize_datetime(ev.created_at)
-            if ev.details:
-                try:
-                    import json
-                    d = json.loads(ev.details)
-                    if isinstance(d, dict):
-                        if "order_id" in d and d["order_id"] is not None:
-                            target_order_id = int(d["order_id"])
-                        if "candle_index" in d and d["candle_index"] is not None:
-                            ev_candle_idx = int(d["candle_index"])
-                        elif "cancellation_candle_index" in d and d["cancellation_candle_index"] is not None:
-                            ev_candle_idx = int(d["cancellation_candle_index"])
-                except Exception:
-                    pass
-            if target_order_id is None and ev.message:
-                for word in ev.message.split():
-                    if word.isdigit():
-                        target_order_id = int(word)
-                        break
-            if target_order_id is not None:
-                session_cancellation_metadata[target_order_id] = {
-                    "cancel_bar": ev_candle_idx,
-                    "cancel_ts": ev_ts,
-                }
-
-    for d in decisions:
-        if (d.action or "").upper() in ("CANCEL", "CANCEL_ORDER"):
-            order_id = getattr(d, "order_id", None)
-            if order_id is None and d.note:
-                for word in d.note.split():
-                    if word.isdigit():
-                        order_id = int(word)
-                        break
-            if order_id is not None:
-                session_cancellation_metadata[order_id] = {
-                    "cancel_bar": d.candle_index,
-                    "cancel_ts": normalize_datetime(d.decision_date),
-                }
+    session_cancellation_metadata, session_rejection_metadata = PracticeWorkflowService.extract_terminal_order_metadata(
+        db, session_id, decisions
+    )
 
     result = []
     for order in orders:
@@ -372,62 +344,29 @@ def get_orders(
             continue
 
         exc = execution_by_order_id.get(order.id)
-        is_future_fill = False
+        exec_bar = None
+        exec_ts = None
         if exc is not None:
+            exec_ts = normalize_datetime(exc.execution_date)
             if exc.execution_candle_index is not None:
                 exec_bar = exc.execution_candle_index
-            else:
-                exc_ts = normalize_datetime(exc.execution_date)
-                exec_bar = candle_date_to_index.get(exc_ts.date(), None) if exc_ts else None
+            elif exc_ts is not None:
+                exec_bar = candle_date_to_index.get(exec_ts.date(), None)
 
-            if exec_bar is not None and exec_bar > current_index:
-                is_future_fill = True
-            elif exec_bar is None and current_candle_ts:
-                exc_ts = normalize_datetime(exc.execution_date)
-                if exc_ts and exc_ts > current_candle_ts:
-                    is_future_fill = True
+        _, _, is_masked_pending = PracticeWorkflowService.project_order_status_at_cursor(
+            order=order,
+            current_index=current_index,
+            current_candle_ts=current_candle_ts,
+            candle_date_to_index=candle_date_to_index,
+            execution_bar=exec_bar,
+            cancellation_metadata=session_cancellation_metadata,
+            rejection_metadata=session_rejection_metadata,
+            cancellation_registry=_order_cancellation_registry,
+            rejection_registry=_order_rejection_registry,
+            execution_ts=exec_ts,
+        )
 
-        is_future_cancellation = False
-        if (order.status or "").lower() == OrderStatus.CANCELLED.value.lower():
-            cancel_bar = None
-            if getattr(order, "cancellation_candle_index", None) is not None:
-                cancel_bar = order.cancellation_candle_index
-            elif getattr(order, "cancelled_candle_index", None) is not None:
-                cancel_bar = order.cancelled_candle_index
-            elif getattr(order, "cancel_bar", None) is not None:
-                cancel_bar = order.cancel_bar
-            elif getattr(order, "cancellation_bar", None) is not None:
-                cancel_bar = order.cancellation_bar
-
-            cancel_ts_raw = getattr(order, "cancelled_at", None) or getattr(order, "cancellation_date", None)
-            cancel_ts = normalize_datetime(cancel_ts_raw) if cancel_ts_raw else None
-
-            # Check in-memory registry
-            if order.id in _order_cancellation_registry:
-                reg = _order_cancellation_registry[order.id]
-                if cancel_bar is None and reg.get("cancellation_candle_index") is not None:
-                    cancel_bar = reg["cancellation_candle_index"]
-                if cancel_ts is None and reg.get("cancelled_at") is not None:
-                    cancel_ts = normalize_datetime(reg["cancelled_at"])
-
-            # Check cancellation metadata from event logs and decisions
-            if cancel_bar is None and cancel_ts is None and order.id in session_cancellation_metadata:
-                meta = session_cancellation_metadata[order.id]
-                if meta.get("cancel_bar") is not None:
-                    cancel_bar = meta["cancel_bar"]
-                if meta.get("cancel_ts") is not None:
-                    cancel_ts = meta["cancel_ts"]
-
-            if cancel_bar is None and cancel_ts:
-                cancel_bar = candle_date_to_index.get(cancel_ts.date(), None)
-
-            if cancel_bar is not None and cancel_bar > current_index:
-                is_future_cancellation = True
-            elif cancel_bar is None and current_candle_ts and cancel_ts:
-                if cancel_ts > current_candle_ts:
-                    is_future_cancellation = True
-
-        if is_future_fill or is_future_cancellation:
+        if is_masked_pending:
             result.append(OrderResponse(
                 id=order.id,
                 session_id=order.session_id,

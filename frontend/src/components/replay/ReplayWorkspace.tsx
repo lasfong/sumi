@@ -192,7 +192,13 @@ export const ReplayWorkspace: React.FC = () => {
             className="panel"
             data-testid="replay-chart-scroll-region"
             data-minimum-subpane-height="60"
-            style={{ flex: 1, padding: 0, overflowY: 'auto', overflowX: 'hidden' }}
+            style={{
+              flex: 1,
+              padding: '0 0 56px 0',
+              overflowY: 'auto',
+              overflowX: 'hidden',
+              boxSizing: 'border-box',
+            }}
           >
             <div
               style={{ position: 'relative', height: '100%', minHeight: minimumChartHeight }}
@@ -223,7 +229,22 @@ export const ReplayWorkspace: React.FC = () => {
                 onToggle={toggleIndicatorInstance}
                 onRemove={removeIndicatorInstance}
               />
-              <div style={{ position: 'relative', zIndex: 20 }}>
+              <div
+                data-testid="chart-legend-overlay-container"
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  pointerEvents: 'none',
+                  zIndex: 20,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'flex-start',
+                  gap: 4,
+                  padding: '10px 80px 0 14px',
+                }}
+              >
                 <ChartLegendOverlay
                   symbol={symbolName}
                   timeframe={targetTimeframe ?? sessionData?.timeframe ?? '1D'}
@@ -238,75 +259,72 @@ export const ReplayWorkspace: React.FC = () => {
                   }
                   onRemove={removeIndicatorInstance}
                 />
-              </div>
-              <div
-                data-testid="indicator-order-controls"
-                style={{
-                  position: 'absolute',
-                  top: 10,
-                  right: 76,
-                  zIndex: 21,
-                  display: 'flex',
-                  flexWrap: 'wrap',
-                  gap: 4,
-                  pointerEvents: 'none',
-                }}
-              >
-                {indicatorDocument.instances.map((instance, index) => (
-                  <div
-                    key={instance.id}
-                    style={{
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: 2,
-                      padding: '2px 5px',
-                      borderRadius: 4,
-                      background: 'rgba(19, 23, 34, 0.85)',
-                      border: '1px solid rgba(255, 255, 255, 0.14)',
-                      pointerEvents: 'auto',
-                    }}
-                  >
-                    <span style={{ fontSize: 10, color: '#9DA7B3', marginRight: 2 }}>
-                      {instance.label}
-                    </span>
-                    <button
-                      type="button"
-                      aria-label={`Move ${instance.label} up`}
-                      title={`Di chuyển ${instance.label} lên trên`}
-                      disabled={index === 0}
-                      onClick={() => moveIndicatorInstance(instance.id, -1)}
+                <div
+                  data-testid="indicator-order-controls"
+                  style={{
+                    position: 'relative',
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    gap: 4,
+                    pointerEvents: 'none',
+                  }}
+                >
+                  {indicatorDocument.instances.map((instance, index) => (
+                    <div
+                      key={instance.id}
                       style={{
-                        padding: '1px 5px',
-                        fontSize: 10,
-                        opacity: index === 0 ? 0.35 : 0.9,
-                        background: 'rgba(255, 255, 255, 0.08)',
-                        color: '#F0F6FC',
-                        borderRadius: 3,
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 2,
+                        padding: '2px 5px',
+                        borderRadius: 4,
+                        background: 'rgba(19, 23, 34, 0.85)',
+                        border: '1px solid rgba(255, 255, 255, 0.14)',
                         pointerEvents: 'auto',
                       }}
                     >
-                      ↑
-                    </button>
-                    <button
-                      type="button"
-                      aria-label={`Move ${instance.label} down`}
-                      title={`Di chuyển ${instance.label} xuống dưới`}
-                      disabled={index === indicatorDocument.instances.length - 1}
-                      onClick={() => moveIndicatorInstance(instance.id, 1)}
-                      style={{
-                        padding: '1px 5px',
-                        fontSize: 10,
-                        opacity: index === indicatorDocument.instances.length - 1 ? 0.35 : 0.9,
-                        background: 'rgba(255, 255, 255, 0.08)',
-                        color: '#F0F6FC',
-                        borderRadius: 3,
-                        pointerEvents: 'auto',
-                      }}
-                    >
-                      ↓
-                    </button>
-                  </div>
-                ))}
+                      <span style={{ fontSize: 10, color: '#9DA7B3', marginRight: 2 }}>
+                        {instance.label}
+                      </span>
+                      <button
+                        type="button"
+                        aria-label={`Move ${instance.label} up`}
+                        title={`Di chuyển ${instance.label} lên trên`}
+                        disabled={index === 0}
+                        onClick={() => moveIndicatorInstance(instance.id, -1)}
+                        style={{
+                          padding: '1px 5px',
+                          fontSize: 10,
+                          opacity: index === 0 ? 0.35 : 0.9,
+                          background: 'rgba(255, 255, 255, 0.08)',
+                          color: '#F0F6FC',
+                          borderRadius: 3,
+                          pointerEvents: 'auto',
+                        }}
+                      >
+                        ↑
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`Move ${instance.label} down`}
+                        title={`Di chuyển ${instance.label} xuống dưới`}
+                        disabled={index === indicatorDocument.instances.length - 1}
+                        onClick={() => moveIndicatorInstance(instance.id, 1)}
+                        style={{
+                          padding: '1px 5px',
+                          fontSize: 10,
+                          opacity: index === indicatorDocument.instances.length - 1 ? 0.35 : 0.9,
+                          background: 'rgba(255, 255, 255, 0.08)',
+                          color: '#F0F6FC',
+                          borderRadius: 3,
+                          pointerEvents: 'auto',
+                        }}
+                      >
+                        ↓
+                      </button>
+                    </div>
+                  ))}
+                </div>
               </div>
               <ReplayControlDock
                 isPlaying={isPlaying}

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { getAvailableStrategies } from '../api/backtestApi';
@@ -16,6 +16,14 @@ export const ScannerPage: React.FC = () => {
   const [selectedStrategyFilename, setSelectedStrategyFilename] = useState('');
   const [replayError, setReplayError] = useState<string | null>(null);
   const [selectedHistoryRun, setSelectedHistoryRun] = useState<ScannerRun | null>(null);
+
+  // SQA-005: Table search, filtering, and sorting state
+  const [searchQuery, setSearchQuery] = useState('');
+  const [signalFilter, setSignalFilter] = useState('ALL');
+  const [regimeFilter, setRegimeFilter] = useState('ALL');
+  const [sortField, setSortField] = useState<'symbol' | 'timestamp' | 'signal_type' | 'regime' | 'price'>('timestamp');
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
+
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const setSession = useReplayStore(state => state.setSession);
@@ -46,6 +54,7 @@ export const ScannerPage: React.FC = () => {
 
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
+    setSelectedHistoryRun(null);
     if (!strategies) return;
 
     const strategy = strategies.find(item => item.filename === effectiveStrategyFilename);
@@ -68,7 +77,68 @@ export const ScannerPage: React.FC = () => {
   };
 
   const formatMoney = (value?: number) => value ? value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '0.00';
-  const result = mutation.data || selectedHistoryRun?.result_payload;
+  // SQA-015: When a historical run is selected, display its result_payload rather than current mutation data
+  const result = selectedHistoryRun ? selectedHistoryRun.result_payload : mutation.data;
+
+  const availableRegimes = useMemo(() => {
+    if (!result?.results) return [];
+    return Array.from(new Set(result.results.map((r) => r.regime).filter(Boolean)));
+  }, [result]);
+
+  const availableSignalTypes = useMemo(() => {
+    if (!result?.results) return [];
+    return Array.from(new Set(result.results.map((r) => r.signal_type).filter(Boolean)));
+  }, [result]);
+
+  const filteredAndSortedResults = useMemo(() => {
+    if (!result?.results) return [];
+    let items = [...result.results];
+
+    if (searchQuery.trim()) {
+      const q = searchQuery.trim().toUpperCase();
+      items = items.filter((item) => item.symbol.toUpperCase().includes(q));
+    }
+
+    if (signalFilter !== 'ALL') {
+      items = items.filter((item) => item.signal_type.toUpperCase() === signalFilter.toUpperCase());
+    }
+
+    if (regimeFilter !== 'ALL') {
+      items = items.filter((item) => item.regime === regimeFilter);
+    }
+
+    items.sort((a, b) => {
+      let comparison = 0;
+      if (sortField === 'symbol') {
+        comparison = a.symbol.localeCompare(b.symbol);
+      } else if (sortField === 'timestamp') {
+        comparison = new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
+      } else if (sortField === 'signal_type') {
+        comparison = a.signal_type.localeCompare(b.signal_type);
+      } else if (sortField === 'regime') {
+        comparison = a.regime.localeCompare(b.regime);
+      } else if (sortField === 'price') {
+        comparison = a.price - b.price;
+      }
+      return sortDirection === 'asc' ? comparison : -comparison;
+    });
+
+    return items;
+  }, [result, searchQuery, signalFilter, regimeFilter, sortField, sortDirection]);
+
+  const handleSort = (field: 'symbol' | 'timestamp' | 'signal_type' | 'regime' | 'price') => {
+    if (sortField === field) {
+      setSortDirection((prev) => (prev === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortField(field);
+      setSortDirection('asc');
+    }
+  };
+
+  const getSortIcon = (field: string) => {
+    if (sortField !== field) return ' ↕';
+    return sortDirection === 'asc' ? ' ▲' : ' ▼';
+  };
 
   const handleReplaySignal = async (item: ScannerResult, replayIntent: ReplayIntent = 'blind_practice') => {
     setReplayError(null);
@@ -112,7 +182,11 @@ export const ScannerPage: React.FC = () => {
               <button
                 key={run.id}
                 type="button"
-                onClick={() => setSelectedHistoryRun(run)}
+                data-testid={`history-run-${run.id}`}
+                onClick={() => {
+                  setSelectedHistoryRun(run);
+                  mutation.reset();
+                }}
                 style={{
                   textAlign: 'left',
                   padding: '10px',
@@ -195,56 +269,184 @@ export const ScannerPage: React.FC = () => {
           <p data-testid="scanner-ranking-policy" style={{ margin: '0 0 16px', color: 'var(--text-muted)', fontSize: '12px' }}>
             Quantitative ranking: unavailable — scanner signals are shown chronologically until outcomes are validated.
           </p>
-          {result.results.length > 0 ? (
-            <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
-                <thead>
-                  <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', color: 'var(--text-muted)', textAlign: 'left' }}>
-                    <th style={{ padding: '8px', fontWeight: 500 }}>Symbol</th>
-                    <th style={{ padding: '8px', fontWeight: 500 }}>Date</th>
-                    <th style={{ padding: '8px', fontWeight: 500 }}>Signal</th>
-                    <th style={{ padding: '8px', fontWeight: 500 }}>Regime</th>
-                    <th style={{ padding: '8px', fontWeight: 500, textAlign: 'right' }}>Price</th>
-                    <th style={{ padding: '8px', fontWeight: 500 }}>Ranking</th>
-                    <th style={{ padding: '8px', fontWeight: 500, textAlign: 'right' }}>Replay</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {result.results.map((item, index) => (
-                    <tr key={`${item.symbol}-${item.timestamp}-${index}`} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
-                      <td style={{ padding: '12px 8px', fontWeight: 600 }}>{item.symbol}</td>
-                      <td style={{ padding: '12px 8px', color: 'var(--text-muted)' }}>{new Date(item.timestamp).toLocaleDateString()}</td>
-                      <td style={{ padding: '12px 8px', textTransform: 'uppercase' }}>{item.signal_type}</td>
-                      <td style={{ padding: '12px 8px' }}>{item.regime}</td>
-                      <td style={{ padding: '12px 8px', textAlign: 'right', fontFamily: 'monospace' }}>{formatMoney(item.price)}</td>
-                      <td style={{ padding: '12px 8px', color: 'var(--text-muted)' }}>Not rankable</td>
-                      <td style={{ padding: '12px 8px', textAlign: 'right' }}>
-                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '6px' }}>
-                          <button
-                            type="button"
-                            onClick={() => handleReplaySignal(item, 'blind_practice')}
-                            disabled={replayMutation.isPending}
-                            aria-label={`Start blind practice for ${item.symbol} (recommended)`}
-                            style={{ padding: '6px 10px', fontSize: '12px' }}
-                          >
-                            Blind practice
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleReplaySignal(item, 'signal_review')}
-                            disabled={replayMutation.isPending}
-                            aria-label={`Review signal for ${item.symbol}`}
-                            style={{ padding: '6px 10px', fontSize: '12px' }}
-                          >
-                            Review signal
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
+          {/* SQA-005: Filter and Search Bar */}
+          {result.results.length > 0 && (
+            <div
+              data-testid="scanner-filter-bar"
+              style={{
+                display: 'flex',
+                gap: '12px',
+                alignItems: 'center',
+                flexWrap: 'wrap',
+                marginBottom: '16px',
+                padding: '12px',
+                background: 'rgba(255, 255, 255, 0.03)',
+                borderRadius: '6px',
+                border: '1px solid var(--border-color)',
+              }}
+            >
+              <div style={{ flex: '1 1 200px' }}>
+                <input
+                  type="text"
+                  data-testid="scanner-filter-input"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Lọc theo mã cổ phiếu (ví dụ: FPT)..."
+                  style={{
+                    width: '100%',
+                    padding: '8px 12px',
+                    fontSize: '13px',
+                    background: 'rgba(0,0,0,0.2)',
+                    border: '1px solid var(--border-color)',
+                    color: 'var(--text-main)',
+                    borderRadius: '4px',
+                  }}
+                />
+              </div>
+              <div>
+                <select
+                  data-testid="scanner-signal-filter"
+                  value={signalFilter}
+                  onChange={(e) => setSignalFilter(e.target.value)}
+                  style={{
+                    padding: '8px 12px',
+                    fontSize: '13px',
+                    background: '#1c1f26',
+                    border: '1px solid var(--border-color)',
+                    color: 'var(--text-main)',
+                    borderRadius: '4px',
+                  }}
+                >
+                  <option value="ALL">Tất cả tín hiệu</option>
+                  {availableSignalTypes.map((sig) => (
+                    <option key={sig} value={sig}>
+                      {sig.toUpperCase()}
+                    </option>
                   ))}
-                </tbody>
-              </table>
+                </select>
+              </div>
+              <div>
+                <select
+                  data-testid="scanner-regime-filter"
+                  value={regimeFilter}
+                  onChange={(e) => setRegimeFilter(e.target.value)}
+                  style={{
+                    padding: '8px 12px',
+                    fontSize: '13px',
+                    background: '#1c1f26',
+                    border: '1px solid var(--border-color)',
+                    color: 'var(--text-main)',
+                    borderRadius: '4px',
+                  }}
+                >
+                  <option value="ALL">Tất cả trạng thái (Regime)</option>
+                  {availableRegimes.map((reg) => (
+                    <option key={reg} value={reg}>
+                      {reg}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div
+                data-testid="scanner-results-count"
+                style={{ fontSize: '12px', color: 'var(--text-muted)', marginLeft: 'auto' }}
+              >
+                Hiển thị {filteredAndSortedResults.length} / {result.results.length} tín hiệu
+              </div>
             </div>
+          )}
+
+          {result.results.length > 0 ? (
+            filteredAndSortedResults.length > 0 ? (
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                  <thead>
+                    <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', color: 'var(--text-muted)', textAlign: 'left' }}>
+                      <th
+                        data-testid="th-sort-symbol"
+                        onClick={() => handleSort('symbol')}
+                        style={{ padding: '8px', fontWeight: 500, cursor: 'pointer', userSelect: 'none' }}
+                        title="Sắp xếp theo mã"
+                      >
+                        Symbol{getSortIcon('symbol')}
+                      </th>
+                      <th
+                        data-testid="th-sort-date"
+                        onClick={() => handleSort('timestamp')}
+                        style={{ padding: '8px', fontWeight: 500, cursor: 'pointer', userSelect: 'none' }}
+                        title="Sắp xếp theo ngày"
+                      >
+                        Date{getSortIcon('timestamp')}
+                      </th>
+                      <th
+                        data-testid="th-sort-signal"
+                        onClick={() => handleSort('signal_type')}
+                        style={{ padding: '8px', fontWeight: 500, cursor: 'pointer', userSelect: 'none' }}
+                        title="Sắp xếp theo tín hiệu"
+                      >
+                        Signal{getSortIcon('signal_type')}
+                      </th>
+                      <th
+                        data-testid="th-sort-regime"
+                        onClick={() => handleSort('regime')}
+                        style={{ padding: '8px', fontWeight: 500, cursor: 'pointer', userSelect: 'none' }}
+                        title="Sắp xếp theo trạng thái thị trường"
+                      >
+                        Regime{getSortIcon('regime')}
+                      </th>
+                      <th
+                        data-testid="th-sort-price"
+                        onClick={() => handleSort('price')}
+                        style={{ padding: '8px', fontWeight: 500, textAlign: 'right', cursor: 'pointer', userSelect: 'none' }}
+                        title="Sắp xếp theo giá"
+                      >
+                        Price{getSortIcon('price')}
+                      </th>
+                      <th style={{ padding: '8px', fontWeight: 500 }}>Ranking</th>
+                      <th style={{ padding: '8px', fontWeight: 500, textAlign: 'right' }}>Replay</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredAndSortedResults.map((item, index) => (
+                      <tr key={`${item.symbol}-${item.timestamp}-${index}`} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                        <td style={{ padding: '12px 8px', fontWeight: 600 }}>{item.symbol}</td>
+                        <td style={{ padding: '12px 8px', color: 'var(--text-muted)' }}>{new Date(item.timestamp).toLocaleDateString()}</td>
+                        <td style={{ padding: '12px 8px', textTransform: 'uppercase' }}>{item.signal_type}</td>
+                        <td style={{ padding: '12px 8px' }}>{item.regime}</td>
+                        <td style={{ padding: '12px 8px', textAlign: 'right', fontFamily: 'monospace' }}>{formatMoney(item.price)}</td>
+                        <td style={{ padding: '12px 8px', color: 'var(--text-muted)' }}>Not rankable</td>
+                        <td style={{ padding: '12px 8px', textAlign: 'right' }}>
+                          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '6px' }}>
+                            <button
+                              type="button"
+                              onClick={() => handleReplaySignal(item, 'blind_practice')}
+                              disabled={replayMutation.isPending}
+                              aria-label={`Start blind practice for ${item.symbol} (recommended)`}
+                              style={{ padding: '6px 10px', fontSize: '12px' }}
+                            >
+                              Blind practice
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleReplaySignal(item, 'signal_review')}
+                              disabled={replayMutation.isPending}
+                              aria-label={`Review signal for ${item.symbol}`}
+                              style={{ padding: '6px 10px', fontSize: '12px' }}
+                            >
+                              Review signal
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p data-testid="no-filtered-results" style={{ color: 'var(--text-muted)', fontSize: '14px', margin: '16px 0 0' }}>
+                Không tìm thấy tín hiệu nào khớp với bộ lọc.
+              </p>
+            )
           ) : (
             <p style={{ color: 'var(--text-muted)', fontSize: '14px', margin: 0 }}>No signals found.</p>
           )}

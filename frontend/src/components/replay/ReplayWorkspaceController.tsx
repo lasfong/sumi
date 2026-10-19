@@ -253,9 +253,9 @@ export const useReplayWorkspaceController = () => {
         }
         if (direction === 'next') {
           setIsPlaying(false);
-          toast.error('End of data or error');
+          toast.error(extractApiErrorMessage(err, 'End of data or error'));
         } else {
-          toast.error('Start of data or error');
+          toast.error(extractApiErrorMessage(err, 'Start of data or error'));
         }
       } finally {
         if (navCoordinator.token === ticket.token) {
@@ -610,6 +610,14 @@ export const useReplayWorkspaceController = () => {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        return;
+      }
       if (!isGlobalShortcutEligible(e)) return;
       if (!sessionId) return;
 
@@ -662,6 +670,9 @@ export const useReplayWorkspaceController = () => {
           if (drawing.selection.length) { e.preventDefault(); drawing.remove(); }
           break;
         case 'Space':
+          e.preventDefault();
+          setIsPlaying((prev) => !prev);
+          break;
         case 'ArrowRight':
           e.preventDefault();
           handleNext(e.shiftKey ? 5 : 1);
@@ -706,7 +717,7 @@ export const useReplayWorkspaceController = () => {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [drawing, handleDrawingTool, handleNext, handlePrev, sessionId]);
+  }, [drawing, handleDrawingTool, handleNext, handlePrev, sessionId, setIsPlaying]);
 
   const chartCandleRows = useMemo(() => Array.from(
     new Map((candlesData || []).map((c: Candle) => [toDateKey(c.timestamp) || c.timestamp, c] as const)).entries()

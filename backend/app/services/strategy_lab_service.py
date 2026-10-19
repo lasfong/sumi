@@ -814,7 +814,7 @@ class StrategyLabService:
                 "period": "closed_trades",
             },
             "win_rate": {
-                "value": round(win_rate * 100.0, 2) if trade_count else None,
+                "value": round(win_rate, 4) if trade_count else None,
                 "status": "valid" if trade_count else "not_applicable",
                 "sample_size": trade_count,
                 "period": "closed_trades",

@@ -196,18 +196,18 @@ export const ReplayRightPanel: React.FC<ReplayRightPanelProps> = ({
           {showExtendedInspector && (
             <SignalExplanationInspector
               sessionId={sessionId}
-              currentIndex={sessionData?.current_index ?? candleCount - 1}
+              currentIndex={sessionData?.current_index ?? practiceData?.current_index ?? candleCount - 1}
               timeframe={sessionData?.timeframe || '1D'}
-              currentTimestamp={currentCandle?.timestamp}
+              currentTimestamp={practiceData?.current_date ?? currentCandle?.timestamp}
               initialSignalName={selectedInspectorSignal}
               onOpenCatalog={onOpenSignalCatalog}
             />
           )}
           <SignalInspector
             sessionId={sessionId}
-            currentIndex={sessionData?.current_index ?? candleCount - 1}
+            currentIndex={sessionData?.current_index ?? practiceData?.current_index ?? candleCount - 1}
             timeframe={sessionData?.timeframe || '1D'}
-            currentTimestamp={currentCandle?.timestamp}
+            currentTimestamp={practiceData?.current_date ?? currentCandle?.timestamp}
           />
         </div>
       }

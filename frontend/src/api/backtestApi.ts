@@ -80,6 +80,22 @@ export interface BacktestResultSlice {
   worst_trade?: number | null;
 }
 
+export interface BacktestTrade {
+  id: number;
+  symbol: string;
+  entry_date?: string | null;
+  entry_price?: number | null;
+  exit_date?: string | null;
+  exit_price?: number | null;
+  quantity: number;
+  gross_pnl?: number;
+  net_pnl?: number;
+  pnl_percent?: number;
+  holding_candles?: number;
+  status?: string;
+  result?: string;
+}
+
 export interface BacktestResponse {
   status?: 'succeeded' | 'failed' | 'partial';
   session_id?: number;
@@ -94,6 +110,7 @@ export interface BacktestResponse {
   runs?: BacktestResponse[];
   summary?: BacktestRunSummary;
   slices?: BacktestResultSlice[];
+  trades?: BacktestTrade[];
   data_coverage?: DataCoverage;
   execution_assumptions?: ExecutionAssumptions;
   run_manifest?: RunManifest;

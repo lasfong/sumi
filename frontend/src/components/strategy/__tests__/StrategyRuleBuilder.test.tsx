@@ -57,6 +57,21 @@ const mockRegistry = {
       status: 'ACTIVE' as const,
       ast_alias: 'divergence__rsi_regular_bullish',
     },
+    {
+      name: 'volume.relative_volume',
+      version: '1.0.0',
+      category: 'volume',
+      label_vi: 'Khối Lượng Tương Đối (RVOL)',
+      description: 'Volume / 20-day SMA volume',
+      output_type: 'float' as const,
+      parameters_schema: {},
+      default_parameters: {},
+      dependencies: [],
+      warmup_bars: 20,
+      causal_delay_bars: 0,
+      status: 'ACTIVE' as const,
+      ast_alias: 'volume__relative_volume',
+    },
   ],
 };
 
@@ -200,5 +215,48 @@ describe('StrategyRuleBuilder Component (FR-CORE-006, F.4)', () => {
     expect(clickSpy).toHaveBeenCalled();
 
     document.body.removeChild(battleTabMock);
+  });
+
+  it('validates numeric comparison values and disables action buttons when invalid (SQA-010)', async () => {
+    renderWithClient(<StrategyRuleBuilder />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('add-clause-btn')).toBeInTheDocument();
+    });
+
+    // Add clause 2
+    fireEvent.click(screen.getByTestId('add-clause-btn'));
+
+    // Select numeric signal volume__relative_volume
+    const selectClause2 = screen.getByTestId('clause-signal-select-2');
+    fireEvent.change(selectClause2, { target: { value: 'volume__relative_volume' } });
+
+    // Compare value input should be present for numeric signal
+    const input = screen.getByTestId('clause-compare-value-2');
+    expect(input).toBeInTheDocument();
+
+    // Type invalid non-numeric string "abc_invalid"
+    fireEvent.change(input, { target: { value: 'abc_invalid' } });
+
+    // Should display inline error
+    expect(screen.getByTestId('clause-error-2')).toHaveTextContent(/không phải là số hợp lệ/i);
+
+    // Expression status banner should indicate invalid AST expression
+    expect(screen.getByTestId('ast-expression-status')).toHaveTextContent(/Không Hợp Lệ/i);
+
+    // Action buttons must be disabled
+    expect(screen.getByTestId('execute-rule-btn')).toBeDisabled();
+    expect(screen.getByTestId('switch-to-battle-btn')).toBeDisabled();
+    expect(screen.getByTestId('switch-to-single-btn')).toBeDisabled();
+
+    // Fix the value with valid number "1.5"
+    fireEvent.change(input, { target: { value: '1.5' } });
+
+    // Error disappears, status becomes valid, buttons enabled
+    expect(screen.queryByTestId('clause-error-2')).not.toBeInTheDocument();
+    expect(screen.getByTestId('ast-expression-status')).toHaveTextContent(/Hợp Lệ/i);
+    expect(screen.getByTestId('execute-rule-btn')).not.toBeDisabled();
+    expect(screen.getByTestId('switch-to-battle-btn')).not.toBeDisabled();
+    expect(screen.getByTestId('switch-to-single-btn')).not.toBeDisabled();
   });
 });

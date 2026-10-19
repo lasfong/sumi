@@ -15,8 +15,11 @@ from app.domain.enums import SessionMode, SessionStatus
 from app.services.event_logging_service import EventLoggingService
 from app.utils.date_range import end_before, start_at
 from datetime import datetime, timedelta
+import logging
 from typing import List
 from app.domain.market.calendar import TradingCalendar
+
+logger = logging.getLogger(__name__)
 
 class ReplayService:
     @staticmethod
@@ -336,8 +339,28 @@ class ReplayService:
                         exec_price = current_candle.open
 
             if executed:
-                TradeLifecycleService.execute_pending_order(db, session, order, exec_price, current_candle)
-                db.commit()
+                try:
+                    TradeLifecycleService.execute_pending_order(db, session, order, exec_price, current_candle)
+                    db.commit()
+                except Exception as exc:
+                    logger.exception(f"Error executing pending order #{order.id}: {exc}")
+                    db.rollback()
+                    failed_order = db.query(Order).filter(Order.id == order.id).first()
+                    if failed_order and failed_order.status == OrderStatus.PENDING.value:
+                        failed_order.status = OrderStatus.REJECTED.value
+                        EventLoggingService.log_event(
+                            db=db,
+                            event_type="ORDER_REJECTED",
+                            message=f"Pending order #{failed_order.id} rejected due to execution exception: {str(exc)}",
+                            session_id=session.id,
+                            details={"order_id": failed_order.id, "error": str(exc), "candle_index": session.current_index},
+                        )
+                        try:
+                            from app.api.decisions import register_order_rejection
+                            register_order_rejection(failed_order.id, candle_index=session.current_index, rejected_at=current_candle.timestamp)
+                        except Exception:
+                            pass
+                        db.commit()
 
     @staticmethod
     def previous_candle(db: Session, session_id: int, steps: int = 1) -> ReplaySession:

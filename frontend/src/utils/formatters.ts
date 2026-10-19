@@ -112,6 +112,17 @@ export function formatVietnamesePercent(
 }
 
 /**
+ * Format a percentage-point value (already on 0..100 scale, e.g. -4.514517 -> "-4.51%", 8.421735 -> "8.42%").
+ */
+export function formatPercentPoints(
+  value: number | null | undefined,
+  decimals: number = 2
+): string {
+  if (value === null || value === undefined || isNaN(value)) return '0.00%';
+  return `${value.toFixed(decimals)}%`;
+}
+
+/**
  * Format integer volume with vi-VN separators.
  */
 export function formatVietnameseVolume(value: number | null | undefined): string {

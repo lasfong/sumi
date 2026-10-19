@@ -217,4 +217,71 @@ describe('TechnicalFlowBBViewer Component (Master Appendix F.3)', () => {
     expect(screen.getByTestId('bb-degraded-notice')).toHaveTextContent(/CONSTITUENT_COVERAGE_BELOW_80_PCT/i);
     expect(screen.getByTestId('horizon-badge-T03')).toHaveTextContent('58.25');
   });
+
+  it('displays UNAVAILABLE quality badge on zero coverage or empty points, never HIGH (SQA-016)', async () => {
+    const zeroCoverageResponse = {
+      symbol: 'EMPTY_SYM',
+      timeframe: '1D',
+      methodology: 'OHLCV_PROXY',
+      calculation_as_of: '2026-03-01',
+      coverage_ratio: 0.0,
+      publication_status: 'UNAVAILABLE_DEGRADED',
+      points: [],
+      data: [],
+      summary: {},
+    };
+
+    vi.mocked(bbApi.getSymbolBB).mockResolvedValue(
+      zeroCoverageResponse as unknown as bbApi.BBSymbolSeriesResponse
+    );
+
+    renderWithClient(<TechnicalFlowBBViewer defaultSymbol="EMPTY_SYM" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('bb-data-quality-badge')).toBeInTheDocument();
+    });
+
+    const badge = screen.getByTestId('bb-data-quality-badge');
+    expect(badge).toHaveTextContent(/CHẤT LƯỢNG DỮ LIỆU: UNAVAILABLE/i);
+    expect(badge).not.toHaveTextContent('HIGH');
+  });
+
+  it('renders Daily Flow Pressure and Daily Trading Value metrics in summary (SQA-016)', async () => {
+    const responseWithDailyMetrics = {
+      symbol: 'FPT',
+      timeframe: '1D',
+      methodology: 'OHLCV_PROXY',
+      calculation_as_of: '2026-03-01',
+      coverage_ratio: 0.95,
+      points: [
+        {
+          date: '2026-03-01',
+          value: 50.0,
+          basis: 45.0,
+          daily_pressure: 1.85,
+          daily_trading_value: 35000000000,
+          daily_quality: 'HIGH',
+          regime: 'POSITIVE',
+          horizons: {
+            T20: { horizon: 'T20', bb_value: 50.0, raw_denominator: 45.0, is_warmup: false, regime: 'POSITIVE' },
+          },
+        },
+      ],
+      summary: {},
+    };
+
+    vi.mocked(bbApi.getSymbolBB).mockResolvedValue(
+      responseWithDailyMetrics as unknown as bbApi.BBSymbolSeriesResponse
+    );
+
+    renderWithClient(<TechnicalFlowBBViewer defaultSymbol="FPT" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('bb-daily-pressure')).toBeInTheDocument();
+      expect(screen.getByTestId('bb-daily-trading-value')).toBeInTheDocument();
+    });
+
+    expect(screen.getByTestId('bb-daily-pressure')).toHaveTextContent('1.85');
+    expect(screen.getByTestId('bb-daily-trading-value')).toHaveTextContent('35.000.000.000');
+  });
 });

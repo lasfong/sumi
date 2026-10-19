@@ -274,6 +274,33 @@ class BacktestService:
                 ).model_dump(),
             }
 
+        # Check for sufficient warmup history (SQA-014)
+        min_warmup_bars = 1
+        warmup_indicator = None
+        for ind in strategy.indicators:
+            req_len = getattr(ind, "length", None) or getattr(ind, "slow", None) or getattr(ind, "senkou", None)
+            if req_len is None and "_" in ind.name:
+                prefix, suffix = ind.name.rsplit("_", 1)
+                if suffix.isdigit():
+                    req_len = int(suffix)
+            if req_len is not None and req_len > min_warmup_bars:
+                min_warmup_bars = req_len
+                warmup_indicator = ind.name
+
+        if len(candles) < min_warmup_bars:
+            return {
+                "status": "failed",
+                "error_code": "INSUFFICIENT_WARMUP_HISTORY",
+                "message": (
+                    f"Dữ liệu lịch sử ({len(candles)} nến) không đủ cho thời gian warmup của chiến lược "
+                    f"(yêu cầu tối thiểu {min_warmup_bars} nến cho chỉ báo '{warmup_indicator or 'chỉ báo'}'). "
+                    f"Vui lòng mở rộng khoảng thời gian kiểm định."
+                ),
+                "symbol": symbol,
+                "total_candles": len(candles),
+                "analytics": None,
+            }
+
         coverage = self._build_coverage(candles, symbol, start_date, end_date, strategy)
         assumptions = self._build_assumptions(strategy)
         manifest = self._build_manifest(
@@ -340,12 +367,32 @@ class BacktestService:
             timeframe=timeframe,
         )
         
+        trades_list = [
+            {
+                "id": idx + 1,
+                "symbol": symbol,
+                "entry_date": t.entry_time.isoformat() if hasattr(t.entry_time, "isoformat") else str(t.entry_time) if t.entry_time else None,
+                "entry_price": float(t.entry_price) if t.entry_price is not None else None,
+                "exit_date": t.exit_time.isoformat() if hasattr(t.exit_time, "isoformat") else str(t.exit_time) if t.exit_time else None,
+                "exit_price": float(t.exit_price) if t.exit_price is not None else None,
+                "quantity": int(t.quantity) if t.quantity is not None else 0,
+                "gross_pnl": float(t.gross_pnl) if t.gross_pnl is not None else 0.0,
+                "net_pnl": float(t.net_pnl) if t.net_pnl is not None else 0.0,
+                "pnl_percent": float(t.pnl_percent) if t.pnl_percent is not None else 0.0,
+                "holding_candles": int(t.holding_bars) if t.holding_bars is not None else 0,
+                "status": t.status,
+                "result": t.result,
+            }
+            for idx, t in enumerate(kernel_result.ledger.trades)
+        ]
+
         return {
             "session_id": session.id,
             "status": "succeeded",
             "strategy": strategy.name,
             "symbol": symbol,
             "total_candles": len(candles),
+            "trades": trades_list,
             "analytics": analytics.model_dump() if analytics else None,
             "slices": slices,
             "data_coverage": coverage.model_dump(),

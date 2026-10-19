@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { getAvailableStrategies, runBacktest } from '../api/backtestApi';
-import type { AvailableStrategy, BacktestRequest, BacktestResultSlice, StrategyConfig } from '../api/backtestApi';
+import type { AvailableStrategy, BacktestRequest, BacktestResultSlice, BacktestTrade, StrategyConfig } from '../api/backtestApi';
 import type { StrategyRulePayload } from '../components/strategy/StrategyRuleBuilder';
 import { EquityChart } from '../components/analytics/EquityChart';
 import { MetricResultValue } from '../components/analytics/MetricResultValue';
+import { formatPercentPoints } from '../utils/formatters';
 
 const CUSTOM_RULE_FILENAME = 'custom_ast_rule.yaml';
 
@@ -134,12 +135,30 @@ export const BacktestPage: React.FC<BacktestPageProps> = ({ embedded = false }) 
     mutation.mutate(request);
   };
 
-  const formatMoney = (val?: number | null) => val ? val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '0.00';
-  const formatPercent = (val?: number | null) => val ? `${(val * 100).toFixed(2)}%` : '0.00%';
+  const formatMoney = (val?: number | null) =>
+    val !== undefined && val !== null
+      ? val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+      : '0.00';
+  const formatPercent = (val?: number | null) =>
+    val !== undefined && val !== null ? `${(val * 100).toFixed(2)}%` : '0.00%';
+  const formatDate = (val?: string | null) => {
+    if (!val) return '—';
+    return val.includes('T') ? val.split('T')[0] : val;
+  };
 
   const { data: result, isPending } = mutation;
   const analytics = result?.analytics;
   const sliceRows = analytics ? result?.slices || [] : result?.runs?.flatMap(run => run.slices || []) || [];
+
+  const executedTrades: BacktestTrade[] = useMemo(() => {
+    if (result?.trades && result.trades.length > 0) {
+      return result.trades;
+    }
+    if (result?.runs) {
+      return result.runs.flatMap(run => run.trades || []);
+    }
+    return [];
+  }, [result]);
 
   const renderSliceTable = (title: string, rows: BacktestResultSlice[]) => (
     <div className="glass-panel" style={{ padding: '20px' }}>
@@ -171,6 +190,85 @@ export const BacktestPage: React.FC<BacktestPageProps> = ({ embedded = false }) 
         </div>
       ) : (
         <p style={{ color: 'var(--text-muted)', fontSize: '14px', margin: 0 }}>No slice data available.</p>
+      )}
+    </div>
+  );
+
+  const renderExecutedTradesTable = (trades: BacktestTrade[]) => (
+    <div className="glass-panel" style={{ padding: '20px', marginTop: '24px' }} data-testid="backtest-executed-trades">
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+        <h3 style={{ margin: 0, fontSize: '16px' }}>Danh sách Lệnh Đã Thực Hiện ({trades.length} lệnh)</h3>
+        <span style={{ color: 'var(--text-muted)', fontSize: '13px' }}>Chi tiết từng giao dịch trong kỳ kiểm thử</span>
+      </div>
+      {trades.length > 0 ? (
+        <div style={{ overflowX: 'auto', maxHeight: '420px', overflowY: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', color: 'var(--text-muted)', textAlign: 'left', position: 'sticky', top: 0, background: 'var(--bg-panel, #161b22)' }}>
+                <th style={{ padding: '8px 6px', fontWeight: 500 }}>#</th>
+                <th style={{ padding: '8px 6px', fontWeight: 500 }}>Mã</th>
+                <th style={{ padding: '8px 6px', fontWeight: 500 }}>Ngày Vào</th>
+                <th style={{ padding: '8px 6px', fontWeight: 500, textAlign: 'right' }}>Giá Vào</th>
+                <th style={{ padding: '8px 6px', fontWeight: 500 }}>Ngày Ra</th>
+                <th style={{ padding: '8px 6px', fontWeight: 500, textAlign: 'right' }}>Giá Ra</th>
+                <th style={{ padding: '8px 6px', fontWeight: 500, textAlign: 'right' }}>Khối Lượng</th>
+                <th style={{ padding: '8px 6px', fontWeight: 500, textAlign: 'right' }}>Nắm Giữ</th>
+                <th style={{ padding: '8px 6px', fontWeight: 500, textAlign: 'right' }}>Lãi/Lỗ Ròng</th>
+                <th style={{ padding: '8px 6px', fontWeight: 500, textAlign: 'right' }}>% PnL</th>
+                <th style={{ padding: '8px 6px', fontWeight: 500, textAlign: 'center' }}>Kết Quả</th>
+              </tr>
+            </thead>
+            <tbody>
+              {trades.map((trade, idx) => {
+                const isWin = (trade.net_pnl ?? 0) > 0;
+                const isLoss = (trade.net_pnl ?? 0) < 0;
+                const pnlColor = isWin ? 'var(--color-buy)' : isLoss ? 'var(--color-sell)' : 'var(--text-muted)';
+                const resultLabel = trade.result ? trade.result.toUpperCase() : (isWin ? 'WIN' : isLoss ? 'LOSS' : 'BREAKEVEN');
+
+                return (
+                  <tr
+                    key={`${trade.symbol ?? 'sym'}-${trade.id ?? idx}-${idx}`}
+                    data-testid={`trade-row-${trade.id || idx + 1}`}
+                    style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}
+                  >
+                    <td style={{ padding: '10px 6px', color: 'var(--text-muted)' }}>{trade.id || idx + 1}</td>
+                    <td style={{ padding: '10px 6px', fontWeight: 600 }}>{trade.symbol}</td>
+                    <td style={{ padding: '10px 6px', color: 'var(--text-muted)' }}>{formatDate(trade.entry_date)}</td>
+                    <td style={{ padding: '10px 6px', textAlign: 'right' }}>{formatMoney(trade.entry_price)}</td>
+                    <td style={{ padding: '10px 6px', color: 'var(--text-muted)' }}>{formatDate(trade.exit_date)}</td>
+                    <td style={{ padding: '10px 6px', textAlign: 'right' }}>{trade.exit_price !== null && trade.exit_price !== undefined ? formatMoney(trade.exit_price) : 'Đang mở'}</td>
+                    <td style={{ padding: '10px 6px', textAlign: 'right' }}>{trade.quantity?.toLocaleString() || 0}</td>
+                    <td style={{ padding: '10px 6px', textAlign: 'right' }}>{trade.holding_candles ?? 0} nến</td>
+                    <td style={{ padding: '10px 6px', textAlign: 'right', fontWeight: 600, color: pnlColor }}>
+                      {formatMoney(trade.net_pnl)}
+                    </td>
+                    <td style={{ padding: '10px 6px', textAlign: 'right', fontWeight: 600, color: pnlColor }}>
+                      {formatPercentPoints(trade.pnl_percent)}
+                    </td>
+                    <td style={{ padding: '10px 6px', textAlign: 'center' }}>
+                      <span
+                        style={{
+                          padding: '2px 8px',
+                          borderRadius: '4px',
+                          fontSize: '11px',
+                          fontWeight: 600,
+                          background: isWin ? 'rgba(0, 230, 118, 0.15)' : isLoss ? 'rgba(255, 82, 82, 0.15)' : 'rgba(255, 255, 255, 0.08)',
+                          color: pnlColor,
+                        }}
+                      >
+                        {resultLabel}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p data-testid="no-executed-trades" style={{ color: 'var(--text-muted)', fontSize: '14px', margin: 0 }}>
+          Không có giao dịch nào được thực hiện trong kỳ kiểm thử này.
+        </p>
       )}
     </div>
   );
@@ -371,6 +469,7 @@ export const BacktestPage: React.FC<BacktestPageProps> = ({ embedded = false }) 
               {renderSliceTable('Period Slices', sliceRows.filter(row => row.group_type === 'period'))}
               {renderSliceTable('Regime Slices', sliceRows.filter(row => row.group_type === 'regime'))}
             </div>
+            {renderExecutedTradesTable(executedTrades)}
           </div>
         ) : (
         <div className="glass-panel" style={{ borderColor: 'var(--color-sell)', padding: '16px' }}>
@@ -476,6 +575,8 @@ export const BacktestPage: React.FC<BacktestPageProps> = ({ embedded = false }) 
               </div>
             </div>
           </div>
+
+          {renderExecutedTradesTable(executedTrades)}
 
           {result.data_coverage && (
             <div className="glass-panel" style={{ padding: '16px', marginTop: '24px' }} data-testid="backtest-run-contract">

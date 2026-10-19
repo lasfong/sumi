@@ -41,16 +41,14 @@ export const ChartLegendOverlay: React.FC<ChartLegendOverlayProps> = ({
   return (
     <div
       style={{
-        position: 'absolute',
-        top: 10,
-        left: 14,
+        position: 'relative',
         zIndex: 5,
         pointerEvents: 'none',
         display: 'flex',
         flexDirection: 'column',
         gap: 5,
         fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-        maxWidth: 'calc(100% - 100px)',
+        maxWidth: '100%',
       }}
     >
       {/* 1. Symbol & Bar OHLC Header */}
@@ -76,7 +74,7 @@ export const ChartLegendOverlay: React.FC<ChartLegendOverlayProps> = ({
               {timeframe}
             </span>
             <span style={{ color: '#00E5FF', fontSize: '10px', background: 'rgba(0, 229, 255, 0.1)', padding: '1px 5px', borderRadius: 3, fontWeight: 600 }}>
-              x1,000 ₫
+              VND
             </span>
             <span
               style={{ color: '#787b86', fontSize: '11px', fontFamily: 'monospace' }}

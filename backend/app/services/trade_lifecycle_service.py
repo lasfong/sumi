@@ -202,6 +202,28 @@ class TradeLifecycleService:
             if pending_order:
                 pending_order.status = OrderStatus.REJECTED.value
                 db.add(pending_order)
+                EventLoggingService.log_event(
+                    db=db,
+                    event_type="ORDER_REJECTED",
+                    message=f"Pending order #{pending_order.id} rejected: insufficient cash. Required: {amounts.net_amount:g}, Available: {session.current_cash:g}",
+                    session_id=session.id,
+                    details={
+                        "order_id": pending_order.id,
+                        "action": "BUY",
+                        "price": price,
+                        "quantity": qty,
+                        "required_cash": amounts.net_amount,
+                        "available_cash": session.current_cash,
+                        "reason": "insufficient_cash",
+                        "candle_index": session.current_index,
+                    },
+                )
+                try:
+                    from app.api.decisions import register_order_rejection
+                    register_order_rejection(pending_order.id, candle_index=session.current_index, rejected_at=date)
+                except Exception:
+                    pass
+                return
             raise HTTPException(status_code=400, detail=f"Cannot buy: insufficient cash. Required: {amounts.net_amount}, Available: {session.current_cash}")
 
         if pending_order:
@@ -328,6 +350,30 @@ class TradeLifecycleService:
         available_qty = max(0.0, settled_bought - total_sold)
 
         if available_qty < qty:
+            if pending_order:
+                pending_order.status = OrderStatus.REJECTED.value
+                db.add(pending_order)
+                EventLoggingService.log_event(
+                    db=db,
+                    event_type="ORDER_REJECTED",
+                    message=f"Pending order #{pending_order.id} rejected: T+2 constraint or insufficient settled shares. Available: {available_qty:g}, Required: {qty:g}",
+                    session_id=session.id,
+                    details={
+                        "order_id": pending_order.id,
+                        "action": "SELL",
+                        "price": price,
+                        "quantity": qty,
+                        "available_qty": available_qty,
+                        "reason": "settlement_locked",
+                        "candle_index": session.current_index,
+                    },
+                )
+                try:
+                    from app.api.decisions import register_order_rejection
+                    register_order_rejection(pending_order.id, candle_index=session.current_index, rejected_at=date)
+                except Exception:
+                    pass
+                return
             blocked_qty = position.quantity - available_qty
             release_date_str = earliest_unsettled_release_date.isoformat() if hasattr(earliest_unsettled_release_date, 'isoformat') else str(earliest_unsettled_release_date) if earliest_unsettled_release_date else "T+2"
             settlement_label = profile.settlement_label

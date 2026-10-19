@@ -5,7 +5,34 @@
 }
 
 .session-picker-container.compact {
-  min-width: 200px;
+  min-width: 0;
+  max-width: 175px;
+}
+
+.session-picker-container.compact .session-picker-trigger {
+  padding: 3px 8px;
+  font-size: 11px;
+  gap: 5px;
+  border-radius: 4px;
+}
+
+@media (max-width: 1279px) {
+  .session-picker-container.compact {
+    max-width: 125px;
+  }
+  .session-picker-container.compact .session-mode-tag,
+  .session-picker-container.compact .session-tf {
+    display: none;
+  }
+}
+
+@media (max-width: 1150px) {
+  .session-picker-container.compact {
+    max-width: 84px;
+  }
+  .session-picker-container.compact .session-symbol {
+    display: none;
+  }
 }
 
 .session-picker-trigger {

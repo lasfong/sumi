@@ -1,5 +1,6 @@
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from app.domain.engine.indicator_engine import IndicatorEngine
@@ -71,14 +72,31 @@ class StrategyIndicatorAdapter:
                 column for column in result_df.columns
                 if column not in SOURCE_COLUMNS and column not in df.columns
             ]
-            values.update(
-                StrategyIndicatorAdapter._map_columns(
-                    result_df=result_df,
-                    output_columns=output_columns,
-                    indicator_name=indicator.name,
-                    indicator_id=indicator_id,
+            if not output_columns:
+                # SQA-014: pandas-ta returned None or empty due to insufficient warmup history (< lookback)
+                # Populate default output column(s) with NaN series so indicator_values contains all declared keys
+                nan_series = np.full(len(df), np.nan)
+                if indicator_id == "macd":
+                    values[f"{indicator.name}_line"] = nan_series
+                    values[f"{indicator.name}_signal"] = nan_series
+                    values[f"{indicator.name}_hist"] = nan_series
+                elif indicator_id == "ichimoku":
+                    values[f"{indicator.name}_tenkan"] = nan_series
+                    values[f"{indicator.name}_kijun"] = nan_series
+                    values[f"{indicator.name}_span_a"] = nan_series
+                    values[f"{indicator.name}_span_b"] = nan_series
+                    values[f"{indicator.name}_chikou"] = nan_series
+                else:
+                    values[indicator.name] = nan_series
+            else:
+                values.update(
+                    StrategyIndicatorAdapter._map_columns(
+                        result_df=result_df,
+                        output_columns=output_columns,
+                        indicator_name=indicator.name,
+                        indicator_id=indicator_id,
+                    )
                 )
-            )
         for col in ("open", "high", "low", "close", "volume"):
             if col in df.columns:
                 values[col] = df[col].values

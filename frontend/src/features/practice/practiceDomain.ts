@@ -74,6 +74,15 @@ export const validateDecision = (
   if (['SELL', 'REDUCE'].includes(decision.action) && !openShort && (decision.quantity ?? 0) > (openLong?.quantity ?? 0)) {
     return 'Sell quantity exceeds the projected open position.';
   }
+  if (['BUY', 'ADD'].includes(decision.action) && (decision.quantity ?? 0) > 0) {
+    const estimatedPrice = decision.price ?? snapshot.current_price;
+    if (estimatedPrice > 0) {
+      const estimatedCost = (decision.quantity ?? 0) * estimatedPrice * 1.0015;
+      if (snapshot.current_cash != null && estimatedCost > snapshot.current_cash) {
+        return `Không đủ tiền mặt: Chi phí ước tính (${Math.round(estimatedCost).toLocaleString()} ₫) vượt quá số dư khả dụng (${Math.round(snapshot.current_cash).toLocaleString()} ₫).`;
+      }
+    }
+  }
   if (decision.action === 'CLOSE' && !snapshot.positions.length) return 'There is no open position to close.';
   if (decision.stop_loss !== undefined && (!Number.isFinite(decision.stop_loss) || decision.stop_loss <= 0)) return 'Stop loss must be greater than zero.';
   if (decision.target_price !== undefined && (!Number.isFinite(decision.target_price) || decision.target_price <= 0)) return 'Target price must be greater than zero.';

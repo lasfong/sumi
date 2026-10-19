@@ -180,4 +180,125 @@ describe('ScannerPage', () => {
       vi.mocked(scannerApi.createReplaySessionFromSignal).mock.calls[0][0],
     ).toEqual(expect.objectContaining({ replay_intent: 'signal_review' })));
   });
+
+  it('displays historical run results when clicking saved run even after a new scan (SQA-015)', async () => {
+    const historicalRun: scannerApi.ScannerRun = {
+      id: 4,
+      label: 'Historical Run #4',
+      status: 'succeeded',
+      total_results: 1,
+      created_at: '2024-01-01T10:00:00Z',
+      request_config: { symbols: ['VNM'] },
+      result_payload: {
+        status: 'succeeded',
+        total_results: 1,
+        truncated: false,
+        warnings: [],
+        results: [
+          {
+            symbol: 'VNM',
+            timestamp: '2024-01-05T00:00:00',
+            signal_type: 'entry',
+            strategy: 'Old Strategy',
+            price: 70,
+            regime: 'bullish',
+          },
+        ],
+      },
+    };
+
+    vi.mocked(scannerApi.listScannerRuns).mockResolvedValue([historicalRun]);
+
+    vi.mocked(scannerApi.runScanner).mockResolvedValue({
+      status: 'succeeded',
+      total_results: 1,
+      truncated: false,
+      warnings: [],
+      results: [
+        {
+          symbol: 'FPT',
+          timestamp: '2024-01-10T00:00:00',
+          signal_type: 'entry',
+          strategy: 'Scanner Strategy',
+          price: 100,
+          regime: 'bullish',
+        },
+      ],
+    });
+
+    renderWithClient(<ScannerPage />);
+    await screen.findByText(/Scanner Strategy/i);
+
+    // 1. Run a new scan
+    fireEvent.click(screen.getByRole('button', { name: /Run Scanner/i }));
+    await screen.findByText('FPT');
+    expect(screen.queryByText('VNM')).not.toBeInTheDocument();
+
+    // 2. Click the historical run #4
+    const historyRunBtn = await screen.findByTestId('history-run-4');
+    fireEvent.click(historyRunBtn);
+
+    // 3. The historical run results (VNM) must be displayed, not the stale FPT results
+    await screen.findByText('VNM');
+    expect(screen.queryByText('FPT')).not.toBeInTheDocument();
+    expect(screen.getByText(/Signals from Run #4/i)).toBeInTheDocument();
+  });
+
+  it('filters and sorts scanner results table by symbol, signal, and price (SQA-005)', async () => {
+    vi.mocked(scannerApi.runScanner).mockResolvedValue({
+      status: 'succeeded',
+      total_results: 3,
+      truncated: false,
+      warnings: [],
+      results: [
+        { symbol: 'FPT', timestamp: '2024-01-10T00:00:00', signal_type: 'entry', strategy: 'Strat', price: 100, regime: 'bullish' },
+        { symbol: 'SSI', timestamp: '2024-01-12T00:00:00', signal_type: 'exit', strategy: 'Strat', price: 35, regime: 'bearish' },
+        { symbol: 'HPG', timestamp: '2024-01-15T00:00:00', signal_type: 'entry', strategy: 'Strat', price: 25, regime: 'bullish' },
+      ],
+    });
+
+    renderWithClient(<ScannerPage />);
+    await screen.findByText(/Scanner Strategy/i);
+    fireEvent.click(screen.getByRole('button', { name: /Run Scanner/i }));
+
+    await screen.findByText('FPT');
+    expect(screen.getByText('SSI')).toBeInTheDocument();
+    expect(screen.getByText('HPG')).toBeInTheDocument();
+
+    // Verify results count badge
+    expect(screen.getByTestId('scanner-results-count')).toHaveTextContent('Hiển thị 3 / 3 tín hiệu');
+
+    // 1. Search/Filter by symbol 'FP'
+    const filterInput = screen.getByTestId('scanner-filter-input');
+    fireEvent.change(filterInput, { target: { value: 'FP' } });
+    expect(screen.getByText('FPT')).toBeInTheDocument();
+    expect(screen.queryByText('SSI')).not.toBeInTheDocument();
+    expect(screen.queryByText('HPG')).not.toBeInTheDocument();
+    expect(screen.getByTestId('scanner-results-count')).toHaveTextContent('Hiển thị 1 / 3 tín hiệu');
+
+    // Clear search filter
+    fireEvent.change(filterInput, { target: { value: '' } });
+    expect(screen.getByText('SSI')).toBeInTheDocument();
+
+    // 2. Filter by signal dropdown 'exit'
+    const signalSelect = screen.getByTestId('scanner-signal-filter');
+    fireEvent.change(signalSelect, { target: { value: 'exit' } });
+    expect(screen.getByText('SSI')).toBeInTheDocument();
+    expect(screen.queryByText('FPT')).not.toBeInTheDocument();
+    expect(screen.queryByText('HPG')).not.toBeInTheDocument();
+
+    // Reset signal filter
+    fireEvent.change(signalSelect, { target: { value: 'ALL' } });
+
+    // 3. Test sort by Price (click th-sort-price)
+    const priceTh = screen.getByTestId('th-sort-price');
+    fireEvent.click(priceTh); // ascending: 25 (HPG), 35 (SSI), 100 (FPT)
+    const rowsAsc = screen.getAllByRole('row');
+    // First data row (index 1) should be HPG (price 25)
+    expect(rowsAsc[1]).toHaveTextContent('HPG');
+
+    fireEvent.click(priceTh); // descending: 100 (FPT), 35 (SSI), 25 (HPG)
+    const rowsDesc = screen.getAllByRole('row');
+    expect(rowsDesc[1]).toHaveTextContent('FPT');
+  });
 });

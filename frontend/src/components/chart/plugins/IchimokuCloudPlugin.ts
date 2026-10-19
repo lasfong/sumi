@@ -88,11 +88,22 @@ export class IchimokuCloudPlugin implements ICustomSeriesPaneView<Time, Ichimoku
     }
 
     priceValueBuilder(plotRow: IchimokuCloudData): CustomSeriesPricePlotValues {
-        return [plotRow.spanA ?? 0, plotRow.spanB ?? 0, plotRow.spanA ?? 0];
+        const hasA = plotRow.spanA !== null && plotRow.spanA !== undefined && Number.isFinite(plotRow.spanA);
+        const hasB = plotRow.spanB !== null && plotRow.spanB !== undefined && Number.isFinite(plotRow.spanB);
+        if (!hasA && !hasB) return [];
+        if (hasA && hasB) return [plotRow.spanA!, plotRow.spanB!, plotRow.spanA!];
+        const val = hasA ? plotRow.spanA! : plotRow.spanB!;
+        return [val, val, val];
     }
 
     isWhitespace(data: IchimokuCloudData | CustomData): data is CustomData {
-        return (data as IchimokuCloudData).spanA === undefined;
+        const row = data as IchimokuCloudData;
+        return (
+            row.spanA == null ||
+            row.spanB == null ||
+            !Number.isFinite(row.spanA) ||
+            !Number.isFinite(row.spanB)
+        );
     }
 
     renderer(): ICustomSeriesPaneRenderer {

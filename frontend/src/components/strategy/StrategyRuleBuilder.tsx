@@ -127,6 +127,33 @@ export const StrategyRuleBuilder: React.FC<StrategyRuleBuilderProps> = ({
       .join(' ');
   }, [clauses]);
 
+  // Clause validation for numeric and boolean comparison values (SQA-010)
+  const clauseErrors = useMemo(() => {
+    return clauses.map((c) => {
+      const sig = allSignals.find((s) => s.ast_alias === c.signalAlias);
+      const isBool = sig ? sig.output_type === 'bool' : (c.compareValue === 'True' || c.compareValue === 'False');
+      if (isBool) {
+        if (c.compareValue !== 'True' && c.compareValue !== 'False') {
+          return 'Giá trị phải là True hoặc False';
+        }
+        return null;
+      }
+      const trimmed = (c.compareValue ?? '').trim();
+      if (!trimmed) {
+        return 'Vui lòng nhập giá trị so sánh số';
+      }
+      const num = Number(trimmed);
+      if (!Number.isFinite(num) || isNaN(num)) {
+        return `Giá trị "${c.compareValue}" không phải là số hợp lệ`;
+      }
+      return null;
+    });
+  }, [clauses, allSignals]);
+
+  const isValidRule = useMemo(() => {
+    return clauses.length > 0 && clauseErrors.every((err) => err === null);
+  }, [clauses, clauseErrors]);
+
   // Build YAML representation
   const generatedYaml = useMemo(() => {
     return `# Biểu thức quy tắc sinh tự động từ Signal Registry
@@ -194,7 +221,7 @@ ${Array.from(new Set(clauses.map((c) => `  - ${c.signalAlias}`))).join('\n')}
   };
 
   const handleExecuteRule = () => {
-    if (!generatedExpression) return;
+    if (!generatedExpression || !isValidRule) return;
     const payload = buildRulePayload('battle');
     persistAndDispatchRule(payload);
 
@@ -219,7 +246,7 @@ ${Array.from(new Set(clauses.map((c) => `  - ${c.signalAlias}`))).join('\n')}
   };
 
   const handleSwitchToBattle = () => {
-    if (!generatedExpression) return;
+    if (!generatedExpression || !isValidRule) return;
     const payload = buildRulePayload('battle');
     persistAndDispatchRule(payload);
 
@@ -243,7 +270,7 @@ ${Array.from(new Set(clauses.map((c) => `  - ${c.signalAlias}`))).join('\n')}
   };
 
   const handleSwitchToSingle = () => {
-    if (!generatedExpression) return;
+    if (!generatedExpression || !isValidRule) return;
     const payload = buildRulePayload('single');
     persistAndDispatchRule(payload);
 
@@ -425,20 +452,31 @@ ${Array.from(new Set(clauses.map((c) => `  - ${c.signalAlias}`))).join('\n')}
                     <option value="False" style={{ background: '#1c1f26', color: '#fff' }}>False (Sai)</option>
                   </select>
                 ) : (
-                  <input
-                    type="text"
-                    value={clause.compareValue}
-                    onChange={(e) => handleClauseChange(idx, 'compareValue', e.target.value)}
-                    placeholder="Giá trị so sánh"
-                    style={{
-                      padding: '6px 8px',
-                      fontSize: '12px',
-                      background: 'rgba(255, 255, 255, 0.05)',
-                      border: '1px solid var(--border-color)',
-                      color: 'var(--text-main)',
-                      borderRadius: '4px',
-                    }}
-                  />
+                  <div style={{ display: 'flex', flexDirection: 'column' }}>
+                    <input
+                      type="text"
+                      data-testid={`clause-compare-value-${idx}`}
+                      value={clause.compareValue}
+                      onChange={(e) => handleClauseChange(idx, 'compareValue', e.target.value)}
+                      placeholder="Giá trị so sánh"
+                      style={{
+                        padding: '6px 8px',
+                        fontSize: '12px',
+                        background: 'rgba(255, 255, 255, 0.05)',
+                        border: clauseErrors[idx] ? '1px solid var(--color-sell)' : '1px solid var(--border-color)',
+                        color: 'var(--text-main)',
+                        borderRadius: '4px',
+                      }}
+                    />
+                    {clauseErrors[idx] && (
+                      <span
+                        data-testid={`clause-error-${idx}`}
+                        style={{ fontSize: '11px', color: 'var(--color-sell)', marginTop: '2px' }}
+                      >
+                        {clauseErrors[idx]}
+                      </span>
+                    )}
+                  </div>
                 )}
 
                 <button
@@ -466,10 +504,16 @@ ${Array.from(new Set(clauses.map((c) => `  - ${c.signalAlias}`))).join('\n')}
       {/* Generated Expression & YAML Preview */}
       <div style={{ background: 'rgba(0, 0, 0, 0.3)', padding: '14px', borderRadius: '6px', marginBottom: '16px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-          <span style={{ fontSize: '12px', fontWeight: 600, color: '#58A6FF' }}>Biểu thức AST Hợp Lệ:</span>
+          <span
+            data-testid="ast-expression-status"
+            style={{ fontSize: '12px', fontWeight: 600, color: isValidRule ? '#58A6FF' : 'var(--color-sell)' }}
+          >
+            {isValidRule ? 'Biểu thức AST Hợp Lệ:' : '❌ Biểu thức AST Không Hợp Lệ (Giá trị không hợp lệ):'}
+          </span>
           <button
             type="button"
             data-testid="copy-rule-yaml-btn"
+            disabled={!isValidRule}
             onClick={handleCopyYaml}
             style={{
               padding: '4px 10px',
@@ -477,8 +521,9 @@ ${Array.from(new Set(clauses.map((c) => `  - ${c.signalAlias}`))).join('\n')}
               borderRadius: '4px',
               background: 'rgba(255, 255, 255, 0.08)',
               border: '1px solid var(--border-color)',
-              color: copied ? 'var(--color-buy)' : 'var(--text-main)',
-              cursor: 'pointer',
+              color: !isValidRule ? 'gray' : copied ? 'var(--color-buy)' : 'var(--text-main)',
+              cursor: !isValidRule ? 'not-allowed' : 'pointer',
+              opacity: !isValidRule ? 0.6 : 1,
             }}
           >
             {copied ? '✓ Đã Sao Chép YAML' : '📋 Sao Chép Cấu Hình YAML'}
@@ -489,7 +534,7 @@ ${Array.from(new Set(clauses.map((c) => `  - ${c.signalAlias}`))).join('\n')}
           style={{
             fontFamily: 'monospace',
             fontSize: '13px',
-            color: '#00E676',
+            color: isValidRule ? '#00E676' : 'var(--color-sell)',
             background: 'rgba(0, 0, 0, 0.4)',
             padding: '10px',
             borderRadius: '4px',
@@ -514,20 +559,22 @@ ${Array.from(new Set(clauses.map((c) => `  - ${c.signalAlias}`))).join('\n')}
         <button
           type="button"
           data-testid="execute-rule-btn"
+          disabled={!isValidRule}
           onClick={handleExecuteRule}
           style={{
             padding: '10px 18px',
             fontSize: '13px',
             fontWeight: 600,
             borderRadius: '6px',
-            background: 'linear-gradient(135deg, #00E676 0%, #00B0FF 100%)',
-            color: '#0D1117',
+            background: isValidRule ? 'linear-gradient(135deg, #00E676 0%, #00B0FF 100%)' : 'rgba(255, 255, 255, 0.1)',
+            color: isValidRule ? '#0D1117' : 'gray',
             border: 'none',
-            cursor: 'pointer',
+            cursor: isValidRule ? 'pointer' : 'not-allowed',
+            opacity: isValidRule ? 1 : 0.6,
             display: 'inline-flex',
             alignItems: 'center',
             gap: '8px',
-            boxShadow: '0 2px 8px rgba(0, 230, 118, 0.3)',
+            boxShadow: isValidRule ? '0 2px 8px rgba(0, 230, 118, 0.3)' : 'none',
           }}
         >
           🚀 Chạy Kiểm Định Với Quy Tắc Này
@@ -536,16 +583,18 @@ ${Array.from(new Set(clauses.map((c) => `  - ${c.signalAlias}`))).join('\n')}
         <button
           type="button"
           data-testid="switch-to-battle-btn"
+          disabled={!isValidRule}
           onClick={handleSwitchToBattle}
           style={{
             padding: '10px 16px',
             fontSize: '13px',
             fontWeight: 600,
             borderRadius: '6px',
-            background: 'rgba(41, 98, 255, 0.2)',
-            border: '1px solid var(--color-primary)',
-            color: 'var(--color-primary)',
-            cursor: 'pointer',
+            background: isValidRule ? 'rgba(41, 98, 255, 0.2)' : 'rgba(255, 255, 255, 0.05)',
+            border: isValidRule ? '1px solid var(--color-primary)' : '1px solid gray',
+            color: isValidRule ? 'var(--color-primary)' : 'gray',
+            cursor: isValidRule ? 'pointer' : 'not-allowed',
+            opacity: isValidRule ? 1 : 0.6,
             display: 'inline-flex',
             alignItems: 'center',
             gap: '6px',
@@ -557,16 +606,18 @@ ${Array.from(new Set(clauses.map((c) => `  - ${c.signalAlias}`))).join('\n')}
         <button
           type="button"
           data-testid="switch-to-single-btn"
+          disabled={!isValidRule}
           onClick={handleSwitchToSingle}
           style={{
             padding: '10px 16px',
             fontSize: '13px',
             fontWeight: 600,
             borderRadius: '6px',
-            background: 'rgba(88, 166, 255, 0.14)',
-            border: '1px solid rgba(88, 166, 255, 0.5)',
-            color: '#58A6FF',
-            cursor: 'pointer',
+            background: isValidRule ? 'rgba(88, 166, 255, 0.14)' : 'rgba(255, 255, 255, 0.05)',
+            border: isValidRule ? '1px solid rgba(88, 166, 255, 0.5)' : '1px solid gray',
+            color: isValidRule ? '#58A6FF' : 'gray',
+            cursor: isValidRule ? 'pointer' : 'not-allowed',
+            opacity: isValidRule ? 1 : 0.6,
             display: 'inline-flex',
             alignItems: 'center',
             gap: '6px',

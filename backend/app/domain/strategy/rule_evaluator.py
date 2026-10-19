@@ -23,10 +23,27 @@ def get_rule_identifiers(condition: str) -> set[str]:
 
 
 def validate_condition(condition: str, allowed_names: set[str]) -> None:
-    identifiers = get_rule_identifiers(condition)
+    tree = _parse_condition(condition)
+    identifiers = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
     unknown = identifiers - allowed_names
     if unknown:
         raise RuleEvaluationError(f"Unknown identifier(s): {', '.join(sorted(unknown))}")
+
+    # Validate operands in comparisons: ensure non-identifiers are valid numeric/bool literals (SQA-010)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Compare):
+            operands = [node.left, *node.comparators]
+            for op in operands:
+                if isinstance(op, ast.Name):
+                    continue
+                if isinstance(op, ast.Constant):
+                    if not isinstance(op.value, (int, float, bool)) and op.value is not None:
+                        raise RuleEvaluationError(f"Comparison operand must be numeric or boolean, got {type(op.value).__name__}: {op.value!r}")
+                elif isinstance(op, ast.UnaryOp) and isinstance(op.op, (ast.USub, ast.Not)):
+                    if isinstance(op.operand, ast.Constant) and not isinstance(op.operand.value, (int, float, bool)):
+                        raise RuleEvaluationError(f"Unary operand must be numeric or boolean, got {type(op.operand.value).__name__}")
+                else:
+                    raise RuleEvaluationError(f"Unsupported comparison operand type: {type(op).__name__}")
 
 
 def evaluate_condition(condition: str, values: dict[str, Any]) -> bool:
@@ -201,18 +218,21 @@ def _compare(left: Any, right: Any, op: ast.cmpop) -> bool:
     if _is_missing_number(left) or _is_missing_number(right):
         return False
 
-    if isinstance(op, ast.Gt):
-        return left > right
-    if isinstance(op, ast.GtE):
-        return left >= right
-    if isinstance(op, ast.Lt):
-        return left < right
-    if isinstance(op, ast.LtE):
-        return left <= right
-    if isinstance(op, ast.Eq):
-        return left == right
-    if isinstance(op, ast.NotEq):
-        return left != right
+    try:
+        if isinstance(op, ast.Gt):
+            return left > right
+        if isinstance(op, ast.GtE):
+            return left >= right
+        if isinstance(op, ast.Lt):
+            return left < right
+        if isinstance(op, ast.LtE):
+            return left <= right
+        if isinstance(op, ast.Eq):
+            return left == right
+        if isinstance(op, ast.NotEq):
+            return left != right
+    except TypeError:
+        return False
 
     raise RuleEvaluationError(f"Unsupported comparison operator: {type(op).__name__}")
 
