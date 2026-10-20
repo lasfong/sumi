@@ -69,7 +69,11 @@ export const ImportPage: React.FC = () => {
       setPreview(data);
       setError(null);
       if (data.can_accept) {
-        toast.success('Bản xem trước đã sẵn sàng! Vui lòng kiểm tra và xác nhận.');
+        if (data.is_partial || data.rejected_count > 0) {
+          toast('Bản xem trước sẵn sàng (Cảnh báo nhập một phần: có dòng lỗi bị bỏ qua).', { icon: '⚠️' });
+        } else {
+          toast.success('Bản xem trước đã sẵn sàng! Vui lòng kiểm tra và xác nhận.');
+        }
       } else {
         toast.error(data.block_reason || 'Tập tin bị từ chối nhập.');
       }
@@ -160,8 +164,12 @@ export const ImportPage: React.FC = () => {
     }
   };
 
+  const isItemCorrected = (item: { is_corrected?: boolean; reject_reason?: string | null }) =>
+    Boolean(item.is_corrected || (item.reject_reason && item.reject_reason.startsWith('[NORMALIZED_OHLC_PRECISION]')));
+
   const filteredItems = (preview?.items || []).filter((item) => {
     if (itemFilter === 'all') return true;
+    if (itemFilter === 'corrected') return isItemCorrected(item);
     return item.classification === itemFilter;
   });
 
@@ -298,56 +306,103 @@ export const ImportPage: React.FC = () => {
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
                 <h3 style={{ margin: 0 }}>2. Kết quả kiểm duyệt bản xem trước</h3>
                 <span
+                  data-testid="preview-status-badge"
                   style={{
                     padding: '4px 12px', borderRadius: '4px', fontSize: '12px', fontWeight: 700,
-                    background: preview.can_accept ? 'rgba(38, 166, 154, 0.15)' : 'rgba(239, 83, 80, 0.15)',
-                    color: preview.can_accept ? 'var(--color-buy)' : 'var(--color-sell)',
+                    background: !preview.can_accept
+                      ? 'rgba(239, 83, 80, 0.15)'
+                      : (preview.is_partial || preview.rejected_count > 0)
+                        ? 'rgba(255, 167, 38, 0.18)'
+                        : 'rgba(38, 166, 154, 0.15)',
+                    color: !preview.can_accept
+                      ? 'var(--color-sell)'
+                      : (preview.is_partial || preview.rejected_count > 0)
+                        ? '#f59e0b'
+                        : 'var(--color-buy)',
                   }}
                 >
-                  {preview.can_accept ? '✅ Đủ điều kiện nhập' : '❌ Bị chặn (Chứa lỗi/Xung đột)'}
+                  {!preview.can_accept
+                    ? '❌ Bị chặn (Chứa lỗi/Xung đột)'
+                    : (preview.is_partial || preview.rejected_count > 0)
+                      ? '⚠️ Đủ điều kiện nhập một phần (Có dòng bị loại)'
+                      : (preview.corrected_count || 0) > 0
+                        ? '✅ Đủ điều kiện nhập (Có chuẩn hóa biên OHLC)'
+                        : '✅ Đủ điều kiện nhập'}
                 </span>
               </div>
 
               {/* Counts metrics */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: '0.5rem', marginBottom: '1.5rem' }}>
-                <div className="card" style={{ padding: '10px', textAlign: 'center' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '0.5rem', marginBottom: '1.5rem' }}>
+                <div className="card" style={{ padding: '10px', textAlign: 'center' }} data-testid="metric-parsed">
                   <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Hợp lệ</div>
                   <div style={{ fontSize: '18px', fontWeight: 700, color: 'var(--color-buy)' }}>{preview.parsed_count}</div>
                 </div>
-                <div className="card" style={{ padding: '10px', textAlign: 'center' }}>
+                <div className="card" style={{ padding: '10px', textAlign: 'center' }} data-testid="metric-corrected">
+                  <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Đã chuẩn hóa</div>
+                  <div style={{ fontSize: '18px', fontWeight: 700, color: (preview.corrected_count || 0) > 0 ? 'var(--color-primary)' : 'var(--text-main)' }}>
+                    {preview.corrected_count || 0}
+                  </div>
+                </div>
+                <div className="card" style={{ padding: '10px', textAlign: 'center' }} data-testid="metric-rejected">
                   <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Sai định dạng</div>
                   <div style={{ fontSize: '18px', fontWeight: 700, color: preview.rejected_count > 0 ? 'var(--color-sell)' : 'var(--text-main)' }}>{preview.rejected_count}</div>
                 </div>
-                <div className="card" style={{ padding: '10px', textAlign: 'center' }}>
+                <div className="card" style={{ padding: '10px', textAlign: 'center' }} data-testid="metric-duplicate">
                   <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Trùng lặp</div>
                   <div style={{ fontSize: '18px', fontWeight: 700, color: 'var(--text-muted)' }}>{preview.duplicate_count}</div>
                 </div>
-                <div className="card" style={{ padding: '10px', textAlign: 'center' }}>
+                <div className="card" style={{ padding: '10px', textAlign: 'center' }} data-testid="metric-conflicting">
                   <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Xung đột</div>
                   <div style={{ fontSize: '18px', fontWeight: 700, color: preview.conflicting_count > 0 ? 'var(--color-sell)' : 'var(--text-main)' }}>{preview.conflicting_count}</div>
                 </div>
-                <div className="card" style={{ padding: '10px', textAlign: 'center' }}>
+                <div className="card" style={{ padding: '10px', textAlign: 'center' }} data-testid="metric-out-of-order">
                   <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Sai thứ tự</div>
                   <div style={{ fontSize: '18px', fontWeight: 700, color: preview.out_of_order_count > 0 ? 'var(--color-sell)' : 'var(--text-main)' }}>{preview.out_of_order_count}</div>
                 </div>
-                <div className="card" style={{ padding: '10px', textAlign: 'center' }}>
+                <div className="card" style={{ padding: '10px', textAlign: 'center' }} data-testid="metric-missing">
                   <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Thiếu ngày (Gaps)</div>
                   <div style={{ fontSize: '18px', fontWeight: 700, color: 'var(--color-close)' }}>{preview.missing_count}</div>
                 </div>
               </div>
 
               {preview.block_reason && (
-                <div style={{ padding: '10px', background: 'rgba(239, 83, 80, 0.1)', border: '1px solid var(--color-sell)', borderRadius: '6px', marginBottom: '1rem', fontSize: '13px', color: 'var(--color-sell)' }}>
+                <div
+                  data-testid="block-reason-banner"
+                  style={{ padding: '10px', background: 'rgba(239, 83, 80, 0.1)', border: '1px solid var(--color-sell)', borderRadius: '6px', marginBottom: '1rem', fontSize: '13px', color: 'var(--color-sell)' }}
+                >
                   ⚠️ <strong>Lý do từ chối:</strong> {preview.block_reason}
+                </div>
+              )}
+
+              {preview.can_accept && (preview.is_partial || preview.rejected_count > 0) && (
+                <div
+                  data-testid="partial-import-warning"
+                  style={{ padding: '10px 12px', background: 'rgba(245, 158, 11, 0.12)', border: '1px solid #f59e0b', borderRadius: '6px', marginBottom: '1rem', fontSize: '13px', color: '#fbbf24' }}
+                >
+                  ⚠️ <strong>Cảnh báo nhập một phần (Partial Import):</strong>{' '}
+                  {preview.partial_warning ||
+                    `Tập tin có ${preview.rejected_count} dòng không hợp lệ bị loại bỏ${preview.missing_count > 0 ? ` và phát sinh ${preview.missing_count} ngày giao dịch bị khuyết (gaps)` : ''}. Chỉ ${preview.parsed_count} dòng hợp lệ sẽ được lưu nếu bạn xác nhận.`}
+                </div>
+              )}
+
+              {(preview.corrected_count || 0) > 0 && (
+                <div
+                  data-testid="normalization-disclosure"
+                  style={{ padding: '10px 12px', background: 'rgba(38, 166, 154, 0.1)', border: '1px solid var(--color-buy)', borderRadius: '6px', marginBottom: '1rem', fontSize: '13px', color: 'var(--color-buy)' }}
+                >
+                  🔧 <strong>Chuẩn hóa biên giá OHLC an toàn:</strong>{' '}
+                  {preview.normalization_warning ||
+                    `Đã chuẩn hóa an toàn ${preview.corrected_count} dòng có sai số làm tròn 4 chữ số thập phân giá điều chỉnh CafeF (giữ nguyên Open/Close/Volume và lưu vết giá gốc trong cột Ghi chú).`}
                 </div>
               )}
 
               {/* Item classification filter & table */}
               <div style={{ marginBottom: '1rem' }}>
-                <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
-                  {['all', 'parsed', 'rejected', 'conflicting', 'duplicate', 'missing', 'out_of_order'].map((cat) => (
+                <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem', flexWrap: 'wrap' }}>
+                  {['all', 'parsed', 'corrected', 'rejected', 'conflicting', 'duplicate', 'missing', 'out_of_order'].map((cat) => (
                     <button
                       key={cat}
+                      data-testid={`filter-btn-${cat}`}
                       onClick={() => setItemFilter(cat)}
                       style={{
                         padding: '4px 8px', fontSize: '12px', borderRadius: '4px',
@@ -375,31 +430,47 @@ export const ImportPage: React.FC = () => {
                       </tr>
                     </thead>
                     <tbody>
-                      {filteredItems.slice(0, 50).map((it, idx) => (
-                        <tr key={idx} style={{ borderBottom: '1px solid var(--border-color)' }}>
-                          <td style={{ padding: '6px 10px', color: 'var(--text-muted)' }}>{it.row_index || '—'}</td>
-                          <td style={{ padding: '6px 10px', fontWeight: 700 }}>{it.symbol}</td>
-                          <td style={{ padding: '6px 10px' }}>{it.timestamp}</td>
-                          <td style={{ padding: '6px 10px' }}>
-                            {it.open != null ? `${it.open} / ${it.high} / ${it.low} / ${it.close}` : '—'}
-                          </td>
-                          <td style={{ padding: '6px 10px' }}>{it.volume != null ? it.volume.toLocaleString() : '—'}</td>
-                          <td style={{ padding: '6px 10px' }}>
-                            <span
-                              style={{
-                                padding: '2px 6px', borderRadius: '4px', fontSize: '10px', fontWeight: 700,
-                                background: it.classification === 'parsed' ? 'rgba(38, 166, 154, 0.15)' :
-                                            it.classification === 'rejected' ? 'rgba(239, 83, 80, 0.15)' : 'rgba(255, 255, 255, 0.1)',
-                                color: it.classification === 'parsed' ? 'var(--color-buy)' :
-                                       it.classification === 'rejected' ? 'var(--color-sell)' : 'var(--text-muted)'
-                              }}
-                            >
-                              {it.classification}
-                            </span>
-                          </td>
-                          <td style={{ padding: '6px 10px', color: 'var(--text-muted)' }}>{it.reject_reason || '—'}</td>
-                        </tr>
-                      ))}
+                      {filteredItems.slice(0, 50).map((it, idx) => {
+                        const corrected = isItemCorrected(it);
+                        return (
+                          <tr key={idx} style={{ borderBottom: '1px solid var(--border-color)' }}>
+                            <td style={{ padding: '6px 10px', color: 'var(--text-muted)' }}>{it.row_index || '—'}</td>
+                            <td style={{ padding: '6px 10px', fontWeight: 700 }}>{it.symbol}</td>
+                            <td style={{ padding: '6px 10px' }}>{it.timestamp}</td>
+                            <td style={{ padding: '6px 10px' }}>
+                              {it.open != null ? `${it.open} / ${it.high} / ${it.low} / ${it.close}` : '—'}
+                            </td>
+                            <td style={{ padding: '6px 10px' }}>{it.volume != null ? it.volume.toLocaleString() : '—'}</td>
+                            <td style={{ padding: '6px 10px' }}>
+                              <div style={{ display: 'flex', gap: '4px', alignItems: 'center', flexWrap: 'wrap' }}>
+                                <span
+                                  style={{
+                                    padding: '2px 6px', borderRadius: '4px', fontSize: '10px', fontWeight: 700,
+                                    background: it.classification === 'parsed' ? 'rgba(38, 166, 154, 0.15)' :
+                                                it.classification === 'rejected' ? 'rgba(239, 83, 80, 0.15)' : 'rgba(255, 255, 255, 0.1)',
+                                    color: it.classification === 'parsed' ? 'var(--color-buy)' :
+                                           it.classification === 'rejected' ? 'var(--color-sell)' : 'var(--text-muted)'
+                                  }}
+                                >
+                                  {it.classification}
+                                </span>
+                                {corrected && (
+                                  <span
+                                    data-testid="badge-normalized-row"
+                                    style={{
+                                      padding: '2px 6px', borderRadius: '4px', fontSize: '10px', fontWeight: 700,
+                                      background: 'rgba(59, 130, 246, 0.18)', color: 'var(--color-primary)'
+                                    }}
+                                  >
+                                    normalized
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+                            <td style={{ padding: '6px 10px', color: 'var(--text-muted)' }}>{it.reject_reason || '—'}</td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                   {filteredItems.length > 50 && (
@@ -413,15 +484,24 @@ export const ImportPage: React.FC = () => {
               {/* Action */}
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '1rem', marginTop: '1.5rem' }}>
                 <button
+                  data-testid="accept-import-btn"
                   onClick={handleAccept}
                   disabled={!preview.can_accept || acceptMutation.isPending}
                   style={{
-                    background: preview.can_accept ? 'var(--color-buy)' : 'var(--border-color)',
+                    background: !preview.can_accept
+                      ? 'var(--border-color)'
+                      : (preview.is_partial || preview.rejected_count > 0)
+                        ? '#d97706'
+                        : 'var(--color-buy)',
                     color: 'white', padding: '12px 24px', fontSize: '14px', fontWeight: 700,
                     borderRadius: '6px', cursor: preview.can_accept ? 'pointer' : 'not-allowed'
                   }}
                 >
-                  {acceptMutation.isPending ? '⏳ Đang lưu...' : '✅ Xác nhận & Nhập dữ liệu vào hệ thống'}
+                  {acceptMutation.isPending
+                    ? '⏳ Đang lưu...'
+                    : (preview.can_accept && (preview.is_partial || preview.rejected_count > 0))
+                      ? `⚠️ Xác nhận & Nhập một phần (${preview.parsed_count} dòng hợp lệ, bỏ qua ${preview.rejected_count} dòng lỗi)`
+                      : '✅ Xác nhận & Nhập dữ liệu vào hệ thống'}
                 </button>
               </div>
             </div>
@@ -528,7 +608,19 @@ export const ImportPage: React.FC = () => {
                           {run.status.toUpperCase()}
                         </span>
                       </td>
-                      <td style={{ padding: '8px 12px', fontWeight: 700 }}>{run.accepted_count}</td>
+                      <td style={{ padding: '8px 12px', fontWeight: 700 }}>
+                        {run.accepted_count}
+                        {(run.corrected_count || 0) > 0 && (
+                          <span style={{ marginLeft: '6px', fontSize: '11px', color: 'var(--color-primary)', fontWeight: 600 }}>
+                            (chuẩn hóa: {run.corrected_count})
+                          </span>
+                        )}
+                        {run.rejected_count > 0 && (
+                          <span style={{ marginLeft: '6px', fontSize: '11px', color: '#f59e0b', fontWeight: 600 }}>
+                            (bỏ qua lỗi: {run.rejected_count})
+                          </span>
+                        )}
+                      </td>
                       <td style={{ padding: '8px 12px' }}>
                         {run.status === 'accepted' && (
                           <button

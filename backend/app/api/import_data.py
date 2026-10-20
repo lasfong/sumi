@@ -1,8 +1,10 @@
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Form
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
 from app.dependencies import get_db
+from app.models.import_run import ImportRunItem
 from app.schemas.import_schema import (
     ImportResponse,
     ImportWarning,
@@ -11,6 +13,7 @@ from app.schemas.import_schema import (
     ImportRollbackResponse,
     CatalogItemSchema
 )
+from app.services.cafef_importer import CafeFImporter
 from app.services.import_workflow_service import ImportWorkflowService, ImportPreviewResponse
 from app.services.event_logging_service import EventLoggingService
 
@@ -58,7 +61,14 @@ def accept_import_run(
         db=db,
         event_type="IMPORT_ACCEPTED",
         message=res.message,
-        details={"run_id": run_id, "accepted_count": res.accepted_count, "status": res.status}
+        details={
+            "run_id": run_id,
+            "accepted_count": res.accepted_count,
+            "corrected_count": res.corrected_count,
+            "rejected_count": res.rejected_count,
+            "is_partial": res.is_partial,
+            "status": res.status,
+        }
     )
     return res
 
@@ -66,6 +76,16 @@ def accept_import_run(
 def list_import_runs(db: Session = Depends(get_db)):
     """List historical import run manifests."""
     runs = ImportWorkflowService.list_import_runs(db)
+    corrected_rows = (
+        db.query(ImportRunItem.run_id, func.count(ImportRunItem.id))
+        .filter(
+            ImportRunItem.classification == "parsed",
+            ImportRunItem.reject_reason.like(f"{CafeFImporter.NORMALIZED_PROVENANCE_PREFIX}%"),
+        )
+        .group_by(ImportRunItem.run_id)
+        .all()
+    )
+    corrected_by_run = {r_id: int(cnt) for r_id, cnt in corrected_rows}
     return [
         {
             "run_id": r.id,
@@ -76,11 +96,13 @@ def list_import_runs(db: Session = Depends(get_db)):
             "adjustment_type": r.adjustment_type,
             "status": r.status,
             "parsed_count": r.parsed_count,
+            "corrected_count": corrected_by_run.get(r.id, 0),
             "rejected_count": r.rejected_count,
             "duplicate_count": r.duplicate_count,
             "conflicting_count": r.conflicting_count,
             "accepted_count": r.accepted_count,
             "can_accept": r.can_accept,
+            "is_partial": bool(r.can_accept and (r.rejected_count or 0) > 0 and (r.parsed_count or 0) > 0),
             "accepted_at": r.accepted_at.isoformat() if r.accepted_at else None,
             "rolled_back_at": r.rolled_back_at.isoformat() if r.rolled_back_at else None
         }

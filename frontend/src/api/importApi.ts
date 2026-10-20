@@ -27,6 +27,12 @@ export interface ImportRunItem {
   volume?: number | null;
   classification: string;
   reject_reason?: string | null;
+  is_corrected?: boolean;
+  raw_open?: number | null;
+  raw_high?: number | null;
+  raw_low?: number | null;
+  raw_close?: number | null;
+  normalization_reason?: string | null;
 }
 
 export interface ImportPreviewResponse {
@@ -41,6 +47,7 @@ export interface ImportPreviewResponse {
   timezone: string;
   status: string;
   parsed_count: number;
+  corrected_count?: number;
   rejected_count: number;
   duplicate_count: number;
   conflicting_count: number;
@@ -48,6 +55,9 @@ export interface ImportPreviewResponse {
   out_of_order_count: number;
   accepted_count: number;
   can_accept: boolean;
+  is_partial?: boolean;
+  partial_warning?: string | null;
+  normalization_warning?: string | null;
   block_reason?: string | null;
   items: ImportRunItem[];
 }
@@ -56,6 +66,10 @@ export interface ImportAcceptResponse {
   run_id: string;
   status: string;
   accepted_count: number;
+  corrected_count?: number;
+  rejected_count?: number;
+  is_partial?: boolean;
+  partial_warning?: string | null;
   message: string;
 }
 
@@ -87,11 +101,13 @@ export interface ImportRunSummary {
   adjustment_type: string;
   status: string;
   parsed_count: number;
+  corrected_count?: number;
   rejected_count: number;
   duplicate_count: number;
   conflicting_count: number;
   accepted_count: number;
   can_accept: boolean;
+  is_partial?: boolean;
   accepted_at?: string | null;
   rolled_back_at?: string | null;
 }

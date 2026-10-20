@@ -187,8 +187,31 @@ class ImportWorkflowService:
                 close=it.close,
                 volume=it.volume,
                 classification=it.classification,
-                reject_reason=it.reject_reason
+                reject_reason=it.reject_reason,
+                is_corrected=bool(getattr(it, "is_corrected", False)),
+                raw_open=getattr(it, "raw_open", None),
+                raw_high=getattr(it, "raw_high", None),
+                raw_low=getattr(it, "raw_low", None),
+                raw_close=getattr(it, "raw_close", None),
+                normalization_reason=getattr(it, "normalization_reason", None),
             ))
+
+        corrected_count = int(counts.get("corrected", 0))
+        is_partial = bool(can_accept and counts["rejected"] > 0 and counts["parsed"] > 0)
+        partial_warning = None
+        if is_partial:
+            gap_clause = f" và phát sinh {counts['missing']} ngày giao dịch bị khuyết (gaps)" if counts["missing"] > 0 else ""
+            partial_warning = (
+                f"Cảnh báo nhập một phần (Partial Import): Tập tin có {counts['rejected']} dòng không hợp lệ bị loại bỏ"
+                f"{gap_clause}. Chỉ {counts['parsed']} dòng hợp lệ sẽ được lưu nếu bạn xác nhận."
+            )
+
+        normalization_warning = None
+        if corrected_count > 0:
+            normalization_warning = (
+                f"Đã chuẩn hóa an toàn biên OHLC cho {corrected_count} dòng có sai số làm tròn 4 chữ số thập phân "
+                f"giá điều chỉnh CafeF (giữ nguyên Open/Close/Volume và lưu vết giá gốc)."
+            )
 
         if confirm:
             run = ImportRun(
@@ -250,6 +273,7 @@ class ImportWorkflowService:
             timezone=timezone_str,
             status=status_str,
             parsed_count=counts["parsed"],
+            corrected_count=corrected_count,
             rejected_count=counts["rejected"],
             duplicate_count=counts["duplicate"],
             conflicting_count=counts["conflicting"],
@@ -257,6 +281,9 @@ class ImportWorkflowService:
             out_of_order_count=counts["out_of_order"],
             accepted_count=0,
             can_accept=can_accept,
+            is_partial=is_partial,
+            partial_warning=partial_warning,
+            normalization_warning=normalization_warning,
             block_reason=block_reason,
             items=item_schemas,
             staged=bool(confirm)
@@ -495,11 +522,38 @@ class ImportWorkflowService:
             raise
 
 
+        corrected_count = sum(
+            1 for item in parsed_items if CafeFImporter.is_normalized_provenance(item.reject_reason)
+        )
+        rejected_count = int(run.rejected_count or 0)
+        missing_count = int(run.missing_count or 0)
+        is_partial = bool(rejected_count > 0 and len(parsed_items) > 0)
+
+        partial_warning = None
+        if is_partial:
+            gap_clause = f", phát sinh {missing_count} ngày giao dịch bị khuyết" if missing_count > 0 else ""
+            partial_warning = (
+                f"Cảnh báo chấp nhận một phần (Partial Import): Đã bỏ qua {rejected_count} dòng lỗi định dạng/OHLC{gap_clause}."
+            )
+
+        base_message = f"Đã chấp nhận và lưu {len(parsed_items)} dòng dữ liệu cho {len(affected_symbols)} mã"
+        details_parts = []
+        if is_partial:
+            details_parts.append(f"CẢNH BÁO NHẬP MỘT PHẦN: bỏ qua {rejected_count} dòng lỗi")
+        if corrected_count > 0:
+            details_parts.append(f"đã chuẩn hóa biên OHLC an toàn {corrected_count} dòng")
+        if details_parts:
+            base_message = f"{base_message} ({'; '.join(details_parts)})"
+
         return ImportAcceptResponse(
             run_id=run_id,
             status="accepted",
             accepted_count=len(parsed_items),
-            message=f"Đã chấp nhận và lưu {len(parsed_items)} dòng dữ liệu cho {len(affected_symbols)} mã"
+            corrected_count=corrected_count,
+            rejected_count=rejected_count,
+            is_partial=is_partial,
+            partial_warning=partial_warning,
+            message=base_message
         )
 
     @staticmethod

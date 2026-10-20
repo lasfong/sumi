@@ -9,6 +9,9 @@ class ImportResponse(BaseModel):
     imported_rows: int
     skipped_rows: int
     duplicate_rows: int
+    corrected_rows: int = 0
+    is_partial: bool = False
+    partial_warning: Optional[str] = None
     symbols_count: int
     start_date: Optional[str] = None
     end_date: Optional[str] = None
@@ -27,6 +30,12 @@ class ImportRunItemSchema(BaseModel):
     volume: Optional[float] = None
     classification: str
     reject_reason: Optional[str] = None
+    is_corrected: bool = False
+    raw_open: Optional[float] = None
+    raw_high: Optional[float] = None
+    raw_low: Optional[float] = None
+    raw_close: Optional[float] = None
+    normalization_reason: Optional[str] = None
 
 class ImportPreviewResponse(BaseModel):
     run_id: str
@@ -40,6 +49,7 @@ class ImportPreviewResponse(BaseModel):
     timezone: str
     status: str
     parsed_count: int
+    corrected_count: int = 0
     rejected_count: int
     duplicate_count: int
     conflicting_count: int
@@ -47,6 +57,9 @@ class ImportPreviewResponse(BaseModel):
     out_of_order_count: int
     accepted_count: int
     can_accept: bool
+    is_partial: bool = False
+    partial_warning: Optional[str] = None
+    normalization_warning: Optional[str] = None
     block_reason: Optional[str] = None
     items: List[ImportRunItemSchema] = []
 
@@ -57,6 +70,10 @@ class ImportAcceptResponse(BaseModel):
     run_id: str
     status: str
     accepted_count: int
+    corrected_count: int = 0
+    rejected_count: int = 0
+    is_partial: bool = False
+    partial_warning: Optional[str] = None
     message: str
 
 class ImportRollbackResponse(BaseModel):

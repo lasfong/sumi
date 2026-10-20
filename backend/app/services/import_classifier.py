@@ -35,7 +35,13 @@ class ClassifiedRow:
         close: Optional[float],
         volume: Optional[float],
         classification: str,
-        reject_reason: Optional[str] = None
+        reject_reason: Optional[str] = None,
+        is_corrected: bool = False,
+        raw_open: Optional[float] = None,
+        raw_high: Optional[float] = None,
+        raw_low: Optional[float] = None,
+        raw_close: Optional[float] = None,
+        normalization_reason: Optional[str] = None,
     ):
         self.row_index = row_index
         self.symbol = symbol
@@ -49,6 +55,12 @@ class ClassifiedRow:
         self.volume = volume
         self.classification = classification
         self.reject_reason = reject_reason
+        self.is_corrected = is_corrected
+        self.raw_open = raw_open
+        self.raw_high = raw_high
+        self.raw_low = raw_low
+        self.raw_close = raw_close
+        self.normalization_reason = normalization_reason
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -64,6 +76,12 @@ class ClassifiedRow:
             "volume": self.volume,
             "classification": self.classification,
             "reject_reason": self.reject_reason,
+            "is_corrected": self.is_corrected,
+            "raw_open": self.raw_open,
+            "raw_high": self.raw_high,
+            "raw_low": self.raw_low,
+            "raw_close": self.raw_close,
+            "normalization_reason": self.normalization_reason,
         }
 
 
@@ -126,6 +144,7 @@ class ImportClassifier:
 
         counts = {
             "parsed": 0,
+            "corrected": 0,
             "rejected": 0,
             "duplicate": 0,
             "conflicting": 0,
@@ -238,11 +257,29 @@ class ImportClassifier:
                 logger.warning("Bỏ qua dòng %d (%s, %s): Giá thấp nhất (%s) lớn hơn giá cao nhất (%s)", row_num, sym, parsed_date, l_val, h_val)
                 continue
 
+            was_corrected = bool(row.get('__ohlc_corrected__', False))
+            correction_reason = str(row.get('__correction_reason__')) if was_corrected and pd.notna(row.get('__correction_reason__')) else None
+            raw_open_orig = float(row.get('__raw_open__')) if was_corrected and pd.notna(row.get('__raw_open__')) else None
+            raw_high_orig = float(row.get('__raw_high__')) if was_corrected and pd.notna(row.get('__raw_high__')) else None
+            raw_low_orig = float(row.get('__raw_low__')) if was_corrected and pd.notna(row.get('__raw_low__')) else None
+            raw_close_orig = float(row.get('__raw_close__')) if was_corrected and pd.notna(row.get('__raw_close__')) else None
+
             if not (l_val <= o_val <= h_val) or not (l_val <= c_val <= h_val):
-                items.append(ClassifiedRow(row_num, sym, timeframe, parsed_date, adjustment_type, o_val, h_val, l_val, c_val, v_val, "rejected", "Giá Mở/Đóng nằm ngoài khoảng [Thấp nhất, Cao nhất]"))
-                counts["rejected"] += 1
-                logger.warning("Bỏ qua dòng %d (%s, %s): Giá Mở/Đóng nằm ngoài khoảng [Thấp nhất, Cao nhất]", row_num, sym, parsed_date)
-                continue
+                from app.services.cafef_importer import CafeFImporter
+                _, norm_h, norm_l, _, is_corr, corr_reason = CafeFImporter.evaluate_and_normalize_ohlc(
+                    sym, o_val, h_val, l_val, c_val, v_val
+                )
+                if is_corr:
+                    was_corrected = True
+                    correction_reason = corr_reason
+                    raw_open_orig, raw_high_orig, raw_low_orig, raw_close_orig = o_val, h_val, l_val, c_val
+                    h_val = norm_h
+                    l_val = norm_l
+                else:
+                    items.append(ClassifiedRow(row_num, sym, timeframe, parsed_date, adjustment_type, o_val, h_val, l_val, c_val, v_val, "rejected", "Giá Mở/Đóng nằm ngoài khoảng [Thấp nhất, Cao nhất]"))
+                    counts["rejected"] += 1
+                    logger.warning("Bỏ qua dòng %d (%s, %s): Giá Mở/Đóng nằm ngoài khoảng [Thấp nhất, Cao nhất]", row_num, sym, parsed_date)
+                    continue
 
             # 4. Out of order check
             is_out_of_order = False
@@ -265,7 +302,20 @@ class ImportClassifier:
             elif key in seen_file_keys:
                 prev_tuple = seen_file_keys[key]
                 if are_candles_close(prev_tuple, candle_tuple):
-                    items.append(ClassifiedRow(row_num, sym, timeframe, parsed_date, adjustment_type, o_val, h_val, l_val, c_val, v_val, "duplicate", "Dữ liệu trùng lặp trong tập tin"))
+                    items.append(
+                        ClassifiedRow(
+                            row_num, sym, timeframe, parsed_date, adjustment_type,
+                            o_val, h_val, l_val, c_val, v_val,
+                            "duplicate",
+                            "Dữ liệu trùng lặp trong tập tin",
+                            is_corrected=was_corrected,
+                            raw_open=raw_open_orig,
+                            raw_high=raw_high_orig,
+                            raw_low=raw_low_orig,
+                            raw_close=raw_close_orig,
+                            normalization_reason=correction_reason,
+                        )
+                    )
                     counts["duplicate"] += 1
                 else:
                     items.append(ClassifiedRow(row_num, sym, timeframe, parsed_date, adjustment_type, o_val, h_val, l_val, c_val, v_val, "conflicting", "Dữ liệu xung đột trong cùng tập tin"))
@@ -273,15 +323,43 @@ class ImportClassifier:
             elif key in existing_candles_map:
                 existing_tuple = existing_candles_map[key]
                 if are_candles_close(existing_tuple, candle_tuple):
-                    items.append(ClassifiedRow(row_num, sym, timeframe, parsed_date, adjustment_type, o_val, h_val, l_val, c_val, v_val, "duplicate", "Dữ liệu trùng khớp với dữ liệu đã lưu trong hệ thống"))
+                    items.append(
+                        ClassifiedRow(
+                            row_num, sym, timeframe, parsed_date, adjustment_type,
+                            o_val, h_val, l_val, c_val, v_val,
+                            "duplicate",
+                            "Dữ liệu trùng khớp với dữ liệu đã lưu trong hệ thống",
+                            is_corrected=was_corrected,
+                            raw_open=raw_open_orig,
+                            raw_high=raw_high_orig,
+                            raw_low=raw_low_orig,
+                            raw_close=raw_close_orig,
+                            normalization_reason=correction_reason,
+                        )
+                    )
                     counts["duplicate"] += 1
                 else:
                     items.append(ClassifiedRow(row_num, sym, timeframe, parsed_date, adjustment_type, o_val, h_val, l_val, c_val, v_val, "conflicting", f"Dữ liệu xung đột với nến đã tồn tại (Đã có: O={existing_tuple[0]}, H={existing_tuple[1]}, L={existing_tuple[2]}, C={existing_tuple[3]}, V={existing_tuple[4]})"))
                     counts["conflicting"] += 1
             else:
                 seen_file_keys[key] = candle_tuple
-                items.append(ClassifiedRow(row_num, sym, timeframe, parsed_date, adjustment_type, o_val, h_val, l_val, c_val, v_val, "parsed"))
+                items.append(
+                    ClassifiedRow(
+                        row_num, sym, timeframe, parsed_date, adjustment_type,
+                        o_val, h_val, l_val, c_val, v_val,
+                        "parsed",
+                        reject_reason=correction_reason if was_corrected else None,
+                        is_corrected=was_corrected,
+                        raw_open=raw_open_orig,
+                        raw_high=raw_high_orig,
+                        raw_low=raw_low_orig,
+                        raw_close=raw_close_orig,
+                        normalization_reason=correction_reason,
+                    )
+                )
                 counts["parsed"] += 1
+                if was_corrected:
+                    counts["corrected"] += 1
                 if sym not in symbol_valid_dates:
                     symbol_valid_dates[sym] = set()
                 symbol_valid_dates[sym].add(parsed_date)
