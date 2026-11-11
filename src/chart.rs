@@ -1,6 +1,16 @@
-use egui::{Align2, Color32, CursorIcon, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
+use egui::epaint::Mesh;
+use egui::text::LayoutJob;
+use egui::{
+    Align2, Color32, CursorIcon, FontId, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, TextFormat,
+    Ui, Vec2,
+};
 use serde::{Deserialize, Serialize};
 
+use crate::indicators::{
+    BucketLineEnvelope, IndicatorCache, IndicatorConfig, MACD_REFERENCE_LEVELS, OscillatorPaneId,
+    RSI_REFERENCE_LEVELS, SeriesBlockIndex, bucket_line_envelope_indexed,
+    visit_conflated_histogram_bars_indexed,
+};
 use crate::model::{Candle, PriceBounds};
 use crate::viewport::{
     CandlestickBarMetrics, HorzScaleOptions, KineticAnimation, KineticScrollConfig, PaneViewport,
@@ -8,7 +18,7 @@ use crate::viewport::{
     iter_conflated_candles,
 };
 
-/// TradingView-inspired dark workstation palette.
+/// TradingView-inspired dark workstation & indicator palette.
 pub mod palette {
     use egui::Color32;
 
@@ -27,9 +37,27 @@ pub mod palette {
     pub const BEARISH_VOL: Color32 = Color32::from_rgba_premultiplied(67, 23, 23, 72);
     pub const CROSSHAIR: Color32 = Color32::from_rgb(149, 152, 161); // #9598A1
     pub const ACCENT_BLUE: Color32 = Color32::from_rgb(41, 98, 255); // #2962FF
+
+    // Milestone R04 — Indicator & Multi-Pane Separator Palette
+    pub const IND_SMA: Color32 = Color32::from_rgb(255, 183, 77); // #FFB74D Amber
+    pub const IND_EMA: Color32 = Color32::from_rgb(41, 182, 246); // #29B6F6 Sky Blue
+    pub const IND_BB_BORDER: Color32 = Color32::from_rgb(77, 208, 225); // #4DD0E1 Cyan
+    pub const IND_BB_MIDDLE: Color32 = Color32::from_rgb(0, 172, 193); // #00ACC1 Teal Basis
+    pub const IND_BB_FILL: Color32 = Color32::from_rgba_premultiplied(8, 22, 24, 26);
+    pub const IND_RSI: Color32 = Color32::from_rgb(179, 136, 255); // #B388FF Violet
+    pub const IND_RSI_BAND_FILL: Color32 = Color32::from_rgba_premultiplied(18, 14, 26, 26);
+    pub const IND_MACD: Color32 = Color32::from_rgb(88, 166, 255); // #58A6FF Blue
+    pub const IND_MACD_SIGNAL: Color32 = Color32::from_rgb(255, 138, 0); // #FF8A00 Orange
+    pub const IND_MACD_HIST_POS_UP: Color32 = Color32::from_rgb(38, 166, 154);
+    pub const IND_MACD_HIST_POS_DOWN: Color32 = Color32::from_rgb(24, 98, 92);
+    pub const IND_MACD_HIST_NEG_DOWN: Color32 = Color32::from_rgb(239, 83, 80);
+    pub const IND_MACD_HIST_NEG_UP: Color32 = Color32::from_rgb(132, 42, 44);
+    pub const IND_ATR: Color32 = Color32::from_rgb(224, 64, 251); // #E040FB Magenta
+    pub const SEPARATOR_BG: Color32 = Color32::from_rgb(26, 31, 44);
+    pub const SEPARATOR_ACTIVE: Color32 = Color32::from_rgb(66, 118, 255);
 }
 
-/// Layout regions computed dynamically from the available chart area on every frame.
+/// Layout regions computed dynamically from the available chart area on every frame (single-pane view).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChartLayout {
     pub outer_rect: Rect,
@@ -49,8 +77,12 @@ impl ChartLayout {
         let price_axis_width = Self::PRICE_AXIS_WIDTH.min((outer_rect.width() * 0.25).max(52.0));
         let time_axis_height = Self::TIME_AXIS_HEIGHT.min((outer_rect.height() * 0.20).max(20.0));
 
-        let split_x = (outer_rect.right() - price_axis_width).max(outer_rect.left() + 40.0);
-        let split_y = (outer_rect.bottom() - time_axis_height).max(outer_rect.top() + 40.0);
+        let split_x = (outer_rect.right() - price_axis_width)
+            .max(outer_rect.left() + 40.0)
+            .min(outer_rect.right());
+        let split_y = (outer_rect.bottom() - time_axis_height)
+            .max(outer_rect.top() + 40.0)
+            .min(outer_rect.bottom());
 
         let plot_rect = Rect::from_min_max(outer_rect.min, Pos2::new(split_x, split_y));
         let price_axis_rect = Rect::from_min_max(
@@ -73,16 +105,277 @@ impl ChartLayout {
     }
 }
 
-/// Modular viewport state coordinating the shared horizontal `TimeScale` and independent per-axis
-/// `PriceScale` instances (`main-right` + `volume-overlay`), plus inertial kinetic scrolling.
+/// Geometry of a single stacked oscillator sub-pane (`RSI`, `MACD`, or `ATR`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SubPaneLayout {
+    pub id: OscillatorPaneId,
+    pub plot_rect: Rect,
+    pub price_axis_rect: Rect,
+}
+
+/// Interactive horizontal resize handle between two vertically adjacent panes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PaneSeparatorLayout {
+    pub separator_index: usize,
+    pub top_pane: Option<OscillatorPaneId>,
+    pub bottom_pane: OscillatorPaneId,
+    pub rect: Rect,
+}
+
+/// Stacked multi-pane workstation layout sharing a single horizontal `TimeScale` (`chart-widget.ts:507–556`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultiPaneLayout {
+    pub outer_rect: Rect,
+    pub main_plot_rect: Rect,
+    pub main_price_axis_rect: Rect,
+    pub oscillators: Vec<SubPaneLayout>,
+    pub separators: Vec<PaneSeparatorLayout>,
+    pub time_axis_rect: Rect,
+    pub corner_rect: Rect,
+}
+
+impl MultiPaneLayout {
+    pub const SEPARATOR_HEIGHT: f32 = 5.0;
+    pub const MIN_PANE_HEIGHT: f32 = 44.0;
+
+    /// Computes proportional vertical heights from `stretch_factor` values with iterative
+    /// minimum-height clamping (`LWC _adjustSizeImpl`) so panes never overlap or leave seam gaps.
+    #[must_use]
+    pub fn compute(
+        outer_rect: Rect,
+        main_stretch: f32,
+        active_oscillators: &[(OscillatorPaneId, f32)],
+    ) -> Self {
+        if active_oscillators.is_empty() {
+            let single = ChartLayout::from_outer_rect(outer_rect);
+            return Self {
+                outer_rect,
+                main_plot_rect: single.plot_rect,
+                main_price_axis_rect: single.price_axis_rect,
+                oscillators: Vec::new(),
+                separators: Vec::new(),
+                time_axis_rect: single.time_axis_rect,
+                corner_rect: single.corner_rect,
+            };
+        }
+
+        let price_axis_width =
+            ChartLayout::PRICE_AXIS_WIDTH.min((outer_rect.width() * 0.25).max(52.0));
+        let time_axis_height =
+            ChartLayout::TIME_AXIS_HEIGHT.min((outer_rect.height() * 0.18).max(20.0));
+        let split_x = (outer_rect.right() - price_axis_width)
+            .max(outer_rect.left() + 40.0)
+            .min(outer_rect.right());
+        let bottom_y = (outer_rect.bottom() - time_axis_height)
+            .max(outer_rect.top() + 60.0)
+            .min(outer_rect.bottom());
+
+        let total_panes = 1 + active_oscillators.len();
+        let total_avail_y = (bottom_y - outer_rect.top()).max(0.0);
+        let sep_h = Self::SEPARATOR_HEIGHT
+            .min((total_avail_y * 0.25 / (active_oscillators.len() as f32)).max(0.0));
+        let total_sep_h = (active_oscillators.len() as f32) * sep_h;
+        let available_pane_h = (total_avail_y - total_sep_h).max(0.0);
+        let effective_min_h =
+            Self::MIN_PANE_HEIGHT.min((available_pane_h / (total_panes as f32)).floor().max(0.0));
+
+        let mut stretches = Vec::with_capacity(total_panes);
+        stretches.push(sanitize_stretch(main_stretch, 4.0));
+        for &(_, s) in active_oscillators {
+            stretches.push(sanitize_stretch(s, 1.0));
+        }
+
+        let mut heights = vec![0.0_f32; total_panes];
+        let mut locked = vec![false; total_panes];
+        let mut remaining_h = available_pane_h;
+
+        for _ in 0..total_panes {
+            let free_stretch: f32 = stretches
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !locked[*i])
+                .map(|(_, &s)| s)
+                .sum();
+            if free_stretch <= 0.0 {
+                break;
+            }
+
+            // Snapshot `pass_remaining_h` before locking panes in this pass so `proposed` shares use
+            // the same numerator & denominator (`free_stretch`), preserving stretch monotonicity.
+            let pass_remaining_h = remaining_h;
+            let mut clamped_any = false;
+            for i in 0..total_panes {
+                if !locked[i] {
+                    let proposed = pass_remaining_h * (stretches[i] / free_stretch);
+                    if proposed < effective_min_h {
+                        heights[i] = effective_min_h;
+                        locked[i] = true;
+                        remaining_h = (remaining_h - effective_min_h).max(0.0);
+                        clamped_any = true;
+                    } else {
+                        heights[i] = proposed;
+                    }
+                }
+            }
+            if !clamped_any {
+                break;
+            }
+        }
+
+        let mut y_cursor = outer_rect.top();
+        let main_bottom = (y_cursor + heights[0]).min(bottom_y);
+        let main_plot_rect = Rect::from_min_max(
+            Pos2::new(outer_rect.left(), y_cursor),
+            Pos2::new(split_x, main_bottom),
+        );
+        let main_price_axis_rect = Rect::from_min_max(
+            Pos2::new(split_x, y_cursor),
+            Pos2::new(outer_rect.right(), main_bottom),
+        );
+        y_cursor = main_bottom;
+
+        let mut oscillators = Vec::with_capacity(active_oscillators.len());
+        let mut separators = Vec::with_capacity(active_oscillators.len());
+
+        for (osc_idx, &(osc_id, _)) in active_oscillators.iter().enumerate() {
+            let top_pane = if osc_idx == 0 {
+                None
+            } else {
+                Some(active_oscillators[osc_idx - 1].0)
+            };
+            let sep_bottom = (y_cursor + sep_h).min(bottom_y);
+            let sep_rect = Rect::from_min_max(
+                Pos2::new(outer_rect.left(), y_cursor),
+                Pos2::new(outer_rect.right(), sep_bottom),
+            );
+            separators.push(PaneSeparatorLayout {
+                separator_index: osc_idx,
+                top_pane,
+                bottom_pane: osc_id,
+                rect: sep_rect,
+            });
+            y_cursor = sep_bottom;
+
+            let pane_bottom = if osc_idx + 1 == active_oscillators.len() {
+                bottom_y
+            } else {
+                (y_cursor + heights[osc_idx + 1]).min(bottom_y)
+            };
+            let plot_rect = Rect::from_min_max(
+                Pos2::new(outer_rect.left(), y_cursor),
+                Pos2::new(split_x, pane_bottom),
+            );
+            let price_axis_rect = Rect::from_min_max(
+                Pos2::new(split_x, y_cursor),
+                Pos2::new(outer_rect.right(), pane_bottom),
+            );
+            oscillators.push(SubPaneLayout {
+                id: osc_id,
+                plot_rect,
+                price_axis_rect,
+            });
+            y_cursor = pane_bottom;
+        }
+
+        let time_axis_rect = Rect::from_min_max(
+            Pos2::new(outer_rect.left(), bottom_y),
+            Pos2::new(split_x, outer_rect.bottom()),
+        );
+        let corner_rect = Rect::from_min_max(Pos2::new(split_x, bottom_y), outer_rect.max);
+
+        Self {
+            outer_rect,
+            main_plot_rect,
+            main_price_axis_rect,
+            oscillators,
+            separators,
+            time_axis_rect,
+            corner_rect,
+        }
+    }
+
+    /// Projects the primary pane + shared bottom time axis into a backward-compatible `ChartLayout`.
+    #[must_use]
+    pub const fn as_primary_chart_layout(&self) -> ChartLayout {
+        ChartLayout {
+            outer_rect: self.outer_rect,
+            plot_rect: self.main_plot_rect,
+            price_axis_rect: self.main_price_axis_rect,
+            time_axis_rect: self.time_axis_rect,
+            corner_rect: self.corner_rect,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SeparatorDragState {
+    separator_index: usize,
+    top_pane: Option<OscillatorPaneId>,
+    bottom_pane: OscillatorPaneId,
+    start_pointer_y: f32,
+    start_top_stretch: f32,
+    start_bottom_stretch: f32,
+    combined_height_px: f32,
+}
+
+fn default_rsi_price_scale() -> PriceScale {
+    PriceScale::new("rsi-right", PriceScaleOptions::sumi_oscillator())
+}
+
+fn default_macd_price_scale() -> PriceScale {
+    PriceScale::new("macd-right", PriceScaleOptions::sumi_oscillator())
+}
+
+fn default_atr_price_scale() -> PriceScale {
+    PriceScale::new("atr-right", PriceScaleOptions::sumi_oscillator())
+}
+
+const fn default_main_stretch() -> f32 {
+    4.0
+}
+
+const fn default_sub_stretch() -> f32 {
+    1.0
+}
+
+#[inline]
+fn sanitize_stretch(val: f32, fallback: f32) -> f32 {
+    if val.is_finite() && val >= 0.05 {
+        val.min(50.0)
+    } else {
+        fallback
+    }
+}
+
+/// Modular viewport state coordinating the shared horizontal `TimeScale` and independent per-pane
+/// `PriceScale` instances (`main-right`, `volume-overlay`, `rsi-right`, `macd-right`, `atr-right`),
+/// proportional multi-pane stretch ratios, and inertial kinetic scrolling.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChartViewportState {
     pub time_scale: TimeScale,
     pub main_price_scale: PriceScale,
     pub volume_price_scale: PriceScale,
 
+    #[serde(default = "default_rsi_price_scale")]
+    pub rsi_price_scale: PriceScale,
+    #[serde(default = "default_macd_price_scale")]
+    pub macd_price_scale: PriceScale,
+    #[serde(default = "default_atr_price_scale")]
+    pub atr_price_scale: PriceScale,
+
+    #[serde(default = "default_main_stretch")]
+    pub main_stretch: f32,
+    #[serde(default = "default_sub_stretch")]
+    pub rsi_stretch: f32,
+    #[serde(default = "default_sub_stretch")]
+    pub macd_stretch: f32,
+    #[serde(default = "default_sub_stretch")]
+    pub atr_stretch: f32,
+
     #[serde(skip)]
     pub kinetic: Option<KineticAnimation>,
+    #[serde(skip)]
+    separator_drag: Option<SeparatorDragState>,
 }
 
 impl Default for ChartViewportState {
@@ -101,16 +394,115 @@ impl ChartViewportState {
                 "volume-overlay",
                 PriceScaleOptions::sumi_volume_overlay(),
             ),
+            rsi_price_scale: default_rsi_price_scale(),
+            macd_price_scale: default_macd_price_scale(),
+            atr_price_scale: default_atr_price_scale(),
+            main_stretch: default_main_stretch(),
+            rsi_stretch: default_sub_stretch(),
+            macd_stretch: default_sub_stretch(),
+            atr_stretch: default_sub_stretch(),
             kinetic: None,
+            separator_drag: None,
         }
     }
 
     /// Sanitizes state restored from persistent `serde` storage against NaN/Infinity or mode mismatches.
     pub fn sanitize_deserialized(&mut self) {
         self.kinetic = None;
+        self.separator_drag = None;
         self.time_scale.sanitize_deserialized();
         self.main_price_scale.sanitize_deserialized();
         self.volume_price_scale.sanitize_deserialized();
+        self.rsi_price_scale.sanitize_deserialized();
+        self.macd_price_scale.sanitize_deserialized();
+        self.atr_price_scale.sanitize_deserialized();
+        // Oscillator sub-panes always operate in Linear vertical space (`RSI`, `MACD`, `ATR`).
+        self.rsi_price_scale
+            .set_mode(crate::viewport::PriceScaleMode::Normal);
+        self.macd_price_scale
+            .set_mode(crate::viewport::PriceScaleMode::Normal);
+        self.atr_price_scale
+            .set_mode(crate::viewport::PriceScaleMode::Normal);
+        self.main_stretch = sanitize_stretch(self.main_stretch, default_main_stretch());
+        self.rsi_stretch = sanitize_stretch(self.rsi_stretch, default_sub_stretch());
+        self.macd_stretch = sanitize_stretch(self.macd_stretch, default_sub_stretch());
+        self.atr_stretch = sanitize_stretch(self.atr_stretch, default_sub_stretch());
+    }
+
+    #[must_use]
+    pub const fn oscillator_price_scale(&self, id: OscillatorPaneId) -> &PriceScale {
+        match id {
+            OscillatorPaneId::Rsi => &self.rsi_price_scale,
+            OscillatorPaneId::Macd => &self.macd_price_scale,
+            OscillatorPaneId::Atr => &self.atr_price_scale,
+        }
+    }
+
+    pub fn oscillator_price_scale_mut(&mut self, id: OscillatorPaneId) -> &mut PriceScale {
+        match id {
+            OscillatorPaneId::Rsi => &mut self.rsi_price_scale,
+            OscillatorPaneId::Macd => &mut self.macd_price_scale,
+            OscillatorPaneId::Atr => &mut self.atr_price_scale,
+        }
+    }
+
+    #[must_use]
+    pub const fn oscillator_stretch(&self, id: OscillatorPaneId) -> f32 {
+        match id {
+            OscillatorPaneId::Rsi => self.rsi_stretch,
+            OscillatorPaneId::Macd => self.macd_stretch,
+            OscillatorPaneId::Atr => self.atr_stretch,
+        }
+    }
+
+    pub fn set_oscillator_stretch(&mut self, id: OscillatorPaneId, stretch: f32) {
+        let s = sanitize_stretch(stretch, 1.0);
+        match id {
+            OscillatorPaneId::Rsi => self.rsi_stretch = s,
+            OscillatorPaneId::Macd => self.macd_stretch = s,
+            OscillatorPaneId::Atr => self.atr_stretch = s,
+        }
+    }
+
+    #[must_use]
+    fn pane_stretch(&self, pane: Option<OscillatorPaneId>) -> f32 {
+        match pane {
+            None => self.main_stretch,
+            Some(id) => self.oscillator_stretch(id),
+        }
+    }
+
+    fn set_pane_stretch(&mut self, pane: Option<OscillatorPaneId>, stretch: f32) {
+        match pane {
+            None => self.main_stretch = sanitize_stretch(stretch, 4.0),
+            Some(id) => self.set_oscillator_stretch(id, stretch),
+        }
+    }
+
+    /// Resets proportional pane stretch ratios to `Main = 4.0`, `Oscillator = 1.0` (`PaneManager.ts:76–77`).
+    pub fn reset_pane_stretches(&mut self) {
+        self.separator_drag = None;
+        self.main_stretch = default_main_stretch();
+        self.rsi_stretch = default_sub_stretch();
+        self.macd_stretch = default_sub_stretch();
+        self.atr_stretch = default_sub_stretch();
+    }
+
+    /// Applies an exact LWC-style adjacent-pair stretch transfer (`pane-separator.ts:181–220`)
+    /// so uninvolved panes retain 100% invariant heights and `MIN_PANE_HEIGHT` is enforced.
+    pub fn apply_separator_drag_delta(
+        &mut self,
+        top_pane: Option<OscillatorPaneId>,
+        bottom_pane: OscillatorPaneId,
+        combined_height_px: f32,
+        delta_y: f32,
+    ) {
+        let start_top = self.pane_stretch(top_pane);
+        let start_bottom = self.oscillator_stretch(bottom_pane);
+        let (new_top, new_bottom) =
+            compute_adjacent_stretch_transfer(start_top, start_bottom, combined_height_px, delta_y);
+        self.set_pane_stretch(top_pane, new_top);
+        self.set_oscillator_stretch(bottom_pane, new_bottom);
     }
 
     /// Enables or disables automatic sub-pixel OHLCV conflation on `time_scale`.
@@ -127,24 +519,49 @@ impl ChartViewportState {
         self.time_scale.zoom(center_x, scale);
     }
 
-    /// Fits the entire series `[0..total_bars)` plus default future `right_offset` and resets price autoscale.
+    /// Fits the entire series `[0..total_bars)` plus default future `right_offset` and resets all price autoscales.
     pub fn fit_all(&mut self) {
         self.kinetic = None;
         self.time_scale.fit_content();
         self.main_price_scale.reset_auto_scale();
         self.volume_price_scale.reset_auto_scale();
+        self.rsi_price_scale.reset_auto_scale();
+        self.macd_price_scale.reset_auto_scale();
+        self.atr_price_scale.reset_auto_scale();
     }
 
-    /// Restores default `bar_spacing` (`8.0`), default future `right_offset` (`12.0`), and price autoscale.
+    /// Restores default `bar_spacing` (`8.0`), default future `right_offset` (`12.0`), and all price autoscales.
     pub fn reset_to_default(&mut self) {
         self.kinetic = None;
+        self.separator_drag = None;
         self.time_scale.restore_default();
         self.main_price_scale.reset_auto_scale();
         self.volume_price_scale.reset_auto_scale();
+        self.rsi_price_scale.reset_auto_scale();
+        self.macd_price_scale.reset_auto_scale();
+        self.atr_price_scale.reset_auto_scale();
     }
 }
 
-/// Visual configuration passed to `render_candlestick_chart`.
+#[inline]
+fn compute_adjacent_stretch_transfer(
+    start_top_stretch: f32,
+    start_bottom_stretch: f32,
+    combined_height_px: f32,
+    delta_y: f32,
+) -> (f32, f32) {
+    let pair_stretch = (start_top_stretch + start_bottom_stretch).max(0.10);
+    let safe_h = combined_height_px.max(24.0);
+    let px_to_stretch = pair_stretch / safe_h;
+    let effective_min_h = MultiPaneLayout::MIN_PANE_HEIGHT.min(safe_h * 0.45);
+    let min_stretch = effective_min_h * px_to_stretch;
+    let max_stretch = (pair_stretch - min_stretch).max(min_stretch);
+    let new_top = (start_top_stretch + delta_y * px_to_stretch).clamp(min_stretch, max_stretch);
+    let new_bottom = (pair_stretch - new_top).clamp(min_stretch, max_stretch);
+    (new_top, new_bottom)
+}
+
+/// Visual configuration passed to `render_candlestick_chart` and `render_workstation_chart`.
 #[derive(Debug, Clone, Copy)]
 pub struct ChartDisplayConfig<'a> {
     pub symbol: &'a str,
@@ -168,10 +585,16 @@ pub struct ChartRenderReport {
     pub rendered_candle_count: usize,
     pub base_value: f64,
     pub kinetic_active: bool,
+    pub pane_count: usize,
+    pub active_overlay_count: usize,
+    pub hovered_oscillator: Option<OscillatorPaneId>,
+    pub hovered_oscillator_value: Option<f64>,
+    pub first_oscillator_plot_rect: Option<Rect>,
+    pub first_separator_rect: Option<Rect>,
 }
 
 /// Renders the native candlestick chart, volume histogram, price/time axes, crosshair, and OHLCV overlay
-/// powered by `crate::viewport::{TimeScale, PriceScale, PaneViewport, KineticAnimation}`.
+/// without indicator overlays or sub-panes (backward-compatible R03 entrypoint).
 pub fn render_candlestick_chart(
     ui: &mut Ui,
     candles: &[Candle],
@@ -188,6 +611,808 @@ pub fn render_candlestick_chart(
         true,
         config,
     )
+}
+
+/// Flagship Milestone R04 workstation renderer: renders the main candlestick + volume pane,
+/// price overlays (`SMA`, `EMA`, `BollingerBands`), `0..=3` stacked oscillator sub-panes (`RSI`,
+/// `MACD`, `ATR`) with interactive splitter resize handles, independent vertical `PriceScale` axes,
+/// shared horizontal `TimeScale` navigation, and synchronized cross-pane crosshair & HUD readouts.
+pub fn render_workstation_chart(
+    ui: &mut Ui,
+    candles: &[Candle],
+    viewport: &mut ChartViewportState,
+    config: ChartDisplayConfig<'_>,
+    indicators: &IndicatorConfig,
+    indicator_cache: &IndicatorCache,
+) -> Option<ChartRenderReport> {
+    if candles.is_empty() {
+        ui.centered_and_justified(|ui| {
+            ui.label("No OHLCV data loaded.");
+        });
+        return None;
+    }
+
+    let available_size = ui.available_size().max(Vec2::new(200.0, 140.0));
+    let (outer_rect, _) = ui.allocate_exact_size(available_size, Sense::hover());
+
+    let mut fallback_clean_indicators = indicators.clone();
+    fallback_clean_indicators.sanitize_deserialized();
+    let indicators = indicator_cache
+        .applied_config()
+        .unwrap_or(&fallback_clean_indicators);
+
+    let active_osc_ids = indicators.active_oscillator_panes();
+    let active_osc_specs: Vec<(OscillatorPaneId, f32)> = active_osc_ids
+        .iter()
+        .map(|&id| (id, viewport.oscillator_stretch(id)))
+        .collect();
+
+    // 1. Pre-compute initial MultiPaneLayout so separator drags can resolve current heights cleanly
+    let pre_layout = MultiPaneLayout::compute(outer_rect, viewport.main_stretch, &active_osc_specs);
+
+    let mut sep_responses = Vec::with_capacity(pre_layout.separators.len());
+    for sep in &pre_layout.separators {
+        let sep_id = ui
+            .id()
+            .with(("sumi_pane_separator", sep.top_pane, sep.bottom_pane));
+        sep_responses.push(ui.interact(sep.rect, sep_id, Sense::click_and_drag()));
+    }
+
+    // Handle interactive pane separator dragging (`LWC pane-separator.ts:181–220`)
+    let mut separator_active_idx: Option<usize> = None;
+    let mut separator_stretched_this_frame = false;
+    for (idx, (sep, resp)) in pre_layout
+        .separators
+        .iter()
+        .zip(sep_responses.iter())
+        .enumerate()
+    {
+        if resp.hovered() || resp.dragged() {
+            ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical);
+            separator_active_idx = Some(idx);
+        }
+        if resp.double_clicked() {
+            viewport.kinetic = None;
+            viewport.reset_pane_stretches();
+            separator_stretched_this_frame = true;
+            continue;
+        }
+        if resp.drag_started()
+            && let Some(origin) = ui
+                .input(|i| i.pointer.press_origin())
+                .or_else(|| resp.interact_pointer_pos())
+        {
+            viewport.kinetic = None;
+            // Sync stored stretches to effective rendered height shares (`pre_layout`) before starting
+            // drag so a previously `MIN_PANE_HEIGHT`-clamped pane never causes an initial drag jump!
+            let total_actual_h: f32 = pre_layout.main_plot_rect.height()
+                + pre_layout
+                    .oscillators
+                    .iter()
+                    .map(|o| o.plot_rect.height())
+                    .sum::<f32>();
+            if total_actual_h > 1.0 {
+                let total_stretch_sum: f32 = sanitize_stretch(viewport.main_stretch, 4.0)
+                    + active_osc_ids
+                        .iter()
+                        .map(|&id| sanitize_stretch(viewport.oscillator_stretch(id), 1.0))
+                        .sum::<f32>();
+                viewport.main_stretch = sanitize_stretch(
+                    (pre_layout.main_plot_rect.height() / total_actual_h) * total_stretch_sum,
+                    4.0,
+                );
+                for osc in &pre_layout.oscillators {
+                    let eff_s = (osc.plot_rect.height() / total_actual_h) * total_stretch_sum;
+                    viewport.set_oscillator_stretch(osc.id, eff_s);
+                }
+            }
+
+            let top_h = match sep.top_pane {
+                None => pre_layout.main_plot_rect.height(),
+                Some(top_id) => pre_layout
+                    .oscillators
+                    .iter()
+                    .find(|o| o.id == top_id)
+                    .map_or(80.0, |o| o.plot_rect.height()),
+            };
+            let bot_h = pre_layout
+                .oscillators
+                .iter()
+                .find(|o| o.id == sep.bottom_pane)
+                .map_or(80.0, |o| o.plot_rect.height());
+            viewport.separator_drag = Some(SeparatorDragState {
+                separator_index: idx,
+                top_pane: sep.top_pane,
+                bottom_pane: sep.bottom_pane,
+                start_pointer_y: origin.y,
+                start_top_stretch: viewport.pane_stretch(sep.top_pane),
+                start_bottom_stretch: viewport.oscillator_stretch(sep.bottom_pane),
+                combined_height_px: top_h + bot_h,
+            });
+        }
+        if resp.dragged()
+            && let Some(pos) = resp.interact_pointer_pos()
+            && let Some(drag) = viewport.separator_drag
+            && drag.separator_index == idx
+            && drag.top_pane == sep.top_pane
+            && drag.bottom_pane == sep.bottom_pane
+        {
+            let (new_top, new_bot) = compute_adjacent_stretch_transfer(
+                drag.start_top_stretch,
+                drag.start_bottom_stretch,
+                drag.combined_height_px,
+                pos.y - drag.start_pointer_y,
+            );
+            viewport.set_pane_stretch(drag.top_pane, new_top);
+            viewport.set_oscillator_stretch(drag.bottom_pane, new_bot);
+            separator_stretched_this_frame = true;
+        }
+        if resp.drag_stopped() {
+            viewport.separator_drag = None;
+        }
+    }
+
+    let multi_layout = if separator_stretched_this_frame {
+        let updated_specs: Vec<(OscillatorPaneId, f32)> = active_osc_ids
+            .iter()
+            .map(|&id| (id, viewport.oscillator_stretch(id)))
+            .collect();
+        MultiPaneLayout::compute(outer_rect, viewport.main_stretch, &updated_specs)
+    } else {
+        pre_layout
+    };
+
+    let painter = ui.painter_at(outer_rect);
+
+    // 2. Build interactive responses for Main Pane, Oscillator Sub-Panes, and shared Time Axis
+    let main_plot_resp = ui.interact(
+        multi_layout.main_plot_rect,
+        ui.id().with("sumi_plot_canvas"),
+        Sense::click_and_drag(),
+    );
+    let main_price_resp = ui.interact(
+        multi_layout.main_price_axis_rect,
+        ui.id().with("sumi_price_axis"),
+        Sense::click_and_drag(),
+    );
+    let time_resp = ui.interact(
+        multi_layout.time_axis_rect,
+        ui.id().with("sumi_time_axis"),
+        Sense::click_and_drag(),
+    );
+
+    let mut osc_responses = Vec::with_capacity(multi_layout.oscillators.len());
+    for osc in &multi_layout.oscillators {
+        let p_resp = ui.interact(
+            osc.plot_rect,
+            ui.id().with(("sumi_osc_plot", osc.id.key())),
+            Sense::click_and_drag(),
+        );
+        let ax_resp = ui.interact(
+            osc.price_axis_rect,
+            ui.id().with(("sumi_osc_axis", osc.id.key())),
+            Sense::click_and_drag(),
+        );
+        osc_responses.push((osc.id, osc.plot_rect, osc.price_axis_rect, p_resp, ax_resp));
+    }
+
+    // 3. Synchronize shared TimeScale width & per-pane PriceScale heights
+    let ppp = f64::from(ui.ctx().pixels_per_point()).max(1.0);
+    let main_plot_f64 = PlotRect::from_egui(multi_layout.main_plot_rect);
+    viewport.time_scale.set_total_bars(candles.len());
+    viewport.time_scale.set_width(main_plot_f64.width);
+    viewport.main_price_scale.set_height(main_plot_f64.height);
+    viewport.volume_price_scale.set_height(main_plot_f64.height);
+
+    for osc in &multi_layout.oscillators {
+        viewport
+            .oscillator_price_scale_mut(osc.id)
+            .set_height(f64::from(osc.plot_rect.height()));
+    }
+
+    let desired_bottom_margin = if config.show_volume { 0.20 } else { 0.10 };
+    if (viewport.main_price_scale.options().scale_margin_bottom - desired_bottom_margin).abs()
+        > 1e-6
+    {
+        let top_m = viewport.main_price_scale.options().scale_margin_top;
+        viewport
+            .main_price_scale
+            .set_margins(top_m, desired_bottom_margin);
+    }
+
+    // Ensure initial price ranges exist prior to first-frame axis drag gestures
+    let init_cf = viewport.time_scale.conflation_factor(ppp);
+    if viewport.main_price_scale.price_range().is_none() {
+        let _ = refresh_main_pane_autoscale_and_bounds(
+            candles,
+            &viewport.time_scale,
+            &mut viewport.main_price_scale,
+            &mut viewport.volume_price_scale,
+            config.show_volume,
+            init_cf,
+            Some((indicators, indicator_cache)),
+        );
+    }
+    let init_strict = non_empty_candle_range(
+        viewport.time_scale.strict_visible_data_range(),
+        candles.len(),
+    );
+    for osc in &multi_layout.oscillators {
+        if viewport
+            .oscillator_price_scale(osc.id)
+            .price_range()
+            .is_none()
+        {
+            refresh_oscillator_autoscale(
+                osc.id,
+                viewport.oscillator_price_scale_mut(osc.id),
+                indicator_cache,
+                init_strict.clone(),
+            );
+        }
+    }
+
+    // 4. Advance shared kinetic inertia once per frame (or cancel on any pointer press across any pane)
+    let (smooth_scroll, time_ms) = ui.input(|i| (i.smooth_scroll_delta, i.time * 1000.0));
+    let any_pointer_down = main_plot_resp.is_pointer_button_down_on()
+        || main_price_resp.is_pointer_button_down_on()
+        || time_resp.is_pointer_button_down_on()
+        || sep_responses
+            .iter()
+            .any(egui::Response::is_pointer_button_down_on)
+        || osc_responses.iter().any(|(_, _, _, pr, ar)| {
+            pr.is_pointer_button_down_on() || ar.is_pointer_button_down_on()
+        });
+    let any_plot_dragged =
+        main_plot_resp.dragged() || osc_responses.iter().any(|(_, _, _, pr, _)| pr.dragged());
+
+    if any_pointer_down {
+        viewport.kinetic = None;
+    } else if !any_plot_dragged {
+        step_shared_kinetic_inertia(ui, time_ms, &mut viewport.time_scale, &mut viewport.kinetic);
+    }
+
+    // 5. Process Main Pane, Oscillator Sub-Panes, Right Price Axes, and Shared Time Axis gestures
+    // Double-clicking ANY plot canvas resets `time_scale` AND all pane `PriceScale`s synchronously!
+    let any_plot_double_clicked = main_plot_resp.double_clicked()
+        || osc_responses
+            .iter()
+            .any(|(_, _, _, pr, _)| pr.double_clicked());
+    if any_plot_double_clicked {
+        viewport.reset_to_default();
+    }
+
+    handle_plot_interactions(
+        ui,
+        &main_plot_resp,
+        main_plot_f64,
+        smooth_scroll,
+        time_ms,
+        &mut viewport.time_scale,
+        &mut viewport.kinetic,
+        &mut viewport.main_price_scale,
+        Some(&mut viewport.volume_price_scale),
+        false,
+    );
+    handle_price_axis_interactions(
+        ui,
+        &main_price_resp,
+        main_plot_f64,
+        &mut viewport.main_price_scale,
+    );
+
+    for &(osc_id, osc_plot_rect, _, ref osc_plot_resp, ref osc_ax_resp) in &osc_responses {
+        let osc_plot_f64 = PlotRect::from_egui(osc_plot_rect);
+        {
+            let ChartViewportState {
+                time_scale,
+                kinetic,
+                rsi_price_scale,
+                macd_price_scale,
+                atr_price_scale,
+                ..
+            } = viewport;
+            let osc_ps = match osc_id {
+                OscillatorPaneId::Rsi => rsi_price_scale,
+                OscillatorPaneId::Macd => macd_price_scale,
+                OscillatorPaneId::Atr => atr_price_scale,
+            };
+            handle_plot_interactions(
+                ui,
+                osc_plot_resp,
+                osc_plot_f64,
+                smooth_scroll,
+                time_ms,
+                time_scale,
+                kinetic,
+                osc_ps,
+                None,
+                false,
+            );
+            handle_price_axis_interactions(ui, osc_ax_resp, osc_plot_f64, osc_ps);
+        }
+    }
+
+    handle_time_axis_interactions(
+        ui,
+        &time_resp,
+        main_plot_f64,
+        &mut viewport.time_scale,
+        &mut viewport.kinetic,
+    );
+
+    // 6. Refresh visible range, dynamic `base_value`, main autoscale + overlay bounds, and oscillator autoscales
+    let conflation_factor = viewport.time_scale.conflation_factor(ppp);
+    let (base_value, bounds) = refresh_main_pane_autoscale_and_bounds(
+        candles,
+        &viewport.time_scale,
+        &mut viewport.main_price_scale,
+        &mut viewport.volume_price_scale,
+        config.show_volume,
+        conflation_factor,
+        Some((indicators, indicator_cache)),
+    )?;
+    let strict_range = non_empty_candle_range(
+        viewport.time_scale.strict_visible_data_range(),
+        candles.len(),
+    );
+    for osc in &multi_layout.oscillators {
+        refresh_oscillator_autoscale(
+            osc.id,
+            viewport.oscillator_price_scale_mut(osc.id),
+            indicator_cache,
+            strict_range.clone(),
+        );
+    }
+    let culling_range =
+        non_empty_candle_range(viewport.time_scale.culling_data_range(), candles.len());
+
+    // 7. Paint backgrounds across all panes, axes, and separators
+    painter.rect_filled(multi_layout.main_plot_rect, 0.0, palette::BG_CHART_CANVAS);
+    painter.rect_filled(
+        multi_layout.main_price_axis_rect,
+        0.0,
+        palette::BG_AXIS_GUTTER,
+    );
+    for osc in &multi_layout.oscillators {
+        painter.rect_filled(osc.plot_rect, 0.0, palette::BG_CHART_CANVAS);
+        painter.rect_filled(osc.price_axis_rect, 0.0, palette::BG_AXIS_GUTTER);
+    }
+    painter.rect_filled(multi_layout.time_axis_rect, 0.0, palette::BG_AXIS_GUTTER);
+    painter.rect_filled(multi_layout.corner_rect, 0.0, palette::BG_WORKSTATION);
+
+    // 8. Compute vertical time grid X coordinates once and share across all panes + bottom time axis
+    let main_vp = PaneViewport::new(
+        &viewport.time_scale,
+        &viewport.main_price_scale,
+        main_plot_f64,
+        base_value,
+    );
+    let vol_vp = PaneViewport::new(
+        &viewport.time_scale,
+        &viewport.volume_price_scale,
+        main_plot_f64,
+        1.0,
+    );
+
+    let time_grid_ticks = collect_time_grid_ticks(
+        candles,
+        &viewport.time_scale,
+        &main_vp,
+        multi_layout.main_plot_rect,
+        multi_layout.time_axis_rect,
+    );
+
+    // 9. Paint Main Pane horizontal price grid + vertical time grid + candlesticks + volume + overlays
+    paint_horizontal_price_grid_and_ticks(
+        &painter,
+        multi_layout.main_plot_rect,
+        multi_layout.main_price_axis_rect,
+        &viewport.main_price_scale,
+        &main_vp,
+        base_value,
+        config.show_grid,
+        54.0,
+        4,
+        12,
+    );
+    if config.show_grid {
+        for &(x, _) in &time_grid_ticks {
+            painter.line_segment(
+                [
+                    Pos2::new(x, multi_layout.main_plot_rect.top()),
+                    Pos2::new(x, multi_layout.main_plot_rect.bottom()),
+                ],
+                Stroke::new(1.0, palette::GRID_LINE),
+            );
+        }
+    }
+    paint_bottom_time_axis_labels(&painter, multi_layout.time_axis_rect, &time_grid_ticks);
+
+    let effective_bar_spacing = viewport.time_scale.bar_spacing() * (conflation_factor as f64);
+    let bar_metrics = CandlestickBarMetrics::compute(effective_bar_spacing, ppp);
+    let rendered_candle_count = paint_candlesticks_and_volume(
+        &painter,
+        multi_layout.main_plot_rect,
+        candles,
+        culling_range.clone(),
+        conflation_factor,
+        &main_vp,
+        &vol_vp,
+        bar_metrics,
+        ppp,
+        config.show_volume,
+    );
+
+    // Main-Pane Technical Overlays (`BollingerBands` ribbon + `SMA` + `EMA`) aligned to exact `conflation_factor`
+    let main_plot_painter = painter.with_clip_rect(multi_layout.main_plot_rect);
+    let mut active_overlay_count = 0_usize;
+    if indicators.show_bbands {
+        active_overlay_count += 1;
+        paint_bollinger_bands(
+            &main_plot_painter,
+            indicator_cache,
+            culling_range.clone(),
+            conflation_factor,
+            &main_vp,
+        );
+    }
+    if indicators.show_sma {
+        active_overlay_count += 1;
+        paint_conflated_line_series(
+            &main_plot_painter,
+            &indicator_cache.sma,
+            Some(&indicator_cache.sma_idx),
+            culling_range.clone(),
+            conflation_factor,
+            &main_vp,
+            Stroke::new(1.6, palette::IND_SMA),
+        );
+    }
+    if indicators.show_ema {
+        active_overlay_count += 1;
+        paint_conflated_line_series(
+            &main_plot_painter,
+            &indicator_cache.ema,
+            Some(&indicator_cache.ema_idx),
+            culling_range.clone(),
+            conflation_factor,
+            &main_vp,
+            Stroke::new(1.6, palette::IND_EMA),
+        );
+    }
+
+    paint_latest_close_line_and_pill(
+        &painter,
+        &main_plot_painter,
+        multi_layout.main_plot_rect,
+        multi_layout.main_price_axis_rect,
+        candles,
+        &viewport.main_price_scale,
+        &main_vp,
+        base_value,
+    );
+
+    // 10. Paint Stacked Oscillator Sub-Panes (`RSI`, `MACD`, `ATR`)
+    for osc in &multi_layout.oscillators {
+        let osc_ps = viewport.oscillator_price_scale(osc.id);
+        let osc_plot_f64 = PlotRect::from_egui(osc.plot_rect);
+        let osc_vp = PaneViewport::new(&viewport.time_scale, osc_ps, osc_plot_f64, 1.0);
+
+        paint_horizontal_price_grid_and_ticks(
+            &painter,
+            osc.plot_rect,
+            osc.price_axis_rect,
+            osc_ps,
+            &osc_vp,
+            1.0,
+            config.show_grid,
+            42.0,
+            2,
+            5,
+        );
+
+        if config.show_grid {
+            for &(x, _) in &time_grid_ticks {
+                painter.line_segment(
+                    [
+                        Pos2::new(x, osc.plot_rect.top()),
+                        Pos2::new(x, osc.plot_rect.bottom()),
+                    ],
+                    Stroke::new(1.0, palette::GRID_LINE),
+                );
+            }
+        }
+
+        let osc_painter = painter.with_clip_rect(osc.plot_rect);
+        match osc.id {
+            OscillatorPaneId::Rsi => {
+                paint_rsi_pane(
+                    &osc_painter,
+                    osc.plot_rect,
+                    &indicator_cache.rsi,
+                    Some(&indicator_cache.rsi_idx),
+                    culling_range.clone(),
+                    conflation_factor,
+                    &osc_vp,
+                );
+            }
+            OscillatorPaneId::Macd => {
+                paint_macd_pane(
+                    &osc_painter,
+                    osc.plot_rect,
+                    indicator_cache,
+                    culling_range.clone(),
+                    conflation_factor,
+                    &osc_vp,
+                    bar_metrics,
+                );
+            }
+            OscillatorPaneId::Atr => {
+                paint_conflated_line_series(
+                    &osc_painter,
+                    &indicator_cache.atr,
+                    Some(&indicator_cache.atr_idx),
+                    culling_range.clone(),
+                    conflation_factor,
+                    &osc_vp,
+                    Stroke::new(1.5, palette::IND_ATR),
+                );
+            }
+        }
+    }
+
+    // 11. Resolve Unified Synchronized Crosshair across Main + Oscillator Sub-Panes
+    #[derive(Clone, Copy)]
+    enum HoveredPane {
+        Main(Pos2),
+        Oscillator(OscillatorPaneId, Rect, Rect, Pos2),
+    }
+
+    let hovered_pane = if separator_active_idx.is_some_and(|idx| sep_responses[idx].dragged()) {
+        None
+    } else if let Some(pos) = main_plot_resp
+        .hover_pos()
+        .filter(|p| multi_layout.main_plot_rect.contains(*p))
+    {
+        Some(HoveredPane::Main(pos))
+    } else {
+        osc_responses
+            .iter()
+            .find_map(|&(id, p_rect, ax_rect, ref pr, _)| {
+                pr.hover_pos()
+                    .filter(|p| p_rect.contains(*p))
+                    .map(|pos| HoveredPane::Oscillator(id, p_rect, ax_rect, pos))
+            })
+    };
+
+    let hover_x = hovered_pane.map(|hp| match hp {
+        HoveredPane::Main(p) | HoveredPane::Oscillator(_, _, _, p) => p.x,
+    });
+    let hovered_slot_index = hover_x.and_then(|hx| main_vp.screen_x_to_index(f64::from(hx)));
+    let default_inspected_idx = culling_range
+        .end
+        .checked_sub(1)
+        .unwrap_or(candles.len() - 1);
+    let inspected_data_index = hover_x
+        .and_then(|hx| main_vp.screen_x_to_clamped_data_index(f64::from(hx)))
+        .unwrap_or(default_inspected_idx);
+
+    let mut pointer_price = None;
+    let mut hovered_oscillator = None;
+    let mut hovered_oscillator_value = None;
+
+    if let Some(hp) = hovered_pane {
+        match hp {
+            HoveredPane::Main(pos) => {
+                pointer_price = main_vp.screen_y_to_price(f64::from(pos.y));
+            }
+            HoveredPane::Oscillator(id, p_rect, _, pos) => {
+                hovered_oscillator = Some(id);
+                let osc_vp = PaneViewport::new(
+                    &viewport.time_scale,
+                    viewport.oscillator_price_scale(id),
+                    PlotRect::from_egui(p_rect),
+                    1.0,
+                );
+                hovered_oscillator_value = osc_vp.screen_y_to_price(f64::from(pos.y));
+            }
+        }
+    }
+
+    if config.show_crosshair
+        && let Some(hp) = hovered_pane
+    {
+        let raw_x = match hp {
+            HoveredPane::Main(p) | HoveredPane::Oscillator(_, _, _, p) => p.x,
+        };
+        let slot_idx = hovered_slot_index.unwrap_or(inspected_data_index as i64);
+        let cross_x = main_vp
+            .index_to_screen_x(slot_idx)
+            .map_or(raw_x, |sx| sx as f32)
+            .clamp(
+                multi_layout.main_plot_rect.left(),
+                multi_layout.main_plot_rect.right(),
+            );
+        let cross_stroke = Stroke::new(1.0, palette::CROSSHAIR.gamma_multiply(0.50));
+
+        // Synchronized vertical crosshair across Main Pane + ALL active Oscillator Sub-Panes!
+        main_plot_painter.line_segment(
+            [
+                Pos2::new(cross_x, multi_layout.main_plot_rect.top()),
+                Pos2::new(cross_x, multi_layout.main_plot_rect.bottom()),
+            ],
+            cross_stroke,
+        );
+        for osc in &multi_layout.oscillators {
+            painter.with_clip_rect(osc.plot_rect).line_segment(
+                [
+                    Pos2::new(cross_x, osc.plot_rect.top()),
+                    Pos2::new(cross_x, osc.plot_rect.bottom()),
+                ],
+                cross_stroke,
+            );
+        }
+
+        // Horizontal crosshair + right-axis value pill in the specific hovered pane
+        match hp {
+            HoveredPane::Main(pos) => {
+                main_plot_painter.line_segment(
+                    [
+                        Pos2::new(multi_layout.main_plot_rect.left(), pos.y),
+                        Pos2::new(multi_layout.main_plot_rect.right(), pos.y),
+                    ],
+                    cross_stroke,
+                );
+                if let Some(pv) = pointer_price {
+                    paint_axis_cursor_pill(
+                        &painter,
+                        multi_layout.main_price_axis_rect,
+                        pos.y,
+                        &viewport.main_price_scale.format_price(pv, base_value),
+                    );
+                }
+            }
+            HoveredPane::Oscillator(id, p_rect, ax_rect, pos) => {
+                painter.with_clip_rect(p_rect).line_segment(
+                    [
+                        Pos2::new(p_rect.left(), pos.y),
+                        Pos2::new(p_rect.right(), pos.y),
+                    ],
+                    cross_stroke,
+                );
+                if let Some(ov) = hovered_oscillator_value {
+                    paint_axis_cursor_pill(
+                        &painter,
+                        ax_rect,
+                        pos.y,
+                        &viewport.oscillator_price_scale(id).format_price(ov, 1.0),
+                    );
+                }
+            }
+        }
+
+        paint_time_axis_cursor_pill(
+            &painter,
+            multi_layout.time_axis_rect,
+            candles,
+            config.timeframe,
+            slot_idx,
+            cross_x,
+        );
+    }
+
+    // 12. Paint interactive pane separators, axis gutters, and outer border
+    for (idx, sep) in multi_layout.separators.iter().enumerate() {
+        let is_hot = separator_active_idx == Some(idx);
+        painter.rect_filled(sep.rect, 0.0, palette::SEPARATOR_BG);
+        let line_color = if is_hot {
+            palette::SEPARATOR_ACTIVE
+        } else {
+            palette::BORDER_SUBTLE
+        };
+        let line_w = if is_hot { 1.5 } else { 1.0 };
+        painter.line_segment(
+            [
+                Pos2::new(sep.rect.left(), sep.rect.center().y),
+                Pos2::new(sep.rect.right(), sep.rect.center().y),
+            ],
+            Stroke::new(line_w, line_color),
+        );
+        // Subtle center grip pill so discoverability of draggable splitters is immediate
+        let grip_cx = multi_layout.main_plot_rect.center().x;
+        painter.line_segment(
+            [
+                Pos2::new(grip_cx - 14.0, sep.rect.center().y),
+                Pos2::new(grip_cx + 14.0, sep.rect.center().y),
+            ],
+            Stroke::new(
+                2.0,
+                if is_hot {
+                    Color32::WHITE
+                } else {
+                    palette::TEXT_MUTED
+                },
+            ),
+        );
+    }
+
+    painter.line_segment(
+        [
+            Pos2::new(multi_layout.main_plot_rect.right(), outer_rect.top()),
+            Pos2::new(multi_layout.main_plot_rect.right(), outer_rect.bottom()),
+        ],
+        Stroke::new(1.0, palette::BORDER_SUBTLE),
+    );
+    painter.line_segment(
+        [
+            Pos2::new(outer_rect.left(), multi_layout.time_axis_rect.top()),
+            Pos2::new(outer_rect.right(), multi_layout.time_axis_rect.top()),
+        ],
+        Stroke::new(1.0, palette::BORDER_SUBTLE),
+    );
+    painter.rect_stroke(
+        outer_rect,
+        0.0,
+        Stroke::new(1.0, palette::BORDER_SUBTLE),
+        StrokeKind::Inside,
+    );
+
+    // 13. Top-left Main OHLCV HUD + Overlay Legend HUD + Per-Oscillator Sub-Pane Legend HUDs
+    // When conflated (`conflation_factor > 1`), inspect `end_index` of the hovered bucket so series
+    // HUD readouts correspond to the closing bar of the inspected conflated candlestick!
+    let hud_series_index = conflated_candle_at(candles, inspected_data_index, conflation_factor)
+        .map_or(inspected_data_index, |b| b.end_index);
+    paint_main_ohlcv_hud(
+        &painter,
+        multi_layout.main_plot_rect,
+        candles,
+        config,
+        inspected_data_index,
+        conflation_factor,
+    );
+    if active_overlay_count > 0 {
+        paint_main_overlay_hud(
+            &painter,
+            multi_layout.main_plot_rect,
+            indicators,
+            indicator_cache,
+            hud_series_index,
+        );
+    }
+    for osc in &multi_layout.oscillators {
+        paint_oscillator_hud(
+            &painter,
+            osc.plot_rect,
+            osc.id,
+            indicators,
+            indicator_cache,
+            hud_series_index,
+        );
+    }
+
+    Some(ChartRenderReport {
+        layout: multi_layout.as_primary_chart_layout(),
+        bounds,
+        inspected_data_index,
+        pointer_price,
+        bar_spacing: viewport.time_scale.bar_spacing(),
+        right_offset: viewport.time_scale.right_offset(),
+        conflation_factor,
+        culled_bar_count: culling_range.len(),
+        rendered_candle_count,
+        base_value,
+        kinetic_active: viewport
+            .kinetic
+            .as_ref()
+            .is_some_and(KineticAnimation::is_active),
+        pane_count: 1 + multi_layout.oscillators.len(),
+        active_overlay_count,
+        hovered_oscillator,
+        hovered_oscillator_value,
+        first_oscillator_plot_rect: multi_layout.oscillators.first().map(|o| o.plot_rect),
+        first_separator_rect: multi_layout.separators.first().map(|s| s.rect),
+    })
 }
 
 /// Multi-pane-capable chart renderer accepting a shared `&mut TimeScale` (and shared kinetic state)
@@ -226,7 +1451,6 @@ pub fn render_shared_pane_candlestick_chart(
     let price_resp = ui.interact(layout.price_axis_rect, price_id, Sense::click_and_drag());
     let time_resp = ui.interact(layout.time_axis_rect, time_id, Sense::click_and_drag());
 
-    // 1. Synchronize viewport dimensions & bar count
     let ppp = f64::from(ui.ctx().pixels_per_point()).max(1.0);
     let plot_rect_f64 = PlotRect::from_egui(layout.plot_rect);
     if sync_shared_time_scale {
@@ -242,20 +1466,19 @@ pub fn render_shared_pane_candlestick_chart(
         main_price_scale.set_margins(top_m, desired_bottom_margin);
     }
 
-    // Ensure initial price range exists before first-frame axis drag gestures
     if main_price_scale.price_range().is_none() {
         let init_cf = shared_time_scale.conflation_factor(ppp);
-        let _ = refresh_pane_autoscale_and_bounds(
+        let _ = refresh_main_pane_autoscale_and_bounds(
             candles,
             shared_time_scale,
             main_price_scale,
             volume_price_scale,
             config.show_volume,
             init_cf,
+            None,
         );
     }
 
-    // 2. Advance active kinetic inertia on `TimeScale::right_offset` (or cancel immediately on pointer press)
     let (smooth_scroll, time_ms) = ui.input(|i| (i.smooth_scroll_delta, i.time * 1000.0));
     if plot_resp.is_pointer_button_down_on()
         || price_resp.is_pointer_button_down_on()
@@ -263,30 +1486,9 @@ pub fn render_shared_pane_candlestick_chart(
     {
         *shared_kinetic = None;
     } else if sync_shared_time_scale && !plot_resp.dragged() {
-        let mut stop_kinetic = false;
-        if let Some(ka) = shared_kinetic.as_ref()
-            && ka.is_active()
-        {
-            if let Some(next_ro) = ka.position_at(time_ms) {
-                let prev_ro = shared_time_scale.right_offset();
-                shared_time_scale.set_right_offset(next_ro);
-                let clamped_hit_wall = (shared_time_scale.right_offset() - next_ro).abs() > 1e-6
-                    && (shared_time_scale.right_offset() - prev_ro).abs() < 1e-9;
-                if ka.is_finished(time_ms) || clamped_hit_wall {
-                    stop_kinetic = true;
-                } else {
-                    ui.ctx().request_repaint();
-                }
-            } else {
-                stop_kinetic = true;
-            }
-        }
-        if stop_kinetic {
-            *shared_kinetic = None;
-        }
+        step_shared_kinetic_inertia(ui, time_ms, shared_time_scale, shared_kinetic);
     }
 
-    // 3. Process interactions across Plot Canvas, Right Price Axis, and Bottom Time Axis
     handle_plot_interactions(
         ui,
         &plot_resp,
@@ -296,7 +1498,8 @@ pub fn render_shared_pane_candlestick_chart(
         shared_time_scale,
         shared_kinetic,
         main_price_scale,
-        volume_price_scale,
+        Some(volume_price_scale),
+        true,
     );
     handle_price_axis_interactions(ui, &price_resp, plot_rect_f64, main_price_scale);
     handle_time_axis_interactions(
@@ -307,26 +1510,24 @@ pub fn render_shared_pane_candlestick_chart(
         shared_kinetic,
     );
 
-    // 4. Refresh visible slice, dynamic `base_value` (`firstValue`), and single-pass autoscale + bounds
     let conflation_factor = shared_time_scale.conflation_factor(ppp);
-    let (base_value, bounds) = refresh_pane_autoscale_and_bounds(
+    let (base_value, bounds) = refresh_main_pane_autoscale_and_bounds(
         candles,
         shared_time_scale,
         main_price_scale,
         volume_price_scale,
         config.show_volume,
         conflation_factor,
+        None,
     )?;
     let culling_range =
         non_empty_candle_range(shared_time_scale.culling_data_range(), candles.len());
 
-    // 5. Paint backgrounds
     painter.rect_filled(layout.plot_rect, 0.0, palette::BG_CHART_CANVAS);
     painter.rect_filled(layout.price_axis_rect, 0.0, palette::BG_AXIS_GUTTER);
     painter.rect_filled(layout.time_axis_rect, 0.0, palette::BG_AXIS_GUTTER);
     painter.rect_filled(layout.corner_rect, 0.0, palette::BG_WORKSTATION);
 
-    // Construct non-monolithic `PaneViewport` coordinate bridges (`Logical <-> PaneLocal <-> Screen`)
     let main_vp = PaneViewport::new(
         shared_time_scale,
         main_price_scale,
@@ -335,235 +1536,66 @@ pub fn render_shared_pane_candlestick_chart(
     );
     let vol_vp = PaneViewport::new(shared_time_scale, volume_price_scale, plot_rect_f64, 1.0);
 
-    // 6. Horizontal price grid & right price axis ticks (`Linear` / `Log` / `%` / `Idx100`)
-    let target_price_ticks = ((layout.plot_rect.height() / 54.0).floor() as usize).clamp(4, 12);
-    let price_ticks = main_price_scale.nice_ticks(target_price_ticks, base_value);
-    for tick in &price_ticks {
-        let y = main_vp.local_y_to_screen_y(tick.local_y) as f32;
-        if config.show_grid {
+    paint_horizontal_price_grid_and_ticks(
+        &painter,
+        layout.plot_rect,
+        layout.price_axis_rect,
+        main_price_scale,
+        &main_vp,
+        base_value,
+        config.show_grid,
+        54.0,
+        4,
+        12,
+    );
+
+    let time_grid_ticks = collect_time_grid_ticks(
+        candles,
+        shared_time_scale,
+        &main_vp,
+        layout.plot_rect,
+        layout.time_axis_rect,
+    );
+    if config.show_grid {
+        for &(x, _) in &time_grid_ticks {
             painter.line_segment(
                 [
-                    Pos2::new(layout.plot_rect.left(), y),
-                    Pos2::new(layout.plot_rect.right(), y),
+                    Pos2::new(x, layout.plot_rect.top()),
+                    Pos2::new(x, layout.plot_rect.bottom()),
                 ],
                 Stroke::new(1.0, palette::GRID_LINE),
             );
         }
-
-        painter.line_segment(
-            [
-                Pos2::new(layout.price_axis_rect.left(), y),
-                Pos2::new(layout.price_axis_rect.left() + 5.0, y),
-            ],
-            Stroke::new(1.0, palette::BORDER_SUBTLE),
-        );
-
-        let label_y = y.clamp(
-            layout.price_axis_rect.top() + 8.0,
-            layout.price_axis_rect.bottom() - 8.0,
-        );
-        painter.text(
-            Pos2::new(layout.price_axis_rect.left() + 8.0, label_y),
-            Align2::LEFT_CENTER,
-            &tick.label,
-            FontId::monospace(11.0),
-            palette::TEXT_MUTED,
-        );
     }
+    paint_bottom_time_axis_labels(&painter, layout.time_axis_rect, &time_grid_ticks);
 
-    // 7. Vertical time grid & bottom time axis ticks ($O(\text{ticks})$ data-aligned stride)
-    if let Some(strict) = shared_time_scale.visible_strict_range() {
-        let target_time_labels = ((layout.plot_rect.width() / 130.0).floor() as i64).clamp(3, 10);
-        let raw_stride = (strict.count().max(1) / target_time_labels).max(1);
-        let stride = nice_bar_stride(raw_stride);
-        let first_idx = strict.left.max(0).div_euclid(stride) * stride;
-        let max_data_idx = (candles.len() as i64).saturating_sub(1);
-
-        let mut idx = first_idx;
-        while idx <= strict.right.min(max_data_idx) {
-            if idx >= 0
-                && let Some(sx) = main_vp.index_to_screen_x(idx)
-            {
-                let x = sx as f32;
-                if x >= layout.plot_rect.left() && x <= layout.plot_rect.right() {
-                    if config.show_grid {
-                        painter.line_segment(
-                            [
-                                Pos2::new(x, layout.plot_rect.top()),
-                                Pos2::new(x, layout.plot_rect.bottom()),
-                            ],
-                            Stroke::new(1.0, palette::GRID_LINE),
-                        );
-                    }
-
-                    if x >= layout.time_axis_rect.left() + 34.0
-                        && x <= layout.time_axis_rect.right() - 34.0
-                    {
-                        painter.line_segment(
-                            [
-                                Pos2::new(x, layout.time_axis_rect.top()),
-                                Pos2::new(x, layout.time_axis_rect.top() + 5.0),
-                            ],
-                            Stroke::new(1.0, palette::BORDER_SUBTLE),
-                        );
-                        painter.text(
-                            Pos2::new(x, layout.time_axis_rect.center().y),
-                            Align2::CENTER_CENTER,
-                            &candles[idx as usize].date_label,
-                            FontId::monospace(11.0),
-                            palette::TEXT_MUTED,
-                        );
-                    }
-                }
-            }
-            idx = idx.saturating_add(stride);
-        }
-    }
-
-    // 8. Single-pass Candlestick + Volume rendering with O(1) slice culling & DPR-aware OHLCV conflation
     let effective_bar_spacing = shared_time_scale.bar_spacing() * (conflation_factor as f64);
     let bar_metrics = CandlestickBarMetrics::compute(effective_bar_spacing, ppp);
-    let half_body_w = (bar_metrics.body_width_logical as f32) * 0.5;
-    let wick_stroke_w = bar_metrics.wick_width_logical as f32;
-    let min_body_h = (1.0 / (ppp as f32)).max(0.25);
+    let rendered_candle_count = paint_candlesticks_and_volume(
+        &painter,
+        layout.plot_rect,
+        candles,
+        culling_range.clone(),
+        conflation_factor,
+        &main_vp,
+        &vol_vp,
+        bar_metrics,
+        ppp,
+        config.show_volume,
+    );
 
     let plot_painter = painter.with_clip_rect(layout.plot_rect);
-    let mut rendered_candle_count = 0_usize;
-    let plot_bottom = layout.plot_rect.bottom();
-    let plot_top = layout.plot_rect.top();
+    paint_latest_close_line_and_pill(
+        &painter,
+        &plot_painter,
+        layout.plot_rect,
+        layout.price_axis_rect,
+        candles,
+        main_price_scale,
+        &main_vp,
+        base_value,
+    );
 
-    let conflated_iter = iter_conflated_candles(candles, culling_range.clone(), conflation_factor);
-    let vol_layer_slot = config
-        .show_volume
-        .then(|| plot_painter.add(egui::Shape::Noop));
-    let mut vol_shapes = if config.show_volume {
-        Vec::with_capacity(conflated_iter.size_hint().0)
-    } else {
-        Vec::new()
-    };
-
-    for bar in conflated_iter {
-        let Some(sx) = main_vp.float_index_to_screen_x(bar.center_logical_index) else {
-            continue;
-        };
-        let cx = sx as f32;
-        if cx + half_body_w < layout.plot_rect.left() || cx - half_body_w > layout.plot_rect.right()
-        {
-            continue;
-        }
-
-        if config.show_volume {
-            let vol_top_y = vol_vp
-                .price_to_screen_y(bar.volume)
-                .map_or(plot_bottom - 1.0, |sy| {
-                    (sy as f32).clamp(plot_top, plot_bottom - 1.0)
-                });
-            let fill = if bar.is_bullish() {
-                palette::BULLISH_VOL
-            } else {
-                palette::BEARISH_VOL
-            };
-            vol_shapes.push(egui::Shape::rect_filled(
-                Rect::from_min_max(
-                    Pos2::new(cx - half_body_w, vol_top_y),
-                    Pos2::new(cx + half_body_w, plot_bottom),
-                ),
-                0.0,
-                fill,
-            ));
-        }
-
-        let (Some(high_sy), Some(low_sy), Some(open_sy), Some(close_sy)) = (
-            main_vp.price_to_screen_y(bar.high),
-            main_vp.price_to_screen_y(bar.low),
-            main_vp.price_to_screen_y(bar.open),
-            main_vp.price_to_screen_y(bar.close),
-        ) else {
-            continue;
-        };
-
-        rendered_candle_count += 1;
-
-        let high_y = high_sy as f32;
-        let low_y = low_sy as f32;
-        let open_y = open_sy as f32;
-        let close_y = close_sy as f32;
-
-        let color = if bar.is_bullish() {
-            palette::BULLISH
-        } else {
-            palette::BEARISH
-        };
-
-        let top_y = open_y.min(close_y);
-        let bottom_y = open_y.max(close_y).max(top_y + min_body_h);
-        // Orientation-agnostic wick extremes so wicks remain 100% intact when `invert_scale == true`!
-        let wick_top_y = high_y.min(low_y);
-        let wick_bottom_y = high_y.max(low_y);
-
-        if wick_top_y < top_y {
-            plot_painter.line_segment(
-                [Pos2::new(cx, wick_top_y), Pos2::new(cx, top_y)],
-                Stroke::new(wick_stroke_w, color),
-            );
-        }
-        if wick_bottom_y > bottom_y {
-            plot_painter.line_segment(
-                [Pos2::new(cx, bottom_y), Pos2::new(cx, wick_bottom_y)],
-                Stroke::new(wick_stroke_w, color),
-            );
-        }
-
-        let body_rect = Rect::from_min_max(
-            Pos2::new(cx - half_body_w, top_y),
-            Pos2::new(cx + half_body_w, bottom_y),
-        );
-        plot_painter.rect_filled(body_rect, 0.0, color);
-    }
-
-    if let Some(slot) = vol_layer_slot {
-        plot_painter.set(slot, egui::Shape::Vec(vol_shapes));
-    }
-
-    // 9. Latest series close reference line & right price axis pill
-    if let Some(last_candle) = candles.last()
-        && let Some(last_sy) = main_vp.price_to_screen_y(last_candle.close)
-    {
-        let last_y = last_sy as f32;
-        if last_y >= layout.plot_rect.top() && last_y <= layout.plot_rect.bottom() {
-            let last_color = if last_candle.is_bullish() {
-                palette::BULLISH
-            } else {
-                palette::BEARISH
-            };
-            plot_painter.line_segment(
-                [
-                    Pos2::new(layout.plot_rect.left(), last_y),
-                    Pos2::new(layout.plot_rect.right(), last_y),
-                ],
-                Stroke::new(1.0, last_color.gamma_multiply(0.55)),
-            );
-
-            let pill_y = last_y.clamp(
-                layout.price_axis_rect.top() + 10.0,
-                layout.price_axis_rect.bottom() - 10.0,
-            );
-            let pill_rect = Rect::from_min_max(
-                Pos2::new(layout.price_axis_rect.left() + 2.0, pill_y - 10.0),
-                Pos2::new(layout.price_axis_rect.right() - 4.0, pill_y + 10.0),
-            );
-            painter.rect_filled(pill_rect, 3.0, last_color);
-            painter.text(
-                Pos2::new(layout.price_axis_rect.left() + 7.0, pill_y),
-                Align2::LEFT_CENTER,
-                main_price_scale.format_price(last_candle.close, base_value),
-                FontId::monospace(11.0),
-                Color32::WHITE,
-            );
-        }
-    }
-
-    // 10. Hovered/inspected candle & two-axis crosshair badges
     let hover_pos = plot_resp
         .hover_pos()
         .filter(|pos| layout.plot_rect.contains(*pos));
@@ -602,60 +1634,24 @@ pub fn render_shared_pane_candlestick_chart(
             Stroke::new(1.0, palette::CROSSHAIR.gamma_multiply(0.50)),
         );
 
-        // Right Price Axis crosshair pill
         if let Some(price_at_cursor) = pointer_price {
-            let pill_y = cross_y.clamp(
-                layout.price_axis_rect.top() + 10.0,
-                layout.price_axis_rect.bottom() - 10.0,
-            );
-            let cursor_pill = Rect::from_min_max(
-                Pos2::new(layout.price_axis_rect.left() + 2.0, pill_y - 9.5),
-                Pos2::new(layout.price_axis_rect.right() - 4.0, pill_y + 9.5),
-            );
-            painter.rect_filled(cursor_pill, 3.0, palette::ACCENT_BLUE);
-            painter.text(
-                Pos2::new(layout.price_axis_rect.left() + 7.0, pill_y),
-                Align2::LEFT_CENTER,
-                main_price_scale.format_price(price_at_cursor, base_value),
-                FontId::monospace(11.0),
-                Color32::WHITE,
+            paint_axis_cursor_pill(
+                &painter,
+                layout.price_axis_rect,
+                cross_y,
+                &main_price_scale.format_price(price_at_cursor, base_value),
             );
         }
-
-        // Bottom Time Axis crosshair pill (supports both historical bars and future whitespace!)
-        let unit_suffix = if config.timeframe.eq_ignore_ascii_case("1D") {
-            "d"
-        } else {
-            "b"
-        };
-        let time_label = if slot_idx >= 0 && (slot_idx as usize) < candles.len() {
-            candles[slot_idx as usize].date_label.clone()
-        } else if slot_idx >= candles.len() as i64 {
-            let ahead = slot_idx - (candles.len() as i64 - 1);
-            format!("+{ahead}{unit_suffix}")
-        } else {
-            format!("{slot_idx}{unit_suffix}")
-        };
-        let pill_half_w = 42.0_f32;
-        let pill_cx = cross_x.clamp(
-            layout.time_axis_rect.left() + pill_half_w + 2.0,
-            layout.time_axis_rect.right() - pill_half_w - 2.0,
-        );
-        let time_pill = Rect::from_min_max(
-            Pos2::new(pill_cx - pill_half_w, layout.time_axis_rect.top() + 3.0),
-            Pos2::new(pill_cx + pill_half_w, layout.time_axis_rect.bottom() - 3.0),
-        );
-        painter.rect_filled(time_pill, 3.0, palette::ACCENT_BLUE);
-        painter.text(
-            time_pill.center(),
-            Align2::CENTER_CENTER,
-            time_label,
-            FontId::monospace(11.0),
-            Color32::WHITE,
+        paint_time_axis_cursor_pill(
+            &painter,
+            layout.time_axis_rect,
+            candles,
+            config.timeframe,
+            slot_idx,
+            cross_x,
         );
     }
 
-    // 11. Axis separator lines & outer border
     painter.line_segment(
         [
             Pos2::new(layout.plot_rect.right(), layout.outer_rect.top()),
@@ -677,8 +1673,825 @@ pub fn render_shared_pane_candlestick_chart(
         StrokeKind::Inside,
     );
 
-    // 12. Top-left TradingView-style OHLCV Legend HUD inside plot canvas
-    // When `conflation_factor > 1`, displays the exact conflated OHLCV bucket rendered under cursor!
+    paint_main_ohlcv_hud(
+        &painter,
+        layout.plot_rect,
+        candles,
+        config,
+        inspected_data_index,
+        conflation_factor,
+    );
+
+    Some(ChartRenderReport {
+        layout,
+        bounds,
+        inspected_data_index,
+        pointer_price,
+        bar_spacing: shared_time_scale.bar_spacing(),
+        right_offset: shared_time_scale.right_offset(),
+        conflation_factor,
+        culled_bar_count: culling_range.len(),
+        rendered_candle_count,
+        base_value,
+        kinetic_active: shared_kinetic
+            .as_ref()
+            .is_some_and(KineticAnimation::is_active),
+        pane_count: 1,
+        active_overlay_count: 0,
+        hovered_oscillator: None,
+        hovered_oscillator_value: None,
+        first_oscillator_plot_rect: None,
+        first_separator_rect: None,
+    })
+}
+
+fn step_shared_kinetic_inertia(
+    ui: &Ui,
+    time_ms: f64,
+    shared_time_scale: &mut TimeScale,
+    shared_kinetic: &mut Option<KineticAnimation>,
+) {
+    let mut stop_kinetic = false;
+    if let Some(ka) = shared_kinetic.as_ref()
+        && ka.is_active()
+    {
+        if let Some(next_ro) = ka.position_at(time_ms) {
+            let prev_ro = shared_time_scale.right_offset();
+            shared_time_scale.set_right_offset(next_ro);
+            let clamped_hit_wall = (shared_time_scale.right_offset() - next_ro).abs() > 1e-6
+                && (shared_time_scale.right_offset() - prev_ro).abs() < 1e-9;
+            if ka.is_finished(time_ms) || clamped_hit_wall {
+                stop_kinetic = true;
+            } else {
+                ui.ctx().request_repaint();
+            }
+        } else {
+            stop_kinetic = true;
+        }
+    }
+    if stop_kinetic {
+        *shared_kinetic = None;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_horizontal_price_grid_and_ticks(
+    painter: &egui::Painter,
+    plot_rect: Rect,
+    price_axis_rect: Rect,
+    price_scale: &PriceScale,
+    vp: &PaneViewport<'_>,
+    base_value: f64,
+    show_grid: bool,
+    px_per_tick: f32,
+    min_ticks: usize,
+    max_ticks: usize,
+) {
+    let target_ticks =
+        ((plot_rect.height() / px_per_tick).floor() as usize).clamp(min_ticks, max_ticks);
+    let ticks = price_scale.nice_ticks(target_ticks, base_value);
+    for tick in &ticks {
+        let y = vp.local_y_to_screen_y(tick.local_y) as f32;
+        if y < plot_rect.top() || y > plot_rect.bottom() {
+            continue;
+        }
+        if show_grid {
+            painter.line_segment(
+                [
+                    Pos2::new(plot_rect.left(), y),
+                    Pos2::new(plot_rect.right(), y),
+                ],
+                Stroke::new(1.0, palette::GRID_LINE),
+            );
+        }
+        painter.line_segment(
+            [
+                Pos2::new(price_axis_rect.left(), y),
+                Pos2::new(price_axis_rect.left() + 5.0, y),
+            ],
+            Stroke::new(1.0, palette::BORDER_SUBTLE),
+        );
+        let label_y = y.clamp(price_axis_rect.top() + 8.0, price_axis_rect.bottom() - 8.0);
+        painter.text(
+            Pos2::new(price_axis_rect.left() + 8.0, label_y),
+            Align2::LEFT_CENTER,
+            &tick.label,
+            FontId::monospace(11.0),
+            palette::TEXT_MUTED,
+        );
+    }
+}
+
+fn collect_time_grid_ticks<'a>(
+    candles: &'a [Candle],
+    time_scale: &TimeScale,
+    main_vp: &PaneViewport<'_>,
+    plot_rect: Rect,
+    time_axis_rect: Rect,
+) -> Vec<(f32, Option<&'a str>)> {
+    let mut out = Vec::new();
+    let Some(strict) = time_scale.visible_strict_range() else {
+        return out;
+    };
+    let target_time_labels = ((plot_rect.width() / 130.0).floor() as i64).clamp(3, 10);
+    let raw_stride = (strict.count().max(1) / target_time_labels).max(1);
+    let stride = nice_bar_stride(raw_stride);
+    let first_idx = strict.left.max(0).div_euclid(stride) * stride;
+    let max_data_idx = (candles.len() as i64).saturating_sub(1);
+
+    let mut idx = first_idx;
+    while idx <= strict.right.min(max_data_idx) {
+        if idx >= 0
+            && let Some(sx) = main_vp.index_to_screen_x(idx)
+        {
+            let x = sx as f32;
+            if x >= plot_rect.left() && x <= plot_rect.right() {
+                let label = (x >= time_axis_rect.left() + 34.0
+                    && x <= time_axis_rect.right() - 34.0)
+                    .then_some(candles[idx as usize].date_label.as_str());
+                out.push((x, label));
+            }
+        }
+        idx = idx.saturating_add(stride);
+    }
+    out
+}
+
+fn paint_bottom_time_axis_labels(
+    painter: &egui::Painter,
+    time_axis_rect: Rect,
+    ticks: &[(f32, Option<&str>)],
+) {
+    for &(x, label_opt) in ticks {
+        if let Some(label) = label_opt {
+            painter.line_segment(
+                [
+                    Pos2::new(x, time_axis_rect.top()),
+                    Pos2::new(x, time_axis_rect.top() + 5.0),
+                ],
+                Stroke::new(1.0, palette::BORDER_SUBTLE),
+            );
+            painter.text(
+                Pos2::new(x, time_axis_rect.center().y),
+                Align2::CENTER_CENTER,
+                label,
+                FontId::monospace(11.0),
+                palette::TEXT_MUTED,
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_candlesticks_and_volume(
+    painter: &egui::Painter,
+    plot_rect: Rect,
+    candles: &[Candle],
+    culling_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    main_vp: &PaneViewport<'_>,
+    vol_vp: &PaneViewport<'_>,
+    bar_metrics: CandlestickBarMetrics,
+    ppp: f64,
+    show_volume: bool,
+) -> usize {
+    let half_body_w = (bar_metrics.body_width_logical as f32) * 0.5;
+    let wick_stroke_w = bar_metrics.wick_width_logical as f32;
+    let min_body_h = (1.0 / (ppp as f32)).max(0.25);
+
+    let plot_painter = painter.with_clip_rect(plot_rect);
+    let mut rendered_candle_count = 0_usize;
+    let plot_bottom = plot_rect.bottom();
+    let plot_top = plot_rect.top();
+
+    let conflated_iter = iter_conflated_candles(candles, culling_range, conflation_factor);
+    let est_bars = conflated_iter.size_hint().0;
+    let vol_layer_slot = show_volume.then(|| plot_painter.add(Shape::Noop));
+    let mut vol_mesh = Mesh::default();
+    if show_volume {
+        vol_mesh.vertices.reserve(est_bars * 4);
+        vol_mesh.indices.reserve(est_bars * 6);
+    }
+    let mut candle_mesh = Mesh::default();
+    candle_mesh.vertices.reserve(est_bars * 12);
+    candle_mesh.indices.reserve(est_bars * 18);
+    let half_wick_w = (wick_stroke_w * 0.5).max(0.45);
+
+    for bar in conflated_iter {
+        let Some(sx) = main_vp.float_index_to_screen_x(bar.center_logical_index) else {
+            continue;
+        };
+        let cx = sx as f32;
+        if cx + half_body_w < plot_rect.left() || cx - half_body_w > plot_rect.right() {
+            continue;
+        };
+
+        if show_volume {
+            let vol_top_y = vol_vp
+                .price_to_screen_y(bar.volume)
+                .map_or(plot_bottom - 1.0, |sy| {
+                    (sy as f32).clamp(plot_top, plot_bottom - 1.0)
+                });
+            let fill = if bar.is_bullish() {
+                palette::BULLISH_VOL
+            } else {
+                palette::BEARISH_VOL
+            };
+            vol_mesh.add_colored_rect(
+                Rect::from_min_max(
+                    Pos2::new(cx - half_body_w, vol_top_y),
+                    Pos2::new(cx + half_body_w, plot_bottom),
+                ),
+                fill,
+            );
+        }
+
+        let (Some(high_sy), Some(low_sy), Some(open_sy), Some(close_sy)) = (
+            main_vp.price_to_screen_y(bar.high),
+            main_vp.price_to_screen_y(bar.low),
+            main_vp.price_to_screen_y(bar.open),
+            main_vp.price_to_screen_y(bar.close),
+        ) else {
+            continue;
+        };
+
+        rendered_candle_count += 1;
+
+        let high_y = high_sy as f32;
+        let low_y = low_sy as f32;
+        let open_y = open_sy as f32;
+        let close_y = close_sy as f32;
+
+        let color = if bar.is_bullish() {
+            palette::BULLISH
+        } else {
+            palette::BEARISH
+        };
+
+        let top_y = open_y.min(close_y);
+        let bottom_y = open_y.max(close_y).max(top_y + min_body_h);
+        let wick_top_y = high_y.min(low_y);
+        let wick_bottom_y = high_y.max(low_y);
+
+        if wick_top_y < top_y {
+            candle_mesh.add_colored_rect(
+                Rect::from_min_max(
+                    Pos2::new(cx - half_wick_w, wick_top_y),
+                    Pos2::new(cx + half_wick_w, top_y),
+                ),
+                color,
+            );
+        }
+        if wick_bottom_y > bottom_y {
+            candle_mesh.add_colored_rect(
+                Rect::from_min_max(
+                    Pos2::new(cx - half_wick_w, bottom_y),
+                    Pos2::new(cx + half_wick_w, wick_bottom_y),
+                ),
+                color,
+            );
+        }
+
+        let body_rect = Rect::from_min_max(
+            Pos2::new(cx - half_body_w, top_y),
+            Pos2::new(cx + half_body_w, bottom_y),
+        );
+        candle_mesh.add_colored_rect(body_rect, color);
+    }
+
+    if let Some(slot) = vol_layer_slot
+        && !vol_mesh.indices.is_empty()
+    {
+        plot_painter.set(slot, Shape::mesh(vol_mesh));
+    }
+    if !candle_mesh.indices.is_empty() {
+        plot_painter.add(Shape::mesh(candle_mesh));
+    }
+
+    rendered_candle_count
+}
+
+#[inline]
+fn resolve_bucket_screen_ys(
+    env: &BucketLineEnvelope,
+    vp: &PaneViewport<'_>,
+) -> Option<(f32, f32, bool)> {
+    let sy0 = vp.price_to_screen_y(env.entry_val)? as f32;
+    if env.is_single {
+        return Some((sy0, sy0, true));
+    }
+    let sy1 = vp.price_to_screen_y(env.exit_val)? as f32;
+    if env.has_internal_gap {
+        return Some((sy0, sy1, false));
+    }
+    // Collapse degenerate sub-pixel vertical jogs (`< 0.65px`) inside smooth buckets while
+    // preserving every genuine intra-bucket M4 vertical spike (`>= 0.65px`).
+    if (sy1 - sy0).abs() < 0.65 {
+        let mid = 0.5 * (sy0 + sy1);
+        Some((mid, mid, true))
+    } else {
+        Some((sy0, sy1, false))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_conflated_line_series(
+    painter: &egui::Painter,
+    series: &[Option<f64>],
+    block_index: Option<&SeriesBlockIndex>,
+    culling_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    vp: &PaneViewport<'_>,
+    stroke: Stroke,
+) {
+    let step = conflation_factor.max(1);
+    let total = series.len();
+    let clamped_start = culling_range.start.min(total);
+    let clamped_end = culling_range.end.min(total);
+    if clamped_start >= clamped_end {
+        return;
+    }
+
+    let mut current_pts: Vec<Pos2> = Vec::with_capacity(256);
+    let flush_segment = |painter: &egui::Painter, pts: &mut Vec<Pos2>| {
+        if pts.len() >= 2 {
+            painter.add(Shape::line(std::mem::take(pts), stroke));
+        } else if let Some(&single_pt) = pts.first() {
+            painter.circle_filled(single_pt, (stroke.width * 0.9).max(1.2), stroke.color);
+            pts.clear();
+        }
+    };
+
+    if step == 1 {
+        for (idx, item) in series
+            .iter()
+            .enumerate()
+            .take(clamped_end)
+            .skip(clamped_start)
+        {
+            if let Some(v) = item.filter(|v| v.is_finite())
+                && let (Some(sx), Some(sy)) = (
+                    vp.float_index_to_screen_x(idx as f64),
+                    vp.price_to_screen_y(v),
+                )
+            {
+                current_pts.push(Pos2::new(sx as f32, sy as f32));
+            } else {
+                flush_segment(painter, &mut current_pts);
+            }
+        }
+        flush_segment(painter, &mut current_pts);
+        return;
+    }
+
+    let aligned_start = (clamped_start / step) * step;
+    let aligned_end = clamped_end.div_ceil(step).saturating_mul(step).min(total);
+    let mut b_start = aligned_start;
+
+    while b_start < aligned_end {
+        let b_end = (b_start + step).min(total);
+        if let Some(env) = bucket_line_envelope_indexed(series, block_index, b_start, b_end)
+            && let (Some(sx), Some((y_entry, y_exit, single))) = (
+                vp.float_index_to_screen_x(env.center_logical_index),
+                resolve_bucket_screen_ys(&env, vp),
+            )
+        {
+            let x = sx as f32;
+            if env.has_leading_gap {
+                flush_segment(painter, &mut current_pts);
+            }
+            if env.has_internal_gap {
+                current_pts.push(Pos2::new(x, y_entry));
+                flush_segment(painter, &mut current_pts);
+                current_pts.push(Pos2::new(x, y_exit));
+            } else if single {
+                current_pts.push(Pos2::new(x, y_entry));
+            } else {
+                current_pts.push(Pos2::new(x, y_entry));
+                current_pts.push(Pos2::new(x, y_exit));
+            }
+            if env.has_trailing_gap {
+                flush_segment(painter, &mut current_pts);
+            }
+        } else {
+            flush_segment(painter, &mut current_pts);
+        }
+        b_start = b_end;
+    }
+    flush_segment(painter, &mut current_pts);
+}
+
+fn paint_bollinger_bands(
+    painter: &egui::Painter,
+    cache: &IndicatorCache,
+    culling_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    vp: &PaneViewport<'_>,
+) {
+    let bbands = &cache.bbands;
+    let step = conflation_factor.max(1);
+    let total = bbands.middle.len();
+    let clamped_start = culling_range.start.min(total);
+    let clamped_end = culling_range.end.min(total);
+    if clamped_start < clamped_end {
+        let mut mesh = Mesh::default();
+        // `(prev_x, prev_u_exit_y, prev_l_exit_y)` matching the exact exit coordinates of the
+        // `bbands.upper` and `bbands.lower` border polylines so the filled ribbon can NEVER bleed!
+        let mut prev_exit: Option<(f32, f32, f32)> = None;
+
+        let aligned_start = (clamped_start / step) * step;
+        let aligned_end = clamped_end.div_ceil(step).saturating_mul(step).min(total);
+        let mut b_start = aligned_start;
+
+        while b_start < aligned_end {
+            let b_end = (b_start + step).min(total);
+            let u_env_opt = bucket_line_envelope_indexed(
+                &bbands.upper,
+                Some(&cache.bb_upper_idx),
+                b_start,
+                b_end,
+            );
+            let l_env_opt = bucket_line_envelope_indexed(
+                &bbands.lower,
+                Some(&cache.bb_lower_idx),
+                b_start,
+                b_end,
+            );
+
+            if let (Some(u_env), Some(l_env)) = (u_env_opt, l_env_opt)
+                && let (Some(sx), Some((u_in, u_out, _)), Some((l_in, l_out, _))) = (
+                    vp.float_index_to_screen_x(u_env.center_logical_index),
+                    resolve_bucket_screen_ys(&u_env, vp),
+                    resolve_bucket_screen_ys(&l_env, vp),
+                )
+            {
+                let x = sx as f32;
+                if u_env.has_leading_gap || l_env.has_leading_gap {
+                    prev_exit = None;
+                }
+                if let Some((px, pu_out, pl_out)) = prev_exit {
+                    let tl = pu_out.min(pl_out);
+                    let bl = pu_out.max(pl_out);
+                    let tr = u_in.min(l_in);
+                    let br = u_in.max(l_in);
+                    let base_v = mesh.vertices.len() as u32;
+                    mesh.colored_vertex(Pos2::new(px, tl), palette::IND_BB_FILL);
+                    mesh.colored_vertex(Pos2::new(px, bl), palette::IND_BB_FILL);
+                    mesh.colored_vertex(Pos2::new(x, tr), palette::IND_BB_FILL);
+                    mesh.colored_vertex(Pos2::new(x, br), palette::IND_BB_FILL);
+                    mesh.add_triangle(base_v, base_v + 1, base_v + 2);
+                    mesh.add_triangle(base_v + 1, base_v + 3, base_v + 2);
+                }
+                if u_env.has_trailing_gap || l_env.has_trailing_gap {
+                    prev_exit = None;
+                } else {
+                    prev_exit = Some((x, u_out, l_out));
+                }
+            } else {
+                prev_exit = None;
+            }
+
+            b_start = b_end;
+        }
+
+        if !mesh.indices.is_empty() {
+            painter.add(Shape::mesh(mesh));
+        }
+    }
+
+    let edge_stroke = Stroke::new(1.2, palette::IND_BB_BORDER);
+    let mid_stroke = Stroke::new(1.2, palette::IND_BB_MIDDLE);
+    paint_conflated_line_series(
+        painter,
+        &bbands.upper,
+        Some(&cache.bb_upper_idx),
+        culling_range.clone(),
+        conflation_factor,
+        vp,
+        edge_stroke,
+    );
+    paint_conflated_line_series(
+        painter,
+        &bbands.middle,
+        Some(&cache.bb_middle_idx),
+        culling_range.clone(),
+        conflation_factor,
+        vp,
+        mid_stroke,
+    );
+    paint_conflated_line_series(
+        painter,
+        &bbands.lower,
+        Some(&cache.bb_lower_idx),
+        culling_range,
+        conflation_factor,
+        vp,
+        edge_stroke,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_rsi_pane(
+    painter: &egui::Painter,
+    plot_rect: Rect,
+    rsi_series: &[Option<f64>],
+    rsi_index: Option<&SeriesBlockIndex>,
+    culling_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    vp: &PaneViewport<'_>,
+) {
+    let upper_ref = RSI_REFERENCE_LEVELS[0].value;
+    let mid_ref = RSI_REFERENCE_LEVELS[1].value;
+    let lower_ref = RSI_REFERENCE_LEVELS[2].value;
+
+    if let (Some(y_hi), Some(y_lo)) = (
+        vp.price_to_screen_y(upper_ref),
+        vp.price_to_screen_y(lower_ref),
+    ) {
+        let top_y = (y_hi as f32)
+            .min(y_lo as f32)
+            .clamp(plot_rect.top(), plot_rect.bottom());
+        let bot_y = (y_hi as f32)
+            .max(y_lo as f32)
+            .clamp(plot_rect.top(), plot_rect.bottom());
+        if bot_y > top_y {
+            painter.rect_filled(
+                Rect::from_min_max(
+                    Pos2::new(plot_rect.left(), top_y),
+                    Pos2::new(plot_rect.right(), bot_y),
+                ),
+                0.0,
+                palette::IND_RSI_BAND_FILL,
+            );
+        }
+    }
+
+    for (lvl, alpha) in [(upper_ref, 0.55), (mid_ref, 0.30), (lower_ref, 0.55)] {
+        if let Some(sy) = vp.price_to_screen_y(lvl) {
+            let y = sy as f32;
+            if y >= plot_rect.top() && y <= plot_rect.bottom() {
+                painter.line_segment(
+                    [
+                        Pos2::new(plot_rect.left(), y),
+                        Pos2::new(plot_rect.right(), y),
+                    ],
+                    Stroke::new(1.0, palette::IND_RSI.gamma_multiply(alpha)),
+                );
+            }
+        }
+    }
+
+    paint_conflated_line_series(
+        painter,
+        rsi_series,
+        rsi_index,
+        culling_range,
+        conflation_factor,
+        vp,
+        Stroke::new(1.5, palette::IND_RSI),
+    );
+}
+
+#[inline]
+fn resolve_macd_histogram_bar_ys(
+    zero_y: f32,
+    val_y: f32,
+    value: f64,
+    plot_top: f32,
+    plot_bottom: f32,
+) -> Option<(f32, f32)> {
+    let (raw_top, raw_bot) = if value.abs() <= 1e-15 {
+        (zero_y - 0.5, zero_y + 0.5)
+    } else if val_y >= zero_y {
+        (zero_y, val_y.max(zero_y + 0.75))
+    } else {
+        (val_y.min(zero_y - 0.75), zero_y)
+    };
+    let top_y = raw_top.max(plot_top);
+    let bot_y = raw_bot.min(plot_bottom);
+    (bot_y > top_y).then_some((top_y, bot_y))
+}
+
+fn paint_macd_pane(
+    painter: &egui::Painter,
+    plot_rect: Rect,
+    cache: &IndicatorCache,
+    culling_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    vp: &PaneViewport<'_>,
+    bar_metrics: CandlestickBarMetrics,
+) {
+    let macd = &cache.macd;
+    let zero_level = MACD_REFERENCE_LEVELS[0].value;
+    let zero_y_opt = vp.price_to_screen_y(zero_level).map(|sy| sy as f32);
+
+    if let Some(zy) = zero_y_opt
+        && zy >= plot_rect.top()
+        && zy <= plot_rect.bottom()
+    {
+        painter.line_segment(
+            [
+                Pos2::new(plot_rect.left(), zy),
+                Pos2::new(plot_rect.right(), zy),
+            ],
+            Stroke::new(1.0, palette::BORDER_SUBTLE),
+        );
+    }
+
+    if let Some(zero_y) = zero_y_opt {
+        let half_w = ((bar_metrics.body_width_logical as f32) * 0.5).max(0.5);
+        let mut hist_mesh = Mesh::default();
+        visit_conflated_histogram_bars_indexed(
+            &macd.histogram,
+            Some(&cache.macd_hist_idx),
+            culling_range.clone(),
+            conflation_factor,
+            |bar| {
+                let Some(sx) = vp.float_index_to_screen_x(bar.center_logical_index) else {
+                    return;
+                };
+                let cx = sx as f32;
+                if cx + half_w < plot_rect.left() || cx - half_w > plot_rect.right() {
+                    return;
+                }
+                let Some(val_sy) = vp.price_to_screen_y(bar.value) else {
+                    return;
+                };
+                let Some((top_y, bot_y)) = resolve_macd_histogram_bar_ys(
+                    zero_y,
+                    val_sy as f32,
+                    bar.value,
+                    plot_rect.top(),
+                    plot_rect.bottom(),
+                ) else {
+                    return;
+                };
+
+                let rising = bar.prev_value.is_none_or(|pv| bar.value >= pv);
+                let color = if bar.value >= 0.0 {
+                    if rising {
+                        palette::IND_MACD_HIST_POS_UP
+                    } else {
+                        palette::IND_MACD_HIST_POS_DOWN
+                    }
+                } else if rising {
+                    palette::IND_MACD_HIST_NEG_UP
+                } else {
+                    palette::IND_MACD_HIST_NEG_DOWN
+                };
+
+                hist_mesh.add_colored_rect(
+                    Rect::from_min_max(
+                        Pos2::new(cx - half_w, top_y),
+                        Pos2::new(cx + half_w, bot_y),
+                    ),
+                    color,
+                );
+            },
+        );
+        if !hist_mesh.indices.is_empty() {
+            painter.add(Shape::mesh(hist_mesh));
+        }
+    }
+
+    paint_conflated_line_series(
+        painter,
+        &macd.macd_line,
+        Some(&cache.macd_line_idx),
+        culling_range.clone(),
+        conflation_factor,
+        vp,
+        Stroke::new(1.4, palette::IND_MACD),
+    );
+    paint_conflated_line_series(
+        painter,
+        &macd.signal_line,
+        Some(&cache.macd_signal_idx),
+        culling_range,
+        conflation_factor,
+        vp,
+        Stroke::new(1.4, palette::IND_MACD_SIGNAL),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_latest_close_line_and_pill(
+    painter: &egui::Painter,
+    plot_painter: &egui::Painter,
+    plot_rect: Rect,
+    price_axis_rect: Rect,
+    candles: &[Candle],
+    main_price_scale: &PriceScale,
+    main_vp: &PaneViewport<'_>,
+    base_value: f64,
+) {
+    if let Some(last_candle) = candles.last()
+        && let Some(last_sy) = main_vp.price_to_screen_y(last_candle.close)
+    {
+        let last_y = last_sy as f32;
+        if last_y >= plot_rect.top() && last_y <= plot_rect.bottom() {
+            let last_color = if last_candle.is_bullish() {
+                palette::BULLISH
+            } else {
+                palette::BEARISH
+            };
+            plot_painter.line_segment(
+                [
+                    Pos2::new(plot_rect.left(), last_y),
+                    Pos2::new(plot_rect.right(), last_y),
+                ],
+                Stroke::new(1.0, last_color.gamma_multiply(0.55)),
+            );
+
+            let pill_y = last_y.clamp(
+                price_axis_rect.top() + 10.0,
+                price_axis_rect.bottom() - 10.0,
+            );
+            let pill_rect = Rect::from_min_max(
+                Pos2::new(price_axis_rect.left() + 2.0, pill_y - 10.0),
+                Pos2::new(price_axis_rect.right() - 4.0, pill_y + 10.0),
+            );
+            painter.rect_filled(pill_rect, 3.0, last_color);
+            painter.text(
+                Pos2::new(price_axis_rect.left() + 7.0, pill_y),
+                Align2::LEFT_CENTER,
+                main_price_scale.format_price(last_candle.close, base_value),
+                FontId::monospace(11.0),
+                Color32::WHITE,
+            );
+        }
+    }
+}
+
+fn paint_axis_cursor_pill(
+    painter: &egui::Painter,
+    axis_rect: Rect,
+    cross_y: f32,
+    formatted_label: &str,
+) {
+    let pill_y = cross_y.clamp(axis_rect.top() + 10.0, axis_rect.bottom() - 10.0);
+    let cursor_pill = Rect::from_min_max(
+        Pos2::new(axis_rect.left() + 2.0, pill_y - 9.5),
+        Pos2::new(axis_rect.right() - 4.0, pill_y + 9.5),
+    );
+    painter.rect_filled(cursor_pill, 3.0, palette::ACCENT_BLUE);
+    painter.text(
+        Pos2::new(axis_rect.left() + 7.0, pill_y),
+        Align2::LEFT_CENTER,
+        formatted_label,
+        FontId::monospace(11.0),
+        Color32::WHITE,
+    );
+}
+
+fn paint_time_axis_cursor_pill(
+    painter: &egui::Painter,
+    time_axis_rect: Rect,
+    candles: &[Candle],
+    timeframe: &str,
+    slot_idx: i64,
+    cross_x: f32,
+) {
+    let unit_suffix = if timeframe.eq_ignore_ascii_case("1D") {
+        "d"
+    } else {
+        "b"
+    };
+    let time_label = if slot_idx >= 0 && (slot_idx as usize) < candles.len() {
+        candles[slot_idx as usize].date_label.clone()
+    } else if slot_idx >= candles.len() as i64 {
+        let ahead = slot_idx - (candles.len() as i64 - 1);
+        format!("+{ahead}{unit_suffix}")
+    } else {
+        format!("{slot_idx}{unit_suffix}")
+    };
+    let pill_half_w = 42.0_f32;
+    let pill_cx = cross_x.clamp(
+        time_axis_rect.left() + pill_half_w + 2.0,
+        time_axis_rect.right() - pill_half_w - 2.0,
+    );
+    let time_pill = Rect::from_min_max(
+        Pos2::new(pill_cx - pill_half_w, time_axis_rect.top() + 3.0),
+        Pos2::new(pill_cx + pill_half_w, time_axis_rect.bottom() - 3.0),
+    );
+    painter.rect_filled(time_pill, 3.0, palette::ACCENT_BLUE);
+    painter.text(
+        time_pill.center(),
+        Align2::CENTER_CENTER,
+        time_label,
+        FontId::monospace(11.0),
+        Color32::WHITE,
+    );
+}
+
+fn paint_main_ohlcv_hud(
+    painter: &egui::Painter,
+    plot_rect: Rect,
+    candles: &[Candle],
+    config: ChartDisplayConfig<'_>,
+    inspected_data_index: usize,
+    conflation_factor: usize,
+) {
     let inspected_bucket = conflated_candle_at(candles, inspected_data_index, conflation_factor)
         .unwrap_or_else(|| {
             let c = &candles[inspected_data_index];
@@ -730,13 +2543,10 @@ pub fn render_shared_pane_candlestick_chart(
     let hud_galley = painter.layout_no_wrap(hud_text, FontId::monospace(11.5), value_color);
     let desired_hud_w = (hud_galley.size().x + 22.0).max(160.0);
     let hud_rect = Rect::from_min_size(
-        Pos2::new(
-            layout.plot_rect.left() + 12.0,
-            layout.plot_rect.top() + 10.0,
-        ),
+        Pos2::new(plot_rect.left() + 12.0, plot_rect.top() + 8.0),
         Vec2::new(
-            desired_hud_w.min((layout.plot_rect.width() - 24.0).max(120.0)),
-            28.0,
+            desired_hud_w.min((plot_rect.width() - 24.0).max(120.0)),
+            26.0,
         ),
     );
     painter.rect_filled(hud_rect, 4.0, palette::BG_FLOATING_HUD);
@@ -746,8 +2556,7 @@ pub fn render_shared_pane_candlestick_chart(
         Stroke::new(1.0, palette::BORDER_SUBTLE),
         StrokeKind::Inside,
     );
-    let hud_painter = painter.with_clip_rect(hud_rect);
-    hud_painter.galley(
+    painter.with_clip_rect(hud_rect).galley(
         Pos2::new(
             hud_rect.left() + 10.0,
             hud_rect.center().y - hud_galley.size().y * 0.5,
@@ -755,22 +2564,244 @@ pub fn render_shared_pane_candlestick_chart(
         hud_galley,
         value_color,
     );
+}
 
-    Some(ChartRenderReport {
-        layout,
-        bounds,
-        inspected_data_index,
-        pointer_price,
-        bar_spacing: shared_time_scale.bar_spacing(),
-        right_offset: shared_time_scale.right_offset(),
-        conflation_factor,
-        culled_bar_count: culling_range.len(),
-        rendered_candle_count,
-        base_value,
-        kinetic_active: shared_kinetic
-            .as_ref()
-            .is_some_and(KineticAnimation::is_active),
-    })
+fn paint_main_overlay_hud(
+    painter: &egui::Painter,
+    plot_rect: Rect,
+    indicators: &IndicatorConfig,
+    cache: &IndicatorCache,
+    idx: usize,
+) {
+    if plot_rect.height() < 64.0 {
+        return;
+    }
+    let mut job = LayoutJob::default();
+    let font = FontId::monospace(11.0);
+    let mut has_item = false;
+
+    let append_sep = |job: &mut LayoutJob, has_item: &mut bool| {
+        if *has_item {
+            job.append(
+                "   ·   ",
+                0.0,
+                TextFormat {
+                    font_id: font.clone(),
+                    color: palette::TEXT_MUTED,
+                    ..Default::default()
+                },
+            );
+        }
+        *has_item = true;
+    };
+
+    if indicators.show_sma {
+        append_sep(&mut job, &mut has_item);
+        let val = cache
+            .sma
+            .get(idx)
+            .copied()
+            .flatten()
+            .map_or_else(|| "—".to_owned(), |v| format!("{v:.2}"));
+        job.append(
+            &format!("SMA({}) {val}", indicators.sma_period),
+            0.0,
+            TextFormat {
+                font_id: font.clone(),
+                color: palette::IND_SMA,
+                ..Default::default()
+            },
+        );
+    }
+    if indicators.show_ema {
+        append_sep(&mut job, &mut has_item);
+        let val = cache
+            .ema
+            .get(idx)
+            .copied()
+            .flatten()
+            .map_or_else(|| "—".to_owned(), |v| format!("{v:.2}"));
+        job.append(
+            &format!("EMA({}) {val}", indicators.ema_period),
+            0.0,
+            TextFormat {
+                font_id: font.clone(),
+                color: palette::IND_EMA,
+                ..Default::default()
+            },
+        );
+    }
+    if indicators.show_bbands {
+        append_sep(&mut job, &mut has_item);
+        let fmt_opt = |s: &[Option<f64>]| {
+            s.get(idx)
+                .copied()
+                .flatten()
+                .map_or_else(|| "—".to_owned(), |v| format!("{v:.2}"))
+        };
+        job.append(
+            &format!(
+                "BB({}, {:.1}) {} / {} / {}",
+                indicators.bb_period,
+                indicators.bb_std_mult,
+                fmt_opt(&cache.bbands.upper),
+                fmt_opt(&cache.bbands.middle),
+                fmt_opt(&cache.bbands.lower),
+            ),
+            0.0,
+            TextFormat {
+                font_id: font,
+                color: palette::IND_BB_BORDER,
+                ..Default::default()
+            },
+        );
+    }
+
+    paint_layout_job_hud(
+        painter,
+        Pos2::new(plot_rect.left() + 12.0, plot_rect.top() + 38.0),
+        (plot_rect.width() - 24.0).max(100.0),
+        22.0,
+        job,
+    );
+}
+
+fn paint_oscillator_hud(
+    painter: &egui::Painter,
+    plot_rect: Rect,
+    id: OscillatorPaneId,
+    indicators: &IndicatorConfig,
+    cache: &IndicatorCache,
+    idx: usize,
+) {
+    let mut job = LayoutJob::default();
+    let font = FontId::monospace(10.8);
+
+    match id {
+        OscillatorPaneId::Rsi => {
+            let val = cache
+                .rsi
+                .get(idx)
+                .copied()
+                .flatten()
+                .map_or_else(|| "—".to_owned(), |v| format!("{v:.2}"));
+            job.append(
+                &format!("RSI({})  {val}", indicators.rsi_period),
+                0.0,
+                TextFormat {
+                    font_id: font,
+                    color: palette::IND_RSI,
+                    ..Default::default()
+                },
+            );
+        }
+        OscillatorPaneId::Macd => {
+            let fmt_signed = |s: &[Option<f64>]| {
+                s.get(idx)
+                    .copied()
+                    .flatten()
+                    .map_or_else(|| "—".to_owned(), |v| format!("{v:+.2}"))
+            };
+            let hist_val = cache.macd.histogram.get(idx).copied().flatten();
+            let hist_color = match hist_val {
+                Some(v) if v >= 0.0 => palette::BULLISH,
+                Some(_) => palette::BEARISH,
+                None => palette::TEXT_MUTED,
+            };
+            job.append(
+                &format!(
+                    "MACD({}, {}, {})  ",
+                    indicators.macd_fast, indicators.macd_slow, indicators.macd_signal
+                ),
+                0.0,
+                TextFormat {
+                    font_id: font.clone(),
+                    color: palette::TEXT_PRIMARY,
+                    ..Default::default()
+                },
+            );
+            job.append(
+                &format!("MACD {}   ", fmt_signed(&cache.macd.macd_line)),
+                0.0,
+                TextFormat {
+                    font_id: font.clone(),
+                    color: palette::IND_MACD,
+                    ..Default::default()
+                },
+            );
+            job.append(
+                &format!("Sig {}   ", fmt_signed(&cache.macd.signal_line)),
+                0.0,
+                TextFormat {
+                    font_id: font.clone(),
+                    color: palette::IND_MACD_SIGNAL,
+                    ..Default::default()
+                },
+            );
+            job.append(
+                &format!("Hist {}", fmt_signed(&cache.macd.histogram)),
+                0.0,
+                TextFormat {
+                    font_id: font,
+                    color: hist_color,
+                    ..Default::default()
+                },
+            );
+        }
+        OscillatorPaneId::Atr => {
+            let val = cache
+                .atr
+                .get(idx)
+                .copied()
+                .flatten()
+                .map_or_else(|| "—".to_owned(), |v| format!("{v:.2}"));
+            job.append(
+                &format!("ATR({})  {val}", indicators.atr_period),
+                0.0,
+                TextFormat {
+                    font_id: font,
+                    color: palette::IND_ATR,
+                    ..Default::default()
+                },
+            );
+        }
+    }
+
+    paint_layout_job_hud(
+        painter,
+        Pos2::new(plot_rect.left() + 10.0, plot_rect.top() + 6.0),
+        (plot_rect.width() - 20.0).max(90.0),
+        21.0,
+        job,
+    );
+}
+
+fn paint_layout_job_hud(
+    painter: &egui::Painter,
+    pos: Pos2,
+    max_width: f32,
+    height: f32,
+    mut job: LayoutJob,
+) {
+    job.wrap.max_width = f32::INFINITY;
+    let galley = painter.layout_job(job);
+    let desired_w = (galley.size().x + 18.0).clamp(90.0, max_width);
+    let hud_rect = Rect::from_min_size(pos, Vec2::new(desired_w, height));
+    painter.rect_filled(hud_rect, 4.0, palette::BG_FLOATING_HUD);
+    painter.rect_stroke(
+        hud_rect,
+        4.0,
+        Stroke::new(1.0, palette::BORDER_SUBTLE),
+        StrokeKind::Inside,
+    );
+    painter.with_clip_rect(hud_rect).galley(
+        Pos2::new(
+            hud_rect.left() + 8.0,
+            hud_rect.center().y - galley.size().y * 0.5,
+        ),
+        galley,
+        Color32::WHITE,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -782,13 +2813,13 @@ fn handle_plot_interactions(
     time_ms: f64,
     time_scale: &mut TimeScale,
     kinetic: &mut Option<KineticAnimation>,
-    main_price_scale: &mut PriceScale,
-    volume_price_scale: &mut PriceScale,
+    pane_price_scale: &mut PriceScale,
+    volume_price_scale: Option<&mut PriceScale>,
+    allow_double_click_reset: bool,
 ) {
     if plot_resp.hovered() && !plot_resp.dragged() {
         ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
 
-        // Horizontal trackpad two-finger pan vs cursor-anchored wheel zoom
         if smooth_scroll.x.abs() > 0.05 && smooth_scroll.x.abs() > smooth_scroll.y.abs() * 1.15 {
             *kinetic = None;
             time_scale.scroll_by_pixels(f64::from(smooth_scroll.x));
@@ -802,17 +2833,22 @@ fn handle_plot_interactions(
         }
     }
 
-    if plot_resp.double_clicked() {
+    if allow_double_click_reset && plot_resp.double_clicked() {
         *kinetic = None;
         time_scale.restore_default();
-        main_price_scale.reset_auto_scale();
-        volume_price_scale.reset_auto_scale();
+        pane_price_scale.reset_auto_scale();
+        if let Some(vps) = volume_price_scale {
+            vps.reset_auto_scale();
+        }
         return;
     }
 
     if plot_resp.drag_started() {
         *kinetic = None;
-        if let Some(pos) = plot_resp.interact_pointer_pos() {
+        if let Some(pos) = ui
+            .input(|i| i.pointer.press_origin())
+            .or_else(|| plot_resp.interact_pointer_pos())
+        {
             let local_x = f64::from(pos.x) - plot_rect.left;
             let local_y = f64::from(pos.y) - plot_rect.top;
             time_scale.start_scroll(local_x);
@@ -824,8 +2860,8 @@ fn handle_plot_interactions(
             ka.add_position(time_scale.right_offset(), time_ms);
             *kinetic = Some(ka);
 
-            if !main_price_scale.is_auto_scale() {
-                main_price_scale.start_scroll(local_y);
+            if !pane_price_scale.is_auto_scale() {
+                pane_price_scale.start_scroll(local_y);
             }
         }
     }
@@ -840,15 +2876,15 @@ fn handle_plot_interactions(
             if let Some(ka) = kinetic.as_mut() {
                 ka.add_position(time_scale.right_offset(), time_ms);
             }
-            if !main_price_scale.is_auto_scale() {
-                main_price_scale.scroll_to(local_y);
+            if !pane_price_scale.is_auto_scale() {
+                pane_price_scale.scroll_to(local_y);
             }
         }
     }
 
     if plot_resp.drag_stopped() {
         time_scale.end_scroll();
-        main_price_scale.end_scroll();
+        pane_price_scale.end_scroll();
         if let Some(ka) = kinetic.as_mut() {
             if ka.start(time_scale.right_offset(), time_ms) {
                 ui.ctx().request_repaint();
@@ -863,31 +2899,33 @@ fn handle_price_axis_interactions(
     ui: &Ui,
     price_resp: &egui::Response,
     plot_rect: PlotRect,
-    main_price_scale: &mut PriceScale,
+    price_scale: &mut PriceScale,
 ) {
     if price_resp.hovered() || price_resp.dragged() {
         ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical);
     }
 
     if price_resp.double_clicked() {
-        main_price_scale.reset_auto_scale();
+        price_scale.reset_auto_scale();
         return;
     }
 
     if price_resp.drag_started()
-        && let Some(pos) = price_resp.interact_pointer_pos()
+        && let Some(pos) = ui
+            .input(|i| i.pointer.press_origin())
+            .or_else(|| price_resp.interact_pointer_pos())
     {
-        main_price_scale.start_scale(f64::from(pos.y) - plot_rect.top);
+        price_scale.start_scale(f64::from(pos.y) - plot_rect.top);
     }
 
     if price_resp.dragged()
         && let Some(pos) = price_resp.interact_pointer_pos()
     {
-        main_price_scale.scale_to(f64::from(pos.y) - plot_rect.top);
+        price_scale.scale_to(f64::from(pos.y) - plot_rect.top);
     }
 
     if price_resp.drag_stopped() {
-        main_price_scale.end_scale();
+        price_scale.end_scale();
     }
 }
 
@@ -910,7 +2948,10 @@ fn handle_time_axis_interactions(
 
     if time_resp.drag_started() {
         *kinetic = None;
-        if let Some(pos) = time_resp.interact_pointer_pos() {
+        if let Some(pos) = ui
+            .input(|i| i.pointer.press_origin())
+            .or_else(|| time_resp.interact_pointer_pos())
+        {
             time_scale.start_scale(f64::from(pos.x) - plot_rect.left);
         }
     }
@@ -926,13 +2967,14 @@ fn handle_time_axis_interactions(
     }
 }
 
-fn refresh_pane_autoscale_and_bounds(
+fn refresh_main_pane_autoscale_and_bounds(
     candles: &[Candle],
     time_scale: &TimeScale,
     main_price_scale: &mut PriceScale,
     volume_price_scale: &mut PriceScale,
     show_volume: bool,
     conflation_factor: usize,
+    overlays: Option<(&IndicatorConfig, &IndicatorCache)>,
 ) -> Option<(f64, PriceBounds)> {
     let strict_range =
         non_empty_candle_range(time_scale.strict_visible_data_range(), candles.len());
@@ -945,10 +2987,7 @@ fn refresh_pane_autoscale_and_bounds(
     let mut raw_max = f64::NEG_INFINITY;
     let mut max_vol = 0.0_f64;
 
-    // Single pass across the rendered conflated (or 1:1) visible candles:
-    // - Eliminates redundant O(N) scans at 100K bars
-    // - Keeps volume autoscale 100% consistent with conflated volume bar heights!
-    for bar in iter_conflated_candles(candles, strict_range, conflation_factor) {
+    for bar in iter_conflated_candles(candles, strict_range.clone(), conflation_factor) {
         if bar.low.is_finite() {
             raw_min = raw_min.min(bar.low);
         }
@@ -960,6 +2999,40 @@ fn refresh_pane_autoscale_and_bounds(
         }
     }
 
+    // Include visible main-pane overlays (`SMA`, `EMA`, `BollingerBands`) in `main_price_scale` autoscale!
+    if main_price_scale.is_auto_scale()
+        && let Some((cfg, cache)) = overlays
+    {
+        let mut merge_ov = |bounds_opt: Option<(f64, f64)>| {
+            if let Some((ov_min, ov_max)) = bounds_opt {
+                if !main_price_scale.is_log() || ov_min > 0.0 {
+                    raw_min = raw_min.min(ov_min);
+                }
+                if !main_price_scale.is_log() || ov_max > 0.0 {
+                    raw_max = raw_max.max(ov_max);
+                }
+            }
+        };
+        if cfg.show_sma {
+            merge_ov(cache.sma_idx.range_bounds(&cache.sma, strict_range.clone()));
+        }
+        if cfg.show_ema {
+            merge_ov(cache.ema_idx.range_bounds(&cache.ema, strict_range.clone()));
+        }
+        if cfg.show_bbands {
+            merge_ov(
+                cache
+                    .bb_upper_idx
+                    .range_bounds(&cache.bbands.upper, strict_range.clone()),
+            );
+            merge_ov(
+                cache
+                    .bb_lower_idx
+                    .range_bounds(&cache.bbands.lower, strict_range),
+            );
+        }
+    }
+
     main_price_scale.autoscale_raw_bounds(raw_min, raw_max, base_value);
     if show_volume {
         volume_price_scale.autoscale_raw_bounds(0.0, max_vol, 1.0);
@@ -968,6 +3041,55 @@ fn refresh_pane_autoscale_and_bounds(
     let bounds = PriceBounds::from_raw_extents(raw_min, raw_max, max_vol, 0.08)
         .or_else(|| PriceBounds::from_candles(&candles[candles.len() - 1..], 0.08))?;
     Some((base_value, bounds))
+}
+
+fn refresh_oscillator_autoscale(
+    id: OscillatorPaneId,
+    price_scale: &mut PriceScale,
+    cache: &IndicatorCache,
+    strict_range: std::ops::Range<usize>,
+) {
+    if !price_scale.is_auto_scale() {
+        return;
+    }
+    match id {
+        OscillatorPaneId::Rsi => {
+            let (min_v, max_v) = cache
+                .rsi_idx
+                .range_bounds(&cache.rsi, strict_range)
+                .unwrap_or((0.0, 100.0));
+            price_scale.autoscale_raw_bounds(min_v.min(0.0), max_v.max(100.0), 50.0);
+        }
+        OscillatorPaneId::Macd => {
+            let mut min_v = 0.0_f64;
+            let mut max_v = 0.0_f64;
+            for b in [
+                cache
+                    .macd_line_idx
+                    .range_bounds(&cache.macd.macd_line, strict_range.clone()),
+                cache
+                    .macd_signal_idx
+                    .range_bounds(&cache.macd.signal_line, strict_range.clone()),
+                cache
+                    .macd_hist_idx
+                    .range_bounds(&cache.macd.histogram, strict_range),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                min_v = min_v.min(b.0);
+                max_v = max_v.max(b.1);
+            }
+            price_scale.autoscale_raw_bounds(min_v, max_v, 1.0);
+        }
+        OscillatorPaneId::Atr => {
+            let (min_v, max_v) = cache
+                .atr_idx
+                .range_bounds(&cache.atr, strict_range)
+                .unwrap_or((0.0, 1.0));
+            price_scale.autoscale_raw_bounds(min_v, max_v, 1.0);
+        }
+    }
 }
 
 fn non_empty_candle_range(range: std::ops::Range<usize>, total: usize) -> std::ops::Range<usize> {
@@ -1008,6 +3130,60 @@ mod tests {
             assert!((layout.time_axis_rect.right() - layout.price_axis_rect.left()).abs() < 1e-4);
             assert!(layout.plot_rect.width() > 100.0);
             assert!(layout.plot_rect.height() > 100.0);
+        }
+    }
+
+    #[test]
+    fn multipane_layout_and_separator_stretch_transfer_preserve_uninvolved_panes() {
+        let outer = Rect::from_min_size(Pos2::new(0.0, 40.0), Vec2::new(1280.0, 760.0));
+        let mut vp = ChartViewportState::new();
+        let active = [
+            (OscillatorPaneId::Rsi, vp.rsi_stretch),
+            (OscillatorPaneId::Macd, vp.macd_stretch),
+            (OscillatorPaneId::Atr, vp.atr_stretch),
+        ];
+        let before = MultiPaneLayout::compute(outer, vp.main_stretch, &active);
+        assert_eq!(before.oscillators.len(), 3);
+        assert_eq!(before.separators.len(), 3);
+        assert!(
+            (before.oscillators[2].plot_rect.bottom() - before.time_axis_rect.top()).abs() < 1e-4
+        );
+
+        // Drag separator 0 (between Main and RSI) DOWN by +60px -> Main grows, RSI shrinks,
+        // while MACD and ATR heights stay 100% unchanged!
+        let combined_h = before.main_plot_rect.height() + before.oscillators[0].plot_rect.height();
+        vp.apply_separator_drag_delta(None, OscillatorPaneId::Rsi, combined_h, 60.0);
+        let after_specs = [
+            (OscillatorPaneId::Rsi, vp.rsi_stretch),
+            (OscillatorPaneId::Macd, vp.macd_stretch),
+            (OscillatorPaneId::Atr, vp.atr_stretch),
+        ];
+        let after = MultiPaneLayout::compute(outer, vp.main_stretch, &after_specs);
+
+        assert!(after.main_plot_rect.height() > before.main_plot_rect.height() + 50.0);
+        assert!(after.oscillators[0].plot_rect.height() >= MultiPaneLayout::MIN_PANE_HEIGHT - 0.1);
+        assert!(
+            (after.oscillators[1].plot_rect.height() - before.oscillators[1].plot_rect.height())
+                .abs()
+                < 1e-3,
+            "uninvolved MACD pane height must remain invariant when resizing Main/RSI separator"
+        );
+        assert!(
+            (after.oscillators[2].plot_rect.height() - before.oscillators[2].plot_rect.height())
+                .abs()
+                < 1e-3,
+            "uninvolved ATR pane height must remain invariant when resizing Main/RSI separator"
+        );
+
+        // Extreme tiny outer rect (200x140 with 4 panes) must never produce negative or overlapping rects
+        let tiny = MultiPaneLayout::compute(
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(200.0, 140.0)),
+            4.0,
+            &after_specs,
+        );
+        assert!(tiny.main_plot_rect.height() >= 12.0);
+        for osc in &tiny.oscillators {
+            assert!(osc.plot_rect.height() >= 10.0);
         }
     }
 
@@ -1064,7 +3240,6 @@ mod tests {
             show_volume: true,
         };
 
-        // Frame 1: Establish widget rects
         let mut rep1 = None;
         let mut out1 = ctx.run_ui(
             egui::RawInput {
@@ -1081,7 +3256,6 @@ mod tests {
         out1.textures_delta.clear();
         let r1 = rep1.unwrap();
 
-        // Frame 2: Hover pointer inside plot canvas + wheel zoom in around cursor
         let cursor_pos = Pos2::new(
             r1.layout.plot_rect.left() + r1.layout.plot_rect.width() * 0.60,
             r1.layout.plot_rect.center().y,
@@ -1116,21 +3290,14 @@ mod tests {
         );
         out2.textures_delta.clear();
         let r2 = rep2.unwrap();
-        assert!(
-            r2.pointer_price.is_some(),
-            "crosshair price must resolve under pointer"
-        );
-        assert!(r2.bar_spacing > r1.bar_spacing, "wheel scroll must zoom in");
+        assert!(r2.pointer_price.is_some());
+        assert!(r2.bar_spacing > r1.bar_spacing);
         let after_float_idx = viewport
             .time_scale
             .local_x_to_float_index(anchor_local_x)
             .unwrap();
-        assert!(
-            (after_float_idx - before_float_idx).abs() <= 2e-5,
-            "UI wheel zoom must preserve exact bar under cursor"
-        );
+        assert!((after_float_idx - before_float_idx).abs() <= 2e-5);
 
-        // Frames 3..5: Press, drag right by 120px, release -> right_offset shifts into history
         let ro_before_drag = viewport.time_scale.right_offset();
         let drag_end = Pos2::new(cursor_pos.x + 120.0, cursor_pos.y);
 
@@ -1173,9 +3340,163 @@ mod tests {
             );
             out.textures_delta.clear();
         }
+        assert!(viewport.time_scale.right_offset() < ro_before_drag);
+    }
+
+    #[test]
+    fn headless_multipane_crosshair_oscillator_zoom_and_separator_drag() {
+        let candles = generate_synthetic_ohlcv(400);
+        let mut viewport = ChartViewportState::new();
+        let ind_cfg = IndicatorConfig {
+            show_sma: true,
+            show_ema: true,
+            show_bbands: true,
+            show_rsi: true,
+            show_macd: true,
+            show_atr: true,
+            ..IndicatorConfig::default()
+        };
+        let mut cache = IndicatorCache::new();
+        cache.sync(&candles, 1, &ind_cfg);
+
+        let ctx = egui::Context::default();
+        let screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 900.0)));
+        let cfg = ChartDisplayConfig {
+            symbol: "VNINDEX",
+            timeframe: "1D",
+            show_grid: true,
+            show_crosshair: true,
+            show_volume: true,
+        };
+
+        // Frame 1: Establish 4-pane layout (Main + RSI + MACD + ATR)
+        let mut rep1 = None;
+        let mut out1 = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                time: Some(1.0),
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    rep1 = render_workstation_chart(
+                        ui,
+                        &candles,
+                        &mut viewport,
+                        cfg,
+                        &ind_cfg,
+                        &cache,
+                    );
+                });
+            },
+        );
+        out1.textures_delta.clear();
+        let r1 = rep1.expect("workstation report");
+        assert_eq!(r1.pane_count, 4);
+        assert_eq!(r1.active_overlay_count, 3);
+
+        // Frame 2: Hover + wheel-zoom inside the RSI oscillator sub-pane -> must zoom shared TimeScale
+        // and resolve RSI cursor value + identical inspected_data_index as hovering Main at the same X!
+        let rsi_rect = r1.first_oscillator_plot_rect.expect("RSI plot rect");
+        let osc_cursor = Pos2::new(
+            rsi_rect.left() + rsi_rect.width() * 0.55,
+            rsi_rect.center().y,
+        );
+        let mut rep2 = None;
+        let mut out2 = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                time: Some(1.016),
+                events: vec![
+                    egui::Event::PointerMoved(osc_cursor),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: Vec2::new(0.0, 54.0),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    rep2 = render_workstation_chart(
+                        ui,
+                        &candles,
+                        &mut viewport,
+                        cfg,
+                        &ind_cfg,
+                        &cache,
+                    );
+                });
+            },
+        );
+        out2.textures_delta.clear();
+        let r2 = rep2.unwrap();
+        assert_eq!(r2.hovered_oscillator, Some(OscillatorPaneId::Rsi));
+        assert!(r2.hovered_oscillator_value.is_some());
         assert!(
-            viewport.time_scale.right_offset() < ro_before_drag,
-            "dragging right must scroll right_offset backward into history"
+            r2.bar_spacing > r1.bar_spacing,
+            "wheel scroll inside RSI sub-pane must zoom shared TimeScale"
+        );
+
+        // Frames 3..5: Drag separator 0 downward by +50px -> Main pane plot height increases!
+        let sep_rect = r2.first_separator_rect.expect("separator 0 rect");
+        let sep_start = sep_rect.center();
+        let sep_end = Pos2::new(sep_start.x, sep_start.y + 50.0);
+        let main_h_before = r2.layout.plot_rect.height();
+        let mut rep_after_sep = None;
+
+        for (t, events) in [
+            (
+                1.032,
+                vec![
+                    egui::Event::PointerMoved(sep_start),
+                    egui::Event::PointerButton {
+                        pos: sep_start,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            ),
+            (1.048, vec![egui::Event::PointerMoved(sep_end)]),
+            (
+                1.064,
+                vec![egui::Event::PointerButton {
+                    pos: sep_end,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            ),
+        ] {
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect,
+                    time: Some(t),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        rep_after_sep = render_workstation_chart(
+                            ui,
+                            &candles,
+                            &mut viewport,
+                            cfg,
+                            &ind_cfg,
+                            &cache,
+                        );
+                    });
+                },
+            );
+            out.textures_delta.clear();
+        }
+        let r_sep = rep_after_sep.unwrap();
+        assert!(
+            r_sep.layout.plot_rect.height() > main_h_before + 35.0,
+            "dragging separator down must expand Main pane height"
         );
     }
 
@@ -1218,9 +3539,198 @@ mod tests {
             shape_counts[idx] = out.shapes.len();
             out.textures_delta.clear();
         }
-        assert_eq!(
-            shape_counts[0], shape_counts[1],
-            "inverted scale must emit the exact same upper & lower wick shapes as normal scale"
+        assert_eq!(shape_counts[0], shape_counts[1]);
+    }
+
+    #[test]
+    fn critic_r04_regression_multipane_waterfill_monotonicity_and_tiny_rect() {
+        // 1. Stretches `[0.75, 0.75, 1.45, 0.75]` when 3 smaller panes clamp to `MIN_PANE_HEIGHT = 44`:
+        // `MACD(1.45)` must receive the larger remaining share (`~68px`), NEVER get falsely locked at `44px`!
+        let outer = Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 243.0));
+        let layout = MultiPaneLayout::compute(
+            outer,
+            0.75,
+            &[
+                (OscillatorPaneId::Rsi, 0.75),
+                (OscillatorPaneId::Macd, 1.45),
+                (OscillatorPaneId::Atr, 0.75),
+            ],
+        );
+        let main_h = layout.main_plot_rect.height();
+        let rsi_h = layout.oscillators[0].plot_rect.height();
+        let macd_h = layout.oscillators[1].plot_rect.height();
+        let atr_h = layout.oscillators[2].plot_rect.height();
+        assert!((main_h - 44.0).abs() < 1e-3);
+        assert!((rsi_h - 44.0).abs() < 1e-3);
+        assert!((atr_h - 44.0).abs() < 1e-3);
+        assert!(
+            macd_h > 65.0,
+            "larger stretch pane MACD(1.45) must receive remaining height (~68px), got {macd_h}"
+        );
+
+        // 2. Pathologically tiny outer_rect (`30x35`) must never invert or exceed `outer_rect`
+        let tiny = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(30.0, 35.0));
+        let single = ChartLayout::from_outer_rect(tiny);
+        assert!(single.plot_rect.right() <= tiny.right() + 1e-4);
+        assert!(single.plot_rect.bottom() <= tiny.bottom() + 1e-4);
+
+        let multi_tiny = MultiPaneLayout::compute(
+            tiny,
+            4.0,
+            &[
+                (OscillatorPaneId::Rsi, 1.0),
+                (OscillatorPaneId::Macd, 1.0),
+                (OscillatorPaneId::Atr, 1.0),
+            ],
+        );
+        assert!(multi_tiny.main_plot_rect.right() <= tiny.right() + 1e-4);
+        assert!(multi_tiny.time_axis_rect.bottom() <= tiny.bottom() + 1e-4);
+        for osc in &multi_tiny.oscillators {
+            assert!(osc.plot_rect.height() >= 0.0);
+            assert!(osc.plot_rect.bottom() <= tiny.bottom() + 1e-4);
+        }
+    }
+
+    #[test]
+    fn critic_r04_regression_macd_zero_bar_symmetry_and_offscreen_clipping() {
+        // Exact `0.0` value is symmetric around `zero_y`
+        let (t0, b0) = resolve_macd_histogram_bar_ys(150.0, 150.0, 0.0, 100.0, 200.0).unwrap();
+        assert!((t0 - 149.5).abs() < 1e-5 && (b0 - 150.5).abs() < 1e-5);
+
+        // Small positive bar (`val_y < zero_y` on normal scale) extends upward from `zero_y`, never downward
+        let (tp, bp) = resolve_macd_histogram_bar_ys(150.0, 149.9, 0.01, 100.0, 200.0).unwrap();
+        assert!((tp - 149.25).abs() < 1e-5 && (bp - 150.0).abs() < 1e-5);
+
+        // Off-screen `zero_y = 260.0` (`> plot_bottom = 200.0`) with `0.0` value clips away completely (`None`)
+        assert!(resolve_macd_histogram_bar_ys(260.0, 260.0, 0.0, 100.0, 200.0).is_none());
+    }
+
+    #[test]
+    fn critic_r04_regression_cross_pane_double_click_and_clamped_separator_drag() {
+        let candles = generate_synthetic_ohlcv(200);
+        let ind_cfg = IndicatorConfig {
+            show_sma: true,
+            show_ema: false,
+            show_bbands: true,
+            show_rsi: true,
+            show_macd: true,
+            show_atr: true,
+            ..IndicatorConfig::default()
+        };
+        let mut cache = IndicatorCache::new();
+        cache.sync(&candles, 1, &ind_cfg);
+        let cfg = ChartDisplayConfig {
+            symbol: "VNINDEX",
+            timeframe: "1D",
+            show_grid: true,
+            show_crosshair: false,
+            show_volume: true,
+        };
+        let ctx = egui::Context::default();
+        let screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0)));
+        let mut viewport = ChartViewportState::new();
+        // Force `RSI` stretch below `MIN_PANE_HEIGHT` share AND disable `main_price_scale` autoscale
+        viewport.rsi_stretch = 0.05;
+
+        let run_frame = |t: f64, events: Vec<egui::Event>, vp: &mut ChartViewportState| {
+            let mut rep = None;
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect,
+                    time: Some(t),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        rep = render_workstation_chart(ui, &candles, vp, cfg, &ind_cfg, &cache);
+                    });
+                },
+            );
+            out.textures_delta.clear();
+            rep.unwrap()
+        };
+
+        let r0 = run_frame(1.0, Vec::new(), &mut viewport);
+        viewport.main_price_scale.start_scale(50.0);
+        viewport.main_price_scale.scale_to(120.0);
+        viewport.main_price_scale.end_scale();
+        assert!(!viewport.main_price_scale.is_auto_scale());
+
+        // Drag separator 0 by +4px while RSI was previously min-clamped -> MACD & ATR stretches stay invariant!
+        let sep0 = r0.first_separator_rect.unwrap().center();
+        let before_layout = MultiPaneLayout::compute(
+            r0.layout.outer_rect,
+            viewport.main_stretch,
+            &[
+                (OscillatorPaneId::Rsi, viewport.rsi_stretch),
+                (OscillatorPaneId::Macd, viewport.macd_stretch),
+                (OscillatorPaneId::Atr, viewport.atr_stretch),
+            ],
+        );
+        let macd_h0 = before_layout.oscillators[1].plot_rect.height();
+        let atr_h0 = before_layout.oscillators[2].plot_rect.height();
+
+        let _ = run_frame(
+            1.02,
+            vec![
+                egui::Event::PointerMoved(sep0),
+                egui::Event::PointerButton {
+                    pos: sep0,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            &mut viewport,
+        );
+        let r_drag = run_frame(
+            1.04,
+            vec![egui::Event::PointerMoved(Pos2::new(sep0.x, sep0.y - 8.0))],
+            &mut viewport,
+        );
+        let _ = run_frame(
+            1.06,
+            vec![egui::Event::PointerButton {
+                pos: Pos2::new(sep0.x, sep0.y - 8.0),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut viewport,
+        );
+        let after_layout = MultiPaneLayout::compute(
+            r_drag.layout.outer_rect,
+            viewport.main_stretch,
+            &[
+                (OscillatorPaneId::Rsi, viewport.rsi_stretch),
+                (OscillatorPaneId::Macd, viewport.macd_stretch),
+                (OscillatorPaneId::Atr, viewport.atr_stretch),
+            ],
+        );
+        assert!((after_layout.oscillators[1].plot_rect.height() - macd_h0).abs() < 0.5);
+        assert!((after_layout.oscillators[2].plot_rect.height() - atr_h0).abs() < 0.5);
+
+        // Now double-click inside the RSI oscillator plot -> must reset `main_price_scale` autoscale too!
+        let rsi_center = r_drag.first_oscillator_plot_rect.unwrap().center();
+        for (t, pressed) in [(2.00, true), (2.02, false), (2.08, true), (2.10, false)] {
+            let _ = run_frame(
+                t,
+                vec![
+                    egui::Event::PointerMoved(rsi_center),
+                    egui::Event::PointerButton {
+                        pos: rsi_center,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                &mut viewport,
+            );
+        }
+        assert!(
+            viewport.main_price_scale.is_auto_scale(),
+            "double-clicking RSI plot must reset main_price_scale autoscale synchronously"
         );
     }
 }

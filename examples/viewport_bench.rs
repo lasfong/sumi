@@ -5,9 +5,12 @@ use std::time::Instant;
 use egui::{Pos2, Rect, Vec2};
 use sumi_workstation::chart::{
     ChartDisplayConfig, ChartViewportState, render_candlestick_chart,
-    render_shared_pane_candlestick_chart,
+    render_shared_pane_candlestick_chart, render_workstation_chart,
 };
 use sumi_workstation::data::generate_synthetic_ohlcv;
+use sumi_workstation::indicators::{
+    BlockExtrema, IndicatorCache, IndicatorConfig, OscillatorPaneId, SeriesBlockIndex,
+};
 use sumi_workstation::model::Candle;
 use sumi_workstation::viewport::{
     HorzScaleOptions, KineticAnimation, PaneViewport, PlotRect, PriceScale, PriceScaleMode,
@@ -87,6 +90,11 @@ fn main() {
     } else {
         "release"
     };
+
+    if std::env::args().any(|a| a == "--r04") {
+        run_r04_indicator_multipane_benchmark(&cpu_brand, mem_bytes, &rustc_ver, profile);
+        return;
+    }
 
     println!("=== Sumi R03 Viewport & Renderer Benchmark ===");
     println!(
@@ -763,6 +771,518 @@ fn format_markdown_report(
         let _ = writeln!(
             s,
             "| `{}` | `{}` ({}) | `{}` | `{}x` | `{}` | `{}` | `{}` | `{}` | `{:.3}` | `{:.3}` | **`{:.3}`** | `{:.3}` | `{pass_60}` | `{pass_120}` |",
+            r.dataset_bars,
+            r.workload_id,
+            r.description,
+            r.scale_mode,
+            r.conflation_factor,
+            r.culled_bars,
+            r.rendered_candles,
+            r.total_vertices,
+            r.total_indices,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            tot_med_ms,
+            tot_p95_ms,
+        );
+    }
+    s
+}
+
+#[derive(Debug, Clone)]
+struct IndicatorComputeCaseResult {
+    dataset_bars: usize,
+    cold_all6_stats: TimingStats,
+    warm_cache_sync_stats: TimingStats,
+    cache_heap_bytes: usize,
+}
+
+fn run_r04_indicator_multipane_benchmark(
+    cpu_brand: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+) {
+    println!("=== Sumi R04 Indicator Engine & 4-Pane Workstation Benchmark ===");
+    println!(
+        "CPU: {cpu_brand} | RAM: {:.1} GiB | {rustc_ver} | profile={profile}",
+        (mem_bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+    );
+
+    let dataset_sizes = [10_000_usize, 50_000_usize, 100_000_usize];
+    let all_ind_cfg = IndicatorConfig {
+        show_sma: true,
+        sma_period: 20,
+        show_ema: true,
+        ema_period: 50,
+        show_bbands: true,
+        bb_period: 20,
+        bb_std_mult: 2.0,
+        show_rsi: true,
+        rsi_period: 14,
+        show_macd: true,
+        macd_fast: 12,
+        macd_slow: 26,
+        macd_signal: 9,
+        show_atr: true,
+        atr_period: 14,
+    };
+
+    let mut compute_results = Vec::new();
+    let mut render_results = Vec::new();
+
+    for &bar_count in &dataset_sizes {
+        let candles = generate_synthetic_ohlcv(bar_count);
+
+        // 1. Cold computation of ALL 6 indicators (10 output series total)
+        let cold_iters = if bar_count >= 100_000 { 40 } else { 80 };
+        let mut cold_samples = Vec::with_capacity(cold_iters);
+        let mut warm_cache = IndicatorCache::new();
+        for step in 0..(8 + cold_iters) {
+            let mut tmp_cache = IndicatorCache::new();
+            let t0 = Instant::now();
+            tmp_cache.sync(&candles, (step + 1) as u64, &all_ind_cfg);
+            std::hint::black_box(&tmp_cache.macd.histogram);
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            if step >= 8 {
+                cold_samples.push(us);
+            }
+            if step == 0 {
+                warm_cache = tmp_cache;
+            }
+        }
+
+        // 2. Warm dirty-cache `sync()` overhead during pan/zoom/hover frames
+        let mut warm_samples = Vec::with_capacity(500);
+        for _ in 0..500 {
+            let t0 = Instant::now();
+            warm_cache.sync(&candles, 1, &all_ind_cfg);
+            std::hint::black_box(warm_cache.rsi.len());
+            warm_samples.push(t0.elapsed().as_secs_f64() * 1_000_000.0);
+        }
+
+        let series_vecs = 10_usize; // sma, ema, bb(3), rsi, macd(3), atr
+        let raw_series_bytes = series_vecs * bar_count * std::mem::size_of::<Option<f64>>();
+        let block_index_bytes = series_vecs
+            * bar_count.div_ceil(SeriesBlockIndex::BLOCK_SIZE)
+            * std::mem::size_of::<Option<BlockExtrema>>();
+        let cache_heap_bytes = raw_series_bytes + block_index_bytes;
+        compute_results.push(IndicatorComputeCaseResult {
+            dataset_bars: bar_count,
+            cold_all6_stats: TimingStats::from_samples(cold_samples),
+            warm_cache_sync_stats: TimingStats::from_samples(warm_samples),
+            cache_heap_bytes,
+        });
+
+        // 3. Full 4-pane workstation UI + epaint tessellation workloads
+        render_results.push(bench_r04_workstation_render(
+            &candles,
+            &all_ind_cfg,
+            &warm_cache,
+            "r04_4pane_std_8px",
+            "4 panes (Main+SMA+EMA+BB + RSI + MACD + ATR), bar_spacing=8.0",
+            PriceScaleMode::Normal,
+            |vp| {
+                vp.reset_to_default();
+                vp.reset_pane_stretches();
+            },
+            15,
+            100,
+        ));
+
+        render_results.push(bench_r04_workstation_render(
+            &candles,
+            &all_ind_cfg,
+            &warm_cache,
+            "r04_4pane_dense_1_2px",
+            "4 panes + all 6 indicators, dense swing view (bar_spacing=1.2, Log)",
+            PriceScaleMode::Logarithmic,
+            |vp| {
+                vp.reset_to_default();
+                vp.reset_pane_stretches();
+                vp.time_scale.set_bar_spacing(1.2);
+            },
+            15,
+            100,
+        ));
+
+        render_results.push(bench_r04_workstation_render(
+            &candles,
+            &all_ind_cfg,
+            &warm_cache,
+            "r04_4pane_fit_conflated",
+            "4 panes + all 6 indicators, full-dataset fit WITH bucket-aligned conflation",
+            PriceScaleMode::Logarithmic,
+            |vp| {
+                vp.reset_pane_stretches();
+                vp.fit_all();
+            },
+            15,
+            80,
+        ));
+
+        if bar_count == 100_000 {
+            render_results.push(bench_r04_workstation_render(
+                &candles,
+                &all_ind_cfg,
+                &warm_cache,
+                "r04_4pane_resized_sep",
+                "4 panes + all 6 indicators after interactive separator stretch transfer",
+                PriceScaleMode::Normal,
+                |vp| {
+                    vp.reset_to_default();
+                    vp.reset_pane_stretches();
+                    vp.apply_separator_drag_delta(None, OscillatorPaneId::Rsi, 450.0, -60.0);
+                },
+                15,
+                100,
+            ));
+        }
+    }
+
+    println!("\n--- Cold All-6 Indicator Compute vs Warm Dirty-Cache Sync ---");
+    for c in &compute_results {
+        println!(
+            "Bars={:<7} | Cold All-6 Median: {:>7.3} ms (P95 {:>7.3} ms) | Warm Sync Median: {:>6.3} µs | Cache Heap: {:.2} MiB",
+            c.dataset_bars,
+            c.cold_all6_stats.median_us / 1_000.0,
+            c.cold_all6_stats.p95_us / 1_000.0,
+            c.warm_cache_sync_stats.median_us,
+            (c.cache_heap_bytes as f64) / (1024.0 * 1024.0),
+        );
+    }
+
+    println!(
+        "\n{:<8} | {:<24} | {:>6} | {:>7} | {:>7} | {:>8} | {:>9} | {:>9} | {:>9}",
+        "Bars",
+        "Workload",
+        "Confl",
+        "Culled",
+        "Drawn",
+        "Vertices",
+        "UI (ms)",
+        "Tess (ms)",
+        "Total(ms)"
+    );
+    println!("{}", "-".repeat(110));
+    for r in &render_results {
+        println!(
+            "{:<8} | {:<24} | {:>5}x | {:>7} | {:>7} | {:>8} | {:>9.3} | {:>9.3} | {:>9.3}",
+            r.dataset_bars,
+            r.workload_id,
+            r.conflation_factor,
+            r.culled_bars,
+            r.rendered_candles,
+            r.total_vertices,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.median_us / 1_000.0,
+        );
+    }
+
+    let json_out = format_r04_json_report(
+        cpu_brand,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        &compute_results,
+        &render_results,
+    );
+    let md_out = format_r04_markdown_report(
+        cpu_brand,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        &compute_results,
+        &render_results,
+    );
+
+    std::fs::create_dir_all("docs/evidence").expect("create docs/evidence");
+    std::fs::write(
+        "docs/evidence/r04_indicator_multipane_benchmark.json",
+        json_out,
+    )
+    .expect("write r04 benchmark json");
+    std::fs::write("docs/evidence/r04_indicator_multipane_benchmark.md", md_out)
+        .expect("write r04 benchmark md");
+
+    println!(
+        "\nSaved docs/evidence/r04_indicator_multipane_benchmark.json and docs/evidence/r04_indicator_multipane_benchmark.md"
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bench_r04_workstation_render(
+    candles: &[Candle],
+    indicators: &IndicatorConfig,
+    cache: &IndicatorCache,
+    workload_id: &'static str,
+    description: &'static str,
+    scale_mode: PriceScaleMode,
+    mut setup_fn: impl FnMut(&mut ChartViewportState),
+    warmup: usize,
+    iters: usize,
+) -> RenderCaseResult {
+    let ctx = egui::Context::default();
+    let screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+    ctx.set_pixels_per_point(2.0);
+
+    let mut vp = ChartViewportState::new();
+    vp.main_price_scale.set_mode(scale_mode);
+
+    let cfg = ChartDisplayConfig {
+        symbol: "VNINDEX",
+        timeframe: "1D",
+        show_grid: true,
+        show_crosshair: true,
+        show_volume: true,
+    };
+
+    for _ in 0..2 {
+        let mut init_out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let _ = render_workstation_chart(ui, candles, &mut vp, cfg, indicators, cache);
+                });
+            },
+        );
+        init_out.textures_delta.clear();
+    }
+    setup_fn(&mut vp);
+
+    let mut ui_samples = Vec::with_capacity(iters);
+    let mut tess_samples = Vec::with_capacity(iters);
+    let mut total_samples = Vec::with_capacity(iters);
+    let mut last_rep = None;
+    let mut paint_shapes = 0_usize;
+    let mut clipped_primitives = 0_usize;
+    let mut total_vertices = 0_usize;
+    let mut total_indices = 0_usize;
+
+    for step in 0..(warmup + iters) {
+        let hover_x = 140.0 + ((step % 35) as f32) * 24.0;
+        let hover_y = if step % 2 == 0 { 220.0 } else { 520.0 }; // alternates hovering Main & Oscillator panes!
+        let raw_input = egui::RawInput {
+            screen_rect,
+            time: Some(step as f64 * 0.016),
+            events: vec![egui::Event::PointerMoved(Pos2::new(hover_x, hover_y))],
+            ..Default::default()
+        };
+
+        let t_frame = Instant::now();
+        let t_ui = Instant::now();
+        let mut full_out = ctx.run_ui(raw_input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                last_rep = render_workstation_chart(ui, candles, &mut vp, cfg, indicators, cache);
+            });
+        });
+        let ui_us = t_ui.elapsed().as_secs_f64() * 1_000_000.0;
+
+        paint_shapes = full_out.shapes.len();
+        let t_tess = Instant::now();
+        let primitives = ctx.tessellate(full_out.shapes, full_out.pixels_per_point);
+        let tess_us = t_tess.elapsed().as_secs_f64() * 1_000_000.0;
+        let total_us = t_frame.elapsed().as_secs_f64() * 1_000_000.0;
+        full_out.textures_delta.clear();
+
+        if step + 1 == warmup + iters {
+            clipped_primitives = primitives.len();
+            total_vertices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.vertices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+            total_indices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.indices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+        }
+        std::hint::black_box(&primitives);
+
+        if step >= warmup {
+            ui_samples.push(ui_us);
+            tess_samples.push(tess_us);
+            total_samples.push(total_us);
+        }
+    }
+
+    let rep = last_rep.expect("r04 benchmark report");
+    assert_eq!(rep.pane_count, 4);
+    assert_eq!(rep.active_overlay_count, 3);
+
+    RenderCaseResult {
+        dataset_bars: candles.len(),
+        workload_id,
+        description,
+        scale_mode: scale_mode.label(),
+        conflation_enabled: true,
+        bar_spacing: rep.bar_spacing,
+        conflation_factor: rep.conflation_factor,
+        culled_bars: rep.culled_bar_count,
+        rendered_candles: rep.rendered_candle_count,
+        paint_shapes,
+        clipped_primitives,
+        total_vertices,
+        total_indices,
+        ui_build_stats: TimingStats::from_samples(ui_samples),
+        tessellate_stats: TimingStats::from_samples(tess_samples),
+        total_cpu_frame_stats: TimingStats::from_samples(total_samples),
+    }
+}
+
+fn format_r04_json_report(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+    compute: &[IndicatorComputeCaseResult],
+    render: &[RenderCaseResult],
+) -> String {
+    let mut s = String::with_capacity(8192);
+    let _ = writeln!(s, "{{");
+    let _ = writeln!(s, "  \"milestone\": \"R04\",");
+    let _ = writeln!(s, "  \"environment\": {{");
+    let _ = writeln!(s, "    \"cpu\": \"{}\",", cpu.replace('"', "\\\""));
+    let _ = writeln!(s, "    \"os\": \"{}\",", std::env::consts::OS);
+    let _ = writeln!(s, "    \"arch\": \"{}\",", std::env::consts::ARCH);
+    let _ = writeln!(s, "    \"ram_bytes\": {mem_bytes},");
+    let _ = writeln!(s, "    \"rustc\": \"{}\",", rustc_ver.replace('"', "\\\""));
+    let _ = writeln!(s, "    \"profile\": \"{profile}\",");
+    let _ = writeln!(s, "    \"viewport_logical_px\": [1280, 800],");
+    let _ = writeln!(s, "    \"pixels_per_point\": 2.0");
+    let _ = writeln!(s, "  }},");
+    let _ = writeln!(s, "  \"indicator_compute\": [");
+    for (idx, c) in compute.iter().enumerate() {
+        let comma = if idx + 1 == compute.len() { "" } else { "," };
+        let _ = writeln!(
+            s,
+            "    {{ \"dataset_bars\": {}, \"cold_all6_median_ms\": {:.4}, \"cold_all6_p95_ms\": {:.4}, \"warm_cache_sync_median_us\": {:.4}, \"cache_heap_bytes\": {} }}{comma}",
+            c.dataset_bars,
+            c.cold_all6_stats.median_us / 1_000.0,
+            c.cold_all6_stats.p95_us / 1_000.0,
+            c.warm_cache_sync_stats.median_us,
+            c.cache_heap_bytes,
+        );
+    }
+    let _ = writeln!(s, "  ],");
+    let _ = writeln!(s, "  \"multipane_workloads\": [");
+    for (idx, r) in render.iter().enumerate() {
+        let comma = if idx + 1 == render.len() { "" } else { "," };
+        let _ = writeln!(
+            s,
+            "    {{ \"dataset_bars\": {}, \"workload_id\": \"{}\", \"scale_mode\": \"{}\", \"bar_spacing\": {:.5}, \"conflation_factor\": {}, \"culled_bars\": {}, \"rendered_candles\": {}, \"paint_shapes\": {}, \"clipped_primitives\": {}, \"total_vertices\": {}, \"total_indices\": {}, \"ui_median_ms\": {:.4}, \"tessellate_median_ms\": {:.4}, \"total_cpu_median_ms\": {:.4}, \"total_cpu_p95_ms\": {:.4} }}{comma}",
+            r.dataset_bars,
+            r.workload_id,
+            r.scale_mode,
+            r.bar_spacing,
+            r.conflation_factor,
+            r.culled_bars,
+            r.rendered_candles,
+            r.paint_shapes,
+            r.clipped_primitives,
+            r.total_vertices,
+            r.total_indices,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.p95_us / 1_000.0,
+        );
+    }
+    let _ = writeln!(s, "  ]");
+    let _ = writeln!(s, "}}");
+    s
+}
+
+fn format_r04_markdown_report(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+    compute: &[IndicatorComputeCaseResult],
+    render: &[RenderCaseResult],
+) -> String {
+    let mut s = String::with_capacity(8192);
+    let _ = writeln!(
+        s,
+        "# Milestone R04 — Indicator Engine & 4-Pane Workstation Benchmark Evidence\n"
+    );
+    let _ = writeln!(
+        s,
+        "- **Command:** `cargo run --release --example viewport_bench -- --r04`"
+    );
+    let _ = writeln!(
+        s,
+        "- **Hardware:** `{cpu}` (`{}-{}`), `{:.1} GiB` RAM",
+        std::env::consts::ARCH,
+        std::env::consts::OS,
+        (mem_bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+    );
+    let _ = writeln!(
+        s,
+        "- **Toolchain & Profile:** `{rustc_ver}` (`--{profile}`)"
+    );
+    let _ = writeln!(
+        s,
+        "- **Active Stack:** Main Candlestick + Volume + `SMA(20)` + `EMA(50)` + `BB(20, 2.0)` + 3 Stacked Oscillator Panes (`RSI(14)`, `MACD(12, 26, 9)`, `ATR(14)`) = **4 Panes, 10 Concurrent Series**\n"
+    );
+    let _ = writeln!(
+        s,
+        "## 1. Cold All-6 Indicator Computation vs Warm Dirty-Cache Sync\n"
+    );
+    let _ = writeln!(
+        s,
+        "| Dataset Bars | Cold All-6 Compute Median (`ms`) | Cold All-6 P95 (`ms`) | Warm Pan/Zoom Cache Sync (`µs`) | Indicator Cache Heap (`MiB`) |"
+    );
+    let _ = writeln!(s, "| ---: | ---: | ---: | ---: | ---: |");
+    for c in compute {
+        let _ = writeln!(
+            s,
+            "| `{}` | **`{:.3} ms`** | `{:.3} ms` | **`{:.3} µs`** | `{:.2} MiB` |",
+            c.dataset_bars,
+            c.cold_all6_stats.median_us / 1_000.0,
+            c.cold_all6_stats.p95_us / 1_000.0,
+            c.warm_cache_sync_stats.median_us,
+            (c.cache_heap_bytes as f64) / (1024.0 * 1024.0),
+        );
+    }
+
+    let _ = writeln!(
+        s,
+        "\n## 2. End-to-End 4-Pane `egui::Painter` Build + `epaint` Tessellation (`DECISION-RENDERER-002` Gate: `< 4.0 ms`)\n"
+    );
+    let _ = writeln!(
+        s,
+        "| Bars | Workload | Scale | Conflation | Culled | Drawn | Vertices | Indices | UI Median (`ms`) | Tessellate Median (`ms`) | Total CPU Median (`ms`) | Total CPU P95 (`ms`) | `< 4.0ms` Hybrid Gate | 120 FPS (`8.33ms`) |"
+    );
+    let _ = writeln!(
+        s,
+        "| ---: | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: | :---: |"
+    );
+    for r in render {
+        let tot_med_ms = r.total_cpu_frame_stats.median_us / 1_000.0;
+        let tot_p95_ms = r.total_cpu_frame_stats.p95_us / 1_000.0;
+        let hybrid_gate = if tot_med_ms < 4.0 {
+            "PASS (<4ms)"
+        } else {
+            "TRIGGER_WGPU"
+        };
+        let pass_120 = if tot_med_ms <= 8.33 {
+            "PASS"
+        } else {
+            "EXCEEDS"
+        };
+        let _ = writeln!(
+            s,
+            "| `{}` | `{}` ({}) | `{}` | `{}x` | `{}` | `{}` | `{}` | `{}` | `{:.3}` | `{:.3}` | **`{:.3}`** | `{:.3}` | `{hybrid_gate}` | `{pass_120}` |",
             r.dataset_bars,
             r.workload_id,
             r.description,

@@ -1,7 +1,7 @@
 # RESEARCH TO RUST ROADMAP — SESSION R01
 
 - **Session Identity:** `SESSION-R01-20261110T202837+0700`
-- **Updated By:** `SESSION-R03-20261111T105832+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Updated By:** `SESSION-R04-20261111T140100+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 - **Principle:** No Rust implementation begins without prior REA or reference-source research evidence.
 
 ---
@@ -52,33 +52,36 @@ cargo test chart::tests::headless_inverted_scale_preserves_candlestick_wick_segm
 
 ---
 
-## Wave 2 — Indicator Engine (Session 04 Target, parallelizable with Wave 1)
+## Wave 2 — Indicator Engine (`COMPLETE — SESSION R04`)
 
-### Pre-condition: Research Gate
-- [ ] Read TA-Lib C source for: SMA, EMA, RSI, MACD, Bollinger Bands, ATR
-- [ ] Read archived `indicatorDomain.ts` for placement model (already recovered — see CHART_ENGINE_RESEARCH_MAP.md §Subsystem 3)
-- [ ] Define Rust `Indicator` trait before any concrete implementation
+### Completed Research & Audit Gates (`VERIFIED`)
+- [x] Cloned official BSD-licensed `TA-Lib/ta-lib` (`fd57d4cfd6c812004d897feb0025fe273b1192e2`) to `research_repos/ta-lib` and verified `ta_SMA.c`, `ta_EMA.c`, `ta_BBANDS.c`, `ta_RSI.c`, `ta_MACD.c`, `ta_ATR.c`, and `ta_TRANGE.c`.
+- [x] Executed live REA MCP JS/TS analysis (`ev_8737910237dddc3c6f846a2eb10db4023cf433ad7e2b8f5974081656c20e73c5`, `ev_380c6a728de9a73e5437c9baa4313a71002783978dea75c9d997b2ff1a7a1a89`, `ev_f46a1dfda7613ec07a0ea58f94b9b5e1df7fe89319a4df95bf3e5a00d11c92c5`) on archived `indicatorDomain.ts`, `PaneManager.ts`, `IndicatorRenderRegistry.ts`, and `IndicatorPaneChrome.tsx`.
+- [x] Authored complete mathematical & rendering specification in [`docs/research/INDICATOR_AND_MULTIPANE_SPEC.md`](INDICATOR_AND_MULTIPANE_SPEC.md) and defined pure `f64` WASM-safe `Indicator` trait before concrete implementation.
 
-### Deliverables
-| Component | Algorithm Source | Rust Target |
-|---|---|---|
-| `Indicator` trait | Defined from research | `src/indicators.rs` |
-| `Sma`, `Ema` | TA-Lib source, Wilder formula | `src/indicators/moving_averages.rs` |
-| `Rsi` | Wilder 1978, TA-Lib | `src/indicators/oscillators.rs` |
-| `BollingerBands` | Keltner/Bollinger papers, TA-Lib | `src/indicators/bands.rs` |
-| `Macd` | Standard formula, TA-Lib | `src/indicators/macd.rs` |
+### Shipped Rust Deliverables (`IMPLEMENTATION_PASS`)
+| Component | Algorithm Source | Shipped Rust Target | Status |
+|---|---|---|---|
+| `Indicator` trait, `IndicatorCache`, `SeriesBlockIndex` & conflated envelopes | `INDICATOR_AND_MULTIPANE_SPEC.md` | `src/indicators/mod.rs` | ✅ SHIPPED |
+| `SmaIndicator` (cancellation reseed), `EmaIndicator` (Sterbenz weights) | TA-Lib `ta_SMA.c`, `ta_EMA.c` | `src/indicators/moving_averages.rs` | ✅ SHIPPED |
+| `BollingerBandsIndicator` (`20, 2.0` population $\sigma$, scaled fallback) | TA-Lib `ta_BBANDS.c` | `src/indicators/bands.rs` | ✅ SHIPPED |
+| `RsiIndicator`, `MacdIndicator`, `AtrIndicator` & reference levels | Wilder 1978, TA-Lib `ta_RSI.c`, `ta_MACD.c`, `ta_ATR.c` | `src/indicators/oscillators.rs` | ✅ SHIPPED |
 
-### Acceptance Tests
-```
-cargo test indicators::sma_basic
-cargo test indicators::ema_warm_up
-cargo test indicators::rsi_wilder_reference
-cargo test indicators::bollinger_expansion
+### Verified Acceptance Tests (`cargo test` — 46/46 PASS)
+```bash
+cargo test indicators::tests::sma_basic_and_long_series_drift_invariance
+cargo test indicators::tests::ema_warm_up_seed_and_zero_ulp_flat_invariance
+cargo test indicators::tests::bollinger_population_stddev_and_volatility_expansion
+cargo test indicators::tests::rsi_wilder_reference_and_ta_lib_edge_cases
+cargo test indicators::tests::macd_alignment_period_swap_and_signal_one_branch
+cargo test indicators::tests::atr_true_range_gaps_and_wilder_smoothing
+cargo test indicators::tests::large_100k_cache_and_right_aligned_conflation_pan_invariance
+cargo test indicators::tests::series_block_index_matches_raw_slice_scans_bit_for_bit
 ```
 
 ---
 
-## Wave 3 — Drawing Engine Port (Session 05 Target)
+## Wave 3 — Drawing Engine Port (`NEXT — MILESTONE R05 TARGET`)
 
 ### Pre-condition: Research Gate
 - [ ] REA `analyze_javascript_application` on `lightweight-charts` source: Extract `ISeriesPrimitive`, `PrimitivePaneView` interfaces
@@ -88,10 +91,10 @@ cargo test indicators::bollinger_expansion
 ### Deliverables
 | Component | Algorithm Source | Rust Target |
 |---|---|---|
-| `Drawing` enum + anchor model | Archive `drawingDomain.ts` | `src/drawings.rs` |
-| Projection + hit-test | Archive `drawingGeometry.ts` (fully recovered) | `src/drawings.rs` |
-| Creation state machine | Archive `useDrawingWorkspaceController.ts` | `src/drawing_input.rs` |
-| Fibonacci retracement | Archive `fibonacciPrice` formula | `src/drawings.rs` |
+| `Drawing` enum + anchor model | Archive `drawingDomain.ts` | `src/drawings/mod.rs` |
+| Projection + hit-test | Archive `drawingGeometry.ts` (fully recovered) | `src/drawings/geometry.rs` |
+| Creation state machine | Archive `useDrawingWorkspaceController.ts` | `src/drawings/controller.rs` |
+| Fibonacci retracement | Archive `fibonacciPrice` formula | `src/drawings/fibonacci.rs` |
 
 ### Acceptance Tests
 ```
@@ -103,30 +106,30 @@ cargo test drawings::ray_projection
 
 ---
 
-## Wave 4 — Multi-Pane Layout (Session 06 Target)
+## Wave 4 — Multi-Pane Layout (`COMPLETE — SESSION R04`)
 
-### Pre-condition: Research Gate
-- [ ] REA `analyze_javascript_application` on lightweight-charts source: Extract `IPane`, `chart.panes()`, `stretchFactor` APIs
-- [ ] Confirm `PaneManager.ts` from archive
+### Completed Research & Audit Gates (`VERIFIED`)
+- [x] Executed live REA MCP JS/TS analysis (`ev_3a1d7aeb2dbcb801ac28e38de3618addf25fb6216f117f3f4b1d9048e9591111`, `ev_4507f2ade5d47a54b59a7589f180e0ec5012d6e6ff86d4fc59cd5f74a1d72565`, `ev_5f12ebbfe8f69dabc129ef25dab6fff37eea11945af331e34760cda658e6260f`) on LWC v5.2.0 `pane.ts`, `pane-separator.ts`, `chart-widget.ts`, `line-pane-view.ts`, `histogram-pane-view.ts`, `histogram-renderer.ts`, and `walk-line.ts`.
+- [x] Verified archived `PaneManager.ts` vs LWC single-canvas `stretchFactor` architecture (`DEC-R04-003`).
 
-### Deliverables
-| Component | Research Source | Rust Target |
-|---|---|---|
-| `PaneLayout` struct | lightweight-charts IPane + archive PaneManager | `src/panes.rs` |
-| Oscillator pane rendering | Archive `IndicatorRenderInput` schema | `src/chart.rs` refactor |
-| Shared time axis | lightweight-charts time-scale sync | `src/chart.rs` |
-| Crosshair sync | lightweight-charts crosshair | `src/chart.rs` |
+### Shipped Rust Deliverables (`IMPLEMENTATION_PASS`)
+| Component | Research Source | Rust Target | Status |
+|---|---|---|---|
+| `MultiPaneLayout` (`stretch_factors`, water-fill `MultiPaneLayout::MIN_PANE_HEIGHT = 44.0`, splitters) | LWC `pane.ts`, `pane-separator.ts`, `chart-widget.ts` | `src/chart.rs` | ✅ SHIPPED |
+| Oscillator pane rendering (`RSI`, `MACD`, `ATR`) + `egui::Mesh` batching | `INDICATOR_AND_MULTIPANE_SPEC.md` | `src/chart.rs`, `src/app.rs` | ✅ SHIPPED |
+| Shared `TimeScale` + unified `conflation_factor` across all panes | LWC `chart-model.ts`, `time-scale.ts` | `src/chart.rs` | ✅ SHIPPED |
+| Synchronized cross-pane vertical crosshair & per-pane price pill | LWC `crosshair.ts`, `pane-widget.ts` | `src/chart.rs` | ✅ SHIPPED |
 
 ---
 
-## Wave 5 — Data Infrastructure (Parallelizable, Session 03+)
+## Wave 5 — Data Infrastructure (Parallelizable, Session R05+)
 
 ### Deliverables
-| Component | Research Source | Rust Target |
-|---|---|---|
-| CSV/JSON OHLCV loader | `lightweight-charts` `SeriesData` format docs | `src/data.rs` extension |
-| Timeframe aggregation | Standard OHLCV rollup (open-source) | `src/data.rs` |
-| WASM gate | cargo check with `wasm32-unknown-unknown` | CI verification |
+| Component | Research Source | Rust Target | Status |
+|---|---|---|---|
+| CSV/JSON OHLCV loader | `lightweight-charts` `SeriesData` format docs | `src/data.rs` extension | Pending (Wave 5) |
+| Timeframe aggregation | Standard OHLCV rollup (open-source) | `src/data.rs` | Pending (Wave 5) |
+| WASM gate | `cargo clippy --target wasm32-unknown-unknown -- -D warnings` | Toolchain & CI verification | ✅ COMPLETE (`SESSION R04`) |
 
 ---
 
@@ -148,4 +151,4 @@ The following architectural decisions are locked from Session 01 and confirmed b
 |---|---|---|
 | **Ghidra 12.1.x** (free) | Unlocks `list_procedures`, `procedure_pseudo_code`, `search_strings` on Rust binaries — required for release-build analysis and future wgpu shader inspection | High |
 | **lightweight-charts local clone** | Authorized Apache 2.0 target for `analyze_javascript_application` — provides complete reference architecture for Waves 1-4 | ✅ Completed (`research_repos/lightweight-charts-5.2.0`, `v5.2.0` `868cae2`) |
-| **TA-Lib source** | BSD-licensed reference for all 18 indicator implementations | Immediate (Wave 2) |
+| **TA-Lib source** | BSD-licensed reference for all 18 indicator implementations | ✅ Completed (`research_repos/ta-lib`, `fd57d4cfd6c812004d897feb0025fe273b1192e2`) |

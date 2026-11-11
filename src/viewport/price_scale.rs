@@ -256,6 +256,20 @@ impl PriceScaleOptions {
             pin_zero_bottom: true,
         }
     }
+
+    /// Oscillator sub-pane scale defaults (`RSI`, `MACD`, `ATR`) with symmetric 8% vertical breathing room.
+    #[must_use]
+    pub fn sumi_oscillator() -> Self {
+        Self {
+            mode: PriceScaleMode::Normal,
+            auto_scale: true,
+            invert_scale: false,
+            scale_margin_top: 0.08,
+            scale_margin_bottom: 0.08,
+            min_move: 0.01,
+            pin_zero_bottom: false,
+        }
+    }
 }
 
 /// Formatted horizontal grid/axis tick mark produced by `PriceScale::nice_ticks`.

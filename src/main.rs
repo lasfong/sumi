@@ -14,11 +14,27 @@ fn main() -> eframe::Result {
         .and_then(|v| v.parse::<f32>().ok())
         .unwrap_or(800.0);
 
+    let is_automated_capture = std::env::var("SUMI_SCREENSHOT_PATH")
+        .ok()
+        .is_some_and(|v| !v.is_empty())
+        || std::env::var("SUMI_CAPTURE_BATCH")
+            .ok()
+            .is_some_and(|v| !v.is_empty());
+
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title(
+            "Sumi Trading Workstation — VNINDEX · 1D (Milestone R04 Multi-Pane & Indicator Engine)",
+        )
+        .with_inner_size([initial_width, initial_height])
+        .with_min_inner_size([640.0, 420.0]);
+
+    if is_automated_capture {
+        // Prevent background automated verification captures from stealing window/keyboard focus!
+        viewport = viewport.with_active(false);
+    }
+
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Sumi Trading Workstation — VNINDEX · 1D (Milestone R03 Viewport Engine)")
-            .with_inner_size([initial_width, initial_height])
-            .with_min_inner_size([640.0, 420.0]),
+        viewport,
         ..Default::default()
     };
 

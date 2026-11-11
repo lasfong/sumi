@@ -2,6 +2,7 @@
 
 - **Tài liệu quản trị:** `docs/operations/SUMI_ORCHESTRATION_CHARTER.md`
 - **Thiết lập tại Session:** `SESSION-R03-20261111T105832+0700`
+- **Cập nhật tại Session:** `SESSION-R04-20261111T140100+0700`
 - **Phạm vi:** Điều phối chương trình phát triển Sumi Rust Desktop Workstation tại `/Users/mizuhara/workspace/sumi`
 - **Ngôn ngữ giao tiếp với Product Owner:** Tiếng Việt (giữ nguyên tên kỹ thuật, file path, symbol, command, Evidence ID).
 
@@ -72,7 +73,7 @@ Bất kỳ Orchestrator hoặc successor mới nào khi tiếp nhận `/Users/mi
 
 1. **Kiểm tra trạng thái Git và Workspace (Read-Only):**
    - Chạy `git branch --show-current`, `git rev-parse HEAD`, `git status --short --branch`, `git tag -l`.
-   - Phân biệt rõ trạng thái dirty có sẵn từ Session 01 (`M .gitignore`, `687` đường dẫn `D` đã chuyển vào `ARCHIVE/`, và các thư mục `??` của dự án Rust mới) với những thay đổi phát sinh trong phiên hiện tại.
+   - Đối chiếu `HEAD` với commit sạch gần nhất của milestone trước theo chính sách `DEC-R04-001` và phân biệt rõ mọi thay đổi chưa commit (nếu có) trước khi bắt đầu phiên mới.
 2. **Đọc bộ hồ sơ chính thức (Canonical Ledger):**
    - [`docs/EXECUTION_STATE.md`](file:///Users/mizuhara/workspace/sumi/docs/EXECUTION_STATE.md)
    - [`docs/NEXT_SESSION_BRIEF.md`](file:///Users/mizuhara/workspace/sumi/docs/NEXT_SESSION_BRIEF.md)
@@ -90,7 +91,7 @@ Bất kỳ Orchestrator hoặc successor mới nào khi tiếp nhận `/Users/mi
 
 ## 5. Các Rào chắn Bất khả xâm phạm (Hard Guardrails)
 
-1. **Cấm thao tác Git ghi/phá hủy khi chưa có lệnh trực tiếp của Product Owner:** Không `git commit`, `git tag`, `git reset`, `git clean`, `git checkout --`, `git stash`.
+1. **Chính sách Git Commit theo Batch & Cấm thao tác phá hủy (`DEC-R04-001`):** Thực hiện đúng 1 local commit sạch trên nhánh `master` khi hoàn tất toàn bộ cổng kiểm chứng của mỗi batch/milestone (`cargo fmt --check`, `cargo clippy` trên native + `wasm32-unknown-unknown`, `cargo test`, benchmark `--release`, `sumi-critic` và `sumi-auditor`). Tuyệt đối cấm `git reset`, `git clean`, `git checkout --`, `git stash`, `git tag` hoặc `git push` khi chưa có chỉ thị trực tiếp của Product Owner.
 2. **Bảo toàn dữ liệu & lịch sử:** Không xóa bất kỳ file/thư mục nào; không chạm vào nội dung trong `ARCHIVE/` (chỉ đọc để nghiên cứu).
 3. **Giới hạn pháp lý & Clean-Room:** Tuyệt đối không dùng REA hoặc bất kỳ công cụ nào để dịch ngược/trích xuất TradingView Desktop proprietary binaries/bundles (`DEC-006`). Chỉ nghiên cứu các nguồn hợp pháp đã phê duyệt (`lightweight-charts v5.2.0` Apache 2.0, `TA-Lib` BSD, `ARCHIVE/` của chính dự án, và binary Rust của Sumi).
 4. **Kiểm soát Dependency & Chi phí:** Không tự ý thêm dependency lớn làm phình binary hoặc phá vỡ khả năng biên dịch `wasm32-unknown-unknown` của domain core; không phát sinh chi phí dịch vụ ngoài nếu chưa được Product Owner phê duyệt.

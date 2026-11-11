@@ -3,6 +3,7 @@
 pub mod app;
 pub mod chart;
 pub mod data;
+pub mod indicators;
 pub mod model;
 pub mod viewport;
 

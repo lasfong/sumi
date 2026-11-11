@@ -1,7 +1,7 @@
 # SUMI TRADING WORKSTATION — DECISION LOG
 
 - **Session Identity (Created):** `SESSION-01-20261110T160909+0700`
-- **Updated By:** `SESSION-R03-20261111T105832+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Updated By:** `SESSION-R04-20261111T140100+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 
 ## Decisions Recorded in Session 01
 
@@ -89,3 +89,29 @@
 - **Session:** `SESSION-R03-20261111T105832+0700`
 - **Context:** Verified live Antigravity runtime capabilities (`swarm`, `define_subagent`/`invoke_subagent`, `rea` MCP) and needed a zero-copy-paste continuity mechanism across sessions.
 - **Decision:** Establish [`docs/operations/SUMI_ORCHESTRATION_CHARTER.md`](operations/SUMI_ORCHESTRATION_CHARTER.md) governing role separation (`Orchestrator`, `Research`, `Engineering`, `Critic`, `Auditor`), Evidence Classification (`VERIFIED` / `INFERRED` / `UNVERIFIED` / `BLOCKED`), and Product Owner decision gates.
+
+---
+
+## Decisions Recorded in Session R04
+
+### DEC-R04-001 — Clean Per-Batch Git Commit Policy (Authorized by Product Owner)
+- **Date:** `2026-11-11`
+- **Session:** `SESSION-R04-20261111T140100+0700`
+- **Context:** On `2026-11-11`, the Product Owner explicitly directed the Orchestrator to commit code cleanly upon completion of each verified batch/milestone plan rather than leaving cumulative uncommitted changes across sessions.
+- **Decision:** Create one clean, verified local commit on `master` at the end of each milestone/batch after all `cargo fmt --check`, `cargo clippy` (native + `wasm32-unknown-unknown`), `cargo test`, `--release` benchmark, `sumi-critic` remediation, and `sumi-auditor` checks pass (Milestone R03 baseline committed at `98ec576`; Milestone R04 committed at completion of Session R04). Destructive Git commands (`git reset`, `git clean`, `git checkout --`) and remote pushes remain strictly prohibited without explicit Product Owner instruction.
+
+### DEC-R04-002 — Authorized Toolchain Additions: `wasm32-unknown-unknown` Target & BSD `TA-Lib` Reference Pin
+- **Date:** `2026-11-11`
+- **Session:** `SESSION-R04-20261111T140100+0700`
+- **Context:** Product Owner approved installing necessary development/verification components for Milestone R04 while preserving `DEC-006` (zero contact with TradingView Desktop).
+- **Decision:** Install `wasm32-unknown-unknown` via `rustup target add wasm32-unknown-unknown` to enforce compile-time WASM portability across `src/model.rs`, `src/data.rs`, `src/viewport/`, and `src/indicators/`, and clone official BSD-licensed `TA-Lib/ta-lib` (`fd57d4cfd6c812004d897feb0025fe273b1192e2`) into gitignored `research_repos/ta-lib` as a read-only mathematical reference alongside `lightweight-charts-5.2.0` (`868cae27bd1acafa0128d8d868ea740a59ae42ce`). Add **zero** new Rust crate dependencies in `Cargo.toml`.
+
+### DEC-R04-003 — Pure `f64` `src/indicators/` Engine, `SeriesBlockIndex`, `egui::Mesh` Batching & Stretch-Factor Multi-Pane Layout
+- **Date:** `2026-11-11`
+- **Session:** `SESSION-R04-20261111T140100+0700`
+- **Context:** Implementing Wave 2 (`SMA`, `EMA`, `BollingerBands`, `RSI`, `MACD`, `ATR`) and Wave 4 (synchronized multi-pane oscillator layout) at `100,000` bars requires: (a) pan-invariant indicator warmup with zero per-frame recomputation, (b) `O(N / 16)` min/max autoscale + conflated envelope lookups, (c) identical horizontal `conflation_factor` across all panes, and (d) `< 4.0 ms` 4-pane `100K` CPU rendering per `DECISION-RENDERER-002`.
+- **Decision:**
+  1. Compute all indicators once over the full dataset (`0..total_bars`) in pure `f64` (`src/indicators/`), guarded by `IndicatorCache` (`(dataset_generation, candles.len(), IndicatorConfig)`), Sterbenz-exact EMA/Wilder complementary weights, SMA cancellation reseeding, and overflow-safe high-magnitude fallbacks.
+  2. Index every indicator output line with a 16-bar `SeriesBlockIndex` (`first`, `last`, `min`, `max`, `dom`, `valid_count`) enabling sub-microsecond visible autoscale and exact `[first, min, max, last]` 2-column vertical-envelope conflation with sub-bucket `None`-gap preservation.
+  3. Implement LWC-inspired stretch-factor `MultiPaneLayout` (`stretch_factors` defaulting to `4.0` main : `1.0` per oscillator, `MultiPaneLayout::MIN_PANE_HEIGHT = 44.0`, monotonic pass-snapshot water-filling, and interactive `5.0 px` separator stretch transfer via `SEPARATOR_HEIGHT = 5.0`) in `src/chart.rs` sharing `ChartViewportState::time_scale` while isolating per-pane `PriceScale` (`PriceScaleOptions::sumi_oscillator`).
+  4. Batch axis-aligned candlesticks, volume bars, MACD histogram bars, and zero-bleed Bollinger ribbons into `egui::Mesh` primitives so `100,000`-bar 4-pane full-fit renders in **`3.141 ms`** median (`< 4.0 ms` `DECISION-RENDERER-002` ceiling) with a single unified `32x` `conflation_factor` across all panes, and run automated GPU batch captures in background window mode (`.with_active(false)` via `SUMI_CAPTURE_BATCH`).
