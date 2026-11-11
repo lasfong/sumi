@@ -8,7 +8,10 @@ use sumi_workstation::chart::{
     render_shared_pane_candlestick_chart, render_workstation_chart,
     render_workstation_chart_with_drawings,
 };
-use sumi_workstation::data::generate_synthetic_ohlcv;
+use sumi_workstation::data::{
+    DataLoadOptions, Timeframe, aggregate_ohlcv, build_btcusdt_15m_json_document,
+    generate_intraday_vn30f_1m_report, generate_synthetic_ohlcv, load_ohlcv_csv, load_ohlcv_json,
+};
 use sumi_workstation::drawings::{
     DrawingAnchor, DrawingGeometry, DrawingPaneTarget, DrawingStore, FibDirection, LocalPoint,
     MAGNET_THRESHOLD_PX, MagnetMode, PaneDrawingProjection, hit_test_pane_drawings,
@@ -103,6 +106,10 @@ fn main() {
     }
     if std::env::args().any(|a| a == "--r05") {
         run_r05_drawing_engine_benchmark(&cpu_brand, mem_bytes, &rustc_ver, profile);
+        return;
+    }
+    if std::env::args().any(|a| a == "--r06") {
+        run_r06_data_timeframe_benchmark(&cpu_brand, mem_bytes, &rustc_ver, profile);
         return;
     }
 
@@ -1994,6 +2001,797 @@ fn format_r05_markdown_report(
     let _ = writeln!(
         s,
         "\n## 2. End-to-End 4-Pane + 6-Indicator + 25-Drawing Frame Budget (`DECISION-RENDERER-002` Gate: `< 4.0 ms`)\n"
+    );
+    let _ = writeln!(
+        s,
+        "| Bars | Workload | Scale | Conflation | Culled | Drawn | Vertices | Indices | UI Median (`ms`) | Tessellate Median (`ms`) | Total CPU Median (`ms`) | Total CPU P95 (`ms`) | `< 4.0ms` Hybrid Gate | 120 FPS (`8.33ms`) |"
+    );
+    let _ = writeln!(
+        s,
+        "| ---: | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: | :---: |"
+    );
+    for r in render {
+        let tot_med_ms = r.total_cpu_frame_stats.median_us / 1_000.0;
+        let tot_p95_ms = r.total_cpu_frame_stats.p95_us / 1_000.0;
+        let hybrid_gate = if tot_med_ms < 4.0 {
+            "PASS (<4ms)"
+        } else {
+            "TRIGGER_WGPU"
+        };
+        let pass_120 = if tot_med_ms <= 8.33 {
+            "PASS"
+        } else {
+            "EXCEEDS"
+        };
+        let _ = writeln!(
+            s,
+            "| `{}` | `{}` ({}) | `{}` | `{}x` | `{}` | `{}` | `{}` | `{}` | `{:.3}` | `{:.3}` | **`{:.3}`** | `{:.3}` | `{hybrid_gate}` | `{pass_120}` |",
+            r.dataset_bars,
+            r.workload_id,
+            r.description,
+            r.scale_mode,
+            r.conflation_factor,
+            r.culled_bars,
+            r.rendered_candles,
+            r.total_vertices,
+            r.total_indices,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            tot_med_ms,
+            tot_p95_ms,
+        );
+    }
+    s
+}
+
+// ============================================================================
+// Milestone R06 — CSV/JSON OHLCV Loader & Multi-Timeframe Aggregation Benchmark
+// ============================================================================
+
+#[derive(Debug, Clone)]
+struct R06LoaderCaseResult {
+    loader_id: &'static str,
+    format: &'static str,
+    raw_rows: usize,
+    parsed_bars: usize,
+    payload_bytes: usize,
+    parse_stats: TimingStats,
+}
+
+#[derive(Debug, Clone)]
+struct R06AggregationCaseResult {
+    source_bars: usize,
+    source_tf: &'static str,
+    target_tf: &'static str,
+    output_bars: usize,
+    aggregate_stats: TimingStats,
+    remap_25_drawings_stats: TimingStats,
+}
+
+fn build_r06_csv_document(candles: &[Candle]) -> String {
+    let mut out = String::with_capacity(candles.len() * 64 + 64);
+    out.push_str("time,open,high,low,close,volume\n");
+    for c in candles {
+        let dt = sumi_workstation::data::decompose_utc(c.timestamp);
+        let _ = writeln!(
+            out,
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z,{:.2},{:.2},{:.2},{:.2},{:.0}",
+            dt.year,
+            dt.month,
+            dt.day,
+            dt.hour,
+            dt.minute,
+            dt.second,
+            c.open,
+            c.high,
+            c.low,
+            c.close,
+            c.volume
+        );
+    }
+    out
+}
+
+fn run_r06_data_timeframe_benchmark(
+    cpu_brand: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+) {
+    println!("=== Sumi R06 Data Loader & Multi-Timeframe Aggregation Benchmark ===");
+    println!(
+        "CPU: {cpu_brand} | RAM: {:.1} GiB | {rustc_ver} | profile={profile}",
+        (mem_bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+    );
+
+    let sizes = [10_000_usize, 50_000_usize, 100_000_usize];
+    let mut loader_cases = Vec::new();
+    let default_opts = DataLoadOptions::default();
+
+    // 1. Streaming RFC-4180 CSV & RFC-8259 JSON Loader Throughput across 10K, 50K, 100K bars
+    for &n in &sizes {
+        let rep_1m = generate_intraday_vn30f_1m_report(n);
+        let csv_doc = build_r06_csv_document(&rep_1m.candles);
+        let json_doc = build_btcusdt_15m_json_document(n);
+        let iters = if n >= 100_000 { 25 } else { 40 };
+        let warmup = 5;
+
+        let mut csv_samples = Vec::with_capacity(iters);
+        let mut parsed_csv_bars = 0_usize;
+        for step in 0..(warmup + iters) {
+            let t0 = Instant::now();
+            let loaded = load_ohlcv_csv(&csv_doc, &default_opts).expect("valid r06 csv");
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            parsed_csv_bars = loaded.candles.len();
+            std::hint::black_box(&loaded.candles);
+            if step >= warmup {
+                csv_samples.push(us);
+            }
+        }
+        loader_cases.push(R06LoaderCaseResult {
+            loader_id: match n {
+                10_000 => "csv_iso8601_10k",
+                50_000 => "csv_iso8601_50k",
+                _ => "csv_iso8601_100k",
+            },
+            format: "CSV (ISO-8601 1m)",
+            raw_rows: n,
+            parsed_bars: parsed_csv_bars,
+            payload_bytes: csv_doc.len(),
+            parse_stats: TimingStats::from_samples(csv_samples),
+        });
+
+        let mut json_samples = Vec::with_capacity(iters);
+        let mut parsed_json_bars = 0_usize;
+        for step in 0..(warmup + iters) {
+            let t0 = Instant::now();
+            let loaded = load_ohlcv_json(&json_doc, &default_opts).expect("valid r06 json");
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            parsed_json_bars = loaded.candles.len();
+            std::hint::black_box(&loaded.candles);
+            if step >= warmup {
+                json_samples.push(us);
+            }
+        }
+        loader_cases.push(R06LoaderCaseResult {
+            loader_id: match n {
+                10_000 => "json_kline_10k",
+                50_000 => "json_kline_50k",
+                _ => "json_kline_100k",
+            },
+            format: "JSON (Unix-ms kline)",
+            raw_rows: n,
+            parsed_bars: parsed_json_bars,
+            payload_bytes: json_doc.len(),
+            parse_stats: TimingStats::from_samples(json_samples),
+        });
+    }
+
+    // Real Archive Fixtures (`CafeF.INDEX.clean.csv` & `SPY.csv`) if present in workspace
+    if let Ok(cafef_csv) =
+        std::fs::read_to_string("ARCHIVE/test-results/p0b/data/CafeF.INDEX.clean.csv")
+    {
+        let cafef_opts = DataLoadOptions {
+            symbol_filter: Some("VNINDEX".to_owned()),
+            ..DataLoadOptions::default()
+        };
+        let mut samples = Vec::with_capacity(80);
+        let mut raw_rows = 0_usize;
+        let mut parsed_bars = 0_usize;
+        for step in 0..90 {
+            let t0 = Instant::now();
+            let rep = load_ohlcv_csv(&cafef_csv, &cafef_opts).expect("cafef csv");
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            raw_rows = rep.raw_row_count;
+            parsed_bars = rep.candles.len();
+            std::hint::black_box(&rep.candles);
+            if step >= 10 {
+                samples.push(us);
+            }
+        }
+        loader_cases.push(R06LoaderCaseResult {
+            loader_id: "archive_cafef_vnindex_csv",
+            format: "CSV (CafeF Multi-Ticker)",
+            raw_rows,
+            parsed_bars,
+            payload_bytes: cafef_csv.len(),
+            parse_stats: TimingStats::from_samples(samples),
+        });
+    }
+
+    if let Ok(spy_csv) =
+        std::fs::read_to_string("ARCHIVE/research_repos/lightweight-charts-drawing/demo/SPY.csv")
+    {
+        let mut samples = Vec::with_capacity(80);
+        let mut raw_rows = 0_usize;
+        let mut parsed_bars = 0_usize;
+        for step in 0..90 {
+            let t0 = Instant::now();
+            let rep = load_ohlcv_csv(&spy_csv, &default_opts).expect("spy csv");
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            raw_rows = rep.raw_row_count;
+            parsed_bars = rep.candles.len();
+            std::hint::black_box(&rep.candles);
+            if step >= 10 {
+                samples.push(us);
+            }
+        }
+        loader_cases.push(R06LoaderCaseResult {
+            loader_id: "archive_spy_5col_csv",
+            format: "CSV (5-Col NYSE SPY)",
+            raw_rows,
+            parsed_bars,
+            payload_bytes: spy_csv.len(),
+            parse_stats: TimingStats::from_samples(samples),
+        });
+    }
+
+    // 2. Multi-Timeframe Aggregation (`100,000` `1m` -> `5m`, `15m`, `1h`, `4h`, `1D`, `1W`)
+    //    + 25-Drawing Exact Timestamp Remapping
+    let base_100k_rep = generate_intraday_vn30f_1m_report(100_000);
+    let candles_100k_1m = base_100k_rep.candles;
+    let mut base_store_25 = build_r05_benchmark_drawings(
+        &candles_100k_1m,
+        candles_100k_1m.len().saturating_sub(600),
+        candles_100k_1m.len() - 1,
+    );
+    // Stamp initial UTC timestamps on all 25 anchors at `1m`
+    base_store_25.remap_timeframe(
+        &candles_100k_1m,
+        Timeframe::M1,
+        &candles_100k_1m,
+        Timeframe::M1,
+    );
+
+    let targets = [
+        Timeframe::M5,
+        Timeframe::M15,
+        Timeframe::H1,
+        Timeframe::H4,
+        Timeframe::D1,
+        Timeframe::W1,
+    ];
+    let mut agg_cases = Vec::new();
+    for &target_tf in &targets {
+        let mut agg_samples = Vec::with_capacity(80);
+        let mut out_candles = Vec::new();
+        for step in 0..90 {
+            let t0 = Instant::now();
+            let agg =
+                aggregate_ohlcv(&candles_100k_1m, Timeframe::M1, target_tf).expect("valid rollup");
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            std::hint::black_box(&agg);
+            if step == 0 {
+                out_candles = agg;
+            }
+            if step >= 10 {
+                agg_samples.push(us);
+            }
+        }
+
+        let mut remap_samples = Vec::with_capacity(200);
+        for step in 0..220 {
+            let mut working_store = base_store_25.clone();
+            let t0 = Instant::now();
+            working_store.remap_timeframe(&candles_100k_1m, Timeframe::M1, &out_candles, target_tf);
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            std::hint::black_box(&working_store.drawings);
+            if step >= 20 {
+                remap_samples.push(us);
+            }
+        }
+
+        agg_cases.push(R06AggregationCaseResult {
+            source_bars: candles_100k_1m.len(),
+            source_tf: Timeframe::M1.label(),
+            target_tf: target_tf.label(),
+            output_bars: out_candles.len(),
+            aggregate_stats: TimingStats::from_samples(agg_samples),
+            remap_25_drawings_stats: TimingStats::from_samples(remap_samples),
+        });
+    }
+
+    // 3. End-to-End 4-Pane + 6-Indicator + 25-Drawing Intraday & Aggregated Frame Budget (`< 4.0 ms` gate)
+    let all_cfg = IndicatorConfig {
+        show_sma: true,
+        show_ema: true,
+        show_bbands: true,
+        show_rsi: true,
+        show_macd: true,
+        show_atr: true,
+        ..IndicatorConfig::default()
+    };
+    let mut cache_1m = IndicatorCache::new();
+    cache_1m.sync(&candles_100k_1m, 1, &all_cfg);
+
+    let candles_15m =
+        aggregate_ohlcv(&candles_100k_1m, Timeframe::M1, Timeframe::M15).expect("15m agg");
+    let mut cache_15m = IndicatorCache::new();
+    cache_15m.sync(&candles_15m, 2, &all_cfg);
+    let mut store_15m = base_store_25.clone();
+    store_15m.remap_timeframe(
+        &candles_100k_1m,
+        Timeframe::M1,
+        &candles_15m,
+        Timeframe::M15,
+    );
+
+    let candles_1d =
+        aggregate_ohlcv(&candles_100k_1m, Timeframe::M1, Timeframe::D1).expect("1d agg");
+    let mut cache_1d = IndicatorCache::new();
+    cache_1d.sync(&candles_1d, 3, &all_cfg);
+    let mut store_1d = base_store_25.clone();
+    store_1d.remap_timeframe(&candles_100k_1m, Timeframe::M1, &candles_1d, Timeframe::D1);
+
+    let render_cases = vec![
+        bench_r06_intraday_workstation_render(
+            &candles_100k_1m,
+            "VN30F1M",
+            "1m",
+            &all_cfg,
+            &cache_1m,
+            &base_store_25,
+            "r06_100k_1m_recent_4pane_25draw",
+            "100K 1m intraday window (bar_spacing=8.0, HH:MM/Day axis, 4 panes + 6 ind + 25 draw)",
+            PriceScaleMode::Normal,
+            |vp| {
+                vp.reset_to_default();
+                vp.time_scale.set_bar_spacing(8.0);
+            },
+            15,
+            100,
+        ),
+        bench_r06_intraday_workstation_render(
+            &candles_100k_1m,
+            "VN30F1M",
+            "1m",
+            &all_cfg,
+            &cache_1m,
+            &base_store_25,
+            "r06_100k_1m_fit_conflated_4pane_25draw",
+            "100K 1m full-fit conflated (Logarithmic, 4 panes + 6 ind + 25 draw)",
+            PriceScaleMode::Logarithmic,
+            |vp| vp.fit_all(),
+            15,
+            80,
+        ),
+        bench_r06_intraday_workstation_render(
+            &candles_15m,
+            "VN30F1M",
+            "15m",
+            &all_cfg,
+            &cache_15m,
+            &store_15m,
+            "r06_100k_to_15m_recent_4pane_25draw",
+            "100K 1m aggregated to 15m + 25 remapped drawings (bar_spacing=8.0, Normal)",
+            PriceScaleMode::Normal,
+            |vp| {
+                vp.reset_to_default();
+                vp.time_scale.set_bar_spacing(8.0);
+            },
+            15,
+            100,
+        ),
+        bench_r06_intraday_workstation_render(
+            &candles_1d,
+            "VN30F1M",
+            "1D",
+            &all_cfg,
+            &cache_1d,
+            &store_1d,
+            "r06_100k_to_1d_fit_4pane_25draw",
+            "100K 1m aggregated to 1D + 25 remapped drawings (fit_all, Logarithmic)",
+            PriceScaleMode::Logarithmic,
+            |vp| vp.fit_all(),
+            15,
+            100,
+        ),
+    ];
+
+    println!("\n--- Streaming CSV & JSON Loader Throughput ---");
+    for c in &loader_cases {
+        let mb = (c.payload_bytes as f64) / (1024.0 * 1024.0);
+        let med_ms = c.parse_stats.median_us / 1_000.0;
+        let mb_per_s = if med_ms > 0.0 {
+            mb / (med_ms / 1_000.0)
+        } else {
+            0.0
+        };
+        println!(
+            "{:<26} | {:>7} bars ({:>6.2} MiB) | Median: {:>7.3} ms (P95 {:>7.3} ms) | {:>7.1} MiB/s",
+            c.loader_id,
+            c.parsed_bars,
+            mb,
+            med_ms,
+            c.parse_stats.p95_us / 1_000.0,
+            mb_per_s,
+        );
+    }
+
+    println!("\n--- 100,000 x 1m Multi-Timeframe Aggregation + 25-Drawing Timestamp Remap ---");
+    for a in &agg_cases {
+        println!(
+            "100K {} -> {:<3} ({:>6} bars) | Rollup Median: {:>7.3} ms (P95 {:>7.3} ms) | Remap 25 Drawings: {:>6.2} µs",
+            a.source_tf,
+            a.target_tf,
+            a.output_bars,
+            a.aggregate_stats.median_us / 1_000.0,
+            a.aggregate_stats.p95_us / 1_000.0,
+            a.remap_25_drawings_stats.median_us,
+        );
+    }
+
+    println!(
+        "\n{:<8} | {:<38} | {:>5} | {:>8} | {:>9} | {:>9} | {:>9}",
+        "Bars", "Workload", "Confl", "Vertices", "UI (ms)", "Tess (ms)", "Total(ms)"
+    );
+    println!("{}", "-".repeat(104));
+    for r in &render_cases {
+        println!(
+            "{:<8} | {:<38} | {:>4}x | {:>8} | {:>9.3} | {:>9.3} | {:>9.3}",
+            r.dataset_bars,
+            r.workload_id,
+            r.conflation_factor,
+            r.total_vertices,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.median_us / 1_000.0,
+        );
+    }
+
+    let json_out = format_r06_json_report(
+        cpu_brand,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        &loader_cases,
+        &agg_cases,
+        &render_cases,
+    );
+    let md_out = format_r06_markdown_report(
+        cpu_brand,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        &loader_cases,
+        &agg_cases,
+        &render_cases,
+    );
+
+    std::fs::create_dir_all("docs/evidence").expect("create docs/evidence");
+    std::fs::write("docs/evidence/r06_data_timeframe_benchmark.json", json_out)
+        .expect("write r06 json");
+    std::fs::write("docs/evidence/r06_data_timeframe_benchmark.md", md_out)
+        .expect("write r06 markdown");
+    println!(
+        "\nSaved docs/evidence/r06_data_timeframe_benchmark.json and docs/evidence/r06_data_timeframe_benchmark.md"
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bench_r06_intraday_workstation_render(
+    candles: &[Candle],
+    symbol: &'static str,
+    timeframe: &'static str,
+    indicators: &IndicatorConfig,
+    cache: &IndicatorCache,
+    initial_store: &DrawingStore,
+    workload_id: &'static str,
+    description: &'static str,
+    scale_mode: PriceScaleMode,
+    mut setup_fn: impl FnMut(&mut ChartViewportState),
+    warmup: usize,
+    iters: usize,
+) -> RenderCaseResult {
+    let ctx = egui::Context::default();
+    let screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+    ctx.set_pixels_per_point(2.0);
+
+    let mut vp = ChartViewportState::new();
+    vp.main_price_scale.set_mode(scale_mode);
+    let mut store = initial_store.clone();
+
+    let cfg = ChartDisplayConfig {
+        symbol,
+        timeframe,
+        show_grid: true,
+        show_crosshair: true,
+        show_volume: true,
+    };
+
+    for _ in 0..2 {
+        let mut init_out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let _ = render_workstation_chart_with_drawings(
+                        ui, candles, &mut vp, cfg, indicators, cache, &mut store,
+                    );
+                });
+            },
+        );
+        init_out.textures_delta.clear();
+    }
+    setup_fn(&mut vp);
+
+    let mut ui_samples = Vec::with_capacity(iters);
+    let mut tess_samples = Vec::with_capacity(iters);
+    let mut total_samples = Vec::with_capacity(iters);
+    let mut last_rep = None;
+    let mut paint_shapes = 0_usize;
+    let mut clipped_primitives = 0_usize;
+    let mut total_vertices = 0_usize;
+    let mut total_indices = 0_usize;
+
+    for step in 0..(warmup + iters) {
+        let hover_x = 140.0 + ((step % 35) as f32) * 24.0;
+        let hover_y = if step % 2 == 0 { 220.0 } else { 520.0 };
+        let raw_input = egui::RawInput {
+            screen_rect,
+            time: Some(step as f64 * 0.016),
+            events: vec![egui::Event::PointerMoved(Pos2::new(hover_x, hover_y))],
+            ..Default::default()
+        };
+
+        let t_frame = Instant::now();
+        let t_ui = Instant::now();
+        let mut full_out = ctx.run_ui(raw_input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                last_rep = render_workstation_chart_with_drawings(
+                    ui, candles, &mut vp, cfg, indicators, cache, &mut store,
+                );
+            });
+        });
+        let ui_us = t_ui.elapsed().as_secs_f64() * 1_000_000.0;
+
+        paint_shapes = full_out.shapes.len();
+        let t_tess = Instant::now();
+        let primitives = ctx.tessellate(full_out.shapes, full_out.pixels_per_point);
+        let tess_us = t_tess.elapsed().as_secs_f64() * 1_000_000.0;
+        let total_us = t_frame.elapsed().as_secs_f64() * 1_000_000.0;
+        full_out.textures_delta.clear();
+
+        if step + 1 == warmup + iters {
+            clipped_primitives = primitives.len();
+            total_vertices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.vertices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+            total_indices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.indices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+        }
+        std::hint::black_box(&primitives);
+
+        if step >= warmup {
+            ui_samples.push(ui_us);
+            tess_samples.push(tess_us);
+            total_samples.push(total_us);
+        }
+    }
+
+    let rep = last_rep.expect("r06 render report");
+    assert_eq!(rep.drawing_count, 25);
+    RenderCaseResult {
+        dataset_bars: candles.len(),
+        workload_id,
+        description,
+        scale_mode: scale_mode.label(),
+        conflation_enabled: true,
+        bar_spacing: rep.bar_spacing,
+        conflation_factor: rep.conflation_factor,
+        culled_bars: rep.culled_bar_count,
+        rendered_candles: rep.rendered_candle_count,
+        paint_shapes,
+        clipped_primitives,
+        total_vertices,
+        total_indices,
+        ui_build_stats: TimingStats::from_samples(ui_samples),
+        tessellate_stats: TimingStats::from_samples(tess_samples),
+        total_cpu_frame_stats: TimingStats::from_samples(total_samples),
+    }
+}
+
+fn format_r06_json_report(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+    loaders: &[R06LoaderCaseResult],
+    aggregations: &[R06AggregationCaseResult],
+    render: &[RenderCaseResult],
+) -> String {
+    let mut s = String::with_capacity(8192);
+    let _ = writeln!(s, "{{");
+    let _ = writeln!(s, "  \"milestone\": \"R06\",");
+    let _ = writeln!(s, "  \"environment\": {{");
+    let _ = writeln!(s, "    \"cpu\": \"{}\",", cpu.replace('"', "\\\""));
+    let _ = writeln!(s, "    \"os\": \"{}\",", std::env::consts::OS);
+    let _ = writeln!(s, "    \"arch\": \"{}\",", std::env::consts::ARCH);
+    let _ = writeln!(s, "    \"ram_bytes\": {mem_bytes},");
+    let _ = writeln!(s, "    \"rustc\": \"{}\",", rustc_ver.replace('"', "\\\""));
+    let _ = writeln!(s, "    \"profile\": \"{profile}\",");
+    let _ = writeln!(s, "    \"viewport_logical_px\": [1280, 800],");
+    let _ = writeln!(s, "    \"pixels_per_point\": 2.0");
+    let _ = writeln!(s, "  }},");
+    let _ = writeln!(s, "  \"loader_throughput\": [");
+    for (idx, c) in loaders.iter().enumerate() {
+        let comma = if idx + 1 == loaders.len() { "" } else { "," };
+        let med_ms = c.parse_stats.median_us / 1_000.0;
+        let mb = (c.payload_bytes as f64) / (1024.0 * 1024.0);
+        let mb_s = if med_ms > 0.0 {
+            mb / (med_ms / 1_000.0)
+        } else {
+            0.0
+        };
+        let _ = writeln!(
+            s,
+            "    {{ \"loader_id\": \"{}\", \"format\": \"{}\", \"raw_rows\": {}, \"parsed_bars\": {}, \"payload_bytes\": {}, \"median_ms\": {:.4}, \"p95_ms\": {:.4}, \"mib_per_sec\": {:.2} }}{comma}",
+            c.loader_id,
+            c.format,
+            c.raw_rows,
+            c.parsed_bars,
+            c.payload_bytes,
+            med_ms,
+            c.parse_stats.p95_us / 1_000.0,
+            mb_s,
+        );
+    }
+    let _ = writeln!(s, "  ],");
+    let _ = writeln!(s, "  \"timeframe_aggregation\": [");
+    for (idx, a) in aggregations.iter().enumerate() {
+        let comma = if idx + 1 == aggregations.len() {
+            ""
+        } else {
+            ","
+        };
+        let _ = writeln!(
+            s,
+            "    {{ \"source_bars\": {}, \"source_tf\": \"{}\", \"target_tf\": \"{}\", \"output_bars\": {}, \"aggregate_median_ms\": {:.4}, \"aggregate_p95_ms\": {:.4}, \"remap_25_drawings_median_us\": {:.3}, \"remap_25_drawings_p95_us\": {:.3} }}{comma}",
+            a.source_bars,
+            a.source_tf,
+            a.target_tf,
+            a.output_bars,
+            a.aggregate_stats.median_us / 1_000.0,
+            a.aggregate_stats.p95_us / 1_000.0,
+            a.remap_25_drawings_stats.median_us,
+            a.remap_25_drawings_stats.p95_us,
+        );
+    }
+    let _ = writeln!(s, "  ],");
+    let _ = writeln!(s, "  \"workstation_workloads\": [");
+    for (idx, r) in render.iter().enumerate() {
+        let comma = if idx + 1 == render.len() { "" } else { "," };
+        let _ = writeln!(
+            s,
+            "    {{ \"dataset_bars\": {}, \"workload_id\": \"{}\", \"scale_mode\": \"{}\", \"bar_spacing\": {:.5}, \"conflation_factor\": {}, \"culled_bars\": {}, \"rendered_candles\": {}, \"paint_shapes\": {}, \"clipped_primitives\": {}, \"total_vertices\": {}, \"total_indices\": {}, \"ui_median_ms\": {:.4}, \"tessellate_median_ms\": {:.4}, \"total_cpu_median_ms\": {:.4}, \"total_cpu_p95_ms\": {:.4} }}{comma}",
+            r.dataset_bars,
+            r.workload_id,
+            r.scale_mode,
+            r.bar_spacing,
+            r.conflation_factor,
+            r.culled_bars,
+            r.rendered_candles,
+            r.paint_shapes,
+            r.clipped_primitives,
+            r.total_vertices,
+            r.total_indices,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.p95_us / 1_000.0,
+        );
+    }
+    let _ = writeln!(s, "  ]");
+    let _ = writeln!(s, "}}");
+    s
+}
+
+fn format_r06_markdown_report(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+    loaders: &[R06LoaderCaseResult],
+    aggregations: &[R06AggregationCaseResult],
+    render: &[RenderCaseResult],
+) -> String {
+    let mut s = String::with_capacity(8192);
+    let _ = writeln!(
+        s,
+        "# Milestone R06 — CSV/JSON OHLCV Data Loader & Multi-Timeframe Aggregation Benchmark Evidence\n"
+    );
+    let _ = writeln!(
+        s,
+        "- **Command:** `cargo run --release --example viewport_bench -- --r06`"
+    );
+    let _ = writeln!(
+        s,
+        "- **Hardware:** `{cpu}` (`{}-{}`), `{:.1} GiB` RAM",
+        std::env::consts::ARCH,
+        std::env::consts::OS,
+        (mem_bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+    );
+    let _ = writeln!(
+        s,
+        "- **Toolchain & Profile:** `{rustc_ver}` (`--{profile}`)"
+    );
+    let _ = writeln!(
+        s,
+        "- **Active Stack:** Pure-Rust Streaming RFC-4180 CSV & RFC-8259 JSON Loaders + `1m..1W` Upward Aggregation + `25` Timestamp-Locked Multi-Pane Drawings + 4-Pane 6-Indicator Adaptive Intraday/Daily Workstation\n"
+    );
+
+    let _ = writeln!(
+        s,
+        "## 1. Streaming RFC-4180 CSV & RFC-8259 JSON Loader Throughput (`10K`, `50K`, `100K` + Real Archive Fixtures)\n"
+    );
+    let _ = writeln!(
+        s,
+        "| Loader Case | Format | Raw Rows | Parsed Bars | Payload (`MiB`) | Parse Median (`ms`) | Parse P95 (`ms`) | Throughput (`MiB/s`) |"
+    );
+    let _ = writeln!(
+        s,
+        "| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: |"
+    );
+    for c in loaders {
+        let mb = (c.payload_bytes as f64) / (1024.0 * 1024.0);
+        let med_ms = c.parse_stats.median_us / 1_000.0;
+        let mb_s = if med_ms > 0.0 {
+            mb / (med_ms / 1_000.0)
+        } else {
+            0.0
+        };
+        let _ = writeln!(
+            s,
+            "| `{}` | `{}` | `{}` | `{}` | `{:.2}` | **`{:.3} ms`** | `{:.3} ms` | **`{:.1} MiB/s`** |",
+            c.loader_id,
+            c.format,
+            c.raw_rows,
+            c.parsed_bars,
+            mb,
+            med_ms,
+            c.parse_stats.p95_us / 1_000.0,
+            mb_s,
+        );
+    }
+
+    let _ = writeln!(
+        s,
+        "\n## 2. `100,000` `1m` Bars Multi-Timeframe Aggregation & 25-Drawing Exact Timestamp Remapping\n"
+    );
+    let _ = writeln!(
+        s,
+        "| Source (`100K`) | Target TF | Output Bars | Rollup Median (`ms`) | Rollup P95 (`ms`) | 25-Drawing Timestamp Remap (`µs`) |"
+    );
+    let _ = writeln!(s, "| :--- | :--- | ---: | ---: | ---: | ---: |");
+    for a in aggregations {
+        let _ = writeln!(
+            s,
+            "| `{} {}` | **`{}`** | `{}` | **`{:.3} ms`** | `{:.3} ms` | **`{:.2} µs`** (P95 `{:.2} µs`) |",
+            a.source_bars,
+            a.source_tf,
+            a.target_tf,
+            a.output_bars,
+            a.aggregate_stats.median_us / 1_000.0,
+            a.aggregate_stats.p95_us / 1_000.0,
+            a.remap_25_drawings_stats.median_us,
+            a.remap_25_drawings_stats.p95_us,
+        );
+    }
+
+    let _ = writeln!(
+        s,
+        "\n## 3. End-to-End 4-Pane + 6-Indicator + 25-Drawing Intraday & Aggregated Frame Budget (`DECISION-RENDERER-002` Gate: `< 4.0 ms`)\n"
     );
     let _ = writeln!(
         s,

@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::data::{Timeframe, remap_timestamp_to_bar_index, resolve_anchor_timestamp};
 use crate::model::Candle;
 
 use super::geometry::{HandlePart, LocalPoint, PaneDrawingProjection};
@@ -335,6 +336,36 @@ impl DrawingStore {
         self.hovered_hit = None;
     }
 
+    /// Remaps all committed drawings and undo/redo history entries from `(old_candles, old_tf)`
+    /// onto `(new_candles, new_tf)` using exact market UTC timestamps (`Milestone R06`).
+    ///
+    /// Sub-bar timestamps recorded on finer timeframes (`1m`/`5m`) are preserved across coarser
+    /// excursions (`5m -> 1D -> 1W -> 5m`) with zero drift, and re-evaluated automatically whenever
+    /// a user edits a handle or body on the new timeframe.
+    pub fn remap_timeframe(
+        &mut self,
+        old_candles: &[Candle],
+        old_tf: Timeframe,
+        new_candles: &[Candle],
+        new_tf: Timeframe,
+    ) {
+        if old_candles.is_empty() || new_candles.is_empty() {
+            return;
+        }
+        self.rollback_active_phase();
+        self.hovered_hit = None;
+
+        for d in &mut self.drawings {
+            remap_drawing_geometry(&mut d.geometry, old_candles, old_tf, new_candles, new_tf);
+        }
+        for cmd in &mut self.undo_stack {
+            remap_command_anchors(cmd, old_candles, old_tf, new_candles, new_tf);
+        }
+        for cmd in &mut self.redo_stack {
+            remap_command_anchors(cmd, old_candles, old_tf, new_candles, new_tf);
+        }
+    }
+
     /// Deletes the currently selected drawing if it exists and is unlocked.
     pub fn delete_selected(&mut self) -> bool {
         let Some(sel_id) = self.selected_id else {
@@ -604,6 +635,7 @@ impl DrawingStore {
                 start_local,
                 grab_offset,
                 drag_activated,
+                original,
                 ..
             } => {
                 self.hovered_hit = None;
@@ -615,16 +647,29 @@ impl DrawingStore {
                 }
                 let target_id = *drawing_id;
                 let target_handle = *handle;
+                let pure_vertical = (local_pos.x - start_local.x).abs() <= 1e-9
+                    && effective_magnet == MagnetMode::Off;
                 let target_local = if effective_magnet == MagnetMode::Ohlc {
                     local_pos
                 } else {
                     LocalPoint::new(local_pos.x + grab_offset.x, local_pos.y + grab_offset.y)
                 };
-                if let Some(anchor) =
+                if let Some(mut anchor) =
                     resolve_anchor(pane, target_local, effective_magnet, proj, candles)
                     && let Some(d) = self.drawings.iter_mut().find(|d| d.id == target_id)
                     && !d.locked
                 {
+                    if pure_vertical {
+                        let [orig_a0, orig_a1] = original.geometry.anchors();
+                        let src = match target_handle {
+                            HandlePart::Anchor(0)
+                            | HandlePart::RectCorner(0)
+                            | HandlePart::RectCorner(3) => orig_a0,
+                            _ => orig_a1,
+                        };
+                        anchor.bar_index = src.bar_index;
+                        anchor.timestamp = src.timestamp;
+                    }
                     apply_handle_drag(&mut d.geometry, target_handle, anchor);
                 }
             }
@@ -1135,10 +1180,12 @@ fn apply_handle_drag(geom: &mut DrawingGeometry, handle: HandlePart, anchor: Dra
                 1 => {
                     corner_a.value = anchor.value;
                     corner_b.bar_index = anchor.bar_index;
+                    corner_b.timestamp = anchor.timestamp;
                 }
                 2 => *corner_b = anchor,
                 3 => {
                     corner_a.bar_index = anchor.bar_index;
+                    corner_a.timestamp = anchor.timestamp;
                     corner_b.value = anchor.value;
                 }
                 _ => {}
@@ -1146,6 +1193,146 @@ fn apply_handle_drag(geom: &mut DrawingGeometry, handle: HandlePart, anchor: Dra
         }
         _ => {}
     }
+}
+
+fn remap_single_anchor(
+    anchor: &mut DrawingAnchor,
+    old_candles: &[Candle],
+    old_tf: Timeframe,
+    new_candles: &[Candle],
+    new_tf: Timeframe,
+) {
+    let ts = anchor
+        .timestamp
+        .filter(|t| t.is_finite() && t.abs() <= super::MAX_ABS_ANCHOR_TIMESTAMP)
+        .or_else(|| resolve_anchor_timestamp(anchor.bar_index, old_candles, old_tf));
+    if let Some(resolved_ts) = ts
+        && resolved_ts.is_finite()
+        && resolved_ts.abs() <= super::MAX_ABS_ANCHOR_TIMESTAMP
+        && let Some((new_idx, snapped_ts)) =
+            remap_timestamp_to_bar_index(resolved_ts, old_tf, new_candles, new_tf)
+    {
+        anchor.bar_index = new_idx;
+        if snapped_ts.is_finite() && snapped_ts.abs() <= super::MAX_ABS_ANCHOR_TIMESTAMP {
+            anchor.timestamp = Some(snapped_ts);
+        }
+    }
+}
+
+fn remap_drawing_geometry(
+    geom: &mut DrawingGeometry,
+    old_candles: &[Candle],
+    old_tf: Timeframe,
+    new_candles: &[Candle],
+    new_tf: Timeframe,
+) {
+    match geom {
+        DrawingGeometry::HorizontalLine { anchor } => {
+            remap_single_anchor(anchor, old_candles, old_tf, new_candles, new_tf);
+        }
+        DrawingGeometry::TrendLine { start, end }
+        | DrawingGeometry::Rectangle {
+            corner_a: start,
+            corner_b: end,
+        }
+        | DrawingGeometry::FibonacciRetracement { start, end, .. } => {
+            remap_single_anchor(start, old_candles, old_tf, new_candles, new_tf);
+            remap_single_anchor(end, old_candles, old_tf, new_candles, new_tf);
+        }
+        DrawingGeometry::Ray { origin, through } => {
+            let was_non_vertical = (through.bar_index - origin.bar_index).abs() > 1e-9;
+            let orig_dir_sign = if through.bar_index >= origin.bar_index {
+                1.0
+            } else {
+                -1.0
+            };
+            remap_single_anchor(origin, old_candles, old_tf, new_candles, new_tf);
+            remap_single_anchor(through, old_candles, old_tf, new_candles, new_tf);
+            let collapsed_horiz =
+                was_non_vertical && (through.bar_index - origin.bar_index).abs() <= 1e-9;
+            if collapsed_horiz || !has_non_zero_direction(*origin, *through) {
+                let candidate = through.bar_index + orig_dir_sign * 1e-3;
+                if candidate.abs() <= super::MAX_ABS_BAR_INDEX {
+                    through.bar_index = candidate;
+                    if through.timestamp.is_none() {
+                        through.timestamp =
+                            resolve_anchor_timestamp(through.bar_index, new_candles, new_tf)
+                                .filter(|t| {
+                                    t.is_finite() && t.abs() <= super::MAX_ABS_ANCHOR_TIMESTAMP
+                                });
+                    }
+                } else {
+                    origin.bar_index = (through.bar_index - orig_dir_sign * 1e-3)
+                        .clamp(-super::MAX_ABS_BAR_INDEX, super::MAX_ABS_BAR_INDEX);
+                    if origin.timestamp.is_none() {
+                        origin.timestamp =
+                            resolve_anchor_timestamp(origin.bar_index, new_candles, new_tf).filter(
+                                |t| t.is_finite() && t.abs() <= super::MAX_ABS_ANCHOR_TIMESTAMP,
+                            );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn remap_command_anchors(
+    cmd: &mut DrawingCommand,
+    old_candles: &[Candle],
+    old_tf: Timeframe,
+    new_candles: &[Candle],
+    new_tf: Timeframe,
+) {
+    match cmd {
+        DrawingCommand::Create(d) | DrawingCommand::Delete { drawing: d, .. } => {
+            remap_drawing_geometry(&mut d.geometry, old_candles, old_tf, new_candles, new_tf);
+        }
+        DrawingCommand::Modify { before, after } => {
+            remap_drawing_geometry(
+                &mut before.geometry,
+                old_candles,
+                old_tf,
+                new_candles,
+                new_tf,
+            );
+            remap_drawing_geometry(
+                &mut after.geometry,
+                old_candles,
+                old_tf,
+                new_candles,
+                new_tf,
+            );
+        }
+        DrawingCommand::ReplaceAll { before, after, .. } => {
+            for d in before {
+                remap_drawing_geometry(&mut d.geometry, old_candles, old_tf, new_candles, new_tf);
+            }
+            for d in after {
+                remap_drawing_geometry(&mut d.geometry, old_candles, old_tf, new_candles, new_tf);
+            }
+        }
+    }
+}
+
+fn translate_single_anchor_local(
+    orig_anchor: DrawingAnchor,
+    orig_pt: LocalPoint,
+    dx: f64,
+    dy: f64,
+    proj: &PaneDrawingProjection<'_>,
+) -> Option<DrawingAnchor> {
+    let moved = proj.local_to_anchor(LocalPoint::new(orig_pt.x + dx, orig_pt.y + dy))?;
+    // Preserve exact sub-bar `bar_index` and cached UTC `timestamp` during pure vertical drags (`dx == 0`).
+    let next_anchor = if dx.abs() <= 1e-9 {
+        DrawingAnchor {
+            bar_index: orig_anchor.bar_index,
+            value: moved.value,
+            timestamp: orig_anchor.timestamp,
+        }
+    } else {
+        DrawingAnchor::new(moved.bar_index, moved.value)
+    };
+    next_anchor.is_valid().then_some(next_anchor)
 }
 
 fn translate_geometry_in_local_space(
@@ -1161,84 +1348,52 @@ fn translate_geometry_in_local_space(
     match *original {
         DrawingGeometry::HorizontalLine { anchor } => {
             let orig_pt = *original_local.first()?;
-            let moved = proj.local_to_anchor(LocalPoint::new(orig_pt.x + dx, orig_pt.y + dy))?;
-            // Preserve `bar_index` if `dx == 0`, otherwise translate smoothly.
-            let next_bar = if dx.abs() <= 1e-9 {
-                anchor.bar_index
-            } else {
-                moved.bar_index
-            };
-            let next_anchor = DrawingAnchor::new(next_bar, moved.value);
-            next_anchor
-                .is_valid()
-                .then_some(DrawingGeometry::HorizontalLine {
-                    anchor: next_anchor,
-                })
+            let next_anchor = translate_single_anchor_local(anchor, orig_pt, dx, dy, proj)?;
+            Some(DrawingGeometry::HorizontalLine {
+                anchor: next_anchor,
+            })
         }
-        DrawingGeometry::TrendLine { .. } => {
+        DrawingGeometry::TrendLine { start, end } => {
             if original_local.len() < 2 {
                 return None;
             }
-            let a0 = proj.local_to_anchor(LocalPoint::new(
-                original_local[0].x + dx,
-                original_local[0].y + dy,
-            ))?;
-            let a1 = proj.local_to_anchor(LocalPoint::new(
-                original_local[1].x + dx,
-                original_local[1].y + dy,
-            ))?;
+            let a0 = translate_single_anchor_local(start, original_local[0], dx, dy, proj)?;
+            let a1 = translate_single_anchor_local(end, original_local[1], dx, dy, proj)?;
             Some(DrawingGeometry::TrendLine { start: a0, end: a1 })
         }
-        DrawingGeometry::Ray { .. } => {
+        DrawingGeometry::Ray { origin, through } => {
             if original_local.len() < 2 {
                 return None;
             }
-            let a0 = proj.local_to_anchor(LocalPoint::new(
-                original_local[0].x + dx,
-                original_local[0].y + dy,
-            ))?;
-            let a1 = proj.local_to_anchor(LocalPoint::new(
-                original_local[1].x + dx,
-                original_local[1].y + dy,
-            ))?;
+            let a0 = translate_single_anchor_local(origin, original_local[0], dx, dy, proj)?;
+            let a1 = translate_single_anchor_local(through, original_local[1], dx, dy, proj)?;
             has_non_zero_direction(a0, a1).then_some(DrawingGeometry::Ray {
                 origin: a0,
                 through: a1,
             })
         }
-        DrawingGeometry::Rectangle { .. } => {
+        DrawingGeometry::Rectangle { corner_a, corner_b } => {
             if original_local.len() < 2 {
                 return None;
             }
-            let a0 = proj.local_to_anchor(LocalPoint::new(
-                original_local[0].x + dx,
-                original_local[0].y + dy,
-            ))?;
-            let a1 = proj.local_to_anchor(LocalPoint::new(
-                original_local[1].x + dx,
-                original_local[1].y + dy,
-            ))?;
+            let a0 = translate_single_anchor_local(corner_a, original_local[0], dx, dy, proj)?;
+            let a1 = translate_single_anchor_local(corner_b, original_local[1], dx, dy, proj)?;
             Some(DrawingGeometry::Rectangle {
                 corner_a: a0,
                 corner_b: a1,
             })
         }
         DrawingGeometry::FibonacciRetracement {
+            start,
+            end,
             direction,
             extend_right,
-            ..
         } => {
             if original_local.len() < 2 {
                 return None;
             }
-            let a0 = proj.local_to_anchor(LocalPoint::new(
-                original_local[0].x + dx,
-                original_local[0].y + dy,
-            ))?;
-            let a1 = proj.local_to_anchor(LocalPoint::new(
-                original_local[1].x + dx,
-                original_local[1].y + dy,
-            ))?;
+            let a0 = translate_single_anchor_local(start, original_local[0], dx, dy, proj)?;
+            let a1 = translate_single_anchor_local(end, original_local[1], dx, dy, proj)?;
             Some(DrawingGeometry::FibonacciRetracement {
                 start: a0,
                 end: a1,

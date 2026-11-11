@@ -1,7 +1,7 @@
 # SUMI TRADING WORKSTATION — DECISION LOG
 
 - **Session Identity (Created):** `SESSION-01-20261110T160909+0700`
-- **Updated By:** `SESSION-R05-20261111T163600+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Updated By:** `SESSION-R06-20261111T194303+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 
 ## Decisions Recorded in Session 01
 
@@ -128,3 +128,17 @@
   1. Implement `src/drawings/` (`mod.rs`, `geometry.rs`, `hit_test.rs`, `controller.rs`, `tests.rs`) in pure `f64` (`wasm32-unknown-unknown`-verified, zero new crates in `Cargo.toml`), anchoring `HorizontalLine`, `TrendLine`, $360^\circ$ `Ray`, `Rectangle`, and `FibonacciRetracement` in continuous logical `(bar_index: f64, value: f64)` coordinates (`|bar_index| <= 1.0e9`, `|value| <= 1.0e15`) scoped to `DrawingPaneTarget` (`Main` + `Oscillator(Rsi | Macd | Atr)`).
   2. Clip finite segments and $360^\circ$ rays analytically via unit-vector + half-scaled `clip_parametric_line` with exact `p == 0.0` checks and `ClipEdge` boundary snapping, render phase-anchored dashes (`paint_styled_segment_phased`) and `egui::Mesh` translucent zone/Fib bands, and enforce order-independent LWC hit-test priority (`SelectedHandle > Handle > Stroke > SelectedBody`) with `EDIT_DRAG_THRESHOLD_PX = 2.0 px` and locked-stroke viewport pan passthrough.
   3. Confirm `egui::Painter` + `egui::Mesh` remains well below the `< 4.0 ms` `DECISION-RENDERER-002` hybrid ceiling with **25 active multi-pane drawings + 6 indicators + 4 panes on `100,000` bars** (`0.2100 ms` standard `8.0 px`, `0.5720 ms` dense `1.2 px`, **`3.5207 ms` median** / `3.8042 ms` P95 full-fit `32x` conflated).
+
+---
+
+## Decisions Recorded in Session R06
+
+### DEC-R06-001 — Zero-Dependency `src/data/` CSV/JSON OHLCV Engine, `1m..1W` Upward Lattice + Causal `DEF-001` Rollup, Timestamp-Locked Drawings & Offscreen Metal `wgpu` Verification
+- **Date:** `2026-11-12`
+- **Session:** `SESSION-R06-20261111T194303+0700`
+- **Context:** Milestone R06 (`Wave 5`) replaces the synthetic-only `src/data.rs` file after live REA MCP analysis (`ev_c3081a8a...`, `ev_a4dabc00...`, `ev_ab7d475a...`, `ev_288c5960...`, `ev_3a7da525...`, `ev_eeaad96e...`, `ev_64453400...`) proved that legacy Sumi lacked client-side OHLCV timeframe aggregation (`0` matches on `aggregateTimeframe`), crashed on multi-symbol `CafeF` CSVs without symbol isolation, and dropped drawing continuity across timeframe switches; additionally, windowed macOS `CAMetalLayer` screenshots stalled with `Skipping frame due to occlusion.` when the physical display slept.
+- **Decision:**
+  1. Implement a zero-new-dependency, `wasm32-unknown-unknown`-verified `src/data/` module (`mod.rs`, `calendar.rs`, `timeframe.rs`, `csv_loader.rs`, `json_loader.rs`, `presets.rs`, `synthetic.rs`, `tests.rs`) featuring Hinnant O(1) proleptic Gregorian UTC calendar math, single-pass RFC-4180 CSV & bounded recursive-descent JSON kline/envelope parsers (`MAX_IMPORT_BYTES = 64 MiB`, `MAX_SCANNED_RECORDS = 2_000_000`, `MAX_IMPORT_RECORDS = 500_000`, `MAX_JSON_DEPTH = 16`), multi-symbol discovery (`SymbolTracker`), and duplicate-timestamp policies (`KeepLast`, `KeepFirst`, scale-aware `RejectConflict`).
+  2. Enforce an upward-only timeframe lattice (`1m`, `5m`, `15m`, `1h`, `4h`, `1D`, `1W`; `Timeframe::can_aggregate_to` requires `target.seconds() >= self.seconds()`, rejecting downward disaggregation while stamping ISO-8601 Monday `00:00:00 UTC` on `1W` buckets) plus `aggregate_ohlcv_up_to(..., cutoff_timestamp)` to guarantee zero lookahead bias (`DEF-001`) for future replay waves.
+  3. Require canonical UTC epoch seconds `Candle::timestamp: i64` and attach fractional-capable `DrawingAnchor::timestamp: Option<f64>` so `DrawingStore::remap_timeframe` preserves exact in-bar and inter-bar anchors across `1m <-> 5m <-> 15m <-> 1h <-> 4h <-> 1D <-> 1W` switches (`0.75–4.29 µs` for `25` drawings on `100K` bars) and isolate drawings per `(DataSourcePreset, symbol)` via `drawings_by_instrument`.
+  4. Replace windowed `ViewportCommand::Screenshot` automation with `OffscreenWgpuHarness` (`eframe::egui_wgpu::RenderState` + `Rgba8Unorm` `2.0x` Retina texture readback on Apple M1 Metal) so `SUMI_CAPTURE_BATCH` and `SUMI_SCREENSHOT_PATH` execute in `< 1s` with zero windows, zero Dock icons, zero focus stealing, and complete immunity to macOS display sleep.

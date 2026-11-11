@@ -14,24 +14,44 @@ fn main() -> eframe::Result {
         .and_then(|v| v.parse::<f32>().ok())
         .unwrap_or(800.0);
 
-    let is_automated_capture = std::env::var("SUMI_SCREENSHOT_PATH")
-        .ok()
-        .is_some_and(|v| !v.is_empty())
-        || std::env::var("SUMI_CAPTURE_BATCH")
-            .ok()
-            .is_some_and(|v| !v.is_empty());
+    // Execute automated GPU verification batches & screenshots offscreen on Metal/wgpu
+    // (zero window creation, zero Dock bounce, zero focus stealing, immune to display sleep).
+    if let Ok(batch_name) = std::env::var("SUMI_CAPTURE_BATCH")
+        && !batch_name.trim().is_empty()
+    {
+        if let Err(err) = sumi_workstation::SumiWorkstationApp::run_offscreen_wgpu_capture_batch(
+            batch_name.trim(),
+        ) {
+            log::error!("Offscreen GPU batch capture '{batch_name}' failed: {err}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
 
-    let mut viewport = egui::ViewportBuilder::default()
+    if let Ok(screenshot_path) = std::env::var("SUMI_SCREENSHOT_PATH")
+        && !screenshot_path.trim().is_empty()
+    {
+        let telemetry_path = std::env::var("SUMI_TELEMETRY_PATH").ok();
+        let scenario = std::env::var("SUMI_SCENARIO").ok();
+        if let Err(err) = sumi_workstation::SumiWorkstationApp::run_offscreen_wgpu_single_capture(
+            screenshot_path.trim(),
+            telemetry_path.as_deref(),
+            scenario.as_deref(),
+            initial_width.round().max(320.0) as u32,
+            initial_height.round().max(240.0) as u32,
+        ) {
+            log::error!("Offscreen GPU single capture '{screenshot_path}' failed: {err}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    let viewport = egui::ViewportBuilder::default()
         .with_title(
-            "Sumi Trading Workstation — VNINDEX · 1D (Milestone R05 Interactive Drawing & Multi-Pane Engine)",
+            "Sumi Trading Workstation — VNINDEX · 1D (Milestone R06 CSV/JSON OHLCV & Multi-Timeframe Engine)",
         )
         .with_inner_size([initial_width, initial_height])
         .with_min_inner_size([640.0, 420.0]);
-
-    if is_automated_capture {
-        // Prevent background automated verification captures from stealing window/keyboard focus!
-        viewport = viewport.with_active(false);
-    }
 
     let native_options = eframe::NativeOptions {
         viewport,

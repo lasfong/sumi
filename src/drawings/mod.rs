@@ -44,6 +44,9 @@ pub const MAX_ABS_BAR_INDEX: f64 = 1.0e9;
 /// Aligned with `PriceScale::is_valid_logical_range` (`1.0e15`) so `price_to_local_y` and `p1 - p0` never overflow `f64::MAX`.
 pub const MAX_ABS_DRAWING_VALUE: f64 = 1.0e15;
 
+/// Maximum absolute cached anchor UTC timestamp accepted during deserialization (`±1e16` seconds).
+pub const MAX_ABS_ANCHOR_TIMESTAMP: f64 = 1.0e16;
+
 /// Target pane owning a drawing's vertical coordinate space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum DrawingPaneTarget {
@@ -233,27 +236,48 @@ impl DrawingColorPreset {
     }
 }
 
-/// Logical data-space anchor binding continuous bar-slot index and raw series value.
+/// Logical data-space anchor binding continuous bar-slot index, raw series value,
+/// and optional market UTC epoch timestamp (`f64` seconds) for lossless multi-timeframe remapping.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct DrawingAnchor {
     pub bar_index: f64,
     pub value: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<f64>,
 }
 
 impl DrawingAnchor {
     #[inline]
     #[must_use]
     pub const fn new(bar_index: f64, value: f64) -> Self {
-        Self { bar_index, value }
+        Self {
+            bar_index,
+            value,
+            timestamp: None,
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn with_timestamp(bar_index: f64, value: f64, timestamp: f64) -> Self {
+        Self {
+            bar_index,
+            value,
+            timestamp: Some(timestamp),
+        }
     }
 
     #[inline]
     #[must_use]
     pub fn is_valid(self) -> bool {
+        let ts_ok = self
+            .timestamp
+            .is_none_or(|ts| ts.is_finite() && ts.abs() <= MAX_ABS_ANCHOR_TIMESTAMP);
         self.bar_index.is_finite()
             && self.bar_index.abs() <= MAX_ABS_BAR_INDEX
             && self.value.is_finite()
             && self.value.abs() <= MAX_ABS_DRAWING_VALUE
+            && ts_ok
     }
 }
 

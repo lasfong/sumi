@@ -1,9 +1,9 @@
 # SUMI TRADING WORKSTATION — EXECUTION STATE
 
-- **Session Identity:** `SESSION-R05-20261111T163600+0700` (`SUMI PROGRAM ORCHESTRATOR`)
-- **Previous Session:** `SESSION-R04-20261111T140100+0700` (`IMPLEMENTATION_PASS` — Committed cleanly at `50a7845`)
-- **Timestamp (Updated):** `2026-11-11T18:01:00+07:00`
-- **Program Status:** `IMPLEMENTATION_PASS` (`Milestone R05 / Wave 3 Interactive Drawing & Annotation Engine Shipped, Critic-Hardened & Independently Audited`)
+- **Session Identity:** `SESSION-R06-20261111T194303+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Previous Session:** `SESSION-R05-20261111T163600+0700` (`IMPLEMENTATION_PASS` — Committed cleanly at `b04d2dc`)
+- **Timestamp (Updated):** `2026-11-12T01:44:00+07:00`
+- **Program Status:** `IMPLEMENTATION_PASS` (`Milestone R06 / Wave 5 CSV/JSON OHLCV Data Loader & Multi-Timeframe Aggregation Shipped, Critic-Hardened & Independently Audited`)
 
 ---
 
@@ -11,7 +11,7 @@
 
 - **Working Directory:** `/Users/mizuhara/workspace/sumi`
 - **Git Branch:** `master`
-- **Batch Commit Policy (`DEC-R04-001`):** Authorized by Product Owner on `2026-11-11` — each verified milestone/batch plan is committed cleanly on `master` (`98ec576` for R03, `50a7845` for R04; Milestone R05 committed cleanly at the close of Session R05).
+- **Batch Commit Policy (`DEC-R04-001`):** Authorized by Product Owner on `2026-11-11` — each verified milestone/batch plan is committed cleanly on `master` (`98ec576` for R03, `50a7845` for R04, `b04d2dc` for R05; Milestone R06 committed cleanly at the close of Session R06).
 - **Git Tags:** `v2.0.0-rc1`, `v2.0.0-rc2` (untouched)
 - **Legacy Project Archive:** Untouched read-only reference at `/Users/mizuhara/workspace/sumi/ARCHIVE`
 - **Authorized Open-Source References (`research_repos/`, gitignored):**
@@ -24,10 +24,11 @@
 
 - **OS & Hardware:** macOS `27.2` (`arm64` Apple M1, `16.0 GiB` unified RAM)
 - **Rust Toolchain:** `rustup 1.29.3`, `rustc 1.99.1 (58cf8f9c3 2026-10-13)` (`stable-aarch64-apple-darwin` + `wasm32-unknown-unknown`)
+- **Crate Dependencies (`Cargo.toml` / `Cargo.lock`):** `0` new dependencies added (`git diff Cargo.toml Cargo.lock` empty).
 - **Antigravity Orchestration (`VERIFIED`):**
   - Durable charter: [`docs/operations/SUMI_ORCHESTRATION_CHARTER.md`](operations/SUMI_ORCHESTRATION_CHARTER.md)
-  - Specialized subagents invoked in R05: `sumi-critic` (`10/10` adversarial findings remediated across `2 CRITICAL`, `4 MAJOR`, `4 MINOR`) and `sumi-auditor` (independent verification sign-off).
-- **REA MCP (`rea-agents@6.8.0`):** `VERIFIED` — `9` live REA MCP operations (`13` exact 64-hex Evidence IDs) executed in R05 across `ARCHIVE/frontend/src/features/drawings/*`, `LWC v5.2.0` primitive files, and the R05 release Mach-O binary (`59bb4d574f6f70bbd3102e0c3865cfba3d3ef7910fbdec6f220bf47b2a51f1ab`), cumulative `45` live REA operations across R01–R05. Zero contact with TradingView Desktop (`DEC-006`).
+  - Specialized subagents invoked in R06: `sumi-critic` (`17/17` adversarial findings remediated across `3 CRITICAL`, `6 HIGH`, `5 MEDIUM`, `3 LOW` with dedicated regression tests) and `sumi-auditor` (independent verification sign-off).
+- **REA MCP (`rea-agents@6.8.0`):** `VERIFIED` — `9` live REA MCP operations (`13` exact 64-hex Evidence IDs: `9` JS/TS + `4` binary) executed in R06 across `ARCHIVE/frontend` data/timeframe files, `LWC v5.2.0` `horz-scale-behavior-time` + `data-layer`, and the final R06 release Mach-O binary (`d397be8d0c99356d02f2d116a64c8daf11ac66dc635cbe12a30e6c16f889f92f`), cumulative `54` live REA operations across R01–R06. Zero contact with TradingView Desktop (`DEC-006`).
 
 ---
 
@@ -40,9 +41,10 @@
 | Session R02 (Pre-R03 Audit) | Initial LWC v5.2.0 coordinate study & `ViewportCamera` draft | **ACCEPTED WITH SCOPE LIMITS** | `VERIFIED` (16 defects fixed in R03) |
 | Session R03 (Wave 1) | Program Orchestrator takeover, R02 audit/rectification & modular `src/viewport/` (`98ec576`) | **PASS** | `VERIFIED` (`29/29` tests) |
 | Session R04 (Waves 2 & 4) | Technical Indicator Engine (`src/indicators/`) & Synchronized Multi-Pane Layout (`50a7845`) | **PASS** | `VERIFIED` (`46/46` tests, `3.141 ms` `100K` 4-pane fit) |
-| Session R05 — Research Gate | 7 live JS/TS REA operations on Archive drawings & LWC primitives → `DRAWING_ENGINE_SPEC.md` | **PASS** | `VERIFIED` (`9` JS/TS + `4` binary 64-hex Evidence IDs) |
-| Session R05 — Wave 3 Engine | Pure `f64` WASM-safe `src/drawings/` (`5` primitives, `ClipEdge` Liang-Barsky, LWC hit-test, OHLC magnet, 64-step Undo/Redo) | **PASS** | `VERIFIED` (`57/57` tests + `wasm32` Clippy) |
-| Session R05 — Workstation & Audit | Multi-pane drawing arbitrage/GPU rendering, `--r05` benchmark (`3.521 ms`), `10/10` Critic fixes, `sumi-auditor` sign-off & clean commit | **PASS** | `VERIFIED` |
+| Session R05 (Wave 3) | Interactive Drawing & Annotation Engine (`src/drawings/`) across 4 panes (`b04d2dc`) | **PASS** | `VERIFIED` (`57/57` tests, `3.521 ms` `100K` 4-pane + 25 drawings) |
+| Session R06 — Research Gate | 7 live JS/TS REA operations on Archive data/TF & LWC time-scale → `DATA_LOADER_AND_TIMEFRAME_SPEC.md` | **PASS** | `VERIFIED` (`9` JS/TS + `4` binary 64-hex Evidence IDs) |
+| Session R06 — Wave 5 Engine | Zero-dependency WASM-safe `src/data/` (`calendar`, `timeframe`, `csv_loader`, `json_loader`, `presets`, `synthetic`) + `DrawingStore::remap_timeframe` | **PASS** | `VERIFIED` (`72/72` tests + `wasm32` Clippy) |
+| Session R06 — Workstation & Audit | Multi-feed/symbol/TF toolbar, adaptive time axis, `OffscreenWgpuHarness`, `--r06` benchmark (`3.761 ms`), `17/17` Critic fixes, `sumi-auditor` sign-off & clean commit | **PASS** | `VERIFIED` |
 
 ---
 
@@ -51,19 +53,20 @@
 ```bash
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
 
-# Format, native + WASM strict Clippy lints, and all 57 automated tests:
+# Format, native + WASM strict Clippy lints, and all 72 automated tests:
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo clippy --target wasm32-unknown-unknown -- -D warnings
+cargo clippy --target wasm32-unknown-unknown --lib -- -D warnings
 cargo test
 
-# Reproducible R03, R04 & R05 release benchmarks (10K / 50K / 100K multi-pane + 25 drawings):
+# Reproducible R03, R04, R05 & R06 release benchmarks (10K / 50K / 100K multi-pane + 25 drawings + CSV/JSON/TF):
 cargo run --release --example viewport_bench
 cargo run --release --example viewport_bench -- --r04
 cargo run --release --example viewport_bench -- --r05
+cargo run --release --example viewport_bench -- --r06
 
-# Background multi-scenario Metal GPU screenshot + telemetry capture (zero focus steal):
-SUMI_CAPTURE_BATCH=r05 cargo run --release
+# Offscreen Apple M1 Metal GPU Retina screenshot + telemetry capture (zero windows, zero focus steal):
+SUMI_CAPTURE_BATCH=r06 cargo run --release
 
 # Launch interactive native macOS Metal trading workstation:
 cargo run --release
@@ -71,20 +74,21 @@ cargo run --release
 
 ---
 
-## 5. Shipped Code & Benchmark Highlights (`Milestone R05`)
+## 5. Shipped Code & Benchmark Highlights (`Milestone R06`)
 
-- **Interactive Drawing & Annotation Engine (`src/drawings/`):**
-  - Continuous `(bar_index: f64, value: f64)` anchors (`|bar_index| <= 1.0e9`, `|value| <= 1.0e15`) across `DrawingPaneTarget` (`Main` + `Oscillator(Rsi | Macd | Atr)`), `HorizontalLine`, `TrendLine`, $360^\circ$ `Ray`, `Rectangle`, and `FibonacciRetracement` (`[0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]`).
-  - Unit-vector + half-scaled `clip_parametric_line` with exact `p == 0.0` checks and `ClipEdge` boundary snapping, order-independent LWC hit-test priority (`SelectedHandle > Handle > Stroke > SelectedBody`), `O(threshold / bar_spacing)` OHLC magnet (`0.125 µs` at `8.0 px`), `EDIT_DRAG_THRESHOLD_PX = 2.0 px` pure-click vs drag separation, log-safe body translation, 64-step Undo/Redo, and ID-compacting `serde` persistence (`PREVIEW_DRAWING_ID = u64::MAX`, `MAX_PERSISTED_DRAWINGS = 4_096`).
-- **Workstation Multi-Pane Integration (`src/chart.rs`, `src/app.rs`):**
-  - Drawing toolbar (`Cursor`, `H-Line`, `Trend`, `Ray`, `Rect`, `Fib`, `Magnet OHLC`, `Undo`, `Redo`, atomic `Demo Set`, `Clear`) and contextual inspector (color, dash style, Fib direction reversal, right extension, lock, delete), phase-anchored dashed strokes (`paint_styled_segment_phased`), collision-free Fib labels, `egui::Mesh` translucent fills, and keyboard shortcuts (`Esc`, `Del`/`Backspace`, `Cmd+Z`, `Cmd+Shift+Z`/`Cmd+Y`).
-- **Measured Release Performance (`Apple M1`, `2560×1600` Retina, `57/57` automated tests passing):**
-  - `100K` 4-pane + 6-indicator + 25-drawing standard view (`bar_spacing = 8.0`, `1x`): **`0.210 ms`** CPU (`0.233 ms` P95).
-  - `100K` 4-pane + 6-indicator + 25-drawing dense view (`bar_spacing = 1.2`, `Log`, `1x`): **`0.572 ms`** CPU (`0.622 ms` P95).
-  - `100K` 4-pane + 6-indicator + 25-drawing full-fit (`Log`, `32x` conflated, `323,356` vertices): **`3.521 ms`** median (`3.804 ms` P95 — **PASS `< 4.0 ms` `DECISION-RENDERER-002` budget**).
+- **Zero-Dependency CSV/JSON OHLCV & Multi-Timeframe Engine (`src/data/`):**
+  - Hinnant O(1) proleptic Gregorian UTC calendar math (`src/data/calendar.rs`), multi-format timestamp resolution (`ISO-8601` + timezone offsets, `CafeF` `YYYYMMDD` + 8-column `DTYYYYMMDD + Time`, Unix `s`/`ms`/`µs`/`ns` with pre-1970 & 1970–1975 series disambiguation), streaming RFC-4180 CSV/TSV/semicolon parser (`103.7–191.1 MiB/s`), and recursive-descent JSON kline/object/envelope parser (`134.9 MiB/s`, `MAX_JSON_DEPTH = 16`).
+  - Upward timeframe lattice (`1m`, `5m`, `15m`, `1h`, `4h`, `1D`, `1W`; `Timeframe::can_aggregate_to` requires `target.seconds() >= self.seconds()`, rejecting downward disaggregation while stamping ISO-8601 Monday `00:00:00 UTC` on `1W` buckets) plus causal `aggregate_ohlcv_up_to(..., cutoff_timestamp)` enforcing `DEF-001` zero lookahead.
+- **Timestamp-Locked Drawings, Per-Instrument Isolation & Offscreen Metal Capture (`src/drawings/`, `src/chart.rs`, `src/app.rs`):**
+  - `Candle::timestamp: i64` + `DrawingAnchor::timestamp: Option<f64>` + `DrawingStore::remap_timeframe` (`0.75–4.29 µs` for `25` drawings across `100K` bars), per-instrument `drawings_by_instrument`, adaptive collision-free UTC time axis (`YYYY-MM-DD HH:MM`, `MM-DD HH:MM`, `HH:MM`, `YYYY-MM-DD`), and `OffscreenWgpuHarness` (`Rgba8Unorm`, `2.0x` Retina `2560×1600` / `1920×1280` on Apple M1 Metal).
+- **Measured Release Performance (`Apple M1`, `2560×1600` Retina, `72/72` automated tests passing):**
+  - `100K` ISO-8601 `1m` CSV (`5.53 MiB`): **`45.303 ms`** (`122.1 MiB/s`) | `100K` JSON klines (`5.90 MiB`): **`43.703 ms`** (`134.9 MiB/s`).
+  - `CafeF.INDEX.clean.csv` (`2,179` `VNINDEX` bars): **`1.302 ms`** (`191.1 MiB/s`) | `SPY.csv` (`8,280` bars): **`3.130 ms`** (`103.7 MiB/s`).
+  - `100K` `1m` 4-pane + 6-indicator + 25-drawing standard intraday (`bar_spacing = 8.0`): **`0.185 ms`** median (`0.223 ms` P95).
+  - `100K` `1m` 4-pane + 6-indicator + 25-drawing full-fit (`Log`, `32x` conflated, `418,136` vertices): **`3.761 ms`** median (`4.112 ms` P95 — **PASS `< 4.0 ms` `DECISION-RENDERER-002` median budget**).
 
 ---
 
-## 6. Next Authorized Milestone (`Wave 5 / Session R06`)
+## 6. Next Authorized Milestone (`Wave 6 / Session R07`)
 
-With **Waves 1, 2, 3, and 4** plus the **`wasm32` gate** shipped and committed cleanly, the next planned milestone on [`docs/research/RESEARCH_TO_RUST_ROADMAP.md`](research/RESEARCH_TO_RUST_ROADMAP.md) is **Milestone R06 — Wave 5: CSV/JSON OHLCV Data Loader & Multi-Timeframe Aggregation (`1m`, `5m`, `15m`, `1h`, `4h`, `1D`, `1W`)**.
+With **Waves 1, 2, 3, 4, and 5** (`Viewport`, `Indicators`, `Drawings`, `Multi-Pane`, and `CSV/JSON OHLCV + Multi-Timeframe`) shipped and verified, the next milestone on [`docs/research/RESEARCH_TO_RUST_ROADMAP.md`](research/RESEARCH_TO_RUST_ROADMAP.md) is **Milestone R07 — Wave 6: Causal Bar Replay & Paper Trading Execution Engine** (leveraging `aggregate_ohlcv_up_to` to eliminate legacy `DEF-001` multi-timeframe replay lookahead bias).

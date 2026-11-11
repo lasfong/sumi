@@ -1146,6 +1146,7 @@ fn render_workstation_chart_inner(
 
     let time_grid_ticks = collect_time_grid_ticks(
         candles,
+        config.timeframe,
         &viewport.time_scale,
         &main_vp,
         multi_layout.main_plot_rect,
@@ -1166,11 +1167,11 @@ fn render_workstation_chart_inner(
         12,
     );
     if config.show_grid {
-        for &(x, _) in &time_grid_ticks {
+        for tick in &time_grid_ticks {
             painter.line_segment(
                 [
-                    Pos2::new(x, multi_layout.main_plot_rect.top()),
-                    Pos2::new(x, multi_layout.main_plot_rect.bottom()),
+                    Pos2::new(tick.x, multi_layout.main_plot_rect.top()),
+                    Pos2::new(tick.x, multi_layout.main_plot_rect.bottom()),
                 ],
                 Stroke::new(1.0, palette::GRID_LINE),
             );
@@ -1283,11 +1284,11 @@ fn render_workstation_chart_inner(
         );
 
         if config.show_grid {
-            for &(x, _) in &time_grid_ticks {
+            for tick in &time_grid_ticks {
                 painter.line_segment(
                     [
-                        Pos2::new(x, osc.plot_rect.top()),
-                        Pos2::new(x, osc.plot_rect.bottom()),
+                        Pos2::new(tick.x, osc.plot_rect.top()),
+                        Pos2::new(tick.x, osc.plot_rect.bottom()),
                     ],
                     Stroke::new(1.0, palette::GRID_LINE),
                 );
@@ -1418,13 +1419,18 @@ fn render_workstation_chart_inner(
             HoveredPane::Main(p) | HoveredPane::Oscillator(_, _, _, p) => p.x,
         };
         let slot_idx = hovered_slot_index.unwrap_or(inspected_data_index as i64);
-        let cross_x = main_vp
-            .index_to_screen_x(slot_idx)
-            .map_or(raw_x, |sx| sx as f32)
-            .clamp(
-                multi_layout.main_plot_rect.left(),
-                multi_layout.main_plot_rect.right(),
-            );
+        let snapped_screen_x =
+            if conflation_factor > 1 && slot_idx >= 0 && (slot_idx as usize) < candles.len() {
+                conflated_candle_at(candles, slot_idx as usize, conflation_factor)
+                    .and_then(|b| main_vp.float_index_to_screen_x(b.center_logical_index))
+                    .or_else(|| main_vp.index_to_screen_x(slot_idx))
+            } else {
+                main_vp.index_to_screen_x(slot_idx)
+            };
+        let cross_x = snapped_screen_x.map_or(raw_x, |sx| sx as f32).clamp(
+            multi_layout.main_plot_rect.left(),
+            multi_layout.main_plot_rect.right(),
+        );
         let cross_stroke = Stroke::new(1.0, palette::CROSSHAIR.gamma_multiply(0.50));
 
         // Synchronized vertical crosshair across Main Pane + ALL active Oscillator Sub-Panes!
@@ -1770,17 +1776,18 @@ pub fn render_shared_pane_candlestick_chart(
 
     let time_grid_ticks = collect_time_grid_ticks(
         candles,
+        config.timeframe,
         shared_time_scale,
         &main_vp,
         layout.plot_rect,
         layout.time_axis_rect,
     );
     if config.show_grid {
-        for &(x, _) in &time_grid_ticks {
+        for tick in &time_grid_ticks {
             painter.line_segment(
                 [
-                    Pos2::new(x, layout.plot_rect.top()),
-                    Pos2::new(x, layout.plot_rect.bottom()),
+                    Pos2::new(tick.x, layout.plot_rect.top()),
+                    Pos2::new(tick.x, layout.plot_rect.bottom()),
                 ],
                 Stroke::new(1.0, palette::GRID_LINE),
             );
@@ -1832,8 +1839,15 @@ pub fn render_shared_pane_candlestick_chart(
         && let Some(pos) = hover_pos
     {
         let slot_idx = hovered_slot_index.unwrap_or(inspected_data_index as i64);
-        let cross_x = main_vp
-            .index_to_screen_x(slot_idx)
+        let snapped_screen_x =
+            if conflation_factor > 1 && slot_idx >= 0 && (slot_idx as usize) < candles.len() {
+                conflated_candle_at(candles, slot_idx as usize, conflation_factor)
+                    .and_then(|b| main_vp.float_index_to_screen_x(b.center_logical_index))
+                    .or_else(|| main_vp.index_to_screen_x(slot_idx))
+            } else {
+                main_vp.index_to_screen_x(slot_idx)
+            };
+        let cross_x = snapped_screen_x
             .map_or(pos.x, |sx| sx as f32)
             .clamp(layout.plot_rect.left(), layout.plot_rect.right());
         let cross_y = pos.y;
@@ -2005,22 +2019,36 @@ fn paint_horizontal_price_grid_and_ticks(
     }
 }
 
-fn collect_time_grid_ticks<'a>(
-    candles: &'a [Candle],
+struct TimeGridTick {
+    x: f32,
+    label: Option<String>,
+}
+
+fn collect_time_grid_ticks(
+    candles: &[Candle],
+    timeframe: &str,
     time_scale: &TimeScale,
     main_vp: &PaneViewport<'_>,
     plot_rect: Rect,
     time_axis_rect: Rect,
-) -> Vec<(f32, Option<&'a str>)> {
+) -> Vec<TimeGridTick> {
     let mut out = Vec::new();
     let Some(strict) = time_scale.visible_strict_range() else {
         return out;
     };
-    let target_time_labels = ((plot_rect.width() / 130.0).floor() as i64).clamp(3, 10);
+    let is_intraday = crate::data::Timeframe::parse_label(timeframe)
+        .is_some_and(crate::data::Timeframe::is_intraday)
+        || candles.first().is_some_and(|c| c.date_label.len() > 10);
+
+    let px_per_label = if is_intraday { 138.0 } else { 130.0 };
+    let target_time_labels = ((plot_rect.width() / px_per_label).floor() as i64).clamp(3, 10);
     let raw_stride = (strict.count().max(1) / target_time_labels).max(1);
     let stride = nice_bar_stride(raw_stride);
     let first_idx = strict.left.max(0).div_euclid(stride) * stride;
     let max_data_idx = (candles.len() as i64).saturating_sub(1);
+
+    let mut prev_labeled_ts: Option<i64> = None;
+    let mut last_label_right_x = f32::NEG_INFINITY;
 
     let mut idx = first_idx;
     while idx <= strict.right.min(max_data_idx) {
@@ -2029,10 +2057,25 @@ fn collect_time_grid_ticks<'a>(
         {
             let x = sx as f32;
             if x >= plot_rect.left() && x <= plot_rect.right() {
-                let label = (x >= time_axis_rect.left() + 34.0
-                    && x <= time_axis_rect.right() - 34.0)
-                    .then_some(candles[idx as usize].date_label.as_str());
-                out.push((x, label));
+                let c = &candles[idx as usize];
+                let candidate = if is_intraday {
+                    crate::data::format_time_axis_tick(c.timestamp, prev_labeled_ts, true)
+                } else {
+                    c.date_label.clone()
+                };
+                let half_w = ((candidate.chars().count() as f32) * 3.45 + 6.0).max(34.0);
+                let fits_inside_axis = x - half_w >= time_axis_rect.left() + 4.0
+                    && x + half_w <= time_axis_rect.right() - 4.0;
+                let non_overlapping = x - half_w >= last_label_right_x + 10.0;
+
+                let label = if fits_inside_axis && non_overlapping {
+                    prev_labeled_ts = Some(c.timestamp);
+                    last_label_right_x = x + half_w;
+                    Some(candidate)
+                } else {
+                    None
+                };
+                out.push(TimeGridTick { x, label });
             }
         }
         idx = idx.saturating_add(stride);
@@ -2043,19 +2086,19 @@ fn collect_time_grid_ticks<'a>(
 fn paint_bottom_time_axis_labels(
     painter: &egui::Painter,
     time_axis_rect: Rect,
-    ticks: &[(f32, Option<&str>)],
+    ticks: &[TimeGridTick],
 ) {
-    for &(x, label_opt) in ticks {
-        if let Some(label) = label_opt {
+    for tick in ticks {
+        if let Some(label) = tick.label.as_deref() {
             painter.line_segment(
                 [
-                    Pos2::new(x, time_axis_rect.top()),
-                    Pos2::new(x, time_axis_rect.top() + 5.0),
+                    Pos2::new(tick.x, time_axis_rect.top()),
+                    Pos2::new(tick.x, time_axis_rect.top() + 5.0),
                 ],
                 Stroke::new(1.0, palette::BORDER_SUBTLE),
             );
             painter.text(
-                Pos2::new(x, time_axis_rect.center().y),
+                Pos2::new(tick.x, time_axis_rect.center().y),
                 Align2::CENTER_CENTER,
                 label,
                 FontId::monospace(11.0),
@@ -2667,6 +2710,25 @@ fn paint_axis_cursor_pill(
     );
 }
 
+pub(crate) fn format_time_axis_cursor_pill_label(
+    candles: &[Candle],
+    timeframe: &str,
+    slot_idx: i64,
+) -> String {
+    let parsed_tf = crate::data::Timeframe::parse_label(timeframe);
+    let unit_suffix = parsed_tf.map_or("b", crate::data::Timeframe::unit_suffix);
+    let unit_mult = parsed_tf.map_or(1_i64, crate::data::Timeframe::unit_multiplier);
+    if slot_idx >= 0 && (slot_idx as usize) < candles.len() {
+        candles[slot_idx as usize].date_label.clone()
+    } else if slot_idx >= candles.len() as i64 {
+        let ahead = (slot_idx - (candles.len() as i64 - 1)).saturating_mul(unit_mult);
+        format!("+{ahead}{unit_suffix}")
+    } else {
+        let behind = slot_idx.saturating_mul(unit_mult);
+        format!("{behind}{unit_suffix}")
+    }
+}
+
 fn paint_time_axis_cursor_pill(
     painter: &egui::Painter,
     time_axis_rect: Rect,
@@ -2675,23 +2737,14 @@ fn paint_time_axis_cursor_pill(
     slot_idx: i64,
     cross_x: f32,
 ) {
-    let unit_suffix = if timeframe.eq_ignore_ascii_case("1D") {
-        "d"
-    } else {
-        "b"
-    };
-    let time_label = if slot_idx >= 0 && (slot_idx as usize) < candles.len() {
-        candles[slot_idx as usize].date_label.clone()
-    } else if slot_idx >= candles.len() as i64 {
-        let ahead = slot_idx - (candles.len() as i64 - 1);
-        format!("+{ahead}{unit_suffix}")
-    } else {
-        format!("{slot_idx}{unit_suffix}")
-    };
-    let pill_half_w = 42.0_f32;
+    let time_label = format_time_axis_cursor_pill_label(candles, timeframe, slot_idx);
+    let max_half_w = (time_axis_rect.width() * 0.48).max(42.0);
+    let pill_half_w = ((time_label.chars().count() as f32) * 3.45 + 9.0)
+        .max(42.0)
+        .min(max_half_w);
     let pill_cx = cross_x.clamp(
         time_axis_rect.left() + pill_half_w + 2.0,
-        time_axis_rect.right() - pill_half_w - 2.0,
+        (time_axis_rect.right() - pill_half_w - 2.0).max(time_axis_rect.left() + pill_half_w + 2.0),
     );
     let time_pill = Rect::from_min_max(
         Pos2::new(pill_cx - pill_half_w, time_axis_rect.top() + 3.0),

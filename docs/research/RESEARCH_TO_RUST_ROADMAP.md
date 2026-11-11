@@ -1,7 +1,7 @@
 # RESEARCH TO RUST ROADMAP — SESSION R01
 
 - **Session Identity:** `SESSION-R01-20261110T202837+0700`
-- **Updated By:** `SESSION-R05-20261111T163600+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Updated By:** `SESSION-R06-20261111T194303+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 - **Principle:** No Rust implementation begins without prior REA or reference-source research evidence.
 
 ---
@@ -129,14 +129,46 @@ cargo test chart::tests::multipane_drawing_arbitrage_creates_drags_selects_locke
 
 ---
 
-## Wave 5 — Data Infrastructure (`NEXT — MILESTONE R06 TARGET`)
+## Wave 5 — Data Infrastructure (`COMPLETE — SESSION R06`)
+
+### Completed Research & Audit Gates (`VERIFIED`)
+- [x] Executed 7 live REA MCP JS/TS operations (`9` exact 64-hex Evidence IDs: `ev_c3081a8a...`, `ev_3e08300a...`, `ev_a4dabc00...`, `ev_d57067b9...`, `ev_ab7d475a...`, `ev_288c5960...`, `ev_3a7da525...`, `ev_eeaad96e...`, `ev_64453400...`) across `ARCHIVE/frontend` data/timeframe pipeline (`7` files) and `lightweight-charts-5.2.0` `horz-scale-behavior-time` + `data-layer` (`7` files), plus 4 final binary REA Evidence IDs (`ev_2acf1d97...`, `ev_fd142ac6...`, `ev_d3f78364...`, `ev_6c511d74...`).
+- [x] Authored [`docs/research/DATA_LOADER_AND_TIMEFRAME_SPEC.md`](DATA_LOADER_AND_TIMEFRAME_SPEC.md) defining zero-dependency CSV/JSON schemas, Hinnant O(1) UTC calendar bijection, `1m..1W` upward lattice, `DEF-001` causal replay aggregation, and timestamp-locked drawing continuity.
+
+### Shipped Rust Deliverables (`IMPLEMENTATION_PASS`)
+| Component | Research Source | Shipped Rust Target | Status |
+|---|---|---|---|
+| Hinnant O(1) UTC calendar + multi-format timestamp parser (`ISO-8601`, `CafeF`, epochs) | LWC `horz-scale-behavior-time.ts` + Archive CSVs | `src/data/calendar.rs` | ✅ SHIPPED |
+| Streaming RFC-4180 CSV & recursive-descent JSON kline/envelope loaders (`103.7–191.1 MiB/s`) | LWC `data-layer.ts` + `CafeF.INDEX.clean.csv` / `SPY.csv` | `src/data/csv_loader.rs`, `src/data/json_loader.rs` | ✅ SHIPPED |
+| Timeframe lattice (`1m`, `5m`, `15m`, `1h`, `4h`, `1D`, `1W`) + `DEF-001` `aggregate_ohlcv_up_to` | `DATA_LOADER_AND_TIMEFRAME_SPEC.md` | `src/data/timeframe.rs` | ✅ SHIPPED |
+| Timestamp-locked `DrawingStore::remap_timeframe` + per-instrument `drawings_by_instrument` | `DATA_LOADER_AND_TIMEFRAME_SPEC.md` | `src/drawings/controller.rs`, `src/app.rs` | ✅ SHIPPED |
+| Adaptive intraday/daily time axis + offscreen Metal `wgpu` Retina harness (`OffscreenWgpuHarness`) | LWC `horz-scale-behavior-time.ts` / `time-formatter.ts` + `egui_wgpu` | `src/chart.rs`, `src/app.rs`, `src/main.rs` | ✅ SHIPPED |
+| WASM gate | `cargo clippy --target wasm32-unknown-unknown --lib -- -D warnings` | Toolchain & CI verification | ✅ COMPLETE (`SESSIONS R04 + R05 + R06`) |
+
+### Verified Acceptance Tests (`cargo test` — 72/72 PASS)
+```bash
+cargo test data::tests::proleptic_gregorian_calendar_bijection_and_leap_year_invariants
+cargo test data::tests::multi_format_timestamp_parser_handles_cafef_iso_tz_and_nanosecond_epochs
+cargo test data::tests::csv_loader_parses_rfc4180_delimiters_bom_quotes_dedup_and_envelope_policies
+cargo test data::tests::json_loader_parses_objects_tuples_envelopes_escapes_and_rejects_deep_or_malformed_json
+cargo test data::tests::timeframe_lattice_associativity_downsample_guard_and_def001_causality
+cargo test data::tests::real_archive_cafef_multi_symbol_and_spy_dst_weekly_aggregation_invariants
+cargo test data::tests::drawing_store_remap_timeframe_preserves_exact_anchors_across_round_trips_and_undo_redo
+cargo test app::tests::r06_workstation_presets_csv_json_import_and_multi_timeframe_switching_preserve_focus_and_drawings
+cargo test app::tests::critic_r06_regression_persisted_session_restore_preserves_4h_timeframe_drawings_and_missing_file_fallback
+cargo test app::tests::critic_r06_regression_per_instrument_drawing_isolation_in_memory_multisymbol_and_cursor_pill_multiplier
+```
+
+---
+
+## Wave 6 — Causal Bar Replay & Paper Trading Execution Engine (`NEXT — MILESTONE R07 TARGET`)
 
 ### Deliverables
 | Component | Research Source | Rust Target | Status |
 |---|---|---|---|
-| CSV/JSON OHLCV loader | `lightweight-charts` `SeriesData` + Archive data schemas | `src/data.rs` / `src/data/` | Next (`Milestone R06`) |
-| Timeframe aggregation (`1m`, `5m`, `15m`, `1h`, `4h`, `1D`, `1W`) | Standard deterministic OHLCV rollup + Archive market data | `src/data.rs` / `src/data/` | Next (`Milestone R06`) |
-| WASM gate | `cargo clippy --target wasm32-unknown-unknown -- -D warnings` | Toolchain & CI verification | ✅ COMPLETE (`SESSIONS R04 + R05`) |
+| Causal bar-by-bar replay controller (`DEF-001` zero-lookahead via `aggregate_ohlcv_up_to`) | `ARCHIVE/frontend/src/features/replay/*` + `ARCHIVE/backend` replay contracts | `src/replay/` | Next (`Milestone R07`) |
+| Paper trading order book (`Market`, `Limit`, `Stop`, `SL/TP`, realized/unrealized PnL & equity curve) | `ARCHIVE/frontend` paper trading / execution domain | `src/trading/` or `src/replay/` | Next (`Milestone R07`) |
+| On-chart replay scrubber, order/position price lines & execution markers | `LWC v5.2.0` series markers / price lines + Archive UI | `src/chart.rs`, `src/app.rs` | Next (`Milestone R07`) |
 
 ---
 
