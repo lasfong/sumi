@@ -1,7 +1,7 @@
 # SUMI TRADING WORKSTATION — DECISION LOG
 
 - **Session Identity (Created):** `SESSION-01-20261110T160909+0700`
-- **Updated By:** `SESSION-R04-20261111T140100+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Updated By:** `SESSION-R05-20261111T163600+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 
 ## Decisions Recorded in Session 01
 
@@ -115,3 +115,16 @@
   2. Index every indicator output line with a 16-bar `SeriesBlockIndex` (`first`, `last`, `min`, `max`, `dom`, `valid_count`) enabling sub-microsecond visible autoscale and exact `[first, min, max, last]` 2-column vertical-envelope conflation with sub-bucket `None`-gap preservation.
   3. Implement LWC-inspired stretch-factor `MultiPaneLayout` (`stretch_factors` defaulting to `4.0` main : `1.0` per oscillator, `MultiPaneLayout::MIN_PANE_HEIGHT = 44.0`, monotonic pass-snapshot water-filling, and interactive `5.0 px` separator stretch transfer via `SEPARATOR_HEIGHT = 5.0`) in `src/chart.rs` sharing `ChartViewportState::time_scale` while isolating per-pane `PriceScale` (`PriceScaleOptions::sumi_oscillator`).
   4. Batch axis-aligned candlesticks, volume bars, MACD histogram bars, and zero-bleed Bollinger ribbons into `egui::Mesh` primitives so `100,000`-bar 4-pane full-fit renders in **`3.141 ms`** median (`< 4.0 ms` `DECISION-RENDERER-002` ceiling) with a single unified `32x` `conflation_factor` across all panes, and run automated GPU batch captures in background window mode (`.with_active(false)` via `SUMI_CAPTURE_BATCH`).
+
+---
+
+## Decisions Recorded in Session R05
+
+### DEC-R05-001 — Pure `f64` Multi-Pane Interactive Drawing Engine, `ClipEdge` Liang-Barsky Clipping & `< 4.0 ms` Validation
+- **Date:** `2026-11-11`
+- **Session:** `SESSION-R05-20261111T163600+0700`
+- **Context:** Wave 3 (`Milestone R05`) ports and rectifies the interactive drawing & annotation engine after live REA MCP analysis (`ev_f8b8d8b5...`, `ev_4d2d8fb2...`, `ev_01525e3b...`, `ev_8c1494cf...`, `ev_98512b7e...`) exposed 5 structural defects in legacy Sumi (`YYYY-MM-DD` `250`-day cliff, rightward-only unclipped rays, broken `Logarithmic` body drag, full-bounding-box Fibonacci hit hijack, and positive-only `'price'` pane lock).
+- **Decision:**
+  1. Implement `src/drawings/` (`mod.rs`, `geometry.rs`, `hit_test.rs`, `controller.rs`, `tests.rs`) in pure `f64` (`wasm32-unknown-unknown`-verified, zero new crates in `Cargo.toml`), anchoring `HorizontalLine`, `TrendLine`, $360^\circ$ `Ray`, `Rectangle`, and `FibonacciRetracement` in continuous logical `(bar_index: f64, value: f64)` coordinates (`|bar_index| <= 1.0e9`, `|value| <= 1.0e15`) scoped to `DrawingPaneTarget` (`Main` + `Oscillator(Rsi | Macd | Atr)`).
+  2. Clip finite segments and $360^\circ$ rays analytically via unit-vector + half-scaled `clip_parametric_line` with exact `p == 0.0` checks and `ClipEdge` boundary snapping, render phase-anchored dashes (`paint_styled_segment_phased`) and `egui::Mesh` translucent zone/Fib bands, and enforce order-independent LWC hit-test priority (`SelectedHandle > Handle > Stroke > SelectedBody`) with `EDIT_DRAG_THRESHOLD_PX = 2.0 px` and locked-stroke viewport pan passthrough.
+  3. Confirm `egui::Painter` + `egui::Mesh` remains well below the `< 4.0 ms` `DECISION-RENDERER-002` hybrid ceiling with **25 active multi-pane drawings + 6 indicators + 4 panes on `100,000` bars** (`0.2100 ms` standard `8.0 px`, `0.5720 ms` dense `1.2 px`, **`3.5207 ms` median** / `3.8042 ms` P95 full-fit `32x` conflated).

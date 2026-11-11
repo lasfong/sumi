@@ -23,7 +23,7 @@ fn main() -> eframe::Result {
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_title(
-            "Sumi Trading Workstation — VNINDEX · 1D (Milestone R04 Multi-Pane & Indicator Engine)",
+            "Sumi Trading Workstation — VNINDEX · 1D (Milestone R05 Interactive Drawing & Multi-Pane Engine)",
         )
         .with_inner_size([initial_width, initial_height])
         .with_min_inner_size([640.0, 420.0]);

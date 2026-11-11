@@ -2,16 +2,20 @@ use egui::{Button, Color32, CornerRadius, Frame, Margin, RichText, Stroke, Vec2,
 use serde::{Deserialize, Serialize};
 
 use crate::chart::{
-    ChartDisplayConfig, ChartRenderReport, ChartViewportState, palette, render_workstation_chart,
+    ChartDisplayConfig, ChartRenderReport, ChartViewportState, palette,
+    render_workstation_chart_with_drawings,
 };
 use crate::data::generate_synthetic_ohlcv;
-#[cfg(not(target_arch = "wasm32"))]
+use crate::drawings::{
+    DrawingAnchor, DrawingColorPreset, DrawingGeometry, DrawingPaneTarget, DrawingStore,
+    DrawingStyle, DrawingTool, FibDirection, LineDashStyle, MagnetMode,
+};
 use crate::indicators::OscillatorPaneId;
 use crate::indicators::{IndicatorCache, IndicatorConfig};
 use crate::model::Candle;
 use crate::viewport::PriceScaleMode;
 
-/// Primary application state for the Sumi Rust Trading Workstation (`Milestone R04`).
+/// Primary application state for the Sumi Rust Trading Workstation (`Milestone R05`).
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 pub struct SumiWorkstationApp {
@@ -23,6 +27,7 @@ pub struct SumiWorkstationApp {
     pub dataset_bar_count: usize,
     pub viewport: ChartViewportState,
     pub indicators: IndicatorConfig,
+    pub drawings: DrawingStore,
 
     #[serde(skip)]
     pub candles: Vec<Candle>,
@@ -63,6 +68,7 @@ impl Default for SumiWorkstationApp {
             dataset_bar_count,
             viewport,
             indicators,
+            drawings: DrawingStore::new(),
             candles,
             indicator_cache,
             dataset_generation: 1,
@@ -96,6 +102,7 @@ impl SumiWorkstationApp {
         };
         app.viewport.sanitize_deserialized();
         app.indicators.sanitize_deserialized();
+        app.drawings.sanitize_deserialized();
 
         if let Ok(bars_str) = std::env::var("SUMI_BAR_COUNT")
             && let Ok(bars) = bars_str.parse::<usize>()
@@ -139,6 +146,7 @@ impl SumiWorkstationApp {
     /// Switches the active synthetic benchmark series (`120`, `10_000`, `50_000`, `100_000`) and resets view.
     pub fn set_dataset_size(&mut self, count: usize) {
         let clamped = count.max(10);
+        self.drawings.cancel_active_gesture();
         self.candles = generate_synthetic_ohlcv(clamped);
         self.dataset_bar_count = self.candles.len();
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
@@ -195,6 +203,230 @@ impl SumiWorkstationApp {
     pub fn reset_view(&mut self) {
         self.viewport.reset_to_default();
         self.viewport.reset_pane_stretches();
+    }
+
+    /// Populates a deterministic, data-anchored set of multi-pane annotations (`HorizontalLine`,
+    /// `TrendLine`, $360^\circ$ `Ray`, `Rectangle`, `FibonacciRetracement` + `RSI` / `MACD` / `ATR`
+    /// sub-pane annotations) scaled cleanly to the currently visible candle range as a single
+    /// undoable `DrawingCommand::ReplaceAll` step preserving `magnet_mode` and `locked` history!
+    pub fn populate_showcase_drawings(&mut self) {
+        if self.candles.len() < 10 {
+            return;
+        }
+        let vis_range = self.viewport.time_scale.strict_visible_data_range();
+        let (left_i, right_i) = if vis_range.len() >= 12 {
+            (vis_range.start, vis_range.end - 1)
+        } else {
+            let start = self.candles.len().saturating_sub(120);
+            (start, self.candles.len() - 1)
+        };
+        let span = (right_i - left_i).max(10);
+        let idx_at = |frac: f64| -> usize {
+            (left_i + ((span as f64) * frac).round() as usize).min(self.candles.len() - 1)
+        };
+
+        let mut slice_low = (usize::MAX, f64::INFINITY);
+        let mut slice_high = (0_usize, f64::NEG_INFINITY);
+        for (offset, c) in self.candles[left_i..=right_i].iter().enumerate() {
+            let idx = left_i + offset;
+            if c.low < slice_low.1 {
+                slice_low = (idx, c.low);
+            }
+            if c.high > slice_high.1 {
+                slice_high = (idx, c.high);
+            }
+        }
+        let price_span = (slice_high.1 - slice_low.1).max(5.0);
+
+        let mut showcase = Vec::with_capacity(8);
+        let make_drawing = |pane: DrawingPaneTarget,
+                            geom: DrawingGeometry,
+                            style: Option<DrawingStyle>,
+                            locked: bool| {
+            let resolved_style =
+                style.unwrap_or_else(|| DrawingStyle::default_for_tool(geom.tool_kind()));
+            let mut d = crate::drawings::Drawing::new(0, pane, geom, resolved_style);
+            d.locked = locked;
+            d
+        };
+
+        // 1. Main Pane: Locked Horizontal Support Line at visible swing low
+        showcase.push(make_drawing(
+            DrawingPaneTarget::Main,
+            DrawingGeometry::HorizontalLine {
+                anchor: DrawingAnchor::new(slice_low.0 as f64, slice_low.1),
+            },
+            Some(DrawingStyle {
+                color: DrawingColorPreset::AmberGold,
+                line_width: 1.5,
+                dash: LineDashStyle::Dashed,
+                fill_opacity: 0.0,
+            }),
+            true,
+        ));
+
+        // 2. Main Pane: Structural TrendLine connecting early and late swing points
+        let tl_i0 = idx_at(0.08);
+        let tl_i1 = idx_at(0.54);
+        showcase.push(make_drawing(
+            DrawingPaneTarget::Main,
+            DrawingGeometry::TrendLine {
+                start: DrawingAnchor::new(tl_i0 as f64, self.candles[tl_i0].low),
+                end: DrawingAnchor::new(tl_i1 as f64, self.candles[tl_i1].close),
+            },
+            None,
+            false,
+        ));
+
+        // 3. Main Pane: Directional 360° Ray projecting into future `right_offset` whitespace
+        let ray_i0 = idx_at(0.60);
+        let ray_i1 = idx_at(0.88);
+        showcase.push(make_drawing(
+            DrawingPaneTarget::Main,
+            DrawingGeometry::Ray {
+                origin: DrawingAnchor::new(ray_i0 as f64, self.candles[ray_i0].high),
+                through: DrawingAnchor::new(
+                    ray_i1 as f64,
+                    self.candles[ray_i1].close + price_span * 0.04,
+                ),
+            },
+            None,
+            false,
+        ));
+
+        // 4. Main Pane: Translucent Supply/Demand Consolidation Rectangle
+        let rect_i0 = idx_at(0.18);
+        let rect_i1 = idx_at(0.42);
+        let rect_mid = (self.candles[rect_i0].close + self.candles[rect_i1].close) * 0.5;
+        showcase.push(make_drawing(
+            DrawingPaneTarget::Main,
+            DrawingGeometry::Rectangle {
+                corner_a: DrawingAnchor::new(rect_i0 as f64, rect_mid - price_span * 0.11),
+                corner_b: DrawingAnchor::new(rect_i1 as f64, rect_mid + price_span * 0.11),
+            },
+            None,
+            false,
+        ));
+
+        // 5. Main Pane: Selected Fibonacci Retracement across the primary impulse leg
+        let fib_i0 = idx_at(0.46);
+        let fib_i1 = idx_at(0.92);
+        let fib_entry_index = showcase.len();
+        showcase.push(make_drawing(
+            DrawingPaneTarget::Main,
+            DrawingGeometry::FibonacciRetracement {
+                start: DrawingAnchor::new(fib_i0 as f64, slice_low.1 + price_span * 0.08),
+                end: DrawingAnchor::new(fib_i1 as f64, slice_high.1 - price_span * 0.04),
+                direction: FibDirection::StartToEnd,
+                extend_right: true,
+            },
+            None,
+            false,
+        ));
+
+        // 6. RSI Sub-Pane: Momentum TrendLine (`32 -> 68`)
+        if self.indicators.show_rsi {
+            let r0 = idx_at(0.15);
+            let r1 = idx_at(0.82);
+            let v0 = self
+                .indicator_cache
+                .rsi
+                .get(r0)
+                .copied()
+                .flatten()
+                .filter(|v| v.is_finite())
+                .unwrap_or(36.0);
+            let v1 = self
+                .indicator_cache
+                .rsi
+                .get(r1)
+                .copied()
+                .flatten()
+                .filter(|v| v.is_finite())
+                .unwrap_or(66.0);
+            showcase.push(make_drawing(
+                DrawingPaneTarget::Oscillator(OscillatorPaneId::Rsi),
+                DrawingGeometry::TrendLine {
+                    start: DrawingAnchor::new(r0 as f64, v0),
+                    end: DrawingAnchor::new(r1 as f64, v1),
+                },
+                Some(DrawingStyle {
+                    color: DrawingColorPreset::Cyan,
+                    line_width: 1.75,
+                    dash: LineDashStyle::Solid,
+                    fill_opacity: 0.0,
+                }),
+                false,
+            ));
+        }
+
+        // 7. MACD Sub-Pane: Negative-to-positive accumulation Rectangle (proving `value <= 0` support)
+        if self.indicators.show_macd {
+            let m0 = idx_at(0.25);
+            let m1 = idx_at(0.75);
+            let mv0 = self
+                .indicator_cache
+                .macd
+                .macd_line
+                .get(m0)
+                .copied()
+                .flatten()
+                .filter(|v| v.is_finite())
+                .unwrap_or(-4.0);
+            let mv1 = self
+                .indicator_cache
+                .macd
+                .signal_line
+                .get(m1)
+                .copied()
+                .flatten()
+                .filter(|v| v.is_finite())
+                .unwrap_or(4.0);
+            let lo = mv0.min(mv1) - 1.5;
+            let hi = mv0.max(mv1) + 1.5;
+            showcase.push(make_drawing(
+                DrawingPaneTarget::Oscillator(OscillatorPaneId::Macd),
+                DrawingGeometry::Rectangle {
+                    corner_a: DrawingAnchor::new(m0 as f64, lo),
+                    corner_b: DrawingAnchor::new(m1 as f64, hi),
+                },
+                Some(DrawingStyle {
+                    color: DrawingColorPreset::ElectricBlue,
+                    line_width: 1.5,
+                    dash: LineDashStyle::Dashed,
+                    fill_opacity: 0.14,
+                }),
+                false,
+            ));
+        }
+
+        // 8. ATR Sub-Pane: Volatility threshold HorizontalLine
+        if self.indicators.show_atr {
+            let a_idx = idx_at(0.70);
+            let atr_val = self
+                .indicator_cache
+                .atr
+                .get(a_idx)
+                .copied()
+                .flatten()
+                .filter(|v| v.is_finite())
+                .unwrap_or(18.0);
+            showcase.push(make_drawing(
+                DrawingPaneTarget::Oscillator(OscillatorPaneId::Atr),
+                DrawingGeometry::HorizontalLine {
+                    anchor: DrawingAnchor::new(a_idx as f64, atr_val),
+                },
+                Some(DrawingStyle {
+                    color: DrawingColorPreset::Magenta,
+                    line_width: 1.4,
+                    dash: LineDashStyle::Dashed,
+                    fill_opacity: 0.0,
+                }),
+                false,
+            ));
+        }
+
+        let _ = self.drawings.replace_all(showcase, Some(fib_entry_index));
     }
 }
 
@@ -411,6 +643,133 @@ impl eframe::App for SumiWorkstationApp {
                     ui.checkbox(&mut self.show_crosshair, "Crosshair");
                     ui.checkbox(&mut self.show_volume, "Volume");
                 });
+
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(5.0, 4.0);
+
+                    ui.label(
+                        RichText::new("DRAW:")
+                            .monospace()
+                            .strong()
+                            .size(11.0)
+                            .color(palette::TEXT_MUTED),
+                    );
+
+                    for tool in [
+                        DrawingTool::Select,
+                        DrawingTool::HorizontalLine,
+                        DrawingTool::TrendLine,
+                        DrawingTool::Ray,
+                        DrawingTool::Rectangle,
+                        DrawingTool::FibonacciRetracement,
+                    ] {
+                        let is_active = self.drawings.active_tool == tool;
+                        if ui.selectable_label(is_active, tool.short_label()).clicked() {
+                            self.drawings.set_tool(tool);
+                        }
+                    }
+
+                    ui.separator();
+
+                    let mut magnet_on = self.drawings.magnet_mode == MagnetMode::Ohlc;
+                    if indicator_toggle_pill(
+                        ui,
+                        &mut magnet_on,
+                        "Magnet OHLC",
+                        Color32::from_rgb(255, 193, 7),
+                    ) {
+                        self.drawings.magnet_mode = if magnet_on {
+                            MagnetMode::Ohlc
+                        } else {
+                            MagnetMode::Off
+                        };
+                    }
+
+                    if ui
+                        .add_enabled(self.drawings.can_undo(), Button::new("Undo"))
+                        .clicked()
+                    {
+                        let _ = self.drawings.undo();
+                    }
+                    if ui
+                        .add_enabled(self.drawings.can_redo(), Button::new("Redo"))
+                        .clicked()
+                    {
+                        let _ = self.drawings.redo();
+                    }
+                    if ui.button("Demo Set").clicked() {
+                        self.populate_showcase_drawings();
+                    }
+                    if ui
+                        .add_enabled(self.drawings.has_unlocked_drawings(), Button::new("Clear"))
+                        .clicked()
+                    {
+                        let _ = self.drawings.clear_unlocked();
+                    }
+
+                    if let Some(sel) = self.drawings.selected_drawing().cloned() {
+                        ui.separator();
+                        let [cr, cg, cb] = sel.style.color.rgb();
+                        ui.label(
+                            RichText::new(format!(
+                                "#{} [{}·{}]",
+                                sel.id,
+                                sel.pane.short_label(),
+                                sel.tool_kind().short_label()
+                            ))
+                            .monospace()
+                            .size(11.0)
+                            .color(Color32::from_rgb(cr, cg, cb)),
+                        );
+                        if ui
+                            .add_enabled(
+                                !sel.locked,
+                                Button::new(format!("Color: {}", sel.style.color.short_label())),
+                            )
+                            .clicked()
+                        {
+                            let _ = self.drawings.cycle_selected_color();
+                        }
+                        if ui
+                            .add_enabled(
+                                !sel.locked,
+                                Button::new(format!("Dash: {}", sel.style.dash.label())),
+                            )
+                            .clicked()
+                        {
+                            let _ = self.drawings.cycle_selected_dash();
+                        }
+                        if let DrawingGeometry::FibonacciRetracement { extend_right, .. } =
+                            sel.geometry
+                        {
+                            if ui
+                                .add_enabled(!sel.locked, Button::new("Rev 0↔1"))
+                                .clicked()
+                            {
+                                let _ = self.drawings.reverse_selected_fibonacci();
+                            }
+                            let ext_label = if extend_right {
+                                "Ext →: ON"
+                            } else {
+                                "Ext →: OFF"
+                            };
+                            if ui
+                                .add_enabled(!sel.locked, Button::new(ext_label))
+                                .clicked()
+                            {
+                                let _ = self.drawings.toggle_selected_fib_extend();
+                            }
+                        }
+                        let lock_label = if sel.locked { "Unlock" } else { "Lock" };
+                        if ui.button(lock_label).clicked() {
+                            let _ = self.drawings.toggle_selected_lock();
+                        }
+                        if ui.add_enabled(!sel.locked, Button::new("Delete")).clicked() {
+                            let _ = self.drawings.delete_selected();
+                        }
+                    }
+                });
             });
 
         // Synchronize dirty-tracked indicator cache (0.000 ms on pan/zoom/hover frames!)
@@ -437,18 +796,23 @@ impl eframe::App for SumiWorkstationApp {
                         "MANUAL"
                     };
 
+                    let mag_tag = match self.drawings.magnet_mode {
+                        MagnetMode::Off => "OFF",
+                        MagnetMode::Ohlc => "OHLC",
+                    };
                     if let Some(rep) = self.last_report {
                         ui.label(
                             RichText::new(format!(
-                                "R04 MULTI-PANE   |   PANES: {} (OVL: {})   |   BARS: {} culled / {} drawn / {} total ({first_date} → {last_date})   |   CONFLATION: {}x   |   SPACING: {:.3}px   |   RIGHT OFFSET: {:+.1}   |   SCALE: {scale_mode} ({auto_tag})   |   MAIN PLOT: {:.0}×{:.0}px",
+                                "R05 WORKSTATION   |   PANES: {} (OVL: {})   |   DRAWINGS: {} (TOOL: {}, MAG: {mag_tag})   |   BARS: {} culled / {} drawn / {} total ({first_date} → {last_date})   |   CONFLATION: {}x   |   SPACING: {:.3}px   |   SCALE: {scale_mode} ({auto_tag})   |   PLOT: {:.0}×{:.0}px",
                                 rep.pane_count,
                                 rep.active_overlay_count,
+                                rep.drawing_count,
+                                rep.active_drawing_tool.short_label(),
                                 rep.culled_bar_count,
                                 rep.rendered_candle_count,
                                 self.candles.len(),
                                 rep.conflation_factor,
                                 rep.bar_spacing,
-                                rep.right_offset,
                                 rep.layout.plot_rect.width(),
                                 rep.layout.plot_rect.height(),
                             ))
@@ -459,7 +823,7 @@ impl eframe::App for SumiWorkstationApp {
                     } else {
                         ui.label(
                             RichText::new(format!(
-                                "R04 MULTI-PANE   |   TOTAL BARS: {} ({first_date} → {last_date})",
+                                "R05 WORKSTATION   |   TOTAL BARS: {} ({first_date} → {last_date})",
                                 self.candles.len()
                             ))
                             .monospace()
@@ -478,7 +842,7 @@ impl eframe::App for SumiWorkstationApp {
         egui::CentralPanel::default()
             .frame(central_frame)
             .show(ui, |ui| {
-                self.last_report = render_workstation_chart(
+                self.last_report = render_workstation_chart_with_drawings(
                     ui,
                     &self.candles,
                     &mut self.viewport,
@@ -491,6 +855,7 @@ impl eframe::App for SumiWorkstationApp {
                     },
                     &self.indicators,
                     &self.indicator_cache,
+                    &mut self.drawings,
                 );
             });
 
@@ -504,11 +869,18 @@ impl eframe::App for SumiWorkstationApp {
 #[cfg(not(target_arch = "wasm32"))]
 impl SumiWorkstationApp {
     fn handle_automated_verification_capture(&mut self, ui: &mut egui::Ui) {
-        if let Ok(batch_name) = std::env::var("SUMI_CAPTURE_BATCH")
-            && batch_name == "r04"
-        {
-            self.handle_r04_single_session_batch_capture(ui);
-            return;
+        if let Ok(batch_name) = std::env::var("SUMI_CAPTURE_BATCH") {
+            match batch_name.as_str() {
+                "r04" => {
+                    self.handle_r04_single_session_batch_capture(ui);
+                    return;
+                }
+                "r05" => {
+                    self.handle_r05_single_session_batch_capture(ui);
+                    return;
+                }
+                _ => {}
+            }
         }
 
         let Ok(screenshot_path) = std::env::var("SUMI_SCREENSHOT_PATH") else {
@@ -683,6 +1055,194 @@ impl SumiWorkstationApp {
         }
     }
 
+    /// Captures all 3 Milestone R05 Retina GPU drawing verification scenarios inside ONE single
+    /// background window session (`with_active(false)`, zero window flashing, zero focus stealing).
+    fn handle_r05_single_session_batch_capture(&mut self, ui: &mut egui::Ui) {
+        ui.ctx().request_repaint();
+
+        if self.batch_step_start_frame == 0 {
+            let _ = std::fs::create_dir_all("docs/evidence");
+            self.batch_step = 0;
+            self.batch_step_start_frame = self.frame_count;
+            self.apply_r05_batch_step(ui, 0);
+            return;
+        }
+
+        let elapsed_frames = self.frame_count.saturating_sub(self.batch_step_start_frame);
+        let settle_frames = if self.batch_step == 2 { 8 } else { 6 };
+
+        if elapsed_frames >= settle_frames && !self.screenshot_requested {
+            self.screenshot_requested = true;
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+        }
+
+        if let Some(image) = Self::take_screenshot_event(ui) {
+            let (png_path, json_path) = match self.batch_step {
+                0 => (
+                    "docs/evidence/r05_drawings_showcase_1280x800.png",
+                    "docs/evidence/r05_drawings_showcase_1280x800.json",
+                ),
+                1 => (
+                    "docs/evidence/r05_drawings_log_100k_fit_1280x800.png",
+                    "docs/evidence/r05_drawings_log_100k_fit_1280x800.json",
+                ),
+                _ => (
+                    "docs/evidence/r05_drawings_interaction_resized_960x640.png",
+                    "docs/evidence/r05_drawings_interaction_resized_960x640.json",
+                ),
+            };
+            self.persist_capture_artifacts(png_path, Some(json_path), &image);
+
+            self.batch_step += 1;
+            self.screenshot_requested = false;
+            if self.batch_step >= 3 {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            } else {
+                self.batch_step_start_frame = self.frame_count;
+                self.apply_r05_batch_step(ui, self.batch_step);
+            }
+        }
+    }
+
+    fn apply_r05_batch_step(&mut self, ui: &mut egui::Ui, step: usize) {
+        match step {
+            0 => {
+                // Scenario 0: 1280x800, 240 bars, 3 panes (Main + RSI + MACD), all 5 primitives + selected Fib with handles
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(1280.0, 800.0)));
+                self.set_dataset_size(240);
+                self.viewport.time_scale.set_width(1178.0);
+                self.set_scale_mode(PriceScaleMode::Normal);
+                self.viewport.reset_pane_stretches();
+                self.indicators = IndicatorConfig {
+                    show_sma: true,
+                    show_ema: true,
+                    show_bbands: true,
+                    show_rsi: true,
+                    show_macd: true,
+                    show_atr: false,
+                    ..IndicatorConfig::default()
+                };
+                self.indicator_cache
+                    .sync(&self.candles, self.dataset_generation, &self.indicators);
+                self.populate_showcase_drawings();
+            }
+            1 => {
+                // Scenario 1: 1280x800, 100,000 bars full-fit Logarithmic + ALL 6 indicators (4 panes, 32x conflation) + 8 multi-pane annotations
+                self.set_dataset_size(100_000);
+                self.viewport.time_scale.set_width(1178.0);
+                self.indicators = IndicatorConfig {
+                    show_sma: true,
+                    show_ema: true,
+                    show_bbands: true,
+                    show_rsi: true,
+                    show_macd: true,
+                    show_atr: true,
+                    ..IndicatorConfig::default()
+                };
+                self.indicator_cache
+                    .sync(&self.candles, self.dataset_generation, &self.indicators);
+                self.set_scale_mode(PriceScaleMode::Logarithmic);
+                self.viewport.reset_pane_stretches();
+                self.viewport.fit_all();
+                self.populate_showcase_drawings();
+            }
+            _ => {
+                // Scenario 2: Resized 960x640 compact layout + OHLC Magnet ON + leftward 360° Ray + live rubber-band TrendLine preview
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(960.0, 640.0)));
+                self.set_dataset_size(180);
+                self.viewport.time_scale.set_width(858.0);
+                self.set_scale_mode(PriceScaleMode::Normal);
+                self.indicators = IndicatorConfig {
+                    show_sma: true,
+                    show_ema: false,
+                    show_bbands: true,
+                    show_rsi: true,
+                    show_macd: true,
+                    show_atr: false,
+                    ..IndicatorConfig::default()
+                };
+                self.indicator_cache
+                    .sync(&self.candles, self.dataset_generation, &self.indicators);
+                self.viewport.reset_pane_stretches();
+                self.viewport
+                    .apply_separator_drag_delta(None, OscillatorPaneId::Rsi, 360.0, -36.0);
+                self.populate_showcase_drawings();
+                self.drawings.magnet_mode = MagnetMode::Ohlc;
+
+                // Add an explicit leftward 360° Ray (`dx < 0`) to visually demonstrate full directional Liang-Barsky clipping!
+                let left_origin = 162_usize.min(self.candles.len() - 1);
+                let left_through = 128_usize.min(self.candles.len() - 1);
+                let _ = self.drawings.add_drawing(
+                    DrawingPaneTarget::Main,
+                    DrawingGeometry::Ray {
+                        origin: DrawingAnchor::new(
+                            left_origin as f64,
+                            self.candles[left_origin].high,
+                        ),
+                        through: DrawingAnchor::new(
+                            left_through as f64,
+                            self.candles[left_through].high + 6.0,
+                        ),
+                    },
+                    Some(DrawingStyle {
+                        color: DrawingColorPreset::Crimson,
+                        line_width: 1.8,
+                        dash: LineDashStyle::Solid,
+                        fill_opacity: 0.0,
+                    }),
+                );
+
+                // Seed a live 2-click rubber-band TrendLine preview using `PaneDrawingProjection` + OHLC Magnet!
+                let mut tmp_ps = self.viewport.main_price_scale.clone();
+                tmp_ps.set_height(320.0);
+                let vis = self.visible_slice();
+                if let Some(bounds) = crate::model::PriceBounds::from_candles(vis, 0.08) {
+                    let bv = vis.first().map_or(1200.0, |c| c.close);
+                    tmp_ps.autoscale_raw_bounds(bounds.raw_min, bounds.raw_max, bv);
+                    let proj = crate::drawings::PaneDrawingProjection::new(
+                        &self.viewport.time_scale,
+                        &tmp_ps,
+                        858.0,
+                        320.0,
+                        bv,
+                    );
+                    let i0 = 115_usize.min(self.candles.len() - 1);
+                    let i1 = 168_usize.min(self.candles.len() - 1);
+                    if let (Some(lp0), Some(lp1)) = (
+                        proj.anchor_to_local(DrawingAnchor::new(i0 as f64, self.candles[i0].low)),
+                        proj.anchor_to_local(DrawingAnchor::new(i1 as f64, self.candles[i1].close)),
+                    ) {
+                        self.drawings.set_tool(DrawingTool::TrendLine);
+                        let _ = self.drawings.pointer_down(
+                            DrawingPaneTarget::Main,
+                            lp0,
+                            false,
+                            &proj,
+                            &self.candles,
+                        );
+                        let _ = self.drawings.pointer_up(
+                            DrawingPaneTarget::Main,
+                            Some(lp0),
+                            false,
+                            &proj,
+                            &self.candles,
+                        );
+                        self.drawings.pointer_move(
+                            DrawingPaneTarget::Main,
+                            lp1,
+                            false,
+                            &proj,
+                            &self.candles,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     fn take_screenshot_event(ui: &egui::Ui) -> Option<std::sync::Arc<egui::ColorImage>> {
         ui.input(|i| {
             for event in &i.events {
@@ -713,8 +1273,15 @@ impl SumiWorkstationApp {
         if let Some(t_path) = telemetry_path.filter(|p| !p.is_empty())
             && let Some(rep) = self.last_report
         {
+            let selected_json = rep
+                .selected_drawing_id
+                .map_or_else(|| "null".to_owned(), |id| id.to_string());
+            let magnet_str = match rep.magnet_mode {
+                MagnetMode::Off => "Off",
+                MagnetMode::Ohlc => "Ohlc",
+            };
             let json = format!(
-                "{{\n  \"symbol\": \"{}\",\n  \"timeframe\": \"{}\",\n  \"total_candles\": {},\n  \"culled_candles\": {},\n  \"rendered_candles\": {},\n  \"conflation_factor\": {},\n  \"bar_spacing\": {:.6},\n  \"right_offset\": {:.6},\n  \"scale_mode\": \"{}\",\n  \"auto_scale\": {},\n  \"pane_count\": {},\n  \"active_overlay_count\": {},\n  \"stretches\": [{:.3}, {:.3}, {:.3}, {:.3}],\n  \"base_value\": {:.4},\n  \"screenshot_px\": [{}, {}],\n  \"outer_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"plot_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"price_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"time_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"raw_price_min\": {:.2},\n  \"raw_price_max\": {:.2}\n}}\n",
+                "{{\n  \"symbol\": \"{}\",\n  \"timeframe\": \"{}\",\n  \"total_candles\": {},\n  \"culled_candles\": {},\n  \"rendered_candles\": {},\n  \"conflation_factor\": {},\n  \"bar_spacing\": {:.6},\n  \"right_offset\": {:.6},\n  \"scale_mode\": \"{}\",\n  \"auto_scale\": {},\n  \"pane_count\": {},\n  \"active_overlay_count\": {},\n  \"drawing_count\": {},\n  \"active_drawing_tool\": \"{}\",\n  \"selected_drawing_id\": {},\n  \"magnet_mode\": \"{}\",\n  \"stretches\": [{:.3}, {:.3}, {:.3}, {:.3}],\n  \"base_value\": {:.4},\n  \"screenshot_px\": [{}, {}],\n  \"outer_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"plot_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"price_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"time_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"raw_price_min\": {:.2},\n  \"raw_price_max\": {:.2}\n}}\n",
                 self.symbol,
                 self.timeframe,
                 self.candles.len(),
@@ -727,6 +1294,10 @@ impl SumiWorkstationApp {
                 self.viewport.main_price_scale.is_auto_scale(),
                 rep.pane_count,
                 rep.active_overlay_count,
+                rep.drawing_count,
+                rep.active_drawing_tool.short_label(),
+                selected_json,
+                magnet_str,
                 self.viewport.main_stretch,
                 self.viewport.rsi_stretch,
                 self.viewport.macd_stretch,
@@ -823,5 +1394,53 @@ mod tests {
         app.reset_view();
         assert!((app.viewport.time_scale.right_offset() - 12.0).abs() < 1e-6);
         assert!((app.viewport.time_scale.bar_spacing() - 8.0).abs() < 1e-6);
+
+        // Verify Critic R05 atomic `populate_showcase_drawings` preserves `magnet_mode`, prior user drawings
+        // on 1-step Undo, `locked = true` across Undo -> Redo, and `has_unlocked_drawings` state!
+        app.drawings.magnet_mode = MagnetMode::Ohlc;
+        let user_id = app
+            .drawings
+            .add_drawing(
+                DrawingPaneTarget::Main,
+                DrawingGeometry::HorizontalLine {
+                    anchor: DrawingAnchor::new(9950.0, 1200.0),
+                },
+                None,
+            )
+            .unwrap();
+        app.drawings.selected_id = Some(user_id);
+
+        app.populate_showcase_drawings();
+        assert_eq!(app.drawings.magnet_mode, MagnetMode::Ohlc);
+        assert_eq!(app.drawings.drawings.len(), 8);
+        assert!(app.drawings.drawings[0].locked);
+        assert!(app.drawings.selected_id.is_some());
+        assert!(app.drawings.has_unlocked_drawings());
+
+        // Single Undo restores user's previous drawing & selection!
+        assert!(app.drawings.undo());
+        assert_eq!(app.drawings.drawings.len(), 1);
+        assert_eq!(app.drawings.drawings[0].id, user_id);
+        assert_eq!(app.drawings.selected_id, Some(user_id));
+
+        // Single Redo restores all 8 showcase drawings WITH `locked == true` preserved on item 0!
+        assert!(app.drawings.redo());
+        assert_eq!(app.drawings.drawings.len(), 8);
+        assert!(
+            app.drawings.drawings[0].locked,
+            "locked support line must remain locked after Undo -> Redo"
+        );
+
+        let unlocked_cleared = app.drawings.clear_unlocked();
+        assert_eq!(unlocked_cleared, 7);
+        assert_eq!(
+            app.drawings.drawings.len(),
+            1,
+            "locked support line stays preserved"
+        );
+        assert!(
+            !app.drawings.has_unlocked_drawings(),
+            "Clear button must disable once only locked drawings remain"
+        );
     }
 }

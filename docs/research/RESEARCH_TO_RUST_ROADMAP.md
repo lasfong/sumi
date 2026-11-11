@@ -1,7 +1,7 @@
 # RESEARCH TO RUST ROADMAP — SESSION R01
 
 - **Session Identity:** `SESSION-R01-20261110T202837+0700`
-- **Updated By:** `SESSION-R04-20261111T140100+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Updated By:** `SESSION-R05-20261111T163600+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 - **Principle:** No Rust implementation begins without prior REA or reference-source research evidence.
 
 ---
@@ -81,27 +81,34 @@ cargo test indicators::tests::series_block_index_matches_raw_slice_scans_bit_for
 
 ---
 
-## Wave 3 — Drawing Engine Port (`NEXT — MILESTONE R05 TARGET`)
+## Wave 3 — Drawing Engine Port (`COMPLETE — SESSION R05`)
 
-### Pre-condition: Research Gate
-- [ ] REA `analyze_javascript_application` on `lightweight-charts` source: Extract `ISeriesPrimitive`, `PrimitivePaneView` interfaces
-- [ ] Confirm drawing anchor schema from archived `drawingDomain.ts`
-- [ ] Review `drawingGeometry.ts` algorithms (all already recovered — see REA_EXECUTION_EVIDENCE.md §Record 4)
+### Completed Research & Audit Gates (`VERIFIED`)
+- [x] Executed live REA MCP JS/TS analysis (`ev_f8b8d8b5...`, `ev_4d2d8fb2...`, `ev_6041f2c6...`, `ev_01525e3b...`, `ev_8c1494cf...`, `ev_25a75e6c...`, `ev_98512b7e...`) on `lightweight-charts-5.2.0` (`iseries-primitive.ts`, `ipane-primitive.ts`, `pane-primitive-wrapper.ts`, `series-primitive-wrapper.ts`, `primitive-wrapper-base.ts`, `pane-widget.ts`) and `ARCHIVE/frontend/src/features/drawings/{drawingDomain,drawingGeometry,drawingMagnet,useDrawingWorkspaceController,SumiPrimitiveDrawingProvider,DrawingCommandHistory}.ts`.
+- [x] Documented and rectified all 5 legacy Sumi drawing defects in [`docs/research/DRAWING_ENGINE_SPEC.md`](DRAWING_ENGINE_SPEC.md).
 
-### Deliverables
-| Component | Algorithm Source | Rust Target |
-|---|---|---|
-| `Drawing` enum + anchor model | Archive `drawingDomain.ts` | `src/drawings/mod.rs` |
-| Projection + hit-test | Archive `drawingGeometry.ts` (fully recovered) | `src/drawings/geometry.rs` |
-| Creation state machine | Archive `useDrawingWorkspaceController.ts` | `src/drawings/controller.rs` |
-| Fibonacci retracement | Archive `fibonacciPrice` formula | `src/drawings/fibonacci.rs` |
+### Shipped Rust Deliverables (`IMPLEMENTATION_PASS`)
+| Component | Algorithm Source | Shipped Rust Target | Status |
+|---|---|---|---|
+| `Drawing`, `DrawingAnchor`, `DrawingPaneTarget` & style schema | Archive `drawingDomain.ts` + multi-pane extension | `src/drawings/mod.rs` | ✅ SHIPPED |
+| `PaneDrawingProjection`, `ClipEdge` Liang-Barsky & Fib levels | Archive `drawingGeometry.ts` + analytical clipping | `src/drawings/geometry.rs` | ✅ SHIPPED |
+| LWC handle-first hit-test & `O(threshold / bar_spacing)` OHLC magnet | LWC `ipane-primitive.ts` + Archive `drawingMagnet.ts` | `src/drawings/hit_test.rs` | ✅ SHIPPED |
+| `DrawingStore`, 1/2-click + drag state machine & 64-step Undo/Redo | Archive `useDrawingWorkspaceController.ts`, `DrawingCommandHistory.ts` | `src/drawings/controller.rs` | ✅ SHIPPED |
+| Multi-pane GPU overlay, phase-anchored dashes, toolbar & inspector | `DRAWING_ENGINE_SPEC.md` | `src/chart.rs`, `src/app.rs` | ✅ SHIPPED |
 
-### Acceptance Tests
-```
-cargo test drawings::hit_test_trendline
-cargo test drawings::hit_test_anchor_priority
-cargo test drawings::fibonacci_levels
-cargo test drawings::ray_projection
+### Verified Acceptance Tests (`cargo test` — 57/57 PASS)
+```bash
+cargo test drawings::tests::liang_barsky_clips_finite_segments_and_360_degree_rays_accurately
+cargo test drawings::tests::fibonacci_levels_match_canonical_archive_ratios_and_direction_reversal
+cargo test drawings::tests::hit_test_precedence_prevents_fib_and_unselected_rect_hijack_and_supports_lock_selection
+cargo test drawings::tests::ohlc_magnet_snaps_within_threshold_and_breaks_ties_deterministically
+cargo test drawings::tests::controller_supports_two_click_and_drag_creation_log_body_drag_and_bounded_undo_redo
+cargo test drawings::tests::rectangle_four_corner_resize_and_oscillator_negative_values_and_sanitization_work
+cargo test drawings::tests::critic_r05_regression_click_without_drag_preserves_geometry_and_redo_stack
+cargo test drawings::tests::critic_r05_regression_liang_barsky_no_phantom_edge_ray_tiny_ray_and_extreme_span
+cargo test drawings::tests::critic_r05_regression_locked_rectangle_deselect_pan_passthrough_and_transitive_ties
+cargo test drawings::tests::critic_r05_regression_u64_max_id_compaction_and_cross_pane_drag_hover_isolation
+cargo test chart::tests::multipane_drawing_arbitrage_creates_drags_selects_locked_and_preserves_pan
 ```
 
 ---
@@ -122,14 +129,14 @@ cargo test drawings::ray_projection
 
 ---
 
-## Wave 5 — Data Infrastructure (Parallelizable, Session R05+)
+## Wave 5 — Data Infrastructure (`NEXT — MILESTONE R06 TARGET`)
 
 ### Deliverables
 | Component | Research Source | Rust Target | Status |
 |---|---|---|---|
-| CSV/JSON OHLCV loader | `lightweight-charts` `SeriesData` format docs | `src/data.rs` extension | Pending (Wave 5) |
-| Timeframe aggregation | Standard OHLCV rollup (open-source) | `src/data.rs` | Pending (Wave 5) |
-| WASM gate | `cargo clippy --target wasm32-unknown-unknown -- -D warnings` | Toolchain & CI verification | ✅ COMPLETE (`SESSION R04`) |
+| CSV/JSON OHLCV loader | `lightweight-charts` `SeriesData` + Archive data schemas | `src/data.rs` / `src/data/` | Next (`Milestone R06`) |
+| Timeframe aggregation (`1m`, `5m`, `15m`, `1h`, `4h`, `1D`, `1W`) | Standard deterministic OHLCV rollup + Archive market data | `src/data.rs` / `src/data/` | Next (`Milestone R06`) |
+| WASM gate | `cargo clippy --target wasm32-unknown-unknown -- -D warnings` | Toolchain & CI verification | ✅ COMPLETE (`SESSIONS R04 + R05`) |
 
 ---
 

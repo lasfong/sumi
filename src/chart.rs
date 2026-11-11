@@ -1,11 +1,16 @@
 use egui::epaint::Mesh;
 use egui::text::LayoutJob;
 use egui::{
-    Align2, Color32, CursorIcon, FontId, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, TextFormat,
-    Ui, Vec2,
+    Align2, Color32, CursorIcon, FontId, Key, Pos2, Rect, Sense, Shape, Stroke, StrokeKind,
+    TextFormat, Ui, Vec2,
 };
 use serde::{Deserialize, Serialize};
 
+use crate::drawings::{
+    Drawing, DrawingColorPreset, DrawingGeometry, DrawingId, DrawingInteractionPhase,
+    DrawingPaneTarget, DrawingStore, DrawingTool, HandlePart, HitTarget, LineDashStyle, LocalPoint,
+    MagnetMode, PaneDrawingProjection, PointerCaptureOutcome, ProjectedDrawingShape,
+};
 use crate::indicators::{
     BucketLineEnvelope, IndicatorCache, IndicatorConfig, MACD_REFERENCE_LEVELS, OscillatorPaneId,
     RSI_REFERENCE_LEVELS, SeriesBlockIndex, bucket_line_envelope_indexed,
@@ -591,6 +596,10 @@ pub struct ChartRenderReport {
     pub hovered_oscillator_value: Option<f64>,
     pub first_oscillator_plot_rect: Option<Rect>,
     pub first_separator_rect: Option<Rect>,
+    pub drawing_count: usize,
+    pub active_drawing_tool: DrawingTool,
+    pub selected_drawing_id: Option<DrawingId>,
+    pub magnet_mode: MagnetMode,
 }
 
 /// Renders the native candlestick chart, volume histogram, price/time axes, crosshair, and OHLCV overlay
@@ -624,6 +633,49 @@ pub fn render_workstation_chart(
     config: ChartDisplayConfig<'_>,
     indicators: &IndicatorConfig,
     indicator_cache: &IndicatorCache,
+) -> Option<ChartRenderReport> {
+    render_workstation_chart_inner(
+        ui,
+        candles,
+        viewport,
+        config,
+        indicators,
+        indicator_cache,
+        None,
+    )
+}
+
+/// Flagship Milestone R05 workstation renderer: extends [`render_workstation_chart`] with full
+/// multi-pane interactive drawing & annotation creation, Liang-Barsky clipping, OHLC magnet
+/// snapping, handle/body manipulation, rubber-band previews, and keyboard shortcuts.
+pub fn render_workstation_chart_with_drawings(
+    ui: &mut Ui,
+    candles: &[Candle],
+    viewport: &mut ChartViewportState,
+    config: ChartDisplayConfig<'_>,
+    indicators: &IndicatorConfig,
+    indicator_cache: &IndicatorCache,
+    drawings: &mut DrawingStore,
+) -> Option<ChartRenderReport> {
+    render_workstation_chart_inner(
+        ui,
+        candles,
+        viewport,
+        config,
+        indicators,
+        indicator_cache,
+        Some(drawings),
+    )
+}
+
+fn render_workstation_chart_inner(
+    ui: &mut Ui,
+    candles: &[Candle],
+    viewport: &mut ChartViewportState,
+    config: ChartDisplayConfig<'_>,
+    indicators: &IndicatorConfig,
+    indicator_cache: &IndicatorCache,
+    mut drawings: Option<&mut DrawingStore>,
 ) -> Option<ChartRenderReport> {
     if candles.is_empty() {
         ui.centered_and_justified(|ui| {
@@ -820,39 +872,8 @@ pub fn render_workstation_chart(
             .set_margins(top_m, desired_bottom_margin);
     }
 
-    // Ensure initial price ranges exist prior to first-frame axis drag gestures
-    let init_cf = viewport.time_scale.conflation_factor(ppp);
-    if viewport.main_price_scale.price_range().is_none() {
-        let _ = refresh_main_pane_autoscale_and_bounds(
-            candles,
-            &viewport.time_scale,
-            &mut viewport.main_price_scale,
-            &mut viewport.volume_price_scale,
-            config.show_volume,
-            init_cf,
-            Some((indicators, indicator_cache)),
-        );
-    }
-    let init_strict = non_empty_candle_range(
-        viewport.time_scale.strict_visible_data_range(),
-        candles.len(),
-    );
-    for osc in &multi_layout.oscillators {
-        if viewport
-            .oscillator_price_scale(osc.id)
-            .price_range()
-            .is_none()
-        {
-            refresh_oscillator_autoscale(
-                osc.id,
-                viewport.oscillator_price_scale_mut(osc.id),
-                indicator_cache,
-                init_strict.clone(),
-            );
-        }
-    }
-
-    // 4. Advance shared kinetic inertia once per frame (or cancel on any pointer press across any pane)
+    // 4. Advance shared kinetic inertia once per frame BEFORE pre-input autoscale & drawing projection
+    // so inertial scrolling and `PaneDrawingProjection` stay 100% same-frame synchronized!
     let (smooth_scroll, time_ms) = ui.input(|i| (i.smooth_scroll_delta, i.time * 1000.0));
     let any_pointer_down = main_plot_resp.is_pointer_button_down_on()
         || main_price_resp.is_pointer_button_down_on()
@@ -872,12 +893,130 @@ pub fn render_workstation_chart(
         step_shared_kinetic_inertia(ui, time_ms, &mut viewport.time_scale, &mut viewport.kinetic);
     }
 
+    // Ensure current price ranges & `pre_base_value` are up to date BEFORE drawing input arbitrage
+    // so `PaneDrawingProjection` maps pointer clicks/drags accurately even right after toolbar or kinetic changes.
+    let init_cf = viewport.time_scale.conflation_factor(ppp);
+    let init_strict = non_empty_candle_range(
+        viewport.time_scale.strict_visible_data_range(),
+        candles.len(),
+    );
+    let pre_base_value = if viewport.main_price_scale.price_range().is_none()
+        || viewport.main_price_scale.is_auto_scale()
+    {
+        refresh_main_pane_autoscale_and_bounds(
+            candles,
+            &viewport.time_scale,
+            &mut viewport.main_price_scale,
+            &mut viewport.volume_price_scale,
+            config.show_volume,
+            init_cf,
+            Some((indicators, indicator_cache)),
+        )
+        .map_or_else(|| candles[init_strict.start].close, |(bv, _)| bv)
+    } else {
+        candles[init_strict.start].close
+    };
+    for osc in &multi_layout.oscillators {
+        if viewport
+            .oscillator_price_scale(osc.id)
+            .price_range()
+            .is_none()
+            || viewport.oscillator_price_scale(osc.id).is_auto_scale()
+        {
+            refresh_oscillator_autoscale(
+                osc.id,
+                viewport.oscillator_price_scale_mut(osc.id),
+                indicator_cache,
+                init_strict.clone(),
+            );
+        }
+    }
+
+    // 4b. Process Drawing Engine keyboard shortcuts & per-pane pointer arbitrage (`Milestone R05`)
+    let separator_busy = separator_active_idx.is_some_and(|idx| {
+        sep_responses[idx].dragged() || sep_responses[idx].is_pointer_button_down_on()
+    });
+    let mut suppress_main_drag_pan = false;
+    let mut suppress_osc_drag_pan = vec![false; osc_responses.len()];
+    let mut drawing_blocked_double_click = false;
+
+    if let Some(store) = drawings.as_deref_mut() {
+        sanitize_hidden_oscillator_drawing_state(store, &active_osc_ids);
+        handle_drawing_keyboard_shortcuts(ui, store);
+
+        let ptr = sample_drawing_pointer_input(ui);
+        drawing_blocked_double_click = store.active_tool != DrawingTool::Select
+            || !matches!(store.phase(), DrawingInteractionPhase::Idle);
+
+        if !separator_busy {
+            let main_proj = PaneDrawingProjection::new(
+                &viewport.time_scale,
+                &viewport.main_price_scale,
+                main_plot_f64.width,
+                main_plot_f64.height,
+                pre_base_value,
+            );
+            suppress_main_drag_pan = drive_pane_drawing_input(
+                store,
+                DrawingPaneTarget::Main,
+                multi_layout.main_plot_rect,
+                main_plot_f64,
+                &main_plot_resp,
+                ptr,
+                &main_proj,
+                candles,
+            );
+            if suppress_main_drag_pan || store.hovered_hit().is_some() {
+                drawing_blocked_double_click = true;
+            }
+            if suppress_main_drag_pan {
+                viewport.kinetic = None;
+                viewport.time_scale.end_scroll();
+                viewport.main_price_scale.end_scroll();
+            }
+
+            for (osc_idx, &(osc_id, osc_plot_rect, _, ref osc_plot_resp, _)) in
+                osc_responses.iter().enumerate()
+            {
+                let osc_plot_f64 = PlotRect::from_egui(osc_plot_rect);
+                let osc_proj = PaneDrawingProjection::new(
+                    &viewport.time_scale,
+                    viewport.oscillator_price_scale(osc_id),
+                    osc_plot_f64.width,
+                    osc_plot_f64.height,
+                    1.0,
+                );
+                let captured = drive_pane_drawing_input(
+                    store,
+                    DrawingPaneTarget::Oscillator(osc_id),
+                    osc_plot_rect,
+                    osc_plot_f64,
+                    osc_plot_resp,
+                    ptr,
+                    &osc_proj,
+                    candles,
+                );
+                suppress_osc_drag_pan[osc_idx] = captured;
+                if captured || store.hovered_hit().is_some() {
+                    drawing_blocked_double_click = true;
+                }
+                if captured {
+                    viewport.kinetic = None;
+                    viewport.time_scale.end_scroll();
+                    viewport.oscillator_price_scale_mut(osc_id).end_scroll();
+                }
+            }
+        }
+    }
+
     // 5. Process Main Pane, Oscillator Sub-Panes, Right Price Axes, and Shared Time Axis gestures
-    // Double-clicking ANY plot canvas resets `time_scale` AND all pane `PriceScale`s synchronously!
-    let any_plot_double_clicked = main_plot_resp.double_clicked()
-        || osc_responses
-            .iter()
-            .any(|(_, _, _, pr, _)| pr.double_clicked());
+    // Double-clicking ANY plot canvas resets `time_scale` AND all pane `PriceScale`s synchronously
+    // (unless a drawing placement, drag, or hover hit claimed the gesture).
+    let any_plot_double_clicked = !drawing_blocked_double_click
+        && (main_plot_resp.double_clicked()
+            || osc_responses
+                .iter()
+                .any(|(_, _, _, pr, _)| pr.double_clicked()));
     if any_plot_double_clicked {
         viewport.reset_to_default();
     }
@@ -893,6 +1032,7 @@ pub fn render_workstation_chart(
         &mut viewport.main_price_scale,
         Some(&mut viewport.volume_price_scale),
         false,
+        suppress_main_drag_pan,
     );
     handle_price_axis_interactions(
         ui,
@@ -901,7 +1041,9 @@ pub fn render_workstation_chart(
         &mut viewport.main_price_scale,
     );
 
-    for &(osc_id, osc_plot_rect, _, ref osc_plot_resp, ref osc_ax_resp) in &osc_responses {
+    for (osc_idx, &(osc_id, osc_plot_rect, _, ref osc_plot_resp, ref osc_ax_resp)) in
+        osc_responses.iter().enumerate()
+    {
         let osc_plot_f64 = PlotRect::from_egui(osc_plot_rect);
         {
             let ChartViewportState {
@@ -928,9 +1070,16 @@ pub fn render_workstation_chart(
                 osc_ps,
                 None,
                 false,
+                suppress_osc_drag_pan[osc_idx],
             );
             handle_price_axis_interactions(ui, osc_ax_resp, osc_plot_f64, osc_ps);
         }
+    }
+
+    if let Some(store) = drawings.as_deref()
+        && !separator_busy
+    {
+        apply_drawing_cursor_feedback(ui, store);
     }
 
     handle_time_axis_interactions(
@@ -1093,6 +1242,27 @@ pub fn render_workstation_chart(
         base_value,
     );
 
+    if let Some(store) = drawings.as_deref() {
+        let main_draw_proj = PaneDrawingProjection::new(
+            &viewport.time_scale,
+            &viewport.main_price_scale,
+            main_plot_f64.width,
+            main_plot_f64.height,
+            base_value,
+        );
+        paint_pane_drawings(
+            &painter,
+            &main_plot_painter,
+            multi_layout.main_plot_rect,
+            multi_layout.main_price_axis_rect,
+            DrawingPaneTarget::Main,
+            store,
+            &main_draw_proj,
+            &viewport.main_price_scale,
+            base_value,
+        );
+    }
+
     // 10. Paint Stacked Oscillator Sub-Panes (`RSI`, `MACD`, `ATR`)
     for osc in &multi_layout.oscillators {
         let osc_ps = viewport.oscillator_price_scale(osc.id);
@@ -1159,6 +1329,27 @@ pub fn render_workstation_chart(
                     Stroke::new(1.5, palette::IND_ATR),
                 );
             }
+        }
+
+        if let Some(store) = drawings.as_deref() {
+            let osc_draw_proj = PaneDrawingProjection::new(
+                &viewport.time_scale,
+                osc_ps,
+                osc_plot_f64.width,
+                osc_plot_f64.height,
+                1.0,
+            );
+            paint_pane_drawings(
+                &painter,
+                &osc_painter,
+                osc.plot_rect,
+                osc.price_axis_rect,
+                DrawingPaneTarget::Oscillator(osc.id),
+                store,
+                &osc_draw_proj,
+                osc_ps,
+                1.0,
+            );
         }
     }
 
@@ -1391,6 +1582,29 @@ pub fn render_workstation_chart(
         );
     }
 
+    let (drawing_count, active_drawing_tool, selected_drawing_id, magnet_mode) =
+        if let Some(store) = drawings.as_deref() {
+            let visible_count = store
+                .drawings
+                .iter()
+                .filter(|d| {
+                    d.visible
+                        && match d.pane {
+                            DrawingPaneTarget::Main => true,
+                            DrawingPaneTarget::Oscillator(id) => active_osc_ids.contains(&id),
+                        }
+                })
+                .count();
+            (
+                visible_count,
+                store.active_tool,
+                store.selected_id,
+                store.magnet_mode,
+            )
+        } else {
+            (0, DrawingTool::Select, None, MagnetMode::Off)
+        };
+
     Some(ChartRenderReport {
         layout: multi_layout.as_primary_chart_layout(),
         bounds,
@@ -1412,6 +1626,10 @@ pub fn render_workstation_chart(
         hovered_oscillator_value,
         first_oscillator_plot_rect: multi_layout.oscillators.first().map(|o| o.plot_rect),
         first_separator_rect: multi_layout.separators.first().map(|s| s.rect),
+        drawing_count,
+        active_drawing_tool,
+        selected_drawing_id,
+        magnet_mode,
     })
 }
 
@@ -1500,6 +1718,7 @@ pub fn render_shared_pane_candlestick_chart(
         main_price_scale,
         Some(volume_price_scale),
         true,
+        false,
     );
     handle_price_axis_interactions(ui, &price_resp, plot_rect_f64, main_price_scale);
     handle_time_axis_interactions(
@@ -1702,6 +1921,10 @@ pub fn render_shared_pane_candlestick_chart(
         hovered_oscillator_value: None,
         first_oscillator_plot_rect: None,
         first_separator_rect: None,
+        drawing_count: 0,
+        active_drawing_tool: DrawingTool::Select,
+        selected_drawing_id: None,
+        magnet_mode: MagnetMode::Off,
     })
 }
 
@@ -2816,6 +3039,7 @@ fn handle_plot_interactions(
     pane_price_scale: &mut PriceScale,
     volume_price_scale: Option<&mut PriceScale>,
     allow_double_click_reset: bool,
+    suppress_drag_pan: bool,
 ) {
     if plot_resp.hovered() && !plot_resp.dragged() {
         ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
@@ -2831,6 +3055,10 @@ fn handle_plot_interactions(
             let scale = (f64::from(smooth_scroll.y) / 36.0).clamp(-3.0, 3.0);
             time_scale.zoom(anchor_local_x, scale);
         }
+    }
+
+    if suppress_drag_pan {
+        return;
     }
 
     if allow_double_click_reset && plot_resp.double_clicked() {
@@ -3112,6 +3340,687 @@ fn nice_bar_stride(raw_stride: i64) -> i64 {
         }
     }
     raw_stride.max(1)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DrawingPointerInput {
+    primary_pressed: bool,
+    primary_down: bool,
+    primary_released: bool,
+    press_origin: Option<Pos2>,
+    latest_pos: Option<Pos2>,
+    snap_modifier: bool,
+}
+
+fn sample_drawing_pointer_input(ui: &Ui) -> DrawingPointerInput {
+    ui.input(|i| DrawingPointerInput {
+        primary_pressed: i.pointer.primary_pressed(),
+        primary_down: i.pointer.primary_down(),
+        primary_released: i.pointer.primary_released(),
+        press_origin: i.pointer.press_origin(),
+        latest_pos: i.pointer.latest_pos().or_else(|| i.pointer.interact_pos()),
+        snap_modifier: i.modifiers.command || i.modifiers.ctrl,
+    })
+}
+
+fn sanitize_hidden_oscillator_drawing_state(
+    store: &mut DrawingStore,
+    active_osc_ids: &[OscillatorPaneId],
+) {
+    let pane_is_active = |pane: DrawingPaneTarget| match pane {
+        DrawingPaneTarget::Main => true,
+        DrawingPaneTarget::Oscillator(id) => active_osc_ids.contains(&id),
+    };
+    let cancel_phase = match store.phase() {
+        DrawingInteractionPhase::Idle => false,
+        DrawingInteractionPhase::PlacingSingle { pane, .. }
+        | DrawingInteractionPhase::PlacingTwoAnchor { pane, .. }
+        | DrawingInteractionPhase::DraggingHandle { pane, .. }
+        | DrawingInteractionPhase::DraggingBody { pane, .. } => !pane_is_active(*pane),
+    };
+    if cancel_phase {
+        store.cancel_active_gesture();
+    }
+    if let Some((hp, _)) = store.hovered_hit()
+        && !pane_is_active(hp)
+    {
+        store.clear_hover_for_pane(hp);
+    }
+    if let Some(sel_pane) = store.selected_drawing().map(|d| d.pane)
+        && !pane_is_active(sel_pane)
+    {
+        store.selected_id = None;
+    }
+}
+
+fn handle_drawing_keyboard_shortcuts(ui: &Ui, store: &mut DrawingStore) {
+    if ui.ctx().egui_wants_keyboard_input() {
+        return;
+    }
+    let (esc, del, undo, redo) = ui.input(|i| {
+        let cmd_or_ctrl = i.modifiers.command || i.modifiers.ctrl;
+        let esc = i.key_pressed(Key::Escape);
+        let del = i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace);
+        let undo = cmd_or_ctrl && !i.modifiers.shift && i.key_pressed(Key::Z);
+        let redo = (cmd_or_ctrl && i.modifiers.shift && i.key_pressed(Key::Z))
+            || (i.modifiers.ctrl && i.key_pressed(Key::Y));
+        (esc, del, undo, redo)
+    });
+
+    if esc {
+        let _ = store.cancel_or_deselect();
+    } else if del {
+        let _ = store.delete_selected();
+    } else if redo {
+        let _ = store.redo();
+    } else if undo {
+        let _ = store.undo();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drive_pane_drawing_input(
+    store: &mut DrawingStore,
+    pane: DrawingPaneTarget,
+    plot_rect: Rect,
+    plot_rect_f64: PlotRect,
+    plot_resp: &egui::Response,
+    ptr: DrawingPointerInput,
+    proj: &PaneDrawingProjection<'_>,
+    candles: &[Candle],
+) -> bool {
+    let to_local = |p: Pos2| {
+        LocalPoint::new(
+            f64::from(p.x) - plot_rect_f64.left,
+            f64::from(p.y) - plot_rect_f64.top,
+        )
+    };
+
+    let was_capturing_before = store.is_capturing_pane_gesture(pane);
+    let mut claimed_press = false;
+    let mut pressed_pos_this_frame: Option<Pos2> = None;
+
+    if ptr.primary_pressed
+        && let Some(pp) = ptr.press_origin.or(ptr.latest_pos)
+        && plot_rect.contains(pp)
+    {
+        pressed_pos_this_frame = Some(pp);
+        let outcome = store.pointer_down(pane, to_local(pp), ptr.snap_modifier, proj, candles);
+        claimed_press = outcome == PointerCaptureOutcome::CapturedByDrawing;
+    }
+
+    let phase_on_pane = match store.phase() {
+        DrawingInteractionPhase::Idle => false,
+        DrawingInteractionPhase::PlacingSingle { pane: p, .. }
+        | DrawingInteractionPhase::PlacingTwoAnchor { pane: p, .. }
+        | DrawingInteractionPhase::DraggingHandle { pane: p, .. }
+        | DrawingInteractionPhase::DraggingBody { pane: p, .. } => *p == pane,
+    };
+    let is_edit_drag_phase = matches!(
+        store.phase(),
+        DrawingInteractionPhase::DraggingHandle { .. }
+            | DrawingInteractionPhase::DraggingBody { .. }
+    );
+
+    if let Some(lp) = ptr.latest_pos {
+        let same_as_press = pressed_pos_this_frame.is_some_and(|pp| (lp - pp).length_sq() <= 1e-6);
+        if plot_rect.contains(lp) || (phase_on_pane && ptr.primary_down) {
+            if !(same_as_press && is_edit_drag_phase) {
+                store.pointer_move(pane, to_local(lp), ptr.snap_modifier, proj, candles);
+            }
+        } else if !phase_on_pane {
+            store.clear_hover_for_pane(pane);
+        }
+    } else if !phase_on_pane {
+        store.clear_hover_for_pane(pane);
+    }
+
+    let should_release_on_pane = match store.phase() {
+        DrawingInteractionPhase::PlacingSingle { pane: p, .. }
+        | DrawingInteractionPhase::DraggingHandle { pane: p, .. }
+        | DrawingInteractionPhase::DraggingBody { pane: p, .. } => *p == pane,
+        DrawingInteractionPhase::PlacingTwoAnchor {
+            pane: p,
+            wait_for_second_press,
+            second_press_active,
+            ..
+        } => *p == pane && (!*wait_for_second_press || *second_press_active),
+        DrawingInteractionPhase::Idle => false,
+    };
+
+    if ptr.primary_released && should_release_on_pane {
+        let _ = store.pointer_up(
+            pane,
+            ptr.latest_pos.map(to_local),
+            ptr.snap_modifier,
+            proj,
+            candles,
+        );
+    } else if !claimed_press
+        && !was_capturing_before
+        && plot_resp.clicked()
+        && store.active_tool == DrawingTool::Select
+        && matches!(store.phase(), DrawingInteractionPhase::Idle)
+    {
+        let hit_any = ptr.latest_pos.is_some_and(|lp| {
+            crate::drawings::hit_test_pane_drawings(
+                &store.drawings,
+                pane,
+                proj,
+                to_local(lp),
+                store.selected_id,
+            )
+            .is_some()
+        });
+        if !hit_any {
+            store.on_empty_canvas_click();
+        }
+    }
+
+    was_capturing_before || claimed_press || store.is_capturing_pane_gesture(pane)
+}
+
+fn apply_drawing_cursor_feedback(ui: &Ui, store: &DrawingStore) {
+    match store.phase() {
+        DrawingInteractionPhase::PlacingSingle { .. }
+        | DrawingInteractionPhase::PlacingTwoAnchor { .. } => {
+            ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+        }
+        DrawingInteractionPhase::DraggingHandle { .. }
+        | DrawingInteractionPhase::DraggingBody { .. } => {
+            ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+        }
+        DrawingInteractionPhase::Idle => {
+            if store.active_tool != DrawingTool::Select {
+                ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+            } else if let Some((_, hit)) = store.hovered_hit() {
+                let icon = if hit.locked {
+                    CursorIcon::PointingHand
+                } else {
+                    match hit.target {
+                        HitTarget::Handle(_) => CursorIcon::PointingHand,
+                        HitTarget::Body => CursorIcon::Grab,
+                    }
+                };
+                ui.ctx().set_cursor_icon(icon);
+            }
+        }
+    }
+}
+
+#[inline]
+fn drawing_color32(preset: DrawingColorPreset) -> Color32 {
+    let [r, g, b] = preset.rgb();
+    Color32::from_rgb(r, g, b)
+}
+
+#[inline]
+fn drawing_premultiplied_fill(preset: DrawingColorPreset, opacity: f32) -> Color32 {
+    let alpha = opacity.clamp(0.0, 1.0);
+    let [r, g, b] = preset.rgb();
+    Color32::from_rgba_premultiplied(
+        (f32::from(r) * alpha).round() as u8,
+        (f32::from(g) * alpha).round() as u8,
+        (f32::from(b) * alpha).round() as u8,
+        (255.0 * alpha).round() as u8,
+    )
+}
+
+#[inline]
+fn local_to_screen_pos(plot_rect: Rect, pt: LocalPoint) -> Pos2 {
+    Pos2::new(
+        plot_rect.left() + (pt.x as f32),
+        plot_rect.top() + (pt.y as f32),
+    )
+}
+
+fn paint_styled_segment_phased(
+    painter: &egui::Painter,
+    p0: Pos2,
+    p1: Pos2,
+    phase_origin: Pos2,
+    stroke: Stroke,
+    dash: LineDashStyle,
+) {
+    match dash {
+        LineDashStyle::Solid => {
+            painter.line_segment([p0, p1], stroke);
+        }
+        LineDashStyle::Dashed | LineDashStyle::Dotted => {
+            let delta = p1 - p0;
+            let total_len = delta.length();
+            if !total_len.is_finite() || total_len <= 0.5 {
+                return;
+            }
+            let (dash_len, gap_len) = match dash {
+                LineDashStyle::Dashed => (7.5_f32, 4.5_f32),
+                LineDashStyle::Dotted => (2.5_f32, 4.5_f32),
+                LineDashStyle::Solid => unreachable!(),
+            };
+            let dir = delta / total_len;
+            let step = (dash_len + gap_len).max(1.0);
+            let max_dashes = 1_024_usize;
+
+            // Anchor dash phase to `phase_origin` so clipped lines/rays never shimmer ("marching ants") while panning!
+            let s0 = if phase_origin.is_finite() {
+                (p0 - phase_origin).dot(dir)
+            } else {
+                0.0
+            };
+            let phase = if s0.is_finite() {
+                s0.rem_euclid(step)
+            } else {
+                0.0
+            };
+
+            let mut count = 0_usize;
+            let mut dist = if phase < dash_len {
+                let first_end = (dash_len - phase).min(total_len);
+                if first_end > 0.15 {
+                    painter.line_segment([p0, p0 + dir * first_end], stroke);
+                    count += 1;
+                }
+                step - phase
+            } else {
+                step - phase
+            };
+
+            while dist < total_len && count < max_dashes {
+                let end_d = (dist + dash_len).min(total_len);
+                painter.line_segment([p0 + dir * dist, p0 + dir * end_d], stroke);
+                dist += step;
+                count += 1;
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_pane_drawings(
+    axis_painter: &egui::Painter,
+    plot_painter: &egui::Painter,
+    plot_rect: Rect,
+    price_axis_rect: Rect,
+    pane: DrawingPaneTarget,
+    store: &DrawingStore,
+    proj: &PaneDrawingProjection<'_>,
+    price_scale: &PriceScale,
+    base_value: f64,
+) {
+    for drawing in &store.drawings {
+        if !drawing.visible || drawing.pane != pane {
+            continue;
+        }
+        let is_selected = store.selected_id == Some(drawing.id);
+        let is_hovered = store
+            .hovered_hit()
+            .is_some_and(|(hp, hm)| hp == pane && hm.drawing_id == drawing.id);
+        paint_single_drawing(
+            axis_painter,
+            plot_painter,
+            plot_rect,
+            price_axis_rect,
+            drawing,
+            proj,
+            price_scale,
+            base_value,
+            is_selected,
+            is_hovered,
+            false,
+        );
+    }
+
+    if let Some(preview) = store.preview_drawing()
+        && preview.pane == pane
+    {
+        paint_single_drawing(
+            axis_painter,
+            plot_painter,
+            plot_rect,
+            price_axis_rect,
+            &preview,
+            proj,
+            price_scale,
+            base_value,
+            true,
+            false,
+            true,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_single_drawing(
+    axis_painter: &egui::Painter,
+    plot_painter: &egui::Painter,
+    plot_rect: Rect,
+    price_axis_rect: Rect,
+    drawing: &Drawing,
+    proj: &PaneDrawingProjection<'_>,
+    price_scale: &PriceScale,
+    base_value: f64,
+    is_selected: bool,
+    is_hovered: bool,
+    is_preview: bool,
+) {
+    let Some(projected) = proj.project_drawing(drawing) else {
+        return;
+    };
+    let base_color = drawing_color32(drawing.style.color);
+    let stroke_w = if is_selected {
+        (drawing.style.line_width + 0.45).min(8.5)
+    } else {
+        drawing.style.line_width
+    };
+    let dash = if is_preview && drawing.style.dash == LineDashStyle::Solid {
+        LineDashStyle::Dashed
+    } else {
+        drawing.style.dash
+    };
+    let primary_stroke = Stroke::new(stroke_w, base_color);
+    let highlight_glow = (is_selected || is_hovered).then(|| {
+        Stroke::new(
+            stroke_w + 3.2,
+            drawing_premultiplied_fill(drawing.style.color, 0.22),
+        )
+    });
+
+    let bar0_screen_x = proj
+        .time_scale
+        .index_to_local_x(0)
+        .filter(|x| x.is_finite() && x.abs() <= 1.0e6)
+        .map_or(plot_rect.left(), |x| plot_rect.left() + (x as f32));
+
+    match &projected.shape {
+        ProjectedDrawingShape::HorizontalLine {
+            y,
+            value,
+            visible_segment,
+        } => {
+            if let Some(seg) = visible_segment {
+                let p0 = local_to_screen_pos(plot_rect, seg.start);
+                let p1 = local_to_screen_pos(plot_rect, seg.end);
+                if let Some(glow) = highlight_glow {
+                    plot_painter.line_segment([p0, p1], glow);
+                }
+                paint_styled_segment_phased(
+                    plot_painter,
+                    p0,
+                    p1,
+                    Pos2::new(bar0_screen_x, p0.y),
+                    primary_stroke,
+                    dash,
+                );
+
+                let formatted = price_scale.format_price(*value, base_value);
+                let label_text = if drawing.locked {
+                    format!("LOCK {formatted}")
+                } else {
+                    formatted.clone()
+                };
+                let label_y = (plot_rect.top() + (*y as f32) - 4.0)
+                    .clamp(plot_rect.top() + 10.0, plot_rect.bottom() - 4.0);
+                plot_painter.text(
+                    Pos2::new(plot_rect.right() - 8.0, label_y),
+                    Align2::RIGHT_BOTTOM,
+                    label_text,
+                    FontId::monospace(10.5),
+                    base_color,
+                );
+
+                if is_selected {
+                    let sy = (plot_rect.top() + (*y as f32))
+                        .clamp(price_axis_rect.top() + 9.5, price_axis_rect.bottom() - 9.5);
+                    let badge_rect = Rect::from_min_max(
+                        Pos2::new(price_axis_rect.left() + 2.0, sy - 8.5),
+                        Pos2::new(price_axis_rect.right() - 4.0, sy + 8.5),
+                    );
+                    axis_painter.rect_filled(badge_rect, 3.0, base_color);
+                    axis_painter.text(
+                        Pos2::new(price_axis_rect.left() + 6.0, sy),
+                        Align2::LEFT_CENTER,
+                        formatted,
+                        FontId::monospace(10.5),
+                        palette::BG_WORKSTATION,
+                    );
+                }
+            }
+        }
+        ProjectedDrawingShape::Segment {
+            raw_start, clipped, ..
+        } => {
+            if let Some(seg) = clipped {
+                let p0 = local_to_screen_pos(plot_rect, seg.start);
+                let p1 = local_to_screen_pos(plot_rect, seg.end);
+                let raw_origin_screen = local_to_screen_pos(plot_rect, *raw_start);
+                if let Some(glow) = highlight_glow {
+                    plot_painter.line_segment([p0, p1], glow);
+                }
+                paint_styled_segment_phased(
+                    plot_painter,
+                    p0,
+                    p1,
+                    raw_origin_screen,
+                    primary_stroke,
+                    dash,
+                );
+
+                // Subtle origin ring on `Ray` so directional rays are visually distinct from finite `TrendLine`s.
+                if matches!(drawing.geometry, DrawingGeometry::Ray { .. })
+                    && plot_rect.expand(4.0).contains(raw_origin_screen)
+                {
+                    plot_painter.circle_stroke(
+                        raw_origin_screen,
+                        3.5,
+                        Stroke::new(1.4, base_color),
+                    );
+                }
+            }
+        }
+        ProjectedDrawingShape::Rectangle {
+            raw_rect,
+            clipped_fill,
+            clipped_edges,
+        } => {
+            if let Some(fill_rect) = clipped_fill
+                && drawing.style.fill_opacity > 0.001
+            {
+                let screen_fill = Rect::from_min_max(
+                    local_to_screen_pos(plot_rect, LocalPoint::new(fill_rect.left, fill_rect.top)),
+                    local_to_screen_pos(
+                        plot_rect,
+                        LocalPoint::new(fill_rect.right, fill_rect.bottom),
+                    ),
+                );
+                let mut mesh = Mesh::default();
+                mesh.add_colored_rect(
+                    screen_fill,
+                    drawing_premultiplied_fill(drawing.style.color, drawing.style.fill_opacity),
+                );
+                plot_painter.add(Shape::mesh(mesh));
+            }
+
+            let raw_tl =
+                local_to_screen_pos(plot_rect, LocalPoint::new(raw_rect.left, raw_rect.top));
+            for edge in clipped_edges.iter().flatten() {
+                let p0 = local_to_screen_pos(plot_rect, edge.start);
+                let p1 = local_to_screen_pos(plot_rect, edge.end);
+                if let Some(glow) = highlight_glow {
+                    plot_painter.line_segment([p0, p1], glow);
+                }
+                paint_styled_segment_phased(plot_painter, p0, p1, raw_tl, primary_stroke, dash);
+            }
+        }
+        ProjectedDrawingShape::Fibonacci {
+            control_segment,
+            levels,
+            bands,
+        } => {
+            if !bands.is_empty() && drawing.style.fill_opacity > 0.001 {
+                let mut band_mesh = Mesh::default();
+                for band in bands {
+                    let opacity = if band.band_index.is_multiple_of(2) {
+                        drawing.style.fill_opacity
+                    } else {
+                        drawing.style.fill_opacity * 0.50
+                    };
+                    let screen_band = Rect::from_min_max(
+                        local_to_screen_pos(
+                            plot_rect,
+                            LocalPoint::new(band.rect.left, band.rect.top),
+                        ),
+                        local_to_screen_pos(
+                            plot_rect,
+                            LocalPoint::new(band.rect.right, band.rect.bottom),
+                        ),
+                    );
+                    band_mesh.add_colored_rect(
+                        screen_band,
+                        drawing_premultiplied_fill(drawing.style.color, opacity),
+                    );
+                }
+                plot_painter.add(Shape::mesh(band_mesh));
+            }
+
+            if let Some(ctrl) = control_segment {
+                let c0 = local_to_screen_pos(plot_rect, ctrl.start);
+                let c1 = local_to_screen_pos(plot_rect, ctrl.end);
+                let ctrl_origin = projected
+                    .anchors_local
+                    .first()
+                    .map_or(c0, |pt| local_to_screen_pos(plot_rect, *pt));
+                paint_styled_segment_phased(
+                    plot_painter,
+                    c0,
+                    c1,
+                    ctrl_origin,
+                    Stroke::new(1.15, base_color.gamma_multiply(0.75)),
+                    LineDashStyle::Dashed,
+                );
+            }
+
+            for lvl in levels {
+                if !lvl.visible_in_pane {
+                    continue;
+                }
+                let lp0 = local_to_screen_pos(plot_rect, LocalPoint::new(lvl.x_left, lvl.y));
+                let lp1 = local_to_screen_pos(plot_rect, LocalPoint::new(lvl.x_right, lvl.y));
+                let is_key_ratio = (lvl.ratio - 0.0).abs() < 1e-6
+                    || (lvl.ratio - 0.5).abs() < 1e-6
+                    || (lvl.ratio - 0.618).abs() < 1e-6
+                    || (lvl.ratio - 1.0).abs() < 1e-6;
+                let lvl_w = if is_key_ratio {
+                    stroke_w
+                } else {
+                    (stroke_w * 0.85).max(1.0)
+                };
+                if let Some(glow) = highlight_glow {
+                    plot_painter.line_segment([lp0, lp1], glow);
+                }
+                paint_styled_segment_phased(
+                    plot_painter,
+                    lp0,
+                    lp1,
+                    Pos2::new(bar0_screen_x, lp0.y),
+                    Stroke::new(lvl_w, base_color),
+                    drawing.style.dash,
+                );
+            }
+
+            // Collision-free Fibonacci level labels prioritized by structural significance (`0.0, 1.0, 0.5, 0.618, ...`)
+            // so compressed or zero-height retracements never pile overlapping text on the same pixel row!
+            const LABEL_PRIORITY_ORDER: [usize; 7] = [0, 6, 3, 4, 2, 1, 5];
+            let mut drawn_label_ys = [0.0_f32; 7];
+            let mut drawn_count = 0_usize;
+            for &lvl_idx in &LABEL_PRIORITY_ORDER {
+                let Some(lvl) = levels.get(lvl_idx) else {
+                    continue;
+                };
+                if !lvl.visible_in_pane {
+                    continue;
+                }
+                let lp0 = local_to_screen_pos(plot_rect, LocalPoint::new(lvl.x_left, lvl.y));
+                let lp1 = local_to_screen_pos(plot_rect, LocalPoint::new(lvl.x_right, lvl.y));
+                if (lp1.x - lp0.x) < 54.0 {
+                    continue;
+                }
+                let ty = (lp0.y - 2.0).clamp(plot_rect.top() + 9.0, plot_rect.bottom() - 2.0);
+                if drawn_label_ys[..drawn_count]
+                    .iter()
+                    .any(|&py| (ty - py).abs() < 11.5)
+                {
+                    continue;
+                }
+                drawn_label_ys[drawn_count] = ty;
+                drawn_count += 1;
+
+                let ratio_str = if (lvl.ratio - 0.0).abs() < 1e-6
+                    || (lvl.ratio - 0.5).abs() < 1e-6
+                    || (lvl.ratio - 1.0).abs() < 1e-6
+                {
+                    format!("{:.1}", lvl.ratio)
+                } else {
+                    format!("{:.3}", lvl.ratio)
+                };
+                let txt = format!(
+                    "{ratio_str} ({})",
+                    price_scale.format_price(lvl.value, base_value)
+                );
+                plot_painter.text(
+                    Pos2::new(lp0.x + 5.0, ty),
+                    Align2::LEFT_BOTTOM,
+                    txt,
+                    FontId::monospace(10.0),
+                    base_color,
+                );
+            }
+        }
+    }
+
+    // Paint crisp anchor / corner handles when selected, hovered, or actively placing a preview!
+    if (is_selected || is_hovered || is_preview) && !projected.locked {
+        for handle in &projected.handles {
+            let hp = local_to_screen_pos(plot_rect, handle.pos);
+            if !plot_rect.expand(6.0).contains(hp) {
+                continue;
+            }
+            match handle.part {
+                HandlePart::Anchor(_) => {
+                    plot_painter.circle_filled(hp, 4.6, palette::BG_CHART_CANVAS);
+                    plot_painter.circle_stroke(hp, 4.6, Stroke::new(2.0, base_color));
+                    if is_selected || is_preview {
+                        plot_painter.circle_filled(hp, 1.8, Color32::WHITE);
+                    }
+                }
+                HandlePart::RectCorner(_) => {
+                    let sq = Rect::from_center_size(hp, Vec2::splat(8.4));
+                    plot_painter.rect_filled(sq, 1.5, palette::BG_CHART_CANVAS);
+                    plot_painter.rect_stroke(
+                        sq,
+                        1.5,
+                        Stroke::new(1.8, base_color),
+                        StrokeKind::Inside,
+                    );
+                }
+            }
+        }
+    } else if is_selected
+        && projected.locked
+        && let Some(&first_pt) = projected.anchors_local.first()
+    {
+        let lp = local_to_screen_pos(plot_rect, first_pt);
+        let badge_pos = Pos2::new(
+            lp.x.clamp(plot_rect.left() + 28.0, plot_rect.right() - 28.0),
+            (lp.y - 10.0).clamp(plot_rect.top() + 12.0, plot_rect.bottom() - 12.0),
+        );
+        plot_painter.text(
+            badge_pos,
+            Align2::CENTER_CENTER,
+            "[LOCKED]",
+            FontId::monospace(10.0),
+            base_color,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3731,6 +4640,252 @@ mod tests {
         assert!(
             viewport.main_price_scale.is_auto_scale(),
             "double-clicking RSI plot must reset main_price_scale autoscale synchronously"
+        );
+    }
+
+    #[test]
+    fn multipane_drawing_arbitrage_creates_drags_selects_locked_and_preserves_pan() {
+        let candles = generate_synthetic_ohlcv(240);
+        let mut viewport = ChartViewportState::new();
+        let indicators = IndicatorConfig {
+            show_rsi: true,
+            show_macd: true,
+            ..Default::default()
+        };
+        let mut cache = IndicatorCache::new();
+        cache.sync(&candles, 1, &indicators);
+        let mut drawings = DrawingStore::new();
+        let ctx = egui::Context::default();
+
+        let run_frame = |time: f64,
+                         events: Vec<egui::Event>,
+                         vp: &mut ChartViewportState,
+                         ds: &mut DrawingStore|
+         -> ChartRenderReport {
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut rep = None;
+            let mut out = ctx.run_ui(raw, |ui| {
+                rep = render_workstation_chart_with_drawings(
+                    ui,
+                    &candles,
+                    vp,
+                    ChartDisplayConfig {
+                        symbol: "VNINDEX",
+                        timeframe: "1D",
+                        show_grid: true,
+                        show_crosshair: true,
+                        show_volume: true,
+                    },
+                    &indicators,
+                    &cache,
+                    ds,
+                );
+            });
+            let _ = ctx.tessellate(out.shapes, out.pixels_per_point);
+            out.textures_delta.clear();
+            rep.expect("chart renders")
+        };
+
+        let r0 = run_frame(1.0, Vec::new(), &mut viewport, &mut drawings);
+        let ro_initial = r0.right_offset;
+
+        // 1. Place a 2-click TrendLine on the Main pane without panning `time_scale`.
+        drawings.set_tool(DrawingTool::TrendLine);
+        let main_rect = r0.layout.plot_rect;
+        let p0 = Pos2::new(main_rect.left() + 300.0, main_rect.top() + 180.0);
+        let p1 = Pos2::new(main_rect.left() + 520.0, main_rect.top() + 110.0);
+
+        let _ = run_frame(
+            1.02,
+            vec![
+                egui::Event::PointerMoved(p0),
+                egui::Event::PointerButton {
+                    pos: p0,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            &mut viewport,
+            &mut drawings,
+        );
+        let _ = run_frame(
+            1.04,
+            vec![egui::Event::PointerButton {
+                pos: p0,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut viewport,
+            &mut drawings,
+        );
+        let _ = run_frame(
+            1.06,
+            vec![egui::Event::PointerMoved(p1)],
+            &mut viewport,
+            &mut drawings,
+        );
+        let _ = run_frame(
+            1.08,
+            vec![egui::Event::PointerButton {
+                pos: p1,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut viewport,
+            &mut drawings,
+        );
+        let r_after_create = run_frame(
+            1.10,
+            vec![egui::Event::PointerButton {
+                pos: p1,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut viewport,
+            &mut drawings,
+        );
+        assert_eq!(r_after_create.drawing_count, 1);
+        assert_eq!(drawings.active_tool, DrawingTool::Select);
+        assert!((r_after_create.right_offset - ro_initial).abs() < 1e-6);
+
+        // 2. Place a HorizontalLine on the RSI sub-pane.
+        drawings.set_tool(DrawingTool::HorizontalLine);
+        let rsi_center = r_after_create.first_oscillator_plot_rect.unwrap().center();
+        let _ = run_frame(
+            1.12,
+            vec![
+                egui::Event::PointerMoved(rsi_center),
+                egui::Event::PointerButton {
+                    pos: rsi_center,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            &mut viewport,
+            &mut drawings,
+        );
+        let r_after_rsi = run_frame(
+            1.14,
+            vec![egui::Event::PointerButton {
+                pos: rsi_center,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut viewport,
+            &mut drawings,
+        );
+        assert_eq!(r_after_rsi.drawing_count, 2);
+        let rsi_id = drawings.selected_id.expect("RSI horizontal line selected");
+
+        // 3. Lock the RSI HorizontalLine, deselect on empty Main canvas, then click RSI line again -> stays selected!
+        assert!(drawings.toggle_selected_lock());
+        let empty_pt = Pos2::new(main_rect.left() + 80.0, main_rect.top() + 40.0);
+        let _ = run_frame(
+            1.16,
+            vec![
+                egui::Event::PointerMoved(empty_pt),
+                egui::Event::PointerButton {
+                    pos: empty_pt,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            &mut viewport,
+            &mut drawings,
+        );
+        let _ = run_frame(
+            1.18,
+            vec![egui::Event::PointerButton {
+                pos: empty_pt,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut viewport,
+            &mut drawings,
+        );
+        assert_eq!(drawings.selected_id, None);
+
+        let _ = run_frame(
+            1.20,
+            vec![
+                egui::Event::PointerMoved(rsi_center),
+                egui::Event::PointerButton {
+                    pos: rsi_center,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            &mut viewport,
+            &mut drawings,
+        );
+        let _ = run_frame(
+            1.22,
+            vec![egui::Event::PointerButton {
+                pos: rsi_center,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut viewport,
+            &mut drawings,
+        );
+        assert_eq!(
+            drawings.selected_id,
+            Some(rsi_id),
+            "two-frame click on locked drawing must remain selected on release"
+        );
+
+        // 4. Starting a drag directly on a locked drawing passes through to `TimeScale` pan smoothly!
+        let ro_before_locked_pan = viewport.time_scale.right_offset();
+        let drag_to = Pos2::new(rsi_center.x - 80.0, rsi_center.y);
+        let _ = run_frame(
+            1.24,
+            vec![
+                egui::Event::PointerMoved(rsi_center),
+                egui::Event::PointerButton {
+                    pos: rsi_center,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            &mut viewport,
+            &mut drawings,
+        );
+        let _ = run_frame(
+            1.26,
+            vec![egui::Event::PointerMoved(drag_to)],
+            &mut viewport,
+            &mut drawings,
+        );
+        let r_after_locked_pan = run_frame(
+            1.28,
+            vec![egui::Event::PointerButton {
+                pos: drag_to,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut viewport,
+            &mut drawings,
+        );
+        assert!(
+            (r_after_locked_pan.right_offset - ro_before_locked_pan).abs() > 1.0,
+            "dragging over a locked drawing must pan shared TimeScale unimpeded"
         );
     }
 }

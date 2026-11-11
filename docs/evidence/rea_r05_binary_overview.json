@@ -1,0 +1,43 @@
+{
+  "milestone": "R05",
+  "session_id": "SESSION-R05-20261111T163600+0700",
+  "binary_path": "/Users/mizuhara/workspace/sumi/target/release/sumi-workstation",
+  "sha256": "59bb4d574f6f70bbd3102e0c3865cfba3d3ef7910fbdec6f220bf47b2a51f1ab",
+  "bytes": 16623888,
+  "format": "mach-o",
+  "architecture": "arm64",
+  "word_size": 64,
+  "uuid": "383E1B48-D730-37AF-84AE-CF943E41E67B",
+  "rea_operations": [
+    {
+      "op_id": "REA-R05-08",
+      "tool": "inspect_rust_binary",
+      "parameters": {
+        "path": "/Users/mizuhara/workspace/sumi/target/release/sumi-workstation",
+        "detail": "summary"
+      },
+      "parent_evidence_id": "ev_b7c8db4d920e8f946dc2f91cb8f272c3a9dafc63955d112a3e3ae34671a75edb",
+      "summary_evidence_id": "ev_258699dd2d2f72da215a1a70714aaee09948e74ded7c3cb667c0675309bd41f1",
+      "rustc_commit_hashes_count": 1
+    },
+    {
+      "op_id": "REA-R05-09",
+      "tool": "inspect_macho",
+      "parameters": {
+        "detail": "summary"
+      },
+      "parent_evidence_id": "ev_a07daa400f148b6383b439e1c1cb7bd2eeac638a58cc7a2109e082998a3c3c78",
+      "summary_evidence_id": "ev_cfc8717dfcd3df909426dafdfba350066b9f914a51e7ddfaa006ffdf5dc47048",
+      "collections": {
+        "entrypoints": 1,
+        "architectures": 1,
+        "build_metadata": 1,
+        "load_commands": 30,
+        "dependencies": 14,
+        "imports": 324,
+        "exports": 4802,
+        "segments": 5
+      }
+    }
+  ]
+}

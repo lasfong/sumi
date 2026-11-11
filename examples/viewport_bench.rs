@@ -6,8 +6,14 @@ use egui::{Pos2, Rect, Vec2};
 use sumi_workstation::chart::{
     ChartDisplayConfig, ChartViewportState, render_candlestick_chart,
     render_shared_pane_candlestick_chart, render_workstation_chart,
+    render_workstation_chart_with_drawings,
 };
 use sumi_workstation::data::generate_synthetic_ohlcv;
+use sumi_workstation::drawings::{
+    DrawingAnchor, DrawingGeometry, DrawingPaneTarget, DrawingStore, FibDirection, LocalPoint,
+    MAGNET_THRESHOLD_PX, MagnetMode, PaneDrawingProjection, hit_test_pane_drawings,
+    snap_to_visible_ohlc,
+};
 use sumi_workstation::indicators::{
     BlockExtrema, IndicatorCache, IndicatorConfig, OscillatorPaneId, SeriesBlockIndex,
 };
@@ -93,6 +99,10 @@ fn main() {
 
     if std::env::args().any(|a| a == "--r04") {
         run_r04_indicator_multipane_benchmark(&cpu_brand, mem_bytes, &rustc_ver, profile);
+        return;
+    }
+    if std::env::args().any(|a| a == "--r05") {
+        run_r05_drawing_engine_benchmark(&cpu_brand, mem_bytes, &rustc_ver, profile);
         return;
     }
 
@@ -1258,6 +1268,732 @@ fn format_r04_markdown_report(
     let _ = writeln!(
         s,
         "\n## 2. End-to-End 4-Pane `egui::Painter` Build + `epaint` Tessellation (`DECISION-RENDERER-002` Gate: `< 4.0 ms`)\n"
+    );
+    let _ = writeln!(
+        s,
+        "| Bars | Workload | Scale | Conflation | Culled | Drawn | Vertices | Indices | UI Median (`ms`) | Tessellate Median (`ms`) | Total CPU Median (`ms`) | Total CPU P95 (`ms`) | `< 4.0ms` Hybrid Gate | 120 FPS (`8.33ms`) |"
+    );
+    let _ = writeln!(
+        s,
+        "| ---: | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: | :---: |"
+    );
+    for r in render {
+        let tot_med_ms = r.total_cpu_frame_stats.median_us / 1_000.0;
+        let tot_p95_ms = r.total_cpu_frame_stats.p95_us / 1_000.0;
+        let hybrid_gate = if tot_med_ms < 4.0 {
+            "PASS (<4ms)"
+        } else {
+            "TRIGGER_WGPU"
+        };
+        let pass_120 = if tot_med_ms <= 8.33 {
+            "PASS"
+        } else {
+            "EXCEEDS"
+        };
+        let _ = writeln!(
+            s,
+            "| `{}` | `{}` ({}) | `{}` | `{}x` | `{}` | `{}` | `{}` | `{}` | `{:.3}` | `{:.3}` | **`{:.3}`** | `{:.3}` | `{hybrid_gate}` | `{pass_120}` |",
+            r.dataset_bars,
+            r.workload_id,
+            r.description,
+            r.scale_mode,
+            r.conflation_factor,
+            r.culled_bars,
+            r.rendered_candles,
+            r.total_vertices,
+            r.total_indices,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            tot_med_ms,
+            tot_p95_ms,
+        );
+    }
+    s
+}
+
+#[derive(Debug, Clone)]
+struct DrawingMathCaseResult {
+    dataset_bars: usize,
+    active_drawings: usize,
+    project_stats: TimingStats,
+    hit_test_stats: TimingStats,
+    magnet_snap_stats: TimingStats,
+    magnet_fit_stats: TimingStats,
+}
+
+fn build_r05_benchmark_drawings(
+    candles: &[Candle],
+    vis_left: usize,
+    vis_right: usize,
+) -> DrawingStore {
+    let mut store = DrawingStore::new();
+    let span = vis_right.saturating_sub(vis_left).max(20);
+    let bar_at = |frac: f64| -> usize {
+        (vis_left + ((span as f64) * frac).round() as usize).min(candles.len() - 1)
+    };
+
+    // 25 active drawings: 5 of each primitive distributed across Main, RSI, MACD, and ATR!
+    for k in 0..5_usize {
+        let f0 = 0.06 + (k as f64) * 0.16;
+        let f1 = (f0 + 0.18).min(0.96);
+        let i0 = bar_at(f0);
+        let i1 = bar_at(f1);
+        let p0 = candles[i0].low;
+        let p1 = candles[i1].high;
+
+        // 1. HorizontalLine (Main + RSI + MACD + ATR)
+        let h_pane = match k {
+            0 | 1 => DrawingPaneTarget::Main,
+            2 => DrawingPaneTarget::Oscillator(OscillatorPaneId::Rsi),
+            3 => DrawingPaneTarget::Oscillator(OscillatorPaneId::Macd),
+            _ => DrawingPaneTarget::Oscillator(OscillatorPaneId::Atr),
+        };
+        let h_val = match k {
+            0 | 1 => (p0 + p1) * 0.5,
+            2 => 55.0,
+            3 => -2.5,
+            _ => 18.0,
+        };
+        let _ = store.add_drawing(
+            h_pane,
+            DrawingGeometry::HorizontalLine {
+                anchor: DrawingAnchor::new(i0 as f64, h_val),
+            },
+            None,
+        );
+
+        // 2. TrendLine
+        let tl_pane = if k == 4 {
+            DrawingPaneTarget::Oscillator(OscillatorPaneId::Rsi)
+        } else {
+            DrawingPaneTarget::Main
+        };
+        let (tl_v0, tl_v1) = if k == 4 { (35.0, 68.0) } else { (p0, p1) };
+        let _ = store.add_drawing(
+            tl_pane,
+            DrawingGeometry::TrendLine {
+                start: DrawingAnchor::new(i0 as f64, tl_v0),
+                end: DrawingAnchor::new(i1 as f64, tl_v1),
+            },
+            None,
+        );
+
+        // 3. 360° Ray (including leftward rays when k % 2 == 1)
+        let (r_orig, r_thru) = if k % 2 == 0 {
+            (
+                DrawingAnchor::new(i0 as f64, p0),
+                DrawingAnchor::new(i1 as f64, p1),
+            )
+        } else {
+            (
+                DrawingAnchor::new(i1 as f64, p1),
+                DrawingAnchor::new(i0 as f64, p0),
+            )
+        };
+        let _ = store.add_drawing(
+            DrawingPaneTarget::Main,
+            DrawingGeometry::Ray {
+                origin: r_orig,
+                through: r_thru,
+            },
+            None,
+        );
+
+        // 4. Rectangle (Main + MACD negative zone)
+        let rect_pane = if k == 3 {
+            DrawingPaneTarget::Oscillator(OscillatorPaneId::Macd)
+        } else {
+            DrawingPaneTarget::Main
+        };
+        let (rc0, rc1) = if k == 3 {
+            (
+                DrawingAnchor::new(i0 as f64, -5.0),
+                DrawingAnchor::new(i1 as f64, 4.0),
+            )
+        } else {
+            (
+                DrawingAnchor::new(i0 as f64, p0),
+                DrawingAnchor::new(i1 as f64, p1),
+            )
+        };
+        let _ = store.add_drawing(
+            rect_pane,
+            DrawingGeometry::Rectangle {
+                corner_a: rc0,
+                corner_b: rc1,
+            },
+            None,
+        );
+
+        // 5. FibonacciRetracement
+        let id = store.add_drawing(
+            DrawingPaneTarget::Main,
+            DrawingGeometry::FibonacciRetracement {
+                start: DrawingAnchor::new(i0 as f64, p0),
+                end: DrawingAnchor::new(i1 as f64, p1),
+                direction: if k % 2 == 0 {
+                    FibDirection::StartToEnd
+                } else {
+                    FibDirection::EndToStart
+                },
+                extend_right: k == 0,
+            },
+            None,
+        );
+        if k == 0 {
+            store.selected_id = id;
+        }
+    }
+    assert_eq!(store.drawings.len(), 25);
+    store
+}
+
+fn run_r05_drawing_engine_benchmark(
+    cpu_brand: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+) {
+    println!("=== Sumi R05 Interactive Drawing & Multi-Pane Benchmark ===");
+    println!(
+        "CPU: {cpu_brand} | RAM: {:.1} GiB | {rustc_ver} | profile={profile}",
+        (mem_bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+    );
+
+    let dataset_sizes = [10_000_usize, 50_000_usize, 100_000_usize];
+    let all_cfg = IndicatorConfig {
+        show_sma: true,
+        show_ema: true,
+        show_bbands: true,
+        show_rsi: true,
+        show_macd: true,
+        show_atr: true,
+        ..IndicatorConfig::default()
+    };
+
+    let mut math_cases = Vec::with_capacity(dataset_sizes.len());
+    let mut render_cases = Vec::new();
+
+    for &bar_count in &dataset_sizes {
+        let candles = generate_synthetic_ohlcv(bar_count);
+        let mut cache = IndicatorCache::new();
+        cache.sync(&candles, 1, &all_cfg);
+
+        // 1. Pure Drawing Projection + Hit-Test + OHLC Magnet microbenchmarks
+        let store_recent = build_r05_benchmark_drawings(
+            &candles,
+            candles.len().saturating_sub(150),
+            candles.len() - 1,
+        );
+        let mut ts = TimeScale::with_data(candles.len(), 1178.0, HorzScaleOptions::sumi_default());
+        ts.set_bar_spacing(8.0);
+        let mut main_ps = PriceScale::new("main-right", PriceScaleOptions::sumi_main_price());
+        main_ps.set_height(420.0);
+        let vis_slice = &candles[candles.len().saturating_sub(150)..];
+        let base_val = vis_slice[0].close;
+        main_ps.autoscale_candles(vis_slice, base_val);
+
+        let mut rsi_ps = PriceScale::new("rsi-right", PriceScaleOptions::sumi_oscillator());
+        rsi_ps.set_height(100.0);
+        rsi_ps.autoscale_raw_bounds(0.0, 100.0, 50.0);
+        let mut macd_ps = PriceScale::new("macd-right", PriceScaleOptions::sumi_oscillator());
+        macd_ps.set_height(100.0);
+        macd_ps.autoscale_raw_bounds(-12.0, 12.0, 1.0);
+        let mut atr_ps = PriceScale::new("atr-right", PriceScaleOptions::sumi_oscillator());
+        atr_ps.set_height(100.0);
+        atr_ps.autoscale_raw_bounds(0.0, 40.0, 1.0);
+
+        let main_proj = PaneDrawingProjection::new(&ts, &main_ps, 1178.0, 420.0, base_val);
+        let rsi_proj = PaneDrawingProjection::new(&ts, &rsi_ps, 1178.0, 100.0, 1.0);
+        let macd_proj = PaneDrawingProjection::new(&ts, &macd_ps, 1178.0, 100.0, 1.0);
+        let atr_proj = PaneDrawingProjection::new(&ts, &atr_ps, 1178.0, 100.0, 1.0);
+
+        let mut proj_samples = Vec::with_capacity(500);
+        for step in 0..550 {
+            let t0 = Instant::now();
+            let mut count = 0_usize;
+            for d in &store_recent.drawings {
+                let p = match d.pane {
+                    DrawingPaneTarget::Main => main_proj.project_drawing(d),
+                    DrawingPaneTarget::Oscillator(OscillatorPaneId::Rsi) => {
+                        rsi_proj.project_drawing(d)
+                    }
+                    DrawingPaneTarget::Oscillator(OscillatorPaneId::Macd) => {
+                        macd_proj.project_drawing(d)
+                    }
+                    DrawingPaneTarget::Oscillator(OscillatorPaneId::Atr) => {
+                        atr_proj.project_drawing(d)
+                    }
+                };
+                if p.is_some() {
+                    count += 1;
+                }
+            }
+            std::hint::black_box(count);
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            if step >= 50 {
+                proj_samples.push(us);
+            }
+        }
+
+        let mut hit_samples = Vec::with_capacity(500);
+        for step in 0..550 {
+            let cx = 80.0 + ((step % 41) as f64) * 24.0;
+            let cy = 40.0 + ((step % 13) as f64) * 22.0;
+            let cursor = LocalPoint::new(cx, cy);
+            let t0 = Instant::now();
+            let h0 = hit_test_pane_drawings(
+                &store_recent.drawings,
+                DrawingPaneTarget::Main,
+                &main_proj,
+                cursor,
+                store_recent.selected_id,
+            );
+            let h1 = hit_test_pane_drawings(
+                &store_recent.drawings,
+                DrawingPaneTarget::Oscillator(OscillatorPaneId::Rsi),
+                &rsi_proj,
+                LocalPoint::new(cx, 50.0),
+                store_recent.selected_id,
+            );
+            let h2 = hit_test_pane_drawings(
+                &store_recent.drawings,
+                DrawingPaneTarget::Oscillator(OscillatorPaneId::Macd),
+                &macd_proj,
+                LocalPoint::new(cx, 50.0),
+                store_recent.selected_id,
+            );
+            let h3 = hit_test_pane_drawings(
+                &store_recent.drawings,
+                DrawingPaneTarget::Oscillator(OscillatorPaneId::Atr),
+                &atr_proj,
+                LocalPoint::new(cx, 50.0),
+                store_recent.selected_id,
+            );
+            std::hint::black_box((h0, h1, h2, h3));
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            if step >= 50 {
+                hit_samples.push(us);
+            }
+        }
+
+        let mut magnet_samples = Vec::with_capacity(500);
+        for step in 0..550 {
+            let cx = 120.0 + ((step % 37) as f64) * 26.0;
+            let cy = 60.0 + ((step % 17) as f64) * 18.0;
+            let cursor = LocalPoint::new(cx, cy);
+            let raw = main_proj
+                .local_to_anchor(cursor)
+                .unwrap_or(DrawingAnchor::new(0.0, 1200.0));
+            let t0 = Instant::now();
+            let snapped = snap_to_visible_ohlc(
+                raw,
+                cursor,
+                &candles,
+                &main_proj,
+                MagnetMode::Ohlc,
+                MAGNET_THRESHOLD_PX,
+            );
+            std::hint::black_box(snapped);
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            if step >= 50 {
+                magnet_samples.push(us);
+            }
+        }
+
+        let mut fit_ts =
+            TimeScale::with_data(candles.len(), 1178.0, HorzScaleOptions::sumi_default());
+        fit_ts.fit_content();
+        let mut fit_ps = PriceScale::new("main-fit", PriceScaleOptions::sumi_main_price());
+        fit_ps.set_height(420.0);
+        let fit_base = candles[0].close;
+        fit_ps.autoscale_candles(&candles, fit_base);
+        let fit_proj = PaneDrawingProjection::new(&fit_ts, &fit_ps, 1178.0, 420.0, fit_base);
+        let mut magnet_fit_samples = Vec::with_capacity(500);
+        for step in 0..550 {
+            let cx = 120.0 + ((step % 37) as f64) * 26.0;
+            let cy = 60.0 + ((step % 17) as f64) * 18.0;
+            let cursor = LocalPoint::new(cx, cy);
+            let raw = fit_proj
+                .local_to_anchor(cursor)
+                .unwrap_or(DrawingAnchor::new(0.0, 1200.0));
+            let t0 = Instant::now();
+            let snapped = snap_to_visible_ohlc(
+                raw,
+                cursor,
+                &candles,
+                &fit_proj,
+                MagnetMode::Ohlc,
+                MAGNET_THRESHOLD_PX,
+            );
+            std::hint::black_box(snapped);
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            if step >= 50 {
+                magnet_fit_samples.push(us);
+            }
+        }
+
+        math_cases.push(DrawingMathCaseResult {
+            dataset_bars: bar_count,
+            active_drawings: store_recent.drawings.len(),
+            project_stats: TimingStats::from_samples(proj_samples),
+            hit_test_stats: TimingStats::from_samples(hit_samples),
+            magnet_snap_stats: TimingStats::from_samples(magnet_samples),
+            magnet_fit_stats: TimingStats::from_samples(magnet_fit_samples),
+        });
+
+        // 2. End-to-End 4-Pane + 6-Indicator + 25-Drawing Workstation Render + Tessellation
+        render_cases.push(bench_r05_workstation_render(
+            &candles,
+            &all_cfg,
+            &cache,
+            "r05_standard_8px_4pane_25draw",
+            "4 panes + 6 indicators + 25 drawings (bar_spacing=8.0, Linear)",
+            PriceScaleMode::Normal,
+            candles.len().saturating_sub(150),
+            candles.len() - 1,
+            |vp| vp.reset_to_default(),
+            20,
+            100,
+        ));
+        render_cases.push(bench_r05_workstation_render(
+            &candles,
+            &all_cfg,
+            &cache,
+            "r05_dense_1_2px_4pane_25draw",
+            "4 panes + 6 indicators + 25 drawings (bar_spacing=1.2, Log)",
+            PriceScaleMode::Logarithmic,
+            candles.len().saturating_sub(980),
+            candles.len() - 1,
+            |vp| {
+                vp.reset_to_default();
+                vp.time_scale.set_bar_spacing(1.2);
+            },
+            20,
+            100,
+        ));
+        render_cases.push(bench_r05_workstation_render(
+            &candles,
+            &all_cfg,
+            &cache,
+            "r05_fit_all_conflated_4pane_25draw",
+            "4 panes + 6 indicators + 25 drawings (100% full-fit conflated, Log)",
+            PriceScaleMode::Logarithmic,
+            0,
+            candles.len() - 1,
+            |vp| vp.fit_all(),
+            15,
+            80,
+        ));
+    }
+
+    println!(
+        "\n{:<8} | {:<34} | {:>5} | {:>8} | {:>9} | {:>9} | {:>9}",
+        "Bars", "Workload", "Confl", "Vertices", "UI (ms)", "Tess (ms)", "Total(ms)"
+    );
+    println!("{}", "-".repeat(100));
+    for r in &render_cases {
+        println!(
+            "{:<8} | {:<34} | {:>4}x | {:>8} | {:>9.3} | {:>9.3} | {:>9.3}",
+            r.dataset_bars,
+            r.workload_id,
+            r.conflation_factor,
+            r.total_vertices,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.median_us / 1_000.0,
+        );
+    }
+
+    let json_out = format_r05_json_report(
+        cpu_brand,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        &math_cases,
+        &render_cases,
+    );
+    let md_out = format_r05_markdown_report(
+        cpu_brand,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        &math_cases,
+        &render_cases,
+    );
+
+    std::fs::create_dir_all("docs/evidence").expect("create docs/evidence");
+    std::fs::write("docs/evidence/r05_drawing_engine_benchmark.json", json_out)
+        .expect("write r05 json");
+    std::fs::write("docs/evidence/r05_drawing_engine_benchmark.md", md_out)
+        .expect("write r05 markdown");
+    println!(
+        "\nSaved docs/evidence/r05_drawing_engine_benchmark.json and docs/evidence/r05_drawing_engine_benchmark.md"
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bench_r05_workstation_render(
+    candles: &[Candle],
+    indicators: &IndicatorConfig,
+    cache: &IndicatorCache,
+    workload_id: &'static str,
+    description: &'static str,
+    scale_mode: PriceScaleMode,
+    vis_left: usize,
+    vis_right: usize,
+    mut setup_fn: impl FnMut(&mut ChartViewportState),
+    warmup: usize,
+    iters: usize,
+) -> RenderCaseResult {
+    let ctx = egui::Context::default();
+    let screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+    ctx.set_pixels_per_point(2.0);
+
+    let mut vp = ChartViewportState::new();
+    vp.main_price_scale.set_mode(scale_mode);
+    let mut store = build_r05_benchmark_drawings(candles, vis_left, vis_right);
+
+    let cfg = ChartDisplayConfig {
+        symbol: "VNINDEX",
+        timeframe: "1D",
+        show_grid: true,
+        show_crosshair: true,
+        show_volume: true,
+    };
+
+    for _ in 0..2 {
+        let mut init_out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let _ = render_workstation_chart_with_drawings(
+                        ui, candles, &mut vp, cfg, indicators, cache, &mut store,
+                    );
+                });
+            },
+        );
+        init_out.textures_delta.clear();
+    }
+    setup_fn(&mut vp);
+
+    let mut ui_samples = Vec::with_capacity(iters);
+    let mut tess_samples = Vec::with_capacity(iters);
+    let mut total_samples = Vec::with_capacity(iters);
+    let mut last_rep = None;
+    let mut paint_shapes = 0_usize;
+    let mut clipped_primitives = 0_usize;
+    let mut total_vertices = 0_usize;
+    let mut total_indices = 0_usize;
+
+    for step in 0..(warmup + iters) {
+        let hover_x = 120.0 + ((step % 37) as f32) * 24.0;
+        let hover_y = 140.0 + ((step % 19) as f32) * 28.0;
+        let raw_input = egui::RawInput {
+            screen_rect,
+            time: Some(step as f64 * 0.016),
+            events: vec![egui::Event::PointerMoved(Pos2::new(hover_x, hover_y))],
+            ..Default::default()
+        };
+
+        let t_frame = Instant::now();
+        let t_ui = Instant::now();
+        let mut full_out = ctx.run_ui(raw_input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                last_rep = render_workstation_chart_with_drawings(
+                    ui, candles, &mut vp, cfg, indicators, cache, &mut store,
+                );
+            });
+        });
+        let ui_us = t_ui.elapsed().as_secs_f64() * 1_000_000.0;
+        paint_shapes = full_out.shapes.len();
+
+        let t_tess = Instant::now();
+        let primitives = ctx.tessellate(full_out.shapes, full_out.pixels_per_point);
+        let tess_us = t_tess.elapsed().as_secs_f64() * 1_000_000.0;
+        let total_us = t_frame.elapsed().as_secs_f64() * 1_000_000.0;
+        full_out.textures_delta.clear();
+
+        if step + 1 == warmup + iters {
+            clipped_primitives = primitives.len();
+            total_vertices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.vertices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+            total_indices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.indices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+        }
+        std::hint::black_box(&primitives);
+
+        if step >= warmup {
+            ui_samples.push(ui_us);
+            tess_samples.push(tess_us);
+            total_samples.push(total_us);
+        }
+    }
+
+    let rep = last_rep.expect("r05 render report");
+    assert_eq!(rep.drawing_count, 25);
+    RenderCaseResult {
+        dataset_bars: candles.len(),
+        workload_id,
+        description,
+        scale_mode: scale_mode.label(),
+        conflation_enabled: true,
+        bar_spacing: rep.bar_spacing,
+        conflation_factor: rep.conflation_factor,
+        culled_bars: rep.culled_bar_count,
+        rendered_candles: rep.rendered_candle_count,
+        paint_shapes,
+        clipped_primitives,
+        total_vertices,
+        total_indices,
+        ui_build_stats: TimingStats::from_samples(ui_samples),
+        tessellate_stats: TimingStats::from_samples(tess_samples),
+        total_cpu_frame_stats: TimingStats::from_samples(total_samples),
+    }
+}
+
+fn format_r05_json_report(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+    math: &[DrawingMathCaseResult],
+    render: &[RenderCaseResult],
+) -> String {
+    let mut s = String::with_capacity(8192);
+    let _ = writeln!(s, "{{");
+    let _ = writeln!(s, "  \"milestone\": \"R05\",");
+    let _ = writeln!(s, "  \"environment\": {{");
+    let _ = writeln!(s, "    \"cpu\": \"{}\",", cpu.replace('"', "\\\""));
+    let _ = writeln!(s, "    \"os\": \"{}\",", std::env::consts::OS);
+    let _ = writeln!(s, "    \"arch\": \"{}\",", std::env::consts::ARCH);
+    let _ = writeln!(s, "    \"ram_bytes\": {mem_bytes},");
+    let _ = writeln!(s, "    \"rustc\": \"{}\",", rustc_ver.replace('"', "\\\""));
+    let _ = writeln!(s, "    \"profile\": \"{profile}\",");
+    let _ = writeln!(s, "    \"viewport_logical_px\": [1280, 800],");
+    let _ = writeln!(s, "    \"pixels_per_point\": 2.0");
+    let _ = writeln!(s, "  }},");
+    let _ = writeln!(s, "  \"drawing_geometry_and_hit_test\": [");
+    for (idx, m) in math.iter().enumerate() {
+        let comma = if idx + 1 == math.len() { "" } else { "," };
+        let _ = writeln!(
+            s,
+            "    {{ \"dataset_bars\": {}, \"active_drawings\": {}, \"project_median_us\": {:.3}, \"project_p95_us\": {:.3}, \"hit_test_4panes_median_us\": {:.3}, \"hit_test_4panes_p95_us\": {:.3}, \"ohlc_magnet_8px_median_us\": {:.3}, \"ohlc_magnet_8px_p95_us\": {:.3}, \"ohlc_magnet_fit_all_median_us\": {:.3}, \"ohlc_magnet_fit_all_p95_us\": {:.3} }}{comma}",
+            m.dataset_bars,
+            m.active_drawings,
+            m.project_stats.median_us,
+            m.project_stats.p95_us,
+            m.hit_test_stats.median_us,
+            m.hit_test_stats.p95_us,
+            m.magnet_snap_stats.median_us,
+            m.magnet_snap_stats.p95_us,
+            m.magnet_fit_stats.median_us,
+            m.magnet_fit_stats.p95_us,
+        );
+    }
+    let _ = writeln!(s, "  ],");
+    let _ = writeln!(s, "  \"multipane_drawing_workloads\": [");
+    for (idx, r) in render.iter().enumerate() {
+        let comma = if idx + 1 == render.len() { "" } else { "," };
+        let _ = writeln!(
+            s,
+            "    {{ \"dataset_bars\": {}, \"workload_id\": \"{}\", \"scale_mode\": \"{}\", \"bar_spacing\": {:.5}, \"conflation_factor\": {}, \"culled_bars\": {}, \"rendered_candles\": {}, \"active_drawings\": 25, \"paint_shapes\": {}, \"clipped_primitives\": {}, \"total_vertices\": {}, \"total_indices\": {}, \"ui_median_ms\": {:.4}, \"tessellate_median_ms\": {:.4}, \"total_cpu_median_ms\": {:.4}, \"total_cpu_p95_ms\": {:.4} }}{comma}",
+            r.dataset_bars,
+            r.workload_id,
+            r.scale_mode,
+            r.bar_spacing,
+            r.conflation_factor,
+            r.culled_bars,
+            r.rendered_candles,
+            r.paint_shapes,
+            r.clipped_primitives,
+            r.total_vertices,
+            r.total_indices,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.p95_us / 1_000.0,
+        );
+    }
+    let _ = writeln!(s, "  ]");
+    let _ = writeln!(s, "}}");
+    s
+}
+
+fn format_r05_markdown_report(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+    math: &[DrawingMathCaseResult],
+    render: &[RenderCaseResult],
+) -> String {
+    let mut s = String::with_capacity(8192);
+    let _ = writeln!(
+        s,
+        "# Milestone R05 — Interactive Drawing & Multi-Pane Workstation Benchmark Evidence\n"
+    );
+    let _ = writeln!(
+        s,
+        "- **Command:** `cargo run --release --example viewport_bench -- --r05`"
+    );
+    let _ = writeln!(
+        s,
+        "- **Hardware:** `{cpu}` (`{}-{}`), `{:.1} GiB` RAM",
+        std::env::consts::ARCH,
+        std::env::consts::OS,
+        (mem_bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+    );
+    let _ = writeln!(
+        s,
+        "- **Toolchain & Profile:** `{rustc_ver}` (`--{profile}`)"
+    );
+    let _ = writeln!(
+        s,
+        "- **Active Stack:** Main Candlestick + Volume + `SMA(20)` + `EMA(50)` + `BB(20, 2.0)` + 3 Stacked Oscillator Panes (`RSI(14)`, `MACD(12, 26, 9)`, `ATR(14)`) + **25 Active Multi-Pane Drawings** (`5` `HorizontalLine`, `5` `TrendLine`, `5` $360^\\circ$ `Ray`, `5` `Rectangle`, `5` `FibonacciRetracement`)\n"
+    );
+    let _ = writeln!(
+        s,
+        "## 1. Pure `f64` Projection, Liang-Barsky Clipping, 4-Pane Hit-Testing & OHLC Magnet Throughput\n"
+    );
+    let _ = writeln!(
+        s,
+        "| Dataset Bars | Active Drawings | Project + Clip 25 Drawings (`µs`) | 4-Pane Hit-Test 25 Drawings (`µs`) | OHLC Magnet `bar_spacing = 8.0` (`µs`) | OHLC Magnet `fit_content` (`µs`) |"
+    );
+    let _ = writeln!(s, "| ---: | ---: | ---: | ---: | ---: | ---: |");
+    for m in math {
+        let _ = writeln!(
+            s,
+            "| `{}` | `{}` | **`{:.2} µs`** (P95 `{:.2} µs`) | **`{:.2} µs`** (P95 `{:.2} µs`) | **`{:.2} µs`** (P95 `{:.2} µs`) | **`{:.2} µs`** (P95 `{:.2} µs`) |",
+            m.dataset_bars,
+            m.active_drawings,
+            m.project_stats.median_us,
+            m.project_stats.p95_us,
+            m.hit_test_stats.median_us,
+            m.hit_test_stats.p95_us,
+            m.magnet_snap_stats.median_us,
+            m.magnet_snap_stats.p95_us,
+            m.magnet_fit_stats.median_us,
+            m.magnet_fit_stats.p95_us,
+        );
+    }
+
+    let _ = writeln!(
+        s,
+        "\n## 2. End-to-End 4-Pane + 6-Indicator + 25-Drawing Frame Budget (`DECISION-RENDERER-002` Gate: `< 4.0 ms`)\n"
     );
     let _ = writeln!(
         s,

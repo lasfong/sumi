@@ -1,0 +1,29 @@
+{
+  "milestone": "R05",
+  "environment": {
+    "cpu": "Apple M1",
+    "os": "macos",
+    "arch": "aarch64",
+    "ram_bytes": 17179869184,
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "profile": "release",
+    "viewport_logical_px": [1280, 800],
+    "pixels_per_point": 2.0
+  },
+  "drawing_geometry_and_hit_test": [
+    { "dataset_bars": 10000, "active_drawings": 25, "project_median_us": 4.084, "project_p95_us": 4.208, "hit_test_4panes_median_us": 4.750, "hit_test_4panes_p95_us": 5.292, "ohlc_magnet_8px_median_us": 0.166, "ohlc_magnet_8px_p95_us": 0.292, "ohlc_magnet_fit_all_median_us": 6.834, "ohlc_magnet_fit_all_p95_us": 9.209 },
+    { "dataset_bars": 50000, "active_drawings": 25, "project_median_us": 2.625, "project_p95_us": 2.708, "hit_test_4panes_median_us": 3.375, "hit_test_4panes_p95_us": 3.541, "ohlc_magnet_8px_median_us": 0.125, "ohlc_magnet_8px_p95_us": 0.209, "ohlc_magnet_fit_all_median_us": 27.541, "ohlc_magnet_fit_all_p95_us": 33.250 },
+    { "dataset_bars": 100000, "active_drawings": 25, "project_median_us": 2.459, "project_p95_us": 2.625, "hit_test_4panes_median_us": 3.208, "hit_test_4panes_p95_us": 3.417, "ohlc_magnet_8px_median_us": 0.125, "ohlc_magnet_8px_p95_us": 0.250, "ohlc_magnet_fit_all_median_us": 55.042, "ohlc_magnet_fit_all_p95_us": 66.375 }
+  ],
+  "multipane_drawing_workloads": [
+    { "dataset_bars": 10000, "workload_id": "r05_standard_8px_4pane_25draw", "scale_mode": "Linear", "bar_spacing": 8.00000, "conflation_factor": 1, "culled_bars": 137, "rendered_candles": 136, "active_drawings": 25, "paint_shapes": 749, "clipped_primitives": 26, "total_vertices": 17622, "total_indices": 56955, "ui_median_ms": 0.1323, "tessellate_median_ms": 0.0952, "total_cpu_median_ms": 0.2286, "total_cpu_p95_ms": 0.2475 },
+    { "dataset_bars": 10000, "workload_id": "r05_dense_1_2px_4pane_25draw", "scale_mode": "Log", "bar_spacing": 1.20000, "conflation_factor": 1, "culled_bars": 971, "rendered_candles": 969, "active_drawings": 25, "paint_shapes": 740, "clipped_primitives": 26, "total_vertices": 70304, "total_indices": 234510, "ui_median_ms": 0.3426, "tessellate_median_ms": 0.2315, "total_cpu_median_ms": 0.5750, "total_cpu_p95_ms": 0.6439 },
+    { "dataset_bars": 10000, "workload_id": "r05_fit_all_conflated_4pane_25draw", "scale_mode": "Log", "bar_spacing": 0.11766, "conflation_factor": 4, "culled_bars": 10000, "rendered_candles": 2499, "active_drawings": 25, "paint_shapes": 730, "clipped_primitives": 26, "total_vertices": 233468, "total_indices": 859200, "ui_median_ms": 1.7121, "tessellate_median_ms": 0.8476, "total_cpu_median_ms": 2.5588, "total_cpu_p95_ms": 2.7833 },
+    { "dataset_bars": 50000, "workload_id": "r05_standard_8px_4pane_25draw", "scale_mode": "Linear", "bar_spacing": 8.00000, "conflation_factor": 1, "culled_bars": 137, "rendered_candles": 136, "active_drawings": 25, "paint_shapes": 744, "clipped_primitives": 26, "total_vertices": 17690, "total_indices": 56901, "ui_median_ms": 0.1243, "tessellate_median_ms": 0.0887, "total_cpu_median_ms": 0.2130, "total_cpu_p95_ms": 0.2455 },
+    { "dataset_bars": 50000, "workload_id": "r05_dense_1_2px_4pane_25draw", "scale_mode": "Log", "bar_spacing": 1.20000, "conflation_factor": 1, "culled_bars": 971, "rendered_candles": 969, "active_drawings": 25, "paint_shapes": 744, "clipped_primitives": 26, "total_vertices": 70684, "total_indices": 235158, "ui_median_ms": 0.3449, "tessellate_median_ms": 0.2433, "total_cpu_median_ms": 0.5880, "total_cpu_p95_ms": 0.6668 },
+    { "dataset_bars": 50000, "workload_id": "r05_fit_all_conflated_4pane_25draw", "scale_mode": "Log", "bar_spacing": 0.02355, "conflation_factor": 16, "culled_bars": 50000, "rendered_candles": 3124, "active_drawings": 25, "paint_shapes": 729, "clipped_primitives": 26, "total_vertices": 334508, "total_indices": 1281324, "ui_median_ms": 1.7178, "tessellate_median_ms": 1.2304, "total_cpu_median_ms": 2.9525, "total_cpu_p95_ms": 3.1797 },
+    { "dataset_bars": 100000, "workload_id": "r05_standard_8px_4pane_25draw", "scale_mode": "Linear", "bar_spacing": 8.00000, "conflation_factor": 1, "culled_bars": 137, "rendered_candles": 136, "active_drawings": 25, "paint_shapes": 746, "clipped_primitives": 26, "total_vertices": 17526, "total_indices": 56685, "ui_median_ms": 0.1215, "tessellate_median_ms": 0.0887, "total_cpu_median_ms": 0.2100, "total_cpu_p95_ms": 0.2327 },
+    { "dataset_bars": 100000, "workload_id": "r05_dense_1_2px_4pane_25draw", "scale_mode": "Log", "bar_spacing": 1.20000, "conflation_factor": 1, "culled_bars": 971, "rendered_candles": 969, "active_drawings": 25, "paint_shapes": 744, "clipped_primitives": 26, "total_vertices": 70668, "total_indices": 234936, "ui_median_ms": 0.3420, "tessellate_median_ms": 0.2300, "total_cpu_median_ms": 0.5720, "total_cpu_p95_ms": 0.6216 },
+    { "dataset_bars": 100000, "workload_id": "r05_fit_all_conflated_4pane_25draw", "scale_mode": "Log", "bar_spacing": 0.01178, "conflation_factor": 32, "culled_bars": 100000, "rendered_candles": 3124, "active_drawings": 25, "paint_shapes": 731, "clipped_primitives": 26, "total_vertices": 323356, "total_indices": 1243260, "ui_median_ms": 2.2625, "tessellate_median_ms": 1.2473, "total_cpu_median_ms": 3.5207, "total_cpu_p95_ms": 3.8042 }
+  ]
+}
