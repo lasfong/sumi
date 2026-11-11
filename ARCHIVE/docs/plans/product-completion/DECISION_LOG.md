@@ -351,3 +351,18 @@ Concise record of architectural, governance, and commit-gate decisions across De
   - Reconciled the W5 report's "13 modified files" header label against the actual **14 modified tracked files** (`11` source/test files: `backend/app/domain/bb/calculator.py`, `backend/app/services/trade_lifecycle_service.py`, `backend/tests/test_b41_bb_contract.py`, `backend/tests/test_b50_trading_practice_ux.py`, `frontend/src/App.tsx`, `frontend/src/components/replay/ReplayRightPanel.tsx`, `frontend/src/components/replay/ScannerSourceContext.tsx`, `frontend/src/components/replay/SessionDebriefModal.tsx`, `frontend/src/pages/AnalyticsPage.tsx`, `frontend/src/pages/BacktestPage.tsx`, `frontend/src/pages/StrategyLabPage.tsx` + `3` governance files: `DECISION_LOG.md`, `EXECUTION_STATE.md`, `SUMI_V3_BATCH_DEPENDENCY_AND_STATUS_PROPOSED.md`).
   - Authorized one controlled commit covering the exact 14 verified W5 paths with message `fix(v3): complete W5 product UAT remediation and governance records`, keeping local UAT artifacts (`artifacts/local/development-train-05/`) untracked and unpushed.
   - Enforced strict distinction between **`AUTOMATED_UAT_PASS`** (achieved across all 16 batches `B00–B51`, `844` backend tests, `268` frontend tests, `G-01..G-12` Golden Cases, and `101/101` Playwright UAT checks) and **`OWNER_ACCEPTED`** (`ACCEPTED_V3_COMPLETE`), which remains strictly reserved for final Product Owner sign-off using `artifacts/local/development-train-05/OWNER_UAT_GUIDE.md`.
+
+---
+
+### `DEC-10` — Independent QA Remediation Baseline Closure Commit (`925a095`) & Owner UAT Handoff (`APPROVED`)
+- **Date**: 2026-10-17
+- **Phase**: Independent QA Remediation Baseline Closure (`DEF-001..006, 008, 012`)
+- **Status**: **`APPROVED & COMMITTED (`925a095`) — AWAITING OWNER ACCEPTANCE`**
+- **Decision & Outcome**:
+  - Verified all pre-commit gates on `master` (`HEAD` was `bf0bbc6bd6dff3674efa2c6263eb7e1e2f5236f2`):
+    - Independent remediation verification: **`PASS`** (`8/8` prioritized defects `DEF-001`, `DEF-002`, `DEF-003`, `DEF-004`, `DEF-005`, `DEF-006`, `DEF-008`, `DEF-012` resolved; `27/27` financial/API checks; `40/40` Chromium browser retest checks; `12/12` Financial Golden Cases `G-01..G-12`).
+    - Automated technical acceptance: **`PASS`** (`854 passed, 1 skipped, 0 failed` across full `pytest backend` collection; `272 passed, 0 failed` across `43` frontend Vitest files; `tsc -b && vite build` clean with `0` errors).
+    - Production database `backend/sumi.db` unchanged (`188,416` bytes, SHA-256 `234206fc75259f091337d4feb5f41575d0fe5ac02d6c10ba0de8fad68cbcee86`).
+  - Committed the exact 26 verified remediation paths (`24` modified tracked source/test files + `2` new regression test files `backend/app/tests/test_def001_timeframe_isolation.py` and `backend/app/tests/test_qa_remediation_defects.py`) as commit `925a095ed0fb35caa264fa47535bcc3354691e9d` (`fix(v3): resolve independent QA financial and product acceptance defects`).
+  - Recorded the 4 deferred non-blocking P2 usability items (`DEF-007` minor English/Vietnamese label consistency, `DEF-009` raw DSL text editor mode in `StrategyRuleBuilder`, `DEF-010` direct `Jump-to-Date` input in `ReplayControlDock`, and `DEF-011` dedicated `Callout` tool button alongside `Text` in `DrawingToolbar`) as open in the P2 backlog.
+  - Product Owner acceptance remains **`PENDING`** (`ACCEPTED_V3_COMPLETE` not marked); prepared concise Owner UAT handoff at `artifacts/local/independent-qa-final-retest/OWNER_UAT_GUIDE.md`.

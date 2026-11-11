@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Node / frontend
+node_modules/
+dist/
+build/
+.vite/
+
+# Local databases and generated data
+*.db
+*.sqlite
+*.sqlite3
+backend/sumi.db
+data/raw/
+data/*.db
+
+# Local research/POC clones
+research_repos/
+
+# Logs and temporary files
+*.log
+tmp/
+scratch/
+test-results/
+.agents/
+ORIGINAL_REQUEST.md
+artifacts/local/
+
+# OS metadata
+.DS_Store
+*.DS_Store
+
+# Local raw data dumps
+docs/CafeF*/

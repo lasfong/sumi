@@ -1,0 +1,782 @@
+use std::fmt::Write as _;
+use std::process::Command;
+use std::time::Instant;
+
+use egui::{Pos2, Rect, Vec2};
+use sumi_workstation::chart::{
+    ChartDisplayConfig, ChartViewportState, render_candlestick_chart,
+    render_shared_pane_candlestick_chart,
+};
+use sumi_workstation::data::generate_synthetic_ohlcv;
+use sumi_workstation::model::Candle;
+use sumi_workstation::viewport::{
+    HorzScaleOptions, KineticAnimation, PaneViewport, PlotRect, PriceScale, PriceScaleMode,
+    PriceScaleOptions, TimeScale,
+};
+
+#[derive(Debug, Clone)]
+struct TimingStats {
+    iterations: usize,
+    min_us: f64,
+    median_us: f64,
+    p95_us: f64,
+    max_us: f64,
+    mean_us: f64,
+}
+
+impl TimingStats {
+    fn from_samples(mut samples_us: Vec<f64>) -> Self {
+        samples_us.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = samples_us.len().max(1);
+        let min_us = samples_us.first().copied().unwrap_or(0.0);
+        let max_us = samples_us.last().copied().unwrap_or(0.0);
+        let median_us = samples_us[n / 2];
+        let p95_idx = ((n as f64 * 0.95).floor() as usize).min(n - 1);
+        let p95_us = samples_us[p95_idx];
+        let mean_us = samples_us.iter().sum::<f64>() / (n as f64);
+        Self {
+            iterations: n,
+            min_us,
+            median_us,
+            p95_us,
+            max_us,
+            mean_us,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RenderCaseResult {
+    dataset_bars: usize,
+    workload_id: &'static str,
+    description: &'static str,
+    scale_mode: &'static str,
+    conflation_enabled: bool,
+    bar_spacing: f64,
+    conflation_factor: usize,
+    culled_bars: usize,
+    rendered_candles: usize,
+    paint_shapes: usize,
+    clipped_primitives: usize,
+    total_vertices: usize,
+    total_indices: usize,
+    ui_build_stats: TimingStats,
+    tessellate_stats: TimingStats,
+    total_cpu_frame_stats: TimingStats,
+}
+
+#[derive(Debug, Clone)]
+struct MathCaseResult {
+    dataset_bars: usize,
+    gen_time_ms: f64,
+    candle_vec_bytes: usize,
+    rss_kb_after_alloc: u64,
+    pure_zoom_cull_autoscale_stats: TimingStats,
+}
+
+fn main() {
+    let cpu_brand = cmd_stdout("sysctl", &["-n", "machdep.cpu.brand_string"])
+        .unwrap_or_else(|| format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS));
+    let mem_bytes = cmd_stdout("sysctl", &["-n", "hw.memsize"])
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let rustc_ver =
+        cmd_stdout("rustc", &["--version"]).unwrap_or_else(|| "rustc (unknown)".to_owned());
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+
+    println!("=== Sumi R03 Viewport & Renderer Benchmark ===");
+    println!(
+        "CPU: {cpu_brand} | RAM: {:.1} GiB | {rustc_ver} | profile={profile}",
+        (mem_bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+    );
+
+    let dataset_sizes = [10_000_usize, 50_000_usize, 100_000_usize];
+    let mut math_results = Vec::new();
+    let mut render_results = Vec::new();
+    let mut prebuilt_datasets = Vec::with_capacity(dataset_sizes.len());
+
+    // Phase 1: Measure clean dataset generation, heap footprint, RSS, and pure O(1)-culled viewport math
+    // BEFORE allocating multi-megabyte unconflated epaint meshes!
+    for &bar_count in &dataset_sizes {
+        let t_gen = Instant::now();
+        let candles = generate_synthetic_ohlcv(bar_count);
+        let gen_time_ms = t_gen.elapsed().as_secs_f64() * 1_000.0;
+        let candle_vec_bytes = candles.len() * std::mem::size_of::<Candle>()
+            + candles
+                .iter()
+                .map(|c| c.date_label.capacity())
+                .sum::<usize>();
+        let rss_kb = current_rss_kb();
+
+        let math_stats = bench_pure_viewport_math(&candles, 100, 1_000);
+        math_results.push(MathCaseResult {
+            dataset_bars: bar_count,
+            gen_time_ms,
+            candle_vec_bytes,
+            rss_kb_after_alloc: rss_kb,
+            pure_zoom_cull_autoscale_stats: math_stats,
+        });
+        prebuilt_datasets.push(candles);
+    }
+
+    // Phase 2: Measure end-to-end egui::Painter UI + epaint CPU tessellation across workloads
+    for candles in &prebuilt_datasets {
+        let bar_count = candles.len();
+
+        // 1. Standard trading view (~150 visible bars, Linear)
+        render_results.push(bench_headless_render(
+            candles,
+            "standard_8px",
+            "Standard trading view (bar_spacing=8.0, ~150 visible bars)",
+            PriceScaleMode::Normal,
+            true,
+            |vp| {
+                vp.reset_to_default();
+            },
+            20,
+            120,
+        ));
+
+        // 2. Dense view (~980 visible bars, Logarithmic)
+        render_results.push(bench_headless_render(
+            candles,
+            "dense_1_2px_log",
+            "Dense swing view (bar_spacing=1.2, ~980 visible bars, Log)",
+            PriceScaleMode::Logarithmic,
+            true,
+            |vp| {
+                vp.reset_to_default();
+                vp.time_scale.set_bar_spacing(1.2);
+            },
+            20,
+            120,
+        ));
+
+        // 3. Full-dataset fit WITH conflation
+        render_results.push(bench_headless_render(
+            candles,
+            "fit_all_conflated",
+            "Full-dataset fit WITH DPR-aware power-of-2 conflation",
+            PriceScaleMode::Logarithmic,
+            true,
+            |vp| {
+                vp.fit_all();
+            },
+            15,
+            80,
+        ));
+
+        // 4. Full-dataset fit WITHOUT conflation (stress-testing raw egui::Painter tessellation cliff)
+        let unconflated_iters = if bar_count >= 50_000 { 25 } else { 60 };
+        render_results.push(bench_headless_render(
+            candles,
+            "fit_all_unconflated",
+            "Full-dataset fit WITHOUT conflation (raw egui::Painter stress)",
+            PriceScaleMode::Logarithmic,
+            false,
+            |vp| {
+                vp.fit_all();
+            },
+            5,
+            unconflated_iters,
+        ));
+    }
+
+    // 5. Multi-pane workstation simulation (1 shared TimeScale + 3 independent PriceScale panes on 100K bars)
+    let candles_100k = prebuilt_datasets.last().expect("100K dataset");
+    let multipane_res = bench_multipane_3x(candles_100k, 15, 80);
+    render_results.push(multipane_res);
+
+    // Print concise table
+    println!(
+        "\n{:<8} | {:<22} | {:>6} | {:>7} | {:>7} | {:>8} | {:>9} | {:>9} | {:>9}",
+        "Bars",
+        "Workload",
+        "Confl",
+        "Culled",
+        "Drawn",
+        "Vertices",
+        "UI (ms)",
+        "Tess (ms)",
+        "Total(ms)"
+    );
+    println!("{}", "-".repeat(108));
+    for r in &render_results {
+        println!(
+            "{:<8} | {:<22} | {:>5}x | {:>7} | {:>7} | {:>8} | {:>9.3} | {:>9.3} | {:>9.3}",
+            r.dataset_bars,
+            r.workload_id,
+            r.conflation_factor,
+            r.culled_bars,
+            r.rendered_candles,
+            r.total_vertices,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.median_us / 1_000.0,
+        );
+    }
+
+    let json_content = format_json_report(
+        &cpu_brand,
+        mem_bytes,
+        &rustc_ver,
+        profile,
+        &math_results,
+        &render_results,
+    );
+    let md_content = format_markdown_report(
+        &cpu_brand,
+        mem_bytes,
+        &rustc_ver,
+        profile,
+        &math_results,
+        &render_results,
+    );
+
+    std::fs::create_dir_all("docs/evidence").expect("create docs/evidence");
+    std::fs::write("docs/evidence/r03_viewport_benchmark.json", json_content)
+        .expect("write benchmark json");
+    std::fs::write("docs/evidence/r03_viewport_benchmark.md", md_content)
+        .expect("write benchmark markdown");
+
+    println!(
+        "\nSaved docs/evidence/r03_viewport_benchmark.json and docs/evidence/r03_viewport_benchmark.md"
+    );
+}
+
+fn bench_pure_viewport_math(candles: &[Candle], warmup: usize, iters: usize) -> TimingStats {
+    let mut vp = ChartViewportState::new();
+    let plot_rect = PlotRect::new(8.0, 44.0, 1178.0, 690.0);
+    vp.time_scale.set_total_bars(candles.len());
+    vp.time_scale.set_width(plot_rect.width);
+    vp.main_price_scale.set_height(plot_rect.height);
+
+    let mut samples_us = Vec::with_capacity(iters);
+    for step in 0..(warmup + iters) {
+        let scale = if step % 2 == 0 { 0.35 } else { -0.35 };
+        let anchor_x = 300.0 + ((step % 11) as f64) * 55.0;
+
+        let t0 = Instant::now();
+        vp.time_scale.zoom(anchor_x, scale);
+        let strict = vp.time_scale.strict_visible_data_range();
+        let cull = vp.time_scale.culling_data_range();
+        let slice = &candles[strict];
+        let base_val = slice.first().map_or(1000.0, |c| c.close);
+        vp.main_price_scale.autoscale_candles(slice, base_val);
+        let bridge = PaneViewport::new(&vp.time_scale, &vp.main_price_scale, plot_rect, base_val);
+
+        let mut checksum = 0.0_f64;
+        for (offset, c) in candles[cull.clone()].iter().enumerate() {
+            let idx = (cull.start + offset) as i64;
+            if let (Some(sx), Some(sy)) = (
+                bridge.index_to_screen_x(idx),
+                bridge.price_to_screen_y(c.close),
+            ) {
+                checksum += sx + sy;
+            }
+        }
+        std::hint::black_box(checksum);
+        let elapsed_us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        if step >= warmup {
+            samples_us.push(elapsed_us);
+        }
+    }
+    TimingStats::from_samples(samples_us)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bench_headless_render(
+    candles: &[Candle],
+    workload_id: &'static str,
+    description: &'static str,
+    scale_mode: PriceScaleMode,
+    conflation_enabled: bool,
+    mut setup_fn: impl FnMut(&mut ChartViewportState),
+    warmup: usize,
+    iters: usize,
+) -> RenderCaseResult {
+    let ctx = egui::Context::default();
+    let screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+    let ppp = 2.0_f32; // Retina HiDPI
+    ctx.set_pixels_per_point(ppp);
+
+    let mut vp = ChartViewportState::new();
+    vp.set_conflation_enabled(conflation_enabled);
+    vp.main_price_scale.set_mode(scale_mode);
+
+    let cfg = ChartDisplayConfig {
+        symbol: "VNINDEX",
+        timeframe: "1D",
+        show_grid: true,
+        show_crosshair: true,
+        show_volume: true,
+    };
+
+    // Prime 2 frames so pixels_per_point and plot_rect (1178x756 logical px) are 100% settled
+    for _ in 0..2 {
+        let mut init_out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let _ = render_candlestick_chart(ui, candles, &mut vp, cfg);
+                });
+            },
+        );
+        init_out.textures_delta.clear();
+    }
+    setup_fn(&mut vp);
+
+    let mut ui_samples = Vec::with_capacity(iters);
+    let mut tess_samples = Vec::with_capacity(iters);
+    let mut total_samples = Vec::with_capacity(iters);
+
+    let mut last_rep = None;
+    let mut paint_shapes = 0_usize;
+    let mut clipped_primitives = 0_usize;
+    let mut total_vertices = 0_usize;
+    let mut total_indices = 0_usize;
+
+    for step in 0..(warmup + iters) {
+        let hover_x = 120.0 + ((step % 37) as f32) * 24.0;
+        let raw_input = egui::RawInput {
+            screen_rect,
+            time: Some(step as f64 * 0.016),
+            events: vec![egui::Event::PointerMoved(Pos2::new(hover_x, 360.0))],
+            ..Default::default()
+        };
+
+        let t_frame = Instant::now();
+        let t_ui = Instant::now();
+        let mut full_out = ctx.run_ui(raw_input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                last_rep = render_candlestick_chart(ui, candles, &mut vp, cfg);
+            });
+        });
+        let ui_us = t_ui.elapsed().as_secs_f64() * 1_000_000.0;
+
+        paint_shapes = full_out.shapes.len();
+        let t_tess = Instant::now();
+        let primitives = ctx.tessellate(full_out.shapes, full_out.pixels_per_point);
+        let tess_us = t_tess.elapsed().as_secs_f64() * 1_000_000.0;
+        let total_us = t_frame.elapsed().as_secs_f64() * 1_000_000.0;
+
+        full_out.textures_delta.clear();
+
+        if step + 1 == warmup + iters {
+            clipped_primitives = primitives.len();
+            total_vertices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.vertices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+            total_indices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.indices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+        }
+        std::hint::black_box(&primitives);
+
+        if step >= warmup {
+            ui_samples.push(ui_us);
+            tess_samples.push(tess_us);
+            total_samples.push(total_us);
+        }
+    }
+
+    let rep = last_rep.expect("benchmark chart report");
+    if workload_id.starts_with("fit_all") {
+        assert_eq!(
+            rep.culled_bar_count,
+            candles.len(),
+            "fit_all workload must span 100% of dataset bars"
+        );
+    }
+    RenderCaseResult {
+        dataset_bars: candles.len(),
+        workload_id,
+        description,
+        scale_mode: scale_mode.label(),
+        conflation_enabled,
+        bar_spacing: rep.bar_spacing,
+        conflation_factor: rep.conflation_factor,
+        culled_bars: rep.culled_bar_count,
+        rendered_candles: rep.rendered_candle_count,
+        paint_shapes,
+        clipped_primitives,
+        total_vertices,
+        total_indices,
+        ui_build_stats: TimingStats::from_samples(ui_samples),
+        tessellate_stats: TimingStats::from_samples(tess_samples),
+        total_cpu_frame_stats: TimingStats::from_samples(total_samples),
+    }
+}
+
+fn bench_multipane_3x(candles: &[Candle], warmup: usize, iters: usize) -> RenderCaseResult {
+    let ctx = egui::Context::default();
+    let screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 960.0)));
+    let ppp = 2.0_f32;
+    ctx.set_pixels_per_point(ppp);
+
+    let mut shared_ts = TimeScale::new(HorzScaleOptions::sumi_default());
+    let mut shared_kinetic: Option<KineticAnimation> = None;
+    let mut panes = [
+        (
+            PriceScale::new("pane1-right", PriceScaleOptions::sumi_main_price()),
+            PriceScale::new("pane1-vol", PriceScaleOptions::sumi_volume_overlay()),
+        ),
+        (
+            PriceScale::new("pane2-right", PriceScaleOptions::sumi_main_price()),
+            PriceScale::new("pane2-vol", PriceScaleOptions::sumi_volume_overlay()),
+        ),
+        (
+            PriceScale::new("pane3-right", PriceScaleOptions::sumi_main_price()),
+            PriceScale::new("pane3-vol", PriceScaleOptions::sumi_volume_overlay()),
+        ),
+    ];
+    panes[1].0.set_mode(PriceScaleMode::Logarithmic);
+
+    let cfg = ChartDisplayConfig {
+        symbol: "VNINDEX",
+        timeframe: "1D",
+        show_grid: true,
+        show_crosshair: true,
+        show_volume: true,
+    };
+
+    for _ in 0..2 {
+        let mut init_out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let h = (ui.available_height() - 16.0) / 3.0;
+                    for (idx, (main_ps, vol_ps)) in panes.iter_mut().enumerate() {
+                        ui.push_id(idx, |ui| {
+                            ui.allocate_ui(Vec2::new(ui.available_width(), h), |ui| {
+                                let _ = render_shared_pane_candlestick_chart(
+                                    ui,
+                                    candles,
+                                    &mut shared_ts,
+                                    &mut shared_kinetic,
+                                    main_ps,
+                                    vol_ps,
+                                    idx == 0,
+                                    cfg,
+                                );
+                            });
+                        });
+                    }
+                });
+            },
+        );
+        init_out.textures_delta.clear();
+    }
+    shared_ts.set_bar_spacing(1.2);
+
+    let mut ui_samples = Vec::with_capacity(iters);
+    let mut tess_samples = Vec::with_capacity(iters);
+    let mut total_samples = Vec::with_capacity(iters);
+    let mut culled_sum = 0_usize;
+    let mut drawn_sum = 0_usize;
+    let mut paint_shapes = 0_usize;
+    let mut clipped_primitives = 0_usize;
+    let mut total_vertices = 0_usize;
+    let mut total_indices = 0_usize;
+
+    for step in 0..(warmup + iters) {
+        let raw_input = egui::RawInput {
+            screen_rect,
+            time: Some(step as f64 * 0.016),
+            ..Default::default()
+        };
+
+        let t_frame = Instant::now();
+        let t_ui = Instant::now();
+        let mut c_acc = 0_usize;
+        let mut d_acc = 0_usize;
+        let mut full_out = ctx.run_ui(raw_input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                let h = (ui.available_height() - 16.0) / 3.0;
+                for (idx, (main_ps, vol_ps)) in panes.iter_mut().enumerate() {
+                    ui.push_id(idx, |ui| {
+                        ui.allocate_ui(Vec2::new(ui.available_width(), h), |ui| {
+                            if let Some(r) = render_shared_pane_candlestick_chart(
+                                ui,
+                                candles,
+                                &mut shared_ts,
+                                &mut shared_kinetic,
+                                main_ps,
+                                vol_ps,
+                                idx == 0,
+                                cfg,
+                            ) {
+                                c_acc += r.culled_bar_count;
+                                d_acc += r.rendered_candle_count;
+                            }
+                        });
+                    });
+                }
+            });
+        });
+        let ui_us = t_ui.elapsed().as_secs_f64() * 1_000_000.0;
+        culled_sum = c_acc;
+        drawn_sum = d_acc;
+
+        paint_shapes = full_out.shapes.len();
+        let t_tess = Instant::now();
+        let primitives = ctx.tessellate(full_out.shapes, full_out.pixels_per_point);
+        let tess_us = t_tess.elapsed().as_secs_f64() * 1_000_000.0;
+        let total_us = t_frame.elapsed().as_secs_f64() * 1_000_000.0;
+        full_out.textures_delta.clear();
+
+        if step + 1 == warmup + iters {
+            clipped_primitives = primitives.len();
+            total_vertices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.vertices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+            total_indices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.indices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+        }
+        std::hint::black_box(&primitives);
+
+        if step >= warmup {
+            ui_samples.push(ui_us);
+            tess_samples.push(tess_us);
+            total_samples.push(total_us);
+        }
+    }
+
+    RenderCaseResult {
+        dataset_bars: candles.len(),
+        workload_id: "multipane_3x_dense",
+        description: "3 stacked panes sharing 1 TimeScale on 100K bars (bar_spacing=1.2, ~2,940 total visible bars)",
+        scale_mode: "Linear+Log",
+        conflation_enabled: true,
+        bar_spacing: 1.2,
+        conflation_factor: 1,
+        culled_bars: culled_sum,
+        rendered_candles: drawn_sum,
+        paint_shapes,
+        clipped_primitives,
+        total_vertices,
+        total_indices,
+        ui_build_stats: TimingStats::from_samples(ui_samples),
+        tessellate_stats: TimingStats::from_samples(tess_samples),
+        total_cpu_frame_stats: TimingStats::from_samples(total_samples),
+    }
+}
+
+fn cmd_stdout(program: &str, args: &[&str]) -> Option<String> {
+    let out = Command::new(program).args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+fn current_rss_kb() -> u64 {
+    let pid = std::process::id().to_string();
+    cmd_stdout("ps", &["-o", "rss=", "-p", &pid])
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+fn format_json_report(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+    math: &[MathCaseResult],
+    render: &[RenderCaseResult],
+) -> String {
+    let mut s = String::with_capacity(8192);
+    let _ = writeln!(s, "{{");
+    let _ = writeln!(s, "  \"environment\": {{");
+    let _ = writeln!(s, "    \"cpu\": \"{}\",", cpu.replace('"', "\\\""));
+    let _ = writeln!(s, "    \"os\": \"{}\",", std::env::consts::OS);
+    let _ = writeln!(s, "    \"arch\": \"{}\",", std::env::consts::ARCH);
+    let _ = writeln!(s, "    \"ram_bytes\": {mem_bytes},");
+    let _ = writeln!(s, "    \"rustc\": \"{}\",", rustc_ver.replace('"', "\\\""));
+    let _ = writeln!(s, "    \"profile\": \"{profile}\",");
+    let _ = writeln!(s, "    \"viewport_logical_px\": [1280, 800],");
+    let _ = writeln!(s, "    \"pixels_per_point\": 2.0");
+    let _ = writeln!(s, "  }},");
+
+    let _ = writeln!(s, "  \"pure_viewport_math\": [");
+    for (idx, m) in math.iter().enumerate() {
+        let comma = if idx + 1 == math.len() { "" } else { "," };
+        let _ = writeln!(
+            s,
+            "    {{ \"dataset_bars\": {}, \"iterations\": {}, \"gen_time_ms\": {:.4}, \"candle_heap_bytes\": {}, \"process_rss_kb\": {}, \"min_us\": {:.3}, \"median_us\": {:.3}, \"p95_us\": {:.3}, \"max_us\": {:.3}, \"mean_us\": {:.3} }}{comma}",
+            m.dataset_bars,
+            m.pure_zoom_cull_autoscale_stats.iterations,
+            m.gen_time_ms,
+            m.candle_vec_bytes,
+            m.rss_kb_after_alloc,
+            m.pure_zoom_cull_autoscale_stats.min_us,
+            m.pure_zoom_cull_autoscale_stats.median_us,
+            m.pure_zoom_cull_autoscale_stats.p95_us,
+            m.pure_zoom_cull_autoscale_stats.max_us,
+            m.pure_zoom_cull_autoscale_stats.mean_us,
+        );
+    }
+    let _ = writeln!(s, "  ],");
+
+    let _ = writeln!(s, "  \"egui_painter_workloads\": [");
+    for (idx, r) in render.iter().enumerate() {
+        let comma = if idx + 1 == render.len() { "" } else { "," };
+        let _ = writeln!(
+            s,
+            "    {{ \"dataset_bars\": {}, \"workload_id\": \"{}\", \"scale_mode\": \"{}\", \"conflation_enabled\": {}, \"bar_spacing\": {:.5}, \"conflation_factor\": {}, \"culled_bars\": {}, \"rendered_candles\": {}, \"paint_shapes\": {}, \"clipped_primitives\": {}, \"total_vertices\": {}, \"total_indices\": {}, \"ui_median_ms\": {:.4}, \"ui_p95_ms\": {:.4}, \"tessellate_median_ms\": {:.4}, \"tessellate_p95_ms\": {:.4}, \"total_cpu_median_ms\": {:.4}, \"total_cpu_p95_ms\": {:.4} }}{comma}",
+            r.dataset_bars,
+            r.workload_id,
+            r.scale_mode,
+            r.conflation_enabled,
+            r.bar_spacing,
+            r.conflation_factor,
+            r.culled_bars,
+            r.rendered_candles,
+            r.paint_shapes,
+            r.clipped_primitives,
+            r.total_vertices,
+            r.total_indices,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.ui_build_stats.p95_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            r.tessellate_stats.p95_us / 1_000.0,
+            r.total_cpu_frame_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.p95_us / 1_000.0,
+        );
+    }
+    let _ = writeln!(s, "  ]");
+    let _ = writeln!(s, "}}");
+    s
+}
+
+fn format_markdown_report(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+    math: &[MathCaseResult],
+    render: &[RenderCaseResult],
+) -> String {
+    let mut s = String::with_capacity(8192);
+    let _ = writeln!(
+        s,
+        "# Milestone R03 — Reproducible Viewport & `egui::Painter` Benchmark Evidence\n"
+    );
+    let _ = writeln!(
+        s,
+        "- **Command:** `cargo run --release --example viewport_bench`"
+    );
+    let _ = writeln!(
+        s,
+        "- **Hardware:** `{cpu}` (`{}-{}`), `{:.1} GiB` RAM",
+        std::env::consts::ARCH,
+        std::env::consts::OS,
+        (mem_bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+    );
+    let _ = writeln!(
+        s,
+        "- **Toolchain & Profile:** `{rustc_ver}` (`--{profile}`)"
+    );
+    let _ = writeln!(
+        s,
+        "- **Target Resolution:** `1280×800` logical px (`2560×1600` physical Retina px at `pixels_per_point = 2.0`)"
+    );
+    let _ = writeln!(
+        s,
+        "- **Measurement Scope:** Measures deterministic CPU viewport math, `egui` UI pass (`render_candlestick_chart`), and full `epaint` CPU mesh tessellation (`Context::tessellate`). Metal GPU swapchain vsync presentation is measured separately via native GUI capture.\n"
+    );
+
+    let _ = writeln!(
+        s,
+        "## 1. Dataset Generation, Memory Footprint & Pure Viewport Math (`TimeScale` + `PriceScale` + Culling)\n"
+    );
+    let _ = writeln!(
+        s,
+        "| Dataset Bars | Gen Time (`ms`) | Series Heap (`MiB`) | Process RSS (`MiB`) | Pure Zoom+Cull+Autoscale+Project Median (`µs`) | P95 (`µs`) |"
+    );
+    let _ = writeln!(s, "| ---: | ---: | ---: | ---: | ---: | ---: |");
+    for m in math {
+        let _ = writeln!(
+            s,
+            "| `{}` | `{:.2}` | `{:.2}` | `{:.2}` | `{:.2} µs` | `{:.2} µs` |",
+            m.dataset_bars,
+            m.gen_time_ms,
+            (m.candle_vec_bytes as f64) / (1024.0 * 1024.0),
+            (m.rss_kb_after_alloc as f64) / 1024.0,
+            m.pure_zoom_cull_autoscale_stats.median_us,
+            m.pure_zoom_cull_autoscale_stats.p95_us,
+        );
+    }
+
+    let _ = writeln!(
+        s,
+        "\n## 2. End-to-End `egui::Painter` Build + `epaint` Tessellation Across 10K / 50K / 100K Bars\n"
+    );
+    let _ = writeln!(
+        s,
+        "| Bars | Workload | Scale | Conflation | Culled | Drawn | Vertices | Indices | UI Median (`ms`) | Tessellate Median (`ms`) | Total CPU Median (`ms`) | Total CPU P95 (`ms`) | 60 FPS (`16.67ms`) | 120 FPS (`8.33ms`) |"
+    );
+    let _ = writeln!(
+        s,
+        "| ---: | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: | :---: |"
+    );
+    for r in render {
+        let tot_med_ms = r.total_cpu_frame_stats.median_us / 1_000.0;
+        let tot_p95_ms = r.total_cpu_frame_stats.p95_us / 1_000.0;
+        let pass_60 = if tot_med_ms <= 16.67 {
+            "PASS"
+        } else {
+            "EXCEEDS"
+        };
+        let pass_120 = if tot_med_ms <= 8.33 {
+            "PASS"
+        } else {
+            "EXCEEDS"
+        };
+        let _ = writeln!(
+            s,
+            "| `{}` | `{}` ({}) | `{}` | `{}x` | `{}` | `{}` | `{}` | `{}` | `{:.3}` | `{:.3}` | **`{:.3}`** | `{:.3}` | `{pass_60}` | `{pass_120}` |",
+            r.dataset_bars,
+            r.workload_id,
+            r.description,
+            r.scale_mode,
+            r.conflation_factor,
+            r.culled_bars,
+            r.rendered_candles,
+            r.total_vertices,
+            r.total_indices,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            tot_med_ms,
+            tot_p95_ms,
+        );
+    }
+    s
+}

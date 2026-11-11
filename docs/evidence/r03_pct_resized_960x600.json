@@ -1,0 +1,20 @@
+{
+  "symbol": "VNINDEX",
+  "timeframe": "1D",
+  "total_candles": 120,
+  "culled_candles": 97,
+  "rendered_candles": 96,
+  "conflation_factor": 1,
+  "bar_spacing": 8.000000,
+  "right_offset": 12.000000,
+  "scale_mode": "%",
+  "auto_scale": true,
+  "base_value": 1282.9500,
+  "screenshot_px": [1920, 1200],
+  "outer_rect": [8.0, 75.0, 944.0, 473.0],
+  "plot_rect": [8.0, 75.0, 858.0, 445.0],
+  "price_axis_rect": [866.0, 75.0, 86.0, 445.0],
+  "time_axis_rect": [8.0, 520.0, 858.0, 28.0],
+  "raw_price_min": 1233.78,
+  "raw_price_max": 1356.65
+}

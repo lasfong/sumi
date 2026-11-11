@@ -35,7 +35,7 @@ To prevent status inflation and distinguish between code in the working tree, co
 5. **Product Acceptance Status**: `NOT_ACCEPTED` | `HISTORICAL_ACCEPTED_SUPERSEDED` | `AUTOMATED_UAT_PASS` (`READY_FOR_OWNER_UAT`) | `ACCEPTED_V3_COMPLETE` (`OWNER_ACCEPTED`)
 
 > [!IMPORTANT]
-> **Strict Non-Inflation Rule**: No batch in the `B00–B51` program is marked `ACCEPTED_V3_COMPLETE` (`OWNER_ACCEPTED`) until the Product Owner completes interactive review and explicitly signs off. All 16 batches (`B00–B51`) across Waves `W0–W4` and the `W5` UAT remediation baseline (`DEF-W5-01..05`) are `COMPLETE_VERIFIED`, `FULL_GATES_AND_UAT_VERIFIED` (`844` BE / `268` FE / `101/101` W5 Playwright UAT checks), `APPROVED`, and `COMMITTED_ON_MASTER` (`e34516c`, `2151f34`, `c331dc3`, `0732ca0`, `12e166a`, `40f6563`, plus the W5 baseline closure commit), with `Product Acceptance Status` at `AUTOMATED_UAT_PASS` (`READY_FOR_OWNER_UAT`).
+> **Strict Non-Inflation Rule**: No batch in the `B00–B51` program is marked `ACCEPTED_V3_COMPLETE` (`OWNER_ACCEPTED`) until the Product Owner completes interactive review and explicitly signs off. All 16 batches (`B00–B51`) across Waves `W0–W4`, the `W5` UAT remediation baseline (`DEF-W5-01..05`), and the Independent QA remediation baseline (`DEF-001..006, 008, 012`) are `COMPLETE_VERIFIED`, `FULL_GATES_AND_UAT_VERIFIED` (`854` BE / `272` FE / `27/27` financial-API / `40/40` Chromium browser retest / `101/101` W5 Playwright UAT checks), `APPROVED`, and `COMMITTED_ON_MASTER` (`e34516c`, `2151f34`, `c331dc3`, `0732ca0`, `12e166a`, `40f6563`, `bf0bbc6`, `925a095`), with `Product Acceptance Status` at `AUTOMATED_UAT_PASS` (`READY_FOR_OWNER_UAT`, Product Owner acceptance `PENDING`).
 
 ---
 
@@ -46,7 +46,7 @@ Before examining `B00–B51`, it is critical to distinguish the **completed hist
 | Lineage | Batches | Scope | Commit / Tree State | Current Standing |
 |---|---|---|---|---|
 | **P-Lineage** (`docs/dev-program/STATE.json`) | `P1` through `P10` (`P10` reviewed `2026-09-14`) | Signal Engine Foundation (`P1`), Signal Families & Liquidity (`P2`), Multi-Horizon Outcome Lab (`P3`), Regime Segmentation (`P4`), Parameter Stability (`P5`), Cost/Turnover Realism (`P6`), Portfolio Constraints (`P7`), Walk-Forward Validation (`P8`), Research UI & Presets (`P9`), Final Research Pack (`P10`). | `COMMITTED_ON_MASTER` (`HISTORICAL` / `VERIFIED` in `backend/app/domain/` and `backend/app/services/`) | **`HISTORICAL_ACCEPTED_SUPERSEDED`**: Domain and research modules remain in the repository and provide the foundation for Scanner, Signals, and Strategy Lab, but the broader application requires `B00–B51` to resolve the P0/P1 architectural, financial, contract, and UX gaps documented in [`SUMI_GAP_REGISTER.md`](../../architecture/SUMI_GAP_REGISTER.md). |
-| **B-Lineage** ([`DEV_BATCHES.md`](../DEV_BATCHES.md)) | `B00–B03`, `B10–B11`, `B20–B22`, `B30–B32`, `B40–B41`, `B50–B51` + `W5` | 16 product-completion batches closing all P0/P1 gaps across DB safety, Replay zero-lookahead, Financial execution/settlement/metrics parity, Frontend state/WS/ChartKernel, API contracts, and UX completion. | `B00–B51` + `W5` `COMMITTED_ON_MASTER` (`e34516c`, `2151f34`, `c331dc3`, `12e166a`, `40f6563`, plus W5 closure commit). | **Active Product Completion Program** (`AUTOMATED_UAT_PASS` — awaiting Product Owner UAT) tracked in Sections 3–6 below. |
+| **B-Lineage** ([`DEV_BATCHES.md`](../DEV_BATCHES.md)) | `B00–B03`, `B10–B11`, `B20–B22`, `B30–B32`, `B40–B41`, `B50–B51` + `W5` + `QA-Remediation` | 16 product-completion batches closing all P0/P1 gaps across DB safety, Replay zero-lookahead, Financial execution/settlement/metrics parity, Frontend state/WS/ChartKernel, API contracts, and UX completion, plus Independent QA remediation (`DEF-001..006, 008, 012`). | `B00–B51` + `W5` + `QA-Remediation` `COMMITTED_ON_MASTER` (`e34516c`, `2151f34`, `c331dc3`, `12e166a`, `40f6563`, `bf0bbc6`, `925a095`). | **Active Product Completion Program** (`AUTOMATED_UAT_PASS` — awaiting Product Owner UAT) tracked in Sections 3–6 below. |
 
 ---
 
@@ -145,11 +145,16 @@ flowchart TD
 - **Wave `W0-B + W1 + W2` Execution, Zero-Lookahead & Financial Correctness Baseline (`c331dc3`, `0732ca0`)**: `B03`, `B10`, `B11`, `B20`, `B21`, `B22`, remediation `R1–R6`, and Persistent Project Execution Charter in `AGENTS.md`.
 - **Wave `W3` Replay State, WebSocket & Chart Integration Baseline (`12e166a`)**: `B30`, `B31` (including Gate A1 real WebSocket disconnect/reconnect verification), and `B32` (31 paths committed).
 - **Wave `W4` API Contracts, Money Flow BB, Trading Practice & Strategy Lab UX Baseline (`40f6563`)**: `B40`, `B41`, `B50`, and `B51` (63 verified paths committed).
-- **Wave `W5` Product UAT Remediation & Governance Baseline (`DEC-09`)**:
+- **Wave `W5` Product UAT Remediation & Governance Baseline (`DEC-09`, `bf0bbc6`)**:
   - Executed all 5 authoritative user journeys (`Journey 1..5`) and Cross-Journey Quality Gates (`1440×1000`, `1280×800`, and `1024×768`) on isolated deterministic fixtures (`./artifacts/local/development-train-05/run_train05_uat.sh`).
   - **`101/101` UAT checks PASSING**, **`0` console/page errors**, **`0` external network requests**, **`38` UAT artifact entries retained** (`36` PNG screenshots + `train05-uat-results.json` + `fixtures/`) in `artifacts/local/development-train-05/uat/`.
-  - Reconciled the prior report's "13 modified files" header label against the actual **14 modified tracked files** (`11` source/test paths + `3` governance docs) and committed as `fix(v3): complete W5 product UAT remediation and governance records`.
-  - Automated technical acceptance is complete (`AUTOMATED_UAT_PASS`); final product sign-off (`OWNER_ACCEPTED` / `ACCEPTED_V3_COMPLETE`) remains reserved for the Product Owner.
+  - Reconciled the prior report's "13 modified files" header label against the actual **14 modified tracked files** (`11` source/test paths + `3` governance docs) and committed as `bf0bbc6bd6dff3674efa2c6263eb7e1e2f5236f2` (`fix(v3): complete W5 product UAT remediation and governance records`).
+- **Independent QA Financial & Product Acceptance Remediation Baseline (`DEC-10`, `925a095`)**:
+  - Committed the 26 verified remediation paths (`24` modified tracked files + `2` new regression test files) as `925a095ed0fb35caa264fa47535bcc3354691e9d` (`fix(v3): resolve independent QA financial and product acceptance defects`).
+  - Independent remediation verification: **`PASS`** (`8/8` prioritized defects `DEF-001`, `DEF-002`, `DEF-003`, `DEF-004`, `DEF-005`, `DEF-006`, `DEF-008`, `DEF-012` resolved; `27/27` financial/API checks; `40/40` Chromium browser checks; `12/12` Financial Golden Cases `G-01..G-12`).
+  - Automated technical acceptance: **`PASS`** (`854 passed, 1 skipped, 0 failed` backend; `272 passed, 0 failed` frontend; `0` TypeScript/Vite build errors).
+  - Product Owner acceptance: **`PENDING`** (`OWNER_ACCEPTED` / `ACCEPTED_V3_COMPLETE` remains strictly reserved for the Product Owner).
+  - Deferred non-blocking P2 usability items (`DEF-007`, `DEF-009`, `DEF-010`, `DEF-011`) remain open in the backlog.
 
 
 

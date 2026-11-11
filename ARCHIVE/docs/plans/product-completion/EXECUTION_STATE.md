@@ -1,8 +1,8 @@
 # SUMI V3 — DEVELOPMENT EXECUTION STATE
 
-- **Active Train**: **Development Train 05 (`Wave W5`: `W4` Baseline Commit Closure + `W5-UAT` Full Product Acceptance) — `AUTOMATED_UAT_PASS` (`COMPLETE & COMMITTED`, AWAITING OWNER UAT)**
-- **Prior Train Status**: **Development Train 01 (`W0-A`, `B03`, `B10`, `B11`), Train 02 (`B20`, `B21`, `B22`), Remediation (`R1–R7`), Train 03 (`B30`, `B31`, `B32`), & Train 04 (`B40`, `B41`, `B50`, `B51`) COMPLETE & COMMITTED (`e34516c`, `2151f34`, `c331dc3`, `0732ca0`, `12e166a`, `40f6563`)**
-- **Current Phase**: **SUMI V3 TECHNICAL BASELINE COMPLETE (`AUTOMATED_UAT_PASS`) — AWAITING OWNER UAT (`OWNER_ACCEPTED` RESERVED FOR PRODUCT OWNER)**
+- **Active Train**: **Independent QA Remediation Baseline Closure (`DEF-001..006, 008, 012`) — `AUTOMATED_UAT_PASS` (`COMPLETE & COMMITTED`, AWAITING OWNER UAT)**
+- **Prior Train Status**: **Development Train 01 (`W0-A`, `B03`, `B10`, `B11`), Train 02 (`B20`, `B21`, `B22`), Remediation (`R1–R7`), Train 03 (`B30`, `B31`, `B32`), Train 04 (`B40`, `B41`, `B50`, `B51`), & Train 05 (`W5-UAT`) COMPLETE & COMMITTED (`e34516c`, `2151f34`, `c331dc3`, `0732ca0`, `12e166a`, `40f6563`, `bf0bbc6`, `925a095`)**
+- **Current Phase**: **SUMI V3 INDEPENDENT QA REMEDIATION BASELINE CLOSED (`AUTOMATED_UAT_PASS`) — AWAITING OWNER ACCEPTANCE (`OWNER_ACCEPTED` / `ACCEPTED_V3_COMPLETE` RESERVED FOR PRODUCT OWNER)**
 - **Baseline Git Commits**:
   - Base: `1ff5f04ed7a26969130eaba75da50b20684e763e` (`master`)
   - Commit 1 (`W0-A` Stabilization, 38 files): `e34516c`
@@ -11,7 +11,8 @@
   - Commit 4 (Persistent Project Execution Charter, 4 files): `0732ca0` (`0732ca07cd2cb3fcf6f45bef85d93f8fd8bdcb21`)
   - Commit 5 (`W3` Replay State, WebSocket & Chart Integration Baseline, 31 files): `12e166a` (`12e166ad323437b43607c6ba739f4b273a7a4d21`)
   - Commit 6 (`W4` API Contracts, Money Flow BB, Trading Practice & Strategy Lab UX, 63 files): `40f6563` (`40f6563ecc6ef4ce0c37ace90626e3380074c75c`)
-  - Commit 7 (`W5` Product UAT Remediation & Governance Records, 14 files): `fix(v3): complete W5 product UAT remediation and governance records` (authorized per `DEC-09`)
+  - Commit 7 (`W5` Product UAT Remediation & Governance Records, 14 files): `bf0bbc6` (`bf0bbc6bd6dff3674efa2c6263eb7e1e2f5236f2`)
+  - Commit 8 (Independent QA Financial & Product Acceptance Remediation Baseline, 26 files): `925a095` (`925a095ed0fb35caa264fa47535bcc3354691e9d` — `fix(v3): resolve independent QA financial and product acceptance defects`, authorized per `DEC-10`)
 - **Production DB Invariant (`backend/sumi.db`)**: `234206fc75259f091337d4feb5f41575d0fe5ac02d6c10ba0de8fad68cbcee86` (`188,416` bytes — verified bit-exact, `0` byte delta)
 
 
@@ -186,3 +187,29 @@
   - **Production DB (`backend/sumi.db`)**: `234206fc75259f091337d4feb5f41575d0fe5ac02d6c10ba0de8fad68cbcee86` (`188,416` bytes, `0` byte delta).
   - **Owner Acceptance Guide**: Prepared at `artifacts/local/development-train-05/OWNER_UAT_GUIDE.md`.
 - **Status**: **`AUTOMATED_UAT_PASS` — `SUMI V3 TECHNICAL BASELINE COMPLETE — AWAITING OWNER UAT` (`OWNER_ACCEPTED` / `ACCEPTED_V3_COMPLETE` reserved for Product Owner)**
+
+---
+
+## Independent QA Remediation Baseline Closure (`DEF-001..006, 008, 012` — `COMPLETE & COMMITTED`)
+
+- **Remediation Baseline Commit**: `925a095ed0fb35caa264fa47535bcc3354691e9d` (`925a095` — `fix(v3): resolve independent QA financial and product acceptance defects`, `26` paths: `24` modified tracked files + `2` new regression test suites `backend/app/tests/test_def001_timeframe_isolation.py` and `backend/app/tests/test_qa_remediation_defects.py`).
+- **Resolved Prioritized Defects (`8/8 PASS`)**:
+  1. `DEF-001` (`P0`): Strict `Candle.timeframe` isolation across `BacktestService`, `ScannerService`, `AnalyticsService`, and `BatchRunner`, plus `TradingCalendar`-aware causal weekly aggregation (`W1..W5`) in `ReplayService.get_candles`.
+  2. `DEF-002` (`P1`): Parameter Sweep `risk_management` (`stop_loss_pct` and `take_profit_pct`) support and structured `HTTP 400` (`INVALID_SWEEP`) validation in `StrategyLabService`.
+  3. `DEF-003` (`P1`): `SELL` / `CLOSE` while holding an open `LONG` position displays `Trade Sizing & Risk (LONG EXIT)` and explicit `MARKET_NEXT_OPEN` next-open execution copy (`TradeControls.tsx`).
+  4. `DEF-004` (`P1`): Structured `HTTP 400/422` validation responses (never `HTTP 500`) on invalid `plan-sizing` SL/TP geometry (`entry_price == stop_loss`) and malformed inline strategy dicts on `/api/backtest/run`.
+  5. `DEF-005` (`P1`): `backend/scripts/seed_demo.py` uses `TradingCalendar().is_trading_day()` (`0` Vietnam statutory holiday or weekend candles across `520` seeded sessions).
+  6. `DEF-006` (`P1`): Replay session `has_candles` / `available_candles` metadata and `invalidated-session-recovery-banner` recovery flow after import rollback (`0` uncaught `HTTP 400` errors).
+  7. `DEF-008` (`P2` remediated): Risk-based position sizing uses total `account_equity` (`cash + open_positions_market_value`) for `max_risk_amount` while capping affordable shares by `available_cash`.
+  8. `DEF-012` (`P2` remediated): Money Flow BB signals (`bb.direction_*`, `bb.regime_*`) parameter schema and `SignalExplanationInspector` string/enum parameter controls aligned (`HTTP 200`).
+- **Verification & Acceptance Status**:
+  - **Independent Remediation Verification**: **`PASS`** (`8/8` prioritized defects, `27/27` financial/API checks, `40/40` Chromium browser E2E checks, `12/12` Financial Golden Cases `G-01..G-12` in `artifacts/local/independent-qa-final-retest/`).
+  - **Automated Technical Acceptance**: **`PASS`** (`854 passed, 1 skipped, 0 failed` across full `pytest backend` collection; `272 passed, 0 failed` across `43` frontend Vitest files; `tsc -b && vite build` `0` errors).
+  - **Product Owner Acceptance**: **`PENDING`** (`ACCEPTED_V3_COMPLETE` / `OWNER_ACCEPTED` remains strictly reserved for the Product Owner).
+  - **Deferred Non-Blocking P2 Usability Backlog (`OPEN`)**:
+    - `DEF-007` (`P2` Cosmetic): Minor English labels (`New Session`, `Start Replay`) alongside Vietnamese UI copy.
+    - `DEF-009` (`P2` UX Polish): `StrategyRuleBuilder` defaults to visual AST builder without a raw free-text DSL editor mode.
+    - `DEF-010` (`P2` UX Enhancement): Replay control dock uses step/playback buttons (`-5`, `-1`, `+1`, `+5`, `Auto-Play`) without a direct `Jump-to-Date` datepicker input.
+    - `DEF-011` (`P2` UX Enhancement): `DrawingToolbar` provides 7 drawing tools including `drawing-tool-text` without a separate 8th `drawing-tool-callout` button.
+  - **Owner UAT Guide**: [`artifacts/local/independent-qa-final-retest/OWNER_UAT_GUIDE.md`](../../../artifacts/local/independent-qa-final-retest/OWNER_UAT_GUIDE.md).
+  - **Production Database (`backend/sumi.db`)**: `234206fc75259f091337d4feb5f41575d0fe5ac02d6c10ba0de8fad68cbcee86` (`188,416` bytes, untouched).
