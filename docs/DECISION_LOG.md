@@ -1,7 +1,7 @@
 # SUMI TRADING WORKSTATION — DECISION LOG
 
 - **Session Identity (Created):** `SESSION-01-20261110T160909+0700`
-- **Updated By:** `SESSION-R07-20261112T093742+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Updated By:** `SESSION-R08-20261112T140031+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 
 ## Decisions Recorded in Session 01
 
@@ -157,3 +157,17 @@
   2. Implement `src/trading/` (`mod.rs`, `orders.rs`, `portfolio.rs`, `tests.rs`) supporting symmetric `Long`/`Short` `Market`, `Limit`, and `Stop` orders, `SL`/`TP` brackets, unified Gap-Open (`t = Open`) + 3-segment causal 4-waypoint OHLC matching (`[O, L, H, C]` vs `[O, H, L, C]`, pessimistic `SL`-before-`TP` on pre-existing dual-touch bars), proportional entry-fee conservation, timeframe-invariant base-bar execution, and deterministic command-log `rewind_to` (`256.71 µs` across `4,501` bars).
   3. Stamp `Drawing::created_at_timestamp: Option<i64>` and enforce `is_causally_visible` across rendering, hit-testing, `selected_drawing()`, `undo()`, `redo()`, `clear_unlocked()`, and Drawing -> Order Ticket sync so future drawings remain hidden without deletion during replay while right-whitespace projections created during replay stay visible and interactive.
   4. Batch axis-aligned dashed/dotted lines (`paint_styled_segment_phased`) and execution fill-marker triangles (`paint_execution_fill_markers`) into single `egui::Mesh` primitives so `95,001`-bar `1m` full-fit 4-pane + 6-indicator + 25-drawing + Replay + Trading renders in **`3.923 ms`** median (`0.174 ms` standard intraday, `0.291 ms` full workstation UI), remaining within the `< 4.0 ms` `DECISION-RENDERER-002` ceiling.
+
+
+---
+
+## Decisions Recorded in Session R08
+
+### DEC-R08-001 — Pure `f64`/`i64` WASM-Safe Multi-Symbol Watchlist & Scanner (`src/scanner/`), Causal Price/Indicator/Drawing Alert Engine (`src/alerts/`), & `Cmd+K` Command Palette
+- **Date:** `2026-11-12`
+- **Session:** `SESSION-R08-20261112T140031+0700`
+- **Context:** Milestone R08 (`Wave 7`) implements multi-symbol scanning, causal alerts, and instant keyboard navigation after live REA MCP analysis (`ev_7bebc091...`, `ev_bc68b61c...`, `ev_17c740ab...`, `ev_51e9ade8...`, `ev_4f4abed4...`, `ev_294e5ef0...`, `ev_91304935...`, `ev_88c00cb5...`, `ev_db4484c1...`, `ev_a5767e7a...`) exposed 6 legacy architectural defects (SQLite/Pandas `/scanner` route bottleneck, HTTP-coupled `BlindPractice` session mutation, total absence of an Alert Engine alongside LWC `Date.now()`/`setTimeout` wall-clock marker coupling, symbol-only HTTP switcher modal with `50ms` `setTimeout` focus hack, DOM `querySelector('[role="dialog"]')` shortcut collision, and `None`-first metric sort contamination).
+- **Decision:**
+  1. Implement `src/scanner/` (`mod.rs`, `engine.rs`, `tests.rs`) and expand `src/data/presets.rs` (`DataSourcePreset::Vn30Basket` `8` VN30 tickers + `custom_peer_feeds`) in pure `f64`/`i64` (`wasm32-unknown-unknown`-verified, zero new crates in `Cargo.toml`). Single-pass `evaluate_symbol_scan_and_signals` computes Watchlist rows and historical signals across all `13` bundled feeds (`20,797` bars) in **`1.799 ms`**, strictly enforcing `<= replay_cutoff` across all peer feeds, withholding unclosed higher-timeframe tail signals, and pinning `ScannerSignalContext` `BlindPractice` reveal timestamps to bucket close.
+  2. Implement `src/alerts/` (`mod.rs`, `engine.rs`, `tests.rs`) supporting `PriceLevel` (4-waypoint OHLC + stateful `@Mark` departure), `RsiThreshold` (`RSI(14)`), `MacdHistogramZeroCross` (`MACD(12,26,9)`), and `DrawingLine` (`HorizontalLine` `1m==15m` parity, finite `TrendLine`, and $360^\circ$ `Ray` relative-offset crossings with linear slope extrapolation), chronologically sorted `eval_base_timestamp` trigger logs, and bit-exact causal Replay rewind (`Once` alerts automatically re-arm when rewound prior to their trigger).
+  3. Integrate the keyboard-first `Cmd+K` / `Ctrl+K` Command Palette (`13.71 µs` fuzzy/prefix ranking + dynamic `alert <price>` synthesis) with full modal isolation (`disabled_alpha = 1.0` background panel lock, gesture/kinetic cancellation, `Tab`/`Delete`/`MouseWheel` consumption) and horizontal dashed-line + conflated line `egui::Mesh` batching so `95,001`-bar `1m` full-fit 4-pane + Replay + Trading + Alerts renders in **`3.067 ms`** median (`0.182 ms` recent `1m`, `0.407 ms` full workstation, `0.296 ms` `Cmd+K` modal), well inside the `< 4.0 ms` `DECISION-RENDERER-002` ceiling.

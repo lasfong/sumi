@@ -41,8 +41,9 @@ pub use calendar::{
 pub use csv_loader::load_ohlcv_csv;
 pub use json_loader::{MAX_JSON_DEPTH, load_ohlcv_json};
 pub use presets::{
-    DataSourcePreset, build_btcusdt_15m_json_document, generate_intraday_vn30f_1m_report,
-    load_preset_dataset,
+    DataSourcePreset, VN30_BASKET_SYMBOLS, WatchlistFeedEntry, build_btcusdt_15m_json_document,
+    generate_intraday_vn30f_1m_report, generate_vn30_basket_report,
+    load_bundled_watchlist_universe, load_preset_dataset,
 };
 pub use synthetic::generate_synthetic_ohlcv;
 pub use timeframe::{

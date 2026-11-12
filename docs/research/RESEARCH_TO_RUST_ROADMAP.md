@@ -1,7 +1,7 @@
 # RESEARCH TO RUST ROADMAP — SESSION R01
 
 - **Session Identity:** `SESSION-R01-20261110T202837+0700`
-- **Updated By:** `SESSION-R07-20261112T093742+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Updated By:** `SESSION-R08-20261112T140031+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 - **Principle:** No Rust implementation begins without prior REA or reference-source research evidence.
 
 ---
@@ -195,14 +195,47 @@ cargo test app::tests::critic_r07_regression_conflated_boundary_fill_markers_emp
 
 ---
 
-## Wave 7 — Multi-Symbol Watchlist, Technical Scanner, Alert Engine & Command Palette (`PROPOSED — MILESTONE R08`)
+## Wave 7 — Multi-Symbol Watchlist, Technical Scanner, Alert Engine & Command Palette (`COMPLETE — SESSION R08`)
+
+### Completed Research & Audit Gates (`VERIFIED`)
+- [x] Executed 10 live REA MCP JS/TS operations (`12` exact 64-hex Evidence IDs: `ev_7bebc091...`, `ev_a4990be1...`, `ev_bc68b61c...`, `ev_2dc77f5e...`, `ev_17c740ab...`, `ev_51e9ade8...`, `ev_4f4abed4...`, `ev_294e5ef0...`, `ev_91304935...`, `ev_88c00cb5...`, `ev_db4484c1...`, `ev_a5767e7a...`) across `ARCHIVE/frontend` scanner/signals/shortcut pipeline (`10` files) and `lightweight-charts-5.2.0` `price-line-api` + `up-down-markers-plugin` (`7` files), plus 4 final binary REA Evidence IDs (`ev_35144b6f...`, `ev_e2b74368...`, `ev_2a67be8d...`, `ev_3cd35388...`).
+- [x] Authored [`docs/research/SCANNER_ALERTS_AND_COMMAND_PALETTE_SPEC.md`](SCANNER_ALERTS_AND_COMMAND_PALETTE_SPEC.md) rectifying all 6 legacy scanner, alert, and modal navigation defects.
+
+### Shipped Rust Deliverables (`IMPLEMENTATION_PASS`)
+| Component | Research Source | Shipped Rust Target | Status |
+|---|---|---|---|
+| Multi-symbol Watchlist & Technical Scanner (`13` bundled feeds + `custom_peer_feeds`, single-pass `1.799 ms` scan, `DEF-001` peer cutoff, `BlindPractice`) | `ARCHIVE/frontend/src/pages/ScannerPage.tsx` + `ARCHIVE/backend/app/services/scanner_service.py` | `src/scanner/`, `src/data/presets.rs` | ✅ SHIPPED |
+| Causal Price, Indicator & Sloped Drawing-Line Alert Engine (`PriceLevel`, `RSI(14)`, `MACD`, `HorizontalLine`/`TrendLine`/$360^\circ$ `Ray` + Replay rewind) | `SCANNER_ALERTS_AND_COMMAND_PALETTE_SPEC.md` + `LWC v5.2.0` `price-line-api.ts` | `src/alerts/` | ✅ SHIPPED |
+| Keyboard Command Palette (`Cmd+K` `13.71 µs` fuzzy rank, quick `alert <price>`, `disabled_alpha = 1.0` modal isolation) & Watchlist/Alerts Docks | `ARCHIVE/frontend` shortcuts + Native workstation UX | `src/app.rs`, `src/chart.rs` | ✅ SHIPPED |
+
+### Verified Acceptance Tests (`cargo test` — 105/105 PASS)
+```bash
+cargo test scanner::tests::regime_classifier_and_causal_rvol_exclude_current_bar_lookahead
+cargo test scanner::tests::technical_and_volume_signals_fire_causally_and_sort_none_metrics_last
+cargo test scanner::tests::historical_signal_scan_enforces_def001_cutoff_and_blind_practice_masking
+cargo test scanner::tests::multi_symbol_universe_vn30_cafef_spy_btc_scans_deterministically
+cargo test scanner::tests::critic_r08_regression_single_pass_scan_incomplete_tail_and_reveal_timestamp
+cargo test alerts::tests::price_level_4_waypoint_gap_wick_touch_and_flat_continuation_invariants
+cargo test alerts::tests::rsi_and_macd_indicator_alerts_match_wilder_and_talib_crossovers
+cargo test alerts::tests::sloped_trendline_and_360_ray_relative_offset_prevents_parallel_false_cross
+cargo test alerts::tests::causal_replay_stepping_1m_15m_parity_and_rewind_rearms_once_alerts
+cargo test alerts::tests::critic_r08_regression_at_mark_boundary_live_whitespace_ray_and_vertical_line_guard
+cargo test alerts::tests::critic_r08_regression_intrabucket_coarse_alerts_horizontal_parity_and_causal_active_slice
+cargo test app::tests::r08_watchlist_scanner_blind_practice_alerts_and_cmd_k_palette_e2e
+cargo test app::tests::critic_r08_regression_utf8_truncation_mtf_blind_practice_and_peer_future_lock
+cargo test app::tests::critic_r08_regression_cmd_k_modal_tab_delete_gesture_and_scroll_isolation
+```
+
+---
+
+## Wave 8 — Deterministic Strategy Backtest Lab, Equity Curve Sub-Pane & Performance Tearsheet (`PROPOSED — MILESTONE R09`)
 
 ### Proposed Deliverables (Awaiting Product Owner Authorization)
 | Component | Research Source | Rust Target | Status |
 |---|---|---|---|
-| Multi-symbol Watchlist & Technical Scanner (`RSI`/`MACD`/`BB`/`SMA-EMA` cross & volume breakout scans across loaded feeds) | `ARCHIVE/frontend/src/pages/ScannerPage.tsx` + `ARCHIVE/backend/app/api/scanner.py` | `src/scanner/` | Proposed (`Milestone R08`) |
-| Causal Price, Indicator & Drawing-Ray Alert Engine (non-repainting trigger log + visual alert lines) | `ARCHIVE/frontend` signals/alerts + `LWC v5.2.0` price lines | `src/alerts/` | Proposed (`Milestone R08`) |
-| Keyboard Command Palette (`Cmd+K` instant symbol, timeframe, indicator, tool & replay jump) | Native workstation UX + Archive shortcuts | `src/app.rs` | Proposed (`Milestone R08`) |
+| Pure `f64`/`i64` WASM-safe Rule/Signal Strategy Backtest Engine (composable `SMA/EMA`, `RSI`, `MACD`, `BB`, `ATR` trailing & position sizing over `TradingSession`) | `ARCHIVE/frontend/src/pages/StrategyLabPage.tsx` + `ARCHIVE/backend/app/domain/backtest/*` | `src/backtest/` | Proposed (`Milestone R09`) |
+| Synchronized `Equity / Drawdown` Oscillator Sub-Pane & On-Chart Trade Entry/Exit Links | `LWC v5.2.0` area/baseline series + `MultiPaneLayout` | `src/chart.rs` | Proposed (`Milestone R09`) |
+| Strategy Lab Dock, Parameter Sweep Comparison & Quantitative Tearsheet (`Sharpe`, `Sortino`, `CAGR`, `MaxDD`, `Profit Factor`, `Expectancy`, `R-Multiple` distribution) | `ARCHIVE/frontend/src/pages/StrategyLabPage.tsx` | `src/app.rs` | Proposed (`Milestone R09`) |
 
 ---
 

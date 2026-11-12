@@ -15,23 +15,28 @@ use super::synthetic::generate_synthetic_ohlcv;
 use super::timeframe::Timeframe;
 use super::{DataLoadOptions, DataLoadReport};
 
-/// Built-in workstation data feeds selectable from the top toolbar (`Milestone R06`).
+/// Canonical tickers included in [`DataSourcePreset::Vn30Basket`] (`Milestone R08`).
+pub const VN30_BASKET_SYMBOLS: [&str; 8] = ["FPT", "VCB", "HPG", "SSI", "MWG", "TCB", "ACB", "VIC"];
+
+/// Built-in workstation data feeds selectable from the top toolbar (`Milestones R06–R08`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum DataSourcePreset {
     #[default]
     SyntheticVnindex,
     IntradayVn30F1m,
     CafeFIndexCsv,
+    Vn30Basket,
     SpyDailyCsv,
     BtcUsdt15mJson,
     CustomFile,
 }
 
 impl DataSourcePreset {
-    pub const TOOLBAR_PRESETS: [Self; 5] = [
+    pub const TOOLBAR_PRESETS: [Self; 6] = [
         Self::SyntheticVnindex,
         Self::IntradayVn30F1m,
         Self::CafeFIndexCsv,
+        Self::Vn30Basket,
         Self::SpyDailyCsv,
         Self::BtcUsdt15mJson,
     ];
@@ -43,11 +48,22 @@ impl DataSourcePreset {
             Self::SyntheticVnindex => "VNINDEX Synth",
             Self::IntradayVn30F1m => "VN30F1M 1m",
             Self::CafeFIndexCsv => "CafeF CSV",
+            Self::Vn30Basket => "VN30 Basket",
             Self::SpyDailyCsv => "SPY CSV",
             Self::BtcUsdt15mJson => "BTC JSON",
             Self::CustomFile => "File",
         }
     }
+}
+
+/// One preloaded instrument feed in the workstation's multi-symbol Watchlist & Scanner universe.
+#[derive(Debug, Clone)]
+pub struct WatchlistFeedEntry {
+    pub instrument_id: String,
+    pub preset: DataSourcePreset,
+    pub symbol: String,
+    pub base_timeframe: Timeframe,
+    pub candles: Vec<Candle>,
 }
 
 /// Loads one of the built-in workstation presets into a [`DataLoadReport`].
@@ -74,8 +90,204 @@ pub fn load_preset_dataset(
         }
         DataSourcePreset::IntradayVn30F1m => generate_intraday_vn30f_1m_report(5_400),
         DataSourcePreset::CafeFIndexCsv => load_cafef_preset(symbol_override),
+        DataSourcePreset::Vn30Basket => generate_vn30_basket_report(symbol_override),
         DataSourcePreset::SpyDailyCsv => load_spy_preset(),
         DataSourcePreset::BtcUsdt15mJson => load_btcusdt_15m_json_preset(),
+    }
+}
+
+/// Loads all `13` bundled multi-asset instruments (`VNINDEX`, `HNX-INDEX`, `VN30F1M`, `SPY`,
+/// `BTCUSDT`, plus all `8` `VN30` equities) for the workstation Watchlist & Technical Scanner.
+#[must_use]
+pub fn load_bundled_watchlist_universe() -> Vec<WatchlistFeedEntry> {
+    let mut entries = Vec::with_capacity(13);
+    let push_report =
+        |entries: &mut Vec<WatchlistFeedEntry>, preset: DataSourcePreset, rep: DataLoadReport| {
+            let sym_upper = rep.symbol.trim().to_ascii_uppercase();
+            let instrument_id = format!("Preset:{}:{sym_upper}", preset.short_label());
+            entries.push(WatchlistFeedEntry {
+                instrument_id,
+                preset,
+                symbol: rep.symbol,
+                base_timeframe: rep.base_timeframe,
+                candles: rep.candles,
+            });
+        };
+
+    for sym in ["VNINDEX", "HNX-INDEX"] {
+        push_report(
+            &mut entries,
+            DataSourcePreset::CafeFIndexCsv,
+            load_cafef_preset(Some(sym)),
+        );
+    }
+    push_report(
+        &mut entries,
+        DataSourcePreset::IntradayVn30F1m,
+        generate_intraday_vn30f_1m_report(5_400),
+    );
+    push_report(
+        &mut entries,
+        DataSourcePreset::SpyDailyCsv,
+        load_spy_preset(),
+    );
+    push_report(
+        &mut entries,
+        DataSourcePreset::BtcUsdt15mJson,
+        load_btcusdt_15m_json_preset(),
+    );
+    for sym in VN30_BASKET_SYMBOLS {
+        push_report(
+            &mut entries,
+            DataSourcePreset::Vn30Basket,
+            generate_vn30_basket_report(Some(sym)),
+        );
+    }
+    entries
+}
+
+/// Generates a deterministic `180`-session daily OHLCV series for one of the 8 [`VN30_BASKET_SYMBOLS`],
+/// spanning uptrend, pullback, oversold recovery, Bollinger squeeze breakout, golden cross, and downtrend regimes.
+#[must_use]
+pub fn generate_vn30_basket_report(symbol_override: Option<&str>) -> DataLoadReport {
+    let requested = symbol_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("FPT");
+    let matched_idx = VN30_BASKET_SYMBOLS
+        .iter()
+        .position(|s| s.eq_ignore_ascii_case(requested))
+        .unwrap_or(0);
+    let symbol = VN30_BASKET_SYMBOLS[matched_idx].to_owned();
+    let total_bars = 180_usize;
+    let mut candles = Vec::with_capacity(total_bars);
+    let mut day_cursor = days_from_civil(2025, 11, 3); // Monday 2025-11-03
+
+    let base_price = match matched_idx {
+        0 => 126.0, // FPT: strong tech uptrend + final-bar 2.8x volume breakout
+        1 => 89.5,  // VCB: tight squeeze followed by upper Bollinger breakout
+        2 => 26.5,  // HPG: uptrend followed by orderly 6% pullback above EMA(50)
+        3 => 32.0,  // SSI: momentum wave with fresh bullish MACD histogram cross
+        4 => 61.0,  // MWG: sharp selloff into RSI < 30 followed by RSI > 30 recovery bounce
+        5 => 23.4,  // TCB: base-to-uptrend SMA(20)/EMA(50) golden cross
+        6 => 25.6,  // ACB: ultra-tight sideways Bollinger consolidation (< 4% bandwidth)
+        _ => 48.5,  // VIC: sustained distribution downtrend
+    };
+    let mut prev_close = base_price;
+
+    while candles.len() < total_bars {
+        if weekday_from_days(day_cursor) >= 5 {
+            day_cursor += 1;
+            continue;
+        }
+        let i = candles.len();
+        let t = i as f64;
+        let ts = day_cursor * 86_400;
+
+        let (delta_pct, range_pct, vol_mult) = match matched_idx {
+            0 => {
+                // FPT: steady positive drift + strong volume expansion on last bar
+                let drift = 0.0034 + (t * 0.17).sin() * 0.0042;
+                if i == total_bars - 1 {
+                    (0.024, 0.014, 2.85)
+                } else {
+                    (drift, 0.009, 1.0 + (t * 0.31).sin().abs() * 0.25)
+                }
+            }
+            1 => {
+                // VCB: tight low-volatility band in bars 140..178, then decisive upper-BB breakout on final bar
+                if (140..total_bars - 1).contains(&i) {
+                    ((t * 0.55).sin() * 0.0022, 0.0035, 0.92)
+                } else if i == total_bars - 1 {
+                    (0.026, 0.011, 2.35)
+                } else {
+                    (0.0012 + (t * 0.14).cos() * 0.0045, 0.007, 1.05)
+                }
+            }
+            2 => {
+                // HPG: strong uptrend through bar 164, then controlled ~5.5% pullback holding EMA50
+                if i < 165 {
+                    (0.0038 + (t * 0.19).sin() * 0.0035, 0.010, 1.1)
+                } else {
+                    (-0.0038 + (t * 0.4).cos() * 0.001, 0.008, 0.85)
+                }
+            }
+            3 => {
+                // SSI: dip bars 155..175 then sharp 4-bar turn triggering fresh MACD Bull Cross
+                if (155..175).contains(&i) {
+                    (-0.0055, 0.009, 0.95)
+                } else if i >= 175 {
+                    (0.0145, 0.012, 1.65)
+                } else {
+                    (0.0018 + (t * 0.21).sin() * 0.006, 0.010, 1.05)
+                }
+            }
+            4 => {
+                // MWG: steep 14-bar slide pushing RSI(14) < 26, then strong rebound bar crossing RSI > 30
+                if (163..total_bars - 1).contains(&i) {
+                    (-0.0135, 0.009, 1.15)
+                } else if i == total_bars - 1 {
+                    (0.038, 0.015, 2.40)
+                } else {
+                    (0.0008 + (t * 0.16).sin() * 0.005, 0.009, 1.0)
+                }
+            }
+            5 => {
+                // TCB: gentle dip bars 110..158 then steady acceleration so SMA(20) crosses above EMA(50)
+                if (110..158).contains(&i) {
+                    (-0.0032 + (t * 0.25).sin() * 0.002, 0.007, 0.9)
+                } else if i >= 158 {
+                    (0.0062, 0.008, 1.35)
+                } else {
+                    (0.0010 + (t * 0.18).cos() * 0.003, 0.007, 1.0)
+                }
+            }
+            6 => {
+                // ACB: super tight sideways range (< 4% BB width)
+                (
+                    (t * 0.37).sin() * 0.0018,
+                    0.0030,
+                    0.95 + (t * 0.29).cos().abs() * 0.15,
+                )
+            }
+            _ => {
+                // VIC: steady distribution downtrend
+                (-0.0036 + (t * 0.22).cos() * 0.0032, 0.009, 1.10)
+            }
+        };
+
+        let gap_pct = ((t * 0.63 + matched_idx as f64).cos()) * 0.0012;
+        let open = round2((prev_close * (1.0 + gap_pct)).max(5.0));
+        let close = round2((open * (1.0 + delta_pct)).max(5.0));
+        let hi_pad = (open.max(close) * range_pct * 0.55).max(0.05);
+        let lo_pad = (open.min(close) * range_pct * 0.50).max(0.05);
+        let high = round2(open.max(close) + hi_pad);
+        let low = round2((open.min(close) - lo_pad).max(1.0));
+        let base_vol = 2_400_000.0 + (matched_idx as f64) * 450_000.0;
+        let volume = (base_vol * vol_mult).round();
+
+        candles.push(Candle {
+            timestamp: ts,
+            date_label: Timeframe::D1.format_candle_label(ts),
+            open,
+            high,
+            low,
+            close,
+            volume,
+        });
+        prev_close = close;
+        day_cursor += 1;
+    }
+
+    DataLoadReport {
+        symbol,
+        available_symbols: VN30_BASKET_SYMBOLS.iter().map(|&s| s.to_owned()).collect(),
+        base_timeframe: Timeframe::D1,
+        raw_row_count: total_bars * VN30_BASKET_SYMBOLS.len(),
+        deduplicated_count: 0,
+        repaired_envelope_count: 0,
+        filtered_other_symbol_rows: total_bars * (VN30_BASKET_SYMBOLS.len() - 1),
+        candles,
     }
 }
 

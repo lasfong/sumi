@@ -3,13 +3,18 @@ use std::collections::BTreeMap;
 use egui::{Button, Color32, CornerRadius, Frame, Margin, RichText, Stroke, Vec2, Visuals};
 use serde::{Deserialize, Serialize};
 
+use crate::alerts::{
+    AlertCondition, AlertEngine, AlertError, AlertFrequency, AlertId, AlertStatus, CrossDirection,
+    truncate_utf8_bytes,
+};
 use crate::chart::{
     ChartDisplayConfig, ChartRenderReport, ChartReplayTradingOverlay, ChartViewportState, palette,
     render_workstation_chart_full,
 };
 use crate::data::{
     AggregationError, DataFileFormat, DataLoadError, DataLoadOptions, DataLoadReport,
-    DataSourcePreset, Timeframe, generate_synthetic_ohlcv, load_ohlcv_bytes, load_ohlcv_csv,
+    DataSourcePreset, Timeframe, WatchlistFeedEntry, format_utc_date, format_utc_datetime_hm,
+    generate_synthetic_ohlcv, load_bundled_watchlist_universe, load_ohlcv_bytes, load_ohlcv_csv,
     load_ohlcv_json, load_preset_dataset, remap_timestamp_to_bar_index, resolve_anchor_timestamp,
 };
 use crate::drawings::{
@@ -21,6 +26,12 @@ use crate::indicators::{IndicatorCache, IndicatorConfig};
 use crate::model::Candle;
 use crate::replay::{
     ReplayController, ReplaySpeed, ReplayStatus, ReplayStepUnit, ReplayTransition,
+};
+use crate::scanner::{
+    DEFAULT_BLIND_PRACTICE_LOOKBACK_BARS, HistoricalSignalHit, MarketRegime, ScanSignalKind,
+    ScannerFilter, ScannerReplayIntent, ScannerSignalContext, SignalDirection, SymbolScanRow,
+    WatchlistSortColumn, evaluate_symbol_scan_and_signals, filter_and_sort_watchlist,
+    filter_historical_signals,
 };
 use crate::trading::{
     OrderKind, OrderRequest, OrderSide, PositionSide, TradingSession, extract_ticket_from_drawing,
@@ -50,7 +61,149 @@ impl TicketOrderKind {
     }
 }
 
-/// Primary application state for the Sumi Rust Trading Workstation (`Milestone R07`).
+/// Active sub-view inside the left Multi-Symbol Watchlist & Technical Scanner dock (`Milestone R08`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ScannerDockTab {
+    #[default]
+    Watchlist,
+    Signals,
+}
+
+/// Active sub-view inside the unified right-side Paper Trading & Alerts dock (`Milestone R08`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum RightDockTab {
+    #[default]
+    Trading,
+    Alerts,
+}
+
+/// Alert condition template selected in the Alerts Manager quick-create form (`Milestone R08`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum AlertDraftKind {
+    #[default]
+    PriceLevel,
+    RsiThreshold,
+    MacdZeroCross,
+    SelectedDrawing,
+}
+
+impl AlertDraftKind {
+    pub const ALL: [Self; 4] = [
+        Self::PriceLevel,
+        Self::RsiThreshold,
+        Self::MacdZeroCross,
+        Self::SelectedDrawing,
+    ];
+
+    #[inline]
+    #[must_use]
+    pub const fn short_label(self) -> &'static str {
+        match self {
+            Self::PriceLevel => "Price",
+            Self::RsiThreshold => "RSI(14)",
+            Self::MacdZeroCross => "MACD 0",
+            Self::SelectedDrawing => "Drawing",
+        }
+    }
+}
+
+/// Action category badge displayed in the `Cmd+K` / `Ctrl+K` Command Palette (`Milestone R08`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaletteCategory {
+    Symbol,
+    Timeframe,
+    Indicator,
+    Drawing,
+    Alert,
+    Replay,
+    Trading,
+    Scale,
+    Workspace,
+}
+
+impl PaletteCategory {
+    #[inline]
+    #[must_use]
+    pub const fn badge_label(self) -> &'static str {
+        match self {
+            Self::Symbol => "SYMBOL",
+            Self::Timeframe => "TF",
+            Self::Indicator => "INDIC",
+            Self::Drawing => "DRAW",
+            Self::Alert => "ALERT",
+            Self::Replay => "REPLAY",
+            Self::Trading => "TRADE",
+            Self::Scale => "SCALE",
+            Self::Workspace => "VIEW",
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn badge_color(self) -> Color32 {
+        match self {
+            Self::Symbol => Color32::from_rgb(41, 182, 246),
+            Self::Timeframe => Color32::from_rgb(77, 208, 225),
+            Self::Indicator => Color32::from_rgb(179, 136, 255),
+            Self::Drawing => Color32::from_rgb(255, 193, 7),
+            Self::Alert => palette::ALERT_ARMED_AMBER,
+            Self::Replay => palette::REPLAY_CUT_GOLD,
+            Self::Trading => palette::TRADE_ENTRY_BLUE,
+            Self::Scale => Color32::from_rgb(38, 198, 164),
+            Self::Workspace => palette::TEXT_PRIMARY,
+        }
+    }
+}
+
+/// Executable workstation action dispatched from the `Cmd+K` Command Palette (`Milestone R08`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum PaletteAction {
+    SelectWatchlistSymbol {
+        preset: DataSourcePreset,
+        symbol: String,
+    },
+    SetTimeframe(Timeframe),
+    ToggleIndicator(&'static str),
+    SelectDrawingTool(DrawingTool),
+    ToggleMagnet,
+    ToggleScannerDock,
+    OpenAlertsTab,
+    OpenTradingTab,
+    QuickPriceAlert {
+        price: f64,
+        direction: CrossDirection,
+    },
+    ToggleReplayBar,
+    CutReplay70Pct,
+    StepReplayForward,
+    StepReplayBackward,
+    ExitReplay,
+    SetScaleMode(PriceScaleMode),
+    FitContent,
+    ResetView,
+}
+
+/// Ranked candidate row inside the `Cmd+K` Command Palette (`Milestone R08`).
+#[derive(Debug, Clone)]
+pub struct PaletteCandidate {
+    pub category: PaletteCategory,
+    pub title: String,
+    pub subtitle: String,
+    pub keywords: String,
+    pub score: i32,
+    pub action: PaletteAction,
+}
+
+/// Transient modal state for the `Cmd+K` / `Ctrl+K` Command Palette (`Milestone R08`).
+#[derive(Debug, Clone, Default)]
+pub struct CommandPaletteState {
+    pub open: bool,
+    pub query: String,
+    pub selected_index: usize,
+    pub request_focus: bool,
+}
+
+/// Primary application state for the Sumi Rust Trading Workstation (`Milestone R08`).
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 pub struct SumiWorkstationApp {
@@ -73,13 +226,32 @@ pub struct SumiWorkstationApp {
     pub trading: TradingSession,
     #[serde(default)]
     replay_trading_by_instrument: BTreeMap<String, (ReplayController, TradingSession)>,
+    pub alerts: AlertEngine,
+    #[serde(default)]
+    alerts_by_instrument: BTreeMap<String, AlertEngine>,
+    pub scanner_context: Option<ScannerSignalContext>,
+    #[serde(default)]
+    scanner_context_by_instrument: BTreeMap<String, ScannerSignalContext>,
     pub show_replay_bar: bool,
     pub show_trading_panel: bool,
+    pub show_alerts_panel: bool,
+    pub right_dock_tab: RightDockTab,
+    pub show_scanner_dock: bool,
+    pub scanner_tab: ScannerDockTab,
+    pub scanner_filter: ScannerFilter,
+    pub watchlist_sort_col: WatchlistSortColumn,
+    pub watchlist_sort_asc: bool,
+    pub signal_lookback_bars: usize,
     pub ticket_kind: TicketOrderKind,
     pub ticket_qty_input: String,
     pub ticket_price_input: String,
     pub ticket_sl_input: String,
     pub ticket_tp_input: String,
+    pub alert_draft_kind: AlertDraftKind,
+    pub alert_direction: CrossDirection,
+    pub alert_frequency: AlertFrequency,
+    pub alert_value_input: String,
+    pub alert_message_input: String,
 
     #[serde(skip)]
     pub base_candles: Vec<Candle>,
@@ -90,11 +262,29 @@ pub struct SumiWorkstationApp {
     #[serde(skip)]
     in_memory_custom_doc: Option<(DataFileFormat, String)>,
     #[serde(skip)]
+    in_memory_custom_doc_hash: u64,
+    #[serde(skip)]
     pub show_import_bar: bool,
     #[serde(skip)]
     pub last_load_status: Option<(bool, String)>,
     #[serde(skip)]
     pub last_trade_status: Option<(bool, String)>,
+    #[serde(skip)]
+    pub last_alert_status: Option<(bool, String)>,
+    #[serde(skip)]
+    pub command_palette: CommandPaletteState,
+    #[serde(skip)]
+    watchlist_universe: Vec<WatchlistFeedEntry>,
+    #[serde(skip)]
+    custom_peer_feeds: Vec<WatchlistFeedEntry>,
+    #[serde(skip)]
+    raw_watchlist_rows_cache: Vec<SymbolScanRow>,
+    #[serde(skip)]
+    raw_historical_hits_cache: Vec<HistoricalSignalHit>,
+    #[serde(skip)]
+    scanner_synced_key: Option<(u64, String, Option<i64>, usize, bool)>,
+    #[serde(skip)]
+    alerts_synced_key: Option<(u64, u64, Option<i64>, u64)>,
     #[serde(skip)]
     viewport_focus_lock: Option<(f64, f64, f64)>,
     #[serde(skip)]
@@ -138,20 +328,46 @@ impl Default for SumiWorkstationApp {
             replay: ReplayController::new(),
             trading: TradingSession::default(),
             replay_trading_by_instrument: BTreeMap::new(),
+            alerts: AlertEngine::new(),
+            alerts_by_instrument: BTreeMap::new(),
+            scanner_context: None,
+            scanner_context_by_instrument: BTreeMap::new(),
             show_replay_bar: false,
             show_trading_panel: false,
+            show_alerts_panel: false,
+            right_dock_tab: RightDockTab::Trading,
+            show_scanner_dock: false,
+            scanner_tab: ScannerDockTab::Watchlist,
+            scanner_filter: ScannerFilter::default(),
+            watchlist_sort_col: WatchlistSortColumn::Symbol,
+            watchlist_sort_asc: true,
+            signal_lookback_bars: 80,
             ticket_kind: TicketOrderKind::Market,
             ticket_qty_input: "10".to_owned(),
             ticket_price_input: String::new(),
             ticket_sl_input: String::new(),
             ticket_tp_input: String::new(),
+            alert_draft_kind: AlertDraftKind::PriceLevel,
+            alert_direction: CrossDirection::CrossAbove,
+            alert_frequency: AlertFrequency::Once,
+            alert_value_input: String::new(),
+            alert_message_input: String::new(),
             base_candles,
             candles,
             available_symbols: vec!["VNINDEX".to_owned()],
             in_memory_custom_doc: None,
+            in_memory_custom_doc_hash: 0,
             show_import_bar: false,
             last_load_status: None,
             last_trade_status: None,
+            last_alert_status: None,
+            command_palette: CommandPaletteState::default(),
+            watchlist_universe: Vec::new(),
+            custom_peer_feeds: Vec::new(),
+            raw_watchlist_rows_cache: Vec::new(),
+            raw_historical_hits_cache: Vec::new(),
+            scanner_synced_key: None,
+            alerts_synced_key: None,
             viewport_focus_lock: None,
             indicator_cache,
             dataset_generation: 1,
@@ -221,15 +437,41 @@ impl SumiWorkstationApp {
         while self.replay_trading_by_instrument.len() > 64 {
             self.replay_trading_by_instrument.pop_first();
         }
+        self.alerts.sanitize_deserialized();
+        while self.alerts_by_instrument.len() > 64 {
+            self.alerts_by_instrument.pop_first();
+        }
+        for engine in self.alerts_by_instrument.values_mut() {
+            engine.sanitize_deserialized();
+        }
+        if let Some(ref mut ctx) = self.scanner_context {
+            ctx.sanitize_deserialized();
+        }
+        while self.scanner_context_by_instrument.len() > 64 {
+            self.scanner_context_by_instrument.pop_first();
+        }
+        for ctx in self.scanner_context_by_instrument.values_mut() {
+            ctx.sanitize_deserialized();
+        }
+        truncate_utf8_bytes(&mut self.scanner_filter.search_query, 64);
+        self.signal_lookback_bars = self.signal_lookback_bars.clamp(5, 500);
         if self.ticket_qty_input.trim().is_empty() || self.ticket_qty_input.len() > 32 {
             self.ticket_qty_input = "10".to_owned();
         }
-        self.ticket_price_input.truncate(32);
-        self.ticket_sl_input.truncate(32);
-        self.ticket_tp_input.truncate(32);
+        truncate_utf8_bytes(&mut self.ticket_price_input, 32);
+        truncate_utf8_bytes(&mut self.ticket_sl_input, 32);
+        truncate_utf8_bytes(&mut self.ticket_tp_input, 32);
+        truncate_utf8_bytes(&mut self.alert_value_input, 32);
+        truncate_utf8_bytes(&mut self.alert_message_input, 96);
         self.viewport_focus_lock = None;
         self.in_memory_custom_doc = None;
+        self.in_memory_custom_doc_hash = 0;
+        self.custom_peer_feeds.clear();
         self.last_trade_status = None;
+        self.last_alert_status = None;
+        self.command_palette = CommandPaletteState::default();
+        self.scanner_synced_key = None;
+        self.alerts_synced_key = None;
 
         let persisted_tf = Timeframe::parse_label(&self.timeframe).unwrap_or(self.active_timeframe);
         let (report, reset_to_clean_fallback) = if self.data_source == DataSourcePreset::CustomFile
@@ -301,11 +543,15 @@ impl SumiWorkstationApp {
         if reset_to_clean_fallback {
             self.replay.exit_replay();
             self.trading = TradingSession::default();
+            self.alerts = AlertEngine::new();
+            self.scanner_context = None;
             self.show_replay_bar = false;
         } else {
             self.replay.sanitize_deserialized(&report.candles);
             if self.replay.is_active() {
                 self.show_replay_bar = true;
+            } else {
+                self.scanner_context = None;
             }
         }
 
@@ -351,6 +597,7 @@ impl SumiWorkstationApp {
         }
         self.base_candles = report.candles;
         self.candles = active_candles;
+        self.rebuild_custom_peer_feeds();
 
         let cursor_idx = self.current_trading_cursor_base_index();
         self.trading
@@ -372,6 +619,7 @@ impl SumiWorkstationApp {
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
         self.indicator_cache
             .sync(&self.candles, self.dataset_generation, &self.indicators);
+        self.sync_alerts_causal();
     }
 
     pub fn configure_dark_workstation_visuals(ctx: &egui::Context) {
@@ -693,6 +941,7 @@ impl SumiWorkstationApp {
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
         self.indicator_cache
             .sync(&self.candles, self.dataset_generation, &self.indicators);
+        self.sync_alerts_causal();
 
         Ok(())
     }
@@ -701,10 +950,10 @@ impl SumiWorkstationApp {
         let sym_upper = self.symbol.trim().to_ascii_uppercase();
         match self.data_source {
             DataSourcePreset::CustomFile => {
-                if let Some((fmt, ref doc)) = self.in_memory_custom_doc {
+                if let Some((fmt, _)) = self.in_memory_custom_doc {
                     format!(
                         "CustomMem:{fmt:?}:{:016x}:{sym_upper}",
-                        fnv1a_64(doc.as_bytes())
+                        self.in_memory_custom_doc_hash
                     )
                 } else {
                     format!("CustomFile:{}:{sym_upper}", self.import_path_input.trim())
@@ -761,8 +1010,9 @@ impl SumiWorkstationApp {
         let mut outgoing_replay = std::mem::take(&mut self.replay);
         outgoing_replay.pause();
         outgoing_replay.cancel_cut_selection();
+        let outgoing_replay_active = outgoing_replay.is_active();
         let outgoing_trading = std::mem::take(&mut self.trading);
-        if outgoing_replay.is_active() || !outgoing_trading.commands.is_empty() {
+        if outgoing_replay_active || !outgoing_trading.commands.is_empty() {
             while self.replay_trading_by_instrument.len() >= 64
                 && !self
                     .replay_trading_by_instrument
@@ -776,18 +1026,55 @@ impl SumiWorkstationApp {
             self.replay_trading_by_instrument.remove(&outgoing_key);
         }
 
+        // Park outgoing instrument's AlertEngine & ScannerSignalContext cleanly per instrument (`Milestone R08`).
+        let outgoing_alerts = std::mem::take(&mut self.alerts);
+        if !outgoing_alerts.rules.is_empty() {
+            while self.alerts_by_instrument.len() >= 64
+                && !self.alerts_by_instrument.contains_key(&outgoing_key)
+            {
+                self.alerts_by_instrument.pop_first();
+            }
+            self.alerts_by_instrument
+                .insert(outgoing_key.clone(), outgoing_alerts);
+        } else {
+            self.alerts_by_instrument.remove(&outgoing_key);
+        }
+
+        if let Some(ctx) = self.scanner_context.take()
+            && outgoing_replay_active
+        {
+            while self.scanner_context_by_instrument.len() >= 64
+                && !self
+                    .scanner_context_by_instrument
+                    .contains_key(&outgoing_key)
+            {
+                self.scanner_context_by_instrument.pop_first();
+            }
+            self.scanner_context_by_instrument
+                .insert(outgoing_key.clone(), ctx);
+        } else {
+            self.scanner_context_by_instrument.remove(&outgoing_key);
+        }
+
+        let mut refresh_custom_peers = false;
         match custom_update {
             CustomSourceUpdate::Clear => {
                 self.in_memory_custom_doc = None;
+                self.in_memory_custom_doc_hash = 0;
+                self.custom_peer_feeds.clear();
             }
             CustomSourceUpdate::KeepExisting => {}
             #[cfg(not(target_arch = "wasm32"))]
             CustomSourceUpdate::FilePath(p) => {
                 self.in_memory_custom_doc = None;
+                self.in_memory_custom_doc_hash = 0;
                 self.import_path_input = p.to_owned();
+                refresh_custom_peers = true;
             }
             CustomSourceUpdate::InMemory(fmt, text) => {
+                self.in_memory_custom_doc_hash = fnv1a_64(text.as_bytes());
                 self.in_memory_custom_doc = Some((fmt, text.to_owned()));
+                refresh_custom_peers = true;
             }
         }
 
@@ -802,6 +1089,9 @@ impl SumiWorkstationApp {
             self.dataset_bar_count = report.candles.len();
         }
         self.base_candles = report.candles;
+        if refresh_custom_peers {
+            self.rebuild_custom_peer_feeds();
+        }
 
         let incoming_key = self.current_instrument_key();
         let (mut incoming_replay, mut incoming_trading) = self
@@ -853,6 +1143,24 @@ impl SumiWorkstationApp {
         );
         self.drawings = incoming_store;
 
+        let mut incoming_alerts = self
+            .alerts_by_instrument
+            .remove(&incoming_key)
+            .unwrap_or_default();
+        incoming_alerts.sanitize_deserialized();
+        self.alerts = incoming_alerts;
+        self.last_alert_status = None;
+        self.alerts_synced_key = None;
+        if outgoing_key != incoming_key {
+            self.alert_value_input.clear();
+            self.alert_message_input.clear();
+        }
+
+        self.scanner_context = self
+            .scanner_context_by_instrument
+            .remove(&incoming_key)
+            .filter(|_| self.replay.is_active());
+
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
         self.viewport.time_scale.set_total_bars(self.candles.len());
         if reset_viewport {
@@ -860,6 +1168,7 @@ impl SumiWorkstationApp {
         }
         self.indicator_cache
             .sync(&self.candles, self.dataset_generation, &self.indicators);
+        self.sync_alerts_causal();
     }
 
     /// Switches vertical price transformation mode (`Normal`, `Logarithmic`, `Percentage`, `IndexedTo100`).
@@ -1247,6 +1556,7 @@ impl SumiWorkstationApp {
             return false;
         };
         self.show_replay_bar = true;
+        self.scanner_context = None;
         self.last_trade_status = None;
 
         self.trading.rewind_to(
@@ -1282,6 +1592,7 @@ impl SumiWorkstationApp {
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
         self.indicator_cache
             .sync(&self.candles, self.dataset_generation, &self.indicators);
+        self.sync_alerts_causal();
         true
     }
 
@@ -1372,6 +1683,7 @@ impl SumiWorkstationApp {
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
         self.indicator_cache
             .sync(&self.candles, self.dataset_generation, &self.indicators);
+        self.sync_alerts_causal();
     }
 
     /// Steps causal Bar Replay forward by `steps` units (`ActiveBar` or `BaseBar`).
@@ -1421,6 +1733,7 @@ impl SumiWorkstationApp {
         let was_active = self.replay.is_active();
         let prev_cursor = self.replay.base_cursor_index;
         self.replay.exit_replay();
+        self.scanner_context = None;
         if !was_active || self.base_candles.is_empty() {
             return;
         }
@@ -1467,6 +1780,7 @@ impl SumiWorkstationApp {
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
         self.indicator_cache
             .sync(&self.candles, self.dataset_generation, &self.indicators);
+        self.sync_alerts_causal();
     }
 
     /// Parses the workstation Order Ticket fields and submits `side` (`Buy` or `Sell`) at the
@@ -1682,6 +1996,1198 @@ impl SumiWorkstationApp {
             format!("Reset account (${:.0})", self.trading.config.initial_cash),
         ));
     }
+
+    // =========================================================================
+    // Milestone R08 — Watchlist & Scanner, Causal Alerts & Command Palette API
+    // =========================================================================
+
+    /// Lazily initializes the bundled `13`-instrument multi-asset Watchlist universe once per session.
+    pub fn ensure_watchlist_universe_loaded(&mut self) {
+        if self.watchlist_universe.is_empty() {
+            self.watchlist_universe = load_bundled_watchlist_universe();
+        }
+    }
+
+    fn rebuild_custom_peer_feeds(&mut self) {
+        self.custom_peer_feeds.clear();
+        if self.data_source != DataSourcePreset::CustomFile || self.available_symbols.len() <= 1 {
+            return;
+        }
+        for sym in self.available_symbols.clone().into_iter().take(32) {
+            let sym_upper = sym.trim().to_ascii_uppercase();
+            let instrument_id = if let Some((fmt, _)) = self.in_memory_custom_doc {
+                format!(
+                    "CustomMem:{fmt:?}:{:016x}:{sym_upper}",
+                    self.in_memory_custom_doc_hash
+                )
+            } else {
+                format!("CustomFile:{}:{sym_upper}", self.import_path_input.trim())
+            };
+            if sym.eq_ignore_ascii_case(&self.symbol) {
+                self.custom_peer_feeds.push(WatchlistFeedEntry {
+                    instrument_id,
+                    preset: DataSourcePreset::CustomFile,
+                    symbol: sym,
+                    base_timeframe: self.base_timeframe,
+                    candles: self.base_candles.clone(),
+                });
+                continue;
+            }
+            let opts = DataLoadOptions {
+                symbol_filter: Some(sym.clone()),
+                ..DataLoadOptions::default()
+            };
+            let loaded = if let Some((fmt, ref doc)) = self.in_memory_custom_doc {
+                load_ohlcv_bytes(doc.as_bytes(), fmt, &opts).ok()
+            } else {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let p = self.import_path_input.trim();
+                    (!p.is_empty())
+                        .then(|| crate::data::load_ohlcv_file(p, &opts).ok())
+                        .flatten()
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    None
+                }
+            };
+            if let Some(rep) = loaded {
+                self.custom_peer_feeds.push(WatchlistFeedEntry {
+                    instrument_id,
+                    preset: DataSourcePreset::CustomFile,
+                    symbol: rep.symbol,
+                    base_timeframe: rep.base_timeframe,
+                    candles: rep.candles,
+                });
+            }
+        }
+    }
+
+    /// Recomputes raw Watchlist snapshot rows and Historical Signal hits only when dataset generation,
+    /// active instrument key, causal Replay cutoff (`DEF-001`), or lookback window changes (`0.000 ms` on hover/pan/zoom).
+    pub fn sync_scanner_caches(&mut self) {
+        self.ensure_watchlist_universe_loaded();
+        let active_key = self.current_instrument_key();
+        let replay_cutoff = self.replay.cutoff_timestamp(&self.base_candles);
+        let lookback = self.signal_lookback_bars.clamp(5, 500);
+        let incomplete_active_tail = self.replay.is_active()
+            && self.active_timeframe > self.base_timeframe
+            && !self.base_candles.is_empty()
+            && {
+                let idx = self
+                    .replay
+                    .base_cursor_index
+                    .min(self.base_candles.len() - 1);
+                idx + 1 < self.base_candles.len()
+                    && self
+                        .active_timeframe
+                        .bucket_start_timestamp(self.base_candles[idx].timestamp)
+                        == self
+                            .active_timeframe
+                            .bucket_start_timestamp(self.base_candles[idx + 1].timestamp)
+            };
+        let cache_key = (
+            self.dataset_generation,
+            active_key.clone(),
+            replay_cutoff,
+            lookback,
+            incomplete_active_tail,
+        );
+        if self.scanner_synced_key.as_ref() == Some(&cache_key) {
+            return;
+        }
+
+        let mut rows =
+            Vec::with_capacity(self.watchlist_universe.len() + self.custom_peer_feeds.len() + 1);
+        let mut hits = Vec::new();
+
+        let active_in_universe = self
+            .watchlist_universe
+            .iter()
+            .any(|e| e.instrument_id == active_key)
+            || (self.data_source == DataSourcePreset::CustomFile
+                && self
+                    .custom_peer_feeds
+                    .iter()
+                    .any(|e| e.instrument_id == active_key));
+
+        if !active_in_universe && !self.candles.is_empty() {
+            // `self.candles` is already causally materialized to `<= replay_cutoff`!
+            let (row_opt, entry_hits) = evaluate_symbol_scan_and_signals(
+                &active_key,
+                &self.symbol,
+                self.data_source.short_label(),
+                self.active_timeframe,
+                &self.candles,
+                replay_cutoff,
+                lookback,
+                incomplete_active_tail,
+            );
+            if let Some(row) = row_opt {
+                rows.push(row);
+            }
+            hits.extend(entry_hits);
+        }
+
+        if self.data_source == DataSourcePreset::CustomFile && !self.custom_peer_feeds.is_empty() {
+            for entry in &self.custom_peer_feeds {
+                if entry.instrument_id == active_key {
+                    let (row_opt, entry_hits) = evaluate_symbol_scan_and_signals(
+                        &entry.instrument_id,
+                        &entry.symbol,
+                        entry.preset.short_label(),
+                        self.active_timeframe,
+                        &self.candles,
+                        replay_cutoff,
+                        lookback,
+                        incomplete_active_tail,
+                    );
+                    if let Some(row) = row_opt {
+                        rows.push(row);
+                    }
+                    hits.extend(entry_hits);
+                } else {
+                    let (row_opt, entry_hits) = evaluate_symbol_scan_and_signals(
+                        &entry.instrument_id,
+                        &entry.symbol,
+                        entry.preset.short_label(),
+                        entry.base_timeframe,
+                        &entry.candles,
+                        replay_cutoff,
+                        lookback,
+                        false,
+                    );
+                    if let Some(row) = row_opt {
+                        rows.push(row);
+                    }
+                    hits.extend(entry_hits);
+                }
+            }
+        }
+
+        for entry in &self.watchlist_universe {
+            if entry.instrument_id == active_key {
+                let (row_opt, entry_hits) = evaluate_symbol_scan_and_signals(
+                    &entry.instrument_id,
+                    &entry.symbol,
+                    entry.preset.short_label(),
+                    self.active_timeframe,
+                    &self.candles,
+                    replay_cutoff,
+                    lookback,
+                    incomplete_active_tail,
+                );
+                if let Some(row) = row_opt {
+                    rows.push(row);
+                }
+                hits.extend(entry_hits);
+            } else {
+                // Strict cross-sectional `DEF-001` causal gate: pass `replay_cutoff` directly so
+                // future-only peer feeds (`first.timestamp > cut`) are withheld (`0` future leak!)
+                // while overlapping & historical peer feeds slice cleanly to `<= cut`.
+                let (row_opt, entry_hits) = evaluate_symbol_scan_and_signals(
+                    &entry.instrument_id,
+                    &entry.symbol,
+                    entry.preset.short_label(),
+                    entry.base_timeframe,
+                    &entry.candles,
+                    replay_cutoff,
+                    lookback,
+                    false,
+                );
+                if let Some(row) = row_opt {
+                    rows.push(row);
+                }
+                hits.extend(entry_hits);
+            }
+        }
+
+        self.raw_watchlist_rows_cache = rows;
+        self.raw_historical_hits_cache = hits;
+        self.scanner_synced_key = Some(cache_key);
+    }
+
+    /// Returns filtered & deterministically sorted Watchlist rows (`None`/`NaN` metrics always last).
+    #[must_use]
+    pub fn filtered_watchlist_rows(&mut self) -> Vec<SymbolScanRow> {
+        self.sync_scanner_caches();
+        filter_and_sort_watchlist(
+            &self.raw_watchlist_rows_cache,
+            &self.scanner_filter,
+            self.watchlist_sort_col,
+            self.watchlist_sort_asc,
+        )
+    }
+
+    /// Returns filtered & chronologically newest-first Historical Signal hits across the universe.
+    #[must_use]
+    pub fn filtered_historical_signals(&mut self) -> Vec<HistoricalSignalHit> {
+        self.sync_scanner_caches();
+        filter_historical_signals(&self.raw_historical_hits_cache, &self.scanner_filter)
+    }
+
+    /// Switches to `(preset, symbol)` in one click while parking outgoing drawings, replay, trading, and alerts.
+    pub fn select_watchlist_instrument(&mut self, preset: DataSourcePreset, symbol: &str) {
+        if preset == DataSourcePreset::CustomFile {
+            if !self.symbol.eq_ignore_ascii_case(symbol) {
+                self.select_symbol_in_source(symbol);
+            }
+            return;
+        }
+        if preset == DataSourcePreset::SyntheticVnindex {
+            if self.data_source != DataSourcePreset::SyntheticVnindex {
+                self.set_dataset_size(self.dataset_bar_count.max(10));
+            }
+            return;
+        }
+        if self.data_source == preset && self.symbol.eq_ignore_ascii_case(symbol) {
+            return;
+        }
+        let rep = load_preset_dataset(preset, self.dataset_bar_count.max(10), Some(symbol));
+        let summary = format!(
+            "Loaded {} · {} ({} {} bars)",
+            rep.symbol,
+            preset.short_label(),
+            rep.candles.len(),
+            rep.base_timeframe
+        );
+        self.apply_loaded_report_internal(rep, preset, CustomSourceUpdate::Clear, true);
+        self.last_load_status = Some((false, summary));
+    }
+
+    /// Launches a causal Bar Replay session directly from a [`HistoricalSignalHit`] in either
+    /// [`ScannerReplayIntent::BlindPractice`] (cuts `15` bars prior & masks signal details until reached)
+    /// or [`ScannerReplayIntent::SignalReview`] (jumps directly onto the signal bar revealed).
+    pub fn start_scanner_signal_replay(
+        &mut self,
+        hit: HistoricalSignalHit,
+        intent: ScannerReplayIntent,
+    ) -> bool {
+        self.ensure_watchlist_universe_loaded();
+        let active_key = self.current_instrument_key();
+        if hit.instrument_id != active_key {
+            if let Some((preset, sym)) = self
+                .watchlist_universe
+                .iter()
+                .find(|e| e.instrument_id == hit.instrument_id)
+                .map(|e| (e.preset, e.symbol.clone()))
+            {
+                self.select_watchlist_instrument(preset, &sym);
+            } else if let Some(sym) = self
+                .custom_peer_feeds
+                .iter()
+                .find(|e| e.instrument_id == hit.instrument_id)
+                .map(|e| e.symbol.clone())
+            {
+                self.select_watchlist_instrument(DataSourcePreset::CustomFile, &sym);
+            } else if hit.instrument_id.starts_with("Preset:Synth:") {
+                self.select_watchlist_instrument(DataSourcePreset::SyntheticVnindex, &hit.symbol);
+            }
+        }
+        if self.current_instrument_key() != hit.instrument_id {
+            return false;
+        }
+
+        if self.base_candles.is_empty() {
+            return false;
+        }
+        if self.replay.is_active() {
+            self.exit_replay();
+        }
+        if self.base_timeframe.can_aggregate_to(hit.timeframe)
+            && self.active_timeframe != hit.timeframe
+        {
+            let _ = self.set_timeframe(hit.timeframe);
+        }
+        if self.candles.is_empty() {
+            return false;
+        }
+
+        let sig_active_idx = self
+            .candles
+            .partition_point(|c| c.timestamp <= hit.timestamp)
+            .saturating_sub(1)
+            .min(self.candles.len() - 1);
+
+        let Some(sig_close_base_idx) = ReplayController::resolve_cut_base_index(
+            &self.base_candles,
+            &self.candles,
+            self.active_timeframe,
+            sig_active_idx,
+            None,
+        ) else {
+            return false;
+        };
+        let reveal_ts = self.base_candles[sig_close_base_idx].timestamp;
+
+        let target_active_idx = match intent {
+            ScannerReplayIntent::SignalReview => sig_active_idx,
+            ScannerReplayIntent::BlindPractice => {
+                if sig_active_idx == 0 {
+                    0
+                } else {
+                    sig_active_idx
+                        .saturating_sub(DEFAULT_BLIND_PRACTICE_LOOKBACK_BARS)
+                        .min(sig_active_idx - 1)
+                }
+            }
+        };
+
+        let Some(cut_base_idx) = ReplayController::resolve_cut_base_index(
+            &self.base_candles,
+            &self.candles,
+            self.active_timeframe,
+            target_active_idx,
+            None,
+        ) else {
+            return false;
+        };
+
+        let started = self.start_replay_at_base_index(cut_base_idx);
+        if started {
+            self.scanner_context = Some(ScannerSignalContext::with_reveal_timestamp(
+                intent, hit, reveal_ts,
+            ));
+            self.scanner_synced_key = None;
+        }
+        started
+    }
+
+    /// Evaluates causal alerts whenever `dataset_generation`, main-pane drawing geometry, causal
+    /// Replay cutoff, or alert rule definitions change (`0.000 ms` on idle hover/pan/zoom frames).
+    pub fn sync_alerts_causal(&mut self) {
+        let cutoff = self.replay.cutoff_timestamp(&self.base_candles);
+        let draw_digest = compute_drawings_alert_digest(&self.drawings);
+        let pre_rules_digest = compute_alert_rules_digest(&self.alerts);
+        let check_key = (
+            self.dataset_generation,
+            draw_digest,
+            cutoff,
+            pre_rules_digest,
+        );
+        if self.alerts_synced_key == Some(check_key) {
+            return;
+        }
+        if self.alerts.rules.is_empty() {
+            self.alerts.triggers.clear();
+            self.alerts_synced_key = Some(check_key);
+            return;
+        }
+        let cursor_idx = self.current_trading_cursor_base_index();
+        self.alerts.evaluate_causal(
+            &self.base_candles,
+            self.base_timeframe,
+            &self.candles,
+            self.active_timeframe,
+            cursor_idx,
+            cutoff,
+            &self.drawings,
+        );
+        let post_rules_digest = compute_alert_rules_digest(&self.alerts);
+        self.alerts_synced_key = Some((
+            self.dataset_generation,
+            draw_digest,
+            cutoff,
+            post_rules_digest,
+        ));
+    }
+
+    /// Arms a horizontal [`AlertCondition::PriceLevel`] alert at the current causal frontier.
+    pub fn add_quick_price_alert(
+        &mut self,
+        price: f64,
+        direction: CrossDirection,
+    ) -> Result<AlertId, AlertError> {
+        let cursor_idx = self.current_trading_cursor_base_index();
+        let cutoff = self.replay.cutoff_timestamp(&self.base_candles);
+        let res = self.alerts.add_alert(
+            &self.symbol,
+            self.active_timeframe,
+            AlertCondition::PriceLevel { price, direction },
+            self.alert_frequency,
+            None,
+            &self.base_candles,
+            cursor_idx,
+            cutoff,
+            Some(&self.drawings),
+        );
+        match res {
+            Ok(id) => {
+                self.alerts_synced_key = None;
+                self.sync_alerts_causal();
+                self.show_alerts_panel = true;
+                self.right_dock_tab = RightDockTab::Alerts;
+                self.last_alert_status = Some((
+                    false,
+                    format!(
+                        "Armed #{} {} {} {:.2}",
+                        id,
+                        self.symbol,
+                        direction.short_label(),
+                        price
+                    ),
+                ));
+                Ok(id)
+            }
+            Err(err) => {
+                self.last_alert_status = Some((true, err.to_string()));
+                Err(err)
+            }
+        }
+    }
+
+    /// Arms a [`AlertCondition::DrawingLine`] alert on the currently selected Main-pane drawing
+    /// (`HorizontalLine`, finite `TrendLine`, or $360^\circ$ `Ray`).
+    pub fn add_alert_on_selected_drawing(
+        &mut self,
+        direction: CrossDirection,
+    ) -> Result<AlertId, AlertError> {
+        let Some(drawing_id) = self.drawings.selected_id else {
+            let err = AlertError::DrawingNotFound(0);
+            self.last_alert_status = Some((
+                true,
+                "select a Main-pane HorizontalLine, TrendLine, or Ray first".to_owned(),
+            ));
+            return Err(err);
+        };
+        let cursor_idx = self.current_trading_cursor_base_index();
+        let cutoff = self.replay.cutoff_timestamp(&self.base_candles);
+        let res = self.alerts.add_alert(
+            &self.symbol,
+            self.active_timeframe,
+            AlertCondition::DrawingLine {
+                drawing_id,
+                direction,
+            },
+            self.alert_frequency,
+            None,
+            &self.base_candles,
+            cursor_idx,
+            cutoff,
+            Some(&self.drawings),
+        );
+        match res {
+            Ok(id) => {
+                self.alerts_synced_key = None;
+                self.sync_alerts_causal();
+                self.show_alerts_panel = true;
+                self.right_dock_tab = RightDockTab::Alerts;
+                self.last_alert_status = Some((
+                    false,
+                    format!(
+                        "Armed #{} on Drawing #{} ({})",
+                        id,
+                        drawing_id,
+                        direction.short_label()
+                    ),
+                ));
+                Ok(id)
+            }
+            Err(err) => {
+                self.last_alert_status = Some((true, err.to_string()));
+                Err(err)
+            }
+        }
+    }
+
+    /// Submits the draft alert rule configured in the right-side Alerts Manager panel.
+    pub fn submit_draft_alert(&mut self) -> Result<AlertId, AlertError> {
+        let condition = match self.alert_draft_kind {
+            AlertDraftKind::PriceLevel => {
+                let cleaned = self.alert_value_input.trim().replace(',', "");
+                let price = cleaned
+                    .parse::<f64>()
+                    .map_err(|_| AlertError::InvalidPriceLevel)
+                    .inspect_err(|err| {
+                        self.last_alert_status = Some((true, err.to_string()));
+                    })?;
+                AlertCondition::PriceLevel {
+                    price,
+                    direction: self.alert_direction,
+                }
+            }
+            AlertDraftKind::RsiThreshold => {
+                let cleaned = self.alert_value_input.trim().replace(',', "");
+                let level = if cleaned.is_empty() {
+                    30.0
+                } else {
+                    cleaned
+                        .parse::<f64>()
+                        .map_err(|_| AlertError::InvalidIndicatorParams)
+                        .inspect_err(|err| {
+                            self.last_alert_status = Some((true, err.to_string()));
+                        })?
+                };
+                AlertCondition::RsiThreshold {
+                    period: 14,
+                    level,
+                    direction: self.alert_direction,
+                }
+            }
+            AlertDraftKind::MacdZeroCross => AlertCondition::MacdHistogramZeroCross {
+                fast: 12,
+                slow: 26,
+                signal: 9,
+                direction: self.alert_direction,
+            },
+            AlertDraftKind::SelectedDrawing => {
+                let Some(drawing_id) = self.drawings.selected_id else {
+                    let err = AlertError::DrawingNotFound(0);
+                    self.last_alert_status = Some((
+                        true,
+                        "select a Main-pane HorizontalLine, TrendLine, or Ray".to_owned(),
+                    ));
+                    return Err(err);
+                };
+                AlertCondition::DrawingLine {
+                    drawing_id,
+                    direction: self.alert_direction,
+                }
+            }
+        };
+
+        let cursor_idx = self.current_trading_cursor_base_index();
+        let cutoff = self.replay.cutoff_timestamp(&self.base_candles);
+        let custom_msg = (!self.alert_message_input.trim().is_empty())
+            .then(|| self.alert_message_input.trim().to_owned());
+        match self.alerts.add_alert(
+            &self.symbol,
+            self.active_timeframe,
+            condition,
+            self.alert_frequency,
+            custom_msg,
+            &self.base_candles,
+            cursor_idx,
+            cutoff,
+            Some(&self.drawings),
+        ) {
+            Ok(id) => {
+                self.alert_message_input.clear();
+                self.alerts_synced_key = None;
+                self.sync_alerts_causal();
+                self.last_alert_status = Some((false, format!("Armed alert #{id}")));
+                Ok(id)
+            }
+            Err(err) => {
+                self.last_alert_status = Some((true, err.to_string()));
+                Err(err)
+            }
+        }
+    }
+
+    /// Opens the keyboard-first `Cmd+K` / `Ctrl+K` Command Palette modal and requests input focus.
+    pub fn open_command_palette(&mut self) {
+        self.drawings.cancel_active_gesture();
+        self.viewport.cancel_active_interactions();
+        self.ensure_watchlist_universe_loaded();
+        self.command_palette.open = true;
+        self.command_palette.selected_index = 0;
+        self.command_palette.request_focus = true;
+    }
+
+    /// Closes the `Cmd+K` Command Palette modal cleanly.
+    pub fn close_command_palette(&mut self) {
+        self.command_palette.open = false;
+        self.command_palette.request_focus = false;
+    }
+
+    /// Toggles the `Cmd+K` Command Palette modal (`open <-> closed`).
+    pub fn toggle_command_palette(&mut self) {
+        if self.command_palette.open {
+            self.close_command_palette();
+        } else {
+            self.open_command_palette();
+        }
+    }
+
+    /// Builds and ranks all eligible `Cmd+K` Command Palette candidates for `self.command_palette.query`.
+    pub fn build_command_palette_candidates(&mut self) -> Vec<PaletteCandidate> {
+        self.sync_scanner_caches();
+        let q = self.command_palette.query.trim().to_owned();
+        let mut out = Vec::with_capacity(48);
+
+        // 1. Dynamic `alert <price>` synthesis (`"alert 1295"`, `"alert > 1295"`, `"alert < 68500"`)
+        let parsed_quick_alert = parse_quick_alert_query(&q, self.current_mark_price());
+        if let Some((price, dir)) = parsed_quick_alert {
+            out.push(PaletteCandidate {
+                category: PaletteCategory::Alert,
+                title: format!(
+                    "Create Price Alert: {} {} {:.2}",
+                    self.symbol,
+                    dir.short_label(),
+                    price
+                ),
+                subtitle: format!("Arm on {} ({})", self.symbol, self.timeframe),
+                keywords: "alert price cross level".to_owned(),
+                score: 10_000,
+                action: PaletteAction::QuickPriceAlert {
+                    price,
+                    direction: dir,
+                },
+            });
+        }
+
+        let effective_match_q = if parsed_quick_alert.is_some() {
+            "alert"
+        } else {
+            q.as_str()
+        };
+
+        let mut push_scored = |category: PaletteCategory,
+                               title: String,
+                               subtitle: String,
+                               keywords: String,
+                               action: PaletteAction| {
+            if let Some(score) = score_palette_match(effective_match_q, &title, &keywords) {
+                out.push(PaletteCandidate {
+                    category,
+                    title,
+                    subtitle,
+                    keywords,
+                    score,
+                    action,
+                });
+            }
+        };
+
+        // 2. Multi-Asset Watchlist Symbols (`13` bundled feeds + any multi-symbol custom feeds)
+        let mut universe_snapshot: Vec<(String, DataSourcePreset, String, Timeframe)> = self
+            .watchlist_universe
+            .iter()
+            .map(|e| {
+                (
+                    e.instrument_id.clone(),
+                    e.preset,
+                    e.symbol.clone(),
+                    e.base_timeframe,
+                )
+            })
+            .collect();
+        if self.data_source == DataSourcePreset::CustomFile {
+            for e in &self.custom_peer_feeds {
+                universe_snapshot.push((
+                    e.instrument_id.clone(),
+                    e.preset,
+                    e.symbol.clone(),
+                    e.base_timeframe,
+                ));
+            }
+        }
+        for (inst_id, preset, sym, base_tf) in universe_snapshot {
+            let row_info = self
+                .raw_watchlist_rows_cache
+                .iter()
+                .find(|r| r.instrument_id == inst_id)
+                .map_or_else(
+                    || format!("{} · base {base_tf}", preset.short_label()),
+                    |r| {
+                        format!(
+                            "{} · {:.2} ({:+.2}%) · {}",
+                            preset.short_label(),
+                            r.last_close,
+                            r.change_pct,
+                            r.regime.full_label()
+                        )
+                    },
+                );
+            push_scored(
+                PaletteCategory::Symbol,
+                format!("{sym} — Switch Symbol"),
+                row_info,
+                format!("symbol ticker switch {} {}", sym, preset.short_label()),
+                PaletteAction::SelectWatchlistSymbol {
+                    preset,
+                    symbol: sym,
+                },
+            );
+        }
+
+        // 3. Multi-Timeframe Lattice (`1m..1W` allowed from `self.base_timeframe`)
+        for tf in Timeframe::ALL {
+            if self.base_timeframe.can_aggregate_to(tf) {
+                let active_tag = if self.active_timeframe == tf {
+                    "Current active timeframe"
+                } else {
+                    "Aggregate causal OHLCV & remap drawings"
+                };
+                push_scored(
+                    PaletteCategory::Timeframe,
+                    format!("Timeframe: {}", tf.label()),
+                    active_tag.to_owned(),
+                    format!("tf timeframe interval {}", tf.label()),
+                    PaletteAction::SetTimeframe(tf),
+                );
+            }
+        }
+
+        // 4. Technical Indicators (`SMA`, `EMA`, `BB`, `RSI`, `MACD`, `ATR`)
+        for (key, name, on) in [
+            ("SMA", "SMA(20) Overlay", self.indicators.show_sma),
+            ("EMA", "EMA(50) Overlay", self.indicators.show_ema),
+            (
+                "BB",
+                "Bollinger Bands(20, 2.0)",
+                self.indicators.show_bbands,
+            ),
+            ("RSI", "RSI(14) Sub-Pane", self.indicators.show_rsi),
+            (
+                "MACD",
+                "MACD(12, 26, 9) Sub-Pane",
+                self.indicators.show_macd,
+            ),
+            ("ATR", "ATR(14) Sub-Pane", self.indicators.show_atr),
+        ] {
+            push_scored(
+                PaletteCategory::Indicator,
+                format!("Toggle Indicator: {name}"),
+                if on { "Currently ON" } else { "Currently OFF" }.to_owned(),
+                format!("indicator overlay oscillator {key} {name}"),
+                PaletteAction::ToggleIndicator(key),
+            );
+        }
+
+        // 5. Drawing Tools & Magnet
+        for tool in [
+            DrawingTool::Select,
+            DrawingTool::HorizontalLine,
+            DrawingTool::TrendLine,
+            DrawingTool::Ray,
+            DrawingTool::Rectangle,
+            DrawingTool::FibonacciRetracement,
+        ] {
+            push_scored(
+                PaletteCategory::Drawing,
+                format!("Drawing Tool: {}", tool.short_label()),
+                "Activate chart annotation tool".to_owned(),
+                format!("draw tool annotation {}", tool.short_label()),
+                PaletteAction::SelectDrawingTool(tool),
+            );
+        }
+        push_scored(
+            PaletteCategory::Drawing,
+            "Toggle OHLC Magnet Mode".to_owned(),
+            format!("Current: {:?}", self.drawings.magnet_mode),
+            "magnet snap ohlc drawing".to_owned(),
+            PaletteAction::ToggleMagnet,
+        );
+
+        // 6. Workspace Docks, Alerts, Trading, Replay & Scale Modes
+        push_scored(
+            PaletteCategory::Workspace,
+            "Toggle Watchlist & Technical Scanner Dock".to_owned(),
+            if self.show_scanner_dock {
+                "Hide left scanner dock".to_owned()
+            } else {
+                "Open left multi-symbol scanner & signals dock".to_owned()
+            },
+            "watchlist scanner signals screener dock left".to_owned(),
+            PaletteAction::ToggleScannerDock,
+        );
+        let pal_cutoff = self.replay.cutoff_timestamp(&self.base_candles);
+        let pal_vis_rules = self
+            .alerts
+            .rules
+            .iter()
+            .filter(|r| r.is_causally_visible(pal_cutoff))
+            .count();
+        let pal_vis_trigs = self
+            .alerts
+            .triggers
+            .iter()
+            .filter(|ev| pal_cutoff.is_none_or(|cut| alert_event_eval_timestamp(ev) <= cut))
+            .count();
+        push_scored(
+            PaletteCategory::Alert,
+            "Open Alerts Manager & Trigger Log".to_owned(),
+            format!("{pal_vis_rules} rules · {pal_vis_trigs} causal triggers"),
+            "alerts alarm trigger log right panel".to_owned(),
+            PaletteAction::OpenAlertsTab,
+        );
+        if self.current_mark_price() > 0.0 {
+            let mark = self.current_mark_price();
+            let up_px = ((mark * 1.01) * 100.0).round() / 100.0;
+            push_scored(
+                PaletteCategory::Alert,
+                format!("Quick Alert +1% Above Mark ({up_px:.2})"),
+                format!("Arm Once alert on {} @ {up_px:.2}", self.symbol),
+                "quick alert price above mark".to_owned(),
+                PaletteAction::QuickPriceAlert {
+                    price: up_px,
+                    direction: CrossDirection::CrossAbove,
+                },
+            );
+        }
+        push_scored(
+            PaletteCategory::Trading,
+            "Open Paper Trading Ticket & Blotter".to_owned(),
+            "Inspect equity, submit Market/Limit/Stop orders".to_owned(),
+            "paper trade ticket order blotter position equity".to_owned(),
+            PaletteAction::OpenTradingTab,
+        );
+        push_scored(
+            PaletteCategory::Replay,
+            "Toggle Bar Replay Transport Dock".to_owned(),
+            "Show/hide causal replay controls".to_owned(),
+            "bar replay transport dock".to_owned(),
+            PaletteAction::ToggleReplayBar,
+        );
+        if !self.replay.is_active() && self.base_candles.len() >= 4 {
+            push_scored(
+                PaletteCategory::Replay,
+                "Start Causal Bar Replay at 70% Cut".to_owned(),
+                "Slice chart at 70% history with zero lookahead".to_owned(),
+                "replay start cut 70% practice".to_owned(),
+                PaletteAction::CutReplay70Pct,
+            );
+        }
+        if self.replay.is_active() {
+            push_scored(
+                PaletteCategory::Replay,
+                "Replay: Step Forward +1 Bar".to_owned(),
+                "Advance causal replay frontier by 1 step".to_owned(),
+                "replay step forward next bar".to_owned(),
+                PaletteAction::StepReplayForward,
+            );
+            push_scored(
+                PaletteCategory::Replay,
+                "Replay: Step Backward -1 Bar".to_owned(),
+                "Rewind causal replay frontier by 1 step".to_owned(),
+                "replay step backward rewind prev".to_owned(),
+                PaletteAction::StepReplayBackward,
+            );
+            push_scored(
+                PaletteCategory::Replay,
+                "Replay: Exit to Live Full Series".to_owned(),
+                "Restore full unmasked OHLCV series".to_owned(),
+                "replay exit stop live".to_owned(),
+                PaletteAction::ExitReplay,
+            );
+        }
+        for mode in [
+            PriceScaleMode::Normal,
+            PriceScaleMode::Logarithmic,
+            PriceScaleMode::Percentage,
+            PriceScaleMode::IndexedTo100,
+        ] {
+            push_scored(
+                PaletteCategory::Scale,
+                format!("Price Scale: {}", mode.label()),
+                "Switch vertical price axis transformation".to_owned(),
+                format!("scale axis price mode {}", mode.label()),
+                PaletteAction::SetScaleMode(mode),
+            );
+        }
+        push_scored(
+            PaletteCategory::Workspace,
+            "Fit Entire Series to Viewport".to_owned(),
+            "Fit [0..N) bars & reset all pane autoscales".to_owned(),
+            "fit all content zoom full".to_owned(),
+            PaletteAction::FitContent,
+        );
+        push_scored(
+            PaletteCategory::Workspace,
+            "Reset Chart Viewport to Default".to_owned(),
+            "Restore 8px bar spacing & autoscale".to_owned(),
+            "reset default view camera".to_owned(),
+            PaletteAction::ResetView,
+        );
+
+        if !q.is_empty() {
+            out.sort_by(|a, b| {
+                b.score
+                    .cmp(&a.score)
+                    .then_with(|| a.title.len().cmp(&b.title.len()))
+                    .then_with(|| a.title.cmp(&b.title))
+            });
+        }
+        out
+    }
+
+    /// Dispatches a selected [`PaletteAction`] and closes the `Cmd+K` Command Palette.
+    pub fn execute_palette_action(&mut self, action: PaletteAction) {
+        self.close_command_palette();
+        match action {
+            PaletteAction::SelectWatchlistSymbol { preset, symbol } => {
+                self.select_watchlist_instrument(preset, &symbol);
+            }
+            PaletteAction::SetTimeframe(tf) => {
+                let _ = self.set_timeframe(tf);
+            }
+            PaletteAction::ToggleIndicator(key) => match key {
+                "SMA" => self.indicators.show_sma = !self.indicators.show_sma,
+                "EMA" => self.indicators.show_ema = !self.indicators.show_ema,
+                "BB" => self.indicators.show_bbands = !self.indicators.show_bbands,
+                "RSI" => {
+                    self.indicators.show_rsi = !self.indicators.show_rsi;
+                    if self.indicators.show_rsi {
+                        self.viewport.rsi_price_scale.reset_auto_scale();
+                    }
+                }
+                "MACD" => {
+                    self.indicators.show_macd = !self.indicators.show_macd;
+                    if self.indicators.show_macd {
+                        self.viewport.macd_price_scale.reset_auto_scale();
+                    }
+                }
+                "ATR" => {
+                    self.indicators.show_atr = !self.indicators.show_atr;
+                    if self.indicators.show_atr {
+                        self.viewport.atr_price_scale.reset_auto_scale();
+                    }
+                }
+                _ => {}
+            },
+            PaletteAction::SelectDrawingTool(tool) => {
+                if tool != DrawingTool::Select {
+                    self.cancel_replay_cut_selection();
+                }
+                self.drawings.set_tool(tool);
+            }
+            PaletteAction::ToggleMagnet => {
+                self.drawings.magnet_mode = match self.drawings.magnet_mode {
+                    MagnetMode::Off => MagnetMode::Ohlc,
+                    MagnetMode::Ohlc => MagnetMode::Off,
+                };
+            }
+            PaletteAction::ToggleScannerDock => {
+                self.show_scanner_dock = !self.show_scanner_dock;
+            }
+            PaletteAction::OpenAlertsTab => {
+                self.show_alerts_panel = true;
+                self.right_dock_tab = RightDockTab::Alerts;
+            }
+            PaletteAction::OpenTradingTab => {
+                self.show_trading_panel = true;
+                self.right_dock_tab = RightDockTab::Trading;
+            }
+            PaletteAction::QuickPriceAlert { price, direction } => {
+                let _ = self.add_quick_price_alert(price, direction);
+            }
+            PaletteAction::ToggleReplayBar => {
+                if self.show_replay_bar && !self.replay.is_active() {
+                    self.show_replay_bar = false;
+                    self.replay.cancel_cut_selection();
+                } else {
+                    self.show_replay_bar = true;
+                }
+            }
+            PaletteAction::CutReplay70Pct => {
+                if self.base_candles.len() >= 4 {
+                    let cut = (self.base_candles.len() * 70) / 100;
+                    let _ = self.start_replay_at_base_index(cut);
+                }
+            }
+            PaletteAction::StepReplayForward => {
+                let _ = self.step_replay_forward(1);
+            }
+            PaletteAction::StepReplayBackward => {
+                let _ = self.step_replay_backward(1);
+            }
+            PaletteAction::ExitReplay => {
+                self.exit_replay();
+                self.show_replay_bar = false;
+            }
+            PaletteAction::SetScaleMode(mode) => {
+                self.set_scale_mode(mode);
+            }
+            PaletteAction::FitContent => {
+                self.fit_content();
+            }
+            PaletteAction::ResetView => {
+                self.reset_view();
+            }
+        }
+    }
+}
+
+/// Pure deterministic fuzzy/substring scorer for the `Cmd+K` Command Palette (`Milestone R08`).
+#[must_use]
+pub fn score_palette_match(query: &str, title: &str, keywords: &str) -> Option<i32> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Some(0);
+    }
+    let title_l = title.to_ascii_lowercase();
+    let kw_l = keywords.to_ascii_lowercase();
+    let mut total_score = 0_i32;
+
+    for token in trimmed.split_whitespace() {
+        let tok = token.to_ascii_lowercase();
+        if tok.is_empty() {
+            continue;
+        }
+        if title_l == tok {
+            total_score += 600;
+        } else if title_l.starts_with(&tok) {
+            total_score += 360;
+        } else if title_l
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|w| w.starts_with(&tok))
+        {
+            total_score += 240;
+        } else if title_l.contains(&tok) {
+            total_score += 140;
+        } else if kw_l.contains(&tok) {
+            total_score += 90;
+        } else {
+            let subseq_bonus = ordered_subsequence_score(&tok, &title_l)?;
+            total_score += 40 + subseq_bonus;
+        }
+    }
+
+    Some(total_score - (title.len().min(80) as i32))
+}
+
+fn ordered_subsequence_score(needle: &str, haystack: &str) -> Option<i32> {
+    if needle.len() < 2 {
+        return None;
+    }
+    let mut hay_chars = haystack.char_indices();
+    let mut prev_pos: Option<usize> = None;
+    let mut consecutive_bonus = 0_i32;
+    for nc in needle.chars() {
+        let (pos, _) = hay_chars.find(|&(_, hc)| hc == nc)?;
+        if let Some(p) = prev_pos
+            && pos == p + 1
+        {
+            consecutive_bonus += 12;
+        }
+        prev_pos = Some(pos);
+    }
+    Some(consecutive_bonus)
+}
+
+fn parse_quick_alert_query(query: &str, mark_price: f64) -> Option<(f64, CrossDirection)> {
+    let lower = query.trim().to_ascii_lowercase();
+    let rest = lower
+        .strip_prefix("alert ")
+        .or_else(|| lower.strip_prefix("alt "))?;
+    let trimmed = rest.trim();
+    let (explicit_dir, num_part) = if let Some(s) = trimmed.strip_prefix(">=") {
+        (Some(CrossDirection::CrossAbove), s.trim())
+    } else if let Some(s) = trimmed.strip_prefix('>') {
+        (Some(CrossDirection::CrossAbove), s.trim())
+    } else if let Some(s) = trimmed.strip_prefix("<=") {
+        (Some(CrossDirection::CrossBelow), s.trim())
+    } else if let Some(s) = trimmed.strip_prefix('<') {
+        (Some(CrossDirection::CrossBelow), s.trim())
+    } else if let Some(s) = trimmed.strip_prefix("above ") {
+        (Some(CrossDirection::CrossAbove), s.trim())
+    } else if let Some(s) = trimmed.strip_prefix("below ") {
+        (Some(CrossDirection::CrossBelow), s.trim())
+    } else {
+        (None, trimmed)
+    };
+    let price_tok = num_part.split_whitespace().next()?.replace(',', "");
+    let price = price_tok.parse::<f64>().ok()?;
+    if !price.is_finite() || price <= 0.0 || price > crate::data::MAX_ABS_PRICE {
+        return None;
+    }
+    let dir = explicit_dir.unwrap_or(if mark_price > 0.0 && price < mark_price {
+        CrossDirection::CrossBelow
+    } else {
+        CrossDirection::CrossAbove
+    });
+    Some((price, dir))
+}
+
+fn compute_drawings_alert_digest(store: &DrawingStore) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325_u64;
+    let mix = |h: &mut u64, v: u64| {
+        *h ^= v;
+        *h = h.wrapping_mul(0x0100_0000_01b3);
+    };
+    for d in &store.drawings {
+        if d.pane != DrawingPaneTarget::Main {
+            continue;
+        }
+        mix(&mut h, d.id);
+        mix(&mut h, u64::from(d.visible));
+        mix(&mut h, d.created_at_timestamp.unwrap_or(-1) as u64);
+        match d.geometry {
+            DrawingGeometry::HorizontalLine { anchor } => {
+                mix(&mut h, 1);
+                mix(&mut h, anchor.bar_index.to_bits());
+                mix(&mut h, anchor.value.to_bits());
+                mix(&mut h, anchor.timestamp.map_or(u64::MAX, f64::to_bits));
+            }
+            DrawingGeometry::TrendLine { start, end } => {
+                mix(&mut h, 2);
+                mix(&mut h, start.bar_index.to_bits());
+                mix(&mut h, start.value.to_bits());
+                mix(&mut h, start.timestamp.map_or(u64::MAX, f64::to_bits));
+                mix(&mut h, end.bar_index.to_bits());
+                mix(&mut h, end.value.to_bits());
+                mix(&mut h, end.timestamp.map_or(u64::MAX, f64::to_bits));
+            }
+            DrawingGeometry::Ray { origin, through } => {
+                mix(&mut h, 3);
+                mix(&mut h, origin.bar_index.to_bits());
+                mix(&mut h, origin.value.to_bits());
+                mix(&mut h, origin.timestamp.map_or(u64::MAX, f64::to_bits));
+                mix(&mut h, through.bar_index.to_bits());
+                mix(&mut h, through.value.to_bits());
+                mix(&mut h, through.timestamp.map_or(u64::MAX, f64::to_bits));
+            }
+            DrawingGeometry::Rectangle { .. } | DrawingGeometry::FibonacciRetracement { .. } => {}
+        }
+    }
+    h
+}
+
+fn compute_alert_rules_digest(engine: &AlertEngine) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325_u64;
+    let mix = |h: &mut u64, v: u64| {
+        *h ^= v;
+        *h = h.wrapping_mul(0x0100_0000_01b3);
+    };
+    mix(&mut h, engine.rules.len() as u64);
+    for r in &engine.rules {
+        mix(&mut h, r.id);
+        mix(&mut h, r.status as u64);
+        mix(&mut h, r.frequency as u64);
+        mix(&mut h, r.timeframe.seconds() as u64);
+        mix(&mut h, r.armed_at_timestamp as u64);
+        match r.condition {
+            AlertCondition::PriceLevel { price, direction } => {
+                mix(&mut h, 11);
+                mix(&mut h, price.to_bits());
+                mix(&mut h, direction as u64);
+            }
+            AlertCondition::RsiThreshold {
+                period,
+                level,
+                direction,
+            } => {
+                mix(&mut h, 12);
+                mix(&mut h, period as u64);
+                mix(&mut h, level.to_bits());
+                mix(&mut h, direction as u64);
+            }
+            AlertCondition::MacdHistogramZeroCross {
+                fast,
+                slow,
+                signal,
+                direction,
+            } => {
+                mix(&mut h, 13);
+                mix(&mut h, fast as u64);
+                mix(&mut h, slow as u64);
+                mix(&mut h, signal as u64);
+                mix(&mut h, direction as u64);
+            }
+            AlertCondition::DrawingLine {
+                drawing_id,
+                direction,
+            } => {
+                mix(&mut h, 14);
+                mix(&mut h, drawing_id);
+                mix(&mut h, direction as u64);
+            }
+        }
+    }
+    h
 }
 
 fn default_ticket_qty_string(mark_price: f64, initial_cash: f64) -> String {
@@ -1805,7 +3311,34 @@ impl SumiWorkstationApp {
     /// Trading panel, status bar, and multi-pane chart canvas). Shared identically between
     /// interactive `eframe` sessions and offscreen Metal/`wgpu` Retina verification captures.
     pub fn render_workstation_ui(&mut self, ui: &mut egui::Ui) {
-        if self.replay.is_playing() {
+        // Global keyboard-first `Cmd+K` / `Ctrl+K` Command Palette toggle (`Milestone R08`)
+        let cmd_k_pressed = ui.input_mut(|i| {
+            i.consume_key(egui::Modifiers::COMMAND, egui::Key::K)
+                || i.consume_key(egui::Modifiers::CTRL, egui::Key::K)
+        });
+        if cmd_k_pressed {
+            self.toggle_command_palette();
+        }
+
+        if self.command_palette.open {
+            let vp_rect = ui.input(|i| i.viewport_rect());
+            let modal_est = command_palette_modal_rect_estimate(vp_rect);
+            ui.input_mut(|i| {
+                let _ = i.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
+                let _ = i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab);
+                if i.pointer
+                    .hover_pos()
+                    .is_none_or(|pos| !modal_est.contains(pos))
+                {
+                    i.smooth_scroll_delta = Vec2::ZERO;
+                    i.raw
+                        .events
+                        .retain(|ev| !matches!(ev, egui::Event::MouseWheel { .. }));
+                }
+            });
+        }
+
+        if self.replay.is_playing() && !self.command_palette.open {
             let dt = f64::from(ui.input(|i| i.stable_dt).max(0.0));
             if dt > 0.0
                 && let Some(tr) =
@@ -1821,6 +3354,9 @@ impl SumiWorkstationApp {
             }
         }
 
+        // Dirty-tracked causal Alert evaluation (`0.000 ms` on idle hover/pan/zoom frames!)
+        self.sync_alerts_causal();
+
         let was_selecting_cut_bar = self.replay.selecting_cut_bar;
 
         // 1. Top Workstation Toolbar
@@ -1832,6 +3368,10 @@ impl SumiWorkstationApp {
         egui::Panel::top("workstation_top_toolbar")
             .frame(top_frame)
             .show(ui, |ui| {
+                if self.command_palette.open {
+                    ui.visuals_mut().disabled_alpha = 1.0;
+                    ui.disable();
+                }
                 // Row 1: Identity, Price Ticker, Data Feeds, Multi-Timeframe Selector (`1m..1W`) & Replay/Trade Toggles
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = Vec2::new(5.0, 4.0);
@@ -1985,6 +3525,13 @@ impl SumiWorkstationApp {
 
                     ui.separator();
 
+                    let _ = indicator_toggle_pill(
+                        ui,
+                        &mut self.show_scanner_dock,
+                        "Watchlist / Scan",
+                        Color32::from_rgb(41, 182, 246),
+                    );
+
                     let mut replay_dock_open = self.show_replay_bar || self.replay.is_active();
                     if indicator_toggle_pill(
                         ui,
@@ -2000,12 +3547,50 @@ impl SumiWorkstationApp {
                         }
                     }
 
-                    let _ = indicator_toggle_pill(
+                    if indicator_toggle_pill(
                         ui,
                         &mut self.show_trading_panel,
                         "Paper Trade",
                         palette::TRADE_ENTRY_BLUE,
-                    );
+                    ) && self.show_trading_panel
+                    {
+                        self.right_dock_tab = RightDockTab::Trading;
+                    }
+
+                    let tb_cutoff = self.replay.cutoff_timestamp(&self.base_candles);
+                    let vis_rules = self
+                        .alerts
+                        .rules
+                        .iter()
+                        .filter(|r| r.is_causally_visible(tb_cutoff))
+                        .count();
+                    let alerts_lbl = if vis_rules == 0 {
+                        "Alerts".to_owned()
+                    } else {
+                        format!(
+                            "Alerts ({}/{vis_rules})",
+                            self.alerts.armed_count(tb_cutoff)
+                        )
+                    };
+                    if indicator_toggle_pill(
+                        ui,
+                        &mut self.show_alerts_panel,
+                        &alerts_lbl,
+                        palette::ALERT_ARMED_AMBER,
+                    ) && self.show_alerts_panel
+                    {
+                        self.right_dock_tab = RightDockTab::Alerts;
+                    }
+
+                    let mut palette_open = self.command_palette.open;
+                    if indicator_toggle_pill(
+                        ui,
+                        &mut palette_open,
+                        "Cmd+K",
+                        Color32::from_rgb(179, 136, 255),
+                    ) {
+                        self.toggle_command_palette();
+                    }
                 });
 
                 // Optional Non-Modal CSV/JSON File Import Bar
@@ -2281,6 +3866,17 @@ impl SumiWorkstationApp {
                         {
                             let _ = self.sync_ticket_from_selected_drawing();
                         }
+                        if sel.pane == DrawingPaneTarget::Main
+                            && matches!(
+                                sel.geometry,
+                                DrawingGeometry::HorizontalLine { .. }
+                                    | DrawingGeometry::TrendLine { .. }
+                                    | DrawingGeometry::Ray { .. }
+                            )
+                            && ui.button("-> Alert").clicked()
+                        {
+                            let _ = self.add_alert_on_selected_drawing(self.alert_direction);
+                        }
                     }
                 });
 
@@ -2304,7 +3900,11 @@ impl SumiWorkstationApp {
         egui::Panel::bottom("workstation_status_bar")
             .frame(bottom_frame)
             .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
+                if self.command_palette.open {
+                    ui.visuals_mut().disabled_alpha = 1.0;
+                    ui.disable();
+                }
+                ui.horizontal(|ui| {
                     let visible = self.visible_slice();
                     let first_date = visible.first().map_or("-", |c| c.date_label.as_str());
                     let last_date = visible.last().map_or("-", |c| c.date_label.as_str());
@@ -2312,16 +3912,11 @@ impl SumiWorkstationApp {
                     let auto_tag = if self.viewport.main_price_scale.is_auto_scale() {
                         "AUTO"
                     } else {
-                        "MANUAL"
-                    };
-
-                    let mag_tag = match self.drawings.magnet_mode {
-                        MagnetMode::Off => "OFF",
-                        MagnetMode::Ohlc => "OHLC",
+                        "MAN"
                     };
                     let replay_tag = if self.replay.is_active() {
                         format!(
-                            "{} ({}/{})",
+                            "{} {}/{}",
                             self.replay.status.short_label(),
                             self.replay
                                 .base_cursor_index
@@ -2330,50 +3925,90 @@ impl SumiWorkstationApp {
                             self.base_candles.len()
                         )
                     } else if self.replay.selecting_cut_bar {
-                        "SELECT CUT".to_owned()
+                        "CUT".to_owned()
                     } else {
                         "LIVE".to_owned()
                     };
                     let metrics = self.trading.metrics(self.current_mark_price());
+                    let sb_cutoff = self.replay.cutoff_timestamp(&self.base_candles);
+                    let armed_alerts = self.alerts.armed_count(sb_cutoff);
+                    let trig_events = self
+                        .alerts
+                        .triggers
+                        .iter()
+                        .filter(|ev| {
+                            sb_cutoff.is_none_or(|cut| alert_event_eval_timestamp(ev) <= cut)
+                        })
+                        .count();
                     if let Some(rep) = self.last_report {
-                        ui.label(
-                            RichText::new(format!(
-                                "R07 WORKSTATION   |   FEED: {} ({}->{})   |   REPLAY: {replay_tag}   |   EQUITY: ${:.0} ({:+.0} / {} fills)   |   PANES: {} (OVL: {})   |   DRAW: {} ({mag_tag})   |   BARS: {} drawn / {} ({first_date}..{last_date})   |   CONF: {}x   |   {scale_mode} ({auto_tag})   |   {:.0}×{:.0}px",
-                                self.data_source.short_label(),
-                                self.base_timeframe,
-                                self.active_timeframe,
-                                metrics.equity,
-                                metrics.net_pnl,
-                                metrics.fill_count,
-                                rep.pane_count,
-                                rep.active_overlay_count,
-                                rep.drawing_count,
-                                rep.rendered_candle_count,
-                                self.candles.len(),
-                                rep.conflation_factor,
-                                rep.layout.plot_rect.width(),
-                                rep.layout.plot_rect.height(),
-                            ))
-                            .monospace()
-                            .size(11.0)
-                            .color(palette::TEXT_MUTED),
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(format!(
+                                    "R08  |  {} ({}->{})  |  RPL: {replay_tag}  |  ALT: {armed_alerts}A/{trig_events}T  |  EQ: ${:.0} ({:+.0})  |  {}P/{}D  |  BARS: {}/{} ({first_date}..{last_date}) {}x  |  {scale_mode}({auto_tag})  |  {:.0}×{:.0}",
+                                    self.data_source.short_label(),
+                                    self.base_timeframe,
+                                    self.active_timeframe,
+                                    metrics.equity,
+                                    metrics.net_pnl,
+                                    rep.pane_count,
+                                    rep.drawing_count,
+                                    rep.rendered_candle_count,
+                                    self.candles.len(),
+                                    rep.conflation_factor,
+                                    rep.layout.plot_rect.width(),
+                                    rep.layout.plot_rect.height(),
+                                ))
+                                .monospace()
+                                .size(10.2)
+                                .color(palette::TEXT_MUTED),
+                            )
+                            .truncate(),
                         );
                     } else {
-                        ui.label(
-                            RichText::new(format!(
-                                "R07 WORKSTATION   |   REPLAY: {replay_tag}   |   TOTAL BARS: {} ({first_date} .. {last_date})",
-                                self.candles.len()
-                            ))
-                            .monospace()
-                            .size(11.0)
-                            .color(palette::TEXT_MUTED),
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(format!(
+                                    "R08  |  RPL: {replay_tag}  |  ALT: {armed_alerts} armed  |  BARS: {} ({first_date}..{last_date})",
+                                    self.candles.len()
+                                ))
+                                .monospace()
+                                .size(10.2)
+                                .color(palette::TEXT_MUTED),
+                            )
+                            .truncate(),
                         );
                     }
                 });
             });
 
-        // 3. Optional Right-Side Paper Trading Execution & Blotter Panel (`Milestone R07`)
-        if self.show_trading_panel {
+        // 2b. Optional Left-Side Multi-Symbol Watchlist & Technical Scanner Dock (`Milestone R08`)
+        if self.show_scanner_dock {
+            let left_frame = Frame::new()
+                .fill(palette::BG_WORKSTATION)
+                .inner_margin(Margin::symmetric(8, 8))
+                .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE));
+
+            egui::Panel::left("scanner_watchlist_dock")
+                .resizable(true)
+                .default_size(276.0)
+                .size_range(236.0..=360.0)
+                .frame(left_frame)
+                .show(ui, |ui| {
+                    if self.command_palette.open {
+                        ui.visuals_mut().disabled_alpha = 1.0;
+                        ui.disable();
+                    }
+                    self.render_scanner_dock(ui);
+                });
+        }
+
+        // 3. Optional Unified Right-Side Paper Trading & Alerts Dock (`Milestones R07–R08`)
+        if self.show_trading_panel || self.show_alerts_panel {
+            if self.show_trading_panel && !self.show_alerts_panel {
+                self.right_dock_tab = RightDockTab::Trading;
+            } else if self.show_alerts_panel && !self.show_trading_panel {
+                self.right_dock_tab = RightDockTab::Alerts;
+            }
             let right_frame = Frame::new()
                 .fill(palette::BG_WORKSTATION)
                 .inner_margin(Margin::symmetric(10, 8))
@@ -2381,11 +4016,15 @@ impl SumiWorkstationApp {
 
             egui::Panel::right("paper_trading_panel")
                 .resizable(true)
-                .default_size(250.0)
-                .size_range(218.0..=304.0)
+                .default_size(258.0)
+                .size_range(222.0..=320.0)
                 .frame(right_frame)
                 .show(ui, |ui| {
-                    self.render_paper_trading_panel(ui);
+                    if self.command_palette.open {
+                        ui.visuals_mut().disabled_alpha = 1.0;
+                        ui.disable();
+                    }
+                    self.render_right_dock(ui);
                 });
         }
 
@@ -2400,19 +4039,31 @@ impl SumiWorkstationApp {
             .show(ui, |ui| {
                 let pre_ro = self.viewport.time_scale.right_offset();
                 let pre_bs = self.viewport.time_scale.bar_spacing();
+                let pre_draw_digest = compute_drawings_alert_digest(&self.drawings);
                 let replay_status_label = self
                     .replay
                     .is_active()
                     .then(|| self.replay.status.short_label());
+                let replay_cutoff_timestamp = self.replay.cutoff_timestamp(&self.base_candles);
+                let frontier_base_timestamp = self
+                    .base_candles
+                    .get(self.current_trading_cursor_base_index())
+                    .map(|c| c.timestamp);
                 let has_trading_visuals = self.show_trading_panel
                     || self.trading.open_position().is_some()
                     || !self.trading.fills().is_empty()
                     || self.trading.pending_orders().next().is_some();
+                let has_alert_visuals =
+                    !self.alerts.rules.is_empty() || !self.alerts.triggers.is_empty();
                 let overlay = ChartReplayTradingOverlay {
                     replay_active: self.replay.is_active(),
                     selecting_cut_bar: self.replay.selecting_cut_bar,
                     replay_status_label,
                     trading_session: has_trading_visuals.then_some(&self.trading),
+                    alert_engine: has_alert_visuals.then_some(&self.alerts),
+                    replay_cutoff_timestamp,
+                    frontier_base_timestamp,
+                    modal_open: self.command_palette.open,
                 };
                 self.last_report = render_workstation_chart_full(
                     ui,
@@ -2431,6 +4082,9 @@ impl SumiWorkstationApp {
                     overlay,
                 );
                 clicked_cut_idx = self.last_report.and_then(|r| r.clicked_cut_bar_index);
+                if compute_drawings_alert_digest(&self.drawings) != pre_draw_digest {
+                    self.sync_alerts_causal();
+                }
                 if (self.viewport.time_scale.right_offset() - pre_ro).abs() > 1e-6
                     || (self.viewport.time_scale.bar_spacing() - pre_bs).abs() > 1e-6
                 {
@@ -2443,8 +4097,13 @@ impl SumiWorkstationApp {
             ui.ctx().request_repaint();
         }
 
-        // 5. Non-modal keyboard transport shortcuts (suppressed whenever any text input holds focus)
-        if !ui.ctx().egui_wants_keyboard_input() {
+        // 4b. Floating `Cmd+K` / `Ctrl+K` Command Palette Modal (`Milestone R08`)
+        if self.command_palette.open {
+            self.render_command_palette_modal(ui);
+        }
+
+        // 5. Non-modal keyboard transport shortcuts (suppressed whenever modal or text input holds focus)
+        if !self.command_palette.open && !ui.ctx().egui_wants_keyboard_input() {
             let (esc_pressed, space_pressed, step_fwd, step_back) = ui.input(|i| {
                 let plain = !i.modifiers.command && !i.modifiers.ctrl && !i.modifiers.alt;
                 (
@@ -2637,6 +4296,53 @@ impl SumiWorkstationApp {
                         .size(11.0)
                         .color(palette::TEXT_PRIMARY),
                     );
+
+                    if let Some(ref ctx) = self.scanner_context {
+                        ui.separator();
+                        let cutoff = self.replay.cutoff_timestamp(&self.base_candles);
+                        if let Some(sig) = ctx.revealed_signal(cutoff) {
+                            let sig_color = match sig.direction {
+                                SignalDirection::Bullish => palette::BULLISH,
+                                SignalDirection::Bearish => palette::BEARISH,
+                            };
+                            Frame::new()
+                                .fill(sig_color.gamma_multiply(0.18))
+                                .stroke(Stroke::new(1.0, sig_color))
+                                .corner_radius(CornerRadius::same(3))
+                                .inner_margin(Margin::symmetric(6, 2))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{} · {} ({})",
+                                            ctx.intent().short_label(),
+                                            sig.signal.short_label(),
+                                            sig.direction.short_label()
+                                        ))
+                                        .monospace()
+                                        .strong()
+                                        .size(10.5)
+                                        .color(sig_color),
+                                    );
+                                });
+                        } else {
+                            Frame::new()
+                                .fill(palette::ALERT_ARMED_AMBER.gamma_multiply(0.18))
+                                .stroke(Stroke::new(1.0, palette::ALERT_ARMED_AMBER))
+                                .corner_radius(CornerRadius::same(3))
+                                .inner_margin(Margin::symmetric(6, 2))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(
+                                            "BLIND PRACTICE · Signal hidden until reached",
+                                        )
+                                        .monospace()
+                                        .strong()
+                                        .size(10.5)
+                                        .color(palette::ALERT_ARMED_AMBER),
+                                    );
+                                });
+                        }
+                    }
 
                     if ui.button("Exit ×").clicked() {
                         self.exit_replay();
@@ -3077,6 +4783,1253 @@ impl SumiWorkstationApp {
                 }
             });
     }
+
+    fn render_scanner_dock(&mut self, ui: &mut egui::Ui) {
+        self.sync_scanner_caches();
+        let active_key = self.current_instrument_key();
+        let rows = filter_and_sort_watchlist(
+            &self.raw_watchlist_rows_cache,
+            &self.scanner_filter,
+            self.watchlist_sort_col,
+            self.watchlist_sort_asc,
+        );
+        let hits = filter_historical_signals(&self.raw_historical_hits_cache, &self.scanner_filter);
+
+        ui.spacing_mut().item_spacing = Vec2::new(5.0, 6.0);
+
+        // 1. Header & Sub-Tab Switcher
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("WATCHLIST & SCANNER")
+                    .monospace()
+                    .strong()
+                    .size(11.5)
+                    .color(palette::TEXT_PRIMARY),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button(RichText::new("×").monospace().size(11.0))
+                    .clicked()
+                {
+                    self.show_scanner_dock = false;
+                }
+            });
+        });
+
+        ui.horizontal(|ui| {
+            let sp_x = ui.spacing().item_spacing.x;
+            let half_w = ((ui.available_width() - sp_x - 2.0) * 0.5).max(68.0);
+            for (tab, lbl) in [
+                (
+                    ScannerDockTab::Watchlist,
+                    format!("Watchlist ({})", rows.len()),
+                ),
+                (ScannerDockTab::Signals, format!("Signals ({})", hits.len())),
+            ] {
+                let selected = self.scanner_tab == tab;
+                let fill = if selected {
+                    palette::ACCENT_BLUE.gamma_multiply(0.26)
+                } else {
+                    Color32::from_rgb(22, 27, 38)
+                };
+                let stroke = if selected {
+                    Stroke::new(1.0, palette::ACCENT_BLUE)
+                } else {
+                    Stroke::new(1.0, palette::BORDER_SUBTLE)
+                };
+                let btn = Button::new(RichText::new(lbl).monospace().strong().size(10.5).color(
+                    if selected {
+                        Color32::WHITE
+                    } else {
+                        palette::TEXT_MUTED
+                    },
+                ))
+                .fill(fill)
+                .stroke(stroke)
+                .min_size(Vec2::new(half_w, 22.0));
+                if ui.add(btn).clicked() {
+                    self.scanner_tab = tab;
+                }
+            }
+        });
+
+        // 2. Shared Search & Filter Card
+        Frame::new()
+            .fill(Color32::from_rgb(19, 24, 35))
+            .corner_radius(CornerRadius::same(4))
+            .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+            .inner_margin(Margin::symmetric(6, 5))
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+                ui.horizontal(|ui| {
+                    let has_filter = !self.scanner_filter.search_query.is_empty()
+                        || self.scanner_filter.signal_filter.is_some()
+                        || self.scanner_filter.regime_filter.is_some()
+                        || self.scanner_filter.direction_filter.is_some()
+                        || self.scanner_filter.only_active_signals;
+                    let edit_w =
+                        (ui.available_width() - if has_filter { 38.0 } else { 4.0 }).max(90.0);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.scanner_filter.search_query)
+                            .desired_width(edit_w)
+                            .hint_text("Search symbol / regime / sig")
+                            .font(egui::FontId::monospace(10.5)),
+                    );
+                    truncate_utf8_bytes(&mut self.scanner_filter.search_query, 64);
+                    if has_filter
+                        && ui
+                            .button(RichText::new("Clr").monospace().size(9.5))
+                            .clicked()
+                    {
+                        self.scanner_filter = ScannerFilter::default();
+                    }
+                });
+
+                ui.horizontal_wrapped(|ui| {
+                    if self.scanner_tab == ScannerDockTab::Watchlist {
+                        let _ = indicator_toggle_pill(
+                            ui,
+                            &mut self.scanner_filter.only_active_signals,
+                            "Sig Only",
+                            palette::ALERT_ARMED_AMBER,
+                        );
+                    }
+                    for (dir_opt, lbl) in [
+                        (None, "All"),
+                        (Some(SignalDirection::Bullish), "Bull"),
+                        (Some(SignalDirection::Bearish), "Bear"),
+                    ] {
+                        if ui
+                            .selectable_label(
+                                self.scanner_filter.direction_filter == dir_opt,
+                                RichText::new(lbl).monospace().size(10.0),
+                            )
+                            .clicked()
+                        {
+                            self.scanner_filter.direction_filter = dir_opt;
+                        }
+                    }
+
+                    if self.scanner_tab == ScannerDockTab::Signals {
+                        ui.separator();
+                        for lb in [30_usize, 80, 180] {
+                            if ui
+                                .selectable_label(
+                                    self.signal_lookback_bars == lb,
+                                    RichText::new(format!("{lb}B")).monospace().size(10.0),
+                                )
+                                .clicked()
+                            {
+                                self.signal_lookback_bars = lb;
+                            }
+                        }
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    let reg_lbl = self
+                        .scanner_filter
+                        .regime_filter
+                        .map_or("Regime: All", MarketRegime::short_label);
+                    egui::ComboBox::from_id_salt("scanner_regime_combo")
+                        .width(102.0)
+                        .selected_text(RichText::new(reg_lbl).monospace().size(10.0))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.scanner_filter.regime_filter,
+                                None,
+                                "All Regimes",
+                            );
+                            for reg in MarketRegime::ALL_FILTERABLE {
+                                ui.selectable_value(
+                                    &mut self.scanner_filter.regime_filter,
+                                    Some(reg),
+                                    format!("{} ({})", reg.full_label(), reg.short_label()),
+                                );
+                            }
+                        });
+
+                    let sig_lbl = self
+                        .scanner_filter
+                        .signal_filter
+                        .map_or("Sig: All", ScanSignalKind::short_label);
+                    egui::ComboBox::from_id_salt("scanner_sig_combo")
+                        .width(102.0)
+                        .selected_text(RichText::new(sig_lbl).monospace().size(10.0))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.scanner_filter.signal_filter,
+                                None,
+                                "All Signals",
+                            );
+                            for sig in ScanSignalKind::ALL {
+                                ui.selectable_value(
+                                    &mut self.scanner_filter.signal_filter,
+                                    Some(sig),
+                                    format!("{} — {}", sig.short_label(), sig.full_label()),
+                                );
+                            }
+                        });
+                });
+            });
+
+        // 3. Sub-Tab Body
+        match self.scanner_tab {
+            ScannerDockTab::Watchlist => {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(3.0, 2.0);
+                    for col in WatchlistSortColumn::ALL {
+                        let is_col = self.watchlist_sort_col == col;
+                        let arrow = if !is_col {
+                            ""
+                        } else if self.watchlist_sort_asc {
+                            "▲"
+                        } else {
+                            "▼"
+                        };
+                        let text = format!("{}{arrow}", col.short_label());
+                        if ui
+                            .selectable_label(
+                                is_col,
+                                RichText::new(text).monospace().size(9.8).color(if is_col {
+                                    Color32::WHITE
+                                } else {
+                                    palette::TEXT_MUTED
+                                }),
+                            )
+                            .clicked()
+                        {
+                            if is_col {
+                                self.watchlist_sort_asc = !self.watchlist_sort_asc;
+                            } else {
+                                self.watchlist_sort_col = col;
+                                self.watchlist_sort_asc = col == WatchlistSortColumn::Symbol;
+                            }
+                        }
+                    }
+                });
+
+                let mut clicked_instrument: Option<(DataSourcePreset, String)> = None;
+                egui::ScrollArea::vertical()
+                    .id_salt("sumi_watchlist_scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+                        for row in &rows {
+                            let is_active = row.instrument_id == active_key;
+                            let card_fill = if is_active {
+                                Color32::from_rgb(25, 36, 56)
+                            } else {
+                                Color32::from_rgb(18, 22, 32)
+                            };
+                            let card_stroke = if is_active {
+                                Stroke::new(1.0, palette::ACCENT_BLUE)
+                            } else {
+                                Stroke::new(1.0, palette::BORDER_SUBTLE)
+                            };
+
+                            let inner = Frame::new()
+                                .fill(card_fill)
+                                .corner_radius(CornerRadius::same(4))
+                                .stroke(card_stroke)
+                                .inner_margin(Margin::symmetric(7, 5))
+                                .show(ui, |ui| {
+                                    ui.set_min_width(ui.available_width());
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(&row.symbol)
+                                                .monospace()
+                                                .strong()
+                                                .size(11.0)
+                                                .color(if is_active {
+                                                    Color32::from_rgb(100, 198, 255)
+                                                } else {
+                                                    palette::TEXT_PRIMARY
+                                                }),
+                                        );
+                                        ui.label(
+                                            RichText::new(row.timeframe.label())
+                                                .monospace()
+                                                .size(9.5)
+                                                .color(palette::TEXT_MUTED),
+                                        );
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                let chg_color = if row.change_pct > 1e-6 {
+                                                    palette::BULLISH
+                                                } else if row.change_pct < -1e-6 {
+                                                    palette::BEARISH
+                                                } else {
+                                                    palette::TEXT_MUTED
+                                                };
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "{:+.2}%",
+                                                        row.change_pct
+                                                    ))
+                                                    .monospace()
+                                                    .strong()
+                                                    .size(10.2)
+                                                    .color(chg_color),
+                                                );
+                                                ui.label(
+                                                    RichText::new(format_scanner_price(
+                                                        row.last_close,
+                                                    ))
+                                                    .monospace()
+                                                    .strong()
+                                                    .size(10.5)
+                                                    .color(palette::TEXT_PRIMARY),
+                                                );
+                                            },
+                                        );
+                                    });
+
+                                    ui.horizontal(|ui| {
+                                        let reg_c = regime_badge_color(row.regime);
+                                        ui.label(
+                                            RichText::new(row.regime.short_label())
+                                                .monospace()
+                                                .strong()
+                                                .size(9.5)
+                                                .color(reg_c),
+                                        );
+                                        let rvol_s = row.rvol_20.map_or_else(
+                                            || "RV -".to_owned(),
+                                            |v| format!("RV {v:.1}x"),
+                                        );
+                                        let rsi_s = row.rsi_14.map_or_else(
+                                            || "RSI -".to_owned(),
+                                            |v| format!("RSI {v:.0}"),
+                                        );
+                                        ui.label(
+                                            RichText::new(format!("{rvol_s} · {rsi_s}"))
+                                                .monospace()
+                                                .size(9.5)
+                                                .color(palette::TEXT_MUTED),
+                                        );
+                                        if let Some(first_sig) = row.active_signals.first().copied()
+                                        {
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    let sig_c = match first_sig.direction() {
+                                                        SignalDirection::Bullish => {
+                                                            palette::BULLISH
+                                                        }
+                                                        SignalDirection::Bearish => {
+                                                            palette::BEARISH
+                                                        }
+                                                    };
+                                                    let extra = if row.active_signals.len() > 1 {
+                                                        format!(
+                                                            "{} +{}",
+                                                            first_sig.short_label(),
+                                                            row.active_signals.len() - 1
+                                                        )
+                                                    } else {
+                                                        first_sig.short_label().to_owned()
+                                                    };
+                                                    ui.label(
+                                                        RichText::new(extra)
+                                                            .monospace()
+                                                            .strong()
+                                                            .size(9.5)
+                                                            .color(sig_c),
+                                                    );
+                                                },
+                                            );
+                                        }
+                                    });
+                                });
+
+                            let click_resp = ui.interact(
+                                inner.response.rect,
+                                ui.make_persistent_id(("wl_row_click", &row.instrument_id)),
+                                egui::Sense::click(),
+                            );
+                            if click_resp.hovered() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
+                            if click_resp.clicked() {
+                                if let Some(entry) = self
+                                    .watchlist_universe
+                                    .iter()
+                                    .find(|e| e.instrument_id == row.instrument_id)
+                                {
+                                    clicked_instrument = Some((entry.preset, entry.symbol.clone()));
+                                } else if let Some(entry) = self
+                                    .custom_peer_feeds
+                                    .iter()
+                                    .find(|e| e.instrument_id == row.instrument_id)
+                                {
+                                    clicked_instrument =
+                                        Some((DataSourcePreset::CustomFile, entry.symbol.clone()));
+                                } else if row.instrument_id.starts_with("Preset:Synth:") {
+                                    clicked_instrument = Some((
+                                        DataSourcePreset::SyntheticVnindex,
+                                        row.symbol.clone(),
+                                    ));
+                                }
+                            }
+                        }
+                    });
+
+                if let Some((preset, sym)) = clicked_instrument {
+                    self.select_watchlist_instrument(preset, &sym);
+                }
+            }
+            ScannerDockTab::Signals => {
+                let mut launch_req: Option<(HistoricalSignalHit, ScannerReplayIntent)> = None;
+                egui::ScrollArea::vertical()
+                    .id_salt("sumi_signals_scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(4.0, 5.0);
+                        if hits.is_empty() {
+                            ui.label(
+                                RichText::new("No causal signals match current filter.")
+                                    .monospace()
+                                    .size(10.0)
+                                    .color(palette::TEXT_MUTED),
+                            );
+                        }
+                        for hit in hits.iter().take(64) {
+                            let sig_color = match hit.direction {
+                                SignalDirection::Bullish => palette::BULLISH,
+                                SignalDirection::Bearish => palette::BEARISH,
+                            };
+                            Frame::new()
+                                .fill(Color32::from_rgb(18, 22, 32))
+                                .corner_radius(CornerRadius::same(4))
+                                .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                                .inner_margin(Margin::symmetric(7, 5))
+                                .show(ui, |ui| {
+                                    ui.set_min_width(ui.available_width());
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{} · {}",
+                                                hit.symbol,
+                                                hit.timeframe.label()
+                                            ))
+                                            .monospace()
+                                            .strong()
+                                            .size(10.8)
+                                            .color(palette::TEXT_PRIMARY),
+                                        );
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "{} · {}",
+                                                        hit.signal.short_label(),
+                                                        hit.regime.short_label()
+                                                    ))
+                                                    .monospace()
+                                                    .strong()
+                                                    .size(10.0)
+                                                    .color(sig_color),
+                                                );
+                                            },
+                                        );
+                                    });
+
+                                    let ts_lbl = if hit.timeframe.is_intraday() {
+                                        format_utc_datetime_hm(hit.timestamp)
+                                    } else {
+                                        format_utc_date(hit.timestamp)
+                                    };
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "@ {} · {ts_lbl}",
+                                            format_scanner_price(hit.price)
+                                        ))
+                                        .monospace()
+                                        .size(9.6)
+                                        .color(palette::TEXT_MUTED),
+                                    );
+
+                                    ui.horizontal(|ui| {
+                                        let sp_x = ui.spacing().item_spacing.x;
+                                        let btn_w =
+                                            ((ui.available_width() - sp_x - 2.0) * 0.5).max(60.0);
+                                        let blind_btn = Button::new(
+                                            RichText::new("Blind Practice")
+                                                .monospace()
+                                                .strong()
+                                                .size(9.8)
+                                                .color(palette::ALERT_ARMED_AMBER),
+                                        )
+                                        .fill(palette::ALERT_ARMED_AMBER.gamma_multiply(0.16))
+                                        .stroke(Stroke::new(
+                                            1.0,
+                                            palette::ALERT_ARMED_AMBER.gamma_multiply(0.75),
+                                        ))
+                                        .min_size(Vec2::new(btn_w, 20.0));
+
+                                        let review_btn = Button::new(
+                                            RichText::new("Signal Review")
+                                                .monospace()
+                                                .strong()
+                                                .size(9.8)
+                                                .color(Color32::from_rgb(120, 200, 255)),
+                                        )
+                                        .fill(palette::ACCENT_BLUE.gamma_multiply(0.18))
+                                        .stroke(Stroke::new(
+                                            1.0,
+                                            palette::ACCENT_BLUE.gamma_multiply(0.75),
+                                        ))
+                                        .min_size(Vec2::new(btn_w, 20.0));
+
+                                        if ui.add(blind_btn).clicked() {
+                                            launch_req = Some((
+                                                hit.clone(),
+                                                ScannerReplayIntent::BlindPractice,
+                                            ));
+                                        }
+                                        if ui.add(review_btn).clicked() {
+                                            launch_req = Some((
+                                                hit.clone(),
+                                                ScannerReplayIntent::SignalReview,
+                                            ));
+                                        }
+                                    });
+                                });
+                        }
+                    });
+
+                if let Some((hit, intent)) = launch_req {
+                    let _ = self.start_scanner_signal_replay(hit, intent);
+                }
+            }
+        }
+    }
+
+    fn render_right_dock(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing = Vec2::new(5.0, 6.0);
+        let cutoff = self.replay.cutoff_timestamp(&self.base_candles);
+        let armed_n = self.alerts.armed_count(cutoff);
+        let vis_rules = self
+            .alerts
+            .rules
+            .iter()
+            .filter(|r| r.is_causally_visible(cutoff))
+            .count();
+
+        ui.horizontal(|ui| {
+            let sp_x = ui.spacing().item_spacing.x;
+            let half_w = ((ui.available_width() - sp_x - 2.0) * 0.5).max(68.0);
+            for (tab, lbl, accent) in [
+                (
+                    RightDockTab::Trading,
+                    "Paper Trade".to_owned(),
+                    palette::TRADE_ENTRY_BLUE,
+                ),
+                (
+                    RightDockTab::Alerts,
+                    if vis_rules == 0 {
+                        "Alerts".to_owned()
+                    } else {
+                        format!("Alerts ({armed_n}/{vis_rules})")
+                    },
+                    palette::ALERT_ARMED_AMBER,
+                ),
+            ] {
+                let selected = self.right_dock_tab == tab;
+                let btn = Button::new(RichText::new(lbl).monospace().strong().size(10.5).color(
+                    if selected {
+                        Color32::WHITE
+                    } else {
+                        palette::TEXT_MUTED
+                    },
+                ))
+                .fill(if selected {
+                    accent.gamma_multiply(0.24)
+                } else {
+                    Color32::from_rgb(22, 27, 38)
+                })
+                .stroke(Stroke::new(
+                    1.0,
+                    if selected {
+                        accent
+                    } else {
+                        palette::BORDER_SUBTLE
+                    },
+                ))
+                .min_size(Vec2::new(half_w, 22.0));
+
+                if ui.add(btn).clicked() {
+                    self.right_dock_tab = tab;
+                    match tab {
+                        RightDockTab::Trading => self.show_trading_panel = true,
+                        RightDockTab::Alerts => self.show_alerts_panel = true,
+                    }
+                }
+            }
+        });
+        ui.separator();
+
+        match self.right_dock_tab {
+            RightDockTab::Trading => self.render_paper_trading_panel(ui),
+            RightDockTab::Alerts => self.render_alerts_panel(ui),
+        }
+    }
+
+    fn render_alerts_panel(&mut self, ui: &mut egui::Ui) {
+        self.sync_alerts_causal();
+        let cutoff = self.replay.cutoff_timestamp(&self.base_candles);
+        let mark = self.current_mark_price();
+
+        egui::ScrollArea::vertical()
+            .id_salt("sumi_alerts_panel_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(5.0, 6.0);
+
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("CAUSAL ALERTS")
+                            .monospace()
+                            .strong()
+                            .size(12.0)
+                            .color(palette::TEXT_PRIMARY),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if !self.alerts.is_empty()
+                            && ui
+                                .button(RichText::new("Clear All").monospace().size(10.0))
+                                .clicked()
+                        {
+                            self.alerts.clear_all();
+                            self.alerts_synced_key = None;
+                            self.sync_alerts_causal();
+                        }
+                    });
+                });
+
+                // 1. Quick-Arm Alert Builder Card
+                Frame::new()
+                    .fill(Color32::from_rgb(19, 24, 35))
+                    .corner_radius(CornerRadius::same(4))
+                    .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                    .inner_margin(Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            for kind in AlertDraftKind::ALL {
+                                if ui
+                                    .selectable_label(
+                                        self.alert_draft_kind == kind,
+                                        RichText::new(kind.short_label()).monospace().size(10.2),
+                                    )
+                                    .clicked()
+                                {
+                                    self.alert_draft_kind = kind;
+                                    if kind == AlertDraftKind::PriceLevel
+                                        && self.alert_value_input.trim().is_empty()
+                                        && mark > 0.0
+                                    {
+                                        self.alert_value_input = format!("{mark:.2}");
+                                    } else if kind == AlertDraftKind::RsiThreshold
+                                        && self.alert_value_input.trim().is_empty()
+                                    {
+                                        self.alert_value_input = "30.0".to_owned();
+                                    }
+                                }
+                            }
+                        });
+
+                        ui.horizontal_wrapped(|ui| {
+                            for dir in CrossDirection::ALL {
+                                if ui
+                                    .selectable_label(
+                                        self.alert_direction == dir,
+                                        RichText::new(dir.short_label()).monospace().size(10.0),
+                                    )
+                                    .clicked()
+                                {
+                                    self.alert_direction = dir;
+                                }
+                            }
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Freq:")
+                                    .monospace()
+                                    .size(10.0)
+                                    .color(palette::TEXT_MUTED),
+                            );
+                            for freq in AlertFrequency::ALL {
+                                if ui
+                                    .selectable_label(
+                                        self.alert_frequency == freq,
+                                        RichText::new(freq.short_label()).monospace().size(10.0),
+                                    )
+                                    .clicked()
+                                {
+                                    self.alert_frequency = freq;
+                                }
+                            }
+                        });
+
+                        match self.alert_draft_kind {
+                            AlertDraftKind::PriceLevel | AlertDraftKind::RsiThreshold => {
+                                ui.horizontal(|ui| {
+                                    let lbl = if self.alert_draft_kind == AlertDraftKind::PriceLevel
+                                    {
+                                        "Level:"
+                                    } else {
+                                        "RSI:"
+                                    };
+                                    ui.label(
+                                        RichText::new(lbl)
+                                            .monospace()
+                                            .size(10.2)
+                                            .color(palette::TEXT_MUTED),
+                                    );
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.alert_value_input)
+                                            .desired_width(92.0)
+                                            .font(egui::FontId::monospace(10.8)),
+                                    );
+                                    if ui
+                                        .button(RichText::new("@Mark").monospace().size(9.8))
+                                        .clicked()
+                                    {
+                                        if self.alert_draft_kind == AlertDraftKind::PriceLevel
+                                            && mark > 0.0
+                                        {
+                                            self.alert_value_input = format!("{mark:.2}");
+                                        } else if self.alert_draft_kind
+                                            == AlertDraftKind::RsiThreshold
+                                        {
+                                            self.alert_value_input = match self.alert_direction {
+                                                CrossDirection::CrossBelow => "70.0".to_owned(),
+                                                _ => "30.0".to_owned(),
+                                            };
+                                        }
+                                    }
+                                });
+                            }
+                            AlertDraftKind::MacdZeroCross => {
+                                ui.label(
+                                    RichText::new("MACD(12, 26, 9) Histogram 0-Cross")
+                                        .monospace()
+                                        .size(10.0)
+                                        .color(palette::TEXT_MUTED),
+                                );
+                            }
+                            AlertDraftKind::SelectedDrawing => {
+                                let status = match self.drawings.selected_drawing() {
+                                    Some(d) if d.pane == DrawingPaneTarget::Main => format!(
+                                        "Selected: #{} ({})",
+                                        d.id,
+                                        d.geometry.tool_kind().short_label()
+                                    ),
+                                    _ => "Select a Main-pane Line or Ray".to_owned(),
+                                };
+                                ui.label(
+                                    RichText::new(status)
+                                        .monospace()
+                                        .size(10.0)
+                                        .color(palette::ALERT_ARMED_AMBER),
+                                );
+                            }
+                        }
+
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Note:")
+                                    .monospace()
+                                    .size(10.0)
+                                    .color(palette::TEXT_MUTED),
+                            );
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.alert_message_input)
+                                    .desired_width((ui.available_width() - 4.0).max(60.0))
+                                    .hint_text("optional alert note")
+                                    .font(egui::FontId::monospace(10.2)),
+                            );
+                        });
+
+                        let arm_btn = Button::new(
+                            RichText::new("+ Arm Causal Alert")
+                                .monospace()
+                                .strong()
+                                .size(10.8)
+                                .color(palette::ALERT_AXIS_TEXT_DARK),
+                        )
+                        .fill(palette::ALERT_ARMED_AMBER)
+                        .min_size(Vec2::new((ui.available_width() - 2.0).max(80.0), 25.0));
+                        if ui.add(arm_btn).clicked() {
+                            let _ = self.submit_draft_alert();
+                        }
+
+                        if let Some((is_err, ref msg)) = self.last_alert_status {
+                            ui.label(RichText::new(msg).monospace().size(9.8).color(if is_err {
+                                palette::BEARISH
+                            } else {
+                                palette::BULLISH
+                            }));
+                        }
+                    });
+
+                // 2. Active, Triggered & Paused Rules List
+                let visible_rules: Vec<_> = self
+                    .alerts
+                    .rules
+                    .iter()
+                    .filter(|r| r.is_causally_visible(cutoff))
+                    .cloned()
+                    .collect();
+
+                let mut toggle_id: Option<AlertId> = None;
+                let mut remove_id: Option<AlertId> = None;
+                Frame::new()
+                    .fill(Color32::from_rgb(19, 24, 35))
+                    .corner_radius(CornerRadius::same(4))
+                    .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                    .inner_margin(Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(format!("ALERT RULES ({})", visible_rules.len()))
+                                .monospace()
+                                .strong()
+                                .size(10.5)
+                                .color(palette::TEXT_MUTED),
+                        );
+                        if visible_rules.is_empty() {
+                            ui.label(
+                                RichText::new("No causal alert rules armed.")
+                                    .monospace()
+                                    .size(9.8)
+                                    .color(palette::TEXT_MUTED),
+                            );
+                        }
+                        for rule in &visible_rules {
+                            let badge_color = match rule.status {
+                                AlertStatus::Armed => palette::ALERT_ARMED_AMBER,
+                                AlertStatus::Triggered => palette::ALERT_TRIGGERED_GOLD,
+                                AlertStatus::Paused => palette::TEXT_MUTED,
+                            };
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "#{} {}",
+                                        rule.id,
+                                        rule.status.short_label()
+                                    ))
+                                    .monospace()
+                                    .strong()
+                                    .size(9.8)
+                                    .color(badge_color),
+                                );
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} · ×{}",
+                                        rule.frequency.short_label(),
+                                        rule.trigger_count
+                                    ))
+                                    .monospace()
+                                    .size(9.5)
+                                    .color(palette::TEXT_MUTED),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .button(RichText::new("×").monospace().size(9.8))
+                                            .clicked()
+                                        {
+                                            remove_id = Some(rule.id);
+                                        }
+                                        let pause_lbl = if rule.status == AlertStatus::Paused {
+                                            "Arm"
+                                        } else {
+                                            "Pause"
+                                        };
+                                        if ui
+                                            .button(RichText::new(pause_lbl).monospace().size(9.5))
+                                            .clicked()
+                                        {
+                                            toggle_id = Some(rule.id);
+                                        }
+                                    },
+                                );
+                            });
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} ({}) · {}",
+                                    rule.symbol,
+                                    rule.timeframe.label(),
+                                    rule.condition.summary()
+                                ))
+                                .monospace()
+                                .size(9.8)
+                                .color(palette::TEXT_PRIMARY),
+                            );
+                            ui.separator();
+                        }
+                    });
+
+                if let Some(id) = toggle_id {
+                    self.alerts.toggle_pause(id);
+                    self.alerts_synced_key = None;
+                    self.sync_alerts_causal();
+                }
+                if let Some(id) = remove_id {
+                    self.alerts.remove_alert(id);
+                    self.alerts_synced_key = None;
+                    self.sync_alerts_causal();
+                }
+
+                // 3. Causal Trigger Log (newest-first)
+                let visible_triggers: Vec<_> = self
+                    .alerts
+                    .triggers
+                    .iter()
+                    .filter(|ev| cutoff.is_none_or(|cut| alert_event_eval_timestamp(ev) <= cut))
+                    .collect();
+                Frame::new()
+                    .fill(Color32::from_rgb(19, 24, 35))
+                    .corner_radius(CornerRadius::same(4))
+                    .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                    .inner_margin(Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "CAUSAL TRIGGER LOG ({})",
+                                visible_triggers.len()
+                            ))
+                            .monospace()
+                            .strong()
+                            .size(10.5)
+                            .color(palette::ALERT_TRIGGERED_GOLD),
+                        );
+                        if visible_triggers.is_empty() {
+                            ui.label(
+                                RichText::new("Step Replay forward to fire armed alerts.")
+                                    .monospace()
+                                    .size(9.8)
+                                    .color(palette::TEXT_MUTED),
+                            );
+                        }
+                        for ev in visible_triggers.into_iter().rev().take(10) {
+                            let ev_ts = alert_event_eval_timestamp(ev);
+                            let ts_lbl = if ev.timeframe.is_intraday() {
+                                format_utc_datetime_hm(ev_ts)
+                            } else {
+                                format_utc_date(ev_ts)
+                            };
+                            ui.label(
+                                RichText::new(format!(
+                                    "⚡ #{} {} · {}",
+                                    ev.alert_id, ev.symbol, ev.condition_summary
+                                ))
+                                .monospace()
+                                .strong()
+                                .size(9.8)
+                                .color(palette::ALERT_TRIGGERED_GOLD),
+                            );
+                            ui.label(
+                                RichText::new(format!("Obs {:.2} @ {ts_lbl}", ev.observed_value))
+                                    .monospace()
+                                    .size(9.4)
+                                    .color(palette::TEXT_MUTED),
+                            );
+                        }
+                    });
+            });
+    }
+
+    fn render_command_palette_modal(&mut self, ui: &mut egui::Ui) {
+        let mut candidates = self.build_command_palette_candidates();
+        if candidates.is_empty() {
+            self.command_palette.selected_index = 0;
+        } else if self.command_palette.selected_index >= candidates.len() {
+            self.command_palette.selected_index = candidates.len() - 1;
+        }
+
+        // Consume modal navigation & execution keys BEFORE `TextEdit` processes input!
+        let (esc, nav_down, nav_up, enter) = ui.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+            )
+        });
+
+        if esc {
+            self.close_command_palette();
+            ui.ctx().request_repaint();
+            return;
+        }
+        let mut nav_changed = false;
+        if !candidates.is_empty() {
+            if nav_down {
+                self.command_palette.selected_index =
+                    (self.command_palette.selected_index + 1) % candidates.len();
+                nav_changed = true;
+            } else if nav_up {
+                self.command_palette.selected_index = if self.command_palette.selected_index == 0 {
+                    candidates.len() - 1
+                } else {
+                    self.command_palette.selected_index - 1
+                };
+                nav_changed = true;
+            }
+        }
+        if enter {
+            if let Some(action) = candidates
+                .get(self.command_palette.selected_index)
+                .map(|c| c.action.clone())
+            {
+                self.execute_palette_action(action);
+            } else {
+                self.close_command_palette();
+            }
+            ui.ctx().request_repaint();
+            return;
+        }
+
+        let vp_rect = ui.input(|i| i.viewport_rect());
+
+        // 1. Translucent dark backdrop scrim (`Order::Middle`)
+        let scrim_resp = egui::Area::new(egui::Id::new("sumi_cmd_k_scrim"))
+            .order(egui::Order::Middle)
+            .fixed_pos(vp_rect.min)
+            .show(ui.ctx(), |ui| {
+                let (rect, resp) =
+                    ui.allocate_exact_size(vp_rect.size(), egui::Sense::click_and_drag());
+                ui.painter()
+                    .rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(6, 9, 15, 182));
+                resp
+            })
+            .inner;
+
+        // 2. Centered floating Command Palette card (`Order::Foreground`)
+        let modal_w = (vp_rect.width() - 48.0).clamp(320.0, 640.0);
+        let modal_pos = egui::Pos2::new(
+            vp_rect.center().x - modal_w * 0.5,
+            vp_rect.top() + (vp_rect.height() * 0.12).clamp(32.0, 96.0),
+        );
+
+        let mut clicked_action: Option<PaletteAction> = None;
+        let modal_area = egui::Area::new(egui::Id::new("sumi_cmd_k_modal"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(modal_pos)
+            .show(ui.ctx(), |ui| {
+                Frame::new()
+                    .fill(Color32::from_rgb(17, 22, 33))
+                    .corner_radius(CornerRadius::same(8))
+                    .stroke(Stroke::new(1.5, palette::ACCENT_BLUE))
+                    .inner_margin(Margin::symmetric(12, 10))
+                    .show(ui, |ui| {
+                        ui.set_width(modal_w - 24.0);
+                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("CMD+K COMMAND PALETTE")
+                                    .monospace()
+                                    .strong()
+                                    .size(11.5)
+                                    .color(Color32::from_rgb(120, 200, 255)),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        RichText::new("↑↓ Select · Enter Run · Esc Close")
+                                            .monospace()
+                                            .size(9.8)
+                                            .color(palette::TEXT_MUTED),
+                                    );
+                                },
+                            );
+                        });
+
+                        let prev_q = self.command_palette.query.clone();
+                        let edit_resp = ui.add(
+                            egui::TextEdit::singleline(&mut self.command_palette.query)
+                                .desired_width(ui.available_width())
+                                .hint_text(
+                                    "Search symbol (FPT, BTC), timeframe (15m, 4h), tool, or 'alert 68500'...",
+                                )
+                                .font(egui::FontId::monospace(12.0)),
+                        );
+                        truncate_utf8_bytes(&mut self.command_palette.query, 128);
+                        if self.command_palette.request_focus || !edit_resp.has_focus() {
+                            edit_resp.request_focus();
+                            self.command_palette.request_focus = false;
+                        }
+                        if self.command_palette.query != prev_q {
+                            self.command_palette.selected_index = 0;
+                            candidates = self.build_command_palette_candidates();
+                        }
+
+                        ui.separator();
+
+                        egui::ScrollArea::vertical()
+                            .id_salt("sumi_cmd_k_results_scroll")
+                            .max_height(300.0)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing = Vec2::new(4.0, 3.0);
+                                if candidates.is_empty() {
+                                    ui.label(
+                                        RichText::new("No matching workstation commands or symbols.")
+                                            .monospace()
+                                            .size(10.5)
+                                            .color(palette::TEXT_MUTED),
+                                    );
+                                }
+                                for (idx, cand) in candidates.iter().enumerate() {
+                                    let is_sel = idx == self.command_palette.selected_index;
+                                    let row_fill = if is_sel {
+                                        palette::ACCENT_BLUE.gamma_multiply(0.24)
+                                    } else {
+                                        Color32::from_rgb(22, 27, 39)
+                                    };
+                                    let row_stroke = if is_sel {
+                                        Stroke::new(1.0, palette::ACCENT_BLUE)
+                                    } else {
+                                        Stroke::new(1.0, Color32::TRANSPARENT)
+                                    };
+                                    let row_frame = Frame::new()
+                                        .fill(row_fill)
+                                        .corner_radius(CornerRadius::same(4))
+                                        .stroke(row_stroke)
+                                        .inner_margin(Margin::symmetric(8, 5))
+                                        .show(ui, |ui| {
+                                            ui.set_min_width(ui.available_width());
+                                            ui.horizontal(|ui| {
+                                                let cat_c = cand.category.badge_color();
+                                                Frame::new()
+                                                    .fill(cat_c.gamma_multiply(0.18))
+                                                    .stroke(Stroke::new(
+                                                        1.0,
+                                                        cat_c.gamma_multiply(0.75),
+                                                    ))
+                                                    .corner_radius(CornerRadius::same(3))
+                                                    .inner_margin(Margin::symmetric(5, 1))
+                                                    .show(ui, |ui| {
+                                                        ui.label(
+                                                            RichText::new(
+                                                                cand.category.badge_label(),
+                                                            )
+                                                            .monospace()
+                                                            .strong()
+                                                            .size(9.2)
+                                                            .color(cat_c),
+                                                        );
+                                                    });
+
+                                                ui.label(
+                                                    RichText::new(&cand.title)
+                                                        .monospace()
+                                                        .strong()
+                                                        .size(11.0)
+                                                        .color(if is_sel {
+                                                            Color32::WHITE
+                                                        } else {
+                                                            palette::TEXT_PRIMARY
+                                                        }),
+                                                );
+
+                                                ui.with_layout(
+                                                    egui::Layout::right_to_left(
+                                                        egui::Align::Center,
+                                                    ),
+                                                    |ui| {
+                                                        ui.label(
+                                                            RichText::new(&cand.subtitle)
+                                                                .monospace()
+                                                                .size(9.6)
+                                                                .color(palette::TEXT_MUTED),
+                                                        );
+                                                    },
+                                                );
+                                            });
+                                        });
+
+                                    if is_sel && nav_changed {
+                                        row_frame.response.scroll_to_me(Some(egui::Align::Center));
+                                    }
+                                    let row_click = ui.interact(
+                                        row_frame.response.rect,
+                                        ui.make_persistent_id(("cmd_k_row", idx)),
+                                        egui::Sense::click(),
+                                    );
+                                    if row_click.hovered() {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    }
+                                    if row_click.clicked() {
+                                        clicked_action = Some(cand.action.clone());
+                                    }
+                                }
+                            });
+                    })
+            });
+
+        if let Some(action) = clicked_action {
+            self.execute_palette_action(action);
+            ui.ctx().request_repaint();
+        } else if scrim_resp.clicked()
+            && ui.input(|i| {
+                i.pointer
+                    .interact_pos()
+                    .is_none_or(|pos| !modal_area.response.rect.contains(pos))
+            })
+        {
+            self.close_command_palette();
+            ui.ctx().request_repaint();
+        }
+    }
+}
+
+#[inline]
+fn alert_event_eval_timestamp(ev: &crate::alerts::AlertTriggerEvent) -> i64 {
+    if ev.eval_base_timestamp != 0 {
+        ev.eval_base_timestamp
+    } else {
+        ev.bar_timestamp
+    }
+}
+
+#[inline]
+fn command_palette_modal_rect_estimate(vp_rect: egui::Rect) -> egui::Rect {
+    let modal_w = (vp_rect.width() - 48.0).clamp(320.0, 640.0);
+    let modal_pos = egui::Pos2::new(
+        vp_rect.center().x - modal_w * 0.5,
+        vp_rect.top() + (vp_rect.height() * 0.12).clamp(32.0, 96.0),
+    );
+    egui::Rect::from_min_size(modal_pos, Vec2::new(modal_w, 410.0))
+}
+
+fn regime_badge_color(regime: MarketRegime) -> Color32 {
+    match regime {
+        MarketRegime::Uptrend => palette::BULLISH,
+        MarketRegime::Downtrend => palette::BEARISH,
+        MarketRegime::Pullback => palette::ALERT_ARMED_AMBER,
+        MarketRegime::Recovery => Color32::from_rgb(77, 208, 225),
+        MarketRegime::SidewaysSqueeze => Color32::from_rgb(179, 136, 255),
+        MarketRegime::Neutral | MarketRegime::InsufficientHistory => palette::TEXT_MUTED,
+    }
+}
+
+fn format_scanner_price(price: f64) -> String {
+    if !price.is_finite() {
+        "-".to_owned()
+    } else if price.abs() >= 1_000.0 {
+        format!("{price:.1}")
+    } else {
+        format!("{price:.2}")
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -3414,11 +6367,11 @@ impl SumiWorkstationApp {
     }
 
     /// Executes all 3 Retina (`2.0x`) Metal/`wgpu` verification scenarios for `"r04"`, `"r05"`, `"r06"`,
-    /// or `"r07"` offscreen in one headless GPU session (zero windows, zero Dock icons, zero occlusion stalls).
+    /// `"r07"`, or `"r08"` offscreen in one headless GPU session (zero windows, zero Dock icons, zero occlusion stalls).
     pub fn run_offscreen_wgpu_capture_batch(batch_name: &str) -> Result<(), String> {
-        if !matches!(batch_name, "r04" | "r05" | "r06" | "r07") {
+        if !matches!(batch_name, "r04" | "r05" | "r06" | "r07" | "r08") {
             return Err(format!(
-                "unknown SUMI_CAPTURE_BATCH '{batch_name}' (expected 'r04', 'r05', 'r06', or 'r07')"
+                "unknown SUMI_CAPTURE_BATCH '{batch_name}' (expected 'r04', 'r05', 'r06', 'r07', or 'r08')"
             ));
         }
         std::fs::create_dir_all("docs/evidence")
@@ -3433,6 +6386,7 @@ impl SumiWorkstationApp {
                 "r05" => app.apply_r05_batch_step_state(step),
                 "r06" => app.apply_r06_batch_step_state(step),
                 "r07" => app.apply_r07_batch_step_state(step),
+                "r08" => app.apply_r08_batch_step_state(step),
                 _ => unreachable!(),
             };
             let image = harness.capture_app_frame(&mut app, logical_w, logical_h, 6)?;
@@ -4044,6 +6998,238 @@ impl SumiWorkstationApp {
         }
     }
 
+    fn apply_r08_batch_step_state(
+        &mut self,
+        step: usize,
+    ) -> (u32, u32, &'static str, &'static str) {
+        self.close_command_palette();
+        self.show_import_bar = false;
+        self.scanner_filter = ScannerFilter::default();
+
+        match step {
+            0 => {
+                // Scenario 0: 1280x800, Multi-Symbol Watchlist & Technical Scanner Dock (Left, 13 symbols)
+                // + Causal Alerts Manager & Trigger Log (Right) + On-Chart Armed/Triggered Price & Ray
+                // Alerts + Trigger Diamonds + Frontier `ALERT FIRED` Toast on `FPT` (`VN30 Basket` `1D`)!
+                self.exit_replay();
+                self.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+                self.alerts.clear_all();
+                let _ = self.drawings.clear_unlocked();
+                self.set_scale_mode(PriceScaleMode::Normal);
+                self.viewport.reset_pane_stretches();
+                self.indicators = IndicatorConfig {
+                    show_sma: true,
+                    show_ema: true,
+                    show_bbands: true,
+                    show_rsi: true,
+                    show_macd: true,
+                    show_atr: false,
+                    ..IndicatorConfig::default()
+                };
+                self.viewport.time_scale.set_width(700.0);
+
+                let end_idx = self.base_candles.len().saturating_sub(42).max(60);
+                let arm_idx = end_idx.saturating_sub(32);
+                let _ = self.start_replay_at_base_index(arm_idx);
+                self.replay.speed = ReplaySpeed::X5;
+
+                // 1) Sloped `Ray` drawing + `DrawingLine` alert
+                let r0 = arm_idx.saturating_sub(18);
+                let r1 = arm_idx.saturating_sub(2);
+                let ray_id = self
+                    .drawings
+                    .add_drawing(
+                        DrawingPaneTarget::Main,
+                        DrawingGeometry::Ray {
+                            origin: DrawingAnchor::with_timestamp(
+                                r0 as f64,
+                                self.base_candles[r0].low,
+                                self.base_candles[r0].timestamp as f64,
+                            ),
+                            through: DrawingAnchor::with_timestamp(
+                                r1 as f64,
+                                self.base_candles[r1].close,
+                                self.base_candles[r1].timestamp as f64,
+                            ),
+                        },
+                        Some(DrawingStyle {
+                            color: DrawingColorPreset::Cyan,
+                            line_width: 1.75,
+                            dash: LineDashStyle::Solid,
+                            fill_opacity: 0.0,
+                        }),
+                    )
+                    .unwrap_or(1);
+                self.drawings.selected_id = Some(ray_id);
+                let _ = self.add_alert_on_selected_drawing(CrossDirection::CrossAny);
+
+                // 2) Historical `Once` PriceLevel alert that triggers midway through `(arm_idx..end_idx)`
+                let arm_close = self.base_candles[arm_idx].close;
+                let mut mid_hi = arm_close;
+                let mut mid_lo = arm_close;
+                for c in &self.base_candles[(arm_idx + 1)..end_idx] {
+                    mid_hi = mid_hi.max(c.high);
+                    mid_lo = mid_lo.min(c.low);
+                }
+                self.alert_frequency = AlertFrequency::Once;
+                if mid_hi - arm_close >= arm_close - mid_lo && mid_hi > arm_close {
+                    let lvl = 0.5 * (arm_close + mid_hi);
+                    let _ = self.add_quick_price_alert(lvl, CrossDirection::CrossAbove);
+                } else if arm_close > mid_lo {
+                    let lvl = 0.5 * (arm_close + mid_lo);
+                    let _ = self.add_quick_price_alert(lvl, CrossDirection::CrossBelow);
+                }
+
+                // Advance to `end_idx - 1` and arm a frontier alert that fires right on `end_idx`!
+                if let Some(tr) = self
+                    .replay
+                    .jump_to_base_index(&self.base_candles, end_idx.saturating_sub(1))
+                {
+                    self.apply_replay_transition(tr);
+                }
+                let prev_c = self.base_candles[end_idx.saturating_sub(1)].close;
+                let (end_hi, end_lo) = (
+                    self.base_candles[end_idx].high,
+                    self.base_candles[end_idx].low,
+                );
+                if end_hi - prev_c >= prev_c - end_lo && end_hi > prev_c {
+                    let frontier_lvl = 0.5 * (prev_c + end_hi);
+                    let _ = self.add_quick_price_alert(frontier_lvl, CrossDirection::CrossAbove);
+                } else {
+                    let frontier_lvl = 0.5 * (prev_c + end_lo.min(prev_c * 0.999));
+                    let _ = self.add_quick_price_alert(frontier_lvl, CrossDirection::CrossBelow);
+                }
+
+                // Also arm an active `ARMED` resistance alert slightly above visible mark
+                let armed_res = end_hi * 1.022;
+                let _ = self.add_quick_price_alert(armed_res, CrossDirection::CrossAbove);
+                self.alert_value_input = format!("{armed_res:.2}");
+
+                if let Some(tr) = self.replay.jump_to_base_index(&self.base_candles, end_idx) {
+                    self.apply_replay_transition(tr);
+                }
+
+                self.viewport.time_scale.set_bar_spacing(9.5);
+                self.viewport.time_scale.set_right_offset(14.0);
+                self.watchlist_sort_col = WatchlistSortColumn::ChangePct;
+                self.watchlist_sort_asc = false;
+                self.scanner_tab = ScannerDockTab::Watchlist;
+                self.show_scanner_dock = true;
+                self.show_replay_bar = true;
+                self.show_trading_panel = true;
+                self.show_alerts_panel = true;
+                self.right_dock_tab = RightDockTab::Alerts;
+
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r08_watchlist_scanner_and_alerts_1280x800.png",
+                    "docs/evidence/r08_watchlist_scanner_and_alerts_1280x800.json",
+                )
+            }
+            1 => {
+                // Scenario 1: 1280x800, 4-Pane `BTCUSDT` (`15m -> 4h`) + Active Alerts + Floating `Cmd+K`
+                // Command Palette Modal synthesizing dynamic `alert 68500` quick-action!
+                self.exit_replay();
+                self.select_data_source(DataSourcePreset::BtcUsdt15mJson);
+                self.alerts.clear_all();
+                self.set_scale_mode(PriceScaleMode::Normal);
+                self.viewport.reset_pane_stretches();
+                self.indicators = IndicatorConfig {
+                    show_sma: true,
+                    show_ema: true,
+                    show_bbands: true,
+                    show_rsi: true,
+                    show_macd: true,
+                    show_atr: true,
+                    ..IndicatorConfig::default()
+                };
+                let _ = self.set_timeframe(Timeframe::H4);
+                self.viewport.time_scale.set_width(940.0);
+                self.viewport.fit_all();
+                self.viewport.time_scale.set_right_offset(12.0);
+
+                let mark = self.current_mark_price();
+                let upper_lvl = ((mark * 1.018) / 10.0).round() * 10.0;
+                let lower_lvl = ((mark * 0.982) / 10.0).round() * 10.0;
+                self.alert_frequency = AlertFrequency::Once;
+                let _ = self.add_quick_price_alert(upper_lvl, CrossDirection::CrossAbove);
+                let _ = self.add_quick_price_alert(lower_lvl, CrossDirection::CrossBelow);
+
+                self.show_scanner_dock = false;
+                self.show_replay_bar = false;
+                self.show_trading_panel = false;
+                self.show_alerts_panel = true;
+                self.right_dock_tab = RightDockTab::Alerts;
+
+                self.open_command_palette();
+                let query_px = (((mark * 1.008) / 50.0).round() * 50.0) as i64;
+                self.command_palette.query = format!("alert {query_px}");
+                self.command_palette.selected_index = 0;
+
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r08_command_palette_cmd_k_btc_1280x800.png",
+                    "docs/evidence/r08_command_palette_cmd_k_btc_1280x800.json",
+                )
+            }
+            _ => {
+                // Scenario 2: Compact resized `960x640`, Left Scanner `Signals` tab + Causal
+                // `BlindPractice` Replay (`BLIND PRACTICE · Signal hidden until reached`)!
+                self.exit_replay();
+                self.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+                self.signal_lookback_bars = 80;
+                self.scanner_filter = ScannerFilter::default();
+                let candidate_hit = self
+                    .filtered_historical_signals()
+                    .into_iter()
+                    .find(|h| h.bar_index >= 45 && h.instrument_id.starts_with("Preset:VN30"))
+                    .or_else(|| self.filtered_historical_signals().into_iter().next());
+
+                self.indicators = IndicatorConfig {
+                    show_sma: true,
+                    show_ema: true,
+                    show_bbands: false,
+                    show_rsi: true,
+                    show_macd: true,
+                    show_atr: false,
+                    ..IndicatorConfig::default()
+                };
+                self.set_scale_mode(PriceScaleMode::Normal);
+                self.viewport.reset_pane_stretches();
+                self.viewport.time_scale.set_width(640.0);
+
+                if let Some(hit) = candidate_hit {
+                    let _ =
+                        self.start_scanner_signal_replay(hit, ScannerReplayIntent::BlindPractice);
+                    let _ = self.step_replay_forward(4);
+                }
+
+                let mark = self.current_mark_price();
+                if mark > 0.0 {
+                    self.alerts.clear_all();
+                    let _ = self.add_quick_price_alert(mark * 1.015, CrossDirection::CrossAbove);
+                }
+                self.viewport.time_scale.set_bar_spacing(9.0);
+                self.viewport.time_scale.set_right_offset(14.0);
+
+                self.show_scanner_dock = true;
+                self.scanner_tab = ScannerDockTab::Signals;
+                self.show_replay_bar = true;
+                self.show_trading_panel = false;
+                self.show_alerts_panel = false;
+
+                (
+                    960,
+                    640,
+                    "docs/evidence/r08_blind_practice_signal_replay_960x640.png",
+                    "docs/evidence/r08_blind_practice_signal_replay_960x640.json",
+                )
+            }
+        }
+    }
+
     fn persist_capture_artifacts(
         &self,
         screenshot_path: &str,
@@ -4080,8 +7266,13 @@ impl SumiWorkstationApp {
                 || "null".to_owned(),
                 |p| format!("\"{}\"", p.side.short_label()),
             );
+            let replay_cutoff = self.replay.cutoff_timestamp(&self.base_candles);
+            let scanner_sig_revealed = self.scanner_context.as_ref().map_or_else(
+                || "null".to_owned(),
+                |ctx| ctx.is_revealed(replay_cutoff).to_string(),
+            );
             let json = format!(
-                "{{\n  \"symbol\": \"{}\",\n  \"timeframe\": \"{}\",\n  \"base_timeframe\": \"{}\",\n  \"data_source\": \"{}\",\n  \"available_symbols\": [{}],\n  \"base_candles\": {},\n  \"total_candles\": {},\n  \"culled_candles\": {},\n  \"rendered_candles\": {},\n  \"conflation_factor\": {},\n  \"bar_spacing\": {:.6},\n  \"right_offset\": {:.6},\n  \"scale_mode\": \"{}\",\n  \"auto_scale\": {},\n  \"pane_count\": {},\n  \"active_overlay_count\": {},\n  \"drawing_count\": {},\n  \"active_drawing_tool\": \"{}\",\n  \"selected_drawing_id\": {},\n  \"magnet_mode\": \"{}\",\n  \"replay_active\": {},\n  \"replay_status\": \"{}\",\n  \"replay_base_cursor\": {},\n  \"replay_step_unit\": \"{}\",\n  \"show_trading_panel\": {},\n  \"active_price_lines\": {},\n  \"rendered_fill_markers\": {},\n  \"equity\": {:.2},\n  \"net_pnl\": {:.2},\n  \"fill_count\": {},\n  \"closed_trade_count\": {},\n  \"pending_order_count\": {},\n  \"open_position_side\": {},\n  \"stretches\": [{:.3}, {:.3}, {:.3}, {:.3}],\n  \"base_value\": {:.4},\n  \"screenshot_px\": [{}, {}],\n  \"outer_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"plot_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"price_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"time_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"raw_price_min\": {:.2},\n  \"raw_price_max\": {:.2}\n}}\n",
+                "{{\n  \"symbol\": \"{}\",\n  \"timeframe\": \"{}\",\n  \"base_timeframe\": \"{}\",\n  \"data_source\": \"{}\",\n  \"available_symbols\": [{}],\n  \"base_candles\": {},\n  \"total_candles\": {},\n  \"culled_candles\": {},\n  \"rendered_candles\": {},\n  \"conflation_factor\": {},\n  \"bar_spacing\": {:.6},\n  \"right_offset\": {:.6},\n  \"scale_mode\": \"{}\",\n  \"auto_scale\": {},\n  \"pane_count\": {},\n  \"active_overlay_count\": {},\n  \"drawing_count\": {},\n  \"active_drawing_tool\": \"{}\",\n  \"selected_drawing_id\": {},\n  \"magnet_mode\": \"{}\",\n  \"replay_active\": {},\n  \"replay_status\": \"{}\",\n  \"replay_base_cursor\": {},\n  \"replay_step_unit\": \"{}\",\n  \"show_trading_panel\": {},\n  \"show_scanner_dock\": {},\n  \"show_alerts_panel\": {},\n  \"command_palette_open\": {},\n  \"alert_rule_count\": {},\n  \"alert_trigger_count\": {},\n  \"active_alert_lines\": {},\n  \"rendered_alert_markers\": {},\n  \"scanner_signal_revealed\": {},\n  \"active_price_lines\": {},\n  \"rendered_fill_markers\": {},\n  \"equity\": {:.2},\n  \"net_pnl\": {:.2},\n  \"fill_count\": {},\n  \"closed_trade_count\": {},\n  \"pending_order_count\": {},\n  \"open_position_side\": {},\n  \"stretches\": [{:.3}, {:.3}, {:.3}, {:.3}],\n  \"base_value\": {:.4},\n  \"screenshot_px\": [{}, {}],\n  \"outer_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"plot_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"price_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"time_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"raw_price_min\": {:.2},\n  \"raw_price_max\": {:.2}\n}}\n",
                 self.symbol,
                 self.timeframe,
                 self.base_timeframe,
@@ -4107,6 +7298,14 @@ impl SumiWorkstationApp {
                 self.current_trading_cursor_base_index(),
                 self.replay.step_unit.short_label(),
                 self.show_trading_panel,
+                self.show_scanner_dock,
+                self.show_alerts_panel,
+                self.command_palette.open,
+                self.alerts.rules.len(),
+                self.alerts.triggers.len(),
+                rep.active_alert_line_count,
+                rep.rendered_alert_marker_count,
+                scanner_sig_revealed,
                 rep.active_price_line_count,
                 rep.rendered_fill_marker_count,
                 metrics.equity,
@@ -4953,6 +8152,533 @@ mod tests {
         assert_eq!(
             app.drawings.selected_id, None,
             "empty canvas click must deselect even when a hidden future Rectangle spans that coordinate"
+        );
+    }
+
+    #[test]
+    fn r08_watchlist_scanner_blind_practice_alerts_and_cmd_k_palette_e2e() {
+        let mut app = SumiWorkstationApp::default();
+        app.viewport.time_scale.set_width(960.0);
+
+        // 1. Multi-Symbol Watchlist Universe (`13` bundled feeds + active SyntheticVNINDEX = `14` rows initially,
+        //    then `13` rows once switched onto `Vn30Basket::FPT`)
+        let initial_rows = app.filtered_watchlist_rows();
+        assert_eq!(initial_rows.len(), 14);
+
+        app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+        assert_eq!(app.symbol, "FPT");
+        assert_eq!(app.data_source, DataSourcePreset::Vn30Basket);
+        let basket_rows = app.filtered_watchlist_rows();
+        assert_eq!(basket_rows.len(), 13);
+
+        // 2. Historical Signal -> `BlindPractice` Replay launch (`15` bars pre-signal, masked until reached,
+        //    and re-masked on causal `step_replay_backward`!)
+        let hits = app.filtered_historical_signals();
+        assert!(
+            !hits.is_empty(),
+            "bundled 13-symbol universe must emit historical signals"
+        );
+        let target_hit = hits
+            .iter()
+            .find(|h| h.symbol == "FPT" && h.bar_index >= 40)
+            .or_else(|| hits.iter().find(|h| h.bar_index >= 40))
+            .expect("signal with sufficient pre-signal history")
+            .clone();
+
+        assert!(
+            app.start_scanner_signal_replay(target_hit.clone(), ScannerReplayIntent::BlindPractice)
+        );
+        assert!(app.replay.is_active());
+        let initial_cutoff = app.replay.cutoff_timestamp(&app.base_candles);
+        assert!(initial_cutoff.unwrap() < target_hit.timestamp);
+        assert_eq!(
+            app.scanner_context
+                .as_ref()
+                .unwrap()
+                .revealed_signal(initial_cutoff),
+            None,
+            "BlindPractice must hide signal details prior to reveal_at_timestamp"
+        );
+
+        // Also verify scanner hits are strictly gated by `DEF-001` cutoff on the active instrument!
+        for h in app.filtered_historical_signals() {
+            if h.instrument_id == target_hit.instrument_id {
+                assert!(
+                    h.timestamp <= initial_cutoff.unwrap(),
+                    "active-instrument historical scan must never leak future signals past replay cutoff"
+                );
+            }
+        }
+
+        while app.replay.cutoff_timestamp(&app.base_candles).unwrap() < target_hit.timestamp {
+            assert!(app.step_replay_forward(1));
+        }
+        let reveal_cutoff = app.replay.cutoff_timestamp(&app.base_candles);
+        assert_eq!(reveal_cutoff, Some(target_hit.timestamp));
+        assert!(
+            app.scanner_context
+                .as_ref()
+                .unwrap()
+                .revealed_signal(reveal_cutoff)
+                .is_some(),
+            "signal must reveal once replay reaches signal timestamp"
+        );
+
+        assert!(app.step_replay_backward(1));
+        let rewound_cutoff = app.replay.cutoff_timestamp(&app.base_candles);
+        assert!(
+            app.scanner_context
+                .as_ref()
+                .unwrap()
+                .revealed_signal(rewound_cutoff)
+                .is_none(),
+            "stepping backward before signal bar must immediately re-mask BlindPractice context"
+        );
+        app.exit_replay();
+
+        // 3. Per-Instrument Alert Isolation (`FPT <-> BTCUSDT <-> FPT`) & Real-Time Drawing Mutation Re-Sync
+        app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+        app.alerts.clear_all();
+        assert!(app.start_replay_at_base_index(120));
+        let c120 = app.base_candles[120].close;
+        let line_id = app
+            .drawings
+            .add_drawing(
+                DrawingPaneTarget::Main,
+                DrawingGeometry::HorizontalLine {
+                    anchor: DrawingAnchor::with_timestamp(
+                        115.0,
+                        c120 * 1.50,
+                        app.base_candles[115].timestamp as f64,
+                    ),
+                },
+                None,
+            )
+            .unwrap();
+        app.drawings.selected_id = Some(line_id);
+        let draw_alert_id = app
+            .add_alert_on_selected_drawing(CrossDirection::CrossAny)
+            .unwrap();
+        assert_eq!(app.alerts.rules.len(), 1);
+        assert_eq!(app.alerts.triggers.len(), 0);
+
+        assert!(app.step_replay_forward(5));
+        assert_eq!(
+            app.alerts.triggers.len(),
+            0,
+            "far-away horizontal line must not fire"
+        );
+
+        // Mutate the drawing line between `base_candles[120].close` and `base_candles[125].close` (or across bar 121's range)
+        let b121 = &app.base_candles[121];
+        let mid_121 = 0.5 * (b121.low + b121.high);
+        app.drawings
+            .drawings
+            .iter_mut()
+            .find(|d| d.id == line_id)
+            .unwrap()
+            .geometry = DrawingGeometry::HorizontalLine {
+            anchor: DrawingAnchor::with_timestamp(
+                115.0,
+                mid_121,
+                app.base_candles[115].timestamp as f64,
+            ),
+        };
+        app.sync_alerts_causal();
+        assert!(
+            app.alerts
+                .triggers
+                .iter()
+                .any(|ev| ev.alert_id == draw_alert_id),
+            "dragging/modifying a DrawingLine must immediately re-evaluate causal alert crossings"
+        );
+
+        // Switch to `BTCUSDT` -> alerts must start empty, then switch back to `FPT` -> rule & trigger restored!
+        app.select_watchlist_instrument(DataSourcePreset::BtcUsdt15mJson, "BTCUSDT");
+        assert!(app.alerts.rules.is_empty());
+        app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+        assert_eq!(app.alerts.rules.len(), 1);
+        assert!(!app.alerts.triggers.is_empty());
+        app.exit_replay();
+        app.alerts.clear_all();
+
+        // 4. Headless `egui::Context` UI Pass: `Cmd+K` Modal Focus Isolation + Dynamic `alert <px>` Dispatch + On-Chart Line
+        let ctx = egui::Context::default();
+        SumiWorkstationApp::configure_dark_workstation_visuals(&ctx);
+        let screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(1280.0, 800.0),
+        ));
+        app.show_scanner_dock = true;
+        app.show_alerts_panel = true;
+        app.right_dock_tab = RightDockTab::Alerts;
+
+        // Open palette via `Cmd+K` key press while a drawing stays selected (verifying `Esc` closes modal, NOT drawing selection!)
+        app.drawings.selected_id = Some(line_id);
+        let mut out_open = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                events: vec![egui::Event::Key {
+                    key: egui::Key::K,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers {
+                        command: true,
+                        ..Default::default()
+                    },
+                }],
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out_open.textures_delta.clear();
+        assert!(app.command_palette.open);
+
+        // Pressing `Escape` while modal is open must close modal while keeping `selected_id == Some(line_id)`!
+        let mut out_esc = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out_esc.textures_delta.clear();
+        assert!(!app.command_palette.open);
+        assert_eq!(
+            app.drawings.selected_id,
+            Some(line_id),
+            "Escape inside Cmd+K modal must not leak through to deselect chart drawings"
+        );
+
+        // Re-open palette, type dynamic `alert <mark * 1.01>`, press `Enter`, and verify alert rule + on-chart line render!
+        app.open_command_palette();
+        let quick_px = ((app.current_mark_price() * 1.01) * 100.0).round() / 100.0;
+        app.command_palette.query = format!("alert {quick_px:.2}");
+        let mut out_enter = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out_enter.textures_delta.clear();
+        assert!(!app.command_palette.open);
+        assert_eq!(app.alerts.rules.len(), 1);
+
+        let mut out_after = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out_after.textures_delta.clear();
+        let rep = app.last_report.expect("chart render report");
+        assert!(
+            rep.active_alert_line_count >= 1,
+            "armed PriceLevel alert must render an on-chart horizontal line & price-axis pill"
+        );
+    }
+
+    #[test]
+    fn critic_r08_regression_utf8_truncation_mtf_blind_practice_and_peer_future_lock() {
+        let mut app = SumiWorkstationApp::default();
+
+        // 1. Multi-byte Vietnamese + emoji UTF-8 truncation (`CRITICAL-01`):
+        //    `restore_persisted_session` must never slice mid-codepoint or panic!
+        let long_vn = "Cảnh báo phá vỡ kháng cự đỉnh cũ 🔥 ".repeat(16);
+        app.scanner_filter.search_query = long_vn.clone();
+        app.alert_message_input = long_vn.clone();
+        app.alert_value_input = long_vn.clone();
+        app.ticket_price_input = long_vn.clone();
+        app.command_palette.query = long_vn.clone();
+        let _ =
+            app.add_quick_price_alert(app.current_mark_price() * 1.02, CrossDirection::CrossAbove);
+        app.alerts.rules[0].message = long_vn.clone();
+        app.restore_persisted_session();
+        assert!(app.scanner_filter.search_query.len() <= 64);
+        assert!(app.alert_message_input.len() <= 160);
+        assert!(app.alerts.rules[0].message.len() <= crate::alerts::MAX_MESSAGE_BYTES);
+        app.scanner_filter.search_query.clear();
+        app.command_palette.query.clear();
+
+        // 2. Multi-symbol Custom CSV (`AAA` + `BBB`) Watchlist, `Cmd+K` switching, and bogus ID guard (`MEDIUM-02`)
+        let mut csv_lines = vec!["symbol,timestamp,open,high,low,close,volume".to_owned()];
+        let base_ts = 1_750_000_000_i64;
+        for i in 0..45_i64 {
+            let ts = base_ts + i * 86_400;
+            let px_a = 100.0 + (i as f64) * 1.2 + if i % 4 == 0 { -2.5 } else { 0.8 };
+            let px_b = 200.0 + (i as f64) * 0.9 + if i % 5 == 0 { -3.0 } else { 1.1 };
+            csv_lines.push(format!(
+                "AAA,{ts},{:.2},{:.2},{:.2},{:.2},12000",
+                px_a - 0.5,
+                px_a + 1.8,
+                px_a - 1.6,
+                px_a
+            ));
+            csv_lines.push(format!(
+                "BBB,{ts},{:.2},{:.2},{:.2},{:.2},18000",
+                px_b - 0.6,
+                px_b + 2.0,
+                px_b - 1.9,
+                px_b
+            ));
+        }
+        app.load_from_csv_str(&csv_lines.join("\n"), &DataLoadOptions::default())
+            .expect("multi-symbol CSV must load");
+        let custom_rows = app.filtered_watchlist_rows();
+        assert!(custom_rows.iter().any(|r| r.symbol == "AAA"));
+        assert!(custom_rows.iter().any(|r| r.symbol == "BBB"));
+        app.command_palette.query = "BBB".to_owned();
+        let cands = app.build_command_palette_candidates();
+        assert!(
+            cands
+                .iter()
+                .any(|c| matches!(&c.action, PaletteAction::SelectWatchlistSymbol { preset: DataSourcePreset::CustomFile, symbol } if symbol == "BBB")),
+            "Cmd+K palette must list peer symbol BBB from multi-symbol CustomFile"
+        );
+        app.command_palette.query.clear();
+
+        let mut bogus_hit = app.filtered_historical_signals()[0].clone();
+        bogus_hit.instrument_id = "Bogus:NonExistent:XYZ".to_owned();
+        bogus_hit.symbol = "XYZ".to_owned();
+        assert!(
+            !app.start_scanner_signal_replay(bogus_hit, ScannerReplayIntent::SignalReview),
+            "unknown instrument_id must return false instead of silently replaying the active symbol"
+        );
+
+        // 3. Cross-instrument causal Replay lock (`CRITICAL-02` Part A):
+        //    Replaying `FPT` (`Vn30Basket`, Sep 2026) must withhold future Oct 2026 `BTCUSDT`!
+        app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+        assert!(app.start_replay_at_base_index(120));
+        let fpt_cutoff = app.replay.cutoff_timestamp(&app.base_candles).unwrap();
+        let replay_rows = app.filtered_watchlist_rows();
+        assert!(
+            !replay_rows.iter().any(|r| r.symbol == "BTCUSDT"),
+            "future-only peer feed (Oct 2026 BTCUSDT) must not leak into Watchlist during Sep 2026 replay"
+        );
+        for h in app.filtered_historical_signals() {
+            assert!(
+                h.timestamp <= fpt_cutoff,
+                "every peer historical signal during Replay must obey <= replay_cutoff"
+            );
+        }
+        app.exit_replay();
+
+        // 4. Higher-TF `15m` `BlindPractice` on `1m` `VN30F1M` (`CRITICAL-02` Part B):
+        //    Signal must stay masked across `09:00..09:13` (`BaseBar` ticks) and only reveal at `15m` bucket close!
+        app.select_watchlist_instrument(DataSourcePreset::IntradayVn30F1m, "VN30F1M");
+        app.set_timeframe(Timeframe::M15).unwrap();
+        let hit_15m = app
+            .filtered_historical_signals()
+            .into_iter()
+            .find(|h| h.symbol == "VN30F1M" && h.timeframe == Timeframe::M15 && h.bar_index >= 25)
+            .expect("15m VN30F1M historical signal");
+
+        assert!(
+            app.start_scanner_signal_replay(hit_15m.clone(), ScannerReplayIntent::BlindPractice)
+        );
+        let reveal_ts = app.scanner_context.as_ref().unwrap().reveal_at_timestamp();
+        assert!(
+            reveal_ts > hit_15m.timestamp,
+            "15m signal on 1m base feed must set reveal_at_timestamp to bucket close (> bucket open)"
+        );
+
+        app.replay.step_unit = ReplayStepUnit::BaseBar;
+        while app.replay.cutoff_timestamp(&app.base_candles).unwrap() < hit_15m.timestamp {
+            assert!(app.step_replay_forward(1));
+        }
+        let open_cutoff = app.replay.cutoff_timestamp(&app.base_candles).unwrap();
+        assert_eq!(open_cutoff, hit_15m.timestamp);
+        assert!(
+            app.scanner_context
+                .as_ref()
+                .unwrap()
+                .revealed_signal(Some(open_cutoff))
+                .is_none(),
+            "BlindPractice must remain masked on the first 1m tick of the 15m signal bucket"
+        );
+        assert!(
+            !app.filtered_historical_signals().iter().any(|h| {
+                h.instrument_id == hit_15m.instrument_id && h.timestamp == hit_15m.timestamp
+            }),
+            "unclosed active 15m tail bucket must withhold intrabar scanner signals until bucket close"
+        );
+
+        while app.replay.cutoff_timestamp(&app.base_candles).unwrap() < reveal_ts {
+            assert!(app.step_replay_forward(1));
+        }
+        let close_cutoff = app.replay.cutoff_timestamp(&app.base_candles).unwrap();
+        assert_eq!(close_cutoff, reveal_ts);
+        assert!(
+            app.scanner_context
+                .as_ref()
+                .unwrap()
+                .revealed_signal(Some(close_cutoff))
+                .is_some(),
+            "BlindPractice must reveal cleanly once the 15m bucket closes"
+        );
+    }
+
+    #[test]
+    fn critic_r08_regression_cmd_k_modal_tab_delete_gesture_and_scroll_isolation() {
+        let mut app = SumiWorkstationApp::default();
+        let ctx = egui::Context::default();
+        SumiWorkstationApp::configure_dark_workstation_visuals(&ctx);
+        let screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(1280.0, 800.0),
+        ));
+
+        // Add an unlocked selected drawing so `Delete`/`Backspace` would delete it if leaked.
+        let keep_id = app
+            .drawings
+            .add_drawing(
+                DrawingPaneTarget::Main,
+                DrawingGeometry::HorizontalLine {
+                    anchor: DrawingAnchor::new(80.0, app.current_mark_price()),
+                },
+                None,
+            )
+            .unwrap();
+        app.drawings.selected_id = Some(keep_id);
+
+        // Warm up layout once, then initiate a 2-anchor TrendLine gesture + kinetic scroll before `Cmd+K`.
+        let mut warm = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        warm.textures_delta.clear();
+
+        app.drawings.active_tool = DrawingTool::TrendLine;
+        let click_pos = egui::Pos2::new(620.0, 320.0);
+        let mut start_draw = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                events: vec![
+                    egui::Event::PointerMoved(click_pos),
+                    egui::Event::PointerButton {
+                        pos: click_pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::PointerButton {
+                        pos: click_pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        start_draw.textures_delta.clear();
+        assert!(
+            !matches!(
+                app.drawings.phase(),
+                crate::drawings::DrawingInteractionPhase::Idle
+            ),
+            "1st TrendLine click must arm PlacingTwoAnchor before Cmd+K"
+        );
+        app.viewport.kinetic = Some(crate::viewport::KineticAnimation::new(
+            0.01, 5.0, 0.997, 1.0, 50.0, 0.01,
+        ));
+
+        // Open `Cmd+K` -> must cancel active drawing placement AND kinetic scroll immediately (`HIGH-04`).
+        app.open_command_palette();
+        app.command_palette.query.clear();
+        app.drawings.selected_id = Some(keep_id);
+        assert!(matches!(
+            app.drawings.phase(),
+            crate::drawings::DrawingInteractionPhase::Idle
+        ));
+        assert!(app.viewport.kinetic.is_none());
+
+        let ro_before = app.viewport.time_scale.right_offset();
+        let bs_before = app.viewport.time_scale.bar_spacing();
+
+        // While `Cmd+K` is open with an EMPTY query, fire `Tab`, `Shift+Tab`, `Delete`, `Backspace`,
+        // and outside-modal `MouseWheel` scroll -> none may leak to background panels, drawings, or chart!
+        let mut modal_turn = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                events: vec![
+                    egui::Event::PointerMoved(egui::Pos2::new(120.0, 260.0)),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::Vec2::new(48.0, -36.0),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::Key {
+                        key: egui::Key::Tab,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::Key {
+                        key: egui::Key::Tab,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers {
+                            shift: true,
+                            ..Default::default()
+                        },
+                    },
+                    egui::Event::Key {
+                        key: egui::Key::Delete,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::Key {
+                        key: egui::Key::Backspace,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        modal_turn.textures_delta.clear();
+
+        assert!(app.command_palette.open);
+        assert_eq!(
+            app.drawings.drawings.len(),
+            1,
+            "Delete/Backspace while Cmd+K is open with empty query must never delete selected chart drawings"
+        );
+        assert_eq!(app.drawings.selected_id, Some(keep_id));
+        assert!(
+            (app.viewport.time_scale.right_offset() - ro_before).abs() < 1e-9
+                && (app.viewport.time_scale.bar_spacing() - bs_before).abs() < 1e-9,
+            "outside-modal scroll wheel must not pan or zoom the chart while Cmd+K is open"
         );
     }
 }

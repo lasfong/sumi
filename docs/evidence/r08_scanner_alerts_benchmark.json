@@ -1,0 +1,25 @@
+{
+  "milestone": "R08",
+  "environment": {
+    "cpu": "Apple M1",
+    "os": "macos",
+    "arch": "aarch64",
+    "ram_bytes": 17179869184,
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "profile": "release",
+    "viewport_logical_px": [1280, 800],
+    "pixels_per_point": 2.0
+  },
+  "scanner_alerts_and_palette_domain": [
+    { "case_id": "scanner_13_symbols_watchlist_and_signals", "description": "13-symbol multi-asset Watchlist snapshot + 80-bar Historical Signal scan + sort", "input_units": 20797, "output_items": 147, "median_us": 1799.084, "p95_us": 2156.416, "max_us": 2357.958 },
+    { "case_id": "alerts_eval_5000_1m_bars_5_rules", "description": "Causal evaluation of 5 rules (`Price`×2 + `RSI` + `MACD` + `DrawingLine`) on 95K `1m` series", "input_units": 5001, "output_items": 256, "median_us": 3108.500, "p95_us": 4076.792, "max_us": 4477.375 },
+    { "case_id": "alerts_causal_rewind_rearm_once", "description": "Causal Replay rewind (`95,000 -> 92,000`) re-arming `Once` alerts & rebuilding trigger log", "input_units": 2001, "output_items": 187, "median_us": 2916.125, "p95_us": 3928.000, "max_us": 4417.875 },
+    { "case_id": "command_palette_fuzzy_rank_cycle", "description": "`Cmd+K` candidate generation & fuzzy ranking across symbol, timeframe, indicator & quick-alert queries", "input_units": 42, "output_items": 3, "median_us": 13.708, "p95_us": 14.333, "max_us": 27.292 }
+  ],
+  "workstation_r08_workloads": [
+    { "dataset_bars": 95001, "workload_id": "r08_chart_1m_recent_4pane_25draw_trading_alerts", "scale_mode": "Linear", "bar_spacing": 8.00000, "conflation_factor": 1, "culled_bars": 141, "rendered_candles": 140, "paint_shapes": 284, "clipped_primitives": 36, "total_vertices": 16274, "total_indices": 47241, "ui_median_ms": 0.1175, "tessellate_median_ms": 0.0643, "total_cpu_median_ms": 0.1817, "total_cpu_p95_ms": 0.2076 },
+    { "dataset_bars": 95001, "workload_id": "r08_chart_1m_fit_conflated_4pane_trading_alerts", "scale_mode": "Log", "bar_spacing": 0.01240, "conflation_factor": 32, "culled_bars": 95001, "rendered_candles": 2968, "paint_shapes": 280, "clipped_primitives": 44, "total_vertices": 298492, "total_indices": 458022, "ui_median_ms": 2.5662, "tessellate_median_ms": 0.4603, "total_cpu_median_ms": 3.0670, "total_cpu_p95_ms": 3.8960 },
+    { "dataset_bars": 4543, "workload_id": "r08_full_workstation_watchlist_alerts_4pane", "scale_mode": "Linear", "bar_spacing": 8.50000, "conflation_factor": 1, "culled_bars": 69, "rendered_candles": 68, "paint_shapes": 557, "clipped_primitives": 46, "total_vertices": 22646, "total_indices": 72249, "ui_median_ms": 0.2965, "tessellate_median_ms": 0.1106, "total_cpu_median_ms": 0.4070, "total_cpu_p95_ms": 0.6017 },
+    { "dataset_bars": 4543, "workload_id": "r08_full_workstation_cmd_k_modal_open", "scale_mode": "Linear", "bar_spacing": 8.50000, "conflation_factor": 1, "culled_bars": 102, "rendered_candles": 101, "paint_shapes": 484, "clipped_primitives": 40, "total_vertices": 23968, "total_indices": 75060, "ui_median_ms": 0.1862, "tessellate_median_ms": 0.1097, "total_cpu_median_ms": 0.2960, "total_cpu_p95_ms": 0.4087 }
+  ]
+}

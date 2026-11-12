@@ -3,7 +3,8 @@ use std::process::Command;
 use std::time::Instant;
 
 use egui::{Pos2, Rect, Vec2};
-use sumi_workstation::app::SumiWorkstationApp;
+use sumi_workstation::alerts::{AlertCondition, AlertEngine, AlertFrequency, CrossDirection};
+use sumi_workstation::app::{RightDockTab, ScannerDockTab, SumiWorkstationApp};
 use sumi_workstation::chart::{
     ChartDisplayConfig, ChartReplayTradingOverlay, ChartViewportState, render_candlestick_chart,
     render_shared_pane_candlestick_chart, render_workstation_chart, render_workstation_chart_full,
@@ -11,7 +12,8 @@ use sumi_workstation::chart::{
 };
 use sumi_workstation::data::{
     DataLoadOptions, Timeframe, aggregate_ohlcv, build_btcusdt_15m_json_document,
-    generate_intraday_vn30f_1m_report, generate_synthetic_ohlcv, load_ohlcv_csv, load_ohlcv_json,
+    generate_intraday_vn30f_1m_report, generate_synthetic_ohlcv, load_bundled_watchlist_universe,
+    load_ohlcv_csv, load_ohlcv_json,
 };
 use sumi_workstation::drawings::{
     DrawingAnchor, DrawingGeometry, DrawingPaneTarget, DrawingStore, FibDirection, LocalPoint,
@@ -23,6 +25,9 @@ use sumi_workstation::indicators::{
 };
 use sumi_workstation::model::Candle;
 use sumi_workstation::replay::{ReplayController, ReplayStepUnit};
+use sumi_workstation::scanner::{
+    ScannerFilter, WatchlistSortColumn, evaluate_symbol_scan_and_signals, filter_and_sort_watchlist,
+};
 use sumi_workstation::trading::{OrderKind, OrderRequest, OrderSide, TradingSession};
 use sumi_workstation::viewport::{
     HorzScaleOptions, KineticAnimation, PaneViewport, PlotRect, PriceScale, PriceScaleMode,
@@ -117,6 +122,10 @@ fn main() {
     }
     if std::env::args().any(|a| a == "--r07") {
         run_r07_replay_trading_benchmark(&cpu_brand, mem_bytes, &rustc_ver, profile);
+        return;
+    }
+    if std::env::args().any(|a| a == "--r08") {
+        run_r08_scanner_alerts_palette_benchmark(&cpu_brand, mem_bytes, &rustc_ver, profile);
         return;
     }
 
@@ -3306,6 +3315,7 @@ fn bench_r07_workstation_render(
                             selecting_cut_bar,
                             replay_status_label: Some("REPLAY PAUSED · 15m"),
                             trading_session: Some(trading),
+                            ..Default::default()
                         },
                     );
                 });
@@ -3353,6 +3363,7 @@ fn bench_r07_workstation_render(
                         selecting_cut_bar,
                         replay_status_label: Some("REPLAY PAUSED · 15m"),
                         trading_session: Some(trading),
+                        ..Default::default()
                     },
                 );
             });
@@ -3660,6 +3671,914 @@ fn format_r07_markdown_report(
     let _ = writeln!(
         s,
         "\n## 2. End-to-End 4-Pane + 6-Indicator + 25-Drawing + Replay + Paper Trading Frame Budget (`DECISION-RENDERER-002` Gate: `< 4.0 ms`)\n"
+    );
+    let _ = writeln!(
+        s,
+        "| Bars | Workload | Scale | Conflation | Culled | Drawn | Vertices | Indices | UI Median (`ms`) | Tessellate Median (`ms`) | Total CPU Median (`ms`) | Total CPU P95 (`ms`) | `< 4.0ms` Hybrid Gate | 120 FPS (`8.33ms`) |"
+    );
+    let _ = writeln!(
+        s,
+        "| ---: | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: | :---: |"
+    );
+    for r in render {
+        let tot_med_ms = r.total_cpu_frame_stats.median_us / 1_000.0;
+        let tot_p95_ms = r.total_cpu_frame_stats.p95_us / 1_000.0;
+        let hybrid_gate = if tot_med_ms < 4.0 {
+            "PASS (<4ms)"
+        } else {
+            "TRIGGER_WGPU"
+        };
+        let pass_120 = if tot_med_ms <= 8.33 {
+            "PASS"
+        } else {
+            "EXCEEDS"
+        };
+        let _ = writeln!(
+            s,
+            "| `{}` | `{}` ({}) | `{}` | `{}x` | `{}` | `{}` | `{}` | `{}` | `{:.3}` | `{:.3}` | **`{:.3}`** | `{:.3}` | `{hybrid_gate}` | `{pass_120}` |",
+            r.dataset_bars,
+            r.workload_id,
+            r.description,
+            r.scale_mode,
+            r.conflation_factor,
+            r.culled_bars,
+            r.rendered_candles,
+            r.total_vertices,
+            r.total_indices,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            tot_med_ms,
+            tot_p95_ms,
+        );
+    }
+    s
+}
+
+#[derive(Debug, Clone)]
+struct R08DomainBenchCase {
+    case_id: &'static str,
+    description: &'static str,
+    input_units: usize,
+    output_items: usize,
+    stats: TimingStats,
+}
+
+fn build_r08_benchmark_alert_engine(
+    base_candles: &[Candle],
+    active_candles: &[Candle],
+    active_tf: Timeframe,
+    arm_idx: usize,
+    eval_idx: usize,
+    drawings: &DrawingStore,
+) -> AlertEngine {
+    let mut engine = AlertEngine::new();
+    let arm_close = base_candles[arm_idx].close;
+    let arm_cut = Some(base_candles[arm_idx].timestamp);
+
+    let _ = engine.add_alert(
+        "VN30F1M",
+        active_tf,
+        AlertCondition::PriceLevel {
+            price: arm_close * 1.002,
+            direction: CrossDirection::CrossAbove,
+        },
+        AlertFrequency::Once,
+        None,
+        base_candles,
+        arm_idx,
+        arm_cut,
+        Some(drawings),
+    );
+    let _ = engine.add_alert(
+        "VN30F1M",
+        active_tf,
+        AlertCondition::PriceLevel {
+            price: arm_close * 0.996,
+            direction: CrossDirection::CrossBelow,
+        },
+        AlertFrequency::OncePerBarClose,
+        None,
+        base_candles,
+        arm_idx,
+        arm_cut,
+        Some(drawings),
+    );
+    let _ = engine.add_alert(
+        "VN30F1M",
+        active_tf,
+        AlertCondition::RsiThreshold {
+            period: 14,
+            level: 32.0,
+            direction: CrossDirection::CrossAbove,
+        },
+        AlertFrequency::OncePerBarClose,
+        None,
+        base_candles,
+        arm_idx,
+        arm_cut,
+        Some(drawings),
+    );
+    let _ = engine.add_alert(
+        "VN30F1M",
+        active_tf,
+        AlertCondition::MacdHistogramZeroCross {
+            fast: 12,
+            slow: 26,
+            signal: 9,
+            direction: CrossDirection::CrossAny,
+        },
+        AlertFrequency::OncePerBarClose,
+        None,
+        base_candles,
+        arm_idx,
+        arm_cut,
+        Some(drawings),
+    );
+    if let Some(ray_d) = drawings.drawings.iter().find(|d| {
+        d.pane == DrawingPaneTarget::Main
+            && matches!(
+                d.geometry,
+                DrawingGeometry::Ray { .. }
+                    | DrawingGeometry::TrendLine { .. }
+                    | DrawingGeometry::HorizontalLine { .. }
+            )
+    }) {
+        let _ = engine.add_alert(
+            "VN30F1M",
+            active_tf,
+            AlertCondition::DrawingLine {
+                drawing_id: ray_d.id,
+                direction: CrossDirection::CrossAny,
+            },
+            AlertFrequency::OncePerBarClose,
+            None,
+            base_candles,
+            arm_idx,
+            arm_cut,
+            Some(drawings),
+        );
+    }
+
+    let eval_cut = Some(base_candles[eval_idx].timestamp);
+    engine.evaluate_causal(
+        base_candles,
+        Timeframe::M1,
+        active_candles,
+        active_tf,
+        eval_idx,
+        eval_cut,
+        drawings,
+    );
+    engine
+}
+
+fn run_r08_scanner_alerts_palette_benchmark(
+    cpu_brand: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+) {
+    println!("=========================================================================");
+    println!(" SUMI R08 WATCHLIST SCANNER, CAUSAL ALERTS & CMD+K PALETTE BENCHMARK");
+    println!(" CPU      : {cpu_brand}");
+    println!(
+        " RAM      : {:.1} GiB",
+        (mem_bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+    );
+    println!(" Toolchain: {rustc_ver} ({profile})");
+    println!("=========================================================================\n");
+
+    let mut domain_cases = Vec::new();
+
+    // 1A. 13-Symbol Multi-Asset Watchlist Snapshot + Historical Signal Scan (`lookback = 80`)
+    let universe = load_bundled_watchlist_universe();
+    let total_universe_bars: usize = universe.iter().map(|e| e.candles.len()).sum();
+    {
+        let filter = ScannerFilter::default();
+        let mut samples = Vec::with_capacity(80);
+        let mut out_items = 0_usize;
+        for step in 0..92 {
+            let t0 = Instant::now();
+            let mut rows = Vec::with_capacity(universe.len());
+            let mut hits = Vec::new();
+            for entry in &universe {
+                let (row_opt, entry_hits) = evaluate_symbol_scan_and_signals(
+                    &entry.instrument_id,
+                    &entry.symbol,
+                    entry.preset.short_label(),
+                    entry.base_timeframe,
+                    &entry.candles,
+                    None,
+                    80,
+                    false,
+                );
+                if let Some(r) = row_opt {
+                    rows.push(r);
+                }
+                hits.extend(entry_hits);
+            }
+            let sorted =
+                filter_and_sort_watchlist(&rows, &filter, WatchlistSortColumn::ChangePct, false);
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            out_items = sorted.len() + hits.len();
+            std::hint::black_box((sorted.len(), hits.len()));
+            if step >= 12 {
+                samples.push(us);
+            }
+        }
+        domain_cases.push(R08DomainBenchCase {
+            case_id: "scanner_13_symbols_watchlist_and_signals",
+            description: "13-symbol multi-asset Watchlist snapshot + 80-bar Historical Signal scan + sort",
+            input_units: total_universe_bars,
+            output_items: out_items,
+            stats: TimingStats::from_samples(samples),
+        });
+    }
+
+    // Prepare 100K `1m` series (`90,000..=95,000` active causal window) for AlertEngine & Workstation benchmarks
+    let rep_100k = generate_intraday_vn30f_1m_report(100_000);
+    let candles_100k_1m = rep_100k.candles;
+    let cut_start_idx = 90_000_usize;
+    let cut_end_idx = 95_000_usize;
+
+    let mut replay_95k = ReplayController::new();
+    let cutoff_ts = replay_95k
+        .start_at_base_index(&candles_100k_1m, cut_end_idx)
+        .expect("cutoff ts");
+    let candles_95k_1m = replay_95k
+        .materialize_candles(&candles_100k_1m, Timeframe::M1, Timeframe::M1)
+        .expect("95k 1m slice");
+    let mut store_95k_1m = build_r05_benchmark_drawings(
+        &candles_95k_1m,
+        candles_95k_1m.len().saturating_sub(500),
+        candles_95k_1m.len() - 1,
+    );
+    store_95k_1m.remap_timeframe(
+        &candles_95k_1m,
+        Timeframe::M1,
+        &candles_95k_1m,
+        Timeframe::M1,
+    );
+    store_95k_1m.set_replay_cutoff_timestamp(Some(cutoff_ts), candles_95k_1m.len());
+
+    // 1B. Causal `AlertEngine::evaluate_causal` across 5,000 `1m` bars (`PriceLevel` + `RSI` + `MACD` + `DrawingLine`)
+    let base_alerts = build_r08_benchmark_alert_engine(
+        &candles_100k_1m,
+        &candles_95k_1m,
+        Timeframe::M1,
+        cut_start_idx,
+        cut_end_idx,
+        &store_95k_1m,
+    );
+    {
+        let mut samples = Vec::with_capacity(80);
+        let mut trig_cnt = 0_usize;
+        for step in 0..92 {
+            let mut eng = base_alerts.clone();
+            let t0 = Instant::now();
+            eng.evaluate_causal(
+                &candles_100k_1m,
+                Timeframe::M1,
+                &candles_95k_1m,
+                Timeframe::M1,
+                cut_end_idx,
+                Some(cutoff_ts),
+                &store_95k_1m,
+            );
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            trig_cnt = eng.triggers.len();
+            std::hint::black_box(trig_cnt);
+            if step >= 12 {
+                samples.push(us);
+            }
+        }
+        domain_cases.push(R08DomainBenchCase {
+            case_id: "alerts_eval_5000_1m_bars_5_rules",
+            description: "Causal evaluation of 5 rules (`Price`×2 + `RSI` + `MACD` + `DrawingLine`) on 95K `1m` series",
+            input_units: cut_end_idx - cut_start_idx + 1,
+            output_items: trig_cnt,
+            stats: TimingStats::from_samples(samples),
+        });
+    }
+
+    // 1C. Causal Replay Rewind (`95,000 -> 92,000`) re-arming `Once` rules & purging future triggers
+    {
+        let rewind_idx = 92_000_usize;
+        let rewind_cut = candles_100k_1m[rewind_idx].timestamp;
+        let candles_92k_1m = &candles_100k_1m[..=rewind_idx];
+        let mut samples = Vec::with_capacity(80);
+        let mut rewound_trigs = 0_usize;
+        for step in 0..92 {
+            let mut eng = base_alerts.clone();
+            let t0 = Instant::now();
+            eng.evaluate_causal(
+                &candles_100k_1m,
+                Timeframe::M1,
+                candles_92k_1m,
+                Timeframe::M1,
+                rewind_idx,
+                Some(rewind_cut),
+                &store_95k_1m,
+            );
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            rewound_trigs = eng.triggers.len();
+            std::hint::black_box((rewound_trigs, eng.armed_count(Some(rewind_cut))));
+            if step >= 12 {
+                samples.push(us);
+            }
+        }
+        domain_cases.push(R08DomainBenchCase {
+            case_id: "alerts_causal_rewind_rearm_once",
+            description: "Causal Replay rewind (`95,000 -> 92,000`) re-arming `Once` alerts & rebuilding trigger log",
+            input_units: rewind_idx - cut_start_idx + 1,
+            output_items: rewound_trigs,
+            stats: TimingStats::from_samples(samples),
+        });
+    }
+
+    // 1D. `Cmd+K` Command Palette Candidate Generation & Fuzzy Ranking
+    {
+        let mut palette_app = SumiWorkstationApp::default();
+        palette_app.ensure_watchlist_universe_loaded();
+        palette_app.sync_scanner_caches();
+        let queries = ["", "fpt", "15m", "macd", "alert 1295"];
+        let mut samples = Vec::with_capacity(150);
+        let mut cand_count = 0_usize;
+        for step in 0..170 {
+            palette_app.command_palette.query = queries[step % queries.len()].to_owned();
+            let t0 = Instant::now();
+            let cands = palette_app.build_command_palette_candidates();
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            cand_count = cands.len();
+            std::hint::black_box(cand_count);
+            if step >= 20 {
+                samples.push(us);
+            }
+        }
+        domain_cases.push(R08DomainBenchCase {
+            case_id: "command_palette_fuzzy_rank_cycle",
+            description: "`Cmd+K` candidate generation & fuzzy ranking across symbol, timeframe, indicator & quick-alert queries",
+            input_units: 42,
+            output_items: cand_count,
+            stats: TimingStats::from_samples(samples),
+        });
+    }
+
+    // 2. End-to-End Render Workloads (`< 4.0 ms` Hybrid Gate across all 4!)
+    let all_cfg = IndicatorConfig {
+        show_sma: true,
+        show_ema: true,
+        show_bbands: true,
+        show_rsi: true,
+        show_macd: true,
+        show_atr: true,
+        ..IndicatorConfig::default()
+    };
+    let mut cache_95k_1m = IndicatorCache::new();
+    cache_95k_1m.sync(&candles_95k_1m, 1, &all_cfg);
+    let trading_95k =
+        build_r07_benchmark_trading_session(&candles_100k_1m, cut_start_idx, cut_end_idx);
+
+    let render_cases = vec![
+        bench_r08_chart_render(
+            &candles_95k_1m,
+            "VN30F1M",
+            "1m",
+            &all_cfg,
+            &cache_95k_1m,
+            &store_95k_1m,
+            &trading_95k,
+            &base_alerts,
+            Some(cutoff_ts),
+            "r08_chart_1m_recent_4pane_25draw_trading_alerts",
+            "95K 1m Replay + 4 panes + 6 ind + 25 draw + Trading + Active/Triggered Alerts (bar_spacing=8.0)",
+            PriceScaleMode::Normal,
+            |vp| {
+                vp.reset_to_default();
+                vp.time_scale.set_bar_spacing(8.0);
+                vp.time_scale.set_right_offset(8.0);
+            },
+            15,
+            100,
+        ),
+        bench_r08_chart_render(
+            &candles_95k_1m,
+            "VN30F1M",
+            "1m",
+            &all_cfg,
+            &cache_95k_1m,
+            &store_95k_1m,
+            &trading_95k,
+            &base_alerts,
+            Some(cutoff_ts),
+            "r08_chart_1m_fit_conflated_4pane_trading_alerts",
+            "95K 1m full-fit conflated + Replay + Trading + Batched Alert Diamonds & Lines (Logarithmic)",
+            PriceScaleMode::Logarithmic,
+            |vp| vp.fit_all(),
+            15,
+            80,
+        ),
+        bench_r08_full_workstation_ui(
+            &candles_100k_1m,
+            false,
+            "r08_full_workstation_watchlist_alerts_4pane",
+            "Full SumiWorkstationApp (Left 13-Sym Watchlist + Right Alerts Dock + Replay + 4 Panes + 100K Feed)",
+            15,
+            80,
+        ),
+        bench_r08_full_workstation_ui(
+            &candles_100k_1m,
+            true,
+            "r08_full_workstation_cmd_k_modal_open",
+            "Full SumiWorkstationApp + Floating `Cmd+K` Command Palette Modal (`alert 1295`) over 4-Pane Chart",
+            15,
+            80,
+        ),
+    ];
+
+    println!("\n--- Multi-Symbol Scanner, Causal Alerts & Command Palette Domain Throughput ---");
+    for d in &domain_cases {
+        println!(
+            "{:<42} | in={:>6} | out={:>4} | Median: {:>8.2} µs (P95 {:>8.2} µs)",
+            d.case_id, d.input_units, d.output_items, d.stats.median_us, d.stats.p95_us,
+        );
+    }
+
+    println!(
+        "\n{:<8} | {:<48} | {:>5} | {:>8} | {:>9} | {:>9} | {:>9}",
+        "Bars", "Workload", "Confl", "Vertices", "UI (ms)", "Tess (ms)", "Total(ms)"
+    );
+    println!("{}", "-".repeat(114));
+    for r in &render_cases {
+        println!(
+            "{:<8} | {:<48} | {:>4}x | {:>8} | {:>9.3} | {:>9.3} | {:>9.3}",
+            r.dataset_bars,
+            r.workload_id,
+            r.conflation_factor,
+            r.total_vertices,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.median_us / 1_000.0,
+        );
+    }
+
+    let json_out = format_r08_json_report(
+        cpu_brand,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        &domain_cases,
+        &render_cases,
+    );
+    let md_out = format_r08_markdown_report(
+        cpu_brand,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        &domain_cases,
+        &render_cases,
+    );
+
+    std::fs::create_dir_all("docs/evidence").expect("create docs/evidence");
+    std::fs::write("docs/evidence/r08_scanner_alerts_benchmark.json", json_out)
+        .expect("write r08 json");
+    std::fs::write("docs/evidence/r08_scanner_alerts_benchmark.md", md_out)
+        .expect("write r08 markdown");
+    println!(
+        "\nSaved docs/evidence/r08_scanner_alerts_benchmark.json and docs/evidence/r08_scanner_alerts_benchmark.md"
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bench_r08_chart_render(
+    candles: &[Candle],
+    symbol: &'static str,
+    timeframe: &'static str,
+    indicators: &IndicatorConfig,
+    cache: &IndicatorCache,
+    initial_store: &DrawingStore,
+    trading: &TradingSession,
+    alerts: &AlertEngine,
+    replay_cutoff_timestamp: Option<i64>,
+    workload_id: &'static str,
+    description: &'static str,
+    scale_mode: PriceScaleMode,
+    mut setup_fn: impl FnMut(&mut ChartViewportState),
+    warmup: usize,
+    iters: usize,
+) -> RenderCaseResult {
+    let ctx = egui::Context::default();
+    let screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+    ctx.set_pixels_per_point(2.0);
+
+    let mut vp = ChartViewportState::new();
+    vp.main_price_scale.set_mode(scale_mode);
+    let mut store = initial_store.clone();
+    let cfg = ChartDisplayConfig {
+        symbol,
+        timeframe,
+        show_grid: true,
+        show_crosshair: true,
+        show_volume: true,
+    };
+
+    for _ in 0..2 {
+        let mut init_out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let _ = render_workstation_chart_full(
+                        ui,
+                        candles,
+                        &mut vp,
+                        cfg,
+                        indicators,
+                        cache,
+                        &mut store,
+                        ChartReplayTradingOverlay {
+                            replay_active: true,
+                            selecting_cut_bar: false,
+                            replay_status_label: Some("PAUSED"),
+                            trading_session: Some(trading),
+                            alert_engine: Some(alerts),
+                            replay_cutoff_timestamp,
+                            frontier_base_timestamp: replay_cutoff_timestamp
+                                .or_else(|| candles.last().map(|c| c.timestamp)),
+                            modal_open: false,
+                        },
+                    );
+                });
+            },
+        );
+        init_out.textures_delta.clear();
+    }
+    setup_fn(&mut vp);
+
+    let mut ui_samples = Vec::with_capacity(iters);
+    let mut tess_samples = Vec::with_capacity(iters);
+    let mut total_samples = Vec::with_capacity(iters);
+    let mut last_rep = None;
+    let mut paint_shapes = 0_usize;
+    let mut clipped_primitives = 0_usize;
+    let mut total_vertices = 0_usize;
+    let mut total_indices = 0_usize;
+
+    for step in 0..(warmup + iters) {
+        let hover_x = 180.0 + ((step % 30) as f32) * 24.0;
+        let hover_y = if step % 2 == 0 { 220.0 } else { 520.0 };
+        let raw_input = egui::RawInput {
+            screen_rect,
+            time: Some(step as f64 * 0.016),
+            events: vec![egui::Event::PointerMoved(Pos2::new(hover_x, hover_y))],
+            ..Default::default()
+        };
+
+        let t_frame = Instant::now();
+        let t_ui = Instant::now();
+        let mut full_out = ctx.run_ui(raw_input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                last_rep = render_workstation_chart_full(
+                    ui,
+                    candles,
+                    &mut vp,
+                    cfg,
+                    indicators,
+                    cache,
+                    &mut store,
+                    ChartReplayTradingOverlay {
+                        replay_active: true,
+                        selecting_cut_bar: false,
+                        replay_status_label: Some("PAUSED"),
+                        trading_session: Some(trading),
+                        alert_engine: Some(alerts),
+                        replay_cutoff_timestamp,
+                        frontier_base_timestamp: replay_cutoff_timestamp
+                            .or_else(|| candles.last().map(|c| c.timestamp)),
+                        modal_open: false,
+                    },
+                );
+            });
+        });
+        let ui_us = t_ui.elapsed().as_secs_f64() * 1_000_000.0;
+
+        paint_shapes = full_out.shapes.len();
+        let t_tess = Instant::now();
+        let primitives = ctx.tessellate(full_out.shapes, full_out.pixels_per_point);
+        let tess_us = t_tess.elapsed().as_secs_f64() * 1_000_000.0;
+        let total_us = t_frame.elapsed().as_secs_f64() * 1_000_000.0;
+        full_out.textures_delta.clear();
+
+        if step + 1 == warmup + iters {
+            clipped_primitives = primitives.len();
+            total_vertices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.vertices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+            total_indices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.indices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+        }
+
+        if step >= warmup {
+            ui_samples.push(ui_us);
+            tess_samples.push(tess_us);
+            total_samples.push(total_us);
+        }
+    }
+
+    let rep = last_rep.expect("r08 chart render report");
+    RenderCaseResult {
+        dataset_bars: candles.len(),
+        workload_id,
+        description,
+        scale_mode: scale_mode.label(),
+        conflation_enabled: true,
+        bar_spacing: rep.bar_spacing,
+        conflation_factor: rep.conflation_factor,
+        culled_bars: rep.culled_bar_count,
+        rendered_candles: rep.rendered_candle_count,
+        paint_shapes,
+        clipped_primitives,
+        total_vertices,
+        total_indices,
+        ui_build_stats: TimingStats::from_samples(ui_samples),
+        tessellate_stats: TimingStats::from_samples(tess_samples),
+        total_cpu_frame_stats: TimingStats::from_samples(total_samples),
+    }
+}
+
+fn bench_r08_full_workstation_ui(
+    candles_100k_1m: &[Candle],
+    open_cmd_k_modal: bool,
+    workload_id: &'static str,
+    description: &'static str,
+    warmup: usize,
+    iters: usize,
+) -> RenderCaseResult {
+    let ctx = egui::Context::default();
+    SumiWorkstationApp::configure_dark_workstation_visuals(&ctx);
+    let screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+    ctx.set_pixels_per_point(2.0);
+
+    let mut app = SumiWorkstationApp::default();
+    let csv_100k = build_r06_csv_document(candles_100k_1m);
+    app.load_from_csv_str(&csv_100k, &DataLoadOptions::default())
+        .expect("load 100k csv into app");
+    app.set_timeframe(Timeframe::M15).expect("15m rollup");
+    app.indicators = IndicatorConfig {
+        show_sma: true,
+        show_ema: true,
+        show_bbands: true,
+        show_rsi: true,
+        show_macd: true,
+        show_atr: true,
+        ..IndicatorConfig::default()
+    };
+
+    assert!(app.start_replay_at_base_index(68_000));
+    app.populate_showcase_drawings();
+    let mark = app.current_mark_price();
+    let _ = app.add_quick_price_alert(mark * 1.003, CrossDirection::CrossAbove);
+    let _ = app.add_quick_price_alert(mark * 0.996, CrossDirection::CrossBelow);
+    let _ = app.step_replay_forward(10);
+
+    app.show_replay_bar = true;
+    app.show_scanner_dock = !open_cmd_k_modal;
+    app.scanner_tab = ScannerDockTab::Watchlist;
+    app.show_trading_panel = true;
+    app.show_alerts_panel = true;
+    app.right_dock_tab = RightDockTab::Alerts;
+    app.viewport.time_scale.set_bar_spacing(8.5);
+    app.viewport.time_scale.set_right_offset(8.0);
+
+    if open_cmd_k_modal {
+        app.open_command_palette();
+        app.command_palette.query = format!("alert {:.0}", mark * 1.005);
+    }
+
+    for _ in 0..2 {
+        let mut init_out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        init_out.textures_delta.clear();
+    }
+
+    let mut ui_samples = Vec::with_capacity(iters);
+    let mut tess_samples = Vec::with_capacity(iters);
+    let mut total_samples = Vec::with_capacity(iters);
+    let mut paint_shapes = 0_usize;
+    let mut clipped_primitives = 0_usize;
+    let mut total_vertices = 0_usize;
+    let mut total_indices = 0_usize;
+
+    for step in 0..(warmup + iters) {
+        let hover_x = 340.0 + ((step % 20) as f32) * 18.0;
+        let hover_y = if step % 2 == 0 { 260.0 } else { 520.0 };
+        let raw_input = egui::RawInput {
+            screen_rect,
+            time: Some(step as f64 * 0.016),
+            events: vec![egui::Event::PointerMoved(Pos2::new(hover_x, hover_y))],
+            ..Default::default()
+        };
+
+        let t_frame = Instant::now();
+        let t_ui = Instant::now();
+        let mut full_out = ctx.run_ui(raw_input, |ui| {
+            app.render_workstation_ui(ui);
+        });
+        let ui_us = t_ui.elapsed().as_secs_f64() * 1_000_000.0;
+
+        paint_shapes = full_out.shapes.len();
+        let t_tess = Instant::now();
+        let primitives = ctx.tessellate(full_out.shapes, full_out.pixels_per_point);
+        let tess_us = t_tess.elapsed().as_secs_f64() * 1_000_000.0;
+        let total_us = t_frame.elapsed().as_secs_f64() * 1_000_000.0;
+        full_out.textures_delta.clear();
+
+        if step + 1 == warmup + iters {
+            clipped_primitives = primitives.len();
+            total_vertices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.vertices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+            total_indices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.indices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+        }
+
+        if step >= warmup {
+            ui_samples.push(ui_us);
+            tess_samples.push(tess_us);
+            total_samples.push(total_us);
+        }
+    }
+
+    let rep = app.last_report.expect("full app r08 report");
+    RenderCaseResult {
+        dataset_bars: app.candles.len(),
+        workload_id,
+        description,
+        scale_mode: app.viewport.main_price_scale.mode().label(),
+        conflation_enabled: true,
+        bar_spacing: rep.bar_spacing,
+        conflation_factor: rep.conflation_factor,
+        culled_bars: rep.culled_bar_count,
+        rendered_candles: rep.rendered_candle_count,
+        paint_shapes,
+        clipped_primitives,
+        total_vertices,
+        total_indices,
+        ui_build_stats: TimingStats::from_samples(ui_samples),
+        tessellate_stats: TimingStats::from_samples(tess_samples),
+        total_cpu_frame_stats: TimingStats::from_samples(total_samples),
+    }
+}
+
+fn format_r08_json_report(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+    domain: &[R08DomainBenchCase],
+    render: &[RenderCaseResult],
+) -> String {
+    let mut s = String::with_capacity(8192);
+    let _ = writeln!(s, "{{");
+    let _ = writeln!(s, "  \"milestone\": \"R08\",");
+    let _ = writeln!(s, "  \"environment\": {{");
+    let _ = writeln!(s, "    \"cpu\": \"{}\",", cpu.replace('"', "\\\""));
+    let _ = writeln!(s, "    \"os\": \"{}\",", std::env::consts::OS);
+    let _ = writeln!(s, "    \"arch\": \"{}\",", std::env::consts::ARCH);
+    let _ = writeln!(s, "    \"ram_bytes\": {mem_bytes},");
+    let _ = writeln!(s, "    \"rustc\": \"{}\",", rustc_ver.replace('"', "\\\""));
+    let _ = writeln!(s, "    \"profile\": \"{profile}\",");
+    let _ = writeln!(s, "    \"viewport_logical_px\": [1280, 800],");
+    let _ = writeln!(s, "    \"pixels_per_point\": 2.0");
+    let _ = writeln!(s, "  }},");
+    let _ = writeln!(s, "  \"scanner_alerts_and_palette_domain\": [");
+    for (idx, d) in domain.iter().enumerate() {
+        let comma = if idx + 1 == domain.len() { "" } else { "," };
+        let _ = writeln!(
+            s,
+            "    {{ \"case_id\": \"{}\", \"description\": \"{}\", \"input_units\": {}, \"output_items\": {}, \"median_us\": {:.3}, \"p95_us\": {:.3}, \"max_us\": {:.3} }}{comma}",
+            d.case_id,
+            d.description.replace('"', "\\\""),
+            d.input_units,
+            d.output_items,
+            d.stats.median_us,
+            d.stats.p95_us,
+            d.stats.max_us,
+        );
+    }
+    let _ = writeln!(s, "  ],");
+    let _ = writeln!(s, "  \"workstation_r08_workloads\": [");
+    for (idx, r) in render.iter().enumerate() {
+        let comma = if idx + 1 == render.len() { "" } else { "," };
+        let _ = writeln!(
+            s,
+            "    {{ \"dataset_bars\": {}, \"workload_id\": \"{}\", \"scale_mode\": \"{}\", \"bar_spacing\": {:.5}, \"conflation_factor\": {}, \"culled_bars\": {}, \"rendered_candles\": {}, \"paint_shapes\": {}, \"clipped_primitives\": {}, \"total_vertices\": {}, \"total_indices\": {}, \"ui_median_ms\": {:.4}, \"tessellate_median_ms\": {:.4}, \"total_cpu_median_ms\": {:.4}, \"total_cpu_p95_ms\": {:.4} }}{comma}",
+            r.dataset_bars,
+            r.workload_id,
+            r.scale_mode,
+            r.bar_spacing,
+            r.conflation_factor,
+            r.culled_bars,
+            r.rendered_candles,
+            r.paint_shapes,
+            r.clipped_primitives,
+            r.total_vertices,
+            r.total_indices,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.p95_us / 1_000.0,
+        );
+    }
+    let _ = writeln!(s, "  ]");
+    let _ = writeln!(s, "}}");
+    s
+}
+
+fn format_r08_markdown_report(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+    domain: &[R08DomainBenchCase],
+    render: &[RenderCaseResult],
+) -> String {
+    let mut s = String::with_capacity(8192);
+    let _ = writeln!(
+        s,
+        "# Milestone R08 — Multi-Symbol Watchlist Scanner, Causal Alert Engine & `Cmd+K` Command Palette Benchmark Evidence\n"
+    );
+    let _ = writeln!(
+        s,
+        "- **Command:** `cargo run --release --example viewport_bench -- --r08`"
+    );
+    let _ = writeln!(
+        s,
+        "- **Hardware:** `{cpu}` (`{}-{}`), `{:.1} GiB` RAM",
+        std::env::consts::ARCH,
+        std::env::consts::OS,
+        (mem_bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+    );
+    let _ = writeln!(
+        s,
+        "- **Toolchain & Profile:** `{rustc_ver}` (`--{profile}`)"
+    );
+    let _ = writeln!(
+        s,
+        "- **Active Stack:** `13`-Symbol Multi-Asset Watchlist Universe (`VN30` + `CafeF` + `SPY` + `BTCUSDT` + `VN30F1M`) + `100,000` `1m` Base Bars + Causal `AlertEngine` (`PriceLevel`, `RSI(14)`, `MACD(12,26,9)`, `DrawingLine`) + `Cmd+K` Command Palette + 4 Panes + 6 Indicators + 25 Drawings + Paper Trading\n"
+    );
+
+    let _ = writeln!(
+        s,
+        "## 1. Multi-Symbol Scanner, Causal Alert Evaluation/Rewind & Command Palette Throughput\n"
+    );
+    let _ = writeln!(
+        s,
+        "| Case ID | Description | Input Bars / Items | Output Rows / Events | Median (`µs`) | P95 (`µs`) | Max (`µs`) |"
+    );
+    let _ = writeln!(s, "| :--- | :--- | ---: | ---: | ---: | ---: | ---: |");
+    for d in domain {
+        let _ = writeln!(
+            s,
+            "| `{}` | {} | `{}` | `{}` | **`{:.2} µs`** | `{:.2} µs` | `{:.2} µs` |",
+            d.case_id,
+            d.description,
+            d.input_units,
+            d.output_items,
+            d.stats.median_us,
+            d.stats.p95_us,
+            d.stats.max_us,
+        );
+    }
+
+    let _ = writeln!(
+        s,
+        "\n## 2. End-to-End Workstation Frame Budget (`DECISION-RENDERER-002` Gate: `< 4.0 ms`)\n"
     );
     let _ = writeln!(
         s,
