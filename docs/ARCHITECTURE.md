@@ -1,19 +1,19 @@
-# SUMI TRADING WORKSTATION — ARCHITECTURE (`MILESTONE R06`)
+# SUMI TRADING WORKSTATION — ARCHITECTURE (`MILESTONE R07`)
 
-- **Updated By:** `SESSION-R06-20261111T194303+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Updated By:** `SESSION-R07-20261112T093742+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 - **Crate Name:** `sumi-workstation` (`v0.1.0`, Rust Edition 2024, `egui`/`eframe 0.36.2`, `wgpu 30.0.1`)
 
 ---
 
 ## 1. Crate & Directory Structure
 
-The workstation uses a single-crate library + binary architecture (`src/lib.rs` + `src/main.rs`) with strict module boundaries separating pure `f64`/`i64` domain, CSV/JSON data ingestion, multi-timeframe aggregation, viewport, technical indicator, and interactive drawing engines (`wasm32-unknown-unknown`-verified via `cargo clippy --target wasm32-unknown-unknown --lib -- -D warnings`, zero new crates in `Cargo.toml`) from `egui` immediate-mode UI and native macOS Metal windowing/offscreen rendering:
+The workstation uses a single-crate library + binary architecture (`src/lib.rs` + `src/main.rs`) with strict module boundaries separating pure `f64`/`i64` domain, CSV/JSON data ingestion, multi-timeframe aggregation, viewport, technical indicator, interactive drawing, causal bar replay, and paper trading execution engines (`wasm32-unknown-unknown`-verified via `cargo clippy --target wasm32-unknown-unknown --lib -- -D warnings`, zero new crates in `Cargo.toml`) from `egui` immediate-mode UI and native macOS Metal windowing/offscreen rendering:
 
 ```text
 /Users/mizuhara/workspace/sumi
 ├── Cargo.toml
 ├── src/
-│   ├── lib.rs                      # Crate root exporting app, chart, data, drawings, indicators, model, viewport
+│   ├── lib.rs                      # Crate root exporting app, chart, data, drawings, indicators, model, replay, trading, viewport
 │   ├── main.rs                     # Native macOS entry point (routes SUMI_CAPTURE_BATCH / SUMI_SCREENSHOT_PATH to offscreen Metal)
 │   ├── model.rs                    # Pure OHLCV domain model (Candle with i64 UTC timestamp, PriceBounds, ViewportMapping)
 │   ├── data/                       # Milestone R06 Zero-Dependency OHLCV Loader & Multi-Timeframe Engine (WASM-safe)
@@ -39,54 +39,61 @@ The workstation uses a single-crate library + binary architecture (`src/lib.rs` 
 │   │   ├── bands.rs                # Bollinger Bands (20, 2.0 population σ, overflow-safe scaled fallback)
 │   │   ├── oscillators.rs          # Wilder RSI (14), MACD (12, 26, 9), Wilder ATR (14) & reference levels
 │   │   └── tests.rs                # TA-Lib/Wilder golden fixtures, 100K pan invariance & Critic R04 suites
-│   ├── drawings/                   # Milestone R05+R06 Interactive Drawing & Annotation Engine (f64 + UTC timestamp, WASM-safe)
-│   │   ├── mod.rs                  # Drawing, DrawingAnchor (bar_index + Option<f64> timestamp), DrawingPaneTarget & 5 geometries
+│   ├── drawings/                   # Milestone R05–R07 Interactive Drawing & Annotation Engine (f64 + UTC + Causal, WASM-safe)
+│   │   ├── mod.rs                  # Drawing (created_at_timestamp + is_causally_visible), DrawingAnchor & 5 geometries
 │   │   ├── geometry.rs             # PaneDrawingProjection, ClipEdge Liang-Barsky ray/segment clipping & Fib levels
-│   │   ├── hit_test.rs             # LWC priority hit-testing (SelectedHandle>Handle>Stroke>SelectedBody) & OHLC magnet
-│   │   ├── controller.rs           # DrawingStore, remap_timeframe, 1/2-click + drag state machine, 64-step Undo/Redo & serde safety
+│   │   ├── hit_test.rs             # Causal LWC priority hit-testing (SelectedHandle>Handle>Stroke>SelectedBody) & OHLC magnet
+│   │   ├── controller.rs           # DrawingStore, causal replay cutoff guards, remap_timeframe, 64-step Undo/Redo & serde safety
 │   │   └── tests.rs                # Liang-Barsky, $360^\circ$ ray, Fib, magnet, log-drag & Critic R05 suites
-│   ├── chart.rs                    # MultiPaneLayout, adaptive intraday/daily time axis, drawing arbitrage, Mesh batching & UI
-│   └── app.rs                      # SumiWorkstationApp shell, data/TF/indicator/drawing toolbars, per-instrument drawings & OffscreenWgpuHarness
+│   ├── replay/                     # Milestone R07 Causal Bar Replay Engine (f64/i64, WASM-safe)
+│   │   ├── mod.rs                  # ReplaySpeed (1x..20x), ReplayStepUnit (ActiveBar, BaseBar), ReplayStatus & ReplayTransition
+│   │   ├── controller.rs           # ReplayController, DEF-001 prefix materialization, step/jump/tick state machine & serde safety
+│   │   └── tests.rs                # Multi-timeframe DEF-001 lookahead lock, partial bars, causal drawings & Critic R07 suite
+│   ├── trading/                    # Milestone R07 Paper Trading Execution & Portfolio Engine (f64/i64, WASM-safe)
+│   │   ├── mod.rs                  # Public exports for AccountConfig, Order, Position, ExecutionFill, ClosedTrade & TradingSession
+│   │   ├── orders.rs               # OrderSide, PositionSide, OrderKind (Market/Limit/Stop), FillReason & PortfolioMetrics
+│   │   ├── portfolio.rs            # TradingSession, 4-waypoint OHLC matching, fee-conserving ledger & command-log rewind_to
+│   │   └── tests.rs                # Gap-open/dual-touch brackets, 1m==15m parity, fee conservation, rewind & Critic R07 suites
+│   ├── chart.rs                    # MultiPaneLayout, ChartReplayTradingOverlay, Cut Scrubber, Price Lines, Fill Arrows & Mesh batching
+│   └── app.rs                      # SumiWorkstationApp shell, Replay Dock, Paper Trading Panel, Ticket Sync & OffscreenWgpuHarness
 ├── examples/
-│   └── viewport_bench.rs           # Reproducible 10K/50K/100K R03, --r04, --r05 & --r06 release benchmarks
+│   └── viewport_bench.rs           # Reproducible 10K/50K/100K R03, --r04, --r05, --r06 & --r07 release benchmarks
 └── docs/
     ├── operations/                 # SUMI_ORCHESTRATION_CHARTER.md (durable multi-session orchestration)
-    ├── research/                   # REA traces, LWC v5.2.0 & TA-Lib specs, viewport/indicator/drawing/data-timeframe designs
+    ├── research/                   # REA traces, LWC v5.2.0 & TA-Lib specs, viewport/indicator/drawing/data/replay-trading designs
     ├── evidence/                   # Offscreen & windowed Metal PNG captures, runtime JSON telemetry, benchmark reports
     └── sessions/                   # Chronological session registry
 ```
 
 ---
 
-## 2. Coordinate Spaces, Timeframe Continuity & Multi-Pane Boundaries
+## 2. Coordinate Spaces, Timeframe Continuity & Causal Replay Boundaries
 
-Per [`docs/research/RUST_VIEWPORT_CAMERA_DESIGN.md`](research/RUST_VIEWPORT_CAMERA_DESIGN.md), [`docs/research/INDICATOR_AND_MULTIPANE_SPEC.md`](research/INDICATOR_AND_MULTIPANE_SPEC.md), [`docs/research/DRAWING_ENGINE_SPEC.md`](research/DRAWING_ENGINE_SPEC.md), and [`docs/research/DATA_LOADER_AND_TIMEFRAME_SPEC.md`](research/DATA_LOADER_AND_TIMEFRAME_SPEC.md), Sumi strictly separates horizontal time state, per-pane vertical price state, UTC timestamp continuity, and screen layout offsets:
+Per [`docs/research/RUST_VIEWPORT_CAMERA_DESIGN.md`](research/RUST_VIEWPORT_CAMERA_DESIGN.md), [`docs/research/INDICATOR_AND_MULTIPANE_SPEC.md`](research/INDICATOR_AND_MULTIPANE_SPEC.md), [`docs/research/DRAWING_ENGINE_SPEC.md`](research/DRAWING_ENGINE_SPEC.md), [`docs/research/DATA_LOADER_AND_TIMEFRAME_SPEC.md`](research/DATA_LOADER_AND_TIMEFRAME_SPEC.md), and [`docs/research/BAR_REPLAY_AND_PAPER_TRADING_SPEC.md`](research/BAR_REPLAY_AND_PAPER_TRADING_SPEC.md), Sumi strictly separates horizontal time state, per-pane vertical price state, UTC timestamp continuity, causal replay frontiers, and screen layout offsets:
 
-1. **Logical / Data & Canonical UTC Time Coordinates (`f64` / `i64`):**
+1. **Logical / Data, Canonical UTC & Causal Cutoff Coordinates (`f64` / `i64`):**
    - `bar_index` (`0..total_bars` for active `Candle` slices and aligned `Vec<Option<f64>>` indicator outputs; continuous `f64` `DrawingAnchor::bar_index` across historical `< 0` and future `>= total_bars` whitespace).
-   - `Candle::timestamp: i64` (canonical UTC epoch seconds on every candle) and `DrawingAnchor::timestamp: Option<f64>` (fractional-capable UTC epoch seconds preserving exact in-bar and inter-bar offsets), mapped bijectively via Hinnant O(1) calendar math (`src/data/calendar.rs`) and bucketed across `Timeframe` (`1m`, `5m`, `15m`, `1h`, `4h`, `1D`, `1W`). When switching timeframes on an instrument, `DrawingStore::remap_timeframe` resolves exact in-series or fractional out-of-range `bar_index` positions in $O(\log N)$ per anchor without drift across arbitrary round-trips.
-   - `raw_price` / `DrawingAnchor::value` (`f64` raw domain price, volume, or oscillator value) and transformed `logical_price` (`Normal`, `Logarithmic`, `Percentage`, `IndexedTo100` on `Main`; independent linear `sumi_oscillator` `PriceScale` per oscillator sub-pane).
+   - `Candle::timestamp: i64` and `DrawingAnchor::timestamp: Option<f64>`, mapped bijectively via Hinnant O(1) calendar math (`src/data/calendar.rs`) across `Timeframe` (`1m`, `5m`, `15m`, `1h`, `4h`, `1D`, `1W`).
+   - When `ReplayController` is active at `base_cursor_index`, `materialize_candles` slices `&base_candles[..=base_cursor_index]` before rolling up into `active_timeframe`, guaranteeing zero future lookahead (`DEF-001`) across candles, incomplete higher-timeframe bars, and `IndicatorCache`, while `DrawingStore` enforces `is_causally_visible(Some(cutoff_ts), candles.len())`.
 2. **Pane-Local Coordinates (`f64`):**
    - `local_x ∈ [0.0, plot_width)` owned by [`TimeScale`](../src/viewport/time_scale.rs) — **shared** across `Main` and all active oscillator sub-panes (`RSI`, `MACD`, `ATR`), using one unified `conflation_factor(dpr)`.
    - `local_y ∈ [0.0, pane_plot_height)` owned by an **independent** [`PriceScale`](../src/viewport/price_scale.rs) per pane/axis (`main_price_scale`, `volume_price_scale`, `rsi_price_scale`, `macd_price_scale`, `atr_price_scale`).
-   - [`PaneDrawingProjection`](../src/drawings/geometry.rs) maps `(bar_index, value) <-> LocalPoint` and clips finite segments, $360^\circ$ rays, rectangles, and Fibonacci levels analytically in `f64` against `[0.0, width] × [0.0, height]`.
 3. **Screen Coordinates (`f64` → `egui::Pos2` `f32` at paint boundary):**
-   - Partitioned vertically by [`MultiPaneLayout`](../src/chart.rs) (`stretch_factors` `4.0` main : `1.0` per active oscillator, `MultiPaneLayout::MIN_PANE_HEIGHT = 44.0`, `5.0 px` interactive splitters) and bridged per pane via [`PaneViewport`](../src/viewport/pane_viewport.rs), with collision-free adaptive UTC time-axis tick formatting (`YYYY-MM-DD HH:MM`, `MM-DD HH:MM`, `HH:MM`, `YYYY-MM-DD`).
+   - Partitioned vertically by [`MultiPaneLayout`](../src/chart.rs) (`stretch_factors` `4.0` main : `1.0` per active oscillator, `MultiPaneLayout::MIN_PANE_HEIGHT = 44.0`, `5.0 px` interactive splitters) and bridged per pane via [`PaneViewport`](../src/viewport/pane_viewport.rs).
 
 ---
 
-## 3. Data Ingestion, Multi-Timeframe, Indicator & Drawing Pipeline
+## 3. Data, Replay, Paper Trading, Indicator & Drawing Pipeline
 
-1. **Zero-Dependency CSV/JSON Ingestion & Timeframe Lattice (`src/data/`):**
-   - Streams CSV/TSV/semicolon files (`122.1–191.1 MiB/s`) and JSON kline/object/envelope feeds (`134.9 MiB/s`) with strict resource bounds (`MAX_IMPORT_BYTES = 64 MiB`, `MAX_SCANNED_RECORDS = 2_000_000`, `MAX_IMPORT_RECORDS = 500_000`, `MAX_JSON_DEPTH = 16`), multi-symbol discovery (`CafeF.INDEX.clean.csv` `HNX-INDEX` / `VNINDEX`), and canonical upward aggregation (`aggregate_ohlcv` in `0.45–2.61 ms` for `100K` `1m` bars; causal `aggregate_ohlcv_up_to` enforcing `DEF-001`).
-2. **Full-History Indicator Cache (`IndicatorCache`):** Evaluates `SMA(20)`, `EMA(50)`, `BollingerBands(20, 2.0)`, `RSI(14)`, `MACD(12, 26, 9)`, and `ATR(14)` only on `(dataset_generation, candles.len(), IndicatorConfig)` change and builds 16-bar `SeriesBlockIndex` trees.
-3. **Multi-Pane Layout, Drawing Arbitrage & `egui::Mesh` Batching (`src/chart.rs`):**
-   - Partitions stacked panes, advances `KineticAnimation`, evaluates `DrawingStore` (`pointer_down`, `pointer_move`, `pointer_up`, `hit_test_pane_drawings`, `snap_to_visible_ohlc`), and emits `egui::Mesh` batches + phase-anchored overlays (`0.185 ms` intraday standard, **`3.761 ms`** median at `100,000` `1m` bars full-fit across `4` panes + `6` indicators + `25` drawings — below the `< 4.0 ms` `DECISION-RENDERER-002` ceiling).
+1. **Zero-Dependency CSV/JSON Ingestion & Timeframe Lattice (`src/data/`):** Streams CSV/TSV (`103.7–191.1 MiB/s`) and JSON kline/envelope feeds (`134.9 MiB/s`) with multi-symbol discovery and upward aggregation (`1m..1W`).
+2. **Causal Replay & Timeframe-Invariant Paper Trading (`src/replay/`, `src/trading/`):** Advances `base_cursor_index` (`ActiveBar` or `BaseBar`, `1.25 µs` per `15m` step), evaluates `Market`/`Limit`/`Stop` orders and `SL`/`TP` brackets along the unified Gap-Open + 4-waypoint OHLC path on chronological base candles (`1m == 15m` bit-exact fill parity), conserves entry/exit commissions across partial closes, and reconstructs exact historical state on `rewind_to` (`256.71 µs` across `4,501` bars).
+3. **Full-History / Causal-Slice Indicator Cache (`IndicatorCache`):** Evaluates `SMA(20)`, `EMA(50)`, `BollingerBands(20, 2.0)`, `RSI(14)`, `MACD(12, 26, 9)`, and `ATR(14)` strictly over the materialized candle slice and builds 16-bar `SeriesBlockIndex` trees.
+4. **Multi-Pane Layout, Drawing/Cut Arbitrage & `egui::Mesh` Batching (`src/chart.rs`):** Batches candlesticks, volume, MACD histograms, Bollinger bands, axis-aligned dashed/dotted lines, and execution fill-marker arrows into `egui::Mesh` primitives (`0.174 ms` active `95K` intraday replay, **`3.923 ms`** median at `95K/100K` `1m` full-fit across `4` panes + `6` indicators + `25` drawings + Replay + Trading — below the `< 4.0 ms` `DECISION-RENDERER-002` ceiling).
 
 ---
 
 ## 4. Legacy Compatibility, Offscreen Metal Capture & Portability Rules
 
-- [`ViewportMapping`](../src/model.rs) from Session 01, `generate_synthetic_ohlcv` from Session R03, `render_candlestick_chart` / `render_workstation_chart`, and `render_workstation_chart_with_drawings` remain intact with zero breaking changes.
-- Automated verification captures (`SUMI_CAPTURE_BATCH=r04|r05|r06` and `SUMI_SCREENSHOT_PATH`) execute offscreen on Apple M1 Metal via `OffscreenWgpuHarness` (`eframe::egui_wgpu::RenderState`, `Rgba8Unorm`, `2.0x` Retina), opening **zero** windows, never touching macOS focus or Dock, and operating reliably even when the physical display is asleep.
-- `src/model.rs`, `src/data/`, `src/viewport/`, `src/indicators/`, and `src/drawings/` use zero OS-specific APIs (with native file-path helpers cleanly gated behind `#[cfg(not(target_arch = "wasm32"))]`) and pass `cargo clippy --target wasm32-unknown-unknown --lib -- -D warnings`.
+- [`ViewportMapping`](../src/model.rs), `generate_synthetic_ohlcv`, `render_candlestick_chart`, `render_workstation_chart`, `render_workstation_chart_with_drawings`, and `render_workstation_chart_full` remain intact with zero breaking changes.
+- Automated verification captures (`SUMI_CAPTURE_BATCH=r04|r05|r06|r07` and `SUMI_SCREENSHOT_PATH`) execute offscreen on Apple M1 Metal via `OffscreenWgpuHarness` (`eframe::egui_wgpu::RenderState`, `Rgba8Unorm`, `2.0x` Retina), opening **zero** windows and never touching macOS focus or Dock.
+- `src/model.rs`, `src/data/`, `src/viewport/`, `src/indicators/`, `src/drawings/`, `src/replay/`, and `src/trading/` use zero OS-specific APIs and pass `cargo clippy --target wasm32-unknown-unknown --lib -- -D warnings`.

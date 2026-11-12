@@ -17,6 +17,7 @@ use crate::indicators::{
     visit_conflated_histogram_bars_indexed,
 };
 use crate::model::{Candle, PriceBounds};
+use crate::trading::{ExecutionFill, OrderSide, PositionSide, TradingSession};
 use crate::viewport::{
     CandlestickBarMetrics, HorzScaleOptions, KineticAnimation, KineticScrollConfig, PaneViewport,
     PlotRect, PriceScale, PriceScaleOptions, TimeScale, conflated_candle_at,
@@ -60,6 +61,15 @@ pub mod palette {
     pub const IND_ATR: Color32 = Color32::from_rgb(224, 64, 251); // #E040FB Magenta
     pub const SEPARATOR_BG: Color32 = Color32::from_rgb(26, 31, 44);
     pub const SEPARATOR_ACTIVE: Color32 = Color32::from_rgb(66, 118, 255);
+
+    // Milestone R07 — Causal Bar Replay & Paper Trading Overlay Palette
+    pub const REPLAY_CUT_GOLD: Color32 = Color32::from_rgb(255, 179, 0); // #FFB300
+    pub const REPLAY_MASK_CURTAIN: Color32 = Color32::from_rgba_premultiplied(5, 7, 11, 152);
+    pub const TRADE_ENTRY_BLUE: Color32 = Color32::from_rgb(88, 166, 255); // #58A6FF
+    pub const TRADE_STOP_LOSS: Color32 = Color32::from_rgb(255, 23, 68); // #FF1744
+    pub const TRADE_TAKE_PROFIT: Color32 = Color32::from_rgb(0, 230, 118); // #00E676
+    pub const MARKER_BUY_ARROW: Color32 = Color32::from_rgb(0, 230, 118); // #00E676
+    pub const MARKER_SELL_ARROW: Color32 = Color32::from_rgb(255, 82, 82); // #FF5252
 }
 
 /// Layout regions computed dynamically from the available chart area on every frame (single-pane view).
@@ -576,6 +586,15 @@ pub struct ChartDisplayConfig<'a> {
     pub show_volume: bool,
 }
 
+/// Optional Bar Replay & Paper Trading visual overlay state passed to [`render_workstation_chart_full`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ChartReplayTradingOverlay<'a> {
+    pub replay_active: bool,
+    pub selecting_cut_bar: bool,
+    pub replay_status_label: Option<&'a str>,
+    pub trading_session: Option<&'a TradingSession>,
+}
+
 /// Telemetry returned by a chart render pass for HUD and verification readouts.
 #[derive(Debug, Clone, Copy)]
 pub struct ChartRenderReport {
@@ -600,6 +619,9 @@ pub struct ChartRenderReport {
     pub active_drawing_tool: DrawingTool,
     pub selected_drawing_id: Option<DrawingId>,
     pub magnet_mode: MagnetMode,
+    pub clicked_cut_bar_index: Option<usize>,
+    pub rendered_fill_marker_count: usize,
+    pub active_price_line_count: usize,
 }
 
 /// Renders the native candlestick chart, volume histogram, price/time axes, crosshair, and OHLCV overlay
@@ -642,6 +664,7 @@ pub fn render_workstation_chart(
         indicators,
         indicator_cache,
         None,
+        ChartReplayTradingOverlay::default(),
     )
 }
 
@@ -665,9 +688,37 @@ pub fn render_workstation_chart_with_drawings(
         indicators,
         indicator_cache,
         Some(drawings),
+        ChartReplayTradingOverlay::default(),
     )
 }
 
+/// Flagship Milestone R07 workstation renderer: extends [`render_workstation_chart_with_drawings`]
+/// with interactive Bar Replay cut-scrubber selection, causal frontier rendering, Position & Working
+/// Order `PriceLine`s + right-axis pills, and `O(log F + V)` LWC-style execution fill arrows.
+#[allow(clippy::too_many_arguments)]
+pub fn render_workstation_chart_full(
+    ui: &mut Ui,
+    candles: &[Candle],
+    viewport: &mut ChartViewportState,
+    config: ChartDisplayConfig<'_>,
+    indicators: &IndicatorConfig,
+    indicator_cache: &IndicatorCache,
+    drawings: &mut DrawingStore,
+    replay_trading: ChartReplayTradingOverlay<'_>,
+) -> Option<ChartRenderReport> {
+    render_workstation_chart_inner(
+        ui,
+        candles,
+        viewport,
+        config,
+        indicators,
+        indicator_cache,
+        Some(drawings),
+        replay_trading,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_workstation_chart_inner(
     ui: &mut Ui,
     candles: &[Candle],
@@ -676,6 +727,7 @@ fn render_workstation_chart_inner(
     indicators: &IndicatorConfig,
     indicator_cache: &IndicatorCache,
     mut drawings: Option<&mut DrawingStore>,
+    replay_trading: ChartReplayTradingOverlay<'_>,
 ) -> Option<ChartRenderReport> {
     if candles.is_empty() {
         ui.centered_and_justified(|ui| {
@@ -942,71 +994,81 @@ fn render_workstation_chart_inner(
 
     if let Some(store) = drawings.as_deref_mut() {
         sanitize_hidden_oscillator_drawing_state(store, &active_osc_ids);
-        handle_drawing_keyboard_shortcuts(ui, store);
-
-        let ptr = sample_drawing_pointer_input(ui);
-        drawing_blocked_double_click = store.active_tool != DrawingTool::Select
-            || !matches!(store.phase(), DrawingInteractionPhase::Idle);
-
-        if !separator_busy {
-            let main_proj = PaneDrawingProjection::new(
-                &viewport.time_scale,
-                &viewport.main_price_scale,
-                main_plot_f64.width,
-                main_plot_f64.height,
-                pre_base_value,
-            );
-            suppress_main_drag_pan = drive_pane_drawing_input(
-                store,
-                DrawingPaneTarget::Main,
-                multi_layout.main_plot_rect,
-                main_plot_f64,
-                &main_plot_resp,
-                ptr,
-                &main_proj,
-                candles,
-            );
-            if suppress_main_drag_pan || store.hovered_hit().is_some() {
-                drawing_blocked_double_click = true;
+        if replay_trading.selecting_cut_bar {
+            store.clear_hover_for_pane(DrawingPaneTarget::Main);
+            for &id in &active_osc_ids {
+                store.clear_hover_for_pane(DrawingPaneTarget::Oscillator(id));
             }
-            if suppress_main_drag_pan {
-                viewport.kinetic = None;
-                viewport.time_scale.end_scroll();
-                viewport.main_price_scale.end_scroll();
-            }
+            drawing_blocked_double_click = true;
+        } else {
+            handle_drawing_keyboard_shortcuts(ui, store);
 
-            for (osc_idx, &(osc_id, osc_plot_rect, _, ref osc_plot_resp, _)) in
-                osc_responses.iter().enumerate()
-            {
-                let osc_plot_f64 = PlotRect::from_egui(osc_plot_rect);
-                let osc_proj = PaneDrawingProjection::new(
+            let ptr = sample_drawing_pointer_input(ui);
+            drawing_blocked_double_click = store.active_tool != DrawingTool::Select
+                || !matches!(store.phase(), DrawingInteractionPhase::Idle);
+
+            if !separator_busy {
+                let main_proj = PaneDrawingProjection::new(
                     &viewport.time_scale,
-                    viewport.oscillator_price_scale(osc_id),
-                    osc_plot_f64.width,
-                    osc_plot_f64.height,
-                    1.0,
+                    &viewport.main_price_scale,
+                    main_plot_f64.width,
+                    main_plot_f64.height,
+                    pre_base_value,
                 );
-                let captured = drive_pane_drawing_input(
+                suppress_main_drag_pan = drive_pane_drawing_input(
                     store,
-                    DrawingPaneTarget::Oscillator(osc_id),
-                    osc_plot_rect,
-                    osc_plot_f64,
-                    osc_plot_resp,
+                    DrawingPaneTarget::Main,
+                    multi_layout.main_plot_rect,
+                    main_plot_f64,
+                    &main_plot_resp,
                     ptr,
-                    &osc_proj,
+                    &main_proj,
                     candles,
                 );
-                suppress_osc_drag_pan[osc_idx] = captured;
-                if captured || store.hovered_hit().is_some() {
+                if suppress_main_drag_pan || store.hovered_hit().is_some() {
                     drawing_blocked_double_click = true;
                 }
-                if captured {
+                if suppress_main_drag_pan {
                     viewport.kinetic = None;
                     viewport.time_scale.end_scroll();
-                    viewport.oscillator_price_scale_mut(osc_id).end_scroll();
+                    viewport.main_price_scale.end_scroll();
+                }
+
+                for (osc_idx, &(osc_id, osc_plot_rect, _, ref osc_plot_resp, _)) in
+                    osc_responses.iter().enumerate()
+                {
+                    let osc_plot_f64 = PlotRect::from_egui(osc_plot_rect);
+                    let osc_proj = PaneDrawingProjection::new(
+                        &viewport.time_scale,
+                        viewport.oscillator_price_scale(osc_id),
+                        osc_plot_f64.width,
+                        osc_plot_f64.height,
+                        1.0,
+                    );
+                    let captured = drive_pane_drawing_input(
+                        store,
+                        DrawingPaneTarget::Oscillator(osc_id),
+                        osc_plot_rect,
+                        osc_plot_f64,
+                        osc_plot_resp,
+                        ptr,
+                        &osc_proj,
+                        candles,
+                    );
+                    suppress_osc_drag_pan[osc_idx] = captured;
+                    if captured || store.hovered_hit().is_some() {
+                        drawing_blocked_double_click = true;
+                    }
+                    if captured {
+                        viewport.kinetic = None;
+                        viewport.time_scale.end_scroll();
+                        viewport.oscillator_price_scale_mut(osc_id).end_scroll();
+                    }
                 }
             }
         }
+    } else if replay_trading.selecting_cut_bar {
+        drawing_blocked_double_click = true;
     }
 
     // 5. Process Main Pane, Oscillator Sub-Panes, Right Price Axes, and Shared Time Axis gestures
@@ -1261,6 +1323,38 @@ fn render_workstation_chart_inner(
             &main_draw_proj,
             &viewport.main_price_scale,
             base_value,
+            candles.len(),
+        );
+    }
+
+    let (rendered_fill_marker_count, active_price_line_count) =
+        if let Some(session) = replay_trading.trading_session {
+            paint_trading_overlays(
+                &painter,
+                &main_plot_painter,
+                multi_layout.main_plot_rect,
+                multi_layout.main_price_axis_rect,
+                candles,
+                culling_range.clone(),
+                conflation_factor,
+                &viewport.main_price_scale,
+                &main_vp,
+                base_value,
+                session,
+            )
+        } else {
+            (0, 0)
+        };
+
+    if replay_trading.replay_active && !replay_trading.selecting_cut_bar {
+        paint_replay_frontier(
+            &main_plot_painter,
+            &painter,
+            &multi_layout,
+            candles,
+            &main_vp,
+            viewport.time_scale.bar_spacing(),
+            replay_trading.replay_status_label,
         );
     }
 
@@ -1350,6 +1444,7 @@ fn render_workstation_chart_inner(
                 &osc_draw_proj,
                 osc_ps,
                 1.0,
+                candles.len(),
             );
         }
     }
@@ -1499,6 +1594,44 @@ fn render_workstation_chart_inner(
         );
     }
 
+    // 11b. Interactive Bar Replay Cut Scrubber (`selecting_cut_bar == true`)
+    let mut clicked_cut_bar_index = None;
+    if replay_trading.selecting_cut_bar {
+        if hovered_pane.is_some() {
+            ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+        }
+        let scrubber_idx = hover_x
+            .and_then(|hx| main_vp.screen_x_to_clamped_data_index(f64::from(hx)))
+            .unwrap_or_else(|| ((candles.len() * 2) / 3).min(candles.len().saturating_sub(1)));
+        paint_replay_cut_scrubber(
+            &painter,
+            &main_plot_painter,
+            &multi_layout,
+            candles,
+            scrubber_idx,
+            &main_vp,
+            viewport.time_scale.bar_spacing(),
+        );
+
+        let clicked_pos = if main_plot_resp.clicked() {
+            main_plot_resp
+                .interact_pointer_pos()
+                .or_else(|| ui.input(|i| i.pointer.interact_pos()))
+        } else {
+            osc_responses.iter().find_map(|(_, _, _, pr, _)| {
+                pr.clicked()
+                    .then(|| {
+                        pr.interact_pointer_pos()
+                            .or_else(|| ui.input(|i| i.pointer.interact_pos()))
+                    })
+                    .flatten()
+            })
+        };
+        if let Some(pos) = clicked_pos {
+            clicked_cut_bar_index = main_vp.screen_x_to_clamped_data_index(f64::from(pos.x));
+        }
+    }
+
     // 12. Paint interactive pane separators, axis gutters, and outer border
     for (idx, sep) in multi_layout.separators.iter().enumerate() {
         let is_hot = separator_active_idx == Some(idx);
@@ -1590,11 +1723,12 @@ fn render_workstation_chart_inner(
 
     let (drawing_count, active_drawing_tool, selected_drawing_id, magnet_mode) =
         if let Some(store) = drawings.as_deref() {
+            let cutoff = store.replay_cutoff_timestamp();
             let visible_count = store
                 .drawings
                 .iter()
                 .filter(|d| {
-                    d.visible
+                    d.is_causally_visible(cutoff, candles.len())
                         && match d.pane {
                             DrawingPaneTarget::Main => true,
                             DrawingPaneTarget::Oscillator(id) => active_osc_ids.contains(&id),
@@ -1636,6 +1770,9 @@ fn render_workstation_chart_inner(
         active_drawing_tool,
         selected_drawing_id,
         magnet_mode,
+        clicked_cut_bar_index,
+        rendered_fill_marker_count,
+        active_price_line_count,
     })
 }
 
@@ -1939,6 +2076,9 @@ pub fn render_shared_pane_candlestick_chart(
         active_drawing_tool: DrawingTool::Select,
         selected_drawing_id: None,
         magnet_mode: MagnetMode::Off,
+        clicked_cut_bar_index: None,
+        rendered_fill_marker_count: 0,
+        active_price_line_count: 0,
     })
 }
 
@@ -3556,12 +3696,14 @@ fn drive_pane_drawing_input(
         && matches!(store.phase(), DrawingInteractionPhase::Idle)
     {
         let hit_any = ptr.latest_pos.is_some_and(|lp| {
-            crate::drawings::hit_test_pane_drawings(
+            crate::drawings::hit_test_pane_drawings_causal(
                 &store.drawings,
                 pane,
                 proj,
                 to_local(lp),
                 store.selected_id,
+                store.replay_cutoff_timestamp(),
+                candles.len(),
             )
             .is_some()
         });
@@ -3667,25 +3809,682 @@ fn paint_styled_segment_phased(
             };
 
             let mut count = 0_usize;
-            let mut dist = if phase < dash_len {
-                let first_end = (dash_len - phase).min(total_len);
-                if first_end > 0.15 {
-                    painter.line_segment([p0, p0 + dir * first_end], stroke);
+            let is_horizontal = delta.y.abs() <= 1e-4;
+            let is_vertical = delta.x.abs() <= 1e-4;
+
+            if is_horizontal || is_vertical {
+                let half_w = (stroke.width * 0.5).max(0.5);
+                let est_dashes = ((total_len / step).ceil() as usize + 2).min(max_dashes);
+                let mut mesh = Mesh::with_texture(egui::TextureId::default());
+                mesh.vertices.reserve(est_dashes * 4);
+                mesh.indices.reserve(est_dashes * 6);
+
+                let mut emit_axis_dash = |d0: f32, d1: f32| {
+                    let a = p0 + dir * d0;
+                    let b = p0 + dir * d1;
+                    let rect = if is_horizontal {
+                        Rect::from_min_max(
+                            Pos2::new(a.x.min(b.x), p0.y - half_w),
+                            Pos2::new(a.x.max(b.x), p0.y + half_w),
+                        )
+                    } else {
+                        Rect::from_min_max(
+                            Pos2::new(p0.x - half_w, a.y.min(b.y)),
+                            Pos2::new(p0.x + half_w, a.y.max(b.y)),
+                        )
+                    };
+                    mesh.add_colored_rect(rect, stroke.color);
+                };
+
+                let mut dist = if phase < dash_len {
+                    let first_end = (dash_len - phase).min(total_len);
+                    if first_end > 0.15 {
+                        emit_axis_dash(0.0, first_end);
+                        count += 1;
+                    }
+                    step - phase
+                } else {
+                    step - phase
+                };
+
+                while dist < total_len && count < max_dashes {
+                    let end_d = (dist + dash_len).min(total_len);
+                    emit_axis_dash(dist, end_d);
+                    dist += step;
                     count += 1;
                 }
-                step - phase
-            } else {
-                step - phase
-            };
 
-            while dist < total_len && count < max_dashes {
-                let end_d = (dist + dash_len).min(total_len);
-                painter.line_segment([p0 + dir * dist, p0 + dir * end_d], stroke);
-                dist += step;
-                count += 1;
+                if !mesh.is_empty() {
+                    painter.add(Shape::mesh(mesh));
+                }
+            } else {
+                let mut dist = if phase < dash_len {
+                    let first_end = (dash_len - phase).min(total_len);
+                    if first_end > 0.15 {
+                        painter.line_segment([p0, p0 + dir * first_end], stroke);
+                        count += 1;
+                    }
+                    step - phase
+                } else {
+                    step - phase
+                };
+
+                while dist < total_len && count < max_dashes {
+                    let end_d = (dist + dash_len).min(total_len);
+                    painter.line_segment([p0 + dir * dist, p0 + dir * end_d], stroke);
+                    dist += step;
+                    count += 1;
+                }
             }
         }
     }
+}
+
+fn format_compact_qty(qty: f64) -> String {
+    if (qty - qty.round()).abs() < 1e-6 {
+        format!("{:.0}", qty.round())
+    } else if (qty * 100.0 - (qty * 100.0).round()).abs() < 1e-4 {
+        format!("{qty:.2}")
+    } else {
+        format!("{qty:.4}")
+    }
+}
+
+fn paint_replay_frontier(
+    main_plot_painter: &egui::Painter,
+    painter: &egui::Painter,
+    multi_layout: &MultiPaneLayout,
+    candles: &[Candle],
+    main_vp: &PaneViewport<'_>,
+    bar_spacing: f64,
+    status_label: Option<&str>,
+) {
+    if candles.is_empty() {
+        return;
+    }
+    let last_idx = candles.len() - 1;
+    if let Some(last_cx) = main_vp.index_to_screen_x(last_idx as i64) {
+        let frontier_x = (last_cx + bar_spacing * 0.5) as f32;
+        if frontier_x > multi_layout.main_plot_rect.left()
+            && frontier_x < multi_layout.main_plot_rect.right()
+        {
+            let stroke = Stroke::new(1.25, palette::REPLAY_CUT_GOLD.gamma_multiply(0.65));
+            let p0 = Pos2::new(frontier_x, multi_layout.main_plot_rect.top());
+            let p1 = Pos2::new(frontier_x, multi_layout.main_plot_rect.bottom());
+            paint_styled_segment_phased(
+                main_plot_painter,
+                p0,
+                p1,
+                p0,
+                stroke,
+                LineDashStyle::Dashed,
+            );
+            for osc in &multi_layout.oscillators {
+                let osc_p = painter.with_clip_rect(osc.plot_rect);
+                let op0 = Pos2::new(frontier_x, osc.plot_rect.top());
+                let op1 = Pos2::new(frontier_x, osc.plot_rect.bottom());
+                paint_styled_segment_phased(&osc_p, op0, op1, op0, stroke, LineDashStyle::Dashed);
+            }
+        }
+    }
+
+    let badge_text = format!(
+        "REPLAY · {} · {}",
+        status_label.unwrap_or("ACTIVE"),
+        candles[last_idx].date_label
+    );
+    let font = FontId::monospace(10.5);
+    let galley = painter.layout_no_wrap(badge_text, font, palette::REPLAY_CUT_GOLD);
+    let pad = Vec2::new(7.0, 3.5);
+    let rect = Rect::from_min_size(
+        Pos2::new(
+            (multi_layout.main_plot_rect.right() - galley.size().x - pad.x * 2.0 - 8.0)
+                .max(multi_layout.main_plot_rect.left() + 8.0),
+            (multi_layout.main_plot_rect.bottom() - galley.size().y - pad.y * 2.0 - 8.0)
+                .max(multi_layout.main_plot_rect.top() + 8.0),
+        ),
+        galley.size() + pad * 2.0,
+    );
+    main_plot_painter.rect_filled(rect, 4.0, palette::BG_FLOATING_HUD);
+    main_plot_painter.rect_stroke(
+        rect,
+        4.0,
+        Stroke::new(1.0, palette::REPLAY_CUT_GOLD.gamma_multiply(0.75)),
+        StrokeKind::Inside,
+    );
+    main_plot_painter.galley(rect.min + pad, galley, palette::REPLAY_CUT_GOLD);
+}
+
+fn paint_replay_cut_scrubber(
+    painter: &egui::Painter,
+    main_plot_painter: &egui::Painter,
+    multi_layout: &MultiPaneLayout,
+    candles: &[Candle],
+    scrubber_idx: usize,
+    main_vp: &PaneViewport<'_>,
+    bar_spacing: f64,
+) {
+    if candles.is_empty() {
+        return;
+    }
+    let idx = scrubber_idx.min(candles.len() - 1);
+    let Some(cx) = main_vp.index_to_screen_x(idx as i64) else {
+        return;
+    };
+    let cut_x = ((cx + bar_spacing * 0.5) as f32).clamp(
+        multi_layout.main_plot_rect.left(),
+        multi_layout.main_plot_rect.right(),
+    );
+
+    if cut_x < multi_layout.main_plot_rect.right() {
+        let mask_rect = Rect::from_min_max(
+            Pos2::new(cut_x, multi_layout.main_plot_rect.top()),
+            Pos2::new(
+                multi_layout.main_plot_rect.right(),
+                multi_layout.main_plot_rect.bottom(),
+            ),
+        );
+        main_plot_painter.rect_filled(mask_rect, 0.0, palette::REPLAY_MASK_CURTAIN);
+    }
+    main_plot_painter.line_segment(
+        [
+            Pos2::new(cut_x, multi_layout.main_plot_rect.top()),
+            Pos2::new(cut_x, multi_layout.main_plot_rect.bottom()),
+        ],
+        Stroke::new(2.0, palette::REPLAY_CUT_GOLD),
+    );
+
+    for osc in &multi_layout.oscillators {
+        let osc_p = painter.with_clip_rect(osc.plot_rect);
+        if cut_x < osc.plot_rect.right() {
+            let osc_mask = Rect::from_min_max(
+                Pos2::new(cut_x, osc.plot_rect.top()),
+                Pos2::new(osc.plot_rect.right(), osc.plot_rect.bottom()),
+            );
+            osc_p.rect_filled(osc_mask, 0.0, palette::REPLAY_MASK_CURTAIN);
+        }
+        osc_p.line_segment(
+            [
+                Pos2::new(cut_x, osc.plot_rect.top()),
+                Pos2::new(cut_x, osc.plot_rect.bottom()),
+            ],
+            Stroke::new(1.8, palette::REPLAY_CUT_GOLD),
+        );
+    }
+
+    let label = format!("<< CUT REPLAY HERE · {}", candles[idx].date_label);
+    let font = FontId::monospace(11.0);
+    let galley = painter.layout_no_wrap(label, font, Color32::from_rgb(18, 20, 26));
+    let pad = Vec2::new(8.0, 4.0);
+    let pill_w = galley.size().x + pad.x * 2.0;
+    let pill_h = galley.size().y + pad.y * 2.0;
+    let min_x = (cut_x - pill_w * 0.5).clamp(
+        multi_layout.main_plot_rect.left() + 6.0,
+        (multi_layout.main_plot_rect.right() - pill_w - 6.0)
+            .max(multi_layout.main_plot_rect.left() + 6.0),
+    );
+    let pill_rect = Rect::from_min_size(
+        Pos2::new(min_x, multi_layout.main_plot_rect.top() + 10.0),
+        Vec2::new(pill_w, pill_h),
+    );
+    main_plot_painter.rect_filled(pill_rect, 4.0, palette::REPLAY_CUT_GOLD);
+    main_plot_painter.galley(pill_rect.min + pad, galley, Color32::from_rgb(18, 20, 26));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_trading_price_line_and_pill(
+    axis_painter: &egui::Painter,
+    plot_painter: &egui::Painter,
+    plot_rect: Rect,
+    price_axis_rect: Rect,
+    price: f64,
+    color: Color32,
+    dash: LineDashStyle,
+    stroke_width: f32,
+    inline_badge: &str,
+    price_scale: &PriceScale,
+    main_vp: &PaneViewport<'_>,
+    base_value: f64,
+) -> bool {
+    let Some(sy) = main_vp.price_to_screen_y(price) else {
+        return false;
+    };
+    let y = sy as f32;
+    if y < plot_rect.top() || y > plot_rect.bottom() {
+        return false;
+    }
+
+    let p0 = Pos2::new(plot_rect.left(), y);
+    let p1 = Pos2::new(plot_rect.right(), y);
+    paint_styled_segment_phased(
+        plot_painter,
+        p0,
+        p1,
+        p0,
+        Stroke::new(stroke_width, color.gamma_multiply(0.90)),
+        dash,
+    );
+
+    if !inline_badge.is_empty() && plot_rect.width() > 160.0 {
+        let font = FontId::monospace(10.0);
+        let galley = axis_painter.layout_no_wrap(inline_badge.to_owned(), font, Color32::WHITE);
+        let pad = Vec2::new(5.5, 2.5);
+        let badge_w = galley.size().x + pad.x * 2.0;
+        let badge_h = galley.size().y + pad.y * 2.0;
+        let badge_x = (plot_rect.right() - badge_w - 10.0).max(plot_rect.left() + 8.0);
+        let badge_y = (y - badge_h * 0.5).clamp(
+            plot_rect.top() + 2.0,
+            (plot_rect.bottom() - badge_h - 2.0).max(plot_rect.top() + 2.0),
+        );
+        let badge_rect =
+            Rect::from_min_size(Pos2::new(badge_x, badge_y), Vec2::new(badge_w, badge_h));
+        plot_painter.rect_filled(
+            badge_rect,
+            3.0,
+            Color32::from_rgba_unmultiplied(15, 19, 28, 232),
+        );
+        plot_painter.rect_stroke(
+            badge_rect,
+            3.0,
+            Stroke::new(1.0, color.gamma_multiply(0.85)),
+            StrokeKind::Inside,
+        );
+        plot_painter.galley(badge_rect.min + pad, galley, Color32::WHITE);
+    }
+
+    let pill_y = y.clamp(price_axis_rect.top() + 9.5, price_axis_rect.bottom() - 9.5);
+    let pill_rect = Rect::from_min_max(
+        Pos2::new(price_axis_rect.left() + 2.0, pill_y - 9.0),
+        Pos2::new(price_axis_rect.right() - 4.0, pill_y + 9.0),
+    );
+    axis_painter.rect_filled(pill_rect, 3.0, color);
+    axis_painter.text(
+        Pos2::new(price_axis_rect.left() + 6.0, pill_y),
+        Align2::LEFT_CENTER,
+        price_scale.format_price(price, base_value),
+        FontId::monospace(10.5),
+        Color32::WHITE,
+    );
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_execution_fill_markers(
+    plot_painter: &egui::Painter,
+    plot_rect: Rect,
+    candles: &[Candle],
+    culling_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    inverted_scale: bool,
+    bar_spacing: f64,
+    main_vp: &PaneViewport<'_>,
+    fills: &[ExecutionFill],
+) -> usize {
+    if fills.is_empty() || candles.is_empty() || culling_range.is_empty() {
+        return 0;
+    }
+    let cf = conflation_factor.max(1);
+    let aligned_start = if cf > 1 {
+        (culling_range.start / cf) * cf
+    } else {
+        culling_range.start
+    }
+    .min(candles.len());
+    let aligned_end = if cf > 1 {
+        culling_range
+            .end
+            .div_ceil(cf)
+            .saturating_mul(cf)
+            .min(candles.len())
+    } else {
+        culling_range.end.min(candles.len())
+    };
+    if aligned_start >= aligned_end {
+        return 0;
+    }
+
+    let min_ts = candles[aligned_start].timestamp;
+    let max_excl_ts = (aligned_end < candles.len()).then(|| candles[aligned_end].timestamp);
+    let fill_start = fills.partition_point(|f| f.timestamp < min_ts);
+    let fill_end = match max_excl_ts {
+        Some(t) => fills.partition_point(|f| f.timestamp < t),
+        None => fills.len(),
+    };
+    if fill_start >= fill_end {
+        return 0;
+    }
+
+    let mut candle_cursor = aligned_start;
+    let mut rendered_markers = 0_usize;
+    let arrow_cap = (fill_end - fill_start).min(256);
+    let mut arrow_mesh = Mesh::with_texture(egui::TextureId::default());
+    arrow_mesh.vertices.reserve(arrow_cap * 6);
+    arrow_mesh.indices.reserve(arrow_cap * 6);
+    let border_col = Color32::from_rgba_unmultiplied(10, 14, 20, 220);
+
+    let emit_arrow_triangle = |mesh: &mut Mesh,
+                               tip: Pos2,
+                               b_left: Pos2,
+                               b_right: Pos2,
+                               outward: f32,
+                               fill_col: Color32| {
+        // Crisp 1px dark halo triangle behind the solid fill triangle (zero per-arrow Vec alloc!)
+        let o_tip = Pos2::new(tip.x, tip.y - outward * 1.0);
+        let o_bl = Pos2::new(b_left.x - 0.9, b_left.y + outward * 0.8);
+        let o_br = Pos2::new(b_right.x + 0.9, b_right.y + outward * 0.8);
+        let base = mesh.vertices.len() as u32;
+        mesh.colored_vertex(o_tip, border_col);
+        mesh.colored_vertex(o_bl, border_col);
+        mesh.colored_vertex(o_br, border_col);
+        mesh.add_triangle(base, base + 1, base + 2);
+
+        let ibase = mesh.vertices.len() as u32;
+        mesh.colored_vertex(tip, fill_col);
+        mesh.colored_vertex(b_left, fill_col);
+        mesh.colored_vertex(b_right, fill_col);
+        mesh.add_triangle(ibase, ibase + 1, ibase + 2);
+    };
+
+    let mut cur_bucket_id: Option<usize> = None;
+    let mut buy_count_in_bucket = 0_usize;
+    let mut sell_count_in_bucket = 0_usize;
+    let mut last_bucket_geom: Option<(f32, f32, f32)> = None; // (cx, low_y, high_y)
+
+    let flush_overflow = |painter: &egui::Painter,
+                          geom: Option<(f32, f32, f32)>,
+                          buy_cnt: usize,
+                          sell_cnt: usize| {
+        let Some((cx, low_y, high_y)) = geom else {
+            return;
+        };
+        if buy_cnt > 3 {
+            let dir = if inverted_scale { -1.0_f32 } else { 1.0_f32 };
+            let oy = (low_y + dir * (10.0 + 3.0 * 11.0))
+                .clamp(plot_rect.top() + 8.0, plot_rect.bottom() - 8.0);
+            painter.text(
+                Pos2::new(cx, oy),
+                Align2::CENTER_CENTER,
+                format!("+{}", buy_cnt - 3),
+                FontId::monospace(9.5),
+                palette::MARKER_BUY_ARROW,
+            );
+        }
+        if sell_cnt > 3 {
+            let dir = if inverted_scale { 1.0_f32 } else { -1.0_f32 };
+            let oy = (high_y + dir * (10.0 + 3.0 * 11.0))
+                .clamp(plot_rect.top() + 8.0, plot_rect.bottom() - 8.0);
+            painter.text(
+                Pos2::new(cx, oy),
+                Align2::CENTER_CENTER,
+                format!("+{}", sell_cnt - 3),
+                FontId::monospace(9.5),
+                palette::MARKER_SELL_ARROW,
+            );
+        }
+    };
+
+    for fill in &fills[fill_start..fill_end] {
+        let step = candles[candle_cursor..aligned_end]
+            .partition_point(|c| c.timestamp <= fill.timestamp)
+            .saturating_sub(1);
+        candle_cursor += step;
+        let bucket_id = candle_cursor / cf;
+
+        if cur_bucket_id != Some(bucket_id) {
+            flush_overflow(
+                plot_painter,
+                last_bucket_geom,
+                buy_count_in_bucket,
+                sell_count_in_bucket,
+            );
+            cur_bucket_id = Some(bucket_id);
+            buy_count_in_bucket = 0;
+            sell_count_in_bucket = 0;
+
+            let (logical_x, bar_high, bar_low) = if cf > 1 {
+                if let Some(b) = conflated_candle_at(candles, candle_cursor, cf) {
+                    (b.center_logical_index, b.high, b.low)
+                } else {
+                    let c = &candles[candle_cursor];
+                    (candle_cursor as f64, c.high, c.low)
+                }
+            } else {
+                let c = &candles[candle_cursor];
+                (candle_cursor as f64, c.high, c.low)
+            };
+
+            let sx = main_vp.float_index_to_screen_x(logical_x);
+            let hy = main_vp.price_to_screen_y(bar_high);
+            let ly = main_vp.price_to_screen_y(bar_low);
+            last_bucket_geom = match (sx, ly, hy) {
+                (Some(x), Some(l), Some(h)) => Some((x as f32, l as f32, h as f32)),
+                _ => None,
+            };
+        }
+
+        let Some((cx, low_y, high_y)) = last_bucket_geom else {
+            continue;
+        };
+        if cx < plot_rect.left() - 8.0 || cx > plot_rect.right() + 8.0 {
+            continue;
+        }
+
+        let half_w = (bar_spacing as f32 * 0.42).clamp(4.2, 6.8);
+        let arrow_h = (half_w * 1.35).clamp(5.8, 9.0);
+
+        match fill.side {
+            OrderSide::Buy => {
+                let slot = buy_count_in_bucket;
+                buy_count_in_bucket += 1;
+                if slot < 3 {
+                    // `belowBar` (`low` side), pointing inward toward the candle!
+                    let outward = if inverted_scale { -1.0_f32 } else { 1.0_f32 };
+                    let tip_y = (low_y + outward * (5.5 + (slot as f32) * 11.5))
+                        .clamp(plot_rect.top() + 10.0, plot_rect.bottom() - 10.0);
+                    let base_y = tip_y + outward * arrow_h;
+                    emit_arrow_triangle(
+                        &mut arrow_mesh,
+                        Pos2::new(cx, tip_y),
+                        Pos2::new(cx - half_w, base_y),
+                        Pos2::new(cx + half_w, base_y),
+                        outward,
+                        palette::MARKER_BUY_ARROW,
+                    );
+                    if bar_spacing >= 12.0 && slot == 0 {
+                        plot_painter.text(
+                            Pos2::new(cx, base_y + outward * 6.5),
+                            Align2::CENTER_CENTER,
+                            fill.reason.short_label(),
+                            FontId::monospace(9.0),
+                            palette::MARKER_BUY_ARROW,
+                        );
+                    }
+                    rendered_markers += 1;
+                }
+            }
+            OrderSide::Sell => {
+                let slot = sell_count_in_bucket;
+                sell_count_in_bucket += 1;
+                if slot < 3 {
+                    // `aboveBar` (`high` side), pointing inward toward the candle!
+                    let outward = if inverted_scale { 1.0_f32 } else { -1.0_f32 };
+                    let tip_y = (high_y + outward * (5.5 + (slot as f32) * 11.5))
+                        .clamp(plot_rect.top() + 10.0, plot_rect.bottom() - 10.0);
+                    let base_y = tip_y + outward * arrow_h;
+                    emit_arrow_triangle(
+                        &mut arrow_mesh,
+                        Pos2::new(cx, tip_y),
+                        Pos2::new(cx - half_w, base_y),
+                        Pos2::new(cx + half_w, base_y),
+                        outward,
+                        palette::MARKER_SELL_ARROW,
+                    );
+                    if bar_spacing >= 12.0 && slot == 0 {
+                        plot_painter.text(
+                            Pos2::new(cx, base_y + outward * 6.5),
+                            Align2::CENTER_CENTER,
+                            fill.reason.short_label(),
+                            FontId::monospace(9.0),
+                            palette::MARKER_SELL_ARROW,
+                        );
+                    }
+                    rendered_markers += 1;
+                }
+            }
+        }
+    }
+
+    if !arrow_mesh.is_empty() {
+        plot_painter.add(Shape::mesh(arrow_mesh));
+    }
+
+    flush_overflow(
+        plot_painter,
+        last_bucket_geom,
+        buy_count_in_bucket,
+        sell_count_in_bucket,
+    );
+    rendered_markers
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_trading_overlays(
+    axis_painter: &egui::Painter,
+    plot_painter: &egui::Painter,
+    plot_rect: Rect,
+    price_axis_rect: Rect,
+    candles: &[Candle],
+    culling_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    price_scale: &PriceScale,
+    main_vp: &PaneViewport<'_>,
+    base_value: f64,
+    session: &TradingSession,
+) -> (usize, usize) {
+    let mut price_lines = 0_usize;
+
+    // 1. Working (`Pending`) Limit & Stop orders
+    for order in session.pending_orders() {
+        if let Some(trig_price) = order.kind.trigger_price() {
+            let color = match order.side {
+                OrderSide::Buy => palette::BULLISH,
+                OrderSide::Sell => palette::BEARISH,
+            };
+            let badge = format!(
+                "{} {} {}",
+                order.side.short_label(),
+                order.kind.short_label(),
+                format_compact_qty(order.quantity)
+            );
+            if paint_trading_price_line_and_pill(
+                axis_painter,
+                plot_painter,
+                plot_rect,
+                price_axis_rect,
+                trig_price,
+                color,
+                LineDashStyle::Dotted,
+                1.2,
+                &badge,
+                price_scale,
+                main_vp,
+                base_value,
+            ) {
+                price_lines += 1;
+            }
+        }
+    }
+
+    // 2. Active Position Entry, Stop Loss, and Take Profit lines
+    if let Some(pos) = session.open_position() {
+        let mark_price = candles.last().map_or(pos.avg_entry_price, |c| c.close);
+        let unreal_pnl = pos.unrealized_pnl(mark_price);
+        let unreal_pct = pos.unrealized_return_pct(mark_price);
+        let side_tag = match pos.side {
+            PositionSide::Long => "LONG",
+            PositionSide::Short => "SHORT",
+        };
+        let entry_badge = format!(
+            "{} {}  {:+.2} ({:+.2}%)",
+            side_tag,
+            format_compact_qty(pos.quantity),
+            unreal_pnl,
+            unreal_pct
+        );
+        if paint_trading_price_line_and_pill(
+            axis_painter,
+            plot_painter,
+            plot_rect,
+            price_axis_rect,
+            pos.avg_entry_price,
+            palette::TRADE_ENTRY_BLUE,
+            LineDashStyle::Dashed,
+            1.55,
+            &entry_badge,
+            price_scale,
+            main_vp,
+            base_value,
+        ) {
+            price_lines += 1;
+        }
+
+        if let Some(sl) = pos.stop_loss {
+            let sl_pnl = pos.unrealized_pnl(sl);
+            let sl_badge = format!("SL  {:+.2}", sl_pnl);
+            if paint_trading_price_line_and_pill(
+                axis_painter,
+                plot_painter,
+                plot_rect,
+                price_axis_rect,
+                sl,
+                palette::TRADE_STOP_LOSS,
+                LineDashStyle::Dashed,
+                1.35,
+                &sl_badge,
+                price_scale,
+                main_vp,
+                base_value,
+            ) {
+                price_lines += 1;
+            }
+        }
+
+        if let Some(tp) = pos.take_profit {
+            let tp_pnl = pos.unrealized_pnl(tp);
+            let tp_badge = format!("TP  {:+.2}", tp_pnl);
+            if paint_trading_price_line_and_pill(
+                axis_painter,
+                plot_painter,
+                plot_rect,
+                price_axis_rect,
+                tp,
+                palette::TRADE_TAKE_PROFIT,
+                LineDashStyle::Dashed,
+                1.35,
+                &tp_badge,
+                price_scale,
+                main_vp,
+                base_value,
+            ) {
+                price_lines += 1;
+            }
+        }
+    }
+
+    // 3. Execution Fill Markers (`arrowUp` / `arrowDown`)
+    let marker_count = paint_execution_fill_markers(
+        plot_painter,
+        plot_rect,
+        candles,
+        culling_range,
+        conflation_factor,
+        price_scale.is_inverted(),
+        main_vp.time_scale.bar_spacing(),
+        main_vp,
+        session.fills(),
+    );
+
+    (marker_count, price_lines)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3699,9 +4498,11 @@ fn paint_pane_drawings(
     proj: &PaneDrawingProjection<'_>,
     price_scale: &PriceScale,
     base_value: f64,
+    visible_candle_count: usize,
 ) {
+    let cutoff = store.replay_cutoff_timestamp();
     for drawing in &store.drawings {
-        if !drawing.visible || drawing.pane != pane {
+        if !drawing.is_causally_visible(cutoff, visible_candle_count) || drawing.pane != pane {
             continue;
         }
         let is_selected = store.selected_id == Some(drawing.id);

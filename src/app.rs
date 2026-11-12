@@ -4,14 +4,13 @@ use egui::{Button, Color32, CornerRadius, Frame, Margin, RichText, Stroke, Vec2,
 use serde::{Deserialize, Serialize};
 
 use crate::chart::{
-    ChartDisplayConfig, ChartRenderReport, ChartViewportState, palette,
-    render_workstation_chart_with_drawings,
+    ChartDisplayConfig, ChartRenderReport, ChartReplayTradingOverlay, ChartViewportState, palette,
+    render_workstation_chart_full,
 };
 use crate::data::{
     AggregationError, DataFileFormat, DataLoadError, DataLoadOptions, DataLoadReport,
-    DataSourcePreset, Timeframe, aggregate_ohlcv, generate_synthetic_ohlcv, load_ohlcv_bytes,
-    load_ohlcv_csv, load_ohlcv_json, load_preset_dataset, remap_timestamp_to_bar_index,
-    resolve_anchor_timestamp,
+    DataSourcePreset, Timeframe, generate_synthetic_ohlcv, load_ohlcv_bytes, load_ohlcv_csv,
+    load_ohlcv_json, load_preset_dataset, remap_timestamp_to_bar_index, resolve_anchor_timestamp,
 };
 use crate::drawings::{
     DrawingAnchor, DrawingColorPreset, DrawingGeometry, DrawingPaneTarget, DrawingStore,
@@ -20,9 +19,38 @@ use crate::drawings::{
 use crate::indicators::OscillatorPaneId;
 use crate::indicators::{IndicatorCache, IndicatorConfig};
 use crate::model::Candle;
+use crate::replay::{
+    ReplayController, ReplaySpeed, ReplayStatus, ReplayStepUnit, ReplayTransition,
+};
+use crate::trading::{
+    OrderKind, OrderRequest, OrderSide, PositionSide, TradingSession, extract_ticket_from_drawing,
+};
 use crate::viewport::PriceScaleMode;
 
-/// Primary application state for the Sumi Rust Trading Workstation (`Milestone R06`).
+/// Order-type tab selection in the workstation Paper Trading ticket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TicketOrderKind {
+    #[default]
+    Market,
+    Limit,
+    Stop,
+}
+
+impl TicketOrderKind {
+    pub const ALL: [Self; 3] = [Self::Market, Self::Limit, Self::Stop];
+
+    #[inline]
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Market => "Market",
+            Self::Limit => "Limit",
+            Self::Stop => "Stop",
+        }
+    }
+}
+
+/// Primary application state for the Sumi Rust Trading Workstation (`Milestone R07`).
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 pub struct SumiWorkstationApp {
@@ -41,6 +69,17 @@ pub struct SumiWorkstationApp {
     pub drawings: DrawingStore,
     #[serde(default)]
     drawings_by_instrument: BTreeMap<String, DrawingStore>,
+    pub replay: ReplayController,
+    pub trading: TradingSession,
+    #[serde(default)]
+    replay_trading_by_instrument: BTreeMap<String, (ReplayController, TradingSession)>,
+    pub show_replay_bar: bool,
+    pub show_trading_panel: bool,
+    pub ticket_kind: TicketOrderKind,
+    pub ticket_qty_input: String,
+    pub ticket_price_input: String,
+    pub ticket_sl_input: String,
+    pub ticket_tp_input: String,
 
     #[serde(skip)]
     pub base_candles: Vec<Candle>,
@@ -54,6 +93,8 @@ pub struct SumiWorkstationApp {
     pub show_import_bar: bool,
     #[serde(skip)]
     pub last_load_status: Option<(bool, String)>,
+    #[serde(skip)]
+    pub last_trade_status: Option<(bool, String)>,
     #[serde(skip)]
     viewport_focus_lock: Option<(f64, f64, f64)>,
     #[serde(skip)]
@@ -94,12 +135,23 @@ impl Default for SumiWorkstationApp {
             indicators,
             drawings: DrawingStore::new(),
             drawings_by_instrument: BTreeMap::new(),
+            replay: ReplayController::new(),
+            trading: TradingSession::default(),
+            replay_trading_by_instrument: BTreeMap::new(),
+            show_replay_bar: false,
+            show_trading_panel: false,
+            ticket_kind: TicketOrderKind::Market,
+            ticket_qty_input: "10".to_owned(),
+            ticket_price_input: String::new(),
+            ticket_sl_input: String::new(),
+            ticket_tp_input: String::new(),
             base_candles,
             candles,
             available_symbols: vec!["VNINDEX".to_owned()],
             in_memory_custom_doc: None,
             show_import_bar: false,
             last_load_status: None,
+            last_trade_status: None,
             viewport_focus_lock: None,
             indicator_cache,
             dataset_generation: 1,
@@ -166,8 +218,18 @@ impl SumiWorkstationApp {
         for store in self.drawings_by_instrument.values_mut() {
             store.sanitize_deserialized();
         }
+        while self.replay_trading_by_instrument.len() > 64 {
+            self.replay_trading_by_instrument.pop_first();
+        }
+        if self.ticket_qty_input.trim().is_empty() || self.ticket_qty_input.len() > 32 {
+            self.ticket_qty_input = "10".to_owned();
+        }
+        self.ticket_price_input.truncate(32);
+        self.ticket_sl_input.truncate(32);
+        self.ticket_tp_input.truncate(32);
         self.viewport_focus_lock = None;
         self.in_memory_custom_doc = None;
+        self.last_trade_status = None;
 
         let persisted_tf = Timeframe::parse_label(&self.timeframe).unwrap_or(self.active_timeframe);
         let (report, reset_to_clean_fallback) = if self.data_source == DataSourcePreset::CustomFile
@@ -236,14 +298,47 @@ impl SumiWorkstationApp {
             )
         };
 
+        if reset_to_clean_fallback {
+            self.replay.exit_replay();
+            self.trading = TradingSession::default();
+            self.show_replay_bar = false;
+        } else {
+            self.replay.sanitize_deserialized(&report.candles);
+            if self.replay.is_active() {
+                self.show_replay_bar = true;
+            }
+        }
+
         let (resolved_tf, active_candles) =
             if !reset_to_clean_fallback && report.base_timeframe.can_aggregate_to(persisted_tf) {
-                match aggregate_ohlcv(&report.candles, report.base_timeframe, persisted_tf) {
+                match self.replay.materialize_candles(
+                    &report.candles,
+                    report.base_timeframe,
+                    persisted_tf,
+                ) {
                     Ok(agg) => (persisted_tf, agg),
-                    Err(_) => (report.base_timeframe, report.candles.clone()),
+                    Err(_) => {
+                        let fallback = self
+                            .replay
+                            .materialize_candles(
+                                &report.candles,
+                                report.base_timeframe,
+                                report.base_timeframe,
+                            )
+                            .unwrap_or_else(|_| report.candles.clone());
+                        (report.base_timeframe, fallback)
+                    }
                 }
             } else {
-                (report.base_timeframe, report.candles.clone())
+                let fallback = self
+                    .replay
+                    .materialize_candles(
+                        &report.candles,
+                        report.base_timeframe,
+                        report.base_timeframe,
+                    )
+                    .unwrap_or_else(|_| report.candles.clone());
+                (report.base_timeframe, fallback)
             };
 
         self.symbol = report.symbol;
@@ -257,10 +352,18 @@ impl SumiWorkstationApp {
         self.base_candles = report.candles;
         self.candles = active_candles;
 
+        let cursor_idx = self.current_trading_cursor_base_index();
+        self.trading
+            .sanitize_and_rebuild(&self.base_candles, cursor_idx);
+
         // Stamp canonical UTC timestamps onto persisted drawings in-place at `resolved_tf`
         // (`bar_index` remains untouched; `timestamp` is populated for subsequent TF switches).
         self.drawings
             .remap_timeframe(&self.candles, resolved_tf, &self.candles, resolved_tf);
+        self.drawings.set_replay_cutoff_timestamp(
+            self.replay.cutoff_timestamp(&self.base_candles),
+            self.candles.len(),
+        );
 
         self.viewport.time_scale.set_total_bars(self.candles.len());
         if reset_to_clean_fallback {
@@ -490,13 +593,20 @@ impl SumiWorkstationApp {
             return Ok(());
         }
 
-        let aggregated = aggregate_ohlcv(&self.base_candles, self.base_timeframe, target_tf)?;
+        let aggregated =
+            self.replay
+                .materialize_candles(&self.base_candles, self.base_timeframe, target_tf)?;
         let old_tf = self.active_timeframe;
         let old_candles = std::mem::replace(&mut self.candles, aggregated);
 
         // 1. Remap drawings + undo/redo history across `(old_candles, old_tf) -> (self.candles, target_tf)`
+        //    and synchronize causal replay visibility cutoff (`DEF-001`).
         self.drawings
             .remap_timeframe(&old_candles, old_tf, &self.candles, target_tf);
+        self.drawings.set_replay_cutoff_timestamp(
+            self.replay.cutoff_timestamp(&self.base_candles),
+            self.candles.len(),
+        );
 
         // 2. Preserve viewport temporal focus across timeframe switches!
         //    Uses `TimeScale::local_x_to_center_float_index` (`(width - 1.0 - local_x) / bar_spacing`)
@@ -625,6 +735,7 @@ impl SumiWorkstationApp {
         // Park outgoing instrument's drawings normalized to its `base_timeframe` so switching
         // tickers/sources never cross-contaminates drawings across instruments (`HIGH-03`).
         let mut outgoing_store = std::mem::take(&mut self.drawings);
+        outgoing_store.set_replay_cutoff_timestamp(None, self.base_candles.len());
         if !outgoing_store.drawings.is_empty() {
             if !self.candles.is_empty() && !self.base_candles.is_empty() {
                 outgoing_store.remap_timeframe(
@@ -640,9 +751,29 @@ impl SumiWorkstationApp {
                 self.drawings_by_instrument.pop_first();
             }
             self.drawings_by_instrument
-                .insert(outgoing_key, outgoing_store);
+                .insert(outgoing_key.clone(), outgoing_store);
         } else {
             self.drawings_by_instrument.remove(&outgoing_key);
+        }
+
+        // Park outgoing instrument's causal Bar Replay & Paper Trading session so open positions/orders
+        // never leak across tickers (`VN30F1M` <-> `BTCUSDT` <-> `VNINDEX`).
+        let mut outgoing_replay = std::mem::take(&mut self.replay);
+        outgoing_replay.pause();
+        outgoing_replay.cancel_cut_selection();
+        let outgoing_trading = std::mem::take(&mut self.trading);
+        if outgoing_replay.is_active() || !outgoing_trading.commands.is_empty() {
+            while self.replay_trading_by_instrument.len() >= 64
+                && !self
+                    .replay_trading_by_instrument
+                    .contains_key(&outgoing_key)
+            {
+                self.replay_trading_by_instrument.pop_first();
+            }
+            self.replay_trading_by_instrument
+                .insert(outgoing_key.clone(), (outgoing_replay, outgoing_trading));
+        } else {
+            self.replay_trading_by_instrument.remove(&outgoing_key);
         }
 
         match custom_update {
@@ -670,10 +801,39 @@ impl SumiWorkstationApp {
         if source == DataSourcePreset::SyntheticVnindex {
             self.dataset_bar_count = report.candles.len();
         }
-        self.base_candles = report.candles.clone();
-        self.candles = report.candles;
+        self.base_candles = report.candles;
 
         let incoming_key = self.current_instrument_key();
+        let (mut incoming_replay, mut incoming_trading) = self
+            .replay_trading_by_instrument
+            .remove(&incoming_key)
+            .unwrap_or_default();
+        incoming_replay.sanitize_deserialized(&self.base_candles);
+        self.candles = incoming_replay
+            .materialize_candles(
+                &self.base_candles,
+                self.base_timeframe,
+                self.active_timeframe,
+            )
+            .unwrap_or_else(|_| self.base_candles.clone());
+        self.replay = incoming_replay;
+
+        let cursor_idx = self.current_trading_cursor_base_index();
+        incoming_trading.sanitize_and_rebuild(&self.base_candles, cursor_idx);
+        let has_existing_trades = !incoming_trading.commands.is_empty();
+        self.trading = incoming_trading;
+        self.show_replay_bar = self.replay.is_active();
+        self.last_trade_status = None;
+        if !has_existing_trades {
+            self.ticket_qty_input = default_ticket_qty_string(
+                self.current_mark_price(),
+                self.trading.config.initial_cash,
+            );
+            self.ticket_price_input.clear();
+            self.ticket_sl_input.clear();
+            self.ticket_tp_input.clear();
+        }
+
         let mut incoming_store = self
             .drawings_by_instrument
             .remove(&incoming_key)
@@ -681,12 +841,16 @@ impl SumiWorkstationApp {
         incoming_store.magnet_mode = prev_magnet;
         if !incoming_store.drawings.is_empty() && !self.candles.is_empty() {
             incoming_store.remap_timeframe(
-                &self.candles,
-                self.active_timeframe,
+                &self.base_candles,
+                self.base_timeframe,
                 &self.candles,
                 self.active_timeframe,
             );
         }
+        incoming_store.set_replay_cutoff_timestamp(
+            self.replay.cutoff_timestamp(&self.base_candles),
+            self.candles.len(),
+        );
         self.drawings = incoming_store;
 
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
@@ -799,6 +963,7 @@ impl SumiWorkstationApp {
         let price_span = (slice_high.1 - slice_low.1).max(1.0);
 
         let mut showcase = Vec::with_capacity(8);
+        let cutoff_ts = self.drawings.replay_cutoff_timestamp();
         let make_drawing = |pane: DrawingPaneTarget,
                             geom: DrawingGeometry,
                             style: Option<DrawingStyle>,
@@ -807,6 +972,7 @@ impl SumiWorkstationApp {
                 style.unwrap_or_else(|| DrawingStyle::default_for_tool(geom.tool_kind()));
             let mut d = crate::drawings::Drawing::new(0, pane, geom, resolved_style);
             d.locked = locked;
+            d.created_at_timestamp = cutoff_ts;
             d
         };
 
@@ -983,6 +1149,583 @@ impl SumiWorkstationApp {
 
         let _ = self.drawings.replace_all(showcase, Some(fib_entry_index));
     }
+
+    /// Returns the causal `base_candles` index governing order submission and mark-to-market PnL.
+    #[inline]
+    #[must_use]
+    pub fn current_trading_cursor_base_index(&self) -> usize {
+        if self.base_candles.is_empty() {
+            0
+        } else if self.replay.is_active() {
+            self.replay
+                .base_cursor_index
+                .min(self.base_candles.len() - 1)
+        } else {
+            self.base_candles.len() - 1
+        }
+    }
+
+    /// Returns the causal close price at [`Self::current_trading_cursor_base_index`].
+    #[inline]
+    #[must_use]
+    pub fn current_mark_price(&self) -> f64 {
+        let idx = self.current_trading_cursor_base_index();
+        self.base_candles
+            .get(idx)
+            .or_else(|| self.candles.last())
+            .map_or(0.0, |c| c.close)
+    }
+
+    /// Enters interactive on-chart `Jump to Bar` scrubber selection (`✂ Cut Bar`), pausing playback
+    /// while preserving any active causal replay cutoff (`DEF-001`).
+    pub fn enter_replay_cut_selection(&mut self) {
+        if self.base_candles.is_empty() {
+            return;
+        }
+        self.drawings.cancel_active_gesture();
+        self.drawings.set_tool(DrawingTool::Select);
+        self.show_replay_bar = true;
+        self.replay.enter_cut_selection();
+    }
+
+    /// Cancels interactive `Jump to Bar` scrubber selection without altering the replay cursor.
+    pub fn cancel_replay_cut_selection(&mut self) {
+        self.replay.cancel_cut_selection();
+    }
+
+    /// Handles a primary click on `clicked_active_idx` while `self.replay.selecting_cut_bar` is active.
+    pub fn handle_chart_cut_bar_click(&mut self, clicked_active_idx: usize) -> bool {
+        let max_allowed = self
+            .replay
+            .is_active()
+            .then_some(self.replay.base_cursor_index);
+        let Some(base_idx) = ReplayController::resolve_cut_base_index(
+            &self.base_candles,
+            &self.candles,
+            self.active_timeframe,
+            clicked_active_idx,
+            max_allowed,
+        ) else {
+            self.replay.cancel_cut_selection();
+            return false;
+        };
+
+        if self.replay.is_active() {
+            if let Some(tr) = self.replay.jump_to_base_index(&self.base_candles, base_idx) {
+                self.apply_replay_transition(tr);
+            } else {
+                self.replay.cancel_cut_selection();
+            }
+            true
+        } else {
+            self.start_replay_at_base_index(base_idx)
+        }
+    }
+
+    /// Starts (or re-anchors) causal Bar Replay at `base_index` on `self.base_candles`, slicing all
+    /// higher-timeframe OHLCV series, indicators, drawings, and paper-trading state to `<= cutoff`.
+    pub fn start_replay_at_base_index(&mut self, base_index: usize) -> bool {
+        if self.base_candles.is_empty() {
+            return false;
+        }
+        self.drawings.cancel_active_gesture();
+        if !self.candles.is_empty() {
+            // Stamp canonical UTC timestamps onto all pre-existing drawings before slicing candles.
+            self.drawings.remap_timeframe(
+                &self.candles,
+                self.active_timeframe,
+                &self.candles,
+                self.active_timeframe,
+            );
+        }
+
+        let clamped_idx = base_index.min(self.base_candles.len() - 1);
+        let Some(cutoff_ts) = self
+            .replay
+            .start_at_base_index(&self.base_candles, clamped_idx)
+        else {
+            return false;
+        };
+        self.show_replay_bar = true;
+        self.last_trade_status = None;
+
+        self.trading.rewind_to(
+            &self.base_candles,
+            self.replay.start_base_index,
+            clamped_idx,
+        );
+
+        self.candles = self
+            .replay
+            .materialize_candles(
+                &self.base_candles,
+                self.base_timeframe,
+                self.active_timeframe,
+            )
+            .unwrap_or_else(|_| self.base_candles[..=clamped_idx].to_vec());
+
+        self.drawings
+            .set_replay_cutoff_timestamp(Some(cutoff_ts), self.candles.len());
+
+        self.viewport.kinetic = None;
+        self.viewport_focus_lock = None;
+        self.viewport.time_scale.set_total_bars(self.candles.len());
+        self.viewport.time_scale.set_right_offset(16.0);
+        if self.viewport.main_price_scale.is_auto_scale() {
+            self.viewport.main_price_scale.reset_auto_scale();
+        }
+        self.viewport.volume_price_scale.reset_auto_scale();
+        self.viewport.rsi_price_scale.reset_auto_scale();
+        self.viewport.macd_price_scale.reset_auto_scale();
+        self.viewport.atr_price_scale.reset_auto_scale();
+
+        self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
+        self.indicator_cache
+            .sync(&self.candles, self.dataset_generation, &self.indicators);
+        true
+    }
+
+    /// Synchronizes trading execution/rewind, causal OHLCV materialization, drawing timestamps,
+    /// viewport camera tracking, and indicator cache after a [`ReplayTransition`].
+    pub fn apply_replay_transition(&mut self, tr: ReplayTransition) {
+        if self.base_candles.is_empty() {
+            return;
+        }
+        if tr.new_base_index > tr.prev_base_index {
+            self.trading.advance_through_bars(
+                &self.base_candles,
+                tr.prev_base_index.saturating_add(1),
+                tr.new_base_index,
+            );
+        } else if tr.new_base_index < tr.prev_base_index {
+            self.last_trade_status = None;
+            if !self.candles.is_empty() {
+                self.drawings.remap_timeframe(
+                    &self.candles,
+                    self.active_timeframe,
+                    &self.candles,
+                    self.active_timeframe,
+                );
+            }
+            self.trading.rewind_to(
+                &self.base_candles,
+                self.replay.start_base_index,
+                tr.new_base_index,
+            );
+        }
+
+        let old_len = self.candles.len();
+        let old_ro = self.viewport.time_scale.right_offset();
+        let old_last_visible = if old_len > 0 {
+            let old_b = (old_len - 1) as i64;
+            self.viewport
+                .time_scale
+                .visible_strict_range()
+                .is_none_or(|strict| old_b >= strict.left && old_b <= strict.right)
+        } else {
+            true
+        };
+
+        self.candles = self
+            .replay
+            .materialize_candles(
+                &self.base_candles,
+                self.base_timeframe,
+                self.active_timeframe,
+            )
+            .unwrap_or_else(|_| {
+                let end = tr.new_base_index.min(self.base_candles.len() - 1);
+                self.base_candles[..=end].to_vec()
+            });
+        let new_len = self.candles.len();
+
+        self.drawings.refresh_materialized_anchor_timestamps(
+            old_len,
+            &self.candles,
+            self.active_timeframe,
+        );
+        self.drawings
+            .set_replay_cutoff_timestamp(Some(tr.cutoff_timestamp), new_len);
+
+        self.viewport.kinetic = None;
+        self.viewport_focus_lock = None;
+        self.viewport.time_scale.set_total_bars(new_len);
+        if new_len < old_len {
+            let removed = (old_len - new_len) as f64;
+            if old_last_visible {
+                self.viewport
+                    .time_scale
+                    .set_right_offset(old_ro.clamp(8.0, 24.0));
+            } else {
+                self.viewport.time_scale.set_right_offset(old_ro + removed);
+            }
+        }
+
+        if self.viewport.main_price_scale.is_auto_scale() {
+            self.viewport.main_price_scale.reset_auto_scale();
+        }
+        self.viewport.volume_price_scale.reset_auto_scale();
+        self.viewport.rsi_price_scale.reset_auto_scale();
+        self.viewport.macd_price_scale.reset_auto_scale();
+        self.viewport.atr_price_scale.reset_auto_scale();
+
+        self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
+        self.indicator_cache
+            .sync(&self.candles, self.dataset_generation, &self.indicators);
+    }
+
+    /// Steps causal Bar Replay forward by `steps` units (`ActiveBar` or `BaseBar`).
+    pub fn step_replay_forward(&mut self, steps: usize) -> bool {
+        if let Some(tr) = self
+            .replay
+            .step_forward(&self.base_candles, self.active_timeframe, steps)
+        {
+            self.apply_replay_transition(tr);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Steps causal Bar Replay backward by `steps` units, rewinding paper-trading state bit-exactly.
+    pub fn step_replay_backward(&mut self, steps: usize) -> bool {
+        if let Some(tr) =
+            self.replay
+                .step_backward(&self.base_candles, self.active_timeframe, steps)
+        {
+            self.apply_replay_transition(tr);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Jumps causal Bar Replay back to `start_base_index`, rewinding paper-trading state bit-exactly.
+    pub fn jump_replay_to_start(&mut self) -> bool {
+        if let Some(tr) = self.replay.jump_to_start(&self.base_candles) {
+            self.apply_replay_transition(tr);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Toggles auto-play (`Playing <-> Paused`) when Bar Replay is active.
+    pub fn toggle_replay_play_pause(&mut self) -> bool {
+        self.replay.toggle_play_pause(&self.base_candles)
+    }
+
+    /// Exits causal Bar Replay and restores full unmasked chart visibility while advancing any
+    /// working orders/brackets causally to the live close so runtime state matches persisted restore.
+    pub fn exit_replay(&mut self) {
+        let was_active = self.replay.is_active();
+        let prev_cursor = self.replay.base_cursor_index;
+        self.replay.exit_replay();
+        if !was_active || self.base_candles.is_empty() {
+            return;
+        }
+
+        let last_base = self.base_candles.len() - 1;
+        if prev_cursor < last_base
+            && (!self.trading.commands.is_empty() || self.trading.open_position().is_some())
+        {
+            self.trading.advance_through_bars(
+                &self.base_candles,
+                prev_cursor.saturating_add(1),
+                last_base,
+            );
+        }
+
+        let old_len = self.candles.len();
+        self.candles = self
+            .replay
+            .materialize_candles(
+                &self.base_candles,
+                self.base_timeframe,
+                self.active_timeframe,
+            )
+            .unwrap_or_else(|_| self.base_candles.clone());
+        self.drawings.refresh_materialized_anchor_timestamps(
+            old_len,
+            &self.candles,
+            self.active_timeframe,
+        );
+        self.drawings
+            .set_replay_cutoff_timestamp(None, self.candles.len());
+
+        self.viewport.kinetic = None;
+        self.viewport_focus_lock = None;
+        self.viewport.time_scale.set_total_bars(self.candles.len());
+        if self.viewport.main_price_scale.is_auto_scale() {
+            self.viewport.main_price_scale.reset_auto_scale();
+        }
+        self.viewport.volume_price_scale.reset_auto_scale();
+        self.viewport.rsi_price_scale.reset_auto_scale();
+        self.viewport.macd_price_scale.reset_auto_scale();
+        self.viewport.atr_price_scale.reset_auto_scale();
+
+        self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
+        self.indicator_cache
+            .sync(&self.candles, self.dataset_generation, &self.indicators);
+    }
+
+    /// Parses the workstation Order Ticket fields and submits `side` (`Buy` or `Sell`) at the
+    /// current causal replay/live cursor.
+    pub fn submit_ticket_order(
+        &mut self,
+        side: OrderSide,
+    ) -> Result<u64, crate::trading::TradingError> {
+        let qty = parse_ticket_qty(&self.ticket_qty_input).inspect_err(|err| {
+            self.last_trade_status = Some((true, err.to_string()));
+        })?;
+        let kind = match self.ticket_kind {
+            TicketOrderKind::Market => OrderKind::Market,
+            TicketOrderKind::Limit => {
+                let limit_price = parse_ticket_required_price(&self.ticket_price_input)
+                    .inspect_err(|err| {
+                        self.last_trade_status = Some((true, err.to_string()));
+                    })?;
+                OrderKind::Limit { limit_price }
+            }
+            TicketOrderKind::Stop => {
+                let stop_price = parse_ticket_required_price(&self.ticket_price_input)
+                    .inspect_err(|err| {
+                        self.last_trade_status = Some((true, err.to_string()));
+                    })?;
+                OrderKind::Stop { stop_price }
+            }
+        };
+        let stop_loss = parse_ticket_optional_price(&self.ticket_sl_input).inspect_err(|err| {
+            self.last_trade_status = Some((true, err.to_string()));
+        })?;
+        let take_profit =
+            parse_ticket_optional_price(&self.ticket_tp_input).inspect_err(|err| {
+                self.last_trade_status = Some((true, err.to_string()));
+            })?;
+
+        let cursor_idx = self.current_trading_cursor_base_index();
+        let req = OrderRequest {
+            side,
+            kind,
+            quantity: qty,
+            stop_loss,
+            take_profit,
+        };
+        match self
+            .trading
+            .submit_order(req, &self.base_candles, cursor_idx)
+        {
+            Ok(order_id) => {
+                let msg = match kind {
+                    OrderKind::Market => format!(
+                        "Filled #{} {} {:.4} MKT @ {:.2}",
+                        order_id,
+                        side.short_label(),
+                        qty,
+                        self.current_mark_price()
+                    ),
+                    OrderKind::Limit { limit_price } => format!(
+                        "Working #{} {} {:.4} LMT @ {:.2}",
+                        order_id,
+                        side.short_label(),
+                        qty,
+                        limit_price
+                    ),
+                    OrderKind::Stop { stop_price } => format!(
+                        "Working #{} {} {:.4} STP @ {:.2}",
+                        order_id,
+                        side.short_label(),
+                        qty,
+                        stop_price
+                    ),
+                };
+                self.last_trade_status = Some((false, msg));
+                Ok(order_id)
+            }
+            Err(err) => {
+                self.last_trade_status = Some((true, err.to_string()));
+                Err(err)
+            }
+        }
+    }
+
+    /// Populates the Paper Trading Order Ticket from the currently selected main-pane [`crate::drawings::Drawing`].
+    pub fn sync_ticket_from_selected_drawing(&mut self) -> bool {
+        let Some(sync) = self
+            .drawings
+            .selected_drawing()
+            .and_then(extract_ticket_from_drawing)
+        else {
+            self.last_trade_status = Some((
+                true,
+                "select a Main-pane drawing to sync Entry / SL / TP".to_owned(),
+            ));
+            return false;
+        };
+        let mark = self.current_mark_price();
+        self.ticket_kind = match sync.side {
+            OrderSide::Buy if mark > 0.0 && sync.entry_price > mark => TicketOrderKind::Stop,
+            OrderSide::Sell if mark > 0.0 && sync.entry_price < mark => TicketOrderKind::Stop,
+            _ => TicketOrderKind::Limit,
+        };
+        self.ticket_price_input = format!("{:.2}", sync.entry_price);
+        self.ticket_sl_input = sync
+            .stop_loss
+            .map_or_else(String::new, |v| format!("{v:.2}"));
+        self.ticket_tp_input = sync
+            .take_profit
+            .map_or_else(String::new, |v| format!("{v:.2}"));
+        self.show_trading_panel = true;
+        self.last_trade_status = Some((
+            false,
+            format!(
+                "Synced {} {} @ {:.2}",
+                sync.side.short_label(),
+                self.ticket_kind.label(),
+                sync.entry_price
+            ),
+        ));
+        true
+    }
+
+    /// Applies the ticket `SL` / `TP` inputs to the currently open position.
+    pub fn apply_ticket_brackets_to_position(
+        &mut self,
+    ) -> Result<(), crate::trading::TradingError> {
+        let sl = parse_ticket_optional_price(&self.ticket_sl_input).inspect_err(|err| {
+            self.last_trade_status = Some((true, err.to_string()));
+        })?;
+        let tp = parse_ticket_optional_price(&self.ticket_tp_input).inspect_err(|err| {
+            self.last_trade_status = Some((true, err.to_string()));
+        })?;
+        let cursor_idx = self.current_trading_cursor_base_index();
+        match self
+            .trading
+            .update_position_brackets(sl, tp, &self.base_candles, cursor_idx)
+        {
+            Ok(()) => {
+                self.last_trade_status = Some((false, "Updated position SL / TP".to_owned()));
+                Ok(())
+            }
+            Err(err) => {
+                self.last_trade_status = Some((true, err.to_string()));
+                Err(err)
+            }
+        }
+    }
+
+    /// Closes the entire open position at the current causal bar close (`Flatten`).
+    pub fn flatten_open_position(&mut self) -> Result<(), crate::trading::TradingError> {
+        let cursor_idx = self.current_trading_cursor_base_index();
+        match self
+            .trading
+            .flatten_position(&self.base_candles, cursor_idx)
+        {
+            Ok(fill) => {
+                self.last_trade_status = Some((
+                    false,
+                    format!(
+                        "Flattened {:.4} @ {:.2} (PnL {:+.2})",
+                        fill.quantity,
+                        fill.price,
+                        fill.realized_net_pnl.unwrap_or(0.0)
+                    ),
+                ));
+                Ok(())
+            }
+            Err(err) => {
+                self.last_trade_status = Some((true, err.to_string()));
+                Err(err)
+            }
+        }
+    }
+
+    /// Cancels a `Pending` working order by ID.
+    pub fn cancel_working_order(
+        &mut self,
+        order_id: u64,
+    ) -> Result<(), crate::trading::TradingError> {
+        let cursor_idx = self.current_trading_cursor_base_index();
+        match self
+            .trading
+            .cancel_order(order_id, &self.base_candles, cursor_idx)
+        {
+            Ok(()) => {
+                self.last_trade_status = Some((false, format!("Cancelled order #{order_id}")));
+                Ok(())
+            }
+            Err(err) => {
+                self.last_trade_status = Some((true, err.to_string()));
+                Err(err)
+            }
+        }
+    }
+
+    /// Resets the Paper Trading account cleanly at the start of the active replay session (or current bar).
+    pub fn reset_trading_session(&mut self) {
+        let start_idx = if self.replay.is_active() {
+            self.replay.start_base_index
+        } else {
+            self.current_trading_cursor_base_index()
+        };
+        let cursor_idx = self.current_trading_cursor_base_index();
+        self.trading.reset_at(&self.base_candles, start_idx);
+        if cursor_idx > start_idx {
+            self.trading.advance_through_bars(
+                &self.base_candles,
+                start_idx.saturating_add(1),
+                cursor_idx,
+            );
+        }
+        self.last_trade_status = Some((
+            false,
+            format!("Reset account (${:.0})", self.trading.config.initial_cash),
+        ));
+    }
+}
+
+fn default_ticket_qty_string(mark_price: f64, initial_cash: f64) -> String {
+    if !mark_price.is_finite() || mark_price <= 0.0 {
+        return "1".to_owned();
+    }
+    let target_notional = (initial_cash * 0.12).max(100.0);
+    let raw = target_notional / mark_price;
+    if raw >= 10.0 {
+        format!("{:.0}", ((raw / 5.0).round().max(1.0)) * 5.0)
+    } else if raw >= 1.0 {
+        format!("{:.0}", raw.round().max(1.0))
+    } else if raw >= 0.1 {
+        format!("{:.2}", ((raw * 10.0).round().max(1.0)) / 10.0)
+    } else {
+        format!("{:.4}", raw.max(0.0001))
+    }
+}
+
+fn parse_ticket_qty(raw: &str) -> Result<f64, crate::trading::TradingError> {
+    let cleaned = raw.trim().replace(',', "");
+    let qty = cleaned
+        .parse::<f64>()
+        .map_err(|_| crate::trading::TradingError::InvalidQuantity(0.0))?;
+    Ok(qty)
+}
+
+fn parse_ticket_required_price(raw: &str) -> Result<f64, crate::trading::TradingError> {
+    let cleaned = raw.trim().replace(',', "");
+    let price = cleaned
+        .parse::<f64>()
+        .map_err(|_| crate::trading::TradingError::InvalidPrice(0.0))?;
+    Ok(price)
+}
+
+fn parse_ticket_optional_price(raw: &str) -> Result<Option<f64>, crate::trading::TradingError> {
+    let cleaned = raw.trim().replace(',', "");
+    if cleaned.is_empty() {
+        return Ok(None);
+    }
+    let price = cleaned
+        .parse::<f64>()
+        .map_err(|_| crate::trading::TradingError::InvalidPrice(0.0))?;
+    Ok(Some(price))
 }
 
 #[derive(Clone, Copy)]
@@ -1058,10 +1801,28 @@ impl eframe::App for SumiWorkstationApp {
 }
 
 impl SumiWorkstationApp {
-    /// Renders one complete workstation UI pass (toolbar, optional import bar, status bar, and
-    /// multi-pane chart canvas). Shared identically between interactive `eframe` sessions and
-    /// offscreen Metal/`wgpu` Retina verification captures.
+    /// Renders one complete workstation UI pass (toolbar, optional Replay Dock, optional Paper
+    /// Trading panel, status bar, and multi-pane chart canvas). Shared identically between
+    /// interactive `eframe` sessions and offscreen Metal/`wgpu` Retina verification captures.
     pub fn render_workstation_ui(&mut self, ui: &mut egui::Ui) {
+        if self.replay.is_playing() {
+            let dt = f64::from(ui.input(|i| i.stable_dt).max(0.0));
+            if dt > 0.0
+                && let Some(tr) =
+                    self.replay
+                        .advance_playback_dt(dt, &self.base_candles, self.active_timeframe)
+            {
+                self.apply_replay_transition(tr);
+            }
+            if self.replay.is_playing() {
+                let wait_ms = (self.replay.speed.interval_secs() * 500.0).clamp(16.0, 250.0) as u64;
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(wait_ms));
+            }
+        }
+
+        let was_selecting_cut_bar = self.replay.selecting_cut_bar;
+
         // 1. Top Workstation Toolbar
         let top_frame = Frame::new()
             .fill(palette::BG_WORKSTATION)
@@ -1071,7 +1832,7 @@ impl SumiWorkstationApp {
         egui::Panel::top("workstation_top_toolbar")
             .frame(top_frame)
             .show(ui, |ui| {
-                // Row 1: Identity, Price Ticker, Data Feeds, Multi-Timeframe Selector (`1m..1W`)
+                // Row 1: Identity, Price Ticker, Data Feeds, Multi-Timeframe Selector (`1m..1W`) & Replay/Trade Toggles
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = Vec2::new(5.0, 4.0);
 
@@ -1221,6 +1982,30 @@ impl SumiWorkstationApp {
                     if let Some(tf) = requested_tf {
                         let _ = self.set_timeframe(tf);
                     }
+
+                    ui.separator();
+
+                    let mut replay_dock_open = self.show_replay_bar || self.replay.is_active();
+                    if indicator_toggle_pill(
+                        ui,
+                        &mut replay_dock_open,
+                        "<< Bar Replay",
+                        palette::REPLAY_CUT_GOLD,
+                    ) {
+                        if replay_dock_open {
+                            self.show_replay_bar = true;
+                        } else if !self.replay.is_active() {
+                            self.show_replay_bar = false;
+                            self.replay.cancel_cut_selection();
+                        }
+                    }
+
+                    let _ = indicator_toggle_pill(
+                        ui,
+                        &mut self.show_trading_panel,
+                        "Paper Trade",
+                        palette::TRADE_ENTRY_BLUE,
+                    );
                 });
 
                 // Optional Non-Modal CSV/JSON File Import Bar
@@ -1383,6 +2168,9 @@ impl SumiWorkstationApp {
                     ] {
                         let is_active = self.drawings.active_tool == tool;
                         if ui.selectable_label(is_active, tool.short_label()).clicked() {
+                            if tool != DrawingTool::Select {
+                                self.cancel_replay_cut_selection();
+                            }
                             self.drawings.set_tool(tool);
                         }
                     }
@@ -1488,8 +2276,19 @@ impl SumiWorkstationApp {
                         if ui.add_enabled(!sel.locked, Button::new("Delete")).clicked() {
                             let _ = self.drawings.delete_selected();
                         }
+                        if sel.pane == DrawingPaneTarget::Main
+                            && ui.button("-> Order Ticket").clicked()
+                        {
+                            let _ = self.sync_ticket_from_selected_drawing();
+                        }
                     }
                 });
+
+                // Optional Row 4: Compact Causal Bar Replay Transport Dock (`Milestone R07`)
+                if self.show_replay_bar || self.replay.is_active() {
+                    ui.add_space(4.0);
+                    self.render_replay_dock(ui);
+                }
             });
 
         // Synchronize dirty-tracked indicator cache (0.000 ms on pan/zoom/hover frames!)
@@ -1520,17 +2319,35 @@ impl SumiWorkstationApp {
                         MagnetMode::Off => "OFF",
                         MagnetMode::Ohlc => "OHLC",
                     };
+                    let replay_tag = if self.replay.is_active() {
+                        format!(
+                            "{} ({}/{})",
+                            self.replay.status.short_label(),
+                            self.replay
+                                .base_cursor_index
+                                .saturating_add(1)
+                                .min(self.base_candles.len()),
+                            self.base_candles.len()
+                        )
+                    } else if self.replay.selecting_cut_bar {
+                        "SELECT CUT".to_owned()
+                    } else {
+                        "LIVE".to_owned()
+                    };
+                    let metrics = self.trading.metrics(self.current_mark_price());
                     if let Some(rep) = self.last_report {
                         ui.label(
                             RichText::new(format!(
-                                "R06 WORKSTATION   |   FEED: {} (BASE {} -> {})   |   PANES: {} (OVL: {})   |   DRAWINGS: {} (MAG: {mag_tag})   |   BARS: {} culled / {} drawn / {} total ({first_date} .. {last_date})   |   CONFLATION: {}x   |   SCALE: {scale_mode} ({auto_tag})   |   PLOT: {:.0}×{:.0}px",
+                                "R07 WORKSTATION   |   FEED: {} ({}->{})   |   REPLAY: {replay_tag}   |   EQUITY: ${:.0} ({:+.0} / {} fills)   |   PANES: {} (OVL: {})   |   DRAW: {} ({mag_tag})   |   BARS: {} drawn / {} ({first_date}..{last_date})   |   CONF: {}x   |   {scale_mode} ({auto_tag})   |   {:.0}×{:.0}px",
                                 self.data_source.short_label(),
                                 self.base_timeframe,
                                 self.active_timeframe,
+                                metrics.equity,
+                                metrics.net_pnl,
+                                metrics.fill_count,
                                 rep.pane_count,
                                 rep.active_overlay_count,
                                 rep.drawing_count,
-                                rep.culled_bar_count,
                                 rep.rendered_candle_count,
                                 self.candles.len(),
                                 rep.conflation_factor,
@@ -1544,7 +2361,7 @@ impl SumiWorkstationApp {
                     } else {
                         ui.label(
                             RichText::new(format!(
-                                "R06 WORKSTATION   |   TOTAL BARS: {} ({first_date} .. {last_date})",
+                                "R07 WORKSTATION   |   REPLAY: {replay_tag}   |   TOTAL BARS: {} ({first_date} .. {last_date})",
                                 self.candles.len()
                             ))
                             .monospace()
@@ -1555,17 +2372,49 @@ impl SumiWorkstationApp {
                 });
             });
 
-        // 3. Central Multi-Pane Workstation Chart Canvas
+        // 3. Optional Right-Side Paper Trading Execution & Blotter Panel (`Milestone R07`)
+        if self.show_trading_panel {
+            let right_frame = Frame::new()
+                .fill(palette::BG_WORKSTATION)
+                .inner_margin(Margin::symmetric(10, 8))
+                .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE));
+
+            egui::Panel::right("paper_trading_panel")
+                .resizable(true)
+                .default_size(250.0)
+                .size_range(218.0..=304.0)
+                .frame(right_frame)
+                .show(ui, |ui| {
+                    self.render_paper_trading_panel(ui);
+                });
+        }
+
+        // 4. Central Multi-Pane Workstation Chart Canvas
         let central_frame = Frame::new()
             .fill(palette::BG_WORKSTATION)
             .inner_margin(Margin::symmetric(8, 8));
 
+        let mut clicked_cut_idx: Option<usize> = None;
         egui::CentralPanel::default()
             .frame(central_frame)
             .show(ui, |ui| {
                 let pre_ro = self.viewport.time_scale.right_offset();
                 let pre_bs = self.viewport.time_scale.bar_spacing();
-                self.last_report = render_workstation_chart_with_drawings(
+                let replay_status_label = self
+                    .replay
+                    .is_active()
+                    .then(|| self.replay.status.short_label());
+                let has_trading_visuals = self.show_trading_panel
+                    || self.trading.open_position().is_some()
+                    || !self.trading.fills().is_empty()
+                    || self.trading.pending_orders().next().is_some();
+                let overlay = ChartReplayTradingOverlay {
+                    replay_active: self.replay.is_active(),
+                    selecting_cut_bar: self.replay.selecting_cut_bar,
+                    replay_status_label,
+                    trading_session: has_trading_visuals.then_some(&self.trading),
+                };
+                self.last_report = render_workstation_chart_full(
                     ui,
                     &self.candles,
                     &mut self.viewport,
@@ -1579,7 +2428,9 @@ impl SumiWorkstationApp {
                     &self.indicators,
                     &self.indicator_cache,
                     &mut self.drawings,
+                    overlay,
                 );
+                clicked_cut_idx = self.last_report.and_then(|r| r.clicked_cut_bar_index);
                 if (self.viewport.time_scale.right_offset() - pre_ro).abs() > 1e-6
                     || (self.viewport.time_scale.bar_spacing() - pre_bs).abs() > 1e-6
                 {
@@ -1587,7 +2438,644 @@ impl SumiWorkstationApp {
                 }
             });
 
+        if let Some(active_idx) = clicked_cut_idx {
+            let _ = self.handle_chart_cut_bar_click(active_idx);
+            ui.ctx().request_repaint();
+        }
+
+        // 5. Non-modal keyboard transport shortcuts (suppressed whenever any text input holds focus)
+        if !ui.ctx().egui_wants_keyboard_input() {
+            let (esc_pressed, space_pressed, step_fwd, step_back) = ui.input(|i| {
+                let plain = !i.modifiers.command && !i.modifiers.ctrl && !i.modifiers.alt;
+                (
+                    i.key_pressed(egui::Key::Escape),
+                    plain && i.key_pressed(egui::Key::Space),
+                    plain && i.key_pressed(egui::Key::Period),
+                    plain && i.key_pressed(egui::Key::Comma),
+                )
+            });
+            let mut changed = false;
+            if was_selecting_cut_bar && esc_pressed {
+                self.cancel_replay_cut_selection();
+                changed = true;
+            } else if self.replay.is_active() {
+                if space_pressed {
+                    let _ = self.toggle_replay_play_pause();
+                    changed = true;
+                } else if step_fwd {
+                    changed = self.step_replay_forward(1);
+                } else if step_back {
+                    changed = self.step_replay_backward(1);
+                }
+            }
+            if changed {
+                ui.ctx().request_repaint();
+            }
+        }
+
         self.frame_count = self.frame_count.saturating_add(1);
+    }
+
+    fn render_replay_dock(&mut self, ui: &mut egui::Ui) {
+        Frame::new()
+            .fill(Color32::from_rgb(20, 25, 36))
+            .corner_radius(CornerRadius::same(4))
+            .stroke(Stroke::new(
+                1.0,
+                if self.replay.is_active() || self.replay.selecting_cut_bar {
+                    palette::REPLAY_CUT_GOLD.gamma_multiply(0.65)
+                } else {
+                    palette::BORDER_SUBTLE
+                },
+            ))
+            .inner_margin(Margin::symmetric(8, 4))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(5.0, 4.0);
+
+                    let status_text = if self.replay.selecting_cut_bar {
+                        "SELECT CUT"
+                    } else {
+                        self.replay.status.short_label()
+                    };
+                    let badge_color = match self.replay.status {
+                        ReplayStatus::Playing => palette::BULLISH,
+                        ReplayStatus::Paused | ReplayStatus::Completed => palette::REPLAY_CUT_GOLD,
+                        ReplayStatus::Inactive => {
+                            if self.replay.selecting_cut_bar {
+                                palette::REPLAY_CUT_GOLD
+                            } else {
+                                palette::TEXT_MUTED
+                            }
+                        }
+                    };
+                    ui.label(
+                        RichText::new(format!("REPLAY · {status_text}"))
+                            .monospace()
+                            .strong()
+                            .size(11.0)
+                            .color(badge_color),
+                    );
+
+                    let mut cut_mode = self.replay.selecting_cut_bar;
+                    if indicator_toggle_pill(
+                        ui,
+                        &mut cut_mode,
+                        "<< Cut Bar",
+                        palette::REPLAY_CUT_GOLD,
+                    ) {
+                        if cut_mode {
+                            self.enter_replay_cut_selection();
+                        } else {
+                            self.cancel_replay_cut_selection();
+                        }
+                    }
+
+                    if !self.replay.is_active()
+                        && self.base_candles.len() >= 4
+                        && ui.button("Cut 70%").clicked()
+                    {
+                        let cut_idx = (self.base_candles.len() * 70) / 100;
+                        let _ = self.start_replay_at_base_index(cut_idx);
+                    }
+
+                    ui.separator();
+
+                    let active = self.replay.is_active() && !self.base_candles.is_empty();
+                    let can_back = active && self.replay.base_cursor_index > 0;
+                    let can_fwd =
+                        active && self.replay.base_cursor_index + 1 < self.base_candles.len();
+
+                    if ui
+                        .add_enabled(
+                            active && self.replay.base_cursor_index > self.replay.start_base_index,
+                            Button::new("|<< Start"),
+                        )
+                        .clicked()
+                    {
+                        let _ = self.jump_replay_to_start();
+                    }
+                    if ui.add_enabled(can_back, Button::new("<< -1")).clicked() {
+                        let _ = self.step_replay_backward(1);
+                    }
+                    let play_label = if self.replay.is_playing() {
+                        "Pause"
+                    } else {
+                        "Play >"
+                    };
+                    let play_btn = Button::new(
+                        RichText::new(play_label)
+                            .monospace()
+                            .strong()
+                            .size(11.0)
+                            .color(if self.replay.is_playing() {
+                                palette::BULLISH
+                            } else {
+                                palette::TEXT_PRIMARY
+                            }),
+                    );
+                    if ui
+                        .add_enabled(can_fwd || self.replay.is_playing(), play_btn)
+                        .clicked()
+                    {
+                        let _ = self.toggle_replay_play_pause();
+                    }
+                    if ui.add_enabled(can_fwd, Button::new("+1 >>")).clicked() {
+                        let _ = self.step_replay_forward(1);
+                    }
+
+                    ui.separator();
+
+                    ui.label(
+                        RichText::new("Speed:")
+                            .monospace()
+                            .size(11.0)
+                            .color(palette::TEXT_MUTED),
+                    );
+                    for sp in ReplaySpeed::ALL {
+                        if ui
+                            .selectable_label(self.replay.speed == sp, sp.short_label())
+                            .clicked()
+                        {
+                            self.replay.speed = sp;
+                        }
+                    }
+
+                    if self.active_timeframe != self.base_timeframe {
+                        ui.separator();
+                        ui.label(
+                            RichText::new("Step:")
+                                .monospace()
+                                .size(11.0)
+                                .color(palette::TEXT_MUTED),
+                        );
+                        for unit in ReplayStepUnit::ALL {
+                            if ui
+                                .selectable_label(self.replay.step_unit == unit, unit.short_label())
+                                .clicked()
+                            {
+                                self.replay.step_unit = unit;
+                            }
+                        }
+                    }
+
+                    ui.separator();
+
+                    let total_base = self.base_candles.len();
+                    let cur_base = if self.replay.is_active() && total_base > 0 {
+                        self.replay.base_cursor_index.min(total_base - 1) + 1
+                    } else {
+                        total_base
+                    };
+                    let cutoff_lbl = self.candles.last().map_or("-", |c| c.date_label.as_str());
+                    ui.label(
+                        RichText::new(format!(
+                            "Base {cur_base}/{total_base} · Active {} · {cutoff_lbl}",
+                            self.candles.len()
+                        ))
+                        .monospace()
+                        .size(11.0)
+                        .color(palette::TEXT_PRIMARY),
+                    );
+
+                    if ui.button("Exit ×").clicked() {
+                        self.exit_replay();
+                        self.show_replay_bar = false;
+                    }
+                });
+            });
+    }
+
+    fn render_paper_trading_panel(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(5.0, 6.0);
+
+                // Header Row
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("PAPER TRADING")
+                            .monospace()
+                            .strong()
+                            .size(12.0)
+                            .color(palette::TEXT_PRIMARY),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button(RichText::new("Reset").monospace().size(10.5))
+                            .clicked()
+                        {
+                            self.reset_trading_session();
+                        }
+                    });
+                });
+
+                let mark = self.current_mark_price();
+                let metrics = self.trading.metrics(mark);
+                let pnl_color = if metrics.net_pnl > 1e-6 {
+                    palette::BULLISH
+                } else if metrics.net_pnl < -1e-6 {
+                    palette::BEARISH
+                } else {
+                    palette::TEXT_PRIMARY
+                };
+
+                // 1. Account Scoreboard Card
+                Frame::new()
+                    .fill(Color32::from_rgb(19, 24, 35))
+                    .corner_radius(CornerRadius::same(4))
+                    .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                    .inner_margin(Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Equity:")
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(palette::TEXT_MUTED),
+                            );
+                            ui.label(
+                                RichText::new(format!("${:.2}", metrics.equity))
+                                    .monospace()
+                                    .strong()
+                                    .size(11.5)
+                                    .color(palette::TEXT_PRIMARY),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Net PnL:")
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(palette::TEXT_MUTED),
+                            );
+                            ui.label(
+                                RichText::new(format!(
+                                    "{:+.2} ({:+.2}%)",
+                                    metrics.net_pnl, metrics.return_pct
+                                ))
+                                .monospace()
+                                .strong()
+                                .size(11.0)
+                                .color(pnl_color),
+                            );
+                        });
+                        ui.label(
+                            RichText::new(format!(
+                                "Cash ${:.0} · MaxDD {:.2}%",
+                                metrics.cash_balance, metrics.max_drawdown_pct
+                            ))
+                            .monospace()
+                            .size(10.5)
+                            .color(palette::TEXT_MUTED),
+                        );
+                        let pf_str = metrics
+                            .profit_factor
+                            .map_or_else(|| "-".to_owned(), |pf| format!("{pf:.2}"));
+                        let r_str = metrics
+                            .avg_r_multiple
+                            .map_or_else(|| "-".to_owned(), |r| format!("{r:+.2}R"));
+                        ui.label(
+                            RichText::new(format!(
+                                "Trades {} (Win {:.0}%) · PF {pf_str} · {r_str}",
+                                metrics.closed_trade_count, metrics.win_rate_pct
+                            ))
+                            .monospace()
+                            .size(10.5)
+                            .color(palette::TEXT_MUTED),
+                        );
+                    });
+
+                // 2. Order Ticket Card
+                Frame::new()
+                    .fill(Color32::from_rgb(19, 24, 35))
+                    .corner_radius(CornerRadius::same(4))
+                    .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                    .inner_margin(Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            for kind in TicketOrderKind::ALL {
+                                if ui
+                                    .selectable_label(self.ticket_kind == kind, kind.label())
+                                    .clicked()
+                                {
+                                    self.ticket_kind = kind;
+                                    if kind != TicketOrderKind::Market
+                                        && self.ticket_price_input.trim().is_empty()
+                                        && mark > 0.0
+                                    {
+                                        self.ticket_price_input = format!("{mark:.2}");
+                                    }
+                                }
+                            }
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Qty:")
+                                    .monospace()
+                                    .size(10.5)
+                                    .color(palette::TEXT_MUTED),
+                            );
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.ticket_qty_input)
+                                    .desired_width(68.0)
+                                    .font(egui::FontId::monospace(11.0)),
+                            );
+                            ui.label(
+                                RichText::new(format!("Mark {mark:.2}"))
+                                    .monospace()
+                                    .size(10.5)
+                                    .color(palette::TEXT_MUTED),
+                            );
+                        });
+
+                        if self.ticket_kind != TicketOrderKind::Market {
+                            ui.horizontal(|ui| {
+                                let lbl = match self.ticket_kind {
+                                    TicketOrderKind::Limit => "Lmt Px:",
+                                    TicketOrderKind::Stop => "Stp Px:",
+                                    TicketOrderKind::Market => "Px:",
+                                };
+                                ui.label(
+                                    RichText::new(lbl)
+                                        .monospace()
+                                        .size(10.5)
+                                        .color(palette::TEXT_MUTED),
+                                );
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.ticket_price_input)
+                                        .desired_width(88.0)
+                                        .font(egui::FontId::monospace(11.0)),
+                                );
+                                if ui
+                                    .button(RichText::new("@Mark").monospace().size(10.0))
+                                    .clicked()
+                                    && mark > 0.0
+                                {
+                                    self.ticket_price_input = format!("{mark:.2}");
+                                }
+                            });
+                        }
+
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("SL:")
+                                    .monospace()
+                                    .size(10.5)
+                                    .color(palette::TRADE_STOP_LOSS),
+                            );
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.ticket_sl_input)
+                                    .desired_width(68.0)
+                                    .font(egui::FontId::monospace(11.0)),
+                            );
+                            ui.label(
+                                RichText::new("TP:")
+                                    .monospace()
+                                    .size(10.5)
+                                    .color(palette::TRADE_TAKE_PROFIT),
+                            );
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.ticket_tp_input)
+                                    .desired_width(68.0)
+                                    .font(egui::FontId::monospace(11.0)),
+                            );
+                        });
+
+                        let can_sync = self
+                            .drawings
+                            .selected_drawing()
+                            .is_some_and(|d| d.pane == DrawingPaneTarget::Main);
+                        if ui
+                            .add_enabled(
+                                can_sync,
+                                Button::new(
+                                    RichText::new("Sync Selected Drawing")
+                                        .monospace()
+                                        .size(10.5),
+                                ),
+                            )
+                            .clicked()
+                        {
+                            let _ = self.sync_ticket_from_selected_drawing();
+                        }
+
+                        ui.horizontal(|ui| {
+                            let half_w = ((ui.available_width() - 6.0) * 0.5).max(72.0);
+                            let buy_btn = Button::new(
+                                RichText::new(format!("BUY {}", self.ticket_kind.label()))
+                                    .monospace()
+                                    .strong()
+                                    .size(11.0)
+                                    .color(Color32::WHITE),
+                            )
+                            .fill(Color32::from_rgb(16, 148, 108))
+                            .min_size(Vec2::new(half_w, 26.0));
+
+                            let sell_btn = Button::new(
+                                RichText::new(format!("SELL {}", self.ticket_kind.label()))
+                                    .monospace()
+                                    .strong()
+                                    .size(11.0)
+                                    .color(Color32::WHITE),
+                            )
+                            .fill(Color32::from_rgb(196, 52, 68))
+                            .min_size(Vec2::new(half_w, 26.0));
+
+                            if ui.add(buy_btn).clicked() {
+                                let _ = self.submit_ticket_order(OrderSide::Buy);
+                            }
+                            if ui.add(sell_btn).clicked() {
+                                let _ = self.submit_ticket_order(OrderSide::Sell);
+                            }
+                        });
+
+                        if let Some((is_err, ref msg)) = self.last_trade_status {
+                            ui.label(RichText::new(msg).monospace().size(10.0).color(if is_err {
+                                palette::BEARISH
+                            } else {
+                                palette::BULLISH
+                            }));
+                        }
+                    });
+
+                // 3. Open Position Card
+                Frame::new()
+                    .fill(Color32::from_rgb(19, 24, 35))
+                    .corner_radius(CornerRadius::same(4))
+                    .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                    .inner_margin(Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        if let Some(pos) = self.trading.open_position().cloned() {
+                            let side_color = match pos.side {
+                                PositionSide::Long => palette::BULLISH,
+                                PositionSide::Short => palette::BEARISH,
+                            };
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} {:.4} @ {:.2}",
+                                        pos.side.short_label(),
+                                        pos.quantity,
+                                        pos.avg_entry_price
+                                    ))
+                                    .monospace()
+                                    .strong()
+                                    .size(11.0)
+                                    .color(side_color),
+                                );
+                            });
+                            let upnl = pos.unrealized_pnl(mark);
+                            let upct = pos.unrealized_return_pct(mark);
+                            let u_color = if upnl >= 0.0 {
+                                palette::BULLISH
+                            } else {
+                                palette::BEARISH
+                            };
+                            ui.label(
+                                RichText::new(format!("uPnL: {upnl:+.2} ({upct:+.2}%)"))
+                                    .monospace()
+                                    .strong()
+                                    .size(11.0)
+                                    .color(u_color),
+                            );
+                            let sl_lbl = pos
+                                .stop_loss
+                                .map_or_else(|| "-".to_owned(), |v| format!("{v:.2}"));
+                            let tp_lbl = pos
+                                .take_profit
+                                .map_or_else(|| "-".to_owned(), |v| format!("{v:.2}"));
+                            ui.label(
+                                RichText::new(format!("SL {sl_lbl} · TP {tp_lbl}"))
+                                    .monospace()
+                                    .size(10.5)
+                                    .color(palette::TEXT_MUTED),
+                            );
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .button(RichText::new("Apply SL/TP").monospace().size(10.5))
+                                    .clicked()
+                                {
+                                    let _ = self.apply_ticket_brackets_to_position();
+                                }
+                                if ui
+                                    .button(
+                                        RichText::new("Flatten")
+                                            .monospace()
+                                            .strong()
+                                            .size(10.5)
+                                            .color(palette::BEARISH),
+                                    )
+                                    .clicked()
+                                {
+                                    let _ = self.flatten_open_position();
+                                }
+                            });
+                        } else {
+                            ui.label(
+                                RichText::new("Position: FLAT")
+                                    .monospace()
+                                    .size(10.5)
+                                    .color(palette::TEXT_MUTED),
+                            );
+                        }
+                    });
+
+                // 4. Working Orders (`Pending`)
+                let pending_snapshot: Vec<_> = self.trading.pending_orders().cloned().collect();
+                if !pending_snapshot.is_empty() {
+                    let mut cancel_req: Option<u64> = None;
+                    Frame::new()
+                        .fill(Color32::from_rgb(19, 24, 35))
+                        .corner_radius(CornerRadius::same(4))
+                        .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                        .inner_margin(Margin::symmetric(8, 6))
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "WORKING ORDERS ({})",
+                                    pending_snapshot.len()
+                                ))
+                                .monospace()
+                                .strong()
+                                .size(10.5)
+                                .color(palette::REPLAY_CUT_GOLD),
+                            );
+                            for ord in &pending_snapshot {
+                                ui.horizontal(|ui| {
+                                    let px = ord.kind.trigger_price().unwrap_or(0.0);
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "#{} {} {} {:.2} @ {:.2}",
+                                            ord.id,
+                                            ord.side.short_label(),
+                                            ord.kind.short_label(),
+                                            ord.quantity,
+                                            px
+                                        ))
+                                        .monospace()
+                                        .size(10.0)
+                                        .color(palette::TEXT_PRIMARY),
+                                    );
+                                    if ui
+                                        .button(RichText::new("×").monospace().size(10.0))
+                                        .clicked()
+                                    {
+                                        cancel_req = Some(ord.id);
+                                    }
+                                });
+                            }
+                        });
+                    if let Some(id) = cancel_req {
+                        let _ = self.cancel_working_order(id);
+                    }
+                }
+
+                // 5. Execution Fill & Closed Trade Blotter
+                if !self.trading.fills().is_empty() {
+                    Frame::new()
+                        .fill(Color32::from_rgb(19, 24, 35))
+                        .corner_radius(CornerRadius::same(4))
+                        .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                        .inner_margin(Margin::symmetric(8, 6))
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "EXECUTION BLOTTER ({} fills)",
+                                    self.trading.fills().len()
+                                ))
+                                .monospace()
+                                .strong()
+                                .size(10.5)
+                                .color(palette::TEXT_MUTED),
+                            );
+                            for fill in self.trading.fills().iter().rev().take(6) {
+                                let c = match fill.side {
+                                    OrderSide::Buy => palette::BULLISH,
+                                    OrderSide::Sell => palette::BEARISH,
+                                };
+                                let pnl_suffix = fill
+                                    .realized_net_pnl
+                                    .map_or_else(String::new, |p| format!(" ({p:+.1})"));
+                                ui.label(
+                                    RichText::new(format!(
+                                        "#{} {} {} {:.2}@{:.2}{pnl_suffix}",
+                                        fill.fill_id,
+                                        fill.side.short_label(),
+                                        fill.reason.short_label(),
+                                        fill.quantity,
+                                        fill.price
+                                    ))
+                                    .monospace()
+                                    .size(9.8)
+                                    .color(c),
+                                );
+                            }
+                        });
+                }
+            });
     }
 }
 
@@ -1925,12 +3413,12 @@ impl SumiWorkstationApp {
         Ok(())
     }
 
-    /// Executes all 3 Retina (`2.0x`) Metal/`wgpu` verification scenarios for `"r04"`, `"r05"`, or `"r06"`
-    /// offscreen in one headless GPU session (zero windows, zero Dock icons, zero occlusion stalls).
+    /// Executes all 3 Retina (`2.0x`) Metal/`wgpu` verification scenarios for `"r04"`, `"r05"`, `"r06"`,
+    /// or `"r07"` offscreen in one headless GPU session (zero windows, zero Dock icons, zero occlusion stalls).
     pub fn run_offscreen_wgpu_capture_batch(batch_name: &str) -> Result<(), String> {
-        if !matches!(batch_name, "r04" | "r05" | "r06") {
+        if !matches!(batch_name, "r04" | "r05" | "r06" | "r07") {
             return Err(format!(
-                "unknown SUMI_CAPTURE_BATCH '{batch_name}' (expected 'r04', 'r05', or 'r06')"
+                "unknown SUMI_CAPTURE_BATCH '{batch_name}' (expected 'r04', 'r05', 'r06', or 'r07')"
             ));
         }
         std::fs::create_dir_all("docs/evidence")
@@ -1944,6 +3432,7 @@ impl SumiWorkstationApp {
                 "r04" => app.apply_r04_batch_step_state(step),
                 "r05" => app.apply_r05_batch_step_state(step),
                 "r06" => app.apply_r06_batch_step_state(step),
+                "r07" => app.apply_r07_batch_step_state(step),
                 _ => unreachable!(),
             };
             let image = harness.capture_app_frame(&mut app, logical_w, logical_h, 6)?;
@@ -2269,6 +3758,292 @@ impl SumiWorkstationApp {
         }
     }
 
+    fn apply_r07_batch_step_state(
+        &mut self,
+        step: usize,
+    ) -> (u32, u32, &'static str, &'static str) {
+        match step {
+            0 => {
+                // Scenario 0: 1280x800, Intraday `VN30F1M` (`1m` base -> `15m` causal aggregation),
+                // Bar Replay cut mid-bucket (`base_index = 3_607`) with historical round-trip fill arrows,
+                // active bracketed LONG (`Entry` + `SL` + `TP`), working `BUY LIMIT` order, Replay Dock,
+                // and right-side Paper Trading Panel!
+                self.show_import_bar = false;
+                self.select_data_source(DataSourcePreset::IntradayVn30F1m);
+                self.viewport.time_scale.set_width(930.0);
+                self.set_scale_mode(PriceScaleMode::Normal);
+                self.viewport.reset_pane_stretches();
+                self.indicators = IndicatorConfig {
+                    show_sma: true,
+                    show_ema: true,
+                    show_bbands: true,
+                    show_rsi: true,
+                    show_macd: true,
+                    show_atr: false,
+                    ..IndicatorConfig::default()
+                };
+                let _ = self.set_timeframe(Timeframe::M15);
+                let _ = self.start_replay_at_base_index(3_150);
+                self.replay.speed = ReplaySpeed::X5;
+                self.replay.step_unit = ReplayStepUnit::ActiveBar;
+
+                // Execute historical round-trip #1 (`3_150 -> 3_420`) so Buy & Sell arrows render in view!
+                let _ = self.trading.submit_order(
+                    OrderRequest {
+                        side: OrderSide::Buy,
+                        kind: OrderKind::Market,
+                        quantity: 20.0,
+                        stop_loss: None,
+                        take_profit: None,
+                    },
+                    &self.base_candles,
+                    3_150,
+                );
+                if let Some(tr) = self.replay.jump_to_base_index(&self.base_candles, 3_420) {
+                    self.apply_replay_transition(tr);
+                }
+                let _ = self.flatten_open_position();
+
+                // Advance to causal mid-15m cut `3_607` (`DEF-001` partial active bar) and open bracketed LONG + working Limit
+                if let Some(tr) = self.replay.jump_to_base_index(&self.base_candles, 3_607) {
+                    self.apply_replay_transition(tr);
+                }
+                self.viewport.time_scale.set_bar_spacing(11.0);
+                self.viewport.time_scale.set_right_offset(16.0);
+                let mark = self.current_mark_price();
+                let (vis_lo, vis_hi) =
+                    crate::model::PriceBounds::from_candles(self.visible_slice(), 0.0)
+                        .map_or((mark - 10.0, mark + 10.0), |b| (b.raw_min, b.raw_max));
+                let span = (vis_hi - vis_lo).max(4.0);
+                let sl_px = (mark - span * 0.20)
+                    .max(vis_lo - span * 0.03)
+                    .min(mark - span * 0.03);
+                let tp_px = (mark + span * 0.20)
+                    .min(vis_hi + span * 0.04)
+                    .max(mark + span * 0.03);
+                let lmt_px = 0.5 * (mark + sl_px);
+
+                self.ticket_kind = TicketOrderKind::Limit;
+                self.ticket_qty_input = "20".to_owned();
+                self.ticket_price_input = format!("{lmt_px:.2}");
+                self.ticket_sl_input = format!("{sl_px:.2}");
+                self.ticket_tp_input = format!("{tp_px:.2}");
+                let _ = self.trading.submit_order(
+                    OrderRequest {
+                        side: OrderSide::Buy,
+                        kind: OrderKind::Market,
+                        quantity: 20.0,
+                        stop_loss: Some(sl_px),
+                        take_profit: Some(tp_px),
+                    },
+                    &self.base_candles,
+                    3_607,
+                );
+                let _ = self.trading.submit_order(
+                    OrderRequest {
+                        side: OrderSide::Buy,
+                        kind: OrderKind::Limit {
+                            limit_price: lmt_px,
+                        },
+                        quantity: 10.0,
+                        stop_loss: None,
+                        take_profit: None,
+                    },
+                    &self.base_candles,
+                    3_607,
+                );
+
+                self.populate_showcase_drawings();
+                self.show_replay_bar = true;
+                self.show_trading_panel = true;
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r07_replay_cut_intraday_15m_vn30f_1280x800.png",
+                    "docs/evidence/r07_replay_cut_intraday_15m_vn30f_1280x800.json",
+                )
+            }
+            1 => {
+                // Scenario 1: 1280x800, 24/7 `BTCUSDT` (`15m` base -> `4h` causal aggregation, 4 panes),
+                // multi-trade campaign + active bracketed SHORT position (`Entry`, `SL`, `TP`) + working `BUY LIMIT` TP!
+                self.show_import_bar = false;
+                self.select_data_source(DataSourcePreset::BtcUsdt15mJson);
+                self.viewport.time_scale.set_width(930.0);
+                self.set_scale_mode(PriceScaleMode::Normal);
+                self.viewport.reset_pane_stretches();
+                self.indicators = IndicatorConfig {
+                    show_sma: true,
+                    show_ema: true,
+                    show_bbands: true,
+                    show_rsi: true,
+                    show_macd: true,
+                    show_atr: true,
+                    ..IndicatorConfig::default()
+                };
+                let _ = self.set_timeframe(Timeframe::H4);
+                let _ = self.start_replay_at_base_index(640);
+                self.replay.speed = ReplaySpeed::X10;
+                self.replay.step_unit = ReplayStepUnit::ActiveBar;
+
+                // Trade #1 (`640 -> 880` Long round-trip)
+                let _ = self.trading.submit_order(
+                    OrderRequest {
+                        side: OrderSide::Buy,
+                        kind: OrderKind::Market,
+                        quantity: 0.50,
+                        stop_loss: None,
+                        take_profit: None,
+                    },
+                    &self.base_candles,
+                    640,
+                );
+                if let Some(tr) = self.replay.jump_to_base_index(&self.base_candles, 880) {
+                    self.apply_replay_transition(tr);
+                }
+                let _ = self.flatten_open_position();
+
+                // Advance to `1_088` (`68` 4h bars) and open bracketed SHORT + working Buy Limit partial
+                if let Some(tr) = self.replay.jump_to_base_index(&self.base_candles, 1_088) {
+                    self.apply_replay_transition(tr);
+                }
+                self.viewport.fit_all();
+                self.viewport.time_scale.set_right_offset(14.0);
+                let mark = self.current_mark_price();
+                let (vis_lo, vis_hi) =
+                    crate::model::PriceBounds::from_candles(self.visible_slice(), 0.0)
+                        .map_or((mark - 2_000.0, mark + 2_000.0), |b| (b.raw_min, b.raw_max));
+                let span = (vis_hi - vis_lo).max(200.0);
+                let sl = (mark + span * 0.18)
+                    .min(vis_hi + span * 0.04)
+                    .max(mark + span * 0.03);
+                let tp = (mark - span * 0.22)
+                    .max(vis_lo - span * 0.03)
+                    .min(mark - span * 0.03)
+                    .max(1.0);
+                let lmt_px = 0.5 * (mark + tp);
+                let _ = self.trading.submit_order(
+                    OrderRequest {
+                        side: OrderSide::Sell,
+                        kind: OrderKind::Market,
+                        quantity: 0.45,
+                        stop_loss: Some(sl),
+                        take_profit: Some(tp),
+                    },
+                    &self.base_candles,
+                    1_088,
+                );
+                let _ = self.trading.submit_order(
+                    OrderRequest {
+                        side: OrderSide::Buy,
+                        kind: OrderKind::Limit {
+                            limit_price: lmt_px,
+                        },
+                        quantity: 0.20,
+                        stop_loss: None,
+                        take_profit: None,
+                    },
+                    &self.base_candles,
+                    1_088,
+                );
+
+                self.ticket_kind = TicketOrderKind::Stop;
+                self.ticket_qty_input = "0.45".to_owned();
+                self.ticket_price_input = format!("{lmt_px:.2}");
+                self.ticket_sl_input = format!("{sl:.2}");
+                self.ticket_tp_input = format!("{tp:.2}");
+
+                self.show_replay_bar = true;
+                self.show_trading_panel = true;
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r07_paper_trading_short_btc_4h_1280x800.png",
+                    "docs/evidence/r07_paper_trading_short_btc_4h_1280x800.json",
+                )
+            }
+            _ => {
+                // Scenario 2: Compact resized `960x640`, real `CafeF.INDEX.clean.csv` (`VNINDEX` `1D` -> `1W`),
+                // Logarithmic scale, `BaseBar` (`Tick`) intra-week causal replay + bracketed LONG + Demo drawings!
+                self.show_import_bar = false;
+                self.select_data_source(DataSourcePreset::CafeFIndexCsv);
+                self.select_symbol_in_source("VNINDEX");
+                self.viewport.time_scale.set_width(612.0);
+                self.indicators = IndicatorConfig {
+                    show_sma: true,
+                    show_ema: false,
+                    show_bbands: true,
+                    show_rsi: true,
+                    show_macd: true,
+                    show_atr: false,
+                    ..IndicatorConfig::default()
+                };
+                let _ = self.set_timeframe(Timeframe::W1);
+                self.set_scale_mode(PriceScaleMode::Logarithmic);
+                self.viewport.reset_pane_stretches();
+
+                let cut_idx = ((self.base_candles.len() * 82) / 100).max(10);
+                let prior_idx = cut_idx.saturating_sub(45);
+                let _ = self.start_replay_at_base_index(prior_idx);
+                self.replay.step_unit = ReplayStepUnit::BaseBar;
+                self.replay.speed = ReplaySpeed::X2;
+
+                let _ = self.trading.submit_order(
+                    OrderRequest {
+                        side: OrderSide::Buy,
+                        kind: OrderKind::Market,
+                        quantity: 15.0,
+                        stop_loss: None,
+                        take_profit: None,
+                    },
+                    &self.base_candles,
+                    prior_idx,
+                );
+                if let Some(tr) = self.replay.jump_to_base_index(&self.base_candles, cut_idx) {
+                    self.apply_replay_transition(tr);
+                }
+                self.viewport.time_scale.set_bar_spacing(8.5);
+                self.viewport.time_scale.set_right_offset(14.0);
+                let mark = self.current_mark_price();
+                let (vis_lo, vis_hi) =
+                    crate::model::PriceBounds::from_candles(self.visible_slice(), 0.0)
+                        .map_or((mark * 0.92, mark * 1.08), |b| (b.raw_min, b.raw_max));
+                let span = (vis_hi - vis_lo).max(10.0);
+                let entry_ref = self
+                    .trading
+                    .open_position()
+                    .map_or(mark, |p| p.avg_entry_price.min(mark));
+                let sl = (entry_ref - span * 0.16)
+                    .max(vis_lo + span * 0.05)
+                    .min(mark - span * 0.05)
+                    .max(1.0);
+                let tp = (mark + span * 0.18)
+                    .min(vis_hi + span * 0.05)
+                    .max(mark + span * 0.03);
+                let _ = self.trading.update_position_brackets(
+                    Some(sl),
+                    Some(tp),
+                    &self.base_candles,
+                    cut_idx,
+                );
+
+                self.ticket_kind = TicketOrderKind::Market;
+                self.ticket_qty_input = "15".to_owned();
+                self.ticket_sl_input = format!("{sl:.2}");
+                self.ticket_tp_input = format!("{tp:.2}");
+
+                self.populate_showcase_drawings();
+                self.show_replay_bar = true;
+                self.show_trading_panel = true;
+                (
+                    960,
+                    640,
+                    "docs/evidence/r07_vnindex_weekly_causal_replay_960x640.png",
+                    "docs/evidence/r07_vnindex_weekly_causal_replay_960x640.json",
+                )
+            }
+        }
+    }
+
     fn persist_capture_artifacts(
         &self,
         screenshot_path: &str,
@@ -2300,8 +4075,13 @@ impl SumiWorkstationApp {
                 .iter()
                 .map(|s| format!("\"{}\"", s.replace('"', "\\\"")))
                 .collect();
+            let metrics = self.trading.metrics(self.current_mark_price());
+            let pos_side_json = self.trading.open_position().map_or_else(
+                || "null".to_owned(),
+                |p| format!("\"{}\"", p.side.short_label()),
+            );
             let json = format!(
-                "{{\n  \"symbol\": \"{}\",\n  \"timeframe\": \"{}\",\n  \"base_timeframe\": \"{}\",\n  \"data_source\": \"{}\",\n  \"available_symbols\": [{}],\n  \"base_candles\": {},\n  \"total_candles\": {},\n  \"culled_candles\": {},\n  \"rendered_candles\": {},\n  \"conflation_factor\": {},\n  \"bar_spacing\": {:.6},\n  \"right_offset\": {:.6},\n  \"scale_mode\": \"{}\",\n  \"auto_scale\": {},\n  \"pane_count\": {},\n  \"active_overlay_count\": {},\n  \"drawing_count\": {},\n  \"active_drawing_tool\": \"{}\",\n  \"selected_drawing_id\": {},\n  \"magnet_mode\": \"{}\",\n  \"stretches\": [{:.3}, {:.3}, {:.3}, {:.3}],\n  \"base_value\": {:.4},\n  \"screenshot_px\": [{}, {}],\n  \"outer_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"plot_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"price_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"time_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"raw_price_min\": {:.2},\n  \"raw_price_max\": {:.2}\n}}\n",
+                "{{\n  \"symbol\": \"{}\",\n  \"timeframe\": \"{}\",\n  \"base_timeframe\": \"{}\",\n  \"data_source\": \"{}\",\n  \"available_symbols\": [{}],\n  \"base_candles\": {},\n  \"total_candles\": {},\n  \"culled_candles\": {},\n  \"rendered_candles\": {},\n  \"conflation_factor\": {},\n  \"bar_spacing\": {:.6},\n  \"right_offset\": {:.6},\n  \"scale_mode\": \"{}\",\n  \"auto_scale\": {},\n  \"pane_count\": {},\n  \"active_overlay_count\": {},\n  \"drawing_count\": {},\n  \"active_drawing_tool\": \"{}\",\n  \"selected_drawing_id\": {},\n  \"magnet_mode\": \"{}\",\n  \"replay_active\": {},\n  \"replay_status\": \"{}\",\n  \"replay_base_cursor\": {},\n  \"replay_step_unit\": \"{}\",\n  \"show_trading_panel\": {},\n  \"active_price_lines\": {},\n  \"rendered_fill_markers\": {},\n  \"equity\": {:.2},\n  \"net_pnl\": {:.2},\n  \"fill_count\": {},\n  \"closed_trade_count\": {},\n  \"pending_order_count\": {},\n  \"open_position_side\": {},\n  \"stretches\": [{:.3}, {:.3}, {:.3}, {:.3}],\n  \"base_value\": {:.4},\n  \"screenshot_px\": [{}, {}],\n  \"outer_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"plot_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"price_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"time_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"raw_price_min\": {:.2},\n  \"raw_price_max\": {:.2}\n}}\n",
                 self.symbol,
                 self.timeframe,
                 self.base_timeframe,
@@ -2322,6 +4102,19 @@ impl SumiWorkstationApp {
                 rep.active_drawing_tool.short_label(),
                 selected_json,
                 magnet_str,
+                self.replay.is_active(),
+                self.replay.status.short_label(),
+                self.current_trading_cursor_base_index(),
+                self.replay.step_unit.short_label(),
+                self.show_trading_panel,
+                rep.active_price_line_count,
+                rep.rendered_fill_marker_count,
+                metrics.equity,
+                metrics.net_pnl,
+                metrics.fill_count,
+                metrics.closed_trade_count,
+                metrics.pending_order_count,
+                pos_side_json,
                 self.viewport.main_stretch,
                 self.viewport.rsi_stretch,
                 self.viewport.macd_stretch,
@@ -2769,5 +4562,397 @@ mod tests {
         let pill_5m_behind =
             crate::chart::format_time_axis_cursor_pill_label(&app.candles, "5m", -6);
         assert_eq!(pill_5m_behind, "-30m");
+    }
+
+    #[test]
+    fn r07_workstation_causal_replay_mtf_zero_lookahead_ticket_sync_rewind_and_instrument_isolation()
+     {
+        let mut app = SumiWorkstationApp::default();
+        app.viewport.time_scale.set_width(1_000.0);
+        app.select_data_source(DataSourcePreset::IntradayVn30F1m);
+        app.set_timeframe(Timeframe::M15).unwrap();
+        assert_eq!(app.base_candles.len(), 5_400);
+        assert_eq!(app.candles.len(), 360);
+
+        // 1. Place a pre-replay drawing in the future half (`15m` bar `300`) and one in the past (`bar 120`).
+        let past_draw_id = app
+            .drawings
+            .add_drawing(
+                DrawingPaneTarget::Main,
+                DrawingGeometry::HorizontalLine {
+                    anchor: DrawingAnchor::new(120.0, app.candles[120].close),
+                },
+                None,
+            )
+            .unwrap();
+        let future_draw_id = app
+            .drawings
+            .add_drawing(
+                DrawingPaneTarget::Main,
+                DrawingGeometry::HorizontalLine {
+                    anchor: DrawingAnchor::new(300.0, app.candles[300].close),
+                },
+                None,
+            )
+            .unwrap();
+
+        // 2. Start replay mid-15m bucket at `base_index = 2_707` (`DEF-001` zero-lookahead check!).
+        assert!(app.start_replay_at_base_index(2_707));
+        assert!(app.replay.is_active());
+        let cutoff_ts = app.replay.cutoff_timestamp(&app.base_candles).unwrap();
+        assert_eq!(cutoff_ts, app.base_candles[2_707].timestamp);
+
+        // Verify `self.candles` matches `aggregate_ohlcv(&base_candles[..=2707])` bit-for-bit (`DEF-001`)!
+        let expected_15m = crate::data::aggregate_ohlcv(
+            &app.base_candles[..=2_707],
+            Timeframe::M1,
+            Timeframe::M15,
+        )
+        .unwrap();
+        assert_eq!(app.candles, expected_15m);
+        assert_eq!(app.indicator_cache.sma.len(), expected_15m.len());
+
+        // Switching `15m -> 1h -> 15m` during replay NEVER leaks `base_candles[2708..]`!
+        app.set_timeframe(Timeframe::H1).unwrap();
+        let expected_1h =
+            crate::data::aggregate_ohlcv(&app.base_candles[..=2_707], Timeframe::M1, Timeframe::H1)
+                .unwrap();
+        assert_eq!(app.candles, expected_1h);
+        app.set_timeframe(Timeframe::M15).unwrap();
+        assert_eq!(app.candles, expected_15m);
+
+        // Past drawing (`120`) is causally visible; future drawing (`300`) is causally hidden!
+        let vis_cutoff = app.drawings.replay_cutoff_timestamp();
+        let past_d = app
+            .drawings
+            .drawings
+            .iter()
+            .find(|d| d.id == past_draw_id)
+            .unwrap();
+        let fut_d = app
+            .drawings
+            .drawings
+            .iter()
+            .find(|d| d.id == future_draw_id)
+            .unwrap();
+        assert!(past_d.is_causally_visible(vis_cutoff, app.candles.len()));
+        assert!(!fut_d.is_causally_visible(vis_cutoff, app.candles.len()));
+
+        // 3. Select a Fibonacci drawing, sync Order Ticket, submit Market Buy, step forward, then rewind!
+        let mark_0 = app.current_mark_price();
+        let fib_id = app
+            .drawings
+            .add_drawing(
+                DrawingPaneTarget::Main,
+                DrawingGeometry::FibonacciRetracement {
+                    start: DrawingAnchor::new(150.0, mark_0 - 14.0),
+                    end: DrawingAnchor::new(175.0, mark_0 + 18.0),
+                    direction: FibDirection::StartToEnd,
+                    extend_right: true,
+                },
+                None,
+            )
+            .unwrap();
+        app.drawings.selected_id = Some(fib_id);
+        assert!(app.sync_ticket_from_selected_drawing());
+        assert!(!app.ticket_price_input.is_empty());
+        assert!(!app.ticket_sl_input.is_empty());
+        assert!(!app.ticket_tp_input.is_empty());
+
+        let (vis_lo, vis_hi) = crate::model::PriceBounds::from_candles(app.visible_slice(), 0.0)
+            .map_or((mark_0 - 5.0, mark_0 + 5.0), |b| (b.raw_min, b.raw_max));
+        let vis_span = (vis_hi - vis_lo).max(4.0);
+        let sl_test = (mark_0 - vis_span * 0.18)
+            .max(vis_lo - vis_span * 0.03)
+            .min(mark_0 - vis_span * 0.03);
+        let tp_test = (mark_0 + vis_span * 0.18)
+            .min(vis_hi + vis_span * 0.04)
+            .max(mark_0 + vis_span * 0.03);
+        app.ticket_kind = TicketOrderKind::Market;
+        app.ticket_qty_input = "10".to_owned();
+        app.ticket_sl_input = format!("{sl_test:.2}");
+        app.ticket_tp_input = format!("{tp_test:.2}");
+        let ord_id = app.submit_ticket_order(OrderSide::Buy).unwrap();
+        assert_eq!(ord_id, 1);
+        assert!(app.trading.open_position().is_some());
+
+        let snapshot_equity_at_entry = app.trading.equity_at_price(app.current_mark_price());
+        assert!(app.step_replay_forward(3));
+        assert!(app.replay.base_cursor_index > 2_707);
+
+        // Step backward -> jump back to `2_707` (`start`)!
+        assert!(app.jump_replay_to_start());
+        assert_eq!(app.replay.base_cursor_index, 2_707);
+        assert!(
+            (app.trading.equity_at_price(app.current_mark_price()) - snapshot_equity_at_entry)
+                .abs()
+                < 1e-9,
+            "rewinding to start_base_index must restore exact entry-bar equity"
+        );
+
+        // 4. Per-instrument `(ReplayController, TradingSession)` isolation (`VN30F1M` <-> `BTCUSDT`)!
+        app.select_data_source(DataSourcePreset::BtcUsdt15mJson);
+        assert!(!app.replay.is_active());
+        assert!(app.trading.open_position().is_none());
+        assert_eq!(app.trading.fills().len(), 0);
+
+        // Return to `VN30F1M` -> paused replay at `2_707` and open `LONG 10` position are restored!
+        app.select_data_source(DataSourcePreset::IntradayVn30F1m);
+        app.set_timeframe(Timeframe::M15).unwrap();
+        assert!(app.replay.is_active());
+        assert_eq!(app.replay.base_cursor_index, 2_707);
+        assert_eq!(app.trading.open_position().unwrap().quantity, 10.0);
+
+        // 5. Headless `egui::Context` full workstation UI pass renders Replay Dock + Paper Trading Panel + overlays!
+        app.show_replay_bar = true;
+        app.show_trading_panel = true;
+        let ctx = egui::Context::default();
+        SumiWorkstationApp::configure_dark_workstation_visuals(&ctx);
+        for pass in 0..2 {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1280.0, 800.0),
+                )),
+                time: Some(f64::from(pass) * 0.016),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(raw, |ui| {
+                app.render_workstation_ui(ui);
+            });
+            out.textures_delta.clear();
+        }
+        let rep = app
+            .last_report
+            .expect("headless R07 UI pass must emit ChartRenderReport");
+        assert!(
+            rep.active_price_line_count >= 3,
+            "Entry + SL + TP price lines must render"
+        );
+        assert!(
+            rep.rendered_fill_marker_count >= 1,
+            "Market Buy fill arrow must render"
+        );
+    }
+
+    #[test]
+    fn r07_persisted_session_restore_pauses_playing_replay_and_rebuilds_trading_ledger_deterministically()
+     {
+        #[derive(Default)]
+        struct MemStorage(BTreeMap<String, String>);
+        impl eframe::Storage for MemStorage {
+            fn get_string(&self, key: &str) -> Option<String> {
+                self.0.get(key).cloned()
+            }
+            fn set_string(&mut self, key: &str, value: String) {
+                self.0.insert(key.to_owned(), value);
+            }
+            fn remove_string(&mut self, key: &str) {
+                self.0.remove(key);
+            }
+            fn flush(&mut self) {}
+        }
+
+        let mut app = SumiWorkstationApp::default();
+        app.viewport.time_scale.set_width(1_000.0);
+        app.select_data_source(DataSourcePreset::BtcUsdt15mJson);
+        app.set_timeframe(Timeframe::H4).unwrap();
+        assert!(app.start_replay_at_base_index(600));
+        assert!(app.toggle_replay_play_pause());
+        assert!(app.replay.is_playing());
+
+        app.ticket_kind = TicketOrderKind::Market;
+        app.ticket_qty_input = "0.40".to_owned();
+        let mark = app.current_mark_price();
+        app.ticket_sl_input = format!("{:.2}", (mark - 1_500.0).max(100.0));
+        app.ticket_tp_input = format!("{:.2}", mark + 2_200.0);
+        app.submit_ticket_order(OrderSide::Buy).unwrap();
+        assert!(app.step_replay_forward(2));
+        let expected_cursor = app.replay.base_cursor_index;
+        let expected_candles = app.candles.clone();
+        let expected_metrics = app.trading.metrics(app.current_mark_price());
+
+        let mut storage = MemStorage::default();
+        eframe::App::save(&mut app, &mut storage);
+        let mut restored: SumiWorkstationApp =
+            eframe::get_value(&storage, eframe::APP_KEY).unwrap();
+        restored.restore_persisted_session();
+
+        assert!(restored.replay.is_active());
+        assert_eq!(
+            restored.replay.status,
+            ReplayStatus::Paused,
+            "restored replay session must pause automatically on startup"
+        );
+        assert_eq!(restored.replay.base_cursor_index, expected_cursor);
+        assert_eq!(restored.candles, expected_candles);
+        let restored_metrics = restored.trading.metrics(restored.current_mark_price());
+        assert!((restored_metrics.equity - expected_metrics.equity).abs() < 1e-9);
+        assert_eq!(restored_metrics.fill_count, expected_metrics.fill_count);
+    }
+
+    #[test]
+    fn critic_r07_regression_conflated_boundary_fill_markers_empty_click_deselect_and_cut_tool_cancel()
+     {
+        let ctx = egui::Context::default();
+        SumiWorkstationApp::configure_dark_workstation_visuals(&ctx);
+        let screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            Vec2::new(1280.0, 800.0),
+        ));
+        ctx.set_pixels_per_point(2.0);
+
+        // 1. `[MEDIUM-02]`: Conflated `50_000`-bar chart (`cf > 1`) with an execution fill at bar `2`
+        //    while `culling_range.start > 2` inside the same conflated bucket `[0..cf)` must still render its marker!
+        let mut app = SumiWorkstationApp::default();
+        app.set_dataset_size(50_000);
+        app.trading.reset_at(&app.base_candles, 0);
+        app.trading
+            .submit_order(
+                OrderRequest {
+                    side: OrderSide::Buy,
+                    kind: OrderKind::Market,
+                    quantity: 5.0,
+                    stop_loss: None,
+                    take_profit: None,
+                },
+                &app.base_candles,
+                2,
+            )
+            .unwrap();
+        app.show_trading_panel = true;
+
+        for _ in 0..2 {
+            let mut out0 = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect,
+                    ..Default::default()
+                },
+                |ui| app.render_workstation_ui(ui),
+            );
+            out0.textures_delta.clear();
+        }
+
+        app.viewport.time_scale.set_bar_spacing(0.03);
+        let bs = app.viewport.time_scale.bar_spacing();
+        // Place bar `10` near the left edge of `main_plot_rect` so `culling_range.start > 2` while `< cf`!
+        let plot_w = app.last_report.unwrap().layout.plot_rect.width() as f64;
+        let visible_bars = plot_w / bs;
+        let target_right_index = 10.0 + visible_bars;
+        let ro = target_right_index - ((app.candles.len() - 1) as f64);
+        app.viewport.time_scale.set_right_offset(ro);
+
+        let mut out1 = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out1.textures_delta.clear();
+        let rep = app.last_report.expect("conflated report");
+        assert!(rep.conflation_factor >= 8);
+        assert!(
+            rep.rendered_fill_marker_count >= 1,
+            "fill at bar 2 inside visible conflated bucket [0..{}) must render without boundary drop",
+            rep.conflation_factor
+        );
+
+        // 2. `[LOW-02]` & `[LOW-03]`: Entering cut selection and switching to a drawing tool cancels cut mode,
+        //    and `start_replay_at_base_index` / `step_replay_backward` clears stale `last_trade_status`.
+        app.last_trade_status = Some((true, "Stale fill status".to_owned()));
+        assert!(app.start_replay_at_base_index(5_000));
+        assert!(app.last_trade_status.is_none());
+        app.enter_replay_cut_selection();
+        assert!(app.replay.selecting_cut_bar);
+        app.cancel_replay_cut_selection();
+        assert!(!app.replay.selecting_cut_bar);
+
+        // 3. `[HIGH-02]`: Clicking empty canvas over a hidden future Rectangle during Replay deselects cleanly!
+        app.exit_replay();
+        app.set_dataset_size(120);
+        let vis_id = app
+            .drawings
+            .add_drawing(
+                DrawingPaneTarget::Main,
+                crate::drawings::DrawingGeometry::HorizontalLine {
+                    anchor: crate::drawings::DrawingAnchor::with_timestamp(
+                        10.0,
+                        app.candles[10].close,
+                        app.candles[10].timestamp as f64,
+                    ),
+                },
+                None,
+            )
+            .unwrap();
+        let _hidden_rect_id = app
+            .drawings
+            .add_drawing(
+                DrawingPaneTarget::Main,
+                crate::drawings::DrawingGeometry::Rectangle {
+                    corner_a: crate::drawings::DrawingAnchor::with_timestamp(
+                        90.0,
+                        0.0,
+                        app.candles[90].timestamp as f64,
+                    ),
+                    corner_b: crate::drawings::DrawingAnchor::with_timestamp(
+                        115.0,
+                        1_000_000.0,
+                        app.candles[115].timestamp as f64,
+                    ),
+                },
+                None,
+            )
+            .unwrap();
+        assert!(app.start_replay_at_base_index(50));
+        app.drawings.selected_id = Some(vis_id);
+        assert!(app.drawings.selected_drawing().is_some());
+
+        // Render once at replay 50, then click right-offset whitespace where the future Rectangle would sit if unmasked:
+        let mut r0 = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        r0.textures_delta.clear();
+        let plot_rect = app.last_report.unwrap().layout.plot_rect;
+        let click_pos = egui::Pos2::new(plot_rect.right() - 12.0, plot_rect.top() + 24.0);
+        let mut r_press = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                events: vec![
+                    egui::Event::PointerMoved(click_pos),
+                    egui::Event::PointerButton {
+                        pos: click_pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        r_press.textures_delta.clear();
+        let mut r_rel = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                events: vec![egui::Event::PointerButton {
+                    pos: click_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        r_rel.textures_delta.clear();
+        assert_eq!(
+            app.drawings.selected_id, None,
+            "empty canvas click must deselect even when a hidden future Rectangle spans that coordinate"
+        );
     }
 }

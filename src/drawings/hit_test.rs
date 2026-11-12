@@ -205,6 +205,21 @@ pub fn hit_test_pane_drawings(
     cursor: LocalPoint,
     selected_id: Option<DrawingId>,
 ) -> Option<HitMatch> {
+    hit_test_pane_drawings_causal(drawings, pane, proj, cursor, selected_id, None, usize::MAX)
+}
+
+/// Causality-aware variant of [`hit_test_pane_drawings`] that skips drawings masked at
+/// `replay_cutoff_timestamp` (`DEF-001`).
+#[must_use]
+pub fn hit_test_pane_drawings_causal(
+    drawings: &[Drawing],
+    pane: super::DrawingPaneTarget,
+    proj: &PaneDrawingProjection<'_>,
+    cursor: LocalPoint,
+    selected_id: Option<DrawingId>,
+    replay_cutoff_timestamp: Option<i64>,
+    visible_candle_count: usize,
+) -> Option<HitMatch> {
     const INLINE_CAP: usize = 32;
     let mut inline_hits: [Option<HitMatch>; INLINE_CAP] = [None; INLINE_CAP];
     let mut count = 0_usize;
@@ -212,7 +227,9 @@ pub fn hit_test_pane_drawings(
     let mut min_dist_at_priority = f64::INFINITY;
 
     for (z_order, drawing) in drawings.iter().enumerate() {
-        if !drawing.visible || drawing.pane != pane {
+        if !drawing.is_causally_visible(replay_cutoff_timestamp, visible_candle_count)
+            || drawing.pane != pane
+        {
             continue;
         }
         let Some(projected) = proj.project_drawing(drawing) else {
@@ -261,7 +278,9 @@ pub fn hit_test_pane_drawings(
 
     // Rare fallback when > 32 drawings simultaneously intersect the cursor: scan top-down by Z-order.
     for (z_order, drawing) in drawings.iter().enumerate().rev() {
-        if !drawing.visible || drawing.pane != pane {
+        if !drawing.is_causally_visible(replay_cutoff_timestamp, visible_candle_count)
+            || drawing.pane != pane
+        {
             continue;
         }
         let Some(projected) = proj.project_drawing(drawing) else {

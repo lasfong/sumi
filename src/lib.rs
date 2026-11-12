@@ -6,6 +6,8 @@ pub mod data;
 pub mod drawings;
 pub mod indicators;
 pub mod model;
+pub mod replay;
+pub mod trading;
 pub mod viewport;
 
 pub use app::SumiWorkstationApp;

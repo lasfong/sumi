@@ -3,9 +3,10 @@ use std::process::Command;
 use std::time::Instant;
 
 use egui::{Pos2, Rect, Vec2};
+use sumi_workstation::app::SumiWorkstationApp;
 use sumi_workstation::chart::{
-    ChartDisplayConfig, ChartViewportState, render_candlestick_chart,
-    render_shared_pane_candlestick_chart, render_workstation_chart,
+    ChartDisplayConfig, ChartReplayTradingOverlay, ChartViewportState, render_candlestick_chart,
+    render_shared_pane_candlestick_chart, render_workstation_chart, render_workstation_chart_full,
     render_workstation_chart_with_drawings,
 };
 use sumi_workstation::data::{
@@ -21,6 +22,8 @@ use sumi_workstation::indicators::{
     BlockExtrema, IndicatorCache, IndicatorConfig, OscillatorPaneId, SeriesBlockIndex,
 };
 use sumi_workstation::model::Candle;
+use sumi_workstation::replay::{ReplayController, ReplayStepUnit};
+use sumi_workstation::trading::{OrderKind, OrderRequest, OrderSide, TradingSession};
 use sumi_workstation::viewport::{
     HorzScaleOptions, KineticAnimation, PaneViewport, PlotRect, PriceScale, PriceScaleMode,
     PriceScaleOptions, TimeScale,
@@ -110,6 +113,10 @@ fn main() {
     }
     if std::env::args().any(|a| a == "--r06") {
         run_r06_data_timeframe_benchmark(&cpu_brand, mem_bytes, &rustc_ver, profile);
+        return;
+    }
+    if std::env::args().any(|a| a == "--r07") {
+        run_r07_replay_trading_benchmark(&cpu_brand, mem_bytes, &rustc_ver, profile);
         return;
     }
 
@@ -2792,6 +2799,867 @@ fn format_r06_markdown_report(
     let _ = writeln!(
         s,
         "\n## 3. End-to-End 4-Pane + 6-Indicator + 25-Drawing Intraday & Aggregated Frame Budget (`DECISION-RENDERER-002` Gate: `< 4.0 ms`)\n"
+    );
+    let _ = writeln!(
+        s,
+        "| Bars | Workload | Scale | Conflation | Culled | Drawn | Vertices | Indices | UI Median (`ms`) | Tessellate Median (`ms`) | Total CPU Median (`ms`) | Total CPU P95 (`ms`) | `< 4.0ms` Hybrid Gate | 120 FPS (`8.33ms`) |"
+    );
+    let _ = writeln!(
+        s,
+        "| ---: | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: | :---: |"
+    );
+    for r in render {
+        let tot_med_ms = r.total_cpu_frame_stats.median_us / 1_000.0;
+        let tot_p95_ms = r.total_cpu_frame_stats.p95_us / 1_000.0;
+        let hybrid_gate = if tot_med_ms < 4.0 {
+            "PASS (<4ms)"
+        } else {
+            "TRIGGER_WGPU"
+        };
+        let pass_120 = if tot_med_ms <= 8.33 {
+            "PASS"
+        } else {
+            "EXCEEDS"
+        };
+        let _ = writeln!(
+            s,
+            "| `{}` | `{}` ({}) | `{}` | `{}x` | `{}` | `{}` | `{}` | `{}` | `{:.3}` | `{:.3}` | **`{:.3}`** | `{:.3}` | `{hybrid_gate}` | `{pass_120}` |",
+            r.dataset_bars,
+            r.workload_id,
+            r.description,
+            r.scale_mode,
+            r.conflation_factor,
+            r.culled_bars,
+            r.rendered_candles,
+            r.total_vertices,
+            r.total_indices,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            tot_med_ms,
+            tot_p95_ms,
+        );
+    }
+    s
+}
+
+// ============================================================================
+// Milestone R07 — Causal Bar Replay & Paper Trading Execution Engine Benchmark
+// ============================================================================
+
+#[derive(Debug, Clone)]
+struct R07DomainBenchCase {
+    case_id: &'static str,
+    description: &'static str,
+    base_bars: usize,
+    output_or_fills: usize,
+    stats: TimingStats,
+}
+
+fn build_r07_benchmark_trading_session(
+    base_candles: &[Candle],
+    start_idx: usize,
+    end_idx: usize,
+) -> TradingSession {
+    let mut session = TradingSession::default();
+    session.reset_at(base_candles, start_idx);
+    let total_span = end_idx.saturating_sub(start_idx).max(1);
+    let stride = (total_span / 32).max(20);
+    let mut cursor = start_idx;
+
+    while cursor + stride <= end_idx {
+        let mark = base_candles[cursor].close;
+        if session.open_position().is_none() {
+            let step_num = (cursor - start_idx) / stride;
+            let side = if step_num.is_multiple_of(2) {
+                OrderSide::Buy
+            } else {
+                OrderSide::Sell
+            };
+            let (sl, tp) = match side {
+                OrderSide::Buy => (Some(mark * 0.992), Some(mark * 1.012)),
+                OrderSide::Sell => (Some(mark * 1.008), Some(mark * 0.988)),
+            };
+            let _ = session.submit_order(
+                OrderRequest {
+                    side,
+                    kind: OrderKind::Market,
+                    quantity: 4.0,
+                    stop_loss: sl,
+                    take_profit: tp,
+                },
+                base_candles,
+                cursor,
+            );
+            // Submit a working Limit add-on order as well so working order lines & matching run
+            let limit_px = match side {
+                OrderSide::Buy => mark * 0.996,
+                OrderSide::Sell => mark * 1.004,
+            };
+            let _ = session.submit_order(
+                OrderRequest {
+                    side,
+                    kind: OrderKind::Limit {
+                        limit_price: limit_px,
+                    },
+                    quantity: 2.0,
+                    stop_loss: sl,
+                    take_profit: tp,
+                },
+                base_candles,
+                cursor,
+            );
+        } else if ((cursor - start_idx) / stride).is_multiple_of(3) {
+            let _ = session.flatten_position(base_candles, cursor);
+        }
+
+        let next_cursor = (cursor + stride).min(end_idx);
+        session.advance_through_bars(base_candles, cursor + 1, next_cursor);
+        cursor = next_cursor;
+    }
+
+    // Ensure an active bracketed position + working limit order are present at `end_idx` for HUD/line rendering
+    let final_mark = base_candles[end_idx].close;
+    if session.open_position().is_none() {
+        let _ = session.submit_order(
+            OrderRequest {
+                side: OrderSide::Buy,
+                kind: OrderKind::Market,
+                quantity: 5.0,
+                stop_loss: Some(final_mark * 0.994),
+                take_profit: Some(final_mark * 1.009),
+            },
+            base_candles,
+            end_idx,
+        );
+    }
+    let pending_count = session.pending_orders().count();
+    if pending_count == 0 {
+        let _ = session.submit_order(
+            OrderRequest {
+                side: OrderSide::Buy,
+                kind: OrderKind::Limit {
+                    limit_price: final_mark * 0.997,
+                },
+                quantity: 3.0,
+                stop_loss: None,
+                take_profit: None,
+            },
+            base_candles,
+            end_idx,
+        );
+    }
+
+    session
+}
+
+fn run_r07_replay_trading_benchmark(
+    cpu_brand: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+) {
+    println!("=== Sumi R07 Causal Bar Replay & Paper Trading Execution Engine Benchmark ===");
+    println!(
+        "CPU: {cpu_brand} | RAM: {:.1} GiB | {rustc_ver} | profile={profile}",
+        (mem_bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+    );
+
+    let base_100k_rep = generate_intraday_vn30f_1m_report(100_000);
+    let candles_100k_1m = base_100k_rep.candles;
+    let cut_start_idx = 90_000_usize;
+    let cut_end_idx = 95_000_usize;
+
+    let mut domain_cases = Vec::new();
+
+    // 1A. Causal `materialize_candles` at cut_end_idx (`95,001` 1m -> `15m` zero-lookahead rollup)
+    {
+        let mut replay = ReplayController::new();
+        replay.start_at_base_index(&candles_100k_1m, cut_end_idx);
+        let mut samples = Vec::with_capacity(80);
+        let mut out_len = 0_usize;
+        for step in 0..90 {
+            let t0 = Instant::now();
+            let sliced = replay
+                .materialize_candles(&candles_100k_1m, Timeframe::M1, Timeframe::M15)
+                .expect("causal 15m materialize");
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            out_len = sliced.len();
+            std::hint::black_box(&sliced);
+            if step >= 10 {
+                samples.push(us);
+            }
+        }
+        domain_cases.push(R07DomainBenchCase {
+            case_id: "replay_materialize_95k_1m_to_15m",
+            description: "Causal zero-lookahead materialize (`95,001` 1m -> `15m`)",
+            base_bars: cut_end_idx + 1,
+            output_or_fills: out_len,
+            stats: TimingStats::from_samples(samples),
+        });
+    }
+
+    // 1B. Causal `ActiveBar` (`15m`) step-forward + `TradingSession::advance_through_bars`
+    {
+        let base_session =
+            build_r07_benchmark_trading_session(&candles_100k_1m, cut_start_idx, cut_end_idx);
+        let mut samples = Vec::with_capacity(200);
+        let mut fills_after = 0_usize;
+        for step in 0..220 {
+            let mut replay = ReplayController::new();
+            replay.step_unit = ReplayStepUnit::ActiveBar;
+            replay.start_at_base_index(&candles_100k_1m, cut_end_idx);
+            let mut session = base_session.clone();
+            let t0 = Instant::now();
+            let tr = replay
+                .step_forward(&candles_100k_1m, Timeframe::M15, 1)
+                .expect("step forward 1x 15m");
+            session.advance_through_bars(
+                &candles_100k_1m,
+                tr.prev_base_index + 1,
+                tr.new_base_index,
+            );
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            fills_after = session.fills().len();
+            std::hint::black_box((replay.base_cursor_index, session.cash_balance()));
+            if step >= 20 {
+                samples.push(us);
+            }
+        }
+        domain_cases.push(R07DomainBenchCase {
+            case_id: "replay_step_15m_plus_order_matching",
+            description: "`1x 15m` ActiveBar step + intrabar OHLC bracket/limit matching",
+            base_bars: 15,
+            output_or_fills: fills_after,
+            stats: TimingStats::from_samples(samples),
+        });
+    }
+
+    // 1C. Full 5,000-bar `advance_through_bars` simulation (`90,000..=95,000` with ~64 commands)
+    {
+        let mut samples = Vec::with_capacity(120);
+        let mut fill_count = 0_usize;
+        for step in 0..135 {
+            let t0 = Instant::now();
+            let session =
+                build_r07_benchmark_trading_session(&candles_100k_1m, cut_start_idx, cut_end_idx);
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            fill_count = session.fills().len();
+            std::hint::black_box(&session);
+            if step >= 15 {
+                samples.push(us);
+            }
+        }
+        domain_cases.push(R07DomainBenchCase {
+            case_id: "trading_sim_5000_1m_bars_full",
+            description: "5,000-bar `1m` causal paper-trading run (~65 orders + SL/TP brackets)",
+            base_bars: cut_end_idx - cut_start_idx + 1,
+            output_or_fills: fill_count,
+            stats: TimingStats::from_samples(samples),
+        });
+    }
+
+    // 1D. Deterministic `rewind_to` across 4,500 1m bars (`95,000 -> 94,500`, replaying `90,000..=94,500`)
+    {
+        let base_session =
+            build_r07_benchmark_trading_session(&candles_100k_1m, cut_start_idx, cut_end_idx);
+        let rewind_target = cut_end_idx - 500;
+        let mut samples = Vec::with_capacity(120);
+        let mut rewound_fills = 0_usize;
+        for step in 0..135 {
+            let mut session = base_session.clone();
+            let t0 = Instant::now();
+            session.rewind_to(&candles_100k_1m, cut_start_idx, rewind_target);
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            rewound_fills = session.fills().len();
+            std::hint::black_box((session.cash_balance(), session.closed_trades().len()));
+            if step >= 15 {
+                samples.push(us);
+            }
+        }
+        domain_cases.push(R07DomainBenchCase {
+            case_id: "trading_causal_rewind_4500_bars",
+            description: "Bit-exact command-log `rewind_to` (`90,000..=94,500` rebuild)",
+            base_bars: rewind_target - cut_start_idx + 1,
+            output_or_fills: rewound_fills,
+            stats: TimingStats::from_samples(samples),
+        });
+    }
+
+    // 2. End-to-End 4-Pane + 6-Indicator + 25-Drawing + Active Replay + Paper Trading Overlays (`< 4.0 ms` gate)
+    let all_cfg = IndicatorConfig {
+        show_sma: true,
+        show_ema: true,
+        show_bbands: true,
+        show_rsi: true,
+        show_macd: true,
+        show_atr: true,
+        ..IndicatorConfig::default()
+    };
+
+    let mut replay_70k = ReplayController::new();
+    let cutoff_ts = replay_70k
+        .start_at_base_index(&candles_100k_1m, cut_end_idx)
+        .expect("cutoff ts");
+    let trading_70k =
+        build_r07_benchmark_trading_session(&candles_100k_1m, cut_start_idx, cut_end_idx);
+
+    let candles_70k_1m = replay_70k
+        .materialize_candles(&candles_100k_1m, Timeframe::M1, Timeframe::M1)
+        .expect("70k 1m slice");
+    let mut cache_70k_1m = IndicatorCache::new();
+    cache_70k_1m.sync(&candles_70k_1m, 1, &all_cfg);
+    let mut store_70k_1m = build_r05_benchmark_drawings(
+        &candles_70k_1m,
+        candles_70k_1m.len().saturating_sub(500),
+        candles_70k_1m.len() - 1,
+    );
+    store_70k_1m.remap_timeframe(
+        &candles_70k_1m,
+        Timeframe::M1,
+        &candles_70k_1m,
+        Timeframe::M1,
+    );
+    store_70k_1m.set_replay_cutoff_timestamp(Some(cutoff_ts), candles_70k_1m.len());
+
+    let candles_70k_15m = replay_70k
+        .materialize_candles(&candles_100k_1m, Timeframe::M1, Timeframe::M15)
+        .expect("70k 15m slice");
+    let mut cache_70k_15m = IndicatorCache::new();
+    cache_70k_15m.sync(&candles_70k_15m, 2, &all_cfg);
+    let mut store_70k_15m = store_70k_1m.clone();
+    store_70k_15m.remap_timeframe(
+        &candles_70k_1m,
+        Timeframe::M1,
+        &candles_70k_15m,
+        Timeframe::M15,
+    );
+    store_70k_15m.set_replay_cutoff_timestamp(Some(cutoff_ts), candles_70k_15m.len());
+
+    let render_cases = vec![
+        bench_r07_workstation_render(
+            &candles_70k_1m,
+            "VN30F1M",
+            "1m",
+            &all_cfg,
+            &cache_70k_1m,
+            &store_70k_1m,
+            &trading_70k,
+            true,
+            false,
+            "r07_replay_1m_recent_4pane_25draw_trading",
+            "95K/100K 1m Replay + 4 panes + 6 ind + 25 draw + Position/SL/TP/Fills (bar_spacing=8.0)",
+            PriceScaleMode::Normal,
+            |vp| {
+                vp.reset_to_default();
+                vp.time_scale.set_bar_spacing(8.0);
+                vp.time_scale.set_right_offset(8.0);
+            },
+            15,
+            100,
+        ),
+        bench_r07_workstation_render(
+            &candles_70k_15m,
+            "VN30F1M",
+            "15m",
+            &all_cfg,
+            &cache_70k_15m,
+            &store_70k_15m,
+            &trading_70k,
+            true,
+            true,
+            "r07_replay_15m_cut_scrubber_4pane_25draw_trading",
+            "95K/100K -> 15m Replay + Cut Scrubber + 4 panes + 6 ind + 25 draw + Fills (bar_spacing=9.0)",
+            PriceScaleMode::Normal,
+            |vp| {
+                vp.reset_to_default();
+                vp.time_scale.set_bar_spacing(9.0);
+                vp.time_scale.set_right_offset(8.0);
+            },
+            15,
+            100,
+        ),
+        bench_r07_workstation_render(
+            &candles_70k_1m,
+            "VN30F1M",
+            "1m",
+            &all_cfg,
+            &cache_70k_1m,
+            &store_70k_1m,
+            &trading_70k,
+            true,
+            false,
+            "r07_replay_1m_fit_conflated_4pane_25draw_trading",
+            "95K/100K 1m full-fit conflated + Replay Frontier + Trading Overlays (Logarithmic)",
+            PriceScaleMode::Logarithmic,
+            |vp| vp.fit_all(),
+            15,
+            80,
+        ),
+        bench_r07_full_app_ui_100k(15, 80),
+    ];
+
+    println!("\n--- Causal Bar Replay & Paper Trading Domain Throughput ---");
+    for d in &domain_cases {
+        println!(
+            "{:<38} | base={:>6} | out/fills={:>5} | Median: {:>8.2} µs (P95 {:>8.2} µs)",
+            d.case_id, d.base_bars, d.output_or_fills, d.stats.median_us, d.stats.p95_us,
+        );
+    }
+
+    println!(
+        "\n{:<8} | {:<48} | {:>5} | {:>8} | {:>9} | {:>9} | {:>9}",
+        "Bars", "Workload", "Confl", "Vertices", "UI (ms)", "Tess (ms)", "Total(ms)"
+    );
+    println!("{}", "-".repeat(114));
+    for r in &render_cases {
+        println!(
+            "{:<8} | {:<48} | {:>4}x | {:>8} | {:>9.3} | {:>9.3} | {:>9.3}",
+            r.dataset_bars,
+            r.workload_id,
+            r.conflation_factor,
+            r.total_vertices,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.median_us / 1_000.0,
+        );
+    }
+
+    let json_out = format_r07_json_report(
+        cpu_brand,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        &domain_cases,
+        &render_cases,
+    );
+    let md_out = format_r07_markdown_report(
+        cpu_brand,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        &domain_cases,
+        &render_cases,
+    );
+
+    std::fs::create_dir_all("docs/evidence").expect("create docs/evidence");
+    std::fs::write("docs/evidence/r07_replay_trading_benchmark.json", json_out)
+        .expect("write r07 json");
+    std::fs::write("docs/evidence/r07_replay_trading_benchmark.md", md_out)
+        .expect("write r07 markdown");
+    println!(
+        "\nSaved docs/evidence/r07_replay_trading_benchmark.json and docs/evidence/r07_replay_trading_benchmark.md"
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bench_r07_workstation_render(
+    candles: &[Candle],
+    symbol: &'static str,
+    timeframe: &'static str,
+    indicators: &IndicatorConfig,
+    cache: &IndicatorCache,
+    initial_store: &DrawingStore,
+    trading: &TradingSession,
+    replay_active: bool,
+    selecting_cut_bar: bool,
+    workload_id: &'static str,
+    description: &'static str,
+    scale_mode: PriceScaleMode,
+    mut setup_fn: impl FnMut(&mut ChartViewportState),
+    warmup: usize,
+    iters: usize,
+) -> RenderCaseResult {
+    let ctx = egui::Context::default();
+    let screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+    ctx.set_pixels_per_point(2.0);
+
+    let mut vp = ChartViewportState::new();
+    vp.main_price_scale.set_mode(scale_mode);
+    let mut store = initial_store.clone();
+
+    let cfg = ChartDisplayConfig {
+        symbol,
+        timeframe,
+        show_grid: true,
+        show_crosshair: true,
+        show_volume: true,
+    };
+
+    for _ in 0..2 {
+        let mut init_out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let _ = render_workstation_chart_full(
+                        ui,
+                        candles,
+                        &mut vp,
+                        cfg,
+                        indicators,
+                        cache,
+                        &mut store,
+                        ChartReplayTradingOverlay {
+                            replay_active,
+                            selecting_cut_bar,
+                            replay_status_label: Some("REPLAY PAUSED · 15m"),
+                            trading_session: Some(trading),
+                        },
+                    );
+                });
+            },
+        );
+        init_out.textures_delta.clear();
+    }
+    setup_fn(&mut vp);
+
+    let mut ui_samples = Vec::with_capacity(iters);
+    let mut tess_samples = Vec::with_capacity(iters);
+    let mut total_samples = Vec::with_capacity(iters);
+    let mut last_rep = None;
+    let mut paint_shapes = 0_usize;
+    let mut clipped_primitives = 0_usize;
+    let mut total_vertices = 0_usize;
+    let mut total_indices = 0_usize;
+
+    for step in 0..(warmup + iters) {
+        let hover_x = 180.0 + ((step % 30) as f32) * 24.0;
+        let hover_y = if step % 2 == 0 { 220.0 } else { 520.0 };
+        // Clone store only when `selecting_cut_bar` would not mutate it (we send PointerMoved only,
+        // never PointerButton click, so `selecting_cut_bar` remains `true` across all iterations).
+        let raw_input = egui::RawInput {
+            screen_rect,
+            time: Some(step as f64 * 0.016),
+            events: vec![egui::Event::PointerMoved(Pos2::new(hover_x, hover_y))],
+            ..Default::default()
+        };
+
+        let t_frame = Instant::now();
+        let t_ui = Instant::now();
+        let mut full_out = ctx.run_ui(raw_input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                last_rep = render_workstation_chart_full(
+                    ui,
+                    candles,
+                    &mut vp,
+                    cfg,
+                    indicators,
+                    cache,
+                    &mut store,
+                    ChartReplayTradingOverlay {
+                        replay_active,
+                        selecting_cut_bar,
+                        replay_status_label: Some("REPLAY PAUSED · 15m"),
+                        trading_session: Some(trading),
+                    },
+                );
+            });
+        });
+        let ui_us = t_ui.elapsed().as_secs_f64() * 1_000_000.0;
+
+        paint_shapes = full_out.shapes.len();
+        let t_tess = Instant::now();
+        let primitives = ctx.tessellate(full_out.shapes, full_out.pixels_per_point);
+        let tess_us = t_tess.elapsed().as_secs_f64() * 1_000_000.0;
+        let total_us = t_frame.elapsed().as_secs_f64() * 1_000_000.0;
+        full_out.textures_delta.clear();
+
+        if step + 1 == warmup + iters {
+            clipped_primitives = primitives.len();
+            total_vertices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.vertices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+            total_indices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.indices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+        }
+
+        if step >= warmup {
+            ui_samples.push(ui_us);
+            tess_samples.push(tess_us);
+            total_samples.push(total_us);
+        }
+    }
+
+    let rep = last_rep.expect("r07 render report");
+    RenderCaseResult {
+        dataset_bars: candles.len(),
+        workload_id,
+        description,
+        scale_mode: scale_mode.label(),
+        conflation_enabled: true,
+        bar_spacing: rep.bar_spacing,
+        conflation_factor: rep.conflation_factor,
+        culled_bars: rep.culled_bar_count,
+        rendered_candles: rep.rendered_candle_count,
+        paint_shapes,
+        clipped_primitives,
+        total_vertices,
+        total_indices,
+        ui_build_stats: TimingStats::from_samples(ui_samples),
+        tessellate_stats: TimingStats::from_samples(tess_samples),
+        total_cpu_frame_stats: TimingStats::from_samples(total_samples),
+    }
+}
+
+fn bench_r07_full_app_ui_100k(warmup: usize, iters: usize) -> RenderCaseResult {
+    let ctx = egui::Context::default();
+    SumiWorkstationApp::configure_dark_workstation_visuals(&ctx);
+    let screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+    ctx.set_pixels_per_point(2.0);
+
+    let mut app = SumiWorkstationApp::default();
+    let rep_100k = generate_intraday_vn30f_1m_report(100_000);
+    let csv_100k = build_r06_csv_document(&rep_100k.candles);
+    app.load_from_csv_str(&csv_100k, &DataLoadOptions::default())
+        .expect("load 100k csv into app");
+    app.set_timeframe(Timeframe::M15).expect("15m rollup");
+    app.indicators = IndicatorConfig {
+        show_sma: true,
+        show_ema: true,
+        show_bbands: true,
+        show_rsi: true,
+        show_macd: true,
+        show_atr: true,
+        ..IndicatorConfig::default()
+    };
+    app.show_replay_bar = true;
+    app.show_trading_panel = true;
+
+    for _ in 0..2 {
+        let mut init_out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        init_out.textures_delta.clear();
+    }
+
+    assert!(app.start_replay_at_base_index(68_000));
+    app.populate_showcase_drawings();
+    let mark = app.current_mark_price();
+    app.ticket_qty_input = "5".to_owned();
+    app.ticket_sl_input = format!("{:.2}", mark * 0.994);
+    app.ticket_tp_input = format!("{:.2}", mark * 1.009);
+    let _ = app.submit_ticket_order(OrderSide::Buy);
+    let _ = app.step_replay_forward(8);
+    app.viewport.time_scale.set_bar_spacing(8.5);
+    app.viewport.time_scale.set_right_offset(8.0);
+
+    let mut ui_samples = Vec::with_capacity(iters);
+    let mut tess_samples = Vec::with_capacity(iters);
+    let mut total_samples = Vec::with_capacity(iters);
+    let mut paint_shapes = 0_usize;
+    let mut clipped_primitives = 0_usize;
+    let mut total_vertices = 0_usize;
+    let mut total_indices = 0_usize;
+
+    for step in 0..(warmup + iters) {
+        let hover_x = 180.0 + ((step % 25) as f32) * 20.0;
+        let hover_y = if step % 2 == 0 { 250.0 } else { 520.0 };
+        let raw_input = egui::RawInput {
+            screen_rect,
+            time: Some(step as f64 * 0.016),
+            events: vec![egui::Event::PointerMoved(Pos2::new(hover_x, hover_y))],
+            ..Default::default()
+        };
+
+        let t_frame = Instant::now();
+        let t_ui = Instant::now();
+        let mut full_out = ctx.run_ui(raw_input, |ui| {
+            app.render_workstation_ui(ui);
+        });
+        let ui_us = t_ui.elapsed().as_secs_f64() * 1_000_000.0;
+
+        paint_shapes = full_out.shapes.len();
+        let t_tess = Instant::now();
+        let primitives = ctx.tessellate(full_out.shapes, full_out.pixels_per_point);
+        let tess_us = t_tess.elapsed().as_secs_f64() * 1_000_000.0;
+        let total_us = t_frame.elapsed().as_secs_f64() * 1_000_000.0;
+        full_out.textures_delta.clear();
+
+        if step + 1 == warmup + iters {
+            clipped_primitives = primitives.len();
+            total_vertices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.vertices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+            total_indices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.indices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+        }
+
+        if step >= warmup {
+            ui_samples.push(ui_us);
+            tess_samples.push(tess_us);
+            total_samples.push(total_us);
+        }
+    }
+
+    let rep = app.last_report.expect("full app r07 report");
+    RenderCaseResult {
+        dataset_bars: app.candles.len(),
+        workload_id: "r07_full_workstation_ui_dock_ticket_4pane",
+        description: "Full SumiWorkstationApp (Toolbar + Replay Dock + Right Trading Panel + 4 Panes + Overlays)",
+        scale_mode: app.viewport.main_price_scale.mode().label(),
+        conflation_enabled: true,
+        bar_spacing: rep.bar_spacing,
+        conflation_factor: rep.conflation_factor,
+        culled_bars: rep.culled_bar_count,
+        rendered_candles: rep.rendered_candle_count,
+        paint_shapes,
+        clipped_primitives,
+        total_vertices,
+        total_indices,
+        ui_build_stats: TimingStats::from_samples(ui_samples),
+        tessellate_stats: TimingStats::from_samples(tess_samples),
+        total_cpu_frame_stats: TimingStats::from_samples(total_samples),
+    }
+}
+
+fn format_r07_json_report(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+    domain: &[R07DomainBenchCase],
+    render: &[RenderCaseResult],
+) -> String {
+    let mut s = String::with_capacity(8192);
+    let _ = writeln!(s, "{{");
+    let _ = writeln!(s, "  \"milestone\": \"R07\",");
+    let _ = writeln!(s, "  \"environment\": {{");
+    let _ = writeln!(s, "    \"cpu\": \"{}\",", cpu.replace('"', "\\\""));
+    let _ = writeln!(s, "    \"os\": \"{}\",", std::env::consts::OS);
+    let _ = writeln!(s, "    \"arch\": \"{}\",", std::env::consts::ARCH);
+    let _ = writeln!(s, "    \"ram_bytes\": {mem_bytes},");
+    let _ = writeln!(s, "    \"rustc\": \"{}\",", rustc_ver.replace('"', "\\\""));
+    let _ = writeln!(s, "    \"profile\": \"{profile}\",");
+    let _ = writeln!(s, "    \"viewport_logical_px\": [1280, 800],");
+    let _ = writeln!(s, "    \"pixels_per_point\": 2.0");
+    let _ = writeln!(s, "  }},");
+    let _ = writeln!(s, "  \"replay_and_trading_domain\": [");
+    for (idx, d) in domain.iter().enumerate() {
+        let comma = if idx + 1 == domain.len() { "" } else { "," };
+        let _ = writeln!(
+            s,
+            "    {{ \"case_id\": \"{}\", \"description\": \"{}\", \"base_bars\": {}, \"output_or_fills\": {}, \"median_us\": {:.3}, \"p95_us\": {:.3}, \"max_us\": {:.3} }}{comma}",
+            d.case_id,
+            d.description.replace('"', "\\\""),
+            d.base_bars,
+            d.output_or_fills,
+            d.stats.median_us,
+            d.stats.p95_us,
+            d.stats.max_us,
+        );
+    }
+    let _ = writeln!(s, "  ],");
+    let _ = writeln!(s, "  \"workstation_replay_trading_workloads\": [");
+    for (idx, r) in render.iter().enumerate() {
+        let comma = if idx + 1 == render.len() { "" } else { "," };
+        let _ = writeln!(
+            s,
+            "    {{ \"dataset_bars\": {}, \"workload_id\": \"{}\", \"scale_mode\": \"{}\", \"bar_spacing\": {:.5}, \"conflation_factor\": {}, \"culled_bars\": {}, \"rendered_candles\": {}, \"paint_shapes\": {}, \"clipped_primitives\": {}, \"total_vertices\": {}, \"total_indices\": {}, \"ui_median_ms\": {:.4}, \"tessellate_median_ms\": {:.4}, \"total_cpu_median_ms\": {:.4}, \"total_cpu_p95_ms\": {:.4} }}{comma}",
+            r.dataset_bars,
+            r.workload_id,
+            r.scale_mode,
+            r.bar_spacing,
+            r.conflation_factor,
+            r.culled_bars,
+            r.rendered_candles,
+            r.paint_shapes,
+            r.clipped_primitives,
+            r.total_vertices,
+            r.total_indices,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.p95_us / 1_000.0,
+        );
+    }
+    let _ = writeln!(s, "  ]");
+    let _ = writeln!(s, "}}");
+    s
+}
+
+fn format_r07_markdown_report(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+    domain: &[R07DomainBenchCase],
+    render: &[RenderCaseResult],
+) -> String {
+    let mut s = String::with_capacity(8192);
+    let _ = writeln!(
+        s,
+        "# Milestone R07 — Causal Bar Replay & Paper Trading Execution Engine Benchmark Evidence\n"
+    );
+    let _ = writeln!(
+        s,
+        "- **Command:** `cargo run --release --example viewport_bench -- --r07`"
+    );
+    let _ = writeln!(
+        s,
+        "- **Hardware:** `{cpu}` (`{}-{}`), `{:.1} GiB` RAM",
+        std::env::consts::ARCH,
+        std::env::consts::OS,
+        (mem_bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+    );
+    let _ = writeln!(
+        s,
+        "- **Toolchain & Profile:** `{rustc_ver}` (`--{profile}`)"
+    );
+    let _ = writeln!(
+        s,
+        "- **Active Stack:** `100,000` `1m` Base Bars (`VN30F1M`) + Causal Replay Cut (`90,000..=95,000`) + Paper Trading Portfolio (`Market`/`Limit`/`SL`/`TP` Brackets + Execution Fill Markers) + 4 Panes (`Main` + `RSI(14)` + `MACD(12,26,9)` + `ATR(14)`) + 6 Indicators + 25 Causal Drawings + Replay Dock & Right Trading Panel\n"
+    );
+
+    let _ = writeln!(
+        s,
+        "## 1. Causal Replay Slicing, Step-Forward Matching, 5,000-Bar Simulation & Bit-Exact Rewind\n"
+    );
+    let _ = writeln!(
+        s,
+        "| Case ID | Description | Base Bars | Output Bars / Fills | Median (`µs`) | P95 (`µs`) | Max (`µs`) |"
+    );
+    let _ = writeln!(s, "| :--- | :--- | ---: | ---: | ---: | ---: | ---: |");
+    for d in domain {
+        let _ = writeln!(
+            s,
+            "| `{}` | {} | `{}` | `{}` | **`{:.2} µs`** | `{:.2} µs` | `{:.2} µs` |",
+            d.case_id,
+            d.description,
+            d.base_bars,
+            d.output_or_fills,
+            d.stats.median_us,
+            d.stats.p95_us,
+            d.stats.max_us,
+        );
+    }
+
+    let _ = writeln!(
+        s,
+        "\n## 2. End-to-End 4-Pane + 6-Indicator + 25-Drawing + Replay + Paper Trading Frame Budget (`DECISION-RENDERER-002` Gate: `< 4.0 ms`)\n"
     );
     let _ = writeln!(
         s,

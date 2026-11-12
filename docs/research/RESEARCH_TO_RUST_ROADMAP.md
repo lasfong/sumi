@@ -1,7 +1,7 @@
 # RESEARCH TO RUST ROADMAP — SESSION R01
 
 - **Session Identity:** `SESSION-R01-20261110T202837+0700`
-- **Updated By:** `SESSION-R06-20261111T194303+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Updated By:** `SESSION-R07-20261112T093742+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 - **Principle:** No Rust implementation begins without prior REA or reference-source research evidence.
 
 ---
@@ -161,14 +161,48 @@ cargo test app::tests::critic_r06_regression_per_instrument_drawing_isolation_in
 
 ---
 
-## Wave 6 — Causal Bar Replay & Paper Trading Execution Engine (`NEXT — MILESTONE R07 TARGET`)
+## Wave 6 — Causal Bar Replay & Paper Trading Execution Engine (`COMPLETE — SESSION R07`)
 
-### Deliverables
+### Completed Research & Audit Gates (`VERIFIED`)
+- [x] Executed 10 live REA MCP JS/TS operations (`12` exact 64-hex Evidence IDs: `ev_10aea63b...`, `ev_d1e347a9...`, `ev_9527ede0...`, `ev_c102b1d9...`, `ev_418c861e...`, `ev_eaab36ba...`, `ev_4f49eb61...`, `ev_e1958292...`, `ev_81fa9171...`, `ev_7e0b29f4...`, `ev_3f2322b6...`, `ev_19311ed5...`) across `ARCHIVE/frontend` replay/trading pipeline (`9` files) and `lightweight-charts-5.2.0` `custom-price-line` + `series-markers` (`8` files), plus 4 final binary REA Evidence IDs (`ev_dbbcdc03...`, `ev_b158e5f3...`, `ev_59ad2ed9...`, `ev_5f9d71b0...`).
+- [x] Authored [`docs/research/BAR_REPLAY_AND_PAPER_TRADING_SPEC.md`](BAR_REPLAY_AND_PAPER_TRADING_SPEC.md) rectifying all 6 legacy replay & paper-trading defects (`DEF-001` lookahead lock, partial higher-TF bars, deterministic command-log rewind, `Stop` orders + `Short` selling, 4-waypoint OHLC matching, causal drawing visibility, and type-safe Drawing -> Ticket sync).
+
+### Shipped Rust Deliverables (`IMPLEMENTATION_PASS`)
+| Component | Research Source | Shipped Rust Target | Status |
+|---|---|---|---|
+| Causal bar-by-bar replay controller (`DEF-001` zero-lookahead prefix rollup, `ActiveBar`/`BaseBar`) | `ARCHIVE/frontend` + `ARCHIVE/backend` replay contracts | `src/replay/` | ✅ SHIPPED |
+| Paper trading order book (`Market`, `Limit`, `Stop`, `SL/TP`, 4-waypoint OHLC, fee conservation & `rewind_to`) | `BAR_REPLAY_AND_PAPER_TRADING_SPEC.md` | `src/trading/` | ✅ SHIPPED |
+| Causal drawing visibility guards (`created_at_timestamp` + `is_causally_visible`) | `BAR_REPLAY_AND_PAPER_TRADING_SPEC.md` | `src/drawings/` | ✅ SHIPPED |
+| On-chart Cut Scrubber, Replay Frontier, `egui::Mesh` price lines/fill arrows, Replay Dock & Trading Panel | `LWC v5.2.0` `CustomPriceLine` / `SeriesMarkers` + Archive UI | `src/chart.rs`, `src/app.rs` | ✅ SHIPPED |
+
+### Verified Acceptance Tests (`cargo test` — 91/91 PASS)
+```bash
+cargo test replay::tests::def_001_zero_lookahead_slicing_across_all_higher_timeframes
+cargo test replay::tests::active_bar_vs_base_bar_stepping_and_mid_bucket_completion
+cargo test replay::tests::cut_selection_while_active_never_exposes_future_bars
+cargo test replay::tests::playback_accumulator_respects_speed_burst_cap_and_end_of_data
+cargo test replay::tests::causal_drawing_visibility_masks_future_pre_replay_and_preserves_replay_projections
+cargo test replay::tests::critic_r07_regression_causal_undo_redo_clear_unlocked_whitespace_drag_and_dense_hit_test
+cargo test trading::tests::pending_limit_and_stop_orders_handle_gap_opens_and_never_fill_on_submission_bar
+cargo test trading::tests::dual_touch_bar_resolves_pessimistically_sl_before_tp_and_post_entry_follows_4_waypoint_path
+cargo test trading::tests::multi_timeframe_15m_stepping_matches_1m_tick_execution_identically
+cargo test trading::tests::deterministic_command_log_rewind_restores_bit_exact_state
+cargo test trading::tests::critic_r07_regression_pure_reduce_stale_brackets_and_gap_open_bracket_sanitization
+cargo test trading::tests::critic_r07_regression_multi_pending_causal_segment_order_scale_in_r_multiple_and_max_price
+cargo test app::tests::r07_workstation_causal_replay_mtf_zero_lookahead_ticket_sync_rewind_and_instrument_isolation
+cargo test app::tests::critic_r07_regression_conflated_boundary_fill_markers_empty_click_deselect_and_cut_tool_cancel
+```
+
+---
+
+## Wave 7 — Multi-Symbol Watchlist, Technical Scanner, Alert Engine & Command Palette (`PROPOSED — MILESTONE R08`)
+
+### Proposed Deliverables (Awaiting Product Owner Authorization)
 | Component | Research Source | Rust Target | Status |
 |---|---|---|---|
-| Causal bar-by-bar replay controller (`DEF-001` zero-lookahead via `aggregate_ohlcv_up_to`) | `ARCHIVE/frontend/src/features/replay/*` + `ARCHIVE/backend` replay contracts | `src/replay/` | Next (`Milestone R07`) |
-| Paper trading order book (`Market`, `Limit`, `Stop`, `SL/TP`, realized/unrealized PnL & equity curve) | `ARCHIVE/frontend` paper trading / execution domain | `src/trading/` or `src/replay/` | Next (`Milestone R07`) |
-| On-chart replay scrubber, order/position price lines & execution markers | `LWC v5.2.0` series markers / price lines + Archive UI | `src/chart.rs`, `src/app.rs` | Next (`Milestone R07`) |
+| Multi-symbol Watchlist & Technical Scanner (`RSI`/`MACD`/`BB`/`SMA-EMA` cross & volume breakout scans across loaded feeds) | `ARCHIVE/frontend/src/pages/ScannerPage.tsx` + `ARCHIVE/backend/app/api/scanner.py` | `src/scanner/` | Proposed (`Milestone R08`) |
+| Causal Price, Indicator & Drawing-Ray Alert Engine (non-repainting trigger log + visual alert lines) | `ARCHIVE/frontend` signals/alerts + `LWC v5.2.0` price lines | `src/alerts/` | Proposed (`Milestone R08`) |
+| Keyboard Command Palette (`Cmd+K` instant symbol, timeframe, indicator, tool & replay jump) | Native workstation UX + Archive shortcuts | `src/app.rs` | Proposed (`Milestone R08`) |
 
 ---
 

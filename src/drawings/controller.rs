@@ -7,7 +7,7 @@ use crate::model::Candle;
 
 use super::geometry::{HandlePart, LocalPoint, PaneDrawingProjection};
 use super::hit_test::{
-    HitMatch, HitTarget, MAGNET_THRESHOLD_PX, hit_test_pane_drawings, snap_to_visible_ohlc,
+    HitMatch, HitTarget, MAGNET_THRESHOLD_PX, hit_test_pane_drawings_causal, snap_to_visible_ohlc,
 };
 use super::{
     Drawing, DrawingAnchor, DrawingGeometry, DrawingId, DrawingPaneTarget, DrawingStyle,
@@ -122,6 +122,10 @@ pub struct DrawingStore {
     undo_stack: Vec<DrawingCommand>,
     #[serde(skip)]
     redo_stack: Vec<DrawingCommand>,
+    #[serde(skip)]
+    replay_cutoff_timestamp: Option<i64>,
+    #[serde(skip)]
+    causal_visible_candles: usize,
 }
 
 impl Default for DrawingStore {
@@ -143,6 +147,8 @@ impl DrawingStore {
             hovered_hit: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            replay_cutoff_timestamp: None,
+            causal_visible_candles: usize::MAX,
         }
     }
 
@@ -153,6 +159,8 @@ impl DrawingStore {
         self.hovered_hit = None;
         self.undo_stack.clear();
         self.redo_stack.clear();
+        self.replay_cutoff_timestamp = None;
+        self.causal_visible_candles = usize::MAX;
 
         if self.drawings.len() > MAX_PERSISTED_DRAWINGS {
             self.drawings.truncate(MAX_PERSISTED_DRAWINGS);
@@ -211,13 +219,142 @@ impl DrawingStore {
     #[inline]
     #[must_use]
     pub fn has_unlocked_drawings(&self) -> bool {
-        self.drawings.iter().any(|d| !d.locked)
+        self.drawings.iter().any(|d| {
+            !d.locked
+                && d.is_causally_visible(self.replay_cutoff_timestamp, self.causal_visible_candles)
+        })
     }
 
     #[must_use]
     pub fn selected_drawing(&self) -> Option<&Drawing> {
         let id = self.selected_id?;
-        self.drawings.iter().find(|d| d.id == id)
+        self.drawings.iter().find(|d| {
+            d.id == id
+                && d.is_causally_visible(self.replay_cutoff_timestamp, self.causal_visible_candles)
+        })
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn replay_cutoff_timestamp(&self) -> Option<i64> {
+        self.replay_cutoff_timestamp
+    }
+
+    /// Synchronizes the active causal Bar Replay cutoff (`Some(cutoff_ts)`) or clears it (`None`)
+    /// when exiting replay (`Milestone R07 / DEF-001`).
+    pub fn set_replay_cutoff_timestamp(
+        &mut self,
+        cutoff: Option<i64>,
+        visible_candle_count: usize,
+    ) {
+        self.replay_cutoff_timestamp = cutoff;
+        self.causal_visible_candles = if cutoff.is_some() {
+            visible_candle_count
+        } else {
+            usize::MAX
+        };
+        self.sanitize_causal_selection_and_hover();
+    }
+
+    fn sanitize_causal_selection_and_hover(&mut self) {
+        let cutoff = self.replay_cutoff_timestamp;
+        let vis_cnt = self.causal_visible_candles;
+        if let Some(sel_id) = self.selected_id {
+            let masked = self
+                .drawings
+                .iter()
+                .find(|d| d.id == sel_id)
+                .is_none_or(|d| !d.is_causally_visible(cutoff, vis_cnt));
+            if masked {
+                self.rollback_active_phase();
+                self.selected_id = None;
+            }
+        }
+        if let Some((_, hit)) = self.hovered_hit {
+            let masked = self
+                .drawings
+                .iter()
+                .find(|d| d.id == hit.drawing_id)
+                .is_none_or(|d| !d.is_causally_visible(cutoff, vis_cnt));
+            if masked {
+                self.hovered_hit = None;
+            }
+        }
+    }
+
+    /// Refreshes cached `DrawingAnchor::timestamp` values for anchors that were drawn into
+    /// right-offset future whitespace (`bar_index > old_last_idx`) and have now been reached by
+    /// newly materialized replay bars on the **same** timeframe (`bar_index <= new_last_idx`).
+    pub fn refresh_materialized_anchor_timestamps(
+        &mut self,
+        old_candle_count: usize,
+        new_candles: &[Candle],
+        tf: Timeframe,
+    ) {
+        if self.replay_cutoff_timestamp.is_some() {
+            self.causal_visible_candles = new_candles.len();
+        }
+        if new_candles.len() <= old_candle_count || new_candles.is_empty() {
+            return;
+        }
+        let old_last = if old_candle_count == 0 {
+            -1.0
+        } else {
+            (old_candle_count - 1) as f64
+        };
+        let new_last = (new_candles.len() - 1) as f64;
+        let refresh_anchor = |a: &mut DrawingAnchor| {
+            if a.bar_index > old_last
+                && a.bar_index <= new_last
+                && let Some(ts) = resolve_anchor_timestamp(a.bar_index, new_candles, tf)
+                && ts.is_finite()
+                && ts.abs() <= super::MAX_ABS_ANCHOR_TIMESTAMP
+            {
+                a.timestamp = Some(ts);
+            }
+        };
+        let refresh_geom = |geom: &mut DrawingGeometry| match geom {
+            DrawingGeometry::HorizontalLine { anchor } => refresh_anchor(anchor),
+            DrawingGeometry::TrendLine { start, end }
+            | DrawingGeometry::Ray {
+                origin: start,
+                through: end,
+            }
+            | DrawingGeometry::Rectangle {
+                corner_a: start,
+                corner_b: end,
+            }
+            | DrawingGeometry::FibonacciRetracement { start, end, .. } => {
+                refresh_anchor(start);
+                refresh_anchor(end);
+            }
+        };
+        let refresh_cmd = |cmd: &mut DrawingCommand| match cmd {
+            DrawingCommand::Create(d) | DrawingCommand::Delete { drawing: d, .. } => {
+                refresh_geom(&mut d.geometry);
+            }
+            DrawingCommand::Modify { before, after } => {
+                refresh_geom(&mut before.geometry);
+                refresh_geom(&mut after.geometry);
+            }
+            DrawingCommand::ReplaceAll { before, after, .. } => {
+                for d in before {
+                    refresh_geom(&mut d.geometry);
+                }
+                for d in after {
+                    refresh_geom(&mut d.geometry);
+                }
+            }
+        };
+        for d in &mut self.drawings {
+            refresh_geom(&mut d.geometry);
+        }
+        for cmd in &mut self.undo_stack {
+            refresh_cmd(cmd);
+        }
+        for cmd in &mut self.redo_stack {
+            refresh_cmd(cmd);
+        }
     }
 
     #[inline]
@@ -248,7 +385,8 @@ impl DrawingStore {
         let id = self.alloc_id();
         let resolved_style =
             style.unwrap_or_else(|| DrawingStyle::default_for_tool(geometry.tool_kind()));
-        let drawing = Drawing::new(id, pane, geometry, resolved_style);
+        let mut drawing = Drawing::new(id, pane, geometry, resolved_style);
+        drawing.created_at_timestamp = self.replay_cutoff_timestamp;
         self.push_undo(DrawingCommand::Create(drawing.clone()));
         self.drawings.push(drawing);
         Some(id)
@@ -364,9 +502,13 @@ impl DrawingStore {
         for cmd in &mut self.redo_stack {
             remap_command_anchors(cmd, old_candles, old_tf, new_candles, new_tf);
         }
+        if self.replay_cutoff_timestamp.is_some() {
+            self.causal_visible_candles = new_candles.len();
+        }
+        self.sanitize_causal_selection_and_hover();
     }
 
-    /// Deletes the currently selected drawing if it exists and is unlocked.
+    /// Deletes the currently selected drawing if it exists, is causally visible, and is unlocked.
     pub fn delete_selected(&mut self) -> bool {
         let Some(sel_id) = self.selected_id else {
             return false;
@@ -376,6 +518,12 @@ impl DrawingStore {
             self.selected_id = None;
             return false;
         };
+        if !self.drawings[idx]
+            .is_causally_visible(self.replay_cutoff_timestamp, self.causal_visible_candles)
+        {
+            self.selected_id = None;
+            return false;
+        }
         if self.drawings[idx].locked {
             return false;
         }
@@ -388,12 +536,16 @@ impl DrawingStore {
         true
     }
 
-    /// Removes all unlocked drawings across all panes (preserving locked annotations).
+    /// Removes all causally visible unlocked drawings across all panes (preserving locked and
+    /// causally masked future annotations).
     pub fn clear_unlocked(&mut self) -> usize {
         self.rollback_active_phase();
+        let cutoff = self.replay_cutoff_timestamp;
+        let vis_cnt = self.causal_visible_candles;
         let before = self.drawings.clone();
         let before_selected = self.selected_id;
-        self.drawings.retain(|d| d.locked);
+        self.drawings
+            .retain(|d| d.locked || !d.is_causally_visible(cutoff, vis_cnt));
         let removed_count = before.len().saturating_sub(self.drawings.len());
         if removed_count > 0 {
             if let Some(sel) = self.selected_id
@@ -504,6 +656,7 @@ impl DrawingStore {
             }
         }
         self.redo_stack.push(cmd);
+        self.sanitize_causal_selection_and_hover();
         true
     }
 
@@ -541,6 +694,7 @@ impl DrawingStore {
             }
         }
         self.undo_stack.push(cmd);
+        self.sanitize_causal_selection_and_hover();
         true
     }
 
@@ -671,6 +825,12 @@ impl DrawingStore {
                         anchor.timestamp = src.timestamp;
                     }
                     apply_handle_drag(&mut d.geometry, target_handle, anchor);
+                    if let Some(cutoff_ts) = self.replay_cutoff_timestamp {
+                        d.created_at_timestamp = Some(
+                            d.created_at_timestamp
+                                .map_or(cutoff_ts, |t| t.max(cutoff_ts)),
+                        );
+                    }
                 }
             }
             DrawingInteractionPhase::DraggingBody {
@@ -701,16 +861,24 @@ impl DrawingStore {
                     && !d.locked
                 {
                     d.geometry = translated_geom;
+                    if let Some(cutoff_ts) = self.replay_cutoff_timestamp {
+                        d.created_at_timestamp = Some(
+                            d.created_at_timestamp
+                                .map_or(cutoff_ts, |t| t.max(cutoff_ts)),
+                        );
+                    }
                 }
             }
             DrawingInteractionPhase::Idle => {
                 if self.active_tool == DrawingTool::Select {
-                    self.hovered_hit = hit_test_pane_drawings(
+                    self.hovered_hit = hit_test_pane_drawings_causal(
                         &self.drawings,
                         pane,
                         proj,
                         local_pos,
                         self.selected_id,
+                        self.replay_cutoff_timestamp,
+                        candles.len(),
                     )
                     .map(|h| (pane, h));
                 } else {
@@ -795,9 +963,15 @@ impl DrawingStore {
         }
 
         // 3. In `Select` cursor mode, hit-test drawings on `pane`.
-        if let Some(hit) =
-            hit_test_pane_drawings(&self.drawings, pane, proj, local_pos, self.selected_id)
-        {
+        if let Some(hit) = hit_test_pane_drawings_causal(
+            &self.drawings,
+            pane,
+            proj,
+            local_pos,
+            self.selected_id,
+            self.replay_cutoff_timestamp,
+            candles.len(),
+        ) {
             self.selected_id = Some(hit.drawing_id);
             self.hovered_hit = Some((pane, hit));
 
@@ -1080,9 +1254,15 @@ impl DrawingStore {
             return false;
         };
         self.rollback_active_phase();
+        let cutoff = self.replay_cutoff_timestamp;
+        let vis_cnt = self.causal_visible_candles;
         let Some(slot) = self.drawings.iter_mut().find(|d| d.id == sel_id) else {
             return false;
         };
+        if !slot.is_causally_visible(cutoff, vis_cnt) {
+            self.selected_id = None;
+            return false;
+        }
         let before = slot.clone();
         if !f(slot) || *slot == before {
             return false;
@@ -1202,10 +1382,22 @@ fn remap_single_anchor(
     new_candles: &[Candle],
     new_tf: Timeframe,
 ) {
-    let ts = anchor
+    let existing_ts = anchor
         .timestamp
-        .filter(|t| t.is_finite() && t.abs() <= super::MAX_ABS_ANCHOR_TIMESTAMP)
-        .or_else(|| resolve_anchor_timestamp(anchor.bar_index, old_candles, old_tf));
+        .filter(|t| t.is_finite() && t.abs() <= super::MAX_ABS_ANCHOR_TIMESTAMP);
+    let old_last = (old_candles.len().saturating_sub(1)) as f64;
+    if existing_ts.is_none()
+        && anchor.bar_index > old_last
+        && old_tf == new_tf
+        && old_candles.first().map(|c| c.timestamp) == new_candles.first().map(|c| c.timestamp)
+    {
+        // Keep unmaterialized right-offset whitespace projections (`bar_index > old_last`) unstamped
+        // on the same timeframe so session/overnight gaps are never baked into synthetic timestamps.
+        return;
+    }
+
+    let ts =
+        existing_ts.or_else(|| resolve_anchor_timestamp(anchor.bar_index, old_candles, old_tf));
     if let Some(resolved_ts) = ts
         && resolved_ts.is_finite()
         && resolved_ts.abs() <= super::MAX_ABS_ANCHOR_TIMESTAMP
@@ -1213,8 +1405,13 @@ fn remap_single_anchor(
             remap_timestamp_to_bar_index(resolved_ts, old_tf, new_candles, new_tf)
     {
         anchor.bar_index = new_idx;
-        if snapped_ts.is_finite() && snapped_ts.abs() <= super::MAX_ABS_ANCHOR_TIMESTAMP {
-            anchor.timestamp = Some(snapped_ts);
+        let new_last = (new_candles.len().saturating_sub(1)) as f64;
+        if existing_ts.is_some() || new_idx <= new_last {
+            if snapped_ts.is_finite() && snapped_ts.abs() <= super::MAX_ABS_ANCHOR_TIMESTAMP {
+                anchor.timestamp = Some(snapped_ts);
+            }
+        } else {
+            anchor.timestamp = None;
         }
     }
 }

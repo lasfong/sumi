@@ -1,7 +1,7 @@
 # SUMI TRADING WORKSTATION — DECISION LOG
 
 - **Session Identity (Created):** `SESSION-01-20261110T160909+0700`
-- **Updated By:** `SESSION-R06-20261111T194303+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Updated By:** `SESSION-R07-20261112T093742+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 
 ## Decisions Recorded in Session 01
 
@@ -142,3 +142,18 @@
   2. Enforce an upward-only timeframe lattice (`1m`, `5m`, `15m`, `1h`, `4h`, `1D`, `1W`; `Timeframe::can_aggregate_to` requires `target.seconds() >= self.seconds()`, rejecting downward disaggregation while stamping ISO-8601 Monday `00:00:00 UTC` on `1W` buckets) plus `aggregate_ohlcv_up_to(..., cutoff_timestamp)` to guarantee zero lookahead bias (`DEF-001`) for future replay waves.
   3. Require canonical UTC epoch seconds `Candle::timestamp: i64` and attach fractional-capable `DrawingAnchor::timestamp: Option<f64>` so `DrawingStore::remap_timeframe` preserves exact in-bar and inter-bar anchors across `1m <-> 5m <-> 15m <-> 1h <-> 4h <-> 1D <-> 1W` switches (`0.75–4.29 µs` for `25` drawings on `100K` bars) and isolate drawings per `(DataSourcePreset, symbol)` via `drawings_by_instrument`.
   4. Replace windowed `ViewportCommand::Screenshot` automation with `OffscreenWgpuHarness` (`eframe::egui_wgpu::RenderState` + `Rgba8Unorm` `2.0x` Retina texture readback on Apple M1 Metal) so `SUMI_CAPTURE_BATCH` and `SUMI_SCREENSHOT_PATH` execute in `< 1s` with zero windows, zero Dock icons, zero focus stealing, and complete immunity to macOS display sleep.
+
+
+---
+
+## Decisions Recorded in Session R07
+
+### DEC-R07-001 — Pure `f64`/`i64` WASM-Safe Causal Bar Replay (`src/replay/`), 4-Waypoint Paper Trading Engine (`src/trading/`), Causal Drawing Guards & `egui::Mesh` Overlay Batching
+- **Date:** `2026-11-12`
+- **Session:** `SESSION-R07-20261112T093742+0700`
+- **Context:** Milestone R07 (`Wave 6`) implements Bar Replay and Paper Trading after live REA MCP analysis (`ev_10aea63b...`, `ev_9527ede0...`, `ev_418c861e...`, `ev_eaab36ba...`, `ev_4f49eb61...`, `ev_e1958292...`, `ev_81fa9171...`, `ev_7e0b29f4...`, `ev_3f2322b6...`, `ev_19311ed5...`) uncovered 6 structural defects in legacy Sumi (`4`-HTTP-call step latency & dropped partial weekly bars, non-causal rewind cash/position corruption, missing `STOP` orders + `100`-share/no-short lockouts, close-before-intrabar bankruptcy & skipped post-entry brackets, future drawing leakage, and DOM-scraped ticket sync).
+- **Decision:**
+  1. Implement `src/replay/` (`mod.rs`, `controller.rs`, `tests.rs`) in pure `f64`/`i64` (`wasm32-unknown-unknown`-verified, zero new crates in `Cargo.toml`), anchoring replay at `base_cursor_index` (`&base_candles[..=base_cursor_index]` -> `aggregate_ohlcv(..., base_tf, active_tf)`) to guarantee zero future lookahead (`DEF-001`) across candles, incomplete higher-timeframe buckets, and `IndicatorCache`, with `ActiveBar` and `BaseBar` stepping (`1.25 µs` per `15m` step).
+  2. Implement `src/trading/` (`mod.rs`, `orders.rs`, `portfolio.rs`, `tests.rs`) supporting symmetric `Long`/`Short` `Market`, `Limit`, and `Stop` orders, `SL`/`TP` brackets, unified Gap-Open (`t = Open`) + 3-segment causal 4-waypoint OHLC matching (`[O, L, H, C]` vs `[O, H, L, C]`, pessimistic `SL`-before-`TP` on pre-existing dual-touch bars), proportional entry-fee conservation, timeframe-invariant base-bar execution, and deterministic command-log `rewind_to` (`256.71 µs` across `4,501` bars).
+  3. Stamp `Drawing::created_at_timestamp: Option<i64>` and enforce `is_causally_visible` across rendering, hit-testing, `selected_drawing()`, `undo()`, `redo()`, `clear_unlocked()`, and Drawing -> Order Ticket sync so future drawings remain hidden without deletion during replay while right-whitespace projections created during replay stay visible and interactive.
+  4. Batch axis-aligned dashed/dotted lines (`paint_styled_segment_phased`) and execution fill-marker triangles (`paint_execution_fill_markers`) into single `egui::Mesh` primitives so `95,001`-bar `1m` full-fit 4-pane + 6-indicator + 25-drawing + Replay + Trading renders in **`3.923 ms`** median (`0.174 ms` standard intraday, `0.291 ms` full workstation UI), remaining within the `< 4.0 ms` `DECISION-RENDERER-002` ceiling.

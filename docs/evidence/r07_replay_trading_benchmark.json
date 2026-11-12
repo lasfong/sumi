@@ -1,0 +1,25 @@
+{
+  "milestone": "R07",
+  "environment": {
+    "cpu": "Apple M1",
+    "os": "macos",
+    "arch": "aarch64",
+    "ram_bytes": 17179869184,
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "profile": "release",
+    "viewport_logical_px": [1280, 800],
+    "pixels_per_point": 2.0
+  },
+  "replay_and_trading_domain": [
+    { "case_id": "replay_materialize_95k_1m_to_15m", "description": "Causal zero-lookahead materialize (`95,001` 1m -> `15m`)", "base_bars": 95001, "output_or_fills": 6334, "median_us": 1344.667, "p95_us": 1511.500, "max_us": 1735.458 },
+    { "case_id": "replay_step_15m_plus_order_matching", "description": "`1x 15m` ActiveBar step + intrabar OHLC bracket/limit matching", "base_bars": 15, "output_or_fills": 30, "median_us": 1.250, "p95_us": 1.292, "max_us": 1.375 },
+    { "case_id": "trading_sim_5000_1m_bars_full", "description": "5,000-bar `1m` causal paper-trading run (~65 orders + SL/TP brackets)", "base_bars": 5001, "output_or_fills": 30, "median_us": 304.166, "p95_us": 339.750, "max_us": 396.375 },
+    { "case_id": "trading_causal_rewind_4500_bars", "description": "Bit-exact command-log `rewind_to` (`90,000..=94,500` rebuild)", "base_bars": 4501, "output_or_fills": 27, "median_us": 256.709, "p95_us": 276.834, "max_us": 329.083 }
+  ],
+  "workstation_replay_trading_workloads": [
+    { "dataset_bars": 95001, "workload_id": "r07_replay_1m_recent_4pane_25draw_trading", "scale_mode": "Linear", "bar_spacing": 8.00000, "conflation_factor": 1, "culled_bars": 141, "rendered_candles": 140, "paint_shapes": 279, "clipped_primitives": 34, "total_vertices": 15822, "total_indices": 46095, "ui_median_ms": 0.1138, "tessellate_median_ms": 0.0594, "total_cpu_median_ms": 0.1736, "total_cpu_p95_ms": 0.1917 },
+    { "dataset_bars": 6334, "workload_id": "r07_replay_15m_cut_scrubber_4pane_25draw_trading", "scale_mode": "Linear", "bar_spacing": 9.00000, "conflation_factor": 1, "culled_bars": 124, "rendered_candles": 123, "paint_shapes": 334, "clipped_primitives": 44, "total_vertices": 18892, "total_indices": 52764, "ui_median_ms": 0.1220, "tessellate_median_ms": 0.0743, "total_cpu_median_ms": 0.1963, "total_cpu_p95_ms": 0.2235 },
+    { "dataset_bars": 95001, "workload_id": "r07_replay_1m_fit_conflated_4pane_25draw_trading", "scale_mode": "Log", "bar_spacing": 0.01240, "conflation_factor": 32, "culled_bars": 95001, "rendered_candles": 2968, "paint_shapes": 274, "clipped_primitives": 42, "total_vertices": 401860, "total_indices": 1572324, "ui_median_ms": 2.0959, "tessellate_median_ms": 1.8320, "total_cpu_median_ms": 3.9228, "total_cpu_p95_ms": 4.2563 },
+    { "dataset_bars": 4541, "workload_id": "r07_full_workstation_ui_dock_ticket_4pane", "scale_mode": "Linear", "bar_spacing": 8.50000, "conflation_factor": 1, "culled_bars": 103, "rendered_candles": 101, "paint_shapes": 451, "clipped_primitives": 49, "total_vertices": 21942, "total_indices": 68808, "ui_median_ms": 0.1920, "tessellate_median_ms": 0.0989, "total_cpu_median_ms": 0.2912, "total_cpu_p95_ms": 0.3730 }
+  ]
+}

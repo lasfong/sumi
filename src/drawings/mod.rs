@@ -28,7 +28,7 @@ pub use geometry::{
 pub use hit_test::{
     HANDLE_HIT_RADIUS_PX, HitMatch, HitPriority, HitTarget, MAGNET_THRESHOLD_PX,
     SELECTED_HANDLE_HIT_RADIUS_PX, STROKE_HIT_TOLERANCE_PX, hit_test_pane_drawings,
-    hit_test_projected_drawing, snap_to_visible_ohlc,
+    hit_test_pane_drawings_causal, hit_test_projected_drawing, snap_to_visible_ohlc,
 };
 
 /// Stable unique identifier assigned monotonically to each committed [`Drawing`].
@@ -508,6 +508,15 @@ pub struct Drawing {
     pub locked: bool,
     pub style: DrawingStyle,
     pub geometry: DrawingGeometry,
+    /// Optional causal replay cutoff timestamp (`UTC` seconds) at which this drawing was created.
+    ///
+    /// - `Some(created_ts)`: authored during an active Bar Replay session at `created_ts`; visible
+    ///   for all replay states with `cutoff_timestamp >= created_ts` (including anchors projected
+    ///   into right-hand future whitespace), and masked if the user rewinds earlier than `created_ts`.
+    /// - `None`: authored outside Bar Replay; during active replay at `cutoff_timestamp`, visible
+    ///   iff every anchor lies at or before `cutoff_timestamp` (`DEF-001` zero-lookahead guard).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at_timestamp: Option<i64>,
 }
 
 impl Drawing {
@@ -527,6 +536,7 @@ impl Drawing {
             locked: false,
             style: clean_style,
             geometry,
+            created_at_timestamp: None,
         }
     }
 
@@ -538,6 +548,58 @@ impl Drawing {
 
     #[must_use]
     pub fn is_valid(&self) -> bool {
-        self.id > 0 && self.id < PREVIEW_DRAWING_ID && self.geometry.is_valid()
+        let created_ts_ok = self.created_at_timestamp.is_none_or(|ts| {
+            (ts as f64).is_finite() && (ts as f64).abs() <= MAX_ABS_ANCHOR_TIMESTAMP
+        });
+        self.id > 0 && self.id < PREVIEW_DRAWING_ID && self.geometry.is_valid() && created_ts_ok
+    }
+
+    /// Evaluates whether this drawing is causally visible (`DEF-001`) at `replay_cutoff_timestamp`.
+    #[must_use]
+    pub fn is_causally_visible(
+        &self,
+        replay_cutoff_timestamp: Option<i64>,
+        visible_candle_count: usize,
+    ) -> bool {
+        if !self.visible {
+            return false;
+        }
+        let Some(cutoff_ts) = replay_cutoff_timestamp else {
+            return true;
+        };
+        if let Some(created_ts) = self.created_at_timestamp {
+            return created_ts <= cutoff_ts;
+        }
+        // Pre-replay drawing (`created_at_timestamp == None`): HorizontalLine spans all X and carries
+        // only a price level unless anchored to a future candle; mask any pre-replay drawing that has
+        // an anchor strictly beyond `cutoff_ts` (or beyond the causal bar count when unstamped).
+        let cutoff_f = (cutoff_ts as f64) + 1e-3;
+        let max_bar_idx = if visible_candle_count == 0 {
+            -1.0
+        } else {
+            ((visible_candle_count - 1) as f64) + 1e-6
+        };
+        let anchor_ok = |a: DrawingAnchor| -> bool {
+            if let Some(ts) = a.timestamp {
+                ts <= cutoff_f
+            } else {
+                a.bar_index <= max_bar_idx
+            }
+        };
+        match self.geometry {
+            DrawingGeometry::HorizontalLine { anchor } => anchor_ok(anchor),
+            DrawingGeometry::TrendLine { start, end }
+            | DrawingGeometry::Ray {
+                origin: start,
+                through: end,
+            }
+            | DrawingGeometry::Rectangle {
+                corner_a: start,
+                corner_b: end,
+            }
+            | DrawingGeometry::FibonacciRetracement { start, end, .. } => {
+                anchor_ok(start) && anchor_ok(end)
+            }
+        }
     }
 }
