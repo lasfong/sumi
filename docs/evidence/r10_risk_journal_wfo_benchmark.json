@@ -1,0 +1,26 @@
+{
+  "milestone": "R10",
+  "environment": {
+    "cpu": "Apple M1",
+    "os": "macos",
+    "arch": "aarch64",
+    "ram_bytes": 17179869184,
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "profile": "release",
+    "viewport_logical_px": [1280, 800],
+    "pixels_per_point": 2.0
+  },
+  "r10_domain_throughput": [
+    { "case_id": "r10_hose_risk_planner_1k_evals", "description": "1,000 HOSE Risk Planner evaluations (±7% band, 3-tier tick snap, lot 100, T+2, all-in friction)", "input_units": 1000, "output_items": 300, "median_us": 101.125, "median_ms": 0.1011, "p95_us": 104.875, "max_us": 111.666 },
+    { "case_id": "r10_journal_analytics_and_csv_500", "description": "500-entry DEF-001 causal Journal analytics (SQN, Discipline %, Attribution) + RFC-4180 CSV export", "input_units": 500, "output_items": 74263, "median_us": 601.125, "median_ms": 0.6011, "p95_us": 674.083, "max_us": 784.542 },
+    { "case_id": "r10_walk_forward_4fold_rolling_fpt_1d", "description": "4-fold Rolling Walk-Forward (12-variant IS sweep -> stitched OOS curve & Pardo WFE) on FPT 1D", "input_units": 180, "output_items": 3, "median_us": 108.375, "median_ms": 0.1084, "p95_us": 112.333, "max_us": 120.334 },
+    { "case_id": "r10_walk_forward_4fold_anchored_15m", "description": "4-fold Anchored Walk-Forward across 6,667 15m bars (100K 1m rollup)", "input_units": 6667, "output_items": 116, "median_us": 5957.916, "median_ms": 5.9579, "p95_us": 6319.959, "max_us": 6339.875 },
+    { "case_id": "r10_portfolio_vn30_8_equal_weight", "description": "8-symbol VN30 cash equity portfolio simulation (EqualWeight 1/N + diversification DD attribution)", "input_units": 8, "output_items": 180, "median_us": 106.000, "median_ms": 0.1060, "p95_us": 112.084, "max_us": 117.917 },
+    { "case_id": "r10_portfolio_universe_13_causal_inv_vol", "description": "13-feed multi-asset universe portfolio simulation (past-only CausalInverseVolatility(20))", "input_units": 13, "output_items": 10487, "median_us": 2855.417, "median_ms": 2.8554, "p95_us": 3039.083, "max_us": 3051.084 }
+  ],
+  "workstation_r10_workloads": [
+    { "dataset_bars": 180, "workload_id": "r10_full_ui_vn_risk_journal_rr_box", "scale_mode": "Linear", "bar_spacing": 9.50000, "conflation_factor": 1, "culled_bars": 83, "rendered_candles": 81, "paint_shapes": 410, "clipped_primitives": 24, "total_vertices": 17970, "total_indices": 61869, "ui_median_ms": 0.1872, "tessellate_median_ms": 0.0885, "total_cpu_median_ms": 0.2758, "total_cpu_p95_ms": 0.3307 },
+    { "dataset_bars": 4801, "workload_id": "r10_full_ui_wfo_stitched_oos_5panes", "scale_mode": "Linear", "bar_spacing": 8.50000, "conflation_factor": 1, "culled_bars": 94, "rendered_candles": 93, "paint_shapes": 505, "clipped_primitives": 46, "total_vertices": 22486, "total_indices": 73647, "ui_median_ms": 0.2591, "tessellate_median_ms": 0.1091, "total_cpu_median_ms": 0.3691, "total_cpu_p95_ms": 0.4307 },
+    { "dataset_bars": 180, "workload_id": "r10_full_ui_portfolio_equity_5panes", "scale_mode": "Linear", "bar_spacing": 8.00000, "conflation_factor": 1, "culled_bars": 97, "rendered_candles": 96, "paint_shapes": 501, "clipped_primitives": 43, "total_vertices": 21540, "total_indices": 70956, "ui_median_ms": 0.2428, "tessellate_median_ms": 0.1065, "total_cpu_median_ms": 0.3493, "total_cpu_p95_ms": 0.3694 }
+  ]
+}

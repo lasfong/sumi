@@ -4,12 +4,15 @@ use std::time::Instant;
 
 use egui::{Pos2, Rect, Vec2};
 use sumi_workstation::alerts::{AlertCondition, AlertEngine, AlertFrequency, CrossDirection};
-use sumi_workstation::app::{RightDockTab, ScannerDockTab, StrategyLabSubTab, SumiWorkstationApp};
+use sumi_workstation::app::{
+    EquityPaneSource, RightDockTab, ScannerDockTab, StrategyLabSubTab, SumiWorkstationApp,
+};
 use sumi_workstation::backtest::{
-    BacktestConfig, BacktestRunOptions, BacktestRunResult, PositionSizingMode, StopTakeConfig,
-    StrategyDirectionMode, StrategyParams, StrategyPresetKind, SweepRankingMetric,
+    BacktestConfig, BacktestRunOptions, BacktestRunResult, PortfolioUniverseFilter,
+    PortfolioWeightingMode, PositionSizingMode, StopTakeConfig, StrategyDirectionMode,
+    StrategyParams, StrategyPresetKind, SweepRankingMetric, WalkForwardConfig,
     run_all_presets_battle, run_backtest_with_options, run_multi_symbol_battle,
-    run_parameter_sweep,
+    run_parameter_sweep, run_portfolio_backtest, run_walk_forward_validation,
 };
 use sumi_workstation::chart::{
     ChartDisplayConfig, ChartReplayTradingOverlay, ChartViewportState, render_candlestick_chart,
@@ -28,6 +31,10 @@ use sumi_workstation::drawings::{
 };
 use sumi_workstation::indicators::{
     BlockExtrema, IndicatorCache, IndicatorConfig, OscillatorPaneId, SeriesBlockIndex,
+};
+use sumi_workstation::journal::{
+    ChecklistState, ExchangeVenue, MistakeTag, SetupTag, TradeJournalStore, TradePlanInput,
+    VnPriceUnit, compute_trade_plan,
 };
 use sumi_workstation::model::Candle;
 use sumi_workstation::replay::{ReplayController, ReplayStepUnit};
@@ -136,6 +143,10 @@ fn main() {
     }
     if std::env::args().any(|a| a == "--r09") {
         run_r09_backtest_lab_benchmark(&cpu_brand, mem_bytes, &rustc_ver, profile);
+        return;
+    }
+    if std::env::args().any(|a| a == "--r10") {
+        run_r10_risk_journal_wfo_portfolio_benchmark(&cpu_brand, mem_bytes, &rustc_ver, profile);
         return;
     }
 
@@ -4215,6 +4226,7 @@ fn bench_r08_chart_render(
                             trading_session: Some(trading),
                             alert_engine: Some(alerts),
                             backtest_result: None,
+                            equity_override: None,
                             show_equity_pane: false,
                             show_backtest_trades_on_chart: false,
                             focused_backtest_trade_id: None,
@@ -4269,6 +4281,7 @@ fn bench_r08_chart_render(
                         trading_session: Some(trading),
                         alert_engine: Some(alerts),
                         backtest_result: None,
+                        equity_override: None,
                         show_equity_pane: false,
                         show_backtest_trades_on_chart: false,
                         focused_backtest_trade_id: None,
@@ -5128,6 +5141,7 @@ fn bench_r09_chart_full_case<F: FnOnce(&mut ChartViewportState)>(
                             trading_session: Some(trading),
                             alert_engine: Some(alerts),
                             backtest_result: Some(backtest_result),
+                            equity_override: None,
                             show_equity_pane: true,
                             show_backtest_trades_on_chart: true,
                             focused_backtest_trade_id: focused_trade_id,
@@ -5182,6 +5196,7 @@ fn bench_r09_chart_full_case<F: FnOnce(&mut ChartViewportState)>(
                         trading_session: Some(trading),
                         alert_engine: Some(alerts),
                         backtest_result: Some(backtest_result),
+                        equity_override: None,
                         show_equity_pane: true,
                         show_backtest_trades_on_chart: true,
                         focused_backtest_trade_id: focused_trade_id,
@@ -5487,6 +5502,703 @@ fn format_r09_markdown_report(
     let _ = writeln!(
         s,
         "| Case ID | Description | Input Bars | Output Trades / Rows | Median (`µs`) | Median (`ms`) | P95 (`µs`) | Max (`µs`) |"
+    );
+    let _ = writeln!(
+        s,
+        "| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: |"
+    );
+    for d in domain {
+        let _ = writeln!(
+            s,
+            "| `{}` | {} | `{}` | `{}` | **`{:.2} µs`** | **`{:.3} ms`** | `{:.2} µs` | `{:.2} µs` |",
+            d.case_id,
+            d.description,
+            d.input_units,
+            d.output_items,
+            d.stats.median_us,
+            d.stats.median_us / 1_000.0,
+            d.stats.p95_us,
+            d.stats.max_us,
+        );
+    }
+
+    let _ = writeln!(
+        s,
+        "\n## 2. End-to-End Workstation Frame Budget (`DECISION-RENDERER-002` Gate: `< 4.0 ms`)\n"
+    );
+    let _ = writeln!(
+        s,
+        "| Bars | Workload | Scale | Conflation | Culled | Drawn | Vertices | Indices | UI Median (`ms`) | Tessellate Median (`ms`) | Total CPU Median (`ms`) | Total CPU P95 (`ms`) | `< 4.0ms` Hybrid Gate | 120 FPS (`8.33ms`) |"
+    );
+    let _ = writeln!(
+        s,
+        "| ---: | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: | :---: |"
+    );
+    for r in render {
+        let tot_med_ms = r.total_cpu_frame_stats.median_us / 1_000.0;
+        let tot_p95_ms = r.total_cpu_frame_stats.p95_us / 1_000.0;
+        let hybrid_gate = if tot_med_ms < 4.0 {
+            "PASS (<4ms)"
+        } else {
+            "TRIGGER_WGPU"
+        };
+        let pass_120 = if tot_med_ms <= 8.33 {
+            "PASS"
+        } else {
+            "EXCEEDS"
+        };
+        let _ = writeln!(
+            s,
+            "| `{}` | `{}` ({}) | `{}` | `{}x` | `{}` | `{}` | `{}` | `{}` | `{:.3}` | `{:.3}` | **`{:.3}`** | `{:.3}` | `{hybrid_gate}` | `{pass_120}` |",
+            r.dataset_bars,
+            r.workload_id,
+            r.description,
+            r.scale_mode,
+            r.conflation_factor,
+            r.culled_bars,
+            r.rendered_candles,
+            r.total_vertices,
+            r.total_indices,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            tot_med_ms,
+            tot_p95_ms,
+        );
+    }
+    s
+}
+
+fn run_r10_risk_journal_wfo_portfolio_benchmark(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+) {
+    use sumi_workstation::data::DataSourcePreset;
+    use sumi_workstation::trading::PositionSide;
+
+    println!(
+        "=== Sumi R10 Vietnam Risk Planner, Trade Journal & Walk-Forward Portfolio Benchmark ==="
+    );
+    println!(
+        "CPU: {cpu} | RAM: {:.1} GiB | {rustc_ver} | profile={profile}",
+        (mem_bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+    );
+
+    let universe = load_bundled_watchlist_universe();
+    let candles_100k_1m = generate_intraday_vn30f_1m_report(100_000).candles;
+    let candles_15m =
+        aggregate_ohlcv(&candles_100k_1m, Timeframe::M1, Timeframe::M15).expect("15m rollup");
+    let fpt_feed = universe
+        .iter()
+        .find(|e| e.symbol == "FPT")
+        .unwrap_or(&universe[0]);
+
+    let mut domain_cases = Vec::new();
+
+    // 1. 1,000 HOSE Risk Planner evaluations (±7% band, 3-tier tick snap, board lot 100, T+2 weekend rollover, all-in friction)
+    let base_plan_in = TradePlanInput {
+        venue: ExchangeVenue::Hose,
+        price_unit: VnPriceUnit::Auto,
+        side: PositionSide::Long,
+        account_equity: 250_000_000.0,
+        available_cash: 250_000_000.0,
+        leverage: 1.0,
+        risk_pct: 1.0,
+        entry_price: 132_450.0,
+        stop_loss: 126_800.0,
+        target_price: 146_900.0,
+        reference_price: Some(131_500.0),
+        commission_bps: 15.0,
+        tax_sell_bps: 10.0,
+        slippage_bps: 5.0,
+        snap_to_ticks: true,
+        entry_timestamp: Some(1_731_600_000),
+        ..TradePlanInput::default()
+    };
+    let mut plan_1k_samples = Vec::with_capacity(80);
+    let mut last_qty = 0_usize;
+    for step in 0..96 {
+        let t0 = Instant::now();
+        for k in 0..1_000_u32 {
+            let mut inp = base_plan_in.clone();
+            inp.entry_price += f64::from(k % 17) * 50.0;
+            if let Ok(out) = compute_trade_plan(std::hint::black_box(&inp)) {
+                last_qty = out.planned_quantity as usize;
+            }
+        }
+        let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        if step >= 16 {
+            plan_1k_samples.push(us);
+        }
+    }
+    domain_cases.push(R09DomainBenchCase {
+        case_id: "r10_hose_risk_planner_1k_evals",
+        description: "1,000 HOSE Risk Planner evaluations (±7% band, 3-tier tick snap, lot 100, T+2, all-in friction)",
+        input_units: 1_000,
+        output_items: last_qty,
+        stats: TimingStats::from_samples(plan_1k_samples),
+    });
+
+    // 2. 500-Entry Causal Trade Journal Analytics (SQN, Expectancy, Discipline %) + RFC-4180 CSV Export
+    let mut j_store = TradeJournalStore::new();
+    let sample_plan = compute_trade_plan(&base_plan_in).expect("valid sample plan");
+    for i in 0..500_usize {
+        let id = j_store.record_trade_plan(
+            "FPT",
+            &sample_plan,
+            1_700_000_000 + (i as i64) * 3_600,
+            SetupTag::ALL[i % SetupTag::ALL.len()],
+            ((i % 5) + 1) as u8,
+            ChecklistState::all_checked(),
+            "=SUM(1,2) formula-sanitized journal note",
+        );
+        if let Some(e) = j_store.entry_mut(id) {
+            e.status = sumi_workstation::journal::JournalEntryStatus::Closed;
+            e.exit_timestamp = Some(e.entry_timestamp + 7_200);
+            let sign = if i % 3 == 0 { -0.85 } else { 1.65 };
+            e.realized_r = Some(sign);
+            e.net_pnl = sign * 2_500_000.0;
+            e.gross_pnl = e.net_pnl + 125_000.0;
+            e.fees_and_taxes = 125_000.0;
+            if i % 7 == 0 {
+                e.mistake = MistakeTag::FomoChase;
+                e.checklist.calm_state = false;
+            }
+        }
+    }
+    let cutoff_ts = Some(1_700_000_000 + 420 * 3_600);
+    let mut jrn_samples = Vec::with_capacity(80);
+    let mut csv_bytes = 0_usize;
+    for step in 0..96 {
+        let t0 = Instant::now();
+        let analytics = j_store.compute_analytics(std::hint::black_box(cutoff_ts));
+        let csv = j_store.export_csv(std::hint::black_box(cutoff_ts));
+        std::hint::black_box(analytics.sqn);
+        csv_bytes = csv.len();
+        let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        if step >= 16 {
+            jrn_samples.push(us);
+        }
+    }
+    domain_cases.push(R09DomainBenchCase {
+        case_id: "r10_journal_analytics_and_csv_500",
+        description: "500-entry DEF-001 causal Journal analytics (SQN, Discipline %, Attribution) + RFC-4180 CSV export",
+        input_units: 500,
+        output_items: csv_bytes,
+        stats: TimingStats::from_samples(jrn_samples),
+    });
+
+    // 3. 4-Fold Rolling Walk-Forward Optimization (12-grid IS -> blind OOS compounding) on FPT (1D)
+    let bt_cfg = BacktestConfig {
+        preset: StrategyPresetKind::MacdMomentum,
+        params: sumi_workstation::backtest::StrategyParams {
+            macd_fast: 6,
+            macd_slow: 16,
+            macd_signal: 5,
+            macd_trend_ema: 0,
+            ..sumi_workstation::backtest::StrategyParams::default()
+        },
+        direction_mode: StrategyDirectionMode::LongOnly,
+        sizing: PositionSizingMode::PercentEquity(95.0),
+        lot_step: 100.0,
+        commission_bps: 15.0,
+        tax_sell_bps: 10.0,
+        ..BacktestConfig::default()
+    };
+    let bt_cfg_15m = BacktestConfig {
+        lot_step: 1.0,
+        commission_bps: 1.5,
+        tax_sell_bps: 0.0,
+        ..bt_cfg.clone()
+    };
+    let wf_roll = WalkForwardConfig {
+        fold_count: 4,
+        in_sample_ratio: 0.70,
+        anchored: false,
+        ranking_metric: SweepRankingMetric::SharpeRatio,
+    };
+    let mut wfo_fpt_samples = Vec::with_capacity(48);
+    let mut wfo_fpt_trades = 0_usize;
+    for step in 0..56 {
+        let t0 = Instant::now();
+        let rep = run_walk_forward_validation(
+            "FPT",
+            fpt_feed.base_timeframe,
+            std::hint::black_box(&fpt_feed.candles),
+            std::hint::black_box(&bt_cfg),
+            wf_roll,
+            BacktestRunOptions::default(),
+        );
+        wfo_fpt_trades = rep.stitched_oos_trades.len();
+        std::hint::black_box(rep.wfe_pct);
+        let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        if step >= 8 {
+            wfo_fpt_samples.push(us);
+        }
+    }
+    domain_cases.push(R09DomainBenchCase {
+        case_id: "r10_walk_forward_4fold_rolling_fpt_1d",
+        description: "4-fold Rolling Walk-Forward (12-variant IS sweep -> stitched OOS curve & Pardo WFE) on FPT 1D",
+        input_units: fpt_feed.candles.len(),
+        output_items: wfo_fpt_trades,
+        stats: TimingStats::from_samples(wfo_fpt_samples),
+    });
+
+    // 4. 4-Fold Anchored Walk-Forward on 6,667 15m bars (100K 1m causal rollup)
+    let wf_anch = WalkForwardConfig {
+        fold_count: 4,
+        in_sample_ratio: 0.70,
+        anchored: true,
+        ranking_metric: SweepRankingMetric::SharpeRatio,
+    };
+    let mut wfo_15m_samples = Vec::with_capacity(24);
+    let mut wfo_15m_trades = 0_usize;
+    for step in 0..28 {
+        let t0 = Instant::now();
+        let rep = run_walk_forward_validation(
+            "VN30F1M",
+            Timeframe::M15,
+            std::hint::black_box(&candles_15m),
+            std::hint::black_box(&bt_cfg_15m),
+            wf_anch,
+            BacktestRunOptions::default(),
+        );
+        wfo_15m_trades = rep.stitched_oos_trades.len();
+        std::hint::black_box(rep.param_stability_pct);
+        let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        if step >= 4 {
+            wfo_15m_samples.push(us);
+        }
+    }
+    domain_cases.push(R09DomainBenchCase {
+        case_id: "r10_walk_forward_4fold_anchored_15m",
+        description: "4-fold Anchored Walk-Forward across 6,667 15m bars (100K 1m rollup)",
+        input_units: candles_15m.len(),
+        output_items: wfo_15m_trades,
+        stats: TimingStats::from_samples(wfo_15m_samples),
+    });
+
+    // 5. Multi-Asset Portfolio Simulation: VN30 (8 HOSE equities, EqualWeight)
+    let mut port_vn30_samples = Vec::with_capacity(48);
+    let mut port_vn30_pts = 0_usize;
+    for step in 0..56 {
+        let t0 = Instant::now();
+        let rep = run_portfolio_backtest(
+            std::hint::black_box(&universe),
+            Timeframe::D1,
+            std::hint::black_box(&bt_cfg),
+            PortfolioUniverseFilter::Vn30EquitiesOnly,
+            PortfolioWeightingMode::EqualWeight,
+            None,
+        );
+        port_vn30_pts = rep.portfolio_equity_curve.len();
+        std::hint::black_box(rep.diversification_dd_reduction_pct);
+        let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        if step >= 8 {
+            port_vn30_samples.push(us);
+        }
+    }
+    domain_cases.push(R09DomainBenchCase {
+        case_id: "r10_portfolio_vn30_8_equal_weight",
+        description: "8-symbol VN30 cash equity portfolio simulation (EqualWeight 1/N + diversification DD attribution)",
+        input_units: 8,
+        output_items: port_vn30_pts,
+        stats: TimingStats::from_samples(port_vn30_samples),
+    });
+
+    // 6. Multi-Asset Portfolio Simulation: All 13 Universe Feeds (CausalInverseVolatility(20))
+    let mut port_13_samples = Vec::with_capacity(32);
+    let mut port_13_pts = 0_usize;
+    for step in 0..38 {
+        let t0 = Instant::now();
+        let rep = run_portfolio_backtest(
+            std::hint::black_box(&universe),
+            Timeframe::D1,
+            std::hint::black_box(&bt_cfg),
+            PortfolioUniverseFilter::AllUniverseFeeds,
+            PortfolioWeightingMode::CausalInverseVolatility { lookback_bars: 20 },
+            None,
+        );
+        port_13_pts = rep.portfolio_equity_curve.len();
+        std::hint::black_box(rep.portfolio_tearsheet.total_return_pct);
+        let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        if step >= 6 {
+            port_13_samples.push(us);
+        }
+    }
+    domain_cases.push(R09DomainBenchCase {
+        case_id: "r10_portfolio_universe_13_causal_inv_vol",
+        description: "13-feed multi-asset universe portfolio simulation (past-only CausalInverseVolatility(20))",
+        input_units: universe.len(),
+        output_items: port_13_pts,
+        stats: TimingStats::from_samples(port_13_samples),
+    });
+
+    for d in &domain_cases {
+        println!(
+            "[DOMAIN {:42}] in={:6} out={:6} | med={:8.2} us ({:6.3} ms) | p95={:8.2} us",
+            d.case_id,
+            d.input_units,
+            d.output_items,
+            d.stats.median_us,
+            d.stats.median_us / 1_000.0,
+            d.stats.p95_us,
+        );
+    }
+
+    // End-to-End Retina (2.0x, 1280x800) Workstation Frame Budget (< 4.0 ms Hybrid Gate)
+    let render_cases = vec![
+        bench_r10_full_workstation_ui(
+            &candles_100k_1m,
+            0,
+            "r10_full_ui_vn_risk_journal_rr_box",
+            "Full Workstation UI: FPT 1D + HOSE Risk Planner + selected dual-zone RiskRewardBox + Journal KPIs",
+            16,
+            100,
+        ),
+        bench_r10_full_workstation_ui(
+            &candles_100k_1m,
+            1,
+            "r10_full_ui_wfo_stitched_oos_5panes",
+            "Full Workstation UI: 100K 1m->15m + 5 panes (Main+RSI+MACD+ATR+Stitched WFO OOS Equity) + WFO sub-tab",
+            16,
+            100,
+        ),
+        bench_r10_full_workstation_ui(
+            &candles_100k_1m,
+            2,
+            "r10_full_ui_portfolio_equity_5panes",
+            "Full Workstation UI: FPT 1D + 5 panes + mapped 8-symbol VN30 Inv-Vol Portfolio Equity Curve + WFO sub-tab",
+            16,
+            100,
+        ),
+    ];
+
+    for r in &render_cases {
+        println!(
+            "[RENDER {:42}] bars={:6} | drawn={:4} | shapes={:4} | ui={:.3}ms | tess={:.3}ms | total={:.3}ms (p95={:.3}ms)",
+            r.workload_id,
+            r.dataset_bars,
+            r.rendered_candles,
+            r.paint_shapes,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.p95_us / 1_000.0,
+        );
+    }
+
+    let _ = std::fs::create_dir_all("docs/evidence");
+    let json_doc = format_r10_json_report(
+        cpu,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        &domain_cases,
+        &render_cases,
+    );
+    let md_doc = format_r10_markdown_report(
+        cpu,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        &domain_cases,
+        &render_cases,
+    );
+    std::fs::write(
+        "docs/evidence/r10_risk_journal_wfo_benchmark.json",
+        json_doc,
+    )
+    .expect("write r10 benchmark json");
+    std::fs::write("docs/evidence/r10_risk_journal_wfo_benchmark.md", md_doc)
+        .expect("write r10 benchmark md");
+    println!(
+        "\nSaved R10 benchmark artifacts to docs/evidence/r10_risk_journal_wfo_benchmark.{{json,md}}"
+    );
+    let _ = DataSourcePreset::Vn30Basket;
+}
+
+fn bench_r10_full_workstation_ui(
+    candles_100k_1m: &[Candle],
+    mode: u8,
+    workload_id: &'static str,
+    description: &'static str,
+    warmup: usize,
+    iters: usize,
+) -> RenderCaseResult {
+    use sumi_workstation::data::DataSourcePreset;
+
+    let ctx = egui::Context::default();
+    SumiWorkstationApp::configure_dark_workstation_visuals(&ctx);
+    let screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+    ctx.set_pixels_per_point(2.0);
+
+    let mut app = SumiWorkstationApp::default();
+    match mode {
+        0 => {
+            app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+            app.indicators = IndicatorConfig {
+                show_sma: true,
+                show_ema: true,
+                show_bbands: true,
+                show_rsi: true,
+                show_macd: false,
+                show_atr: false,
+                ..IndicatorConfig::default()
+            };
+            let _ = app.import_backtest_trades_to_journal(10);
+            let _ = app.snap_planner_ticks_and_sync_rr_box();
+            let _ = app.draw_or_update_rr_box_from_planner();
+            let _ = app.log_active_plan_to_journal();
+            app.open_journal_tab();
+            app.viewport.time_scale.set_bar_spacing(9.5);
+            app.viewport.time_scale.set_right_offset(10.0);
+        }
+        1 => {
+            let csv_100k = build_r06_csv_document(candles_100k_1m);
+            app.load_from_csv_str(&csv_100k, &DataLoadOptions::default())
+                .expect("load 100k csv");
+            app.set_timeframe(Timeframe::M15).expect("15m rollup");
+            app.indicators = IndicatorConfig {
+                show_sma: true,
+                show_ema: true,
+                show_bbands: false,
+                show_rsi: true,
+                show_macd: true,
+                show_atr: true,
+                ..IndicatorConfig::default()
+            };
+            assert!(app.start_replay_at_base_index(72_000));
+            app.open_strategy_lab();
+            app.strategy_lab_tab = StrategyLabSubTab::WalkForward;
+            app.equity_pane_source = EquityPaneSource::WalkForwardOos;
+            app.show_backtest_trades = false;
+            app.run_active_walk_forward();
+            let _ = app.draw_or_update_rr_box_from_planner();
+            app.viewport.time_scale.set_bar_spacing(8.5);
+            app.viewport.time_scale.set_right_offset(8.0);
+        }
+        _ => {
+            app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+            app.indicators = IndicatorConfig {
+                show_sma: true,
+                show_ema: true,
+                show_bbands: false,
+                show_rsi: true,
+                show_macd: true,
+                show_atr: true,
+                ..IndicatorConfig::default()
+            };
+            app.portfolio_universe_filter = PortfolioUniverseFilter::Vn30EquitiesOnly;
+            app.portfolio_weighting =
+                PortfolioWeightingMode::CausalInverseVolatility { lookback_bars: 20 };
+            app.open_strategy_lab();
+            app.strategy_lab_tab = StrategyLabSubTab::WalkForward;
+            app.equity_pane_source = EquityPaneSource::MultiAssetPortfolio;
+            app.show_backtest_trades = false;
+            app.run_active_walk_forward();
+            app.run_active_portfolio_backtest();
+            let _ = app.draw_or_update_rr_box_from_planner();
+            app.viewport.fit_all();
+        }
+    }
+
+    for _ in 0..2 {
+        let mut init_out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        init_out.textures_delta.clear();
+    }
+
+    let mut ui_samples = Vec::with_capacity(iters);
+    let mut tess_samples = Vec::with_capacity(iters);
+    let mut total_samples = Vec::with_capacity(iters);
+    let mut paint_shapes = 0_usize;
+    let mut clipped_primitives = 0_usize;
+    let mut total_vertices = 0_usize;
+    let mut total_indices = 0_usize;
+
+    for step in 0..(warmup + iters) {
+        let hover_x = 300.0 + ((step % 22) as f32) * 18.0;
+        let hover_y = if step % 2 == 0 { 220.0 } else { 610.0 };
+        let raw_input = egui::RawInput {
+            screen_rect,
+            time: Some(step as f64 * 0.016),
+            events: vec![egui::Event::PointerMoved(Pos2::new(hover_x, hover_y))],
+            ..Default::default()
+        };
+
+        let t_frame = Instant::now();
+        let t_ui = Instant::now();
+        let mut full_out = ctx.run_ui(raw_input, |ui| {
+            app.render_workstation_ui(ui);
+        });
+        let ui_us = t_ui.elapsed().as_secs_f64() * 1_000_000.0;
+
+        paint_shapes = full_out.shapes.len();
+        let t_tess = Instant::now();
+        let primitives = ctx.tessellate(full_out.shapes, full_out.pixels_per_point);
+        let tess_us = t_tess.elapsed().as_secs_f64() * 1_000_000.0;
+        let total_us = t_frame.elapsed().as_secs_f64() * 1_000_000.0;
+        full_out.textures_delta.clear();
+
+        if step + 1 == warmup + iters {
+            clipped_primitives = primitives.len();
+            total_vertices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.vertices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+            total_indices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.indices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+        }
+
+        if step >= warmup {
+            ui_samples.push(ui_us);
+            tess_samples.push(tess_us);
+            total_samples.push(total_us);
+        }
+    }
+
+    let rep = app.last_report.expect("full app r10 report");
+    RenderCaseResult {
+        dataset_bars: app.candles.len(),
+        workload_id,
+        description,
+        scale_mode: app.viewport.main_price_scale.mode().label(),
+        conflation_enabled: true,
+        bar_spacing: rep.bar_spacing,
+        conflation_factor: rep.conflation_factor,
+        culled_bars: rep.culled_bar_count,
+        rendered_candles: rep.rendered_candle_count,
+        paint_shapes,
+        clipped_primitives,
+        total_vertices,
+        total_indices,
+        ui_build_stats: TimingStats::from_samples(ui_samples),
+        tessellate_stats: TimingStats::from_samples(tess_samples),
+        total_cpu_frame_stats: TimingStats::from_samples(total_samples),
+    }
+}
+
+fn format_r10_json_report(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+    domain: &[R09DomainBenchCase],
+    render: &[RenderCaseResult],
+) -> String {
+    let mut s = String::with_capacity(8192);
+    let _ = writeln!(s, "{{");
+    let _ = writeln!(s, "  \"milestone\": \"R10\",");
+    let _ = writeln!(s, "  \"environment\": {{");
+    let _ = writeln!(s, "    \"cpu\": \"{}\",", cpu.replace('"', "\\\""));
+    let _ = writeln!(s, "    \"os\": \"{}\",", std::env::consts::OS);
+    let _ = writeln!(s, "    \"arch\": \"{}\",", std::env::consts::ARCH);
+    let _ = writeln!(s, "    \"ram_bytes\": {mem_bytes},");
+    let _ = writeln!(s, "    \"rustc\": \"{}\",", rustc_ver.replace('"', "\\\""));
+    let _ = writeln!(s, "    \"profile\": \"{profile}\",");
+    let _ = writeln!(s, "    \"viewport_logical_px\": [1280, 800],");
+    let _ = writeln!(s, "    \"pixels_per_point\": 2.0");
+    let _ = writeln!(s, "  }},");
+    let _ = writeln!(s, "  \"r10_domain_throughput\": [");
+    for (idx, d) in domain.iter().enumerate() {
+        let comma = if idx + 1 == domain.len() { "" } else { "," };
+        let _ = writeln!(
+            s,
+            "    {{ \"case_id\": \"{}\", \"description\": \"{}\", \"input_units\": {}, \"output_items\": {}, \"median_us\": {:.3}, \"median_ms\": {:.4}, \"p95_us\": {:.3}, \"max_us\": {:.3} }}{comma}",
+            d.case_id,
+            d.description.replace('"', "\\\""),
+            d.input_units,
+            d.output_items,
+            d.stats.median_us,
+            d.stats.median_us / 1_000.0,
+            d.stats.p95_us,
+            d.stats.max_us,
+        );
+    }
+    let _ = writeln!(s, "  ],");
+    let _ = writeln!(s, "  \"workstation_r10_workloads\": [");
+    for (idx, r) in render.iter().enumerate() {
+        let comma = if idx + 1 == render.len() { "" } else { "," };
+        let _ = writeln!(
+            s,
+            "    {{ \"dataset_bars\": {}, \"workload_id\": \"{}\", \"scale_mode\": \"{}\", \"bar_spacing\": {:.5}, \"conflation_factor\": {}, \"culled_bars\": {}, \"rendered_candles\": {}, \"paint_shapes\": {}, \"clipped_primitives\": {}, \"total_vertices\": {}, \"total_indices\": {}, \"ui_median_ms\": {:.4}, \"tessellate_median_ms\": {:.4}, \"total_cpu_median_ms\": {:.4}, \"total_cpu_p95_ms\": {:.4} }}{comma}",
+            r.dataset_bars,
+            r.workload_id,
+            r.scale_mode,
+            r.bar_spacing,
+            r.conflation_factor,
+            r.culled_bars,
+            r.rendered_candles,
+            r.paint_shapes,
+            r.clipped_primitives,
+            r.total_vertices,
+            r.total_indices,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.p95_us / 1_000.0,
+        );
+    }
+    let _ = writeln!(s, "  ]");
+    let _ = writeln!(s, "}}");
+    s
+}
+
+fn format_r10_markdown_report(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+    domain: &[R09DomainBenchCase],
+    render: &[RenderCaseResult],
+) -> String {
+    let mut s = String::with_capacity(8192);
+    let _ = writeln!(
+        s,
+        "# Milestone R10 — Vietnam Market Microstructure Risk Planner, On-Chart Risk-Reward Tool, Structured Trade Journal & Rolling Walk-Forward Portfolio Benchmark Evidence\n"
+    );
+    let _ = writeln!(
+        s,
+        "- **Command:** `cargo run --release --example viewport_bench -- --r10`"
+    );
+    let _ = writeln!(
+        s,
+        "- **Hardware:** `{cpu}` (`{}-{}`), `{:.1} GiB` RAM",
+        std::env::consts::ARCH,
+        std::env::consts::OS,
+        (mem_bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+    );
+    let _ = writeln!(
+        s,
+        "- **Toolchain & Profile:** `{rustc_ver}` (`--{profile}`)"
+    );
+    let _ = writeln!(
+        s,
+        "- **Active Stack:** Vietnam `HOSE / HNX / UPCOM / VN30F` Microstructure Risk Planner + Dual-Zone `RiskRewardBox` + `DEF-001` Causal `TradeJournalStore` (`SQN`, `Discipline %`, RFC-4180 CSV) + `K`-Fold Rolling/Anchored Walk-Forward (`Pardo WFE` + Stitched OOS Equity) + `8`/`13`-Asset Causal Portfolio Simulation\n"
+    );
+
+    let _ = writeln!(
+        s,
+        "## 1. Risk Planner, Trade Journal, Walk-Forward & Multi-Asset Portfolio Throughput\n"
+    );
+    let _ = writeln!(
+        s,
+        "| Case ID | Description | Input Units | Output Items | Median (`µs`) | Median (`ms`) | P95 (`µs`) | Max (`µs`) |"
     );
     let _ = writeln!(
         s,

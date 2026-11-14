@@ -1,7 +1,7 @@
 # RESEARCH TO RUST ROADMAP — SESSION R01
 
 - **Session Identity:** `SESSION-R01-20261110T202837+0700`
-- **Updated By:** `SESSION-R09-20261114T091018+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Updated By:** `SESSION-R10-20261114T122730+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 - **Principle:** No Rust implementation begins without prior REA or reference-source research evidence.
 
 ---
@@ -262,13 +262,45 @@ cargo test app::tests::critic_r09_regression_auto_sync_on_replay_transitions_and
 
 ---
 
-## Wave 9 — Vietnam Market Microstructure & Risk Planner, Structured Trade Journal & Rolling Walk-Forward Portfolio Analytics (`PROPOSED — MILESTONE R10`)
+## Wave 9 — Vietnam Market Microstructure & Risk Planner, On-Chart Risk-Reward Position Tool, Structured Trade Journal & Rolling Walk-Forward Portfolio Analytics (`COMPLETE — SESSION R10`)
+
+### Completed Research & Audit Gates (`VERIFIED`)
+- [x] Executed 11 live REA MCP JS/TS operations (`13` exact 64-hex Evidence IDs: `ev_d326070e...`, `ev_338e20db...`, `ev_ec714173...`, `ev_9ccc2798...`, `ev_0bd6b7fd...`, `ev_0b2302d7...`, `ev_0ae4bec7...`, `ev_0daaf78d...`, `ev_7838e78d...`, `ev_590404cc...`, `ev_7eebd97b...`, `ev_bc6281a3...`, `ev_72fb8779...`) across `ARCHIVE/frontend` journal/dashboard/decision/batch (`11` files) and `lightweight-charts-5.2.0` primitive/range-hit-test/formatter (`8` files), plus 4 final binary REA Evidence IDs (`ev_76e77e44...`, `ev_cccbd439...`, `ev_29e26683...`, `ev_fb539459...`).
+- [x] Authored [`docs/research/RISK_PLANNER_JOURNAL_AND_PORTFOLIO_SPEC.md`](RISK_PLANNER_JOURNAL_AND_PORTFOLIO_SPEC.md) rectifying all 6 legacy risk-sizing, Vietnam microstructure, on-chart R:R, journal causality, CSV formula-injection, and Walk-Forward/portfolio defects.
+
+### Shipped Rust Deliverables (`IMPLEMENTATION_PASS`)
+| Component | Research Source | Shipped Rust Target | Status |
+|---|---|---|---|
+| Pure `f64`/`i64` WASM-safe Exchange Microstructure & Friction-Aware Trade Risk Planner (`HOSE/HNX/UPCOM/VN30F/VNINDEX/US/Crypto`, `±7%/±10%/±15%` bands, `x100k` futures multiplier + `17%` VSD margin, `UTC+7` `T+2` settlement, `101.12 µs` / `1K` plans) | `ARCHIVE/backend/app/domain/{market_rules.py,trade_planning.py,accounting.py}` | `src/journal/market_rules.rs`, `src/journal/planner.rs` | ✅ SHIPPED |
+| Interactive On-Chart Dual-Zone `RiskRewardBox` Drawing Tool (`RrEntryLeft/Right`, `RrTarget`, `RrStop`, `Long <-> Short` crossover, Planner & Order Ticket sync) | `LWC v5.2.0` `iseries-primitive-api.ts` + `range-hit-test.ts` | `src/drawings/`, `src/chart.rs`, `src/trading/portfolio.rs` | ✅ SHIPPED |
+| Causal `DEF-001` `TradeJournalStore` (`SetupTag`, `MistakeTag`, `ConvictionRating`, 6-item `ChecklistState`, `SQN`, `Discipline %`, Paper rewind sync, formula-safe RFC-4180 CSV & Markdown) | `ARCHIVE/frontend/src/pages/{JournalPage.tsx,DashboardPage.tsx}` | `src/journal/ledger.rs`, `src/app.rs` | ✅ SHIPPED |
+| Continuous-Carry Rolling/Anchored Walk-Forward (`WFO`, Pardo `WFE %`) & Bar-Close Multi-Asset Portfolio (`EqualWeight` / `CausalInverseVolatility`) in `OscillatorPaneId::Equity` | `ARCHIVE/frontend/src/components/strategy/MultiPhaseBatchPanel.tsx` + `RISK_PLANNER_JOURNAL_AND_PORTFOLIO_SPEC.md` | `src/backtest/walk_forward.rs`, `src/backtest/engine.rs`, `src/chart.rs`, `src/app.rs` | ✅ SHIPPED |
+
+### Verified Acceptance Tests (`cargo test` — 136/136 PASS)
+```bash
+cargo test journal::tests::hose_hnx_upcom_vn30f_tick_ladders_and_tier_crossing_price_bands
+cargo test journal::tests::t_plus_2_settlement_skips_weekends_deterministically
+cargo test journal::tests::friction_aware_long_and_short_position_sizer_never_exceeds_risk_budget
+cargo test journal::tests::causal_journal_analytics_sqn_discipline_and_csv_formula_injection_guard
+cargo test journal::tests::critic_r10_regression_vn30f_multiplier_hose_tier_step_local_tz_and_csv_newline
+cargo test drawings::tests::risk_reward_box_hit_test_log_drag_timeframe_remap_and_ticket_extract
+cargo test drawings::tests::critic_r10_regression_rr_box_crossover_drag_never_drifts_fixed_anchor
+cargo test backtest::tests::walk_forward_rolling_and_anchored_zero_oos_lookahead_and_stitched_compounding
+cargo test backtest::tests::portfolio_backtest_equal_and_causal_inverse_vol_with_replay_cutoff
+cargo test backtest::tests::critic_r10_regression_wfo_open_position_carry_conservation_and_intraday_portfolio_causality
+cargo test app::tests::r10_workstation_risk_planner_rr_box_journal_walk_forward_and_portfolio_e2e
+cargo test app::tests::critic_r10_regression_zero_lot_ticket_guard_reseed_venue_reset_and_1w_ref_price
+```
+
+---
+
+## Wave 10 — Volume Profile (`VRVP` / `FRVP` `POC` / `VAH` / `VAL`), Session & Anchored `VWAP` (`AVWAP`) Bands & Relative Strength (`vs VNINDEX`) Overlay (`PROPOSED — MILESTONE R11`)
 
 ### Proposed Deliverables (Awaiting Product Owner Authorization)
 | Component | Research Source | Rust Target | Status |
 |---|---|---|---|
-| Pure `f64`/`i64` WASM-safe Exchange Microstructure & Trade Risk Planner (`HOSE`/`HNX`/`UPCOM`/`VN30F`/`US`/`Crypto` tick ladders, daily price bands `±7%/±10%/±15%`, `T+2.5` cash/share settlement schedule & R-multiple position sizer) | `ARCHIVE/backend/app/domain/{market_rules.py,trade_planning.py,accounting.py}` | `src/risk/` / `src/journal/` | Proposed (`Milestone R10`) |
-| Structured Post-Trade Journal, Behavioral Tagging (`Setup`, `Mistake`, `Conviction`), Rolling Walk-Forward / Multi-Asset Portfolio Analytics & Markdown/CSV Report Export | `ARCHIVE/frontend/src/pages/{JournalPage.tsx,DashboardPage.tsx}` | `src/journal/`, `src/backtest/`, `src/app.rs` | Proposed (`Milestone R10`) |
+| Pure `f64`/`i64` WASM-safe Order-Flow Volume Profile (`Visible Range VRVP` & `Fixed Range FRVP` drawing tool with `POC`, `70%` Value Area `VAH`/`VAL`, Up/Down delta bins) & Session / Anchored `VWAP` (`AVWAP` $\pm 1\sigma, \pm 2\sigma$ bands) | `LWC v5.2.0` `ipane-primitive-api.ts` / `histogram-series.ts` + `TA-Lib` volume primitives | `src/indicators/volume_profile.rs`, `src/indicators/vwap.rs`, `src/drawings/` | Proposed (`Milestone R11`) |
+| Multi-Series Relative Strength (`RS vs VNINDEX` / Peer Benchmark Ratio & Indexed `%` Comparison Overlay) with strict `DEF-001` causal bar-close alignment across Bar Replay | `LWC v5.2.0` `price-scale.ts` (`IndexedTo100` / `Percentage`) + `ARCHIVE` benchmark data | `src/indicators/`, `src/chart.rs`, `src/app.rs` | Proposed (`Milestone R11`) |
 
 ---
 

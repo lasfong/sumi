@@ -193,6 +193,29 @@ pub fn extract_ticket_from_drawing(drawing: &Drawing) -> Option<DrawingTicketSyn
                 })
             }
         }
+        DrawingGeometry::RiskRewardBox {
+            start,
+            end,
+            stop_price,
+        } => {
+            let side = DrawingGeometry::risk_reward_side_of(start.value, end.value, stop_price)?;
+            if start.value > MAX_ORDER_PRICE
+                || end.value > MAX_ORDER_PRICE
+                || stop_price > MAX_ORDER_PRICE
+            {
+                return None;
+            }
+            let order_side = match side {
+                PositionSide::Long => OrderSide::Buy,
+                PositionSide::Short => OrderSide::Sell,
+            };
+            Some(DrawingTicketSync {
+                side: order_side,
+                entry_price: start.value,
+                stop_loss: Some(stop_price),
+                take_profit: Some(end.value),
+            })
+        }
         DrawingGeometry::Rectangle { corner_a, corner_b }
         | DrawingGeometry::TrendLine {
             start: corner_a,

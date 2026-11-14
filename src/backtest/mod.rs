@@ -9,6 +9,7 @@ pub mod metrics;
 pub mod strategy;
 #[cfg(test)]
 mod tests;
+pub mod walk_forward;
 
 pub use engine::{
     BacktestRunOptions, BacktestRunResult, MultiSymbolBattleReport, OpenBacktestPosition,
@@ -24,4 +25,10 @@ pub use metrics::{
 pub use strategy::{
     BacktestConfig, MAX_SWEEP_VARIANTS, PositionSizingMode, StopTakeConfig, StrategyDirectionMode,
     StrategyParams, StrategyPresetKind, SweepRankingMetric, build_preset_sweep_configs,
+};
+pub use walk_forward::{
+    MIN_IS_BARS_PER_FOLD, MIN_OOS_BARS_PER_FOLD, PortfolioBacktestReport,
+    PortfolioConstituentAttribution, PortfolioUniverseFilter, PortfolioWeightingMode,
+    WalkForwardConfig, WalkForwardFoldResult, WalkForwardReport, WalkForwardVerdict,
+    map_equity_curve_to_candles, run_portfolio_backtest, run_walk_forward_validation,
 };

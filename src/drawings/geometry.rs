@@ -126,6 +126,14 @@ pub enum HandlePart {
     /// Deterministic rectangle corner index (`0`: `(a0.bar, a0.val)`, `1`: `(a1.bar, a0.val)`,
     /// `2`: `(a1.bar, a1.val)`, `3`: `(a0.bar, a1.val)`), matching `drawingGeometry.ts:21-23`.
     RectCorner(u8),
+    /// Left horizontal/entry handle of a `RiskRewardBox`.
+    RrEntryLeft,
+    /// Right horizontal/entry handle of a `RiskRewardBox`.
+    RrEntryRight,
+    /// Mid-span target price handle of a `RiskRewardBox`.
+    RrTarget,
+    /// Mid-span stop-loss price handle of a `RiskRewardBox`.
+    RrStop,
 }
 
 /// Projected handle coordinate in pane-local space.
@@ -175,6 +183,19 @@ pub enum ProjectedDrawingShape {
         control_segment: Option<LocalSegment>,
         levels: Vec<ProjectedFibLevel>,
         bands: Vec<ProjectedFibBand>,
+    },
+    RiskReward {
+        is_long: bool,
+        entry_price: f64,
+        stop_price: f64,
+        target_price: f64,
+        gross_r: f64,
+        reward_fill: Option<LocalRect>,
+        risk_fill: Option<LocalRect>,
+        entry_line: Option<LocalSegment>,
+        target_line: Option<LocalSegment>,
+        stop_line: Option<LocalSegment>,
+        side_borders: [Option<LocalSegment>; 2],
     },
 }
 
@@ -468,6 +489,119 @@ impl<'a> PaneDrawingProjection<'a> {
                         control_segment,
                         levels,
                         bands,
+                    },
+                })
+            }
+            DrawingGeometry::RiskRewardBox {
+                start,
+                end,
+                stop_price: _,
+            } => {
+                let (side, entry_price, resolved_stop, target_price, gross_r) =
+                    drawing.geometry.risk_reward_metrics()?;
+                let p0 = self.anchor_to_local(start)?;
+                let p1 = self.anchor_to_local(end)?;
+                let y_stop = self
+                    .price_scale
+                    .price_to_local_y(resolved_stop, self.base_value)?;
+                if !y_stop.is_finite() {
+                    return None;
+                }
+
+                let raw_x_left = p0.x.min(p1.x);
+                let raw_x_right = p0.x.max(p1.x).max(raw_x_left + 36.0);
+                let x_mid = 0.5 * (raw_x_left + raw_x_right);
+
+                let reward_raw = LocalRect {
+                    left: raw_x_left,
+                    top: p0.y.min(p1.y),
+                    right: raw_x_right,
+                    bottom: p0.y.max(p1.y),
+                };
+                let risk_raw = LocalRect {
+                    left: raw_x_left,
+                    top: p0.y.min(y_stop),
+                    right: raw_x_right,
+                    bottom: p0.y.max(y_stop),
+                };
+                let reward_fill = reward_raw
+                    .intersect(bounds)
+                    .filter(|r| r.width() > 0.0 && r.height() > 0.0);
+                let risk_fill = risk_raw
+                    .intersect(bounds)
+                    .filter(|r| r.width() > 0.0 && r.height() > 0.0);
+
+                let entry_line = clip_parametric_line(
+                    LocalPoint::new(raw_x_left, p0.y),
+                    LocalPoint::new(raw_x_right, p0.y),
+                    0.0,
+                    1.0,
+                    bounds,
+                );
+                let target_line = clip_parametric_line(
+                    LocalPoint::new(raw_x_left, p1.y),
+                    LocalPoint::new(raw_x_right, p1.y),
+                    0.0,
+                    1.0,
+                    bounds,
+                );
+                let stop_line = clip_parametric_line(
+                    LocalPoint::new(raw_x_left, y_stop),
+                    LocalPoint::new(raw_x_right, y_stop),
+                    0.0,
+                    1.0,
+                    bounds,
+                );
+
+                let box_top = p1.y.min(y_stop);
+                let box_bot = p1.y.max(y_stop);
+                let side_borders = [
+                    clip_parametric_line(
+                        LocalPoint::new(raw_x_left, box_top),
+                        LocalPoint::new(raw_x_left, box_bot),
+                        0.0,
+                        1.0,
+                        bounds,
+                    ),
+                    clip_parametric_line(
+                        LocalPoint::new(raw_x_right, box_top),
+                        LocalPoint::new(raw_x_right, box_bot),
+                        0.0,
+                        1.0,
+                        bounds,
+                    ),
+                ];
+
+                let mut handles = Vec::with_capacity(4);
+                let handle_defs = [
+                    (HandlePart::RrEntryLeft, LocalPoint::new(raw_x_left, p0.y)),
+                    (HandlePart::RrEntryRight, LocalPoint::new(raw_x_right, p0.y)),
+                    (HandlePart::RrTarget, LocalPoint::new(x_mid, p1.y)),
+                    (HandlePart::RrStop, LocalPoint::new(x_mid, y_stop)),
+                ];
+                for (part, pos) in handle_defs {
+                    if bounds.contains_with_margin(pos, 8.0) {
+                        handles.push(ProjectedHandle { part, pos });
+                    }
+                }
+
+                Some(ProjectedDrawing {
+                    id: drawing.id,
+                    locked: drawing.locked,
+                    anchors_local: vec![p0, p1, LocalPoint::new(p1.x, y_stop)],
+                    handles,
+                    shape: ProjectedDrawingShape::RiskReward {
+                        is_long: side == crate::trading::PositionSide::Long,
+                        entry_price,
+                        stop_price: resolved_stop,
+                        target_price,
+                        gross_r,
+                        reward_fill,
+                        risk_fill,
+                        entry_line,
+                        target_line,
+                        stop_line,
+                        side_borders,
                     },
                 })
             }

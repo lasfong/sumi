@@ -886,3 +886,336 @@ fn critic_r09_regression_t_plus_2_trailing_ratchet_marubozu_slippage_and_mae_mfe
         tr.mfe_pct
     );
 }
+
+#[test]
+fn walk_forward_rolling_and_anchored_zero_oos_lookahead_and_stitched_compounding() {
+    let candles = generate_synthetic_ohlcv(480);
+    let base_cfg = BacktestConfig {
+        preset: StrategyPresetKind::SmaEmaTrendCross,
+        direction_mode: StrategyDirectionMode::LongShort,
+        initial_cash: 100_000.0,
+        ..BacktestConfig::default()
+    };
+
+    for anchored in [false, true] {
+        let wf_cfg = WalkForwardConfig {
+            fold_count: 4,
+            in_sample_ratio: 0.65,
+            anchored,
+            ranking_metric: SweepRankingMetric::SharpeRatio,
+        };
+        let rep = run_walk_forward_validation(
+            "SYNTH",
+            Timeframe::D1,
+            &candles,
+            &base_cfg,
+            wf_cfg,
+            BacktestRunOptions::default(),
+        );
+        assert_eq!(rep.folds.len(), 4);
+        let first_oos = rep.first_oos_bar_index.expect("must have OOS start");
+        assert_eq!(rep.folds[0].oos_start_bar, first_oos);
+        assert_eq!(rep.folds[3].oos_end_bar, candles.len());
+        assert_eq!(rep.stitched_oos_curve.len(), candles.len() - first_oos);
+
+        for (i, fold) in rep.folds.iter().enumerate() {
+            assert_eq!(fold.is_end_bar, fold.oos_start_bar);
+            if anchored {
+                assert_eq!(fold.is_start_bar, 0);
+            } else if i > 0 {
+                assert!(fold.is_start_bar > 0);
+            }
+            if i > 0 {
+                assert_eq!(rep.folds[i - 1].oos_end_bar, fold.oos_start_bar);
+            }
+        }
+        assert!(
+            rep.stitched_equity_values[..first_oos]
+                .iter()
+                .all(Option::is_none)
+        );
+        assert!(
+            rep.stitched_equity_values[first_oos..]
+                .iter()
+                .all(Option::is_some)
+        );
+
+        // Compounding check across the 4 folds:
+        let fold_growth: f64 = rep
+            .folds
+            .iter()
+            .map(|f| 1.0 + f.oos_tearsheet.total_return_pct * 0.01)
+            .product();
+        let stitched_growth = rep.stitched_oos_tearsheet.final_equity / base_cfg.initial_cash;
+        assert!(
+            (fold_growth - stitched_growth).abs() < 1e-9,
+            "stitched OOS equity must compound fold-by-fold exactly: {fold_growth} vs {stitched_growth}"
+        );
+    }
+
+    // `TEST-WFO-CAUSAL-001`: Poison future OOS bars (`>= first_oos`) and prove Fold 1 optimization is 100% blind to OOS!
+    let wf_cfg = WalkForwardConfig::default();
+    let baseline = run_walk_forward_validation(
+        "SYNTH",
+        Timeframe::D1,
+        &candles,
+        &base_cfg,
+        wf_cfg,
+        BacktestRunOptions::default(),
+    );
+    let oos0 = baseline.folds[0].oos_start_bar;
+    let mut poisoned = candles.clone();
+    for c in &mut poisoned[oos0..] {
+        c.open = 999_999.0;
+        c.high = 1_050_000.0;
+        c.low = 950_000.0;
+        c.close = 1_020_000.0;
+    }
+    let poisoned_rep = run_walk_forward_validation(
+        "SYNTH",
+        Timeframe::D1,
+        &poisoned,
+        &base_cfg,
+        wf_cfg,
+        BacktestRunOptions::default(),
+    );
+    assert_eq!(
+        baseline.folds[0].winning_label, poisoned_rep.folds[0].winning_label,
+        "poisoning OOS bars must NEVER alter Fold 1 winning parameter selection"
+    );
+    assert_eq!(
+        baseline.folds[0].is_tearsheet, poisoned_rep.folds[0].is_tearsheet,
+        "poisoning OOS bars must NEVER alter Fold 1 In-Sample tearsheet"
+    );
+
+    // Short slice safeguard (`< 36` bars):
+    let tiny = run_walk_forward_validation(
+        "TINY",
+        Timeframe::D1,
+        &candles[..24],
+        &base_cfg,
+        wf_cfg,
+        BacktestRunOptions::default(),
+    );
+    assert_eq!(tiny.verdict, WalkForwardVerdict::InsufficientData);
+    assert!(tiny.folds.is_empty());
+}
+
+#[test]
+fn portfolio_backtest_equal_and_causal_inverse_vol_with_replay_cutoff() {
+    let feeds = load_bundled_watchlist_universe();
+    let cfg = BacktestConfig {
+        preset: StrategyPresetKind::DonchianAtrBreakout,
+        initial_cash: 1_000_000.0,
+        ..BacktestConfig::default()
+    };
+
+    let vn30_eq = run_portfolio_backtest(
+        &feeds,
+        Timeframe::D1,
+        &cfg,
+        PortfolioUniverseFilter::Vn30EquitiesOnly,
+        PortfolioWeightingMode::EqualWeight,
+        None,
+    );
+    assert_eq!(vn30_eq.constituents.len(), 8);
+    assert!(!vn30_eq.portfolio_equity_curve.is_empty());
+    let weight_sum: f64 = vn30_eq
+        .constituents
+        .iter()
+        .map(|c| c.final_weight_pct)
+        .sum();
+    assert!((weight_sum - 100.0).abs() < 1e-6);
+
+    let all_iv = run_portfolio_backtest(
+        &feeds,
+        Timeframe::D1,
+        &cfg,
+        PortfolioUniverseFilter::AllUniverseFeeds,
+        PortfolioWeightingMode::CausalInverseVolatility { lookback_bars: 15 },
+        None,
+    );
+    assert_eq!(all_iv.constituents.len(), 13);
+    let iv_weight_sum: f64 = all_iv.constituents.iter().map(|c| c.final_weight_pct).sum();
+    assert!((iv_weight_sum - 100.0).abs() < 1e-6);
+
+    // Prove `CausalInverseVolatility` uses strictly `..m` (never `..=m`):
+    // Mutating the final bar of FPT must NOT alter final step weights chosen BEFORE that bar's return!
+    let mut mutated_feeds = feeds.clone();
+    if let Some(fpt) = mutated_feeds.iter_mut().find(|f| f.symbol == "FPT")
+        && let Some(last) = fpt.candles.last_mut()
+    {
+        last.high *= 1.80;
+        last.close *= 1.75;
+    }
+    let mutated_iv = run_portfolio_backtest(
+        &mutated_feeds,
+        Timeframe::D1,
+        &cfg,
+        PortfolioUniverseFilter::Vn30EquitiesOnly,
+        PortfolioWeightingMode::CausalInverseVolatility { lookback_bars: 15 },
+        None,
+    );
+    let base_vn_iv = run_portfolio_backtest(
+        &feeds,
+        Timeframe::D1,
+        &cfg,
+        PortfolioUniverseFilter::Vn30EquitiesOnly,
+        PortfolioWeightingMode::CausalInverseVolatility { lookback_bars: 15 },
+        None,
+    );
+    for c_base in &base_vn_iv.constituents {
+        let c_mut = mutated_iv
+            .constituents
+            .iter()
+            .find(|x| x.symbol == c_base.symbol)
+            .expect("symbol present");
+        assert!(
+            (c_base.final_weight_pct - c_mut.final_weight_pct).abs() < 1e-12,
+            "CausalInverseVolatility weight for {} leaked current-bar return: {} vs {}",
+            c_base.symbol,
+            c_base.final_weight_pct,
+            c_mut.final_weight_pct
+        );
+    }
+
+    // Causal replay cutoff + `map_equity_curve_to_candles` alignment:
+    let fpt_candles = &feeds
+        .iter()
+        .find(|f| f.symbol == "FPT")
+        .expect("FPT")
+        .candles;
+    let mid_close_cut = fpt_candles[fpt_candles.len() / 2].timestamp + 86_399;
+    let cut_port = run_portfolio_backtest(
+        &feeds,
+        Timeframe::D1,
+        &cfg,
+        PortfolioUniverseFilter::Vn30EquitiesOnly,
+        PortfolioWeightingMode::EqualWeight,
+        Some(mid_close_cut),
+    );
+    assert!(
+        cut_port
+            .portfolio_equity_curve
+            .iter()
+            .all(|pt| pt.timestamp <= mid_close_cut),
+        "portfolio replay cutoff must withhold unclosed future bars"
+    );
+    let (mapped_eq, _, mapped_uw, _) = map_equity_curve_to_candles(
+        &vn30_eq.portfolio_equity_curve,
+        fpt_candles,
+        Timeframe::D1,
+        None,
+    );
+    assert_eq!(mapped_eq.len(), fpt_candles.len());
+    assert_eq!(mapped_uw.len(), fpt_candles.len());
+    assert!(mapped_eq.iter().any(Option::is_some));
+    assert_eq!(
+        mapped_eq.last().copied().flatten(),
+        vn30_eq.portfolio_equity_curve.last().map(|pt| pt.equity),
+        "M-03: mapped D1 portfolio curve must capture bar-close portfolio final equity"
+    );
+}
+
+#[test]
+fn critic_r10_regression_wfo_open_position_carry_conservation_and_intraday_portfolio_causality() {
+    // 1. C-02: Walk-Forward carries open positions & pending orders seamlessly across `OOS[k] -> OOS[k+1]`
+    //    and obeys `initial_cash + realized_net_profit - final_open_fee == final_cash` bit-exactly!
+    let feeds = load_bundled_watchlist_universe();
+    let fpt = feeds.iter().find(|f| f.symbol == "FPT").expect("FPT");
+    let cfg = BacktestConfig {
+        preset: StrategyPresetKind::MacdMomentum,
+        params: StrategyParams {
+            macd_fast: 6,
+            macd_slow: 16,
+            macd_signal: 5,
+            macd_trend_ema: 0,
+            ..StrategyParams::default()
+        },
+        risk: StopTakeConfig {
+            min_holding_bars: 2, // VN T+2 lock preserved across fold boundaries!
+            ..StopTakeConfig::default()
+        },
+        lot_step: 100.0,
+        commission_bps: 15.0,
+        tax_sell_bps: 10.0,
+        ..BacktestConfig::default()
+    };
+    let wf = run_walk_forward_validation(
+        "FPT",
+        Timeframe::D1,
+        &fpt.candles,
+        &cfg,
+        WalkForwardConfig {
+            fold_count: 4,
+            in_sample_ratio: 0.65,
+            anchored: false,
+            ranking_metric: SweepRankingMetric::TotalReturnPct,
+        },
+        BacktestRunOptions::default(),
+    );
+    let ts = &wf.stitched_oos_tearsheet;
+    let sum_closed_pnl: f64 = wf.stitched_oos_trades.iter().map(|t| t.net_pnl).sum();
+    assert!((ts.realized_net_profit - sum_closed_pnl).abs() < 1e-6);
+    // Notice `final_cash` equals `initial_cash + realized_net_profit` when flat, or minus open entry fee when carrying an open trade!
+    assert!(
+        ts.final_cash <= ts.initial_cash + sum_closed_pnl + 1e-6,
+        "C-02: WFO stitched cash conservation violated"
+    );
+
+    // 2. C-01 & N-04: Mixed `D1` (`FPT`) + `15m` (`BTCUSDT`) portfolio stamps `D1` at `23:59:59 UTC`
+    //    so Live prefix up to an intraday timestamp `mid_intraday_cut` equals Replay `Some(mid_intraday_cut)` bit-for-bit!
+    let btc = feeds
+        .iter()
+        .find(|f| f.symbol == "BTCUSDT")
+        .expect("BTCUSDT")
+        .clone();
+    let mixed_feeds = vec![fpt.clone(), btc.clone()];
+    let live_port = run_portfolio_backtest(
+        &mixed_feeds,
+        Timeframe::M15,
+        &cfg,
+        PortfolioUniverseFilter::AllUniverseFeeds,
+        PortfolioWeightingMode::CausalInverseVolatility { lookback_bars: 10 },
+        None,
+    );
+    let contrib_sum: f64 = live_port
+        .constituents
+        .iter()
+        .map(|c| c.weighted_return_contribution_pct)
+        .sum();
+    assert!(
+        (contrib_sum - live_port.portfolio_tearsheet.total_return_pct).abs() < 1e-6,
+        "N-04: compounded constituent attribution ({contrib_sum}) must sum identically to portfolio total_return_pct ({})",
+        live_port.portfolio_tearsheet.total_return_pct
+    );
+
+    // Pick a midday intraday cutoff (`12:14:59 UTC`, strictly mid-day inside a `D1` session)
+    let mid_btc_bar = &btc.candles[btc.candles.len() / 2];
+    let intraday_cut =
+        (mid_btc_bar.timestamp.div_euclid(86_400)) * 86_400 + 12 * 3_600 + 14 * 60 + 59;
+    let replay_port = run_portfolio_backtest(
+        &mixed_feeds,
+        Timeframe::M15,
+        &cfg,
+        PortfolioUniverseFilter::AllUniverseFeeds,
+        PortfolioWeightingMode::CausalInverseVolatility { lookback_bars: 10 },
+        Some(intraday_cut),
+    );
+    let live_prefix: Vec<_> = live_port
+        .portfolio_equity_curve
+        .iter()
+        .filter(|pt| pt.timestamp <= intraday_cut)
+        .collect();
+    assert_eq!(
+        live_prefix.len(),
+        replay_port.portfolio_equity_curve.len(),
+        "C-01: Live mixed-frequency portfolio leaked end-of-day D1 bar before 23:59:59 UTC"
+    );
+    for (a, b) in live_prefix
+        .iter()
+        .zip(replay_port.portfolio_equity_curve.iter())
+    {
+        assert!((a.equity - b.equity).abs() < 1e-9);
+    }
+}

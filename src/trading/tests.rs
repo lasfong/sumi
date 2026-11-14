@@ -878,4 +878,37 @@ fn critic_r07_regression_multi_pending_causal_segment_order_scale_in_r_multiple_
         DrawingStyle::default_for_tool(DrawingTool::FibonacciRetracement),
     );
     assert!(extract_ticket_from_drawing(&huge_fib).is_none());
+
+    // 5. `RiskRewardBox` exact Long & Short order ticket extraction (`Milestone R10`):
+    let rr_long = Drawing::new(
+        100,
+        DrawingPaneTarget::Main,
+        DrawingGeometry::RiskRewardBox {
+            start: DrawingAnchor::new(10.0, 128.5),
+            end: DrawingAnchor::new(25.0, 137.8),
+            stop_price: 124.2,
+        },
+        DrawingStyle::default_for_tool(DrawingTool::RiskRewardBox),
+    );
+    let sync_l = extract_ticket_from_drawing(&rr_long).expect("long RR ticket");
+    assert_eq!(sync_l.side, OrderSide::Buy);
+    assert!((sync_l.entry_price - 128.5).abs() < 1e-9);
+    assert_eq!(sync_l.stop_loss, Some(124.2));
+    assert_eq!(sync_l.take_profit, Some(137.8));
+
+    let rr_short = Drawing::new(
+        101,
+        DrawingPaneTarget::Main,
+        DrawingGeometry::RiskRewardBox {
+            start: DrawingAnchor::new(10.0, 128.5),
+            end: DrawingAnchor::new(25.0, 118.0),
+            stop_price: 133.5,
+        },
+        DrawingStyle::default_for_tool(DrawingTool::RiskRewardBox),
+    );
+    let sync_s = extract_ticket_from_drawing(&rr_short).expect("short RR ticket");
+    assert_eq!(sync_s.side, OrderSide::Sell);
+    assert!((sync_s.entry_price - 128.5).abs() < 1e-9);
+    assert_eq!(sync_s.stop_loss, Some(133.5));
+    assert_eq!(sync_s.take_profit, Some(118.0));
 }

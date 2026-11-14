@@ -61,7 +61,9 @@ pub fn drawing_line_value_at_bar(drawing: &Drawing, bar_index: usize) -> Option<
             let val = origin.value + u.max(0.0) * (through.value - origin.value);
             (val.is_finite() && val.abs() <= MAX_ABS_PRICE).then_some(val)
         }
-        DrawingGeometry::Rectangle { .. } | DrawingGeometry::FibonacciRetracement { .. } => None,
+        DrawingGeometry::Rectangle { .. }
+        | DrawingGeometry::FibonacciRetracement { .. }
+        | DrawingGeometry::RiskRewardBox { .. } => None,
     }
 }
 
@@ -307,7 +309,8 @@ fn validate_condition(
                         Ok(())
                     }
                     DrawingGeometry::Rectangle { .. }
-                    | DrawingGeometry::FibonacciRetracement { .. } => {
+                    | DrawingGeometry::FibonacciRetracement { .. }
+                    | DrawingGeometry::RiskRewardBox { .. } => {
                         Err(AlertError::UnsupportedDrawingGeometry)
                     }
                 }

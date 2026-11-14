@@ -129,7 +129,7 @@ pub struct PresetBattleRow {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PendingStrategyOrder {
+pub(crate) enum PendingStrategyOrder {
     Entry {
         side: PositionSide,
         signal_bar: usize,
@@ -145,14 +145,15 @@ enum PendingStrategyOrder {
 }
 
 #[derive(Debug, Clone)]
-struct ActivePositionState {
+pub(crate) struct ActivePositionState {
     side: PositionSide,
     quantity: f64,
+    entry_bar_abs: usize,
     entry_bar_index: usize,
     entry_timestamp: i64,
-    entry_price: f64,
-    entry_fee: f64,
-    entry_sell_tax: f64,
+    pub(crate) entry_price: f64,
+    pub(crate) entry_fee: f64,
+    pub(crate) entry_sell_tax: f64,
     fixed_stop_loss: Option<f64>,
     take_profit: Option<f64>,
     trailing_stop: Option<f64>,
@@ -161,6 +162,35 @@ struct ActivePositionState {
     lowest_since_entry: f64,
     mae_pct: f64,
     mfe_pct: f64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SimulationCarryState {
+    pub(crate) cash: f64,
+    pub(crate) peak_equity: f64,
+    pub(crate) active_pos: Option<ActivePositionState>,
+    pub(crate) pending_order: Option<PendingStrategyOrder>,
+    pub(crate) next_trade_id: u64,
+}
+
+impl SimulationCarryState {
+    #[inline]
+    pub(crate) fn new(initial_cash: f64) -> Self {
+        Self {
+            cash: initial_cash,
+            peak_equity: initial_cash,
+            active_pos: None,
+            pending_order: None,
+            next_trade_id: 1,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn open_position_total_entry_fee(&self) -> f64 {
+        self.active_pos
+            .as_ref()
+            .map_or(0.0, |p| p.entry_fee + p.entry_sell_tax)
+    }
 }
 
 impl ActivePositionState {
@@ -227,7 +257,7 @@ impl ActivePositionState {
     }
 }
 
-struct PrecomputedFeatures {
+pub(crate) struct PrecomputedFeatures {
     sma_fast: Vec<Option<f64>>,
     ema_slow: Vec<Option<f64>>,
     rsi: Vec<Option<f64>>,
@@ -242,7 +272,7 @@ struct PrecomputedFeatures {
 }
 
 impl PrecomputedFeatures {
-    fn build(candles: &[Candle], config: &BacktestConfig) -> Self {
+    pub(crate) fn build(candles: &[Candle], config: &BacktestConfig) -> Self {
         let len = candles.len();
         let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
         let p = &config.params;
@@ -326,12 +356,12 @@ impl PrecomputedFeatures {
     }
 }
 
-struct WindowSimulationOutput {
-    final_cash: f64,
-    equity_curve: Vec<BacktestEquityPoint>,
-    trades: Vec<BacktestTrade>,
-    open_position: Option<OpenBacktestPosition>,
-    unexecuted_signals: Vec<UnexecutedSignal>,
+pub(crate) struct WindowSimulationOutput {
+    pub(crate) final_cash: f64,
+    pub(crate) equity_curve: Vec<BacktestEquityPoint>,
+    pub(crate) trades: Vec<BacktestTrade>,
+    pub(crate) open_position: Option<OpenBacktestPosition>,
+    pub(crate) unexecuted_signals: Vec<UnexecutedSignal>,
 }
 
 /// Runs a deterministic, zero-lookahead strategy backtest on `candles`.
@@ -780,7 +810,7 @@ pub fn run_multi_symbol_battle_with_close_cutoff(
     }
 }
 
-fn simulate_window_with_features(
+pub(crate) fn simulate_window_with_features(
     candles: &[Candle],
     start_idx: usize,
     end_idx: usize,
@@ -789,16 +819,45 @@ fn simulate_window_with_features(
     features: &PrecomputedFeatures,
     incomplete_tail_bar: bool,
 ) -> WindowSimulationOutput {
+    let (out, _) = simulate_window_with_carry(
+        candles,
+        start_idx,
+        end_idx,
+        timeframe,
+        config,
+        features,
+        incomplete_tail_bar,
+        None,
+        false,
+        false,
+    );
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn simulate_window_with_carry(
+    candles: &[Candle],
+    start_idx: usize,
+    end_idx: usize,
+    timeframe: Timeframe,
+    config: &BacktestConfig,
+    features: &PrecomputedFeatures,
+    incomplete_tail_bar: bool,
+    carry_in: Option<SimulationCarryState>,
+    allow_handoff_at_end: bool,
+    use_absolute_indices: bool,
+) -> (WindowSimulationOutput, SimulationCarryState) {
     let end = end_idx.min(candles.len());
     let start = start_idx.min(end);
     let span = end.saturating_sub(start);
     let min_hold_bars = effective_min_holding_bars(config.risk.min_holding_bars, timeframe);
 
-    let mut cash = config.initial_cash;
-    let mut peak_equity = config.initial_cash;
-    let mut active_pos: Option<ActivePositionState> = None;
-    let mut pending_order: Option<PendingStrategyOrder> = None;
-    let mut next_trade_id = 1_u64;
+    let init = carry_in.unwrap_or_else(|| SimulationCarryState::new(config.initial_cash));
+    let mut cash = init.cash;
+    let mut peak_equity = init.peak_equity;
+    let mut active_pos: Option<ActivePositionState> = init.active_pos;
+    let mut pending_order: Option<PendingStrategyOrder> = init.pending_order;
+    let mut next_trade_id = init.next_trade_id;
 
     let mut equity_curve = Vec::with_capacity(span);
     let mut trades = Vec::new();
@@ -806,6 +865,7 @@ fn simulate_window_with_features(
 
     for i in start..end {
         let candle = &candles[i];
+        let out_bar_idx = if use_absolute_indices { i } else { i - start };
 
         // STEP A: Execute pending close-of-bar signal from `i - 1` at `Open[i]` (`BT-TIME-001`).
         if let Some(order) = pending_order.take() {
@@ -822,7 +882,9 @@ fn simulate_window_with_features(
                         pos.observe_price(exec_price);
                         close_position_into_trade(
                             pos,
-                            i.saturating_sub(start),
+                            i,
+                            out_bar_idx,
+                            use_absolute_indices,
                             candle.timestamp,
                             exec_price,
                             reason,
@@ -845,7 +907,9 @@ fn simulate_window_with_features(
                         pos.observe_price(exec_price);
                         close_position_into_trade(
                             pos,
-                            i.saturating_sub(start),
+                            i,
+                            out_bar_idx,
+                            use_absolute_indices,
                             candle.timestamp,
                             exec_price,
                             BacktestExitReason::SignalReversal,
@@ -890,9 +954,9 @@ fn simulate_window_with_features(
         }
 
         // STEP B: Evaluate Margin Insolvency (`[CRITICAL-03]`) & Intrabar Protective `SL`, `TP`, `TrailingStop`.
-        let local_i = i.saturating_sub(start);
         if let Some(mut pos) = active_pos.take() {
-            let bars_held_so_far = local_i.saturating_sub(pos.entry_bar_index);
+            let bars_held_so_far = i.saturating_sub(pos.entry_bar_abs);
+            let is_after_entry_bar = i > pos.entry_bar_abs;
             let exit_side = pos.side.exit_order_side();
             let voluntary_unlocked = bars_held_so_far >= min_hold_bars;
             let eff_stop = if voluntary_unlocked {
@@ -931,8 +995,8 @@ fn simulate_window_with_features(
                     (None, None) => None,
                 };
 
-            // 1. Gap-Open check at `Open[i]` (only when `local_i > pos.entry_bar_index`; at `local_i == entry`, `Open[i]` was the entry fill!).
-            let gap_trigger: Option<(f64, BacktestExitReason)> = if local_i > pos.entry_bar_index {
+            // 1. Gap-Open check at `Open[i]` (only when `i > pos.entry_bar_abs`; at `i == entry_bar_abs`, `Open[i]` was the entry fill!).
+            let gap_trigger: Option<(f64, BacktestExitReason)> = if is_after_entry_bar {
                 let open_exec = apply_slippage(candle.open, exit_side, config.slippage_bps);
                 let open_insolvent = net_equity_after_exit(&pos, cash, open_exec, config) <= 0.0;
                 match pos.side {
@@ -947,7 +1011,7 @@ fn simulate_window_with_features(
                             };
                             Some((candle.open, final_reason))
                         } else if open_insolvent {
-                            Some((candle.open, BacktestExitReason::MarginLiquidation))
+                            Some((candle.open, final_reason_or_liq()))
                         } else if tp_opt.is_some_and(|px| candle.open >= px) {
                             Some((candle.open, BacktestExitReason::TakeProfit))
                         } else {
@@ -983,7 +1047,9 @@ fn simulate_window_with_features(
                 pos.observe_price(exec_price);
                 close_position_into_trade(
                     pos,
-                    local_i,
+                    i,
+                    out_bar_idx,
+                    use_absolute_indices,
                     candle.timestamp,
                     exec_price,
                     reason,
@@ -993,16 +1059,13 @@ fn simulate_window_with_features(
                     &mut trades,
                 );
             } else {
-                if local_i > pos.entry_bar_index {
+                if is_after_entry_bar {
                     pos.observe_price(candle.open);
                 }
                 // 2. Pessimistic intrabar `[Low, High]` check (`SL`/`Liq` takes strict precedence on dual-touch bars!).
-                // On the entry bar (`local_i == pos.entry_bar_index`), require price to actually move adversely past `candle.open`
-                // so `slippage_bps > stop_loss_pct` never triggers a phantom stop on a purely favorable Marubozu (`[MAJOR-02]`)!
                 let intrabar_trigger = match pos.side {
                     PositionSide::Long => {
-                        let moved_adversely =
-                            local_i > pos.entry_bar_index || candle.low < candle.open;
+                        let moved_adversely = is_after_entry_bar || candle.low < candle.open;
                         if moved_adversely
                             && let Some((sl_px, reason)) =
                                 effective_adverse_stop.filter(|(px, _)| candle.low <= *px)
@@ -1015,8 +1078,7 @@ fn simulate_window_with_features(
                         }
                     }
                     PositionSide::Short => {
-                        let moved_adversely =
-                            local_i > pos.entry_bar_index || candle.high > candle.open;
+                        let moved_adversely = is_after_entry_bar || candle.high > candle.open;
                         if moved_adversely
                             && let Some((sl_px, reason)) =
                                 effective_adverse_stop.filter(|(px, _)| candle.high >= *px)
@@ -1032,7 +1094,6 @@ fn simulate_window_with_features(
 
                 if let Some((raw_px, reason, is_adverse_exit)) = intrabar_trigger {
                     if !is_adverse_exit {
-                        // Exiting on `TakeProfit` (after verifying `SL` did not breach): include bar's non-stop adverse wick!
                         match pos.side {
                             PositionSide::Long => pos.observe_price(candle.low),
                             PositionSide::Short => pos.observe_price(candle.high),
@@ -1049,7 +1110,9 @@ fn simulate_window_with_features(
                         };
                     close_position_into_trade(
                         pos,
-                        local_i,
+                        i,
+                        out_bar_idx,
+                        use_absolute_indices,
                         candle.timestamp,
                         exec_price,
                         final_reason,
@@ -1059,8 +1122,6 @@ fn simulate_window_with_features(
                         &mut trades,
                     );
                 } else {
-                    // Position survived bar `i`! Observe full bar excursions AND ratchet `trailing_stop`
-                    // post-close regardless of `min_holding_bars` (`[MAJOR-01]`)!
                     pos.update_excursions(candle);
                     ratchet_trailing_stop_post_close(&mut pos, candle, i, config, features);
                     active_pos = Some(pos);
@@ -1088,7 +1149,7 @@ fn simulate_window_with_features(
         };
 
         equity_curve.push(BacktestEquityPoint {
-            bar_index: i - start,
+            bar_index: out_bar_idx,
             timestamp: candle.timestamp,
             equity,
             cash,
@@ -1105,7 +1166,6 @@ fn simulate_window_with_features(
 
         let desired_order = evaluate_close_of_bar_order(
             i,
-            local_i,
             min_hold_bars,
             candles,
             config,
@@ -1113,7 +1173,7 @@ fn simulate_window_with_features(
             active_pos.as_ref(),
         );
         if let Some(order) = desired_order {
-            if is_last_bar_in_window {
+            if is_last_bar_in_window && !allow_handoff_at_end {
                 // `TEST-BT-001`: Final causal bar cannot fill on non-existent bar `end`!
                 let (side, is_exit) = match order {
                     PendingStrategyOrder::Entry { side, .. } => (side, false),
@@ -1124,7 +1184,7 @@ fn simulate_window_with_features(
                     PendingStrategyOrder::Reverse { new_side, .. } => (new_side, false),
                 };
                 unexecuted_signals.push(UnexecutedSignal {
-                    signal_bar_index: i - start,
+                    signal_bar_index: out_bar_idx,
                     timestamp: candle.timestamp,
                     side,
                     is_exit,
@@ -1136,11 +1196,15 @@ fn simulate_window_with_features(
         }
     }
 
-    let last_close = candles[end - 1].close;
-    let open_position = active_pos.map(|pos| OpenBacktestPosition {
+    let last_close = candles.get(end.saturating_sub(1)).map_or(0.0, |c| c.close);
+    let open_position = active_pos.as_ref().map(|pos| OpenBacktestPosition {
         side: pos.side,
         quantity: pos.quantity,
-        entry_bar_index: pos.entry_bar_index,
+        entry_bar_index: if use_absolute_indices {
+            pos.entry_bar_abs
+        } else {
+            pos.entry_bar_index
+        },
         entry_timestamp: pos.entry_timestamp,
         entry_price: pos.entry_price,
         entry_fee: pos.entry_fee + pos.entry_sell_tax,
@@ -1151,13 +1215,29 @@ fn simulate_window_with_features(
         unrealized_return_pct: pos.unrealized_return_pct(last_close),
     });
 
-    WindowSimulationOutput {
-        final_cash: cash,
-        equity_curve,
-        trades,
-        open_position,
-        unexecuted_signals,
-    }
+    let carry_out = SimulationCarryState {
+        cash,
+        peak_equity,
+        active_pos,
+        pending_order,
+        next_trade_id,
+    };
+
+    (
+        WindowSimulationOutput {
+            final_cash: cash,
+            equity_curve,
+            trades,
+            open_position,
+            unexecuted_signals,
+        },
+        carry_out,
+    )
+}
+
+#[inline]
+const fn final_reason_or_liq() -> BacktestExitReason {
+    BacktestExitReason::MarginLiquidation
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1341,6 +1421,7 @@ fn try_open_position_at_open(
     *active_pos = Some(ActivePositionState {
         side,
         quantity,
+        entry_bar_abs: fill_bar,
         entry_bar_index: fill_bar.saturating_sub(window_start),
         entry_timestamp: candle.timestamp,
         entry_price: exec_price,
@@ -1460,7 +1541,9 @@ fn compute_bankruptcy_raw_price(
 #[allow(clippy::too_many_arguments)]
 fn close_position_into_trade(
     pos: ActivePositionState,
-    exit_bar_index: usize,
+    exit_bar_abs: usize,
+    exit_bar_out: usize,
+    use_absolute_indices: bool,
     exit_timestamp: i64,
     exec_price: f64,
     exit_reason: BacktestExitReason,
@@ -1504,18 +1587,23 @@ fn close_position_into_trade(
 
     let trade_id = *next_trade_id;
     *next_trade_id = next_trade_id.saturating_add(1);
+    let entry_bar_out = if use_absolute_indices {
+        pos.entry_bar_abs
+    } else {
+        pos.entry_bar_index
+    };
 
     trades.push(BacktestTrade {
         trade_id,
         side: pos.side,
         quantity: pos.quantity,
-        entry_bar_index: pos.entry_bar_index,
-        exit_bar_index,
+        entry_bar_index: entry_bar_out,
+        exit_bar_index: exit_bar_out,
         entry_timestamp: pos.entry_timestamp,
         exit_timestamp,
         entry_price: pos.entry_price,
         exit_price: exec_price,
-        bars_held: exit_bar_index.saturating_sub(pos.entry_bar_index),
+        bars_held: exit_bar_abs.saturating_sub(pos.entry_bar_abs),
         gross_pnl,
         entry_fee: pos.entry_fee,
         exit_fee,
@@ -1531,7 +1619,6 @@ fn close_position_into_trade(
 
 fn evaluate_close_of_bar_order(
     i: usize,
-    local_i: usize,
     min_hold_bars: usize,
     candles: &[Candle],
     config: &BacktestConfig,
@@ -1542,8 +1629,8 @@ fn evaluate_close_of_bar_order(
         evaluate_preset_signals_at_bar(i, candles, config, features);
 
     if let Some(pos) = active_pos {
-        // Notice: at `Close[i]`, if the exit fills at `Open[i + 1]`, `exit_bar - entry_bar == (local_i + 1) - entry_bar`.
-        let bars_held_at_next_open = (local_i + 1).saturating_sub(pos.entry_bar_index);
+        // Notice: at `Close[i]`, if the exit fills at `Open[i + 1]`, `exit_bar - entry_bar == (i + 1) - entry_bar_abs`.
+        let bars_held_at_next_open = (i + 1).saturating_sub(pos.entry_bar_abs);
         if bars_held_at_next_open < min_hold_bars {
             return None;
         }
@@ -1802,7 +1889,7 @@ fn effective_min_holding_bars(min_holding_bars: usize, timeframe: Timeframe) -> 
 /// when comparing across heterogeneous asset classes (`BTCUSDT`, `SPY`, `VN30F1M`, `VNINDEX`) in
 /// `run_multi_symbol_battle` (`[MINOR-01]`).
 #[inline]
-fn normalize_config_for_universe_feed(
+pub(crate) fn normalize_config_for_universe_feed(
     base: &BacktestConfig,
     preset: DataSourcePreset,
     effective_tf: Timeframe,
@@ -1839,7 +1926,7 @@ fn normalize_config_for_universe_feed(
 /// coarse tail bar whose closing boundary exceeds `cutoff` when `cutoff` falls strictly inside the
 /// interior of that bar (`[CRITICAL-01]`).
 #[inline]
-fn slice_causal_series_for_options(
+pub(crate) fn slice_causal_series_for_options(
     candles: &[Candle],
     timeframe: Timeframe,
     options: BacktestRunOptions,
@@ -1864,7 +1951,7 @@ fn slice_causal_series_for_options(
     }
 }
 
-fn compare_tearsheets_desc(
+pub(crate) fn compare_tearsheets_desc(
     a: &BacktestTearsheet,
     b: &BacktestTearsheet,
     metric: SweepRankingMetric,

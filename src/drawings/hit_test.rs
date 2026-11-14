@@ -188,6 +188,54 @@ pub fn hit_test_projected_drawing(
                 z_order,
             })
         }
+        ProjectedDrawingShape::RiskReward {
+            reward_fill,
+            risk_fill,
+            entry_line,
+            target_line,
+            stop_line,
+            side_borders,
+            ..
+        } => {
+            let mut min_dist = f64::INFINITY;
+            for seg in [
+                *entry_line,
+                *target_line,
+                *stop_line,
+                side_borders[0],
+                side_borders[1],
+            ]
+            .into_iter()
+            .flatten()
+            {
+                min_dist = min_dist.min(distance_to_segment(cursor, seg));
+            }
+            if min_dist <= STROKE_HIT_TOLERANCE_PX {
+                return Some(HitMatch {
+                    drawing_id: projected.id,
+                    locked: projected.locked,
+                    target: HitTarget::Body,
+                    priority: HitPriority::Stroke,
+                    distance: min_dist,
+                    z_order,
+                });
+            }
+            if is_selected && !projected.locked {
+                let inside = reward_fill.is_some_and(|r| r.contains(cursor))
+                    || risk_fill.is_some_and(|r| r.contains(cursor));
+                if inside {
+                    return Some(HitMatch {
+                        drawing_id: projected.id,
+                        locked: projected.locked,
+                        target: HitTarget::Body,
+                        priority: HitPriority::SelectedBody,
+                        distance: 0.0,
+                        z_order,
+                    });
+                }
+            }
+            None
+        }
     }
 }
 

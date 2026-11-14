@@ -9,16 +9,19 @@ use crate::alerts::{
 };
 use crate::backtest::{
     BacktestConfig, BacktestRunOptions, BacktestRunResult, MIN_STATISTICAL_SAMPLE_TRADES,
-    MultiSymbolBattleReport, ParameterSweepReport, PositionSizingMode, PresetBattleRow,
+    MultiSymbolBattleReport, ParameterSweepReport, PortfolioBacktestReport,
+    PortfolioUniverseFilter, PortfolioWeightingMode, PositionSizingMode, PresetBattleRow,
     RobustnessVerdict, StrategyDirectionMode, StrategyPresetKind, SweepRankingMetric,
-    is_bucket_incomplete_at_close, run_all_presets_battle, run_backtest_with_options,
-    run_multi_symbol_battle_with_close_cutoff, run_parameter_sweep,
+    WalkForwardConfig, WalkForwardReport, WalkForwardVerdict, is_bucket_incomplete_at_close,
+    map_equity_curve_to_candles, run_all_presets_battle, run_backtest_with_options,
+    run_multi_symbol_battle_with_close_cutoff, run_parameter_sweep, run_portfolio_backtest,
+    run_walk_forward_validation,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::backtest::{StopTakeConfig, StrategyParams};
 use crate::chart::{
-    ChartDisplayConfig, ChartRenderReport, ChartReplayTradingOverlay, ChartViewportState, palette,
-    render_workstation_chart_full,
+    ChartDisplayConfig, ChartRenderReport, ChartReplayTradingOverlay, ChartViewportState,
+    EquityCurveOverlay, palette, render_workstation_chart_full,
 };
 use crate::data::{
     AggregationError, DataFileFormat, DataLoadError, DataLoadOptions, DataLoadReport,
@@ -31,7 +34,12 @@ use crate::drawings::{
     DrawingStyle, DrawingTool, FibDirection, LineDashStyle, MagnetMode,
 };
 use crate::indicators::OscillatorPaneId;
-use crate::indicators::{IndicatorCache, IndicatorConfig};
+use crate::indicators::{IndicatorCache, IndicatorConfig, SeriesBlockIndex};
+use crate::journal::{
+    ChecklistState, DailyPriceBand, ExchangeVenue, JournalEntrySource, JournalEntryStatus,
+    MistakeTag, SetupTag, TradeJournalStore, TradePlanComputed, TradePlanInput, VnPriceUnit,
+    compute_daily_price_band, compute_trade_plan,
+};
 use crate::model::Candle;
 use crate::replay::{
     ReplayController, ReplaySpeed, ReplayStatus, ReplayStepUnit, ReplayTransition,
@@ -78,16 +86,17 @@ pub enum ScannerDockTab {
     Signals,
 }
 
-/// Active sub-view inside the unified right-side Paper Trading, Alerts & Strategy Lab dock (`Milestones R08–R09`).
+/// Active sub-view inside the unified right-side Paper Trading, Alerts, Strategy Lab & Journal dock (`Milestones R08–R10`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum RightDockTab {
     #[default]
     Trading,
     Alerts,
     StrategyLab,
+    Journal,
 }
 
-/// Active sub-view inside the `Strategy Lab` right-side dock (`Milestone R09`).
+/// Active sub-view inside the `Strategy Lab` right-side dock (`Milestones R09–R10`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum StrategyLabSubTab {
     #[default]
@@ -95,10 +104,17 @@ pub enum StrategyLabSubTab {
     Trades,
     Sweep,
     Battle,
+    WalkForward,
 }
 
 impl StrategyLabSubTab {
-    pub const ALL: [Self; 4] = [Self::Tearsheet, Self::Trades, Self::Sweep, Self::Battle];
+    pub const ALL: [Self; 5] = [
+        Self::Tearsheet,
+        Self::Trades,
+        Self::Sweep,
+        Self::Battle,
+        Self::WalkForward,
+    ];
 
     #[inline]
     #[must_use]
@@ -108,6 +124,28 @@ impl StrategyLabSubTab {
             Self::Trades => "Trades",
             Self::Sweep => "Sweep",
             Self::Battle => "Battle",
+            Self::WalkForward => "WFO",
+        }
+    }
+}
+
+/// Active series plotted inside the synchronized `OscillatorPaneId::Equity` sub-pane (`Milestone R10`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum EquityPaneSource {
+    #[default]
+    SingleAssetBacktest,
+    WalkForwardOos,
+    MultiAssetPortfolio,
+}
+
+impl EquityPaneSource {
+    #[inline]
+    #[must_use]
+    pub const fn short_label(self) -> &'static str {
+        match self {
+            Self::SingleAssetBacktest => "Single BT",
+            Self::WalkForwardOos => "WFO OOS",
+            Self::MultiAssetPortfolio => "Portfolio",
         }
     }
 }
@@ -207,12 +245,18 @@ pub enum PaletteAction {
     ToggleScannerDock,
     OpenAlertsTab,
     OpenTradingTab,
+    OpenJournalTab,
     OpenStrategyLab,
     ToggleEquityPane,
     ToggleBacktestTradesOnChart,
     SelectStrategyPreset(StrategyPresetKind),
     RunParameterSweep,
     RunUniverseStrategyBattle,
+    RunWalkForwardValidation,
+    RunPortfolioBacktest,
+    DrawRiskRewardFromPlanner,
+    SyncPaperTradesToJournal,
+    ExportJournalCsv,
     QuickPriceAlert {
         price: f64,
         direction: CrossDirection,
@@ -250,6 +294,30 @@ pub struct CommandPaletteState {
 type BacktestSyncKey = (u64, usize, Option<i64>, Option<i64>, bool, u64);
 type SweepSyncKey = (u64, Option<i64>, bool, u64, SweepRankingMetric);
 type BattleSyncKey = (String, u64, Timeframe, Option<i64>, u64, SweepRankingMetric);
+type WalkForwardSyncKey = (u64, usize, Option<i64>, Option<i64>, bool, u64, u64);
+type PortfolioSyncKey = (
+    String,
+    u64,
+    Timeframe,
+    Option<i64>,
+    u64,
+    PortfolioUniverseFilter,
+    PortfolioWeightingMode,
+);
+
+#[derive(Debug, Clone)]
+struct MappedPortfolioCurveCache {
+    dataset_generation: u64,
+    timeframe: Timeframe,
+    replay_close_cutoff: Option<i64>,
+    candle_len: usize,
+    last_timestamp: Option<i64>,
+    title_label: String,
+    baseline_cash: f64,
+    equity_values: Vec<Option<f64>>,
+    equity_idx: SeriesBlockIndex,
+    underwater_values: Vec<Option<f64>>,
+}
 
 /// Primary application state for the Sumi Rust Trading Workstation (`Milestone R09`).
 #[derive(Serialize, Deserialize)]
@@ -284,12 +352,24 @@ pub struct SumiWorkstationApp {
     pub show_trading_panel: bool,
     pub show_alerts_panel: bool,
     pub show_strategy_panel: bool,
+    pub show_journal_panel: bool,
     pub show_equity_pane: bool,
+    pub equity_pane_source: EquityPaneSource,
     pub show_backtest_trades: bool,
     pub right_dock_tab: RightDockTab,
     pub strategy_lab_tab: StrategyLabSubTab,
     pub backtest_config: BacktestConfig,
     pub sweep_ranking: SweepRankingMetric,
+    pub wf_config: WalkForwardConfig,
+    pub portfolio_universe_filter: PortfolioUniverseFilter,
+    pub portfolio_weighting: PortfolioWeightingMode,
+    pub risk_venue_override: Option<ExchangeVenue>,
+    pub risk_plan_input: TradePlanInput,
+    pub journal: TradeJournalStore,
+    pub journal_draft_setup: SetupTag,
+    pub journal_draft_conviction: u8,
+    pub journal_draft_checklist: ChecklistState,
+    pub journal_draft_note: String,
     pub show_scanner_dock: bool,
     pub scanner_tab: ScannerDockTab,
     pub scanner_filter: ScannerFilter,
@@ -326,6 +406,12 @@ pub struct SumiWorkstationApp {
     #[serde(skip)]
     pub last_alert_status: Option<(bool, String)>,
     #[serde(skip)]
+    pub last_journal_status: Option<(bool, String)>,
+    #[serde(skip)]
+    pub last_exported_journal_doc: Option<String>,
+    #[serde(skip)]
+    synced_rr_drawing_signature: Option<(u64, u64, u64, u64)>,
+    #[serde(skip)]
     pub command_palette: CommandPaletteState,
     #[serde(skip)]
     watchlist_universe: Vec<WatchlistFeedEntry>,
@@ -346,6 +432,10 @@ pub struct SumiWorkstationApp {
     #[serde(skip)]
     pub battle_report: Option<MultiSymbolBattleReport>,
     #[serde(skip)]
+    pub walk_forward_report: Option<WalkForwardReport>,
+    #[serde(skip)]
+    pub portfolio_report: Option<PortfolioBacktestReport>,
+    #[serde(skip)]
     pub preset_battle_rows: Vec<PresetBattleRow>,
     #[serde(skip)]
     pub focused_backtest_trade_id: Option<u64>,
@@ -355,6 +445,12 @@ pub struct SumiWorkstationApp {
     sweep_synced_key: Option<SweepSyncKey>,
     #[serde(skip)]
     battle_synced_key: Option<BattleSyncKey>,
+    #[serde(skip)]
+    wf_synced_key: Option<WalkForwardSyncKey>,
+    #[serde(skip)]
+    portfolio_synced_key: Option<PortfolioSyncKey>,
+    #[serde(skip)]
+    portfolio_mapped_curve: Option<MappedPortfolioCurveCache>,
     #[serde(skip)]
     viewport_focus_lock: Option<(f64, f64, f64)>,
     #[serde(skip)]
@@ -406,12 +502,24 @@ impl Default for SumiWorkstationApp {
             show_trading_panel: false,
             show_alerts_panel: false,
             show_strategy_panel: false,
+            show_journal_panel: false,
             show_equity_pane: false,
+            equity_pane_source: EquityPaneSource::SingleAssetBacktest,
             show_backtest_trades: false,
             right_dock_tab: RightDockTab::Trading,
             strategy_lab_tab: StrategyLabSubTab::Tearsheet,
             backtest_config: BacktestConfig::default(),
             sweep_ranking: SweepRankingMetric::SharpeRatio,
+            wf_config: WalkForwardConfig::default(),
+            portfolio_universe_filter: PortfolioUniverseFilter::Vn30EquitiesOnly,
+            portfolio_weighting: PortfolioWeightingMode::EqualWeight,
+            risk_venue_override: None,
+            risk_plan_input: TradePlanInput::default(),
+            journal: TradeJournalStore::new(),
+            journal_draft_setup: SetupTag::TrendPullback,
+            journal_draft_conviction: 4,
+            journal_draft_checklist: ChecklistState::all_checked(),
+            journal_draft_note: String::new(),
             show_scanner_dock: false,
             scanner_tab: ScannerDockTab::Watchlist,
             scanner_filter: ScannerFilter::default(),
@@ -437,6 +545,9 @@ impl Default for SumiWorkstationApp {
             last_load_status: None,
             last_trade_status: None,
             last_alert_status: None,
+            last_journal_status: None,
+            last_exported_journal_doc: None,
+            synced_rr_drawing_signature: None,
             command_palette: CommandPaletteState::default(),
             watchlist_universe: Vec::new(),
             custom_peer_feeds: Vec::new(),
@@ -447,11 +558,16 @@ impl Default for SumiWorkstationApp {
             backtest_result: None,
             sweep_report: None,
             battle_report: None,
+            walk_forward_report: None,
+            portfolio_report: None,
             preset_battle_rows: Vec::new(),
             focused_backtest_trade_id: None,
             backtest_synced_key: None,
             sweep_synced_key: None,
             battle_synced_key: None,
+            wf_synced_key: None,
+            portfolio_synced_key: None,
+            portfolio_mapped_curve: None,
             viewport_focus_lock: None,
             indicator_cache,
             dataset_generation: 1,
@@ -548,23 +664,39 @@ impl SumiWorkstationApp {
         truncate_utf8_bytes(&mut self.alert_value_input, 32);
         truncate_utf8_bytes(&mut self.alert_message_input, 96);
         self.backtest_config.sanitize();
+        self.wf_config.sanitize();
+        self.journal.sanitize_deserialized();
+        self.journal_draft_conviction = self.journal_draft_conviction.clamp(1, 5);
+        truncate_utf8_bytes(
+            &mut self.journal_draft_note,
+            crate::journal::MAX_JOURNAL_NOTE_BYTES,
+        );
+        sanitize_persisted_trade_plan_input(&mut self.risk_plan_input);
         self.viewport_focus_lock = None;
         self.in_memory_custom_doc = None;
         self.in_memory_custom_doc_hash = 0;
         self.custom_peer_feeds.clear();
         self.last_trade_status = None;
         self.last_alert_status = None;
+        self.last_journal_status = None;
+        self.last_exported_journal_doc = None;
+        self.synced_rr_drawing_signature = None;
         self.command_palette = CommandPaletteState::default();
         self.scanner_synced_key = None;
         self.alerts_synced_key = None;
         self.backtest_result = None;
         self.sweep_report = None;
         self.battle_report = None;
+        self.walk_forward_report = None;
+        self.portfolio_report = None;
         self.preset_battle_rows.clear();
         self.focused_backtest_trade_id = None;
         self.backtest_synced_key = None;
         self.sweep_synced_key = None;
         self.battle_synced_key = None;
+        self.wf_synced_key = None;
+        self.portfolio_synced_key = None;
+        self.portfolio_mapped_curve = None;
 
         let persisted_tf = Timeframe::parse_label(&self.timeframe).unwrap_or(self.active_timeframe);
         let (report, reset_to_clean_fallback) = if self.data_source == DataSourcePreset::CustomFile
@@ -712,6 +844,7 @@ impl SumiWorkstationApp {
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
         self.indicator_cache
             .sync(&self.candles, self.dataset_generation, &self.indicators);
+        self.reseed_risk_planner_for_active_instrument(reset_to_clean_fallback);
         self.sync_alerts_causal();
     }
 
@@ -1258,6 +1391,7 @@ impl SumiWorkstationApp {
 
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
         self.focused_backtest_trade_id = None;
+        self.synced_rr_drawing_signature = None;
         self.viewport.equity_price_scale.reset_auto_scale();
         self.viewport.time_scale.set_total_bars(self.candles.len());
         if reset_viewport {
@@ -1265,6 +1399,12 @@ impl SumiWorkstationApp {
         }
         self.indicator_cache
             .sync(&self.candles, self.dataset_generation, &self.indicators);
+        if outgoing_key != incoming_key {
+            self.risk_venue_override = None;
+            self.reseed_risk_planner_for_active_instrument(true);
+        } else {
+            self.reseed_risk_planner_for_active_instrument(false);
+        }
         self.sync_alerts_causal();
     }
 
@@ -1723,6 +1863,17 @@ impl SumiWorkstationApp {
                 self.replay.start_base_index,
                 tr.new_base_index,
             );
+            if self.journal.entries.iter().any(|e| {
+                e.symbol.eq_ignore_ascii_case(&self.symbol)
+                    && matches!(e.source, JournalEntrySource::PaperTrade { .. })
+            }) {
+                let venue = self.active_exchange_venue();
+                let _ = self.journal.sync_paper_closed_trades(
+                    &self.symbol,
+                    venue,
+                    self.trading.closed_trades(),
+                );
+            }
         }
 
         let old_len = self.candles.len();
@@ -1968,7 +2119,19 @@ impl SumiWorkstationApp {
     }
 
     /// Populates the Paper Trading Order Ticket from the currently selected main-pane [`crate::drawings::Drawing`].
+    /// When the selected drawing is a [`DrawingGeometry::RiskRewardBox`], also computes tick-snapped brackets
+    /// and board-lot-compliant position quantity via [`compute_trade_plan`].
     pub fn sync_ticket_from_selected_drawing(&mut self) -> bool {
+        if self
+            .drawings
+            .selected_drawing()
+            .is_some_and(|d| matches!(d.geometry, DrawingGeometry::RiskRewardBox { .. }))
+        {
+            let _ = self.sync_planner_from_selected_rr_box();
+            if self.sync_ticket_from_risk_planner() {
+                return true;
+            }
+        }
         let Some(sync) = self
             .drawings
             .selected_drawing()
@@ -1994,6 +2157,7 @@ impl SumiWorkstationApp {
             .take_profit
             .map_or_else(String::new, |v| format!("{v:.2}"));
         self.show_trading_panel = true;
+        self.right_dock_tab = RightDockTab::Trading;
         self.last_trade_status = Some((
             false,
             format!(
@@ -2541,11 +2705,17 @@ impl SumiWorkstationApp {
             self.sweep_synced_key = None;
             self.battle_report = None;
             self.battle_synced_key = None;
+            self.walk_forward_report = None;
+            self.wf_synced_key = None;
+            self.portfolio_report = None;
+            self.portfolio_synced_key = None;
+            self.portfolio_mapped_curve = None;
         }
     }
 
-    /// Evaluates the causal strategy backtest (and refreshes/invalidates `Sweep` & `Battle` caches
-    /// across Bar Replay cutoffs per `DEF-001`) only when active and dirty (`0.000 ms` on hover/pan/zoom).
+    /// Evaluates the causal strategy backtest (and refreshes/invalidates `Sweep`, `Battle`,
+    /// `Walk-Forward` & `Portfolio` caches across Bar Replay cutoffs per `DEF-001`) only when active
+    /// and dirty (`0.000 ms` on hover/pan/zoom).
     pub fn sync_backtest_causal(&mut self) {
         let any_active =
             self.show_strategy_panel || self.show_equity_pane || self.show_backtest_trades;
@@ -2553,9 +2723,11 @@ impl SumiWorkstationApp {
             return;
         }
         self.backtest_config.sanitize();
+        self.wf_config.sanitize();
         let replay_close_cutoff = self.replay_causal_close_timestamp();
         let incomplete_tail = self.is_active_tail_incomplete();
         let cfg_digest = compute_backtest_config_digest(&self.backtest_config);
+        let wf_digest = compute_walk_forward_config_digest(&self.wf_config);
         let last_ts = self.candles.last().map(|c| c.timestamp);
         let check_key = (
             self.dataset_generation,
@@ -2629,6 +2801,58 @@ impl SumiWorkstationApp {
                 self.battle_report = None;
                 self.battle_synced_key = None;
             }
+        }
+
+        // Guard `Walk-Forward` & `Portfolio` caches across Bar Replay cutoffs (`DEF-001`).
+        let wf_key = (
+            self.dataset_generation,
+            self.candles.len(),
+            last_ts,
+            replay_close_cutoff,
+            incomplete_tail,
+            cfg_digest,
+            wf_digest,
+        );
+        let wf_needed = (self.show_strategy_panel
+            && self.right_dock_tab == RightDockTab::StrategyLab
+            && self.strategy_lab_tab == StrategyLabSubTab::WalkForward)
+            || (self.show_equity_pane
+                && self.equity_pane_source == EquityPaneSource::WalkForwardOos);
+        if self.wf_synced_key != Some(wf_key) {
+            if wf_needed {
+                self.run_active_walk_forward();
+            } else {
+                self.walk_forward_report = None;
+                self.wf_synced_key = None;
+            }
+        }
+
+        let port_key = (
+            self.current_instrument_key(),
+            self.dataset_generation,
+            self.active_timeframe,
+            replay_close_cutoff,
+            cfg_digest,
+            self.portfolio_universe_filter,
+            self.portfolio_weighting,
+        );
+        let port_needed = (self.show_strategy_panel
+            && self.right_dock_tab == RightDockTab::StrategyLab
+            && self.strategy_lab_tab == StrategyLabSubTab::WalkForward)
+            || (self.show_equity_pane
+                && self.equity_pane_source == EquityPaneSource::MultiAssetPortfolio);
+        if self.portfolio_synced_key.as_ref() != Some(&port_key) {
+            if port_needed {
+                self.run_active_portfolio_backtest();
+            } else {
+                self.portfolio_report = None;
+                self.portfolio_synced_key = None;
+                self.portfolio_mapped_curve = None;
+            }
+        } else if self.show_equity_pane
+            && self.equity_pane_source == EquityPaneSource::MultiAssetPortfolio
+        {
+            self.refresh_portfolio_mapped_curve();
         }
     }
 
@@ -2801,6 +3025,727 @@ impl SumiWorkstationApp {
             return false;
         };
         self.start_replay_at_base_index(cut_base_idx)
+    }
+
+    // =========================================================================
+    // Milestone R10 — Vietnam Risk Planner, R:R Box Sync, Journal & WFO/Portfolio
+    // =========================================================================
+
+    /// Resolves the active [`ExchangeVenue`] (`risk_venue_override` or auto-inferred from `symbol` + `data_source`).
+    #[inline]
+    #[must_use]
+    pub fn active_exchange_venue(&self) -> ExchangeVenue {
+        self.risk_venue_override.unwrap_or_else(|| {
+            ExchangeVenue::infer_from_symbol_and_preset(&self.symbol, self.data_source)
+        })
+    }
+
+    /// Computes the strictly causal reference price (`<=` current replay/live frontier) for daily price bands (`DEF-001` & `M-09`).
+    ///
+    /// Evaluates against `base_candles[..=cursor]` using the active venue's exchange-local civil day (`UTC+7` ICT on VN venues,
+    /// `UTC-5` EST on US Equities) so viewing `1W` on `FPT` (`base = D1`) still uses yesterday's `D1` close rather than last week's close.
+    #[must_use]
+    pub fn causal_reference_price(&self) -> Option<f64> {
+        if self.base_candles.is_empty() {
+            let last = self.candles.last()?;
+            return (last.open.is_finite() && last.open > 0.0).then_some(last.open);
+        }
+        let cursor = self
+            .current_trading_cursor_base_index()
+            .min(self.base_candles.len() - 1);
+        let base_slice = &self.base_candles[..=cursor];
+        let last = base_slice.last()?;
+        if base_slice.len() < 2 {
+            return (last.open.is_finite() && last.open > 0.0).then_some(last.open);
+        }
+        if self.base_timeframe.seconds() >= 86_400 {
+            let prev = &base_slice[base_slice.len() - 2];
+            return (prev.close.is_finite() && prev.close > 0.0).then_some(prev.close);
+        }
+        let tz_offset = self.active_exchange_venue().utc_offset_seconds();
+        let cur_local_day = last.timestamp.saturating_add(tz_offset).div_euclid(86_400);
+        if let Some(prior_day_bar) = base_slice.iter().rev().find(|c| {
+            c.timestamp.saturating_add(tz_offset).div_euclid(86_400) < cur_local_day
+                && c.close.is_finite()
+                && c.close > 0.0
+        }) {
+            Some(prior_day_bar.close)
+        } else {
+            let first = &base_slice[0];
+            (first.open.is_finite() && first.open > 0.0).then_some(first.open)
+        }
+    }
+
+    /// Computes today's statutory [`DailyPriceBand`] (`HOSE ±7%`, `HNX ±10%`, `UPCOM ±15%`, `VN30F ±7%`) at the causal frontier.
+    #[must_use]
+    pub fn active_daily_price_band(&self) -> Option<DailyPriceBand> {
+        let venue = self.active_exchange_venue();
+        let ref_px = self.causal_reference_price()?;
+        compute_daily_price_band(venue, ref_px, self.risk_plan_input.price_unit)
+    }
+
+    /// Re-seeds or refreshes [`SumiWorkstationApp::risk_plan_input`] for the active instrument without lookahead.
+    pub fn reseed_risk_planner_for_active_instrument(&mut self, reset_levels: bool) {
+        let venue = self.active_exchange_venue();
+        self.risk_plan_input.venue = venue;
+        self.risk_plan_input.price_unit = VnPriceUnit::Auto;
+        self.risk_plan_input.reference_price = self.causal_reference_price();
+        self.risk_plan_input.entry_timestamp = self.candles.last().map(|c| c.timestamp);
+
+        if reset_levels {
+            self.risk_plan_input.commission_bps = venue.default_commission_bps();
+            self.risk_plan_input.tax_sell_bps = venue.default_tax_sell_bps();
+            self.risk_plan_input.contract_multiplier = 1.0;
+            self.risk_plan_input.initial_margin_pct = venue.default_initial_margin_pct();
+            self.risk_plan_input.slippage_bps = match venue {
+                ExchangeVenue::Vn30Futures
+                | ExchangeVenue::UsEquities
+                | ExchangeVenue::VnIndexBenchmark => 3.0,
+                ExchangeVenue::CryptoSpotPerp => 4.0,
+                ExchangeVenue::Hose | ExchangeVenue::Hnx | ExchangeVenue::Upcom => 5.0,
+            };
+            if !venue.allows_short() {
+                self.risk_plan_input.side = PositionSide::Long;
+            }
+            if self.sync_planner_from_selected_rr_box() {
+                return;
+            }
+        }
+
+        let mark = self.current_mark_price();
+        if !mark.is_finite() || mark <= 0.0 {
+            return;
+        }
+        let scale_mismatch = !self.risk_plan_input.entry_price.is_finite()
+            || self.risk_plan_input.entry_price <= 0.0
+            || self.risk_plan_input.entry_price > mark * 4.0
+            || self.risk_plan_input.entry_price < mark * 0.25;
+
+        if reset_levels || scale_mismatch {
+            self.seed_brackets_around_mark(venue, mark);
+        }
+    }
+
+    /// Explicit `"Reseed"` action (`M-08`): forces fresh brackets around `current_mark_price()` for the active venue
+    /// AND updates any currently selected on-chart [`DrawingGeometry::RiskRewardBox`] so it never stays stale.
+    pub fn reseed_risk_planner_from_live_mark(&mut self) {
+        let venue = self.active_exchange_venue();
+        self.risk_plan_input.venue = venue;
+        self.risk_plan_input.price_unit = VnPriceUnit::Auto;
+        self.risk_plan_input.reference_price = self.causal_reference_price();
+        self.risk_plan_input.entry_timestamp = self.candles.last().map(|c| c.timestamp);
+        self.risk_plan_input.commission_bps = venue.default_commission_bps();
+        self.risk_plan_input.tax_sell_bps = venue.default_tax_sell_bps();
+        self.risk_plan_input.contract_multiplier = 1.0;
+        self.risk_plan_input.initial_margin_pct = venue.default_initial_margin_pct();
+        if !venue.allows_short() {
+            self.risk_plan_input.side = PositionSide::Long;
+        }
+        let mark = self.current_mark_price();
+        if !mark.is_finite() || mark <= 0.0 {
+            return;
+        }
+        self.seed_brackets_around_mark(venue, mark);
+        if let Ok(plan) = self.compute_active_trade_plan()
+            && self.drawings.update_selected_risk_reward_levels(
+                plan.snapped_entry,
+                plan.snapped_stop,
+                plan.snapped_target,
+            )
+            && let Some(sel_id) = self.drawings.selected_id
+        {
+            self.synced_rr_drawing_signature = Some((
+                sel_id,
+                plan.snapped_entry.to_bits(),
+                plan.snapped_stop.to_bits(),
+                plan.snapped_target.to_bits(),
+            ));
+        }
+        self.last_journal_status = Some((
+            false,
+            format!(
+                "Reseeded {} @ {}",
+                venue.short_label(),
+                format_venue_price(mark, venue)
+            ),
+        ));
+    }
+
+    fn seed_brackets_around_mark(&mut self, venue: ExchangeVenue, mark: f64) {
+        let risk_frac = match venue {
+            ExchangeVenue::Vn30Futures => 0.010,
+            ExchangeVenue::VnIndexBenchmark => 0.020,
+            ExchangeVenue::Hose => 0.035,
+            ExchangeVenue::Hnx | ExchangeVenue::Upcom => 0.045,
+            ExchangeVenue::UsEquities => 0.025,
+            ExchangeVenue::CryptoSpotPerp => 0.030,
+        };
+        let reward_frac = risk_frac * 2.4;
+        self.risk_plan_input.entry_price = mark;
+        match self.risk_plan_input.side {
+            PositionSide::Long => {
+                self.risk_plan_input.stop_loss = (mark * (1.0 - risk_frac)).max(mark * 0.2);
+                self.risk_plan_input.target_price = mark * (1.0 + reward_frac);
+            }
+            PositionSide::Short => {
+                self.risk_plan_input.stop_loss = mark * (1.0 + risk_frac);
+                self.risk_plan_input.target_price = (mark * (1.0 - reward_frac)).max(mark * 0.2);
+            }
+        }
+        if venue.is_vn_cash_equity()
+            && mark >= 5_000.0
+            && self.risk_plan_input.account_equity < 10_000_000.0
+        {
+            self.risk_plan_input.account_equity = 100_000_000.0;
+            self.risk_plan_input.available_cash = 100_000_000.0;
+        } else if venue == ExchangeVenue::Vn30Futures
+            && mark < 5_000.0
+            && self.risk_plan_input.account_equity < 50_000.0
+        {
+            self.risk_plan_input.account_equity = 150_000.0;
+            self.risk_plan_input.available_cash = 150_000.0;
+        }
+    }
+
+    /// Builds the causally anchored [`TradePlanInput`] for the current bar/replay frontier.
+    #[must_use]
+    pub fn effective_trade_plan_input(&self) -> TradePlanInput {
+        let mut inp = self.risk_plan_input.clone();
+        inp.venue = self.active_exchange_venue();
+        inp.reference_price = self.causal_reference_price();
+        inp.entry_timestamp = self.candles.last().map(|c| c.timestamp);
+        if !inp.available_cash.is_finite() || inp.available_cash <= 0.0 {
+            inp.available_cash = inp.account_equity;
+        }
+        inp
+    }
+
+    /// Evaluates [`compute_trade_plan`] against [`SumiWorkstationApp::effective_trade_plan_input`].
+    pub fn compute_active_trade_plan(
+        &self,
+    ) -> Result<TradePlanComputed, crate::journal::TradePlanError> {
+        compute_trade_plan(&self.effective_trade_plan_input())
+    }
+
+    /// Pulls `side`, `entry_price`, `stop_loss`, and `target_price` from the selected on-chart [`DrawingGeometry::RiskRewardBox`].
+    pub fn sync_planner_from_selected_rr_box(&mut self) -> bool {
+        let Some((id, entry_px, stop_px, target_px)) =
+            self.drawings
+                .selected_drawing()
+                .and_then(|d| match d.geometry {
+                    DrawingGeometry::RiskRewardBox {
+                        start,
+                        end,
+                        stop_price,
+                    } => Some((d.id, start.value, stop_price, end.value)),
+                    _ => None,
+                })
+        else {
+            return false;
+        };
+        if !entry_px.is_finite()
+            || !stop_px.is_finite()
+            || !target_px.is_finite()
+            || entry_px <= 0.0
+            || stop_px <= 0.0
+            || target_px <= 0.0
+        {
+            return false;
+        }
+        self.risk_plan_input.side = if target_px >= entry_px {
+            PositionSide::Long
+        } else {
+            PositionSide::Short
+        };
+        self.risk_plan_input.entry_price = entry_px;
+        self.risk_plan_input.stop_loss = stop_px;
+        self.risk_plan_input.target_price = target_px;
+        self.synced_rr_drawing_signature = Some((
+            id,
+            entry_px.to_bits(),
+            stop_px.to_bits(),
+            target_px.to_bits(),
+        ));
+        true
+    }
+
+    fn auto_sync_planner_if_rr_box_changed(&mut self) {
+        let Some((id, entry_px, stop_px, target_px)) =
+            self.drawings
+                .selected_drawing()
+                .and_then(|d| match d.geometry {
+                    DrawingGeometry::RiskRewardBox {
+                        start,
+                        end,
+                        stop_price,
+                    } => Some((d.id, start.value, stop_price, end.value)),
+                    _ => None,
+                })
+        else {
+            self.synced_rr_drawing_signature = None;
+            return;
+        };
+        let sig = (
+            id,
+            entry_px.to_bits(),
+            stop_px.to_bits(),
+            target_px.to_bits(),
+        );
+        if self.synced_rr_drawing_signature != Some(sig) {
+            let _ = self.sync_planner_from_selected_rr_box();
+        }
+    }
+
+    /// Snaps the Risk Planner's `Entry / Stop / Target` to valid exchange ticks and updates any selected `RiskRewardBox`.
+    pub fn snap_planner_ticks_and_sync_rr_box(&mut self) -> bool {
+        let mut inp = self.effective_trade_plan_input();
+        inp.snap_to_ticks = true;
+        let Ok(plan) = compute_trade_plan(&inp) else {
+            self.last_journal_status = Some((
+                true,
+                "invalid Entry / Stop / Target brackets for active side".to_owned(),
+            ));
+            return false;
+        };
+        self.risk_plan_input.entry_price = plan.snapped_entry;
+        self.risk_plan_input.stop_loss = plan.snapped_stop;
+        self.risk_plan_input.target_price = plan.snapped_target;
+        if self.drawings.update_selected_risk_reward_levels(
+            plan.snapped_entry,
+            plan.snapped_stop,
+            plan.snapped_target,
+        ) && let Some(sel) = self.drawings.selected_drawing()
+        {
+            self.synced_rr_drawing_signature = Some((
+                sel.id,
+                plan.snapped_entry.to_bits(),
+                plan.snapped_stop.to_bits(),
+                plan.snapped_target.to_bits(),
+            ));
+        }
+        self.last_journal_status = Some((
+            false,
+            format!(
+                "Snapped {} ticks: E {:.2} · SL {:.2} · TP {:.2}",
+                plan.venue.short_label(),
+                plan.snapped_entry,
+                plan.snapped_stop,
+                plan.snapped_target
+            ),
+        ));
+        true
+    }
+
+    /// Draws a new on-chart [`DrawingGeometry::RiskRewardBox`] (or updates the selected one) from the active Risk Planner.
+    pub fn draw_or_update_rr_box_from_planner(&mut self) -> Option<u64> {
+        let Ok(plan) = self.compute_active_trade_plan() else {
+            self.last_journal_status = Some((
+                true,
+                "cannot draw R:R Box: fix invalid Entry / Stop / Target levels".to_owned(),
+            ));
+            return None;
+        };
+        if self.drawings.update_selected_risk_reward_levels(
+            plan.snapped_entry,
+            plan.snapped_stop,
+            plan.snapped_target,
+        ) && let Some(sel_id) = self.drawings.selected_id
+        {
+            self.synced_rr_drawing_signature = Some((
+                sel_id,
+                plan.snapped_entry.to_bits(),
+                plan.snapped_stop.to_bits(),
+                plan.snapped_target.to_bits(),
+            ));
+            self.last_journal_status = Some((
+                false,
+                format!(
+                    "Updated R:R Box #{sel_id} ({:.2}R net)",
+                    plan.net_r_multiple
+                ),
+            ));
+            return Some(sel_id);
+        }
+
+        if self.candles.is_empty() {
+            return None;
+        }
+        let vis_range = self.viewport.time_scale.strict_visible_data_range();
+        let end_idx = if vis_range.is_empty() {
+            self.candles.len() - 1
+        } else {
+            vis_range.end.saturating_sub(1).min(self.candles.len() - 1)
+        };
+        let vis_len = if vis_range.is_empty() {
+            40
+        } else {
+            vis_range.len().max(8)
+        };
+        let box_span = (vis_len / 4).clamp(5, 28);
+        let start_idx = end_idx.saturating_sub(box_span);
+        let start_anchor = match resolve_anchor_timestamp(
+            start_idx as f64,
+            &self.candles,
+            self.active_timeframe,
+        ) {
+            Some(ts) => DrawingAnchor::with_timestamp(start_idx as f64, plan.snapped_entry, ts),
+            None => DrawingAnchor::new(start_idx as f64, plan.snapped_entry),
+        };
+        let end_anchor =
+            match resolve_anchor_timestamp(end_idx as f64, &self.candles, self.active_timeframe) {
+                Some(ts) => DrawingAnchor::with_timestamp(end_idx as f64, plan.snapped_target, ts),
+                None => DrawingAnchor::new(end_idx as f64, plan.snapped_target),
+            };
+
+        let geom = DrawingGeometry::RiskRewardBox {
+            start: start_anchor,
+            end: end_anchor,
+            stop_price: plan.snapped_stop,
+        };
+        let color = if plan.side == PositionSide::Long {
+            DrawingColorPreset::Emerald
+        } else {
+            DrawingColorPreset::Crimson
+        };
+        let style = DrawingStyle {
+            color,
+            line_width: 1.8,
+            dash: LineDashStyle::Solid,
+            fill_opacity: 0.16,
+        };
+        let id = self
+            .drawings
+            .add_drawing(DrawingPaneTarget::Main, geom, Some(style))?;
+        self.drawings.selected_id = Some(id);
+        self.drawings.active_tool = DrawingTool::Select;
+        self.synced_rr_drawing_signature = Some((
+            id,
+            plan.snapped_entry.to_bits(),
+            plan.snapped_stop.to_bits(),
+            plan.snapped_target.to_bits(),
+        ));
+        self.last_journal_status = Some((
+            false,
+            format!(
+                "Created R:R Box #{id} ({} {:.2}R net)",
+                plan.side.short_label(),
+                plan.net_r_multiple
+            ),
+        ));
+        Some(id)
+    }
+
+    /// Populates the Paper Trading Order Ticket (`qty`, `entry`, `SL`, `TP`, `Limit/Stop`) from the active Risk Planner.
+    ///
+    /// Rejects unaffordable or `0`-lot plans (`C-04`) instead of silently substituting `board_lot()`.
+    pub fn sync_ticket_from_risk_planner(&mut self) -> bool {
+        let plan = match self.compute_active_trade_plan() {
+            Ok(p) => p,
+            Err(err) => {
+                self.last_journal_status = Some((true, err.message().to_owned()));
+                return false;
+            }
+        };
+        if !plan.affordable || plan.planned_quantity <= 0.0 {
+            let reason = plan.warnings.first().map_or_else(
+                || "Risk Plan sizes to 0 lots under current risk/margin budget".to_owned(),
+                |w| w.description(),
+            );
+            let msg = format!("Cannot send 0-lot plan to Ticket: {reason}");
+            self.last_journal_status = Some((true, msg.clone()));
+            self.last_trade_status = Some((true, msg));
+            return false;
+        }
+        let mark = self.current_mark_price();
+        self.ticket_kind = match plan.side {
+            PositionSide::Long if mark > 0.0 && plan.snapped_entry > mark => TicketOrderKind::Stop,
+            PositionSide::Short if mark > 0.0 && plan.snapped_entry < mark => TicketOrderKind::Stop,
+            _ => TicketOrderKind::Limit,
+        };
+        self.ticket_qty_input = format_clean_qty(plan.planned_quantity);
+        self.ticket_price_input = format_venue_price(plan.snapped_entry, plan.venue);
+        self.ticket_sl_input = format_venue_price(plan.snapped_stop, plan.venue);
+        self.ticket_tp_input = format_venue_price(plan.snapped_target, plan.venue);
+        self.show_trading_panel = true;
+        self.right_dock_tab = RightDockTab::Trading;
+        let msg = format!(
+            "Planner -> Ticket: {} {} @ {} (SL {} / TP {})",
+            plan.side.short_label(),
+            self.ticket_qty_input,
+            self.ticket_price_input,
+            self.ticket_sl_input,
+            self.ticket_tp_input
+        );
+        self.last_trade_status = Some((false, msg.clone()));
+        self.last_journal_status = Some((false, msg));
+        true
+    }
+
+    /// Logs the currently computed Risk Plan into [`SumiWorkstationApp::journal`] at the causal frontier timestamp.
+    pub fn log_active_plan_to_journal(&mut self) -> Option<u64> {
+        let plan = match self.compute_active_trade_plan() {
+            Ok(p) => p,
+            Err(err) => {
+                self.last_journal_status = Some((true, err.message().to_owned()));
+                return None;
+            }
+        };
+        let causal_ts = self
+            .replay_causal_close_timestamp()
+            .or_else(|| self.candles.last().map(|c| c.timestamp))
+            .unwrap_or(0);
+        let id = self.journal.record_trade_plan(
+            &self.symbol,
+            &plan,
+            causal_ts,
+            self.journal_draft_setup,
+            self.journal_draft_conviction,
+            self.journal_draft_checklist,
+            &self.journal_draft_note,
+        );
+        self.last_journal_status = Some((
+            false,
+            format!(
+                "Logged Plan #{id} ({} {} · {:.2}R net)",
+                self.symbol,
+                plan.side.short_label(),
+                plan.net_r_multiple
+            ),
+        ));
+        Some(id)
+    }
+
+    /// Idempotently synchronizes closed Paper Trading trades for the active symbol into the Journal.
+    pub fn sync_paper_trades_to_journal(&mut self) -> usize {
+        let venue = self.active_exchange_venue();
+        let added = self.journal.sync_paper_closed_trades(
+            &self.symbol,
+            venue,
+            self.trading.closed_trades(),
+        );
+        self.last_journal_status = Some((
+            false,
+            format!(
+                "Synced Paper Trades ({added} new, {} total closed)",
+                self.trading.closed_trades().len()
+            ),
+        ));
+        added
+    }
+
+    /// Idempotently imports up to `max_import` causal Strategy Backtest trades into the Journal.
+    pub fn import_backtest_trades_to_journal(&mut self, max_import: usize) -> usize {
+        self.backtest_config.sanitize();
+        self.sync_backtest_causal();
+        let on_demand_bt;
+        let bt = if let Some(ref cached) = self.backtest_result {
+            cached
+        } else {
+            let opts = BacktestRunOptions {
+                replay_cutoff_timestamp: self.replay_causal_close_timestamp(),
+                incomplete_tail_bar: self.is_active_tail_incomplete(),
+            };
+            on_demand_bt = crate::backtest::run_backtest_with_options(
+                &self.symbol,
+                self.active_timeframe,
+                &self.candles,
+                &self.backtest_config,
+                opts,
+            );
+            &on_demand_bt
+        };
+        let venue = self.active_exchange_venue();
+        let setup_hint = match bt.config.preset {
+            StrategyPresetKind::SmaEmaTrendCross => SetupTag::TrendPullback,
+            StrategyPresetKind::RsiMeanReversion => SetupTag::MeanReversion,
+            StrategyPresetKind::MacdMomentum => SetupTag::MomentumContinuation,
+            StrategyPresetKind::BollingerSqueezeBreakout
+            | StrategyPresetKind::DonchianAtrBreakout => SetupTag::SqueezeBreakout,
+            StrategyPresetKind::RsiBollingerConfluence => SetupTag::SupportBounce,
+        };
+        let added = self.journal.import_backtest_trades(
+            &self.symbol,
+            venue,
+            bt.config.preset.short_label(),
+            setup_hint,
+            &bt.trades,
+            max_import,
+        );
+        self.last_journal_status = Some((
+            false,
+            format!("Imported {added} causal backtest trades into Journal"),
+        ));
+        added
+    }
+
+    /// Generates and caches the causally gated RFC-4180 CSV export of [`SumiWorkstationApp::journal`].
+    pub fn export_journal_csv_causal(&mut self) -> String {
+        let cutoff = self.replay_causal_close_timestamp();
+        let csv = self.journal.export_csv(cutoff);
+        let rows = self.journal.visible_entries(cutoff).len();
+        self.last_exported_journal_doc = Some(csv.clone());
+        self.last_journal_status = Some((
+            false,
+            format!("Copied {rows} causal journal entries as CSV"),
+        ));
+        csv
+    }
+
+    /// Generates and caches the causally gated Markdown debrief report of [`SumiWorkstationApp::journal`].
+    pub fn export_journal_markdown_causal(&mut self) -> String {
+        let cutoff = self.replay_causal_close_timestamp();
+        let md = self.journal.export_markdown(cutoff);
+        let rows = self.journal.visible_entries(cutoff).len();
+        self.last_exported_journal_doc = Some(md.clone());
+        self.last_journal_status = Some((
+            false,
+            format!("Copied {rows} causal journal entries as Markdown"),
+        ));
+        md
+    }
+
+    /// Opens the right-dock `Risk Planner & Journal` tab and syncs any selected `RiskRewardBox`.
+    pub fn open_journal_tab(&mut self) {
+        self.show_journal_panel = true;
+        self.right_dock_tab = RightDockTab::Journal;
+        let _ = self.sync_planner_from_selected_rr_box();
+    }
+
+    /// Runs `K`-fold Rolling or Anchored Walk-Forward Optimization causally on the active series (`Milestone R10`).
+    pub fn run_active_walk_forward(&mut self) {
+        self.backtest_config.sanitize();
+        self.wf_config.sanitize();
+        let replay_close_cutoff = self.replay_causal_close_timestamp();
+        let incomplete_tail = self.is_active_tail_incomplete();
+        let cfg_digest = compute_backtest_config_digest(&self.backtest_config);
+        let wf_digest = compute_walk_forward_config_digest(&self.wf_config);
+        let last_ts = self.candles.last().map(|c| c.timestamp);
+        let opts = BacktestRunOptions {
+            replay_cutoff_timestamp: replay_close_cutoff,
+            incomplete_tail_bar: incomplete_tail,
+        };
+        let rep = run_walk_forward_validation(
+            &self.symbol,
+            self.active_timeframe,
+            &self.candles,
+            &self.backtest_config,
+            self.wf_config,
+            opts,
+        );
+        self.walk_forward_report = Some(rep);
+        self.wf_synced_key = Some((
+            self.dataset_generation,
+            self.candles.len(),
+            last_ts,
+            replay_close_cutoff,
+            incomplete_tail,
+            cfg_digest,
+            wf_digest,
+        ));
+        if self.equity_pane_source == EquityPaneSource::WalkForwardOos {
+            self.viewport.equity_price_scale.reset_auto_scale();
+        }
+    }
+
+    /// Runs causal Multi-Asset Portfolio Simulation across `VN30 (8)` or `All 13` feeds (`Milestone R10`).
+    pub fn run_active_portfolio_backtest(&mut self) {
+        self.ensure_watchlist_universe_loaded();
+        self.backtest_config.sanitize();
+        let replay_close_cutoff = self.replay_causal_close_timestamp();
+        let cfg_digest = compute_backtest_config_digest(&self.backtest_config);
+
+        let feeds: Vec<WatchlistFeedEntry> = if self.data_source == DataSourcePreset::CustomFile
+            && !self.custom_peer_feeds.is_empty()
+        {
+            self.custom_peer_feeds.clone()
+        } else {
+            let mut list = self.watchlist_universe.clone();
+            let active_key = self.current_instrument_key();
+            if !list.iter().any(|e| e.instrument_id == active_key) && !self.base_candles.is_empty()
+            {
+                list.push(WatchlistFeedEntry {
+                    instrument_id: active_key,
+                    preset: self.data_source,
+                    symbol: self.symbol.clone(),
+                    base_timeframe: self.base_timeframe,
+                    candles: self.base_candles.clone(),
+                });
+            }
+            list
+        };
+
+        let effective_filter = if self.data_source == DataSourcePreset::CustomFile
+            && !self.custom_peer_feeds.is_empty()
+        {
+            PortfolioUniverseFilter::AllUniverseFeeds
+        } else {
+            self.portfolio_universe_filter
+        };
+
+        let rep = run_portfolio_backtest(
+            &feeds,
+            self.active_timeframe,
+            &self.backtest_config,
+            effective_filter,
+            self.portfolio_weighting,
+            replay_close_cutoff,
+        );
+        self.portfolio_report = Some(rep);
+        self.portfolio_synced_key = Some((
+            self.current_instrument_key(),
+            self.dataset_generation,
+            self.active_timeframe,
+            replay_close_cutoff,
+            cfg_digest,
+            self.portfolio_universe_filter,
+            self.portfolio_weighting,
+        ));
+        self.portfolio_mapped_curve = None;
+        self.refresh_portfolio_mapped_curve();
+        if self.equity_pane_source == EquityPaneSource::MultiAssetPortfolio {
+            self.viewport.equity_price_scale.reset_auto_scale();
+        }
+    }
+
+    fn refresh_portfolio_mapped_curve(&mut self) {
+        let Some(ref port) = self.portfolio_report else {
+            self.portfolio_mapped_curve = None;
+            return;
+        };
+        let last_ts = self.candles.last().map(|c| c.timestamp);
+        let replay_close_cutoff = self.replay_causal_close_timestamp();
+        if let Some(ref cached) = self.portfolio_mapped_curve
+            && cached.dataset_generation == self.dataset_generation
+            && cached.timeframe == self.active_timeframe
+            && cached.replay_close_cutoff == replay_close_cutoff
+            && cached.candle_len == self.candles.len()
+            && cached.last_timestamp == last_ts
+        {
+            return;
+        }
+        let (eq_vals, eq_idx, uw_vals, _) = map_equity_curve_to_candles(
+            &port.portfolio_equity_curve,
+            &self.candles,
+            self.active_timeframe,
+            replay_close_cutoff,
+        );
+        let title = format!(
+            "PORT {} · {}",
+            port.universe_filter.short_label(),
+            port.weighting.short_label()
+        );
+        self.portfolio_mapped_curve = Some(MappedPortfolioCurveCache {
+            dataset_generation: self.dataset_generation,
+            timeframe: self.active_timeframe,
+            replay_close_cutoff,
+            candle_len: self.candles.len(),
+            last_timestamp: last_ts,
+            title_label: title,
+            baseline_cash: port.initial_capital,
+            equity_values: eq_vals,
+            equity_idx: eq_idx,
+            underwater_values: uw_vals,
+        });
     }
 
     /// Arms a horizontal [`AlertCondition::PriceLevel`] alert at the current causal frontier.
@@ -3165,6 +4110,7 @@ impl SumiWorkstationApp {
             DrawingTool::Ray,
             DrawingTool::Rectangle,
             DrawingTool::FibonacciRetracement,
+            DrawingTool::RiskRewardBox,
         ] {
             push_scored(
                 PaletteCategory::Drawing,
@@ -3235,6 +4181,48 @@ impl SumiWorkstationApp {
             "paper trade ticket order blotter position equity".to_owned(),
             PaletteAction::OpenTradingTab,
         );
+        let j_vis = self
+            .journal
+            .visible_entries(self.replay_causal_close_timestamp())
+            .len();
+        push_scored(
+            PaletteCategory::Trading,
+            "Open Risk Planner & Structured Trade Journal".to_owned(),
+            format!(
+                "{} microstructure · {j_vis} causal journal entries",
+                self.active_exchange_venue().short_label()
+            ),
+            "risk planner position sizing hose lot t+2 ceiling floor journal sqn mistake"
+                .to_owned(),
+            PaletteAction::OpenJournalTab,
+        );
+        push_scored(
+            PaletteCategory::Drawing,
+            "Draw On-Chart R:R Position Box from Risk Planner".to_owned(),
+            format!(
+                "Create or update {} Risk-Reward Box on Main pane",
+                self.risk_plan_input.side.short_label()
+            ),
+            "draw risk reward box rr planner entry stop target".to_owned(),
+            PaletteAction::DrawRiskRewardFromPlanner,
+        );
+        push_scored(
+            PaletteCategory::Trading,
+            "Journal: Sync Closed Paper Trades".to_owned(),
+            format!(
+                "Import {} closed paper trades idempotently",
+                self.trading.closed_trades().len()
+            ),
+            "journal sync import paper trades closed".to_owned(),
+            PaletteAction::SyncPaperTradesToJournal,
+        );
+        push_scored(
+            PaletteCategory::Trading,
+            "Journal: Copy Causal CSV Export".to_owned(),
+            format!("Export {j_vis} causally visible entries (RFC-4180 formula-safe)"),
+            "journal export copy csv spreadsheet".to_owned(),
+            PaletteAction::ExportJournalCsv,
+        );
         push_scored(
             PaletteCategory::Backtest,
             "Open Strategy Backtest Lab & Tearsheet".to_owned(),
@@ -3289,6 +4277,34 @@ impl SumiWorkstationApp {
             ),
             "backtest universe battle multi symbol compare watchlist".to_owned(),
             PaletteAction::RunUniverseStrategyBattle,
+        );
+        push_scored(
+            PaletteCategory::Backtest,
+            format!(
+                "Run {}-Fold Walk-Forward Validation ({})",
+                self.wf_config.fold_count,
+                if self.wf_config.anchored {
+                    "Anchored"
+                } else {
+                    "Rolling"
+                }
+            ),
+            "Causal IS->OOS stitched equity curve, Pardo WFE & parameter stability".to_owned(),
+            "walk forward wfo oos rolling anchored efficiency robustness".to_owned(),
+            PaletteAction::RunWalkForwardValidation,
+        );
+        push_scored(
+            PaletteCategory::Backtest,
+            format!(
+                "Run Multi-Asset Portfolio Simulation ({})",
+                self.portfolio_universe_filter.short_label()
+            ),
+            format!(
+                "{} allocation · Plot combined portfolio equity curve",
+                self.portfolio_weighting.short_label()
+            ),
+            "portfolio multi asset vn30 equal weight inverse volatility diversification".to_owned(),
+            PaletteAction::RunPortfolioBacktest,
         );
         for preset in StrategyPresetKind::ALL {
             push_scored(
@@ -3439,6 +4455,9 @@ impl SumiWorkstationApp {
                 self.show_trading_panel = true;
                 self.right_dock_tab = RightDockTab::Trading;
             }
+            PaletteAction::OpenJournalTab => {
+                self.open_journal_tab();
+            }
             PaletteAction::OpenStrategyLab => {
                 self.open_strategy_lab();
             }
@@ -3468,6 +4487,30 @@ impl SumiWorkstationApp {
                 self.open_strategy_lab();
                 self.strategy_lab_tab = StrategyLabSubTab::Battle;
                 self.run_universe_strategy_battle();
+            }
+            PaletteAction::RunWalkForwardValidation => {
+                self.open_strategy_lab();
+                self.strategy_lab_tab = StrategyLabSubTab::WalkForward;
+                self.equity_pane_source = EquityPaneSource::WalkForwardOos;
+                self.run_active_walk_forward();
+                self.viewport.equity_price_scale.reset_auto_scale();
+            }
+            PaletteAction::RunPortfolioBacktest => {
+                self.open_strategy_lab();
+                self.strategy_lab_tab = StrategyLabSubTab::WalkForward;
+                self.equity_pane_source = EquityPaneSource::MultiAssetPortfolio;
+                self.run_active_portfolio_backtest();
+                self.viewport.equity_price_scale.reset_auto_scale();
+            }
+            PaletteAction::DrawRiskRewardFromPlanner => {
+                let _ = self.draw_or_update_rr_box_from_planner();
+            }
+            PaletteAction::SyncPaperTradesToJournal => {
+                self.open_journal_tab();
+                let _ = self.sync_paper_trades_to_journal();
+            }
+            PaletteAction::ExportJournalCsv => {
+                let _ = self.export_journal_csv_causal();
             }
             PaletteAction::QuickPriceAlert { price, direction } => {
                 let _ = self.add_quick_price_alert(price, direction);
@@ -3638,7 +4681,9 @@ fn compute_drawings_alert_digest(store: &DrawingStore) -> u64 {
                 mix(&mut h, through.value.to_bits());
                 mix(&mut h, through.timestamp.map_or(u64::MAX, f64::to_bits));
             }
-            DrawingGeometry::Rectangle { .. } | DrawingGeometry::FibonacciRetracement { .. } => {}
+            DrawingGeometry::Rectangle { .. }
+            | DrawingGeometry::FibonacciRetracement { .. }
+            | DrawingGeometry::RiskRewardBox { .. } => {}
         }
     }
     h
@@ -3770,6 +4815,150 @@ fn compute_backtest_config_digest(cfg: &BacktestConfig) -> u64 {
     mix(&mut h, cfg.lot_step.to_bits());
     mix_opt(&mut h, cfg.in_sample_split_pct);
     h
+}
+
+fn compute_walk_forward_config_digest(wf: &WalkForwardConfig) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325_u64;
+    let mix = |acc: &mut u64, val: u64| {
+        for b in val.to_le_bytes() {
+            *acc ^= u64::from(b);
+            *acc = acc.wrapping_mul(0x0100_0000_01b3);
+        }
+    };
+    mix(&mut h, wf.fold_count as u64);
+    mix(&mut h, wf.in_sample_ratio.to_bits());
+    mix(&mut h, u64::from(wf.anchored));
+    mix(&mut h, wf.ranking_metric as u64);
+    h
+}
+
+fn sanitize_persisted_trade_plan_input(inp: &mut TradePlanInput) {
+    if !inp.venue.allows_short() {
+        inp.side = PositionSide::Long;
+    }
+    if !inp.account_equity.is_finite() || inp.account_equity <= 0.0 {
+        inp.account_equity = 100_000.0;
+    } else {
+        inp.account_equity = inp.account_equity.clamp(10.0, 1.0e12);
+    }
+    if !inp.available_cash.is_finite() || inp.available_cash <= 0.0 {
+        inp.available_cash = inp.account_equity;
+    } else {
+        inp.available_cash = inp.available_cash.clamp(1.0, 1.0e12);
+    }
+    if !inp.leverage.is_finite() || inp.leverage <= 0.0 {
+        inp.leverage = 1.0;
+    } else {
+        inp.leverage = inp.leverage.clamp(0.1, 20.0);
+    }
+    if !inp.risk_pct.is_finite() || inp.risk_pct <= 0.0 {
+        inp.risk_pct = 1.0;
+    } else {
+        inp.risk_pct = inp.risk_pct.clamp(0.05, 50.0);
+    }
+    if !inp.entry_price.is_finite() || !(1.0e-8..=1.0e12).contains(&inp.entry_price) {
+        inp.entry_price = 100.0;
+    }
+    if !inp.stop_loss.is_finite() || !(1.0e-8..=1.0e12).contains(&inp.stop_loss) {
+        inp.stop_loss = match inp.side {
+            PositionSide::Long => (inp.entry_price * 0.96).max(1.0e-8),
+            PositionSide::Short => (inp.entry_price * 1.04).min(1.0e12),
+        };
+    }
+    if !inp.target_price.is_finite() || !(1.0e-8..=1.0e12).contains(&inp.target_price) {
+        inp.target_price = match inp.side {
+            PositionSide::Long => (inp.entry_price * 1.08).min(1.0e12),
+            PositionSide::Short => (inp.entry_price * 0.92).max(1.0e-8),
+        };
+    }
+    match inp.side {
+        PositionSide::Long => {
+            if inp.stop_loss >= inp.entry_price {
+                inp.stop_loss = (inp.entry_price * 0.96).max(1.0e-8);
+            }
+            if inp.target_price <= inp.entry_price {
+                inp.target_price = (inp.entry_price * 1.08).min(1.0e12);
+            }
+        }
+        PositionSide::Short => {
+            if inp.stop_loss <= inp.entry_price {
+                inp.stop_loss = (inp.entry_price * 1.04).min(1.0e12);
+            }
+            if inp.target_price >= inp.entry_price {
+                inp.target_price = (inp.entry_price * 0.92).max(1.0e-8);
+            }
+        }
+    }
+    inp.reference_price = inp
+        .reference_price
+        .filter(|v| v.is_finite() && (1.0e-8..=1.0e12).contains(v));
+    if !inp.contract_multiplier.is_finite() || inp.contract_multiplier <= 0.0 {
+        inp.contract_multiplier = 1.0;
+    } else {
+        inp.contract_multiplier = inp.contract_multiplier.clamp(1.0e-4, 1.0e9);
+    }
+    if !inp.initial_margin_pct.is_finite() || inp.initial_margin_pct <= 0.0 {
+        inp.initial_margin_pct = inp.venue.default_initial_margin_pct();
+    } else {
+        inp.initial_margin_pct = inp.initial_margin_pct.clamp(1.0, 100.0);
+    }
+    if !inp.max_position_pct.is_finite() || inp.max_position_pct <= 0.0 {
+        inp.max_position_pct = 100.0;
+    } else {
+        inp.max_position_pct = inp.max_position_pct.clamp(1.0, 1_000.0);
+    }
+    inp.entry_timestamp = inp
+        .entry_timestamp
+        .filter(|t| (-4_102_444_800..=32_503_680_000).contains(t));
+    if !inp.commission_bps.is_finite() || !(0.0..1_000.0).contains(&inp.commission_bps) {
+        inp.commission_bps = inp.venue.default_commission_bps();
+    }
+    if !inp.tax_sell_bps.is_finite() || !(0.0..1_000.0).contains(&inp.tax_sell_bps) {
+        inp.tax_sell_bps = inp.venue.default_tax_sell_bps();
+    }
+    if !inp.slippage_bps.is_finite() || !(0.0..1_000.0).contains(&inp.slippage_bps) {
+        inp.slippage_bps = 5.0;
+    }
+}
+
+fn format_clean_qty(qty: f64) -> String {
+    if !qty.is_finite() || qty <= 0.0 {
+        return "0".to_owned();
+    }
+    if (qty - qty.round()).abs() < 1.0e-6 {
+        format!("{:.0}", qty.round())
+    } else {
+        let s = format!("{qty:.4}");
+        s.trim_end_matches('0').trim_end_matches('.').to_owned()
+    }
+}
+
+fn format_venue_price(price: f64, venue: ExchangeVenue) -> String {
+    if !price.is_finite() {
+        return "0.00".to_owned();
+    }
+    match venue {
+        ExchangeVenue::Hose | ExchangeVenue::Hnx | ExchangeVenue::Upcom => {
+            if price >= 1_000.0 {
+                format!("{price:.0}")
+            } else {
+                format!("{price:.2}")
+            }
+        }
+        ExchangeVenue::Vn30Futures => format!("{price:.1}"),
+        ExchangeVenue::VnIndexBenchmark | ExchangeVenue::UsEquities => format!("{price:.2}"),
+        ExchangeVenue::CryptoSpotPerp => {
+            if price >= 100.0 {
+                format!("{price:.2}")
+            } else if price >= 1.0 {
+                format!("{price:.4}")
+            } else if price >= 0.01 {
+                format!("{price:.6}")
+            } else {
+                format!("{price:.8}")
+            }
+        }
+    }
 }
 
 fn default_ticket_qty_string(mark_price: f64, initial_cash: f64) -> String {
@@ -4177,6 +5366,25 @@ impl SumiWorkstationApp {
                         self.viewport.equity_price_scale.reset_auto_scale();
                     }
 
+                    let j_vis_top = self
+                        .journal
+                        .visible_entries(self.replay_causal_close_timestamp())
+                        .len();
+                    let j_lbl = if j_vis_top == 0 {
+                        "Risk & Journal".to_owned()
+                    } else {
+                        format!("Journal ({j_vis_top})")
+                    };
+                    if indicator_toggle_pill(
+                        ui,
+                        &mut self.show_journal_panel,
+                        &j_lbl,
+                        Color32::from_rgb(38, 198, 218),
+                    ) && self.show_journal_panel
+                    {
+                        self.open_journal_tab();
+                    }
+
                     let mut palette_open = self.command_palette.open;
                     if indicator_toggle_pill(
                         ui,
@@ -4354,6 +5562,7 @@ impl SumiWorkstationApp {
                         DrawingTool::Ray,
                         DrawingTool::Rectangle,
                         DrawingTool::FibonacciRetracement,
+                        DrawingTool::RiskRewardBox,
                     ] {
                         let is_active = self.drawings.active_tool == tool;
                         if ui.selectable_label(is_active, tool.short_label()).clicked() {
@@ -4456,6 +5665,18 @@ impl SumiWorkstationApp {
                                 .clicked()
                             {
                                 let _ = self.drawings.toggle_selected_fib_extend();
+                            }
+                        }
+                        if matches!(sel.geometry, DrawingGeometry::RiskRewardBox { .. }) {
+                            if ui
+                                .add_enabled(!sel.locked, Button::new("Flip L/S"))
+                                .clicked()
+                            {
+                                let _ = self.drawings.reverse_selected_risk_reward();
+                                let _ = self.sync_planner_from_selected_rr_box();
+                            }
+                            if ui.button("-> Planner").clicked() {
+                                self.open_journal_tab();
                             }
                         }
                         let lock_label = if sel.locked { "Unlock" } else { "Lock" };
@@ -4561,7 +5782,7 @@ impl SumiWorkstationApp {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(format!(
-                                    "R09  |  {} ({}->{})  |  RPL: {replay_tag}  |  ALT: {armed_alerts}A/{trig_events}T  |  EQ: ${:.0} ({:+.0}){bt_tag}  |  {}P/{}D  |  BARS: {}/{} ({first_date}..{last_date}) {}x  |  {scale_mode}({auto_tag})  |  {:.0}×{:.0}",
+                                    "R10  |  {} ({}->{})  |  RPL: {replay_tag}  |  ALT: {armed_alerts}A/{trig_events}T  |  EQ: ${:.0} ({:+.0}){bt_tag}  |  {}P/{}D  |  BARS: {}/{} ({first_date}..{last_date}) {}x  |  {scale_mode}({auto_tag})  |  {:.0}×{:.0}",
                                     self.data_source.short_label(),
                                     self.base_timeframe,
                                     self.active_timeframe,
@@ -4585,7 +5806,7 @@ impl SumiWorkstationApp {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(format!(
-                                    "R09  |  RPL: {replay_tag}  |  ALT: {armed_alerts} armed{bt_tag}  |  BARS: {} ({first_date}..{last_date})",
+                                    "R10  |  RPL: {replay_tag}  |  ALT: {armed_alerts} armed{bt_tag}  |  BARS: {} ({first_date}..{last_date})",
                                     self.candles.len()
                                 ))
                                 .monospace()
@@ -4619,29 +5840,33 @@ impl SumiWorkstationApp {
                 });
         }
 
-        // 3. Optional Unified Right-Side Paper Trading, Alerts & Strategy Lab Dock (`Milestones R07–R09`)
-        if self.show_trading_panel || self.show_alerts_panel || self.show_strategy_panel {
+        // 3. Optional Unified Right-Side Paper Trading, Alerts, Strategy Lab & Journal Dock (`Milestones R07–R10`)
+        if self.show_trading_panel
+            || self.show_alerts_panel
+            || self.show_strategy_panel
+            || self.show_journal_panel
+        {
+            let first_enabled_tab = if self.show_journal_panel {
+                RightDockTab::Journal
+            } else if self.show_strategy_panel {
+                RightDockTab::StrategyLab
+            } else if self.show_trading_panel {
+                RightDockTab::Trading
+            } else {
+                RightDockTab::Alerts
+            };
             match self.right_dock_tab {
                 RightDockTab::Trading if !self.show_trading_panel => {
-                    self.right_dock_tab = if self.show_strategy_panel {
-                        RightDockTab::StrategyLab
-                    } else {
-                        RightDockTab::Alerts
-                    };
+                    self.right_dock_tab = first_enabled_tab;
                 }
                 RightDockTab::Alerts if !self.show_alerts_panel => {
-                    self.right_dock_tab = if self.show_strategy_panel {
-                        RightDockTab::StrategyLab
-                    } else {
-                        RightDockTab::Trading
-                    };
+                    self.right_dock_tab = first_enabled_tab;
                 }
                 RightDockTab::StrategyLab if !self.show_strategy_panel => {
-                    self.right_dock_tab = if self.show_trading_panel {
-                        RightDockTab::Trading
-                    } else {
-                        RightDockTab::Alerts
-                    };
+                    self.right_dock_tab = first_enabled_tab;
+                }
+                RightDockTab::Journal if !self.show_journal_panel => {
+                    self.right_dock_tab = first_enabled_tab;
                 }
                 _ => {}
             }
@@ -4651,13 +5876,15 @@ impl SumiWorkstationApp {
                 .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE));
 
             let win_w = ui.ctx().content_rect().width();
-            let (panel_id, def_w, min_w, max_w) =
-                if self.right_dock_tab == RightDockTab::StrategyLab {
-                    let def = if win_w < 1060.0 { 276.0 } else { 306.0 };
-                    ("strategy_lab_panel", def, 244.0, 380.0)
-                } else {
+            let (panel_id, def_w, min_w, max_w) = match self.right_dock_tab {
+                RightDockTab::StrategyLab | RightDockTab::Journal => {
+                    let def = if win_w < 1060.0 { 282.0 } else { 312.0 };
+                    ("strategy_lab_panel", def, 248.0, 386.0)
+                }
+                RightDockTab::Trading | RightDockTab::Alerts => {
                     ("paper_trading_panel", 258.0, 222.0, 320.0)
-                };
+                }
+            };
 
             egui::Panel::right(panel_id)
                 .resizable(true)
@@ -4702,6 +5929,48 @@ impl SumiWorkstationApp {
                     !self.alerts.rules.is_empty() || !self.alerts.triggers.is_empty();
                 let has_backtest_visuals =
                     self.show_strategy_panel || self.show_equity_pane || self.show_backtest_trades;
+                let wf_title_str = self.walk_forward_report.as_ref().map(|wf| {
+                    format!(
+                        "WFO {}F {} · {}",
+                        wf.wf_config.fold_count,
+                        if wf.wf_config.anchored { "ANC" } else { "ROL" },
+                        wf.preset.short_label()
+                    )
+                });
+                let equity_override = if !self.show_equity_pane && !self.show_backtest_trades {
+                    None
+                } else {
+                    match self.equity_pane_source {
+                        EquityPaneSource::SingleAssetBacktest => None,
+                        EquityPaneSource::WalkForwardOos => self
+                            .walk_forward_report
+                            .as_ref()
+                            .zip(wf_title_str.as_deref())
+                            .map(|(wf, title)| EquityCurveOverlay {
+                                title_label: title,
+                                baseline_cash: self.backtest_config.initial_cash,
+                                equity_values: &wf.stitched_equity_values,
+                                equity_idx: &wf.stitched_equity_idx,
+                                underwater_values: &wf.stitched_underwater_values,
+                                bar_count: wf.total_bars,
+                                split_bar_index: wf.first_oos_bar_index,
+                                trades: Some(&wf.stitched_oos_trades),
+                            }),
+                        EquityPaneSource::MultiAssetPortfolio => self
+                            .portfolio_mapped_curve
+                            .as_ref()
+                            .map(|mc| EquityCurveOverlay {
+                                title_label: &mc.title_label,
+                                baseline_cash: mc.baseline_cash,
+                                equity_values: &mc.equity_values,
+                                equity_idx: &mc.equity_idx,
+                                underwater_values: &mc.underwater_values,
+                                bar_count: mc.candle_len,
+                                split_bar_index: None,
+                                trades: Some(&[]),
+                            }),
+                    }
+                };
                 let overlay = ChartReplayTradingOverlay {
                     replay_active: self.replay.is_active(),
                     selecting_cut_bar: self.replay.selecting_cut_bar,
@@ -4711,6 +5980,7 @@ impl SumiWorkstationApp {
                     backtest_result: has_backtest_visuals
                         .then_some(self.backtest_result.as_ref())
                         .flatten(),
+                    equity_override,
                     show_equity_pane: self.show_equity_pane,
                     show_backtest_trades_on_chart: self.show_backtest_trades,
                     focused_backtest_trade_id: self.focused_backtest_trade_id,
@@ -4734,6 +6004,7 @@ impl SumiWorkstationApp {
                     &mut self.drawings,
                     overlay,
                 );
+                self.auto_sync_planner_if_rr_box_changed();
                 clicked_cut_idx = self.last_report.and_then(|r| r.clicked_cut_bar_index);
                 if compute_drawings_alert_digest(&self.drawings) != pre_draw_digest {
                     self.sync_alerts_causal();
@@ -5971,10 +7242,14 @@ impl SumiWorkstationApp {
             .iter()
             .filter(|r| r.is_causally_visible(cutoff))
             .count();
+        let j_vis = self
+            .journal
+            .visible_entries(self.replay_causal_close_timestamp())
+            .len();
 
         ui.horizontal(|ui| {
             let sp_x = ui.spacing().item_spacing.x;
-            let tab_w = ((ui.available_width() - 2.0 * sp_x - 2.0) / 3.0).max(56.0);
+            let tab_w = ((ui.available_width() - 3.0 * sp_x - 2.0) / 4.0).max(46.0);
             for (tab, lbl, accent) in [
                 (
                     RightDockTab::Trading,
@@ -5986,18 +7261,27 @@ impl SumiWorkstationApp {
                     if vis_rules == 0 {
                         "Alerts".to_owned()
                     } else {
-                        format!("Alerts({armed_n}/{vis_rules})")
+                        format!("Alt({armed_n}/{vis_rules})")
                     },
                     palette::ALERT_ARMED_AMBER,
                 ),
                 (
                     RightDockTab::StrategyLab,
-                    "Strategy".to_owned(),
+                    "Strat".to_owned(),
                     palette::EQUITY_ABOVE_LINE,
+                ),
+                (
+                    RightDockTab::Journal,
+                    if j_vis == 0 {
+                        "Risk/Jrn".to_owned()
+                    } else {
+                        format!("Jrn({j_vis})")
+                    },
+                    Color32::from_rgb(16, 185, 129),
                 ),
             ] {
                 let selected = self.right_dock_tab == tab;
-                let btn = Button::new(RichText::new(lbl).monospace().strong().size(10.0).color(
+                let btn = Button::new(RichText::new(lbl).monospace().strong().size(9.8).color(
                     if selected {
                         Color32::WHITE
                     } else {
@@ -6028,6 +7312,9 @@ impl SumiWorkstationApp {
                             self.show_strategy_panel = true;
                             self.sync_backtest_causal();
                         }
+                        RightDockTab::Journal => {
+                            self.open_journal_tab();
+                        }
                     }
                 }
             }
@@ -6038,14 +7325,19 @@ impl SumiWorkstationApp {
             RightDockTab::Trading => self.render_paper_trading_panel(ui),
             RightDockTab::Alerts => self.render_alerts_panel(ui),
             RightDockTab::StrategyLab => self.render_strategy_lab_panel(ui),
+            RightDockTab::Journal => self.render_journal_panel(ui),
         }
     }
 
     fn render_strategy_lab_panel(&mut self, ui: &mut egui::Ui) {
         self.sync_backtest_causal();
         let pre_cfg_digest = compute_backtest_config_digest(&self.backtest_config);
+        let pre_wf_digest = compute_walk_forward_config_digest(&self.wf_config);
         let pre_ranking = self.sweep_ranking;
         let pre_sub_tab = self.strategy_lab_tab;
+        let pre_port_filter = self.portfolio_universe_filter;
+        let pre_port_wt = self.portfolio_weighting;
+        let pre_eq_src = self.equity_pane_source;
 
         let mut focus_trade_req: Option<u64> = None;
         let mut replay_trade_req: Option<u64> = None;
@@ -6054,6 +7346,8 @@ impl SumiWorkstationApp {
         let mut select_symbol_req: Option<(DataSourcePreset, String)> = None;
         let mut force_sweep = false;
         let mut force_battle = false;
+        let mut force_wfo = false;
+        let mut force_portfolio = false;
 
         egui::ScrollArea::vertical()
             .id_salt("sumi_strategy_lab_scroll")
@@ -6485,27 +7779,28 @@ impl SumiWorkstationApp {
                         });
                     });
 
-                // 4-Way Sub-Tab Switcher (`Stats` | `Trades` | `Sweep` | `Battle`)
+                // 5-Way Sub-Tab Switcher (`Stats` | `Trd(N)` | `Sweep` | `Battle` | `WFO`)
                 let trade_n = self
                     .backtest_result
                     .as_ref()
                     .map_or(0, |r| r.trades.len());
                 ui.horizontal(|ui| {
                     let sp_x = ui.spacing().item_spacing.x;
-                    let w4 = ((ui.available_width() - 3.0 * sp_x - 2.0) / 4.0).max(46.0);
+                    let w5 = ((ui.available_width() - 4.0 * sp_x - 2.0) / 5.0).max(38.0);
                     for sub in StrategyLabSubTab::ALL {
                         let lbl = match sub {
                             StrategyLabSubTab::Tearsheet => "Stats".to_owned(),
                             StrategyLabSubTab::Trades => format!("Trd({trade_n})"),
                             StrategyLabSubTab::Sweep => "Sweep".to_owned(),
                             StrategyLabSubTab::Battle => "Battle".to_owned(),
+                            StrategyLabSubTab::WalkForward => "WFO".to_owned(),
                         };
                         let sel = self.strategy_lab_tab == sub;
                         let btn = Button::new(
                             RichText::new(lbl)
                                 .monospace()
                                 .strong()
-                                .size(9.8)
+                                .size(9.5)
                                 .color(if sel {
                                     Color32::WHITE
                                 } else {
@@ -6525,12 +7820,42 @@ impl SumiWorkstationApp {
                                 palette::BORDER_SUBTLE
                             },
                         ))
-                        .min_size(Vec2::new(w4, 21.0));
+                        .min_size(Vec2::new(w5, 21.0));
                         if ui.add(btn).clicked() {
                             self.strategy_lab_tab = sub;
                         }
                     }
                 });
+
+                if self.show_equity_pane {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(4.0, 2.0);
+                        ui.label(
+                            RichText::new("EQ PANE:")
+                                .monospace()
+                                .strong()
+                                .size(9.2)
+                                .color(palette::TEXT_MUTED),
+                        );
+                        for src in [
+                            EquityPaneSource::SingleAssetBacktest,
+                            EquityPaneSource::WalkForwardOos,
+                            EquityPaneSource::MultiAssetPortfolio,
+                        ] {
+                            let is_sel = self.equity_pane_source == src;
+                            if ui
+                                .selectable_label(
+                                    is_sel,
+                                    RichText::new(src.short_label()).monospace().size(9.4),
+                                )
+                                .clicked()
+                            {
+                                self.equity_pane_source = src;
+                                self.viewport.equity_price_scale.reset_auto_scale();
+                            }
+                        }
+                    });
+                }
 
                 match self.strategy_lab_tab {
                     StrategyLabSubTab::Tearsheet => {
@@ -7345,6 +8670,444 @@ impl SumiWorkstationApp {
                                 });
                         }
                     }
+                    StrategyLabSubTab::WalkForward => {
+                        // Card A: Rolling / Anchored Walk-Forward Optimization (`IS -> OOS`)
+                        Frame::new()
+                            .fill(Color32::from_rgb(17, 22, 32))
+                            .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                            .corner_radius(4.0)
+                            .inner_margin(Margin::symmetric(7, 6))
+                            .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new("WALK-FORWARD (IS -> OOS)")
+                                            .monospace()
+                                            .strong()
+                                            .size(10.0)
+                                            .color(palette::TEXT_PRIMARY),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui
+                                                .button(
+                                                    RichText::new("Plot OOS EQ")
+                                                        .monospace()
+                                                        .strong()
+                                                        .size(9.3)
+                                                        .color(palette::EQUITY_ABOVE_LINE),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.show_equity_pane = true;
+                                                self.equity_pane_source =
+                                                    EquityPaneSource::WalkForwardOos;
+                                                self.viewport
+                                                    .equity_price_scale
+                                                    .reset_auto_scale();
+                                                force_wfo = true;
+                                            }
+                                            if ui
+                                                .button(
+                                                    RichText::new("Run WFO")
+                                                        .monospace()
+                                                        .size(9.3),
+                                                )
+                                                .clicked()
+                                            {
+                                                force_wfo = true;
+                                            }
+                                        },
+                                    );
+                                });
+
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing = Vec2::new(4.0, 3.0);
+                                    ui.label(RichText::new("Folds:").monospace().size(9.4));
+                                    ui.add(
+                                        egui::DragValue::new(&mut self.wf_config.fold_count)
+                                            .range(2..=8)
+                                            .speed(0.2),
+                                    );
+                                    let mut is_pct = (self.wf_config.in_sample_ratio * 100.0)
+                                        .round()
+                                        .clamp(50.0, 85.0);
+                                    ui.label(RichText::new("IS%:").monospace().size(9.4));
+                                    if ui
+                                        .add(
+                                            egui::DragValue::new(&mut is_pct)
+                                                .range(50.0..=85.0)
+                                                .speed(1.0)
+                                                .suffix("%"),
+                                        )
+                                        .changed()
+                                    {
+                                        self.wf_config.in_sample_ratio =
+                                            (is_pct / 100.0).clamp(0.50, 0.85);
+                                    }
+                                    for (anchored, lbl) in [(false, "Rolling"), (true, "Anchored")]
+                                    {
+                                        if ui
+                                            .selectable_label(
+                                                self.wf_config.anchored == anchored,
+                                                RichText::new(lbl).monospace().size(9.3),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.wf_config.anchored = anchored;
+                                        }
+                                    }
+                                });
+
+                                if let Some(ref wf) = self.walk_forward_report {
+                                    let v_col = match wf.verdict {
+                                        WalkForwardVerdict::RobustOutOfSample => palette::BULLISH,
+                                        WalkForwardVerdict::ModerateDecay => {
+                                            palette::ALERT_ARMED_AMBER
+                                        }
+                                        WalkForwardVerdict::OverfitRegimeDecay
+                                        | WalkForwardVerdict::InsufficientData => palette::BEARISH,
+                                    };
+                                    let wfe_str = wf
+                                        .wfe_pct
+                                        .map_or_else(|| "-".to_owned(), |w| format!("{w:.0}%"));
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label(
+                                            RichText::new(wf.verdict.label())
+                                                .monospace()
+                                                .strong()
+                                                .size(9.8)
+                                                .color(v_col),
+                                        );
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "· WFE {wfe_str} · Stab {:.0}% · Prof {}/{}",
+                                                wf.param_stability_pct,
+                                                wf.profitable_folds,
+                                                wf.folds.len()
+                                            ))
+                                            .monospace()
+                                            .size(9.3)
+                                            .color(palette::TEXT_MUTED),
+                                        );
+                                    });
+
+                                    let oos_ts = &wf.stitched_oos_tearsheet;
+                                    let oos_col = if oos_ts.total_return_pct >= 0.0 {
+                                        palette::EQUITY_ABOVE_LINE
+                                    } else {
+                                        palette::EQUITY_BELOW_LINE
+                                    };
+                                    let sh_str = oos_ts
+                                        .sharpe_ratio
+                                        .map_or_else(|| "-".to_owned(), |v| format!("{v:.2}"));
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "Stitched OOS {:+.2}% · DD -{:.2}% · Sh {sh_str} · {} trd",
+                                            oos_ts.total_return_pct,
+                                            oos_ts.max_drawdown_pct,
+                                            wf.stitched_oos_trades.len()
+                                        ))
+                                        .monospace()
+                                        .strong()
+                                        .size(9.5)
+                                        .color(oos_col),
+                                    );
+
+                                    if !wf.folds.is_empty() {
+                                        ui.separator();
+                                        egui::Grid::new("sumi_wfo_folds_grid")
+                                            .striped(true)
+                                            .spacing([6.0, 2.5])
+                                            .show(ui, |ui| {
+                                                for hdr in ["Fold", "OOS", "Winner", "IS%", "OOS%"]
+                                                {
+                                                    ui.label(
+                                                        RichText::new(hdr)
+                                                            .monospace()
+                                                            .strong()
+                                                            .size(8.9)
+                                                            .color(palette::TEXT_MUTED),
+                                                    );
+                                                }
+                                                ui.end_row();
+                                                for fold in &wf.folds {
+                                                    ui.label(
+                                                        RichText::new(format!(
+                                                            "F{}",
+                                                            fold.fold_index
+                                                        ))
+                                                        .monospace()
+                                                        .size(9.0),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new(format!(
+                                                            "{}..{}",
+                                                            fold.oos_start_bar, fold.oos_end_bar
+                                                        ))
+                                                        .monospace()
+                                                        .size(8.9)
+                                                        .color(palette::TEXT_MUTED),
+                                                    );
+                                                    if ui
+                                                        .small_button(
+                                                            RichText::new(&fold.winning_label)
+                                                                .monospace()
+                                                                .size(8.9),
+                                                        )
+                                                        .on_hover_text(
+                                                            "Apply fold winning config to Strategy Lab",
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        apply_sweep_cfg =
+                                                            Some(fold.winning_config.clone());
+                                                    }
+                                                    ui.label(
+                                                        RichText::new(format!(
+                                                            "{:+.1}%",
+                                                            fold.is_tearsheet.total_return_pct
+                                                        ))
+                                                        .monospace()
+                                                        .size(9.0)
+                                                        .color(palette::TEXT_PRIMARY),
+                                                    );
+                                                    let f_col =
+                                                        if fold.oos_tearsheet.total_return_pct >= 0.0
+                                                        {
+                                                            palette::BULLISH
+                                                        } else {
+                                                            palette::BEARISH
+                                                        };
+                                                    ui.label(
+                                                        RichText::new(format!(
+                                                            "{:+.1}%",
+                                                            fold.oos_tearsheet.total_return_pct
+                                                        ))
+                                                        .monospace()
+                                                        .strong()
+                                                        .size(9.0)
+                                                        .color(f_col),
+                                                    );
+                                                    ui.end_row();
+                                                }
+                                            });
+                                    }
+                                }
+                            });
+
+                        // Card B: Multi-Asset Portfolio Simulation (`VN30 Basket` / `All 13 Feeds`)
+                        Frame::new()
+                            .fill(Color32::from_rgb(17, 22, 32))
+                            .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                            .corner_radius(4.0)
+                            .inner_margin(Margin::symmetric(7, 6))
+                            .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new("MULTI-ASSET PORTFOLIO")
+                                            .monospace()
+                                            .strong()
+                                            .size(10.0)
+                                            .color(palette::TEXT_PRIMARY),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui
+                                                .button(
+                                                    RichText::new("Plot Port EQ")
+                                                        .monospace()
+                                                        .strong()
+                                                        .size(9.3)
+                                                        .color(palette::TRADE_ENTRY_BLUE),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.show_equity_pane = true;
+                                                self.equity_pane_source =
+                                                    EquityPaneSource::MultiAssetPortfolio;
+                                                self.viewport
+                                                    .equity_price_scale
+                                                    .reset_auto_scale();
+                                                force_portfolio = true;
+                                            }
+                                            if ui
+                                                .button(
+                                                    RichText::new("Run Port")
+                                                        .monospace()
+                                                        .size(9.3),
+                                                )
+                                                .clicked()
+                                            {
+                                                force_portfolio = true;
+                                            }
+                                        },
+                                    );
+                                });
+
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing = Vec2::new(4.0, 3.0);
+                                    for filt in [
+                                        PortfolioUniverseFilter::Vn30EquitiesOnly,
+                                        PortfolioUniverseFilter::AllUniverseFeeds,
+                                    ] {
+                                        if ui
+                                            .selectable_label(
+                                                self.portfolio_universe_filter == filt,
+                                                RichText::new(filt.short_label())
+                                                    .monospace()
+                                                    .size(9.3),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.portfolio_universe_filter = filt;
+                                        }
+                                    }
+                                    ui.separator();
+                                    let is_eq = matches!(
+                                        self.portfolio_weighting,
+                                        PortfolioWeightingMode::EqualWeight
+                                    );
+                                    if ui
+                                        .selectable_label(
+                                            is_eq,
+                                            RichText::new("1/N Equal").monospace().size(9.3),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.portfolio_weighting =
+                                            PortfolioWeightingMode::EqualWeight;
+                                    }
+                                    if ui
+                                        .selectable_label(
+                                            !is_eq,
+                                            RichText::new("Inv-Vol(20)").monospace().size(9.3),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.portfolio_weighting =
+                                            PortfolioWeightingMode::CausalInverseVolatility {
+                                                lookback_bars: 20,
+                                            };
+                                    }
+                                });
+
+                                if let Some(ref port) = self.portfolio_report {
+                                    let pts = &port.portfolio_tearsheet;
+                                    let p_col = if pts.total_return_pct >= 0.0 {
+                                        palette::EQUITY_ABOVE_LINE
+                                    } else {
+                                        palette::EQUITY_BELOW_LINE
+                                    };
+                                    let p_sh = pts
+                                        .sharpe_ratio
+                                        .map_or_else(|| "-".to_owned(), |v| format!("{v:.2}"));
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "Port {:+.2}% · DD -{:.2}% · Sh {p_sh} ({} assets)",
+                                            pts.total_return_pct,
+                                            pts.max_drawdown_pct,
+                                            port.constituents.len()
+                                        ))
+                                        .monospace()
+                                        .strong()
+                                        .size(9.5)
+                                        .color(p_col),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "Avg Asset DD -{:.2}% -> Div DD Red {:+.1}%",
+                                            port.avg_constituent_max_dd_pct,
+                                            port.diversification_dd_reduction_pct
+                                        ))
+                                        .monospace()
+                                        .size(9.1)
+                                        .color(palette::TEXT_MUTED),
+                                    );
+
+                                    if !port.constituents.is_empty() {
+                                        ui.separator();
+                                        egui::Grid::new("sumi_portfolio_attrib_grid")
+                                            .striped(true)
+                                            .spacing([6.0, 2.5])
+                                            .show(ui, |ui| {
+                                                for hdr in ["Sym", "Wt%", "Ret%", "DD%", "Ctrb%"] {
+                                                    ui.label(
+                                                        RichText::new(hdr)
+                                                            .monospace()
+                                                            .strong()
+                                                            .size(8.9)
+                                                            .color(palette::TEXT_MUTED),
+                                                    );
+                                                }
+                                                ui.end_row();
+                                                for row in &port.constituents {
+                                                    ui.label(
+                                                        RichText::new(&row.symbol)
+                                                            .monospace()
+                                                            .strong()
+                                                            .size(9.0),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new(format!(
+                                                            "{:.1}%",
+                                                            row.final_weight_pct
+                                                        ))
+                                                        .monospace()
+                                                        .size(9.0)
+                                                        .color(palette::TEXT_MUTED),
+                                                    );
+                                                    let r_c = if row.standalone_return_pct >= 0.0 {
+                                                        palette::BULLISH
+                                                    } else {
+                                                        palette::BEARISH
+                                                    };
+                                                    ui.label(
+                                                        RichText::new(format!(
+                                                            "{:+.1}%",
+                                                            row.standalone_return_pct
+                                                        ))
+                                                        .monospace()
+                                                        .size(9.0)
+                                                        .color(r_c),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new(format!(
+                                                            "-{:.1}%",
+                                                            row.standalone_max_dd_pct
+                                                        ))
+                                                        .monospace()
+                                                        .size(9.0)
+                                                        .color(palette::TEXT_MUTED),
+                                                    );
+                                                    let c_col = if row
+                                                        .weighted_return_contribution_pct
+                                                        >= 0.0
+                                                    {
+                                                        palette::EQUITY_ABOVE_LINE
+                                                    } else {
+                                                        palette::EQUITY_BELOW_LINE
+                                                    };
+                                                    ui.label(
+                                                        RichText::new(format!(
+                                                            "{:+.2}%",
+                                                            row.weighted_return_contribution_pct
+                                                        ))
+                                                        .monospace()
+                                                        .strong()
+                                                        .size(9.0)
+                                                        .color(c_col),
+                                                    );
+                                                    ui.end_row();
+                                                }
+                                            });
+                                    }
+                                }
+                            });
+                    }
                 }
             });
 
@@ -7365,6 +9128,12 @@ impl SumiWorkstationApp {
         if force_battle {
             self.run_universe_strategy_battle();
         }
+        if force_wfo {
+            self.run_active_walk_forward();
+        }
+        if force_portfolio {
+            self.run_active_portfolio_backtest();
+        }
         if let Some(tid) = focus_trade_req {
             let _ = self.focus_backtest_trade(tid);
         }
@@ -7373,11 +9142,948 @@ impl SumiWorkstationApp {
         }
 
         self.backtest_config.sanitize();
+        self.wf_config.sanitize();
         if compute_backtest_config_digest(&self.backtest_config) != pre_cfg_digest
+            || compute_walk_forward_config_digest(&self.wf_config) != pre_wf_digest
             || self.sweep_ranking != pre_ranking
             || self.strategy_lab_tab != pre_sub_tab
+            || self.portfolio_universe_filter != pre_port_filter
+            || self.portfolio_weighting != pre_port_wt
+            || self.equity_pane_source != pre_eq_src
         {
             self.sync_backtest_causal();
+        }
+    }
+
+    fn render_journal_panel(&mut self, ui: &mut egui::Ui) {
+        self.auto_sync_planner_if_rr_box_changed();
+        let replay_cutoff = self.replay_causal_close_timestamp();
+        let active_venue = self.active_exchange_venue();
+        let inferred_venue =
+            ExchangeVenue::infer_from_symbol_and_preset(&self.symbol, self.data_source);
+        let daily_band = self.active_daily_price_band();
+
+        let mut action_from_box = false;
+        let mut action_snap_ticks = false;
+        let mut action_draw_rr = false;
+        let mut action_to_ticket = false;
+        let mut action_log_plan = false;
+        let mut action_sync_paper = false;
+        let mut action_import_bt = false;
+        let mut action_copy_csv = false;
+        let mut action_copy_md = false;
+        let mut delete_entry_req: Option<u64> = None;
+
+        egui::ScrollArea::vertical()
+            .id_salt("sumi_journal_panel_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(4.0, 3.5);
+
+                // Header Row + Causal Mode Badge
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("VN RISK & JOURNAL")
+                            .monospace()
+                            .strong()
+                            .size(11.5)
+                            .color(palette::TEXT_PRIMARY),
+                    );
+                    let (m_lbl, m_col) = if self.replay.is_active() {
+                        ("RPL CAUSAL", palette::REPLAY_CUT_GOLD)
+                    } else {
+                        ("LIVE", Color32::from_rgb(16, 185, 129))
+                    };
+                    ui.label(
+                        RichText::new(m_lbl)
+                            .monospace()
+                            .strong()
+                            .size(9.4)
+                            .color(m_col),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .small_button(RichText::new("Reseed").monospace().size(9.3))
+                            .on_hover_text("Reseed Entry/Stop/Target from current mark & venue")
+                            .clicked()
+                        {
+                            self.reseed_risk_planner_from_live_mark();
+                        }
+                    });
+                });
+
+                if let Some((is_err, ref msg)) = self.last_journal_status {
+                    let s_col = if is_err {
+                        palette::BEARISH
+                    } else {
+                        Color32::from_rgb(16, 185, 129)
+                    };
+                    Frame::new()
+                        .fill(s_col.gamma_multiply(0.14))
+                        .stroke(Stroke::new(1.0, s_col.gamma_multiply(0.75)))
+                        .corner_radius(3.0)
+                        .inner_margin(Margin::symmetric(5, 2))
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new(msg)
+                                    .monospace()
+                                    .size(9.0)
+                                    .color(s_col),
+                            );
+                        });
+                }
+
+                // Card 1: Vietnam & Multi-Asset Microstructure Risk Planner
+                Frame::new()
+                    .fill(Color32::from_rgb(17, 22, 32))
+                    .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                    .corner_radius(4.0)
+                    .inner_margin(Margin::symmetric(6, 4))
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(4.0, 2.8);
+
+                        // Venue Selector + Unit Selector
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Venue:")
+                                    .monospace()
+                                    .size(9.4)
+                                    .color(palette::TEXT_MUTED),
+                            );
+                            let selected_lbl = match self.risk_venue_override {
+                                None => format!("Auto ({})", inferred_venue.short_label()),
+                                Some(v) => v.short_label().to_owned(),
+                            };
+                            let prev_override = self.risk_venue_override;
+                            egui::ComboBox::from_id_salt("sumi_risk_venue_combo")
+                                .selected_text(
+                                    RichText::new(selected_lbl)
+                                        .monospace()
+                                        .strong()
+                                        .size(9.4)
+                                        .color(palette::TEXT_PRIMARY),
+                                )
+                                .width(118.0)
+                                .show_ui(ui, |ui| {
+                                    if ui
+                                        .selectable_label(
+                                            self.risk_venue_override.is_none(),
+                                            format!("Auto ({})", inferred_venue.full_label()),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.risk_venue_override = None;
+                                    }
+                                    for v in ExchangeVenue::ALL {
+                                        if ui
+                                            .selectable_label(
+                                                self.risk_venue_override == Some(v),
+                                                v.full_label(),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.risk_venue_override = Some(v);
+                                        }
+                                    }
+                                });
+                            if self.risk_venue_override != prev_override {
+                                let new_v = self.active_exchange_venue();
+                                self.risk_plan_input.commission_bps =
+                                    new_v.default_commission_bps();
+                                self.risk_plan_input.tax_sell_bps = new_v.default_tax_sell_bps();
+                                self.risk_plan_input.contract_multiplier = 1.0;
+                                self.risk_plan_input.initial_margin_pct =
+                                    new_v.default_initial_margin_pct();
+                                if !new_v.allows_short() {
+                                    self.risk_plan_input.side = PositionSide::Long;
+                                }
+                            }
+                            if active_venue.is_vn_cash_equity()
+                                || active_venue == ExchangeVenue::Vn30Futures
+                            {
+                                let unit_lbl = match self.risk_plan_input.price_unit {
+                                    VnPriceUnit::Auto => "U:Auto",
+                                    VnPriceUnit::ThousandVnd => "U:1k",
+                                    VnPriceUnit::RawVnd => "U:VND",
+                                };
+                                egui::ComboBox::from_id_salt("sumi_risk_price_unit_combo")
+                                    .selected_text(
+                                        RichText::new(unit_lbl)
+                                            .monospace()
+                                            .size(9.1)
+                                            .color(palette::TEXT_MUTED),
+                                    )
+                                    .width(64.0)
+                                    .show_ui(ui, |ui| {
+                                        for (u, lbl) in [
+                                            (VnPriceUnit::Auto, "Auto (1k / Raw VND)"),
+                                            (VnPriceUnit::ThousandVnd, "Thousand VND (1k)"),
+                                            (VnPriceUnit::RawVnd, "Raw VND"),
+                                        ] {
+                                            ui.selectable_value(
+                                                &mut self.risk_plan_input.price_unit,
+                                                u,
+                                                lbl,
+                                            );
+                                        }
+                                    });
+                            }
+                        });
+
+                        if let Some(band) = daily_band {
+                            let locked_state = self.candles.last().and_then(|bar| {
+                                if band.is_locked_ceiling(bar.close, bar.high) {
+                                    Some((
+                                        "LOCKED CEILING (Trắng bên bán)",
+                                        Color32::from_rgb(192, 132, 252),
+                                    ))
+                                } else if band.is_locked_floor(bar.close, bar.low) {
+                                    Some((
+                                        "LOCKED FLOOR (Trắng bên mua)",
+                                        Color32::from_rgb(56, 189, 248),
+                                    ))
+                                } else {
+                                    None
+                                }
+                            });
+                            ui.label(
+                                RichText::new(format!(
+                                    "Band ±{:.0}% · Flr {} · Ref {} · Ceil {} · Lot {:.0} · T+{}",
+                                    band.band_pct * 100.0,
+                                    format_venue_price(band.floor_price, active_venue),
+                                    format_venue_price(band.reference_price, active_venue),
+                                    format_venue_price(band.ceiling_price, active_venue),
+                                    active_venue.board_lot(),
+                                    active_venue.settlement_business_days()
+                                ))
+                                .monospace()
+                                .size(9.1)
+                                .color(Color32::from_rgb(125, 211, 252)),
+                            );
+                            if let Some((lock_txt, lock_col)) = locked_state {
+                                ui.label(
+                                    RichText::new(lock_txt)
+                                        .monospace()
+                                        .strong()
+                                        .size(9.3)
+                                        .color(lock_col),
+                                );
+                            }
+                        } else {
+                            ui.label(
+                                RichText::new(format!(
+                                    "No statutory price band · Lot {} · T+{}",
+                                    format_clean_qty(active_venue.board_lot()),
+                                    active_venue.settlement_business_days()
+                                ))
+                                .monospace()
+                                .size(9.1)
+                                .color(palette::TEXT_MUTED),
+                            );
+                        }
+
+                        // Side + Capital + Risk %
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(4.0, 3.0);
+                            for side in [PositionSide::Long, PositionSide::Short] {
+                                let is_sel = self.risk_plan_input.side == side;
+                                let s_col = match side {
+                                    PositionSide::Long => palette::BULLISH,
+                                    PositionSide::Short => palette::BEARISH,
+                                };
+                                if ui
+                                    .selectable_label(
+                                        is_sel,
+                                        RichText::new(side.short_label())
+                                            .monospace()
+                                            .strong()
+                                            .size(9.6)
+                                            .color(if is_sel {
+                                                s_col
+                                            } else {
+                                                palette::TEXT_MUTED
+                                            }),
+                                    )
+                                    .clicked()
+                                    && self.risk_plan_input.side != side
+                                {
+                                    self.risk_plan_input.side = side;
+                                    let entry = self.risk_plan_input.entry_price;
+                                    let dist_sl =
+                                        (entry - self.risk_plan_input.stop_loss).abs();
+                                    let dist_tp =
+                                        (self.risk_plan_input.target_price - entry).abs();
+                                    if entry > 0.0 && dist_sl > 0.0 && dist_tp > 0.0 {
+                                        match side {
+                                            PositionSide::Long => {
+                                                self.risk_plan_input.stop_loss =
+                                                    (entry - dist_sl).max(entry * 0.05);
+                                                self.risk_plan_input.target_price = entry + dist_tp;
+                                            }
+                                            PositionSide::Short => {
+                                                self.risk_plan_input.stop_loss = entry + dist_sl;
+                                                self.risk_plan_input.target_price =
+                                                    (entry - dist_tp).max(entry * 0.05);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            ui.label(RichText::new("Cap:").monospace().size(9.4));
+                            let cap_step = if self.risk_plan_input.account_equity >= 1_000_000.0 {
+                                1_000_000.0
+                            } else {
+                                500.0
+                            };
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut self.risk_plan_input.account_equity)
+                                        .range(100.0..=1.0e12)
+                                        .speed(cap_step),
+                                )
+                                .changed()
+                            {
+                                self.risk_plan_input.available_cash =
+                                    self.risk_plan_input.account_equity;
+                            }
+                            ui.label(RichText::new("Risk%:").monospace().size(9.4));
+                            ui.add(
+                                egui::DragValue::new(&mut self.risk_plan_input.risk_pct)
+                                    .range(0.05..=25.0)
+                                    .speed(0.05)
+                                    .fixed_decimals(2),
+                            );
+                        });
+
+                        // Entry / Stop / Target + Tick Snap
+                        let px_speed = if self.risk_plan_input.entry_price >= 1_000.0 {
+                            50.0
+                        } else {
+                            0.05
+                        };
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(4.0, 3.0);
+                            ui.label(RichText::new("E:").monospace().size(9.4));
+                            ui.add(
+                                egui::DragValue::new(&mut self.risk_plan_input.entry_price)
+                                    .range(0.01..=1.0e9)
+                                    .speed(px_speed),
+                            );
+                            ui.label(
+                                RichText::new("SL:")
+                                    .monospace()
+                                    .size(9.4)
+                                    .color(palette::BEARISH),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut self.risk_plan_input.stop_loss)
+                                    .range(0.01..=1.0e9)
+                                    .speed(px_speed),
+                            );
+                            ui.label(
+                                RichText::new("TP:")
+                                    .monospace()
+                                    .size(9.4)
+                                    .color(palette::BULLISH),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut self.risk_plan_input.target_price)
+                                    .range(0.01..=1.0e9)
+                                    .speed(px_speed),
+                            );
+                        });
+
+                        // Friction row (`Comm / Tax / Slip` + `Snap`)
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(4.0, 3.0);
+                            ui.label(
+                                RichText::new("Fee/Tax/Slp(bp):")
+                                    .monospace()
+                                    .size(9.1)
+                                    .color(palette::TEXT_MUTED),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut self.risk_plan_input.commission_bps)
+                                    .range(0.0..=500.0)
+                                    .speed(0.5),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut self.risk_plan_input.tax_sell_bps)
+                                    .range(0.0..=500.0)
+                                    .speed(0.5),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut self.risk_plan_input.slippage_bps)
+                                    .range(0.0..=500.0)
+                                    .speed(0.5),
+                            );
+                            ui.checkbox(
+                                &mut self.risk_plan_input.snap_to_ticks,
+                                RichText::new("Tick").monospace().size(9.1),
+                            );
+                        });
+
+                        // Action Bar (`From Box | Snap | Draw R:R | -> Ticket | + Log Plan`)
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(3.5, 3.0);
+                            if ui
+                                .small_button(RichText::new("From Box").monospace().size(9.2))
+                                .clicked()
+                            {
+                                action_from_box = true;
+                            }
+                            if ui
+                                .small_button(RichText::new("Snap Ticks").monospace().size(9.2))
+                                .clicked()
+                            {
+                                action_snap_ticks = true;
+                            }
+                            if ui
+                                .small_button(
+                                    RichText::new("Draw R:R")
+                                        .monospace()
+                                        .strong()
+                                        .size(9.2)
+                                        .color(Color32::from_rgb(16, 185, 129)),
+                                )
+                                .clicked()
+                            {
+                                action_draw_rr = true;
+                            }
+                            if ui
+                                .small_button(
+                                    RichText::new("-> Ticket")
+                                        .monospace()
+                                        .strong()
+                                        .size(9.2)
+                                        .color(palette::TRADE_ENTRY_BLUE),
+                                )
+                                .clicked()
+                            {
+                                action_to_ticket = true;
+                            }
+                            if ui
+                                .small_button(
+                                    RichText::new("+ Log Plan")
+                                        .monospace()
+                                        .strong()
+                                        .size(9.2)
+                                        .color(palette::ALERT_ARMED_AMBER),
+                                )
+                                .clicked()
+                            {
+                                action_log_plan = true;
+                            }
+                        });
+
+                        ui.separator();
+
+                        // Computed Sizing Readout + Warnings
+                        match self.compute_active_trade_plan() {
+                            Ok(plan) => {
+                                let r_col = if plan.net_r_multiple >= 2.0 {
+                                    palette::BULLISH
+                                } else if plan.net_r_multiple >= 1.0 {
+                                    palette::ALERT_ARMED_AMBER
+                                } else {
+                                    palette::BEARISH
+                                };
+                                ui.horizontal_wrapped(|ui| {
+                                    let mult_suffix = if plan.contract_multiplier > 1.0 + 1.0e-6 {
+                                        format!(
+                                            " (x{:.0} · Mgn {:.0})",
+                                            plan.contract_multiplier, plan.margin_required
+                                        )
+                                    } else {
+                                        String::new()
+                                    };
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "Qty {} · Notional {:.0}{mult_suffix}",
+                                            format_clean_qty(plan.planned_quantity),
+                                            plan.position_notional
+                                        ))
+                                        .monospace()
+                                        .strong()
+                                        .size(9.5)
+                                        .color(palette::TEXT_PRIMARY),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "· Net {:.2}R (Gross {:.2}R)",
+                                            plan.net_r_multiple, plan.gross_r_multiple
+                                        ))
+                                        .monospace()
+                                        .strong()
+                                        .size(9.4)
+                                        .color(r_col),
+                                    );
+                                });
+                                let settle_lbl = plan.settlement_timestamp.map_or_else(
+                                    || format!("T+{}", plan.venue.settlement_business_days()),
+                                    |ts| {
+                                        let dt = crate::data::format_utc_datetime_hm(ts);
+                                        format!(
+                                            "T+{} ({})",
+                                            plan.venue.settlement_business_days(),
+                                            dt.get(..10).unwrap_or(&dt)
+                                        )
+                                    },
+                                );
+                                ui.label(
+                                    RichText::new(format!(
+                                        "All-In Risk {:.0} ({:.2}%) · BE {} · Win>= {:.1}% · {settle_lbl}",
+                                        plan.planned_risk_amount,
+                                        plan.planned_risk_pct_actual,
+                                        format_venue_price(plan.breakeven_price, plan.venue),
+                                        plan.required_win_rate_pct
+                                    ))
+                                    .monospace()
+                                    .size(9.1)
+                                    .color(palette::TEXT_MUTED),
+                                );
+                                for warn in &plan.warnings {
+                                    ui.label(
+                                        RichText::new(format!("! {}", warn.description()))
+                                            .monospace()
+                                            .size(9.0)
+                                            .color(palette::ALERT_ARMED_AMBER),
+                                    );
+                                }
+                            }
+                            Err(err) => {
+                                ui.label(
+                                    RichText::new(err.message())
+                                        .monospace()
+                                        .size(9.2)
+                                        .color(palette::BEARISH),
+                                );
+                            }
+                        }
+                    });
+
+                // Card 2: Structured Trade Journal & Discipline Analytics (`DEF-001` Causal)
+                Frame::new()
+                    .fill(Color32::from_rgb(17, 22, 32))
+                    .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                    .corner_radius(4.0)
+                    .inner_margin(Margin::symmetric(6, 4))
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(4.0, 2.8);
+
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(3.5, 2.5);
+                            ui.label(
+                                RichText::new("TRADE JOURNAL")
+                                    .monospace()
+                                    .strong()
+                                    .size(9.8)
+                                    .color(palette::TEXT_PRIMARY),
+                            );
+                            if ui
+                                .small_button(RichText::new("Sync Paper").monospace().size(9.0))
+                                .clicked()
+                            {
+                                action_sync_paper = true;
+                            }
+                            if ui
+                                .small_button(RichText::new("Import BT").monospace().size(9.0))
+                                .clicked()
+                            {
+                                action_import_bt = true;
+                            }
+                            if ui
+                                .small_button(RichText::new("Copy CSV").monospace().size(9.0))
+                                .clicked()
+                            {
+                                action_copy_csv = true;
+                            }
+                            if ui
+                                .small_button(RichText::new("Copy MD").monospace().size(9.0))
+                                .clicked()
+                            {
+                                action_copy_md = true;
+                            }
+                        });
+
+                        let stats = self.journal.compute_analytics(replay_cutoff);
+                        let pnl_c = if stats.total_net_pnl >= 0.0 {
+                            palette::BULLISH
+                        } else {
+                            palette::BEARISH
+                        };
+                        let exp_s = stats
+                            .expectancy_r
+                            .map_or_else(|| "-".to_owned(), |v| format!("{v:+.2}R"));
+                        let pf_s = if let Some(pf) = stats.profit_factor {
+                            format!("{pf:.2}")
+                        } else if stats.win_count > 0 && stats.loss_count == 0 {
+                            "∞".to_owned()
+                        } else {
+                            "-".to_owned()
+                        };
+                        let sqn_s = stats
+                            .sqn
+                            .map_or_else(|| "-".to_owned(), |v| format!("{v:.2}"));
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "Vis {} ({}C/{}P) · Win {:.0}% · PF {pf_s} · Net {:+.1}",
+                                    stats.visible_entry_count,
+                                    stats.closed_count,
+                                    stats.planned_count,
+                                    stats.win_rate_pct,
+                                    stats.total_net_pnl
+                                ))
+                                .monospace()
+                                .strong()
+                                .size(9.2)
+                                .color(pnl_c),
+                            );
+                        });
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "Exp {exp_s} · SQN {sqn_s} · Disc {:.0}% · Mistake Cost -{:.1}",
+                                    stats.discipline_score_pct, stats.cost_of_mistakes
+                                ))
+                                .monospace()
+                                .size(9.1)
+                                .color(palette::TEXT_MUTED),
+                            );
+                        });
+
+                        if !stats.setup_attribution.is_empty() {
+                            let top_summary = stats
+                                .setup_attribution
+                                .iter()
+                                .take(3)
+                                .map(|b| {
+                                    format!(
+                                        "{}:{}({:+.0})",
+                                        b.setup.short_label(),
+                                        b.trade_count,
+                                        b.net_pnl
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" · ");
+                            ui.label(
+                                RichText::new(format!("Setups: {top_summary}"))
+                                    .monospace()
+                                    .size(8.9)
+                                    .color(Color32::from_rgb(148, 163, 184)),
+                            );
+                        }
+
+                        // Visible Entry List (strictly `DEF-001` causal)
+                        struct VisibleJournalRow {
+                            id: u64,
+                            sym: String,
+                            side: PositionSide,
+                            status: JournalEntryStatus,
+                            pnl: f64,
+                            r_val: Option<f64>,
+                            setup: SetupTag,
+                            mistake: MistakeTag,
+                        }
+                        let visible_snapshots: Vec<VisibleJournalRow> = self
+                            .journal
+                            .visible_entries(replay_cutoff)
+                            .into_iter()
+                            .rev()
+                            .take(24)
+                            .map(|e| VisibleJournalRow {
+                                id: e.id,
+                                sym: e.symbol.clone(),
+                                side: e.side,
+                                status: e.status,
+                                pnl: e.net_pnl,
+                                r_val: e.realized_r.or(e.planned_net_r),
+                                setup: e.setup,
+                                mistake: e.mistake,
+                            })
+                            .collect();
+
+                        let selected_visible_id = self
+                            .journal
+                            .selected_entry_id
+                            .filter(|id| visible_snapshots.iter().any(|r| r.id == *id))
+                            .or_else(|| visible_snapshots.first().map(|r| r.id));
+
+                        if !visible_snapshots.is_empty() {
+                            ui.separator();
+                            egui::ScrollArea::vertical()
+                                .id_salt("sumi_journal_entries_list")
+                                .max_height(115.0)
+                                .show(ui, |ui| {
+                                    for row in &visible_snapshots {
+                                        let is_sel = selected_visible_id == Some(row.id);
+                                        let r_txt = row
+                                            .r_val
+                                            .map_or_else(|| "-".to_owned(), |r| format!("{r:+.2}R"));
+                                        let row_txt = match row.status {
+                                            JournalEntryStatus::Planned => format!(
+                                                "#{} {} {} PLAN {r_txt} [{}]",
+                                                row.id,
+                                                row.sym,
+                                                row.side.short_label(),
+                                                row.setup.short_label()
+                                            ),
+                                            JournalEntryStatus::Closed => {
+                                                let m_flag = if row.mistake != MistakeTag::None {
+                                                    " !"
+                                                } else {
+                                                    ""
+                                                };
+                                                format!(
+                                                    "#{} {} {} {:+.1} ({r_txt}) [{}]{m_flag}",
+                                                    row.id,
+                                                    row.sym,
+                                                    row.side.short_label(),
+                                                    row.pnl,
+                                                    row.setup.short_label()
+                                                )
+                                            }
+                                        };
+                                        let row_col = match row.status {
+                                            JournalEntryStatus::Planned => {
+                                                palette::ALERT_ARMED_AMBER
+                                            }
+                                            JournalEntryStatus::Closed if row.pnl >= 0.0 => {
+                                                palette::BULLISH
+                                            }
+                                            JournalEntryStatus::Closed => palette::BEARISH,
+                                        };
+                                        if ui
+                                            .selectable_label(
+                                                is_sel,
+                                                RichText::new(row_txt)
+                                                    .monospace()
+                                                    .size(9.0)
+                                                    .color(row_col),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.journal.selected_entry_id = Some(row.id);
+                                        }
+                                    }
+                                });
+                        }
+
+                        ui.separator();
+
+                        // Inline Debrief & Tagging Editor (edits selected visible entry, or draft plan tags)
+                        if let Some(sel_id) = selected_visible_id
+                            && let Some(entry) = self.journal.entry_mut(sel_id)
+                        {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Edit #{sel_id} ({} · {})",
+                                        entry.symbol,
+                                        entry.source.kind_label()
+                                    ))
+                                    .monospace()
+                                    .strong()
+                                    .size(9.3)
+                                    .color(palette::TEXT_PRIMARY),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .small_button(
+                                                RichText::new("Del")
+                                                    .monospace()
+                                                    .size(9.0)
+                                                    .color(palette::BEARISH),
+                                            )
+                                            .clicked()
+                                        {
+                                            delete_entry_req = Some(sel_id);
+                                        }
+                                    },
+                                );
+                            });
+
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = Vec2::new(4.0, 3.0);
+                                egui::ComboBox::from_id_salt("sumi_jrn_setup_combo")
+                                    .selected_text(
+                                        RichText::new(entry.setup.short_label())
+                                            .monospace()
+                                            .size(9.2),
+                                    )
+                                    .width(105.0)
+                                    .show_ui(ui, |ui| {
+                                        for tag in SetupTag::ALL {
+                                            if ui
+                                                .selectable_label(
+                                                    entry.setup == tag,
+                                                    tag.short_label(),
+                                                )
+                                                .clicked()
+                                            {
+                                                entry.setup = tag;
+                                            }
+                                        }
+                                    });
+                                egui::ComboBox::from_id_salt("sumi_jrn_mistake_combo")
+                                    .selected_text(
+                                        RichText::new(entry.mistake.short_label())
+                                            .monospace()
+                                            .size(9.2),
+                                    )
+                                    .width(115.0)
+                                    .show_ui(ui, |ui| {
+                                        for m in MistakeTag::ALL {
+                                            if ui
+                                                .selectable_label(
+                                                    entry.mistake == m,
+                                                    m.short_label(),
+                                                )
+                                                .clicked()
+                                            {
+                                                entry.mistake = m;
+                                            }
+                                        }
+                                    });
+                                ui.label(RichText::new("Conv:").monospace().size(9.0));
+                                for c in 1..=5_u8 {
+                                    if ui
+                                        .selectable_label(
+                                            entry.conviction == c,
+                                            RichText::new(format!("{c}")).monospace().size(9.0),
+                                        )
+                                        .clicked()
+                                    {
+                                        entry.conviction = c;
+                                    }
+                                }
+                            });
+
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = Vec2::new(3.5, 2.0);
+                                ui.checkbox(
+                                    &mut entry.checklist.trend_aligned,
+                                    RichText::new("Trd").monospace().size(8.9),
+                                );
+                                ui.checkbox(
+                                    &mut entry.checklist.level_confirmed,
+                                    RichText::new("Lvl").monospace().size(8.9),
+                                );
+                                ui.checkbox(
+                                    &mut entry.checklist.catalyst_or_volume_ok,
+                                    RichText::new("Vol").monospace().size(8.9),
+                                );
+                                ui.checkbox(
+                                    &mut entry.checklist.stop_and_lot_sized,
+                                    RichText::new("Lot").monospace().size(8.9),
+                                );
+                                ui.checkbox(
+                                    &mut entry.checklist.band_and_t2_checked,
+                                    RichText::new("T+2").monospace().size(8.9),
+                                );
+                                ui.checkbox(
+                                    &mut entry.checklist.calm_state,
+                                    RichText::new("Calm").monospace().size(8.9),
+                                );
+                            });
+
+                            if ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut entry.notes)
+                                        .hint_text("Post-trade debrief note...")
+                                        .desired_width((ui.available_width() - 4.0).max(120.0))
+                                        .font(egui::FontId::monospace(9.2)),
+                                )
+                                .changed()
+                            {
+                                truncate_utf8_bytes(
+                                    &mut entry.notes,
+                                    crate::journal::MAX_JOURNAL_NOTE_BYTES,
+                                );
+                            }
+                        } else {
+                            ui.label(
+                                RichText::new("Draft Plan Checklist & Setup:")
+                                    .monospace()
+                                    .size(9.2)
+                                    .color(palette::TEXT_MUTED),
+                            );
+                            ui.horizontal_wrapped(|ui| {
+                                egui::ComboBox::from_id_salt("sumi_jrn_draft_setup")
+                                    .selected_text(
+                                        RichText::new(self.journal_draft_setup.short_label())
+                                            .monospace()
+                                            .size(9.2),
+                                    )
+                                    .width(110.0)
+                                    .show_ui(ui, |ui| {
+                                        for tag in SetupTag::ALL {
+                                            if ui
+                                                .selectable_label(
+                                                    self.journal_draft_setup == tag,
+                                                    tag.short_label(),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.journal_draft_setup = tag;
+                                            }
+                                        }
+                                    });
+                                ui.label(RichText::new("Conv:").monospace().size(9.0));
+                                for c in 1..=5_u8 {
+                                    if ui
+                                        .selectable_label(
+                                            self.journal_draft_conviction == c,
+                                            RichText::new(format!("{c}")).monospace().size(9.0),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.journal_draft_conviction = c;
+                                    }
+                                }
+                            });
+                        }
+                    });
+            });
+
+        if let Some(del_id) = delete_entry_req {
+            let _ = self.journal.delete_entry(del_id);
+        }
+        if action_from_box && !self.sync_planner_from_selected_rr_box() {
+            self.last_journal_status = Some((
+                true,
+                "select an on-chart Pos R:R Box first to pull Entry / SL / TP".to_owned(),
+            ));
+        }
+        if action_snap_ticks {
+            let _ = self.snap_planner_ticks_and_sync_rr_box();
+        }
+        if action_draw_rr {
+            let _ = self.draw_or_update_rr_box_from_planner();
+        }
+        if action_to_ticket {
+            let _ = self.sync_ticket_from_risk_planner();
+        }
+        if action_log_plan {
+            let _ = self.log_active_plan_to_journal();
+        }
+        if action_sync_paper {
+            let _ = self.sync_paper_trades_to_journal();
+        }
+        if action_import_bt {
+            let _ = self.import_backtest_trades_to_journal(12);
+        }
+        if action_copy_csv {
+            let csv = self.export_journal_csv_causal();
+            ui.ctx().copy_text(csv);
+        }
+        if action_copy_md {
+            let md = self.export_journal_markdown_causal();
+            ui.ctx().copy_text(md);
         }
     }
 
@@ -8381,11 +11087,14 @@ impl SumiWorkstationApp {
     }
 
     /// Executes all 3 Retina (`2.0x`) Metal/`wgpu` verification scenarios for `"r04"`, `"r05"`, `"r06"`,
-    /// `"r07"`, `"r08"`, or `"r09"` offscreen in one headless GPU session (zero windows, zero Dock icons, zero occlusion stalls).
+    /// `"r07"`, `"r08"`, `"r09"`, or `"r10"` offscreen in one headless GPU session (zero windows, zero Dock icons, zero occlusion stalls).
     pub fn run_offscreen_wgpu_capture_batch(batch_name: &str) -> Result<(), String> {
-        if !matches!(batch_name, "r04" | "r05" | "r06" | "r07" | "r08" | "r09") {
+        if !matches!(
+            batch_name,
+            "r04" | "r05" | "r06" | "r07" | "r08" | "r09" | "r10"
+        ) {
             return Err(format!(
-                "unknown SUMI_CAPTURE_BATCH '{batch_name}' (expected 'r04', 'r05', 'r06', 'r07', 'r08', or 'r09')"
+                "unknown SUMI_CAPTURE_BATCH '{batch_name}' (expected 'r04', 'r05', 'r06', 'r07', 'r08', 'r09', or 'r10')"
             ));
         }
         std::fs::create_dir_all("docs/evidence")
@@ -8402,6 +11111,7 @@ impl SumiWorkstationApp {
                 "r07" => app.apply_r07_batch_step_state(step),
                 "r08" => app.apply_r08_batch_step_state(step),
                 "r09" => app.apply_r09_batch_step_state(step),
+                "r10" => app.apply_r10_batch_step_state(step),
                 _ => unreachable!(),
             };
             let image = harness.capture_app_frame(&mut app, logical_w, logical_h, 6)?;
@@ -9483,6 +12193,347 @@ impl SumiWorkstationApp {
         }
     }
 
+    fn apply_r10_batch_step_state(
+        &mut self,
+        step: usize,
+    ) -> (u32, u32, &'static str, &'static str) {
+        self.close_command_palette();
+        self.show_import_bar = false;
+        self.alerts.clear_all();
+        self.drawings = DrawingStore::new();
+        self.trading = TradingSession::default();
+        self.risk_venue_override = None;
+
+        match step {
+            0 => {
+                // Scenario 0: `1280x800` (`2560x1600` Retina), `FPT` (`VN30` `1D` `HOSE`),
+                // Vietnam Microstructure Risk Planner (`±7%` band, lot `100`, `T+2`, `0.10%` sell tax),
+                // selected dual-zone `RiskRewardBox` on chart + Structured Trade Journal & Discipline KPIs!
+                self.exit_replay();
+                self.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+                self.indicators = IndicatorConfig {
+                    show_sma: true,
+                    show_ema: true,
+                    show_bbands: true,
+                    show_rsi: true,
+                    show_macd: false,
+                    show_atr: false,
+                    sma_period: 15,
+                    ema_period: 40,
+                    ..IndicatorConfig::default()
+                };
+                self.set_scale_mode(PriceScaleMode::Normal);
+                self.viewport.reset_pane_stretches();
+                self.viewport.rsi_stretch = 0.85;
+                self.viewport.time_scale.set_width(880.0);
+                self.viewport.time_scale.set_bar_spacing(10.0);
+                self.viewport.time_scale.set_right_offset(10.0);
+
+                self.show_scanner_dock = false;
+                self.show_replay_bar = false;
+                self.show_trading_panel = false;
+                self.show_alerts_panel = false;
+                self.show_strategy_panel = false;
+                self.show_equity_pane = false;
+                self.show_backtest_trades = false;
+
+                // Seed journal from causal backtest trades + realistic discipline debrief annotations
+                self.journal = TradeJournalStore::new();
+                self.backtest_config = BacktestConfig {
+                    preset: StrategyPresetKind::MacdMomentum,
+                    params: StrategyParams {
+                        macd_fast: 6,
+                        macd_slow: 16,
+                        macd_signal: 5,
+                        macd_trend_ema: 0,
+                        ..StrategyParams::default()
+                    },
+                    risk: StopTakeConfig {
+                        stop_loss_pct: Some(3.2),
+                        take_profit_pct: Some(8.5),
+                        trailing_stop_atr_mult: Some(2.2),
+                        min_holding_bars: 2,
+                        ..StopTakeConfig::default()
+                    },
+                    lot_step: 100.0,
+                    commission_bps: 15.0,
+                    tax_sell_bps: 10.0,
+                    ..BacktestConfig::default()
+                };
+                let _ = self.import_backtest_trades_to_journal(10);
+                for (i, e) in self.journal.entries.iter_mut().enumerate() {
+                    e.checklist = ChecklistState::all_checked();
+                    e.conviction = if e.net_pnl >= 0.0 { 4 } else { 3 };
+                    if i % 2 == 1 {
+                        e.setup = SetupTag::TrendPullback;
+                    }
+                }
+                if let Some(losing_entry) =
+                    self.journal.entries.iter_mut().find(|e| e.net_pnl < 0.0)
+                {
+                    losing_entry.mistake = MistakeTag::FomoChase;
+                    losing_entry.checklist.calm_state = false;
+                    losing_entry.checklist.level_confirmed = false;
+                    losing_entry.conviction = 2;
+                    losing_entry.notes =
+                        "Chased breakout above intraday VWAP without volume confirmation"
+                            .to_owned();
+                }
+
+                // Configure HOSE Risk Planner + draw dual-zone `RiskRewardBox` on `Main` pane
+                let mark = self.current_mark_price().max(10.0);
+                let cap = if mark >= 1_000.0 {
+                    250_000_000.0
+                } else {
+                    250_000.0
+                };
+                self.risk_plan_input = TradePlanInput {
+                    venue: ExchangeVenue::Hose,
+                    price_unit: VnPriceUnit::Auto,
+                    side: PositionSide::Long,
+                    account_equity: cap,
+                    available_cash: cap,
+                    leverage: 1.0,
+                    risk_pct: 1.0,
+                    entry_price: mark * 0.973,
+                    stop_loss: mark * 0.938,
+                    target_price: mark * 1.062,
+                    reference_price: self.causal_reference_price(),
+                    commission_bps: 15.0,
+                    tax_sell_bps: 10.0,
+                    slippage_bps: 5.0,
+                    snap_to_ticks: true,
+                    entry_timestamp: self.candles.last().map(|c| c.timestamp),
+                    ..TradePlanInput::default()
+                };
+                let _ = self.snap_planner_ticks_and_sync_rr_box();
+                let _ = self.draw_or_update_rr_box_from_planner();
+                self.journal_draft_setup = SetupTag::TrendPullback;
+                self.journal_draft_conviction = 5;
+                self.journal_draft_note =
+                    "FPT pullback to SMA15 support · HOSE T+2 swing plan".to_owned();
+                let _ = self.log_active_plan_to_journal();
+                self.open_journal_tab();
+
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r10_vn_hose_risk_planner_and_rr_box_fpt_1280x800.png",
+                    "docs/evidence/r10_vn_hose_risk_planner_and_rr_box_fpt_1280x800.json",
+                )
+            }
+            1 => {
+                // Scenario 1: `1280x800` (`2560x1600` Retina), `FPT` (`VN30` `1D`),
+                // Strategy Lab -> `WFO` Sub-Tab: `4`-Fold Rolling Walk-Forward (`Pardo WFE` + Stitched OOS Equity)
+                // + `VN30 Basket (8)` Causal Inv-Vol Multi-Asset Portfolio Simulation!
+                self.exit_replay();
+                self.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+                self.indicators = IndicatorConfig {
+                    show_sma: true,
+                    show_ema: true,
+                    show_bbands: false,
+                    show_rsi: true,
+                    show_macd: false,
+                    show_atr: false,
+                    sma_period: 15,
+                    ema_period: 40,
+                    ..IndicatorConfig::default()
+                };
+                self.set_scale_mode(PriceScaleMode::Normal);
+                self.viewport.reset_pane_stretches();
+                self.viewport.equity_stretch = 1.45;
+                self.viewport.rsi_stretch = 0.80;
+
+                self.backtest_config = BacktestConfig {
+                    preset: StrategyPresetKind::MacdMomentum,
+                    direction_mode: StrategyDirectionMode::LongOnly,
+                    sizing: PositionSizingMode::PercentEquity(95.0),
+                    risk: StopTakeConfig {
+                        stop_loss_pct: Some(3.2),
+                        take_profit_pct: Some(8.5),
+                        trailing_stop_atr_mult: Some(2.2),
+                        min_holding_bars: 2,
+                        ..StopTakeConfig::default()
+                    },
+                    initial_cash: 100_000.0,
+                    commission_bps: 15.0,
+                    tax_sell_bps: 10.0,
+                    slippage_bps: 5.0,
+                    max_leverage: 1.0,
+                    lot_step: 100.0,
+                    in_sample_split_pct: Some(0.70),
+                    ..BacktestConfig::default()
+                };
+                self.wf_config = WalkForwardConfig {
+                    fold_count: 4,
+                    in_sample_ratio: 0.70,
+                    anchored: false,
+                    ranking_metric: SweepRankingMetric::SharpeRatio,
+                };
+                self.portfolio_universe_filter = PortfolioUniverseFilter::Vn30EquitiesOnly;
+                self.portfolio_weighting =
+                    PortfolioWeightingMode::CausalInverseVolatility { lookback_bars: 20 };
+
+                self.show_scanner_dock = false;
+                self.show_replay_bar = false;
+                self.show_trading_panel = false;
+                self.show_alerts_panel = false;
+                self.show_journal_panel = false;
+                self.open_strategy_lab();
+                self.strategy_lab_tab = StrategyLabSubTab::WalkForward;
+                self.show_equity_pane = true;
+                self.show_backtest_trades = false;
+                self.equity_pane_source = EquityPaneSource::WalkForwardOos;
+                self.run_active_walk_forward();
+                self.run_active_portfolio_backtest();
+
+                self.viewport.time_scale.set_width(880.0);
+                self.viewport.fit_all();
+
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r10_walk_forward_and_portfolio_equity_1280x800.png",
+                    "docs/evidence/r10_walk_forward_and_portfolio_equity_1280x800.json",
+                )
+            }
+            _ => {
+                // Scenario 2: Compact `960x640` (`1920x1280` Retina), Intraday `VN30F1M` `1m -> 15m`
+                // under active Causal Bar Replay (`DEF-001` future-entry masking), `SHORT` `RiskRewardBox`,
+                // and synced Paper Trading round-trips in `VN RISK & JOURNAL`!
+                self.exit_replay();
+                self.select_watchlist_instrument(DataSourcePreset::IntradayVn30F1m, "VN30F1M");
+                let _ = self.set_timeframe(Timeframe::M15);
+                self.indicators = IndicatorConfig {
+                    show_sma: true,
+                    show_ema: true,
+                    show_bbands: false,
+                    show_rsi: false,
+                    show_macd: true,
+                    show_atr: false,
+                    sma_period: 12,
+                    ema_period: 34,
+                    ..IndicatorConfig::default()
+                };
+                self.set_scale_mode(PriceScaleMode::Normal);
+                self.viewport.reset_pane_stretches();
+                self.viewport.macd_stretch = 0.82;
+                self.journal = TradeJournalStore::new();
+
+                let n_base = self.base_candles.len();
+                let t1_idx = ((n_base * 52) / 100).max(20);
+                let t1_exit = ((n_base * 60) / 100).max(t1_idx + 5);
+                let t2_exit = ((n_base * 68) / 100).max(t1_exit + 5);
+                let replay_cut = ((n_base * 72) / 100).max(t2_exit + 3);
+                let future_idx = ((n_base * 84) / 100)
+                    .max(replay_cut + 10)
+                    .min(n_base.saturating_sub(2));
+
+                let _ = self.start_replay_at_base_index(t1_idx);
+                let _ = self.trading.submit_order(
+                    OrderRequest {
+                        side: OrderSide::Buy,
+                        kind: OrderKind::Market,
+                        quantity: 5.0,
+                        stop_loss: None,
+                        take_profit: None,
+                    },
+                    &self.base_candles,
+                    t1_idx,
+                );
+                if let Some(tr) = self.replay.jump_to_base_index(&self.base_candles, t1_exit) {
+                    self.apply_replay_transition(tr);
+                }
+                let _ = self.flatten_open_position();
+
+                let _ = self.trading.submit_order(
+                    OrderRequest {
+                        side: OrderSide::Sell,
+                        kind: OrderKind::Market,
+                        quantity: 4.0,
+                        stop_loss: None,
+                        take_profit: None,
+                    },
+                    &self.base_candles,
+                    t1_exit,
+                );
+                if let Some(tr) = self.replay.jump_to_base_index(&self.base_candles, t2_exit) {
+                    self.apply_replay_transition(tr);
+                }
+                let _ = self.flatten_open_position();
+                let _ = self.sync_paper_trades_to_journal();
+
+                // Annotate journal setups & record a future planned entry at `future_idx`, then rewind to `replay_cut`
+                // so `DEF-001` causal masking actively hides future entries while preserving past round-trips!
+                for (i, entry) in self.journal.entries.iter_mut().enumerate() {
+                    entry.setup = if i % 2 == 0 {
+                        SetupTag::MomentumContinuation
+                    } else {
+                        SetupTag::LiquiditySweep
+                    };
+                    entry.conviction = 4;
+                    if entry.net_pnl < 0.0 {
+                        entry.mistake = MistakeTag::CounterTrendImpulse;
+                        entry.checklist.trend_aligned = false;
+                    }
+                }
+                if future_idx < self.base_candles.len()
+                    && let Ok(plan) = self.compute_active_trade_plan()
+                {
+                    let fut_ts = self.base_candles[future_idx].timestamp + 60;
+                    let _ = self.journal.record_trade_plan(
+                        "VN30F1M",
+                        &plan,
+                        fut_ts,
+                        SetupTag::SqueezeBreakout,
+                        4,
+                        ChecklistState::all_checked(),
+                        "Future plan masked at 72% replay cut",
+                    );
+                }
+                if let Some(tr) = self
+                    .replay
+                    .jump_to_base_index(&self.base_candles, replay_cut)
+                {
+                    self.apply_replay_transition(tr);
+                }
+
+                self.viewport.time_scale.set_width(590.0);
+                self.viewport.time_scale.set_bar_spacing(9.0);
+                self.viewport.time_scale.set_right_offset(10.0);
+
+                // Draw `SHORT` `RiskRewardBox` on `VN30F1M` (`T+0`, lot `1`, tick `0.1`, `100 kVND/pt`, `17%` margin)
+                let mark = self.current_mark_price().max(500.0);
+                self.risk_plan_input.side = PositionSide::Short;
+                self.risk_plan_input.account_equity = 150_000.0;
+                self.risk_plan_input.available_cash = 150_000.0;
+                self.risk_plan_input.risk_pct = 1.50;
+                self.risk_plan_input.entry_price = mark * 1.003;
+                self.risk_plan_input.stop_loss = mark * 1.011;
+                self.risk_plan_input.target_price = mark * 0.979;
+                let _ = self.snap_planner_ticks_and_sync_rr_box();
+                let _ = self.draw_or_update_rr_box_from_planner();
+                self.last_journal_status = None;
+
+                self.show_scanner_dock = false;
+                self.show_replay_bar = true;
+                self.show_trading_panel = false;
+                self.show_alerts_panel = false;
+                self.show_strategy_panel = false;
+                self.show_equity_pane = false;
+                self.show_backtest_trades = false;
+                self.open_journal_tab();
+
+                (
+                    960,
+                    640,
+                    "docs/evidence/r10_trade_journal_discipline_replay_960x640.png",
+                    "docs/evidence/r10_trade_journal_discipline_replay_960x640.json",
+                )
+            }
+        }
+    }
+
     fn persist_capture_artifacts(
         &self,
         screenshot_path: &str,
@@ -9540,8 +12591,28 @@ impl SumiWorkstationApp {
             let bt_rob_json = bt_ref
                 .and_then(|b| b.robustness)
                 .map_or_else(|| "null".to_owned(), |v| format!("\"{}\"", v.label()));
+            let j_stats = self
+                .journal
+                .compute_analytics(self.replay_causal_close_timestamp());
+            let wfo_verdict_json = self.walk_forward_report.as_ref().map_or_else(
+                || "null".to_owned(),
+                |w| format!("\"{}\"", w.verdict.label()),
+            );
+            let wfo_wfe_json = self
+                .walk_forward_report
+                .as_ref()
+                .and_then(|w| w.wfe_pct)
+                .map_or_else(|| "null".to_owned(), |v| format!("{v:.4}"));
+            let port_ret_pct = self
+                .portfolio_report
+                .as_ref()
+                .map_or(0.0, |p| p.portfolio_tearsheet.total_return_pct);
+            let port_dd_red_pct = self
+                .portfolio_report
+                .as_ref()
+                .map_or(0.0, |p| p.diversification_dd_reduction_pct);
             let json = format!(
-                "{{\n  \"symbol\": \"{}\",\n  \"timeframe\": \"{}\",\n  \"base_timeframe\": \"{}\",\n  \"data_source\": \"{}\",\n  \"available_symbols\": [{}],\n  \"base_candles\": {},\n  \"total_candles\": {},\n  \"culled_candles\": {},\n  \"rendered_candles\": {},\n  \"conflation_factor\": {},\n  \"bar_spacing\": {:.6},\n  \"right_offset\": {:.6},\n  \"scale_mode\": \"{}\",\n  \"auto_scale\": {},\n  \"pane_count\": {},\n  \"active_overlay_count\": {},\n  \"drawing_count\": {},\n  \"active_drawing_tool\": \"{}\",\n  \"selected_drawing_id\": {},\n  \"magnet_mode\": \"{}\",\n  \"replay_active\": {},\n  \"replay_status\": \"{}\",\n  \"replay_base_cursor\": {},\n  \"replay_step_unit\": \"{}\",\n  \"show_trading_panel\": {},\n  \"show_scanner_dock\": {},\n  \"show_alerts_panel\": {},\n  \"show_strategy_panel\": {},\n  \"show_equity_pane\": {},\n  \"equity_pane_active\": {},\n  \"show_backtest_trades\": {},\n  \"rendered_backtest_trades\": {},\n  \"backtest_preset\": {},\n  \"backtest_trade_count\": {},\n  \"backtest_return_pct\": {:.4},\n  \"backtest_max_dd_pct\": {:.4},\n  \"backtest_sharpe\": {},\n  \"backtest_robustness\": {},\n  \"command_palette_open\": {},\n  \"alert_rule_count\": {},\n  \"alert_trigger_count\": {},\n  \"active_alert_lines\": {},\n  \"rendered_alert_markers\": {},\n  \"scanner_signal_revealed\": {},\n  \"active_price_lines\": {},\n  \"rendered_fill_markers\": {},\n  \"equity\": {:.2},\n  \"net_pnl\": {:.2},\n  \"fill_count\": {},\n  \"closed_trade_count\": {},\n  \"pending_order_count\": {},\n  \"open_position_side\": {},\n  \"stretches\": [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}],\n  \"base_value\": {:.4},\n  \"screenshot_px\": [{}, {}],\n  \"outer_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"plot_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"price_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"time_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"raw_price_min\": {:.2},\n  \"raw_price_max\": {:.2}\n}}\n",
+                "{{\n  \"symbol\": \"{}\",\n  \"timeframe\": \"{}\",\n  \"base_timeframe\": \"{}\",\n  \"data_source\": \"{}\",\n  \"available_symbols\": [{}],\n  \"base_candles\": {},\n  \"total_candles\": {},\n  \"culled_candles\": {},\n  \"rendered_candles\": {},\n  \"conflation_factor\": {},\n  \"bar_spacing\": {:.6},\n  \"right_offset\": {:.6},\n  \"scale_mode\": \"{}\",\n  \"auto_scale\": {},\n  \"pane_count\": {},\n  \"active_overlay_count\": {},\n  \"drawing_count\": {},\n  \"active_drawing_tool\": \"{}\",\n  \"selected_drawing_id\": {},\n  \"magnet_mode\": \"{}\",\n  \"replay_active\": {},\n  \"replay_status\": \"{}\",\n  \"replay_base_cursor\": {},\n  \"replay_step_unit\": \"{}\",\n  \"show_trading_panel\": {},\n  \"show_scanner_dock\": {},\n  \"show_alerts_panel\": {},\n  \"show_strategy_panel\": {},\n  \"show_journal_panel\": {},\n  \"show_equity_pane\": {},\n  \"equity_pane_source\": \"{}\",\n  \"equity_pane_active\": {},\n  \"active_venue\": \"{}\",\n  \"journal_total_entries\": {},\n  \"journal_visible_entries\": {},\n  \"journal_discipline_pct\": {:.2},\n  \"wfo_verdict\": {},\n  \"wfo_wfe_pct\": {},\n  \"portfolio_return_pct\": {:.4},\n  \"portfolio_dd_reduction_pct\": {:.4},\n  \"show_backtest_trades\": {},\n  \"rendered_backtest_trades\": {},\n  \"backtest_preset\": {},\n  \"backtest_trade_count\": {},\n  \"backtest_return_pct\": {:.4},\n  \"backtest_max_dd_pct\": {:.4},\n  \"backtest_sharpe\": {},\n  \"backtest_robustness\": {},\n  \"command_palette_open\": {},\n  \"alert_rule_count\": {},\n  \"alert_trigger_count\": {},\n  \"active_alert_lines\": {},\n  \"rendered_alert_markers\": {},\n  \"scanner_signal_revealed\": {},\n  \"active_price_lines\": {},\n  \"rendered_fill_markers\": {},\n  \"equity\": {:.2},\n  \"net_pnl\": {:.2},\n  \"fill_count\": {},\n  \"closed_trade_count\": {},\n  \"pending_order_count\": {},\n  \"open_position_side\": {},\n  \"stretches\": [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}],\n  \"base_value\": {:.4},\n  \"screenshot_px\": [{}, {}],\n  \"outer_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"plot_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"price_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"time_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"raw_price_min\": {:.2},\n  \"raw_price_max\": {:.2}\n}}\n",
                 self.symbol,
                 self.timeframe,
                 self.base_timeframe,
@@ -9570,8 +12641,18 @@ impl SumiWorkstationApp {
                 self.show_scanner_dock,
                 self.show_alerts_panel,
                 self.show_strategy_panel,
+                self.show_journal_panel,
                 self.show_equity_pane,
+                self.equity_pane_source.short_label(),
                 rep.equity_pane_active,
+                self.active_exchange_venue().short_label(),
+                self.journal.entries.len(),
+                j_stats.visible_entry_count,
+                j_stats.discipline_score_pct,
+                wfo_verdict_json,
+                wfo_wfe_json,
+                port_ret_pct,
+                port_dd_red_pct,
                 self.show_backtest_trades,
                 rep.rendered_backtest_trade_count,
                 bt_preset_json,
@@ -11132,5 +14213,184 @@ mod tests {
                 .bar_count,
             app.candles.len()
         );
+    }
+
+    #[test]
+    fn r10_workstation_risk_planner_rr_box_journal_walk_forward_and_portfolio_e2e() {
+        let mut app = SumiWorkstationApp::default();
+        app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+        assert_eq!(app.active_exchange_venue(), ExchangeVenue::Hose);
+        assert!(app.active_daily_price_band().is_some());
+
+        // 1. Configure HOSE Risk Planner -> Snap Ticks -> Draw `RiskRewardBox` -> Sync Order Ticket
+        let mark = app.current_mark_price();
+        app.risk_plan_input.account_equity = 250_000_000.0;
+        app.risk_plan_input.available_cash = 250_000_000.0;
+        app.risk_plan_input.risk_pct = 1.0;
+        app.risk_plan_input.side = PositionSide::Long;
+        app.risk_plan_input.entry_price = mark * 0.99;
+        app.risk_plan_input.stop_loss = mark * 0.95;
+        app.risk_plan_input.target_price = mark * 1.08;
+
+        assert!(app.snap_planner_ticks_and_sync_rr_box());
+        let rr_id = app
+            .draw_or_update_rr_box_from_planner()
+            .expect("create RiskRewardBox from planner");
+        assert_eq!(app.drawings.selected_id, Some(rr_id));
+
+        // Flip L/S on the selected `RiskRewardBox` -> `auto_sync_planner_if_rr_box_changed` flips Planner to `Short`!
+        assert!(app.drawings.reverse_selected_risk_reward());
+        app.auto_sync_planner_if_rr_box_changed();
+        assert_eq!(app.risk_plan_input.side, PositionSide::Short);
+
+        // Flip back to `Long` and push to Paper Trading Order Ticket (`Lot 100` multiple!)
+        assert!(app.drawings.reverse_selected_risk_reward());
+        app.auto_sync_planner_if_rr_box_changed();
+        assert_eq!(app.risk_plan_input.side, PositionSide::Long);
+        assert!(app.sync_ticket_from_risk_planner());
+        let parsed_qty: f64 = app.ticket_qty_input.parse().expect("valid ticket qty");
+        assert!(
+            parsed_qty >= 100.0 && (parsed_qty % 100.0).abs() < 1.0e-6,
+            "HOSE ticket quantity must be floored to 100-share board lot, got {parsed_qty}"
+        );
+
+        // 2. Log active plan + import causal backtest trades + verify `DEF-001` causal replay masking on Journal & CSV/MD
+        let logged_id = app.log_active_plan_to_journal().expect("logged plan");
+        assert!(logged_id >= 1);
+        app.backtest_config.preset = StrategyPresetKind::MacdMomentum;
+        app.backtest_config.params.macd_fast = 6;
+        app.backtest_config.params.macd_slow = 16;
+        app.backtest_config.params.macd_signal = 5;
+        app.backtest_config.lot_step = 100.0;
+        let imported_bt = app.import_backtest_trades_to_journal(10);
+        assert!(imported_bt >= 1);
+        let full_visible = app.journal.visible_entries(None).len();
+
+        let cut_idx = app.base_candles.len() / 2;
+        assert!(app.start_replay_at_base_index(cut_idx));
+        let cut_cutoff = app.replay_causal_close_timestamp();
+        let replay_visible = app.journal.visible_entries(cut_cutoff).len();
+        assert!(
+            replay_visible < full_visible,
+            "DEF-001: future journal entries must be causally masked at 50% replay cutoff ({replay_visible} vs {full_visible})"
+        );
+        let csv_doc = app.export_journal_csv_causal();
+        assert_eq!(csv_doc.lines().count(), replay_visible + 1);
+        let md_doc = app.export_journal_markdown_causal();
+        assert!(md_doc.contains("# Sumi Structured Trade Journal & Discipline Report"));
+        app.exit_replay();
+
+        // 3. `Cmd+K` Command Palette actions (`RunWalkForwardValidation` + `RunPortfolioBacktest`) + Headless UI Frames!
+        app.open_command_palette();
+        app.command_palette.query = "walk forward".to_owned();
+        let cands = app.build_command_palette_candidates();
+        assert!(
+            cands
+                .iter()
+                .any(|c| matches!(c.action, PaletteAction::RunWalkForwardValidation))
+        );
+        app.execute_palette_action(PaletteAction::RunWalkForwardValidation);
+        assert!(app.walk_forward_report.is_some());
+        assert_eq!(app.equity_pane_source, EquityPaneSource::WalkForwardOos);
+
+        app.execute_palette_action(PaletteAction::RunPortfolioBacktest);
+        assert!(app.portfolio_report.is_some());
+        assert_eq!(
+            app.portfolio_report
+                .as_ref()
+                .expect("port report")
+                .constituents
+                .len(),
+            8
+        );
+        assert_eq!(
+            app.equity_pane_source,
+            EquityPaneSource::MultiAssetPortfolio
+        );
+
+        let ctx = egui::Context::default();
+        SumiWorkstationApp::configure_dark_workstation_visuals(&ctx);
+        let screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            Vec2::new(1280.0, 800.0),
+        ));
+        for dock_tab in [RightDockTab::StrategyLab, RightDockTab::Journal] {
+            app.right_dock_tab = dock_tab;
+            if dock_tab == RightDockTab::Journal {
+                app.open_journal_tab();
+            }
+            let mut full_output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect,
+                    ..Default::default()
+                },
+                |ui| app.render_workstation_ui(ui),
+            );
+            full_output.textures_delta.clear();
+            let rep = app.last_report.expect("chart render report");
+            assert!(rep.equity_pane_active);
+            assert!(rep.drawing_count >= 1);
+        }
+    }
+
+    #[test]
+    fn critic_r10_regression_zero_lot_ticket_guard_reseed_venue_reset_and_1w_ref_price() {
+        let mut app = SumiWorkstationApp::default();
+        app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+
+        // 1. M-09: `FPT` reference price on `1W` must equal yesterday's `D1` close (never last week's `1W` close!)
+        let d1_ref = app.causal_reference_price().expect("D1 ref price");
+        app.set_timeframe(Timeframe::W1).expect("W1 rollup");
+        let w1_ref = app.causal_reference_price().expect("W1 ref price");
+        assert!(
+            (d1_ref - w1_ref).abs() < 1e-9,
+            "M-09: switching to 1W must preserve D1 statutory reference price ({d1_ref} vs {w1_ref})"
+        );
+        app.set_timeframe(Timeframe::D1).expect("back to D1");
+
+        // 2. C-04: Unaffordable `0`-lot plan MUST NOT populate Order Ticket with `100` shares!
+        app.ticket_qty_input = "777".to_owned();
+        app.risk_plan_input.account_equity = 500.0;
+        app.risk_plan_input.available_cash = 500.0;
+        app.risk_plan_input.risk_pct = 0.5;
+        let zero_plan = app.compute_active_trade_plan().expect("valid 0-lot plan");
+        assert_eq!(zero_plan.planned_quantity, 0.0);
+        assert!(
+            !app.sync_ticket_from_risk_planner(),
+            "C-04: 0-lot plan must reject ticket sync instead of substituting 100-share board lot"
+        );
+        assert_eq!(app.ticket_qty_input, "777");
+
+        // 3. M-08: `Reseed` updates selected `RiskRewardBox`, and switching tickers resets `risk_venue_override`!
+        app.risk_plan_input.account_equity = 250_000_000.0;
+        app.risk_plan_input.available_cash = 250_000_000.0;
+        app.reseed_risk_planner_from_live_mark();
+        let rr_id = app
+            .draw_or_update_rr_box_from_planner()
+            .expect("drawn R:R box");
+        app.risk_plan_input.entry_price *= 0.85;
+        app.reseed_risk_planner_from_live_mark();
+        let (_, box_entry, _, _, _) = app
+            .drawings
+            .drawings
+            .iter()
+            .find(|d| d.id == rr_id)
+            .unwrap()
+            .geometry
+            .risk_reward_metrics()
+            .unwrap();
+        assert!(
+            (box_entry - app.current_mark_price()).abs() < 1.0,
+            "M-08: Reseed must update selected RiskRewardBox to fresh live mark"
+        );
+
+        app.risk_venue_override = Some(ExchangeVenue::UsEquities);
+        assert_eq!(app.active_exchange_venue(), ExchangeVenue::UsEquities);
+        app.select_watchlist_instrument(DataSourcePreset::IntradayVn30F1m, "VN30F1M");
+        assert_eq!(
+            app.risk_venue_override, None,
+            "M-08: switching instruments must reset risk_venue_override"
+        );
+        assert_eq!(app.active_exchange_venue(), ExchangeVenue::Vn30Futures);
     }
 }

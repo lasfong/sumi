@@ -638,6 +638,20 @@ pub struct ChartDisplayConfig<'a> {
     pub show_volume: bool,
 }
 
+/// Custom synchronized equity curve series (`Walk-Forward Stitched OOS` or `Multi-Asset Portfolio`)
+/// overriding the default single-asset [`BacktestRunResult`] curve inside [`OscillatorPaneId::Equity`].
+#[derive(Debug, Clone, Copy)]
+pub struct EquityCurveOverlay<'a> {
+    pub title_label: &'a str,
+    pub baseline_cash: f64,
+    pub equity_values: &'a [Option<f64>],
+    pub equity_idx: &'a SeriesBlockIndex,
+    pub underwater_values: &'a [Option<f64>],
+    pub bar_count: usize,
+    pub split_bar_index: Option<usize>,
+    pub trades: Option<&'a [BacktestTrade]>,
+}
+
 /// Optional Bar Replay, Paper Trading, Alert & Strategy Backtest Lab visual overlay state passed to [`render_workstation_chart_full`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ChartReplayTradingOverlay<'a> {
@@ -647,6 +661,7 @@ pub struct ChartReplayTradingOverlay<'a> {
     pub trading_session: Option<&'a TradingSession>,
     pub alert_engine: Option<&'a AlertEngine>,
     pub backtest_result: Option<&'a BacktestRunResult>,
+    pub equity_override: Option<EquityCurveOverlay<'a>>,
     pub show_equity_pane: bool,
     pub show_backtest_trades_on_chart: bool,
     pub focused_backtest_trade_id: Option<u64>,
@@ -810,8 +825,8 @@ fn render_workstation_chart_inner(
         .unwrap_or(&fallback_clean_indicators);
 
     let mut active_osc_ids = indicators.active_oscillator_panes();
-    let equity_pane_active =
-        replay_trading.show_equity_pane && replay_trading.backtest_result.is_some();
+    let equity_pane_active = replay_trading.show_equity_pane
+        && (replay_trading.equity_override.is_some() || replay_trading.backtest_result.is_some());
     if equity_pane_active && !active_osc_ids.contains(&OscillatorPaneId::Equity) {
         active_osc_ids.push(OscillatorPaneId::Equity);
     }
@@ -1068,6 +1083,7 @@ fn render_workstation_chart_inner(
                 viewport.oscillator_price_scale_mut(osc.id),
                 indicator_cache,
                 replay_trading.backtest_result,
+                replay_trading.equity_override,
                 init_strict.clone(),
             );
         }
@@ -1266,6 +1282,7 @@ fn render_workstation_chart_inner(
             viewport.oscillator_price_scale_mut(osc.id),
             indicator_cache,
             replay_trading.backtest_result,
+            replay_trading.equity_override,
             strict_range.clone(),
         );
     }
@@ -1462,21 +1479,47 @@ fn render_workstation_chart_inner(
             (0, 0)
         };
 
-    let rendered_backtest_trade_count = if let Some(bt) = replay_trading.backtest_result {
-        if (replay_trading.show_backtest_trades_on_chart || equity_pane_active)
-            && let Some(split_idx) = bt.split_bar_index
-        {
-            paint_oos_split_marker(
-                &main_plot_painter,
-                multi_layout.main_plot_rect,
-                bt.bar_count,
-                candles.len(),
-                split_idx,
-                &main_vp,
-                false,
-            );
-        }
-        if replay_trading.show_backtest_trades_on_chart {
+    if equity_pane_active
+        && let Some(eq_ov) = replay_trading.equity_override
+        && let Some(split_idx) = eq_ov.split_bar_index
+    {
+        paint_oos_split_marker(
+            &main_plot_painter,
+            multi_layout.main_plot_rect,
+            eq_ov.bar_count,
+            candles.len(),
+            split_idx,
+            &main_vp,
+            false,
+        );
+    }
+
+    if (replay_trading.show_backtest_trades_on_chart || equity_pane_active)
+        && replay_trading.equity_override.is_none()
+        && let Some(bt) = replay_trading.backtest_result
+        && let Some(split_idx) = bt.split_bar_index
+    {
+        paint_oos_split_marker(
+            &main_plot_painter,
+            multi_layout.main_plot_rect,
+            bt.bar_count,
+            candles.len(),
+            split_idx,
+            &main_vp,
+            false,
+        );
+    }
+
+    let rendered_backtest_trade_count = if replay_trading.show_backtest_trades_on_chart {
+        let active_trade_source = replay_trading
+            .equity_override
+            .and_then(|ov| ov.trades.map(|tr| (tr, ov.bar_count)))
+            .or_else(|| {
+                replay_trading
+                    .backtest_result
+                    .map(|bt| (bt.trades.as_slice(), bt.bar_count))
+            });
+        if let Some((trades_slice, src_bar_count)) = active_trade_source {
             paint_backtest_trade_links(
                 &main_plot_painter,
                 multi_layout.main_plot_rect,
@@ -1484,7 +1527,8 @@ fn render_workstation_chart_inner(
                 culling_range.clone(),
                 conflation_factor,
                 &main_vp,
-                bt,
+                trades_slice,
+                src_bar_count,
                 replay_trading.focused_backtest_trade_id,
                 replay_trading.replay_cutoff_timestamp,
             )
@@ -1509,8 +1553,14 @@ fn render_workstation_chart_inner(
 
     // 10. Paint Stacked Oscillator / Strategy Sub-Panes (`RSI`, `MACD`, `ATR`, `Equity`)
     let equity_base_val = replay_trading
-        .backtest_result
-        .map_or(100_000.0, |bt| bt.config.initial_cash.max(1.0));
+        .equity_override
+        .map(|ov| ov.baseline_cash.max(1.0))
+        .or_else(|| {
+            replay_trading
+                .backtest_result
+                .map(|bt| bt.config.initial_cash.max(1.0))
+        })
+        .unwrap_or(100_000.0);
     for osc in &multi_layout.oscillators {
         let osc_ps = viewport.oscillator_price_scale(osc.id);
         let osc_plot_f64 = PlotRect::from_egui(osc.plot_rect);
@@ -1582,13 +1632,36 @@ fn render_workstation_chart_inner(
                 );
             }
             OscillatorPaneId::Equity => {
-                if let Some(bt) = replay_trading.backtest_result {
+                if let Some(eq_ov) = replay_trading.equity_override {
                     paint_equity_baseline_pane(
                         &painter,
                         &osc_painter,
                         osc.plot_rect,
                         osc.price_axis_rect,
-                        bt,
+                        eq_ov,
+                        candles.len(),
+                        culling_range.clone(),
+                        conflation_factor,
+                        osc_ps,
+                        &osc_vp,
+                    );
+                } else if let Some(bt) = replay_trading.backtest_result {
+                    let eq_ov = EquityCurveOverlay {
+                        title_label: bt.config.preset.short_label(),
+                        baseline_cash: bt.config.initial_cash,
+                        equity_values: &bt.equity_values,
+                        equity_idx: &bt.equity_idx,
+                        underwater_values: &bt.underwater_values,
+                        bar_count: bt.bar_count,
+                        split_bar_index: bt.split_bar_index,
+                        trades: None,
+                    };
+                    paint_equity_baseline_pane(
+                        &painter,
+                        &osc_painter,
+                        osc.plot_rect,
+                        osc.price_axis_rect,
+                        eq_ov,
                         candles.len(),
                         culling_range.clone(),
                         conflation_factor,
@@ -1671,11 +1744,16 @@ fn render_workstation_chart_inner(
             }
             HoveredPane::Oscillator(id, p_rect, _, pos) => {
                 hovered_oscillator = Some(id);
+                let osc_bv = if id == OscillatorPaneId::Equity {
+                    equity_base_val
+                } else {
+                    1.0
+                };
                 let osc_vp = PaneViewport::new(
                     &viewport.time_scale,
                     viewport.oscillator_price_scale(id),
                     PlotRect::from_egui(p_rect),
-                    1.0,
+                    osc_bv,
                 );
                 hovered_oscillator_value = osc_vp.screen_y_to_price(f64::from(pos.y));
             }
@@ -1898,6 +1976,7 @@ fn render_workstation_chart_inner(
             indicators,
             indicator_cache,
             replay_trading.backtest_result,
+            replay_trading.equity_override,
             hud_series_index,
         );
     }
@@ -3206,14 +3285,14 @@ fn paint_equity_baseline_pane(
     plot_painter: &egui::Painter,
     plot_rect: Rect,
     price_axis_rect: Rect,
-    bt: &BacktestRunResult,
+    eq_ov: EquityCurveOverlay<'_>,
     candle_len: usize,
     culling_range: std::ops::Range<usize>,
     conflation_factor: usize,
     price_scale: &PriceScale,
     vp: &PaneViewport<'_>,
 ) {
-    let baseline = bt.config.initial_cash.max(1.0);
+    let baseline = eq_ov.baseline_cash.max(1.0);
     let Some(base_sy) = vp.price_to_screen_y(baseline) else {
         return;
     };
@@ -3258,11 +3337,11 @@ fn paint_equity_baseline_pane(
     }
 
     // 2. Optional `IS | OOS` walk-forward split boundary
-    if let Some(split_idx) = bt.split_bar_index {
+    if let Some(split_idx) = eq_ov.split_bar_index {
         paint_oos_split_marker(
             plot_painter,
             plot_rect,
-            bt.bar_count,
+            eq_ov.bar_count,
             candle_len,
             split_idx,
             vp,
@@ -3271,7 +3350,7 @@ fn paint_equity_baseline_pane(
     }
 
     // 3. Single-pass `egui::Mesh` Baseline-Split Area + Stroke (`LWC BaselineSeries` exact crossing split)
-    let total = bt.equity_values.len().min(candle_len);
+    let total = eq_ov.equity_values.len().min(candle_len);
     let step = conflation_factor.max(1);
     let clamped_start = culling_range.start.min(total);
     let clamped_end = culling_range.end.min(total);
@@ -3347,7 +3426,7 @@ fn paint_equity_baseline_pane(
         let sample_start = clamped_start.saturating_sub(1);
         let sample_end = (clamped_end + 1).min(total);
         for idx in sample_start..sample_end {
-            if let Some(v) = bt.equity_values[idx].filter(|v| v.is_finite())
+            if let Some(v) = eq_ov.equity_values[idx].filter(|v| v.is_finite())
                 && let (Some(sx), Some(sy)) = (
                     vp.float_index_to_screen_x(idx as f64),
                     vp.price_to_screen_y(v),
@@ -3369,8 +3448,8 @@ fn paint_equity_baseline_pane(
         while b_start < aligned_end {
             let b_end = (b_start + step).min(total);
             if let Some(env) = bucket_line_envelope_indexed(
-                &bt.equity_values,
-                Some(&bt.equity_idx),
+                eq_ov.equity_values,
+                Some(eq_ov.equity_idx),
                 b_start,
                 b_end,
             ) && let (Some(sx), Some(sy_in), Some(sy_out)) = (
@@ -3422,11 +3501,12 @@ fn paint_backtest_trade_links(
     culling_range: std::ops::Range<usize>,
     conflation_factor: usize,
     main_vp: &PaneViewport<'_>,
-    bt: &BacktestRunResult,
+    trades: &[BacktestTrade],
+    source_bar_count: usize,
     focused_trade_id: Option<u64>,
     replay_cutoff_timestamp: Option<i64>,
 ) -> usize {
-    if bt.trades.is_empty() || candles.is_empty() || culling_range.is_empty() {
+    if trades.is_empty() || candles.is_empty() || culling_range.is_empty() {
         return 0;
     }
 
@@ -3451,7 +3531,8 @@ fn paint_backtest_trade_links(
     }
 
     let resolve_bar_idx = |bar_idx: usize, ts: i64| -> usize {
-        if bt.bar_count == candles.len() && candles.get(bar_idx).is_some_and(|c| c.timestamp == ts)
+        if source_bar_count == candles.len()
+            && candles.get(bar_idx).is_some_and(|c| c.timestamp == ts)
         {
             bar_idx
         } else {
@@ -3471,22 +3552,22 @@ fn paint_backtest_trade_links(
     };
 
     // O(log T) interval overlap query on non-overlapping chronological trades
-    let first_vis = if bt.bar_count == candles.len() {
-        bt.trades.partition_point(|t| t.exit_bar_index < vis_start)
+    let first_vis = if source_bar_count == candles.len() {
+        trades.partition_point(|t| t.exit_bar_index < vis_start)
     } else {
         let min_ts = candles[vis_start].timestamp;
-        bt.trades.partition_point(|t| t.exit_timestamp < min_ts)
+        trades.partition_point(|t| t.exit_timestamp < min_ts)
     };
-    let last_vis = if bt.bar_count == candles.len() {
-        bt.trades.partition_point(|t| t.entry_bar_index <= vis_end)
+    let last_vis = if source_bar_count == candles.len() {
+        trades.partition_point(|t| t.entry_bar_index <= vis_end)
     } else if vis_end < candles.len() {
         let max_ts = candles[vis_end].timestamp;
-        bt.trades.partition_point(|t| t.entry_timestamp <= max_ts)
+        trades.partition_point(|t| t.entry_timestamp <= max_ts)
     } else {
-        bt.trades.len()
+        trades.len()
     };
 
-    let Some(vis_slice) = bt.trades.get(first_vis..last_vis) else {
+    let Some(vis_slice) = trades.get(first_vis..last_vis) else {
         return 0;
     };
     if vis_slice.is_empty() {
@@ -4021,6 +4102,7 @@ fn paint_oscillator_hud(
     indicators: &IndicatorConfig,
     cache: &IndicatorCache,
     backtest_result: Option<&BacktestRunResult>,
+    equity_override: Option<EquityCurveOverlay<'_>>,
     idx: usize,
 ) {
     let mut job = LayoutJob::default();
@@ -4115,7 +4197,91 @@ fn paint_oscillator_hud(
             );
         }
         OscillatorPaneId::Equity => {
-            if let Some(bt) = backtest_result {
+            if let Some(eq_ov) = equity_override {
+                let base = eq_ov.baseline_cash.max(1.0);
+                let clamped_idx = idx.min(eq_ov.equity_values.len().saturating_sub(1));
+                let eq_opt = eq_ov
+                    .equity_values
+                    .get(clamped_idx)
+                    .copied()
+                    .flatten()
+                    .filter(|v| v.is_finite());
+                job.append(
+                    &format!("EQUITY [{}]  ", eq_ov.title_label),
+                    0.0,
+                    TextFormat {
+                        font_id: font.clone(),
+                        color: palette::TEXT_PRIMARY,
+                        ..Default::default()
+                    },
+                );
+                if let Some(eq) = eq_opt {
+                    let ret_pct = ((eq - base) / base) * 100.0;
+                    let dd_pct = eq_ov
+                        .underwater_values
+                        .get(clamped_idx)
+                        .copied()
+                        .flatten()
+                        .unwrap_or(0.0);
+                    let ret_col = if ret_pct >= 0.0 {
+                        palette::EQUITY_ABOVE_LINE
+                    } else {
+                        palette::EQUITY_BELOW_LINE
+                    };
+                    job.append(
+                        &format!("{eq:.0} ({ret_pct:+.2}%)   "),
+                        0.0,
+                        TextFormat {
+                            font_id: font.clone(),
+                            color: ret_col,
+                            ..Default::default()
+                        },
+                    );
+                    job.append(
+                        &format!("DD {dd_pct:.2}%"),
+                        0.0,
+                        TextFormat {
+                            font_id: font.clone(),
+                            color: if dd_pct < -0.01 {
+                                palette::EQUITY_BELOW_LINE
+                            } else {
+                                palette::TEXT_MUTED
+                            },
+                            ..Default::default()
+                        },
+                    );
+                    if let Some(split_idx) = eq_ov.split_bar_index {
+                        let phase_lbl = if clamped_idx >= split_idx {
+                            "   [OOS]"
+                        } else {
+                            "   [IS]"
+                        };
+                        job.append(
+                            phase_lbl,
+                            0.0,
+                            TextFormat {
+                                font_id: font,
+                                color: if clamped_idx >= split_idx {
+                                    palette::BACKTEST_OOS_SPLIT
+                                } else {
+                                    palette::TEXT_MUTED
+                                },
+                                ..Default::default()
+                            },
+                        );
+                    }
+                } else {
+                    job.append(
+                        "— (Pre-OOS / Warmup)",
+                        0.0,
+                        TextFormat {
+                            font_id: font,
+                            color: palette::TEXT_MUTED,
+                            ..Default::default()
+                        },
+                    );
+                }
+            } else if let Some(bt) = backtest_result {
                 let clamped_idx = idx.min(bt.equity_curve.len().saturating_sub(1));
                 let pt = bt.equity_curve.get(clamped_idx);
                 let base = bt.config.initial_cash.max(1.0);
@@ -4482,6 +4648,7 @@ fn refresh_oscillator_autoscale(
     price_scale: &mut PriceScale,
     cache: &IndicatorCache,
     backtest_result: Option<&BacktestRunResult>,
+    equity_override: Option<EquityCurveOverlay<'_>>,
     strict_range: std::ops::Range<usize>,
 ) {
     if !price_scale.is_auto_scale() {
@@ -4525,7 +4692,23 @@ fn refresh_oscillator_autoscale(
             price_scale.autoscale_raw_bounds(min_v, max_v, 1.0);
         }
         OscillatorPaneId::Equity => {
-            if let Some(bt) = backtest_result {
+            if let Some(eq_ov) = equity_override {
+                let base = eq_ov.baseline_cash.max(1.0);
+                let total = eq_ov.equity_values.len();
+                let clamped = strict_range.start.min(total)..strict_range.end.min(total);
+                let (raw_min, raw_max) = eq_ov
+                    .equity_idx
+                    .range_bounds(eq_ov.equity_values, clamped)
+                    .unwrap_or((base, base));
+                let min_v = raw_min.min(base);
+                let max_v = raw_max.max(base);
+                let pad = if (max_v - min_v).abs() < base * 1e-4 {
+                    base * 0.02
+                } else {
+                    0.0
+                };
+                price_scale.autoscale_raw_bounds(min_v - pad, max_v + pad, base);
+            } else if let Some(bt) = backtest_result {
                 let base = bt.config.initial_cash.max(1.0);
                 let total = bt.equity_values.len();
                 let clamped = strict_range.start.min(total)..strict_range.end.min(total);
@@ -6371,6 +6554,143 @@ fn paint_single_drawing(
                 );
             }
         }
+        ProjectedDrawingShape::RiskReward {
+            is_long,
+            entry_price,
+            stop_price,
+            target_price,
+            gross_r,
+            reward_fill,
+            risk_fill,
+            entry_line,
+            target_line,
+            stop_line,
+            side_borders,
+        } => {
+            let emerald = Color32::from_rgb(38, 198, 164);
+            let crimson = Color32::from_rgb(255, 92, 92);
+            let entry_col = Color32::from_rgb(228, 235, 248);
+
+            if (reward_fill.is_some() || risk_fill.is_some()) && drawing.style.fill_opacity > 0.001
+            {
+                let mut rr_mesh = Mesh::default();
+                let op = drawing.style.fill_opacity.clamp(0.05, 0.45);
+                if let Some(rf) = reward_fill {
+                    let srect = Rect::from_min_max(
+                        local_to_screen_pos(plot_rect, LocalPoint::new(rf.left, rf.top)),
+                        local_to_screen_pos(plot_rect, LocalPoint::new(rf.right, rf.bottom)),
+                    );
+                    rr_mesh.add_colored_rect(
+                        srect,
+                        drawing_premultiplied_fill(DrawingColorPreset::Emerald, op),
+                    );
+                }
+                if let Some(sf) = risk_fill {
+                    let srect = Rect::from_min_max(
+                        local_to_screen_pos(plot_rect, LocalPoint::new(sf.left, sf.top)),
+                        local_to_screen_pos(plot_rect, LocalPoint::new(sf.right, sf.bottom)),
+                    );
+                    rr_mesh.add_colored_rect(
+                        srect,
+                        drawing_premultiplied_fill(DrawingColorPreset::Crimson, op),
+                    );
+                }
+                plot_painter.add(Shape::mesh(rr_mesh));
+            }
+
+            let border_stroke = Stroke::new(
+                1.0,
+                Color32::from_rgba_unmultiplied(150, 168, 195, if is_selected { 145 } else { 90 }),
+            );
+            for side_seg in side_borders.iter().flatten() {
+                let p0 = local_to_screen_pos(plot_rect, side_seg.start);
+                let p1 = local_to_screen_pos(plot_rect, side_seg.end);
+                plot_painter.line_segment([p0, p1], border_stroke);
+            }
+
+            for (seg_opt, col, is_entry) in [
+                (*target_line, emerald, false),
+                (*stop_line, crimson, false),
+                (*entry_line, entry_col, true),
+            ] {
+                if let Some(seg) = seg_opt {
+                    let p0 = local_to_screen_pos(plot_rect, seg.start);
+                    let p1 = local_to_screen_pos(plot_rect, seg.end);
+                    if let Some(glow) = highlight_glow {
+                        plot_painter.line_segment([p0, p1], glow);
+                    }
+                    let w = if is_entry { stroke_w + 0.25 } else { stroke_w };
+                    paint_styled_segment_phased(
+                        plot_painter,
+                        p0,
+                        p1,
+                        Pos2::new(bar0_screen_x, p0.y),
+                        Stroke::new(w, col),
+                        if is_entry { LineDashStyle::Solid } else { dash },
+                    );
+                }
+            }
+
+            // Compact non-overlapping HUD pill & price tags inside the box when wide enough (`>= 72 px`).
+            if let Some(eseg) = entry_line {
+                let ep0 = local_to_screen_pos(plot_rect, eseg.start);
+                let ep1 = local_to_screen_pos(plot_rect, eseg.end);
+                let span_w = ep1.x - ep0.x;
+                if span_w >= 72.0 && *entry_price > 0.0 {
+                    let tp_pct = ((*target_price - *entry_price) / *entry_price) * 100.0;
+                    let sl_pct = ((*stop_price - *entry_price) / *entry_price) * 100.0;
+                    let dir_txt = if *is_long { "LONG" } else { "SHORT" };
+                    let summary = if span_w >= 175.0 {
+                        format!("{dir_txt} {gross_r:.2}R · TP {tp_pct:+.1}% / SL {sl_pct:+.1}%")
+                    } else {
+                        format!("{dir_txt} {gross_r:.2}R")
+                    };
+                    let pill_y =
+                        (ep0.y - 9.0).clamp(plot_rect.top() + 10.0, plot_rect.bottom() - 10.0);
+                    let galley = plot_painter.layout_no_wrap(
+                        summary,
+                        FontId::monospace(10.0),
+                        if *is_long { emerald } else { crimson },
+                    );
+                    let pill_pos = Pos2::new(ep0.x + 5.0, pill_y - galley.size().y * 0.5);
+                    let bg_rect =
+                        Rect::from_min_size(pill_pos, galley.size()).expand2(Vec2::new(4.0, 2.0));
+                    if plot_rect.contains_rect(bg_rect) {
+                        plot_painter.rect_filled(
+                            bg_rect,
+                            3.0,
+                            Color32::from_rgba_unmultiplied(13, 17, 26, 215),
+                        );
+                        plot_painter.galley(pill_pos, galley, Color32::WHITE);
+                    }
+                }
+            }
+
+            if is_selected {
+                for (val, col) in [
+                    (*target_price, emerald),
+                    (*stop_price, crimson),
+                    (*entry_price, base_color),
+                ] {
+                    if let Some(ly) = price_scale.price_to_local_y(val, base_value) {
+                        let sy = (plot_rect.top() + (ly as f32))
+                            .clamp(price_axis_rect.top() + 9.5, price_axis_rect.bottom() - 9.5);
+                        let badge_rect = Rect::from_min_max(
+                            Pos2::new(price_axis_rect.left() + 2.0, sy - 8.0),
+                            Pos2::new(price_axis_rect.right() - 4.0, sy + 8.0),
+                        );
+                        axis_painter.rect_filled(badge_rect, 3.0, col);
+                        axis_painter.text(
+                            Pos2::new(price_axis_rect.left() + 6.0, sy),
+                            Align2::LEFT_CENTER,
+                            price_scale.format_price(val, base_value),
+                            FontId::monospace(10.0),
+                            palette::BG_WORKSTATION,
+                        );
+                    }
+                }
+            }
+        }
     }
 
     // Paint crisp anchor / corner handles when selected, hovered, or actively placing a preview!
@@ -6381,22 +6701,30 @@ fn paint_single_drawing(
                 continue;
             }
             match handle.part {
-                HandlePart::Anchor(_) => {
+                HandlePart::Anchor(_) | HandlePart::RrEntryLeft | HandlePart::RrEntryRight => {
+                    let col = if matches!(
+                        handle.part,
+                        HandlePart::RrEntryLeft | HandlePart::RrEntryRight
+                    ) {
+                        Color32::from_rgb(228, 235, 248)
+                    } else {
+                        base_color
+                    };
                     plot_painter.circle_filled(hp, 4.6, palette::BG_CHART_CANVAS);
-                    plot_painter.circle_stroke(hp, 4.6, Stroke::new(2.0, base_color));
+                    plot_painter.circle_stroke(hp, 4.6, Stroke::new(2.0, col));
                     if is_selected || is_preview {
                         plot_painter.circle_filled(hp, 1.8, Color32::WHITE);
                     }
                 }
-                HandlePart::RectCorner(_) => {
+                HandlePart::RectCorner(_) | HandlePart::RrTarget | HandlePart::RrStop => {
+                    let col = match handle.part {
+                        HandlePart::RrTarget => Color32::from_rgb(38, 198, 164),
+                        HandlePart::RrStop => Color32::from_rgb(255, 92, 92),
+                        _ => base_color,
+                    };
                     let sq = Rect::from_center_size(hp, Vec2::splat(8.4));
                     plot_painter.rect_filled(sq, 1.5, palette::BG_CHART_CANVAS);
-                    plot_painter.rect_stroke(
-                        sq,
-                        1.5,
-                        Stroke::new(1.8, base_color),
-                        StrokeKind::Inside,
-                    );
+                    plot_painter.rect_stroke(sq, 1.5, Stroke::new(1.8, col), StrokeKind::Inside);
                 }
             }
         }

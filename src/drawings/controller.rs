@@ -324,7 +324,8 @@ impl DrawingStore {
                 corner_a: start,
                 corner_b: end,
             }
-            | DrawingGeometry::FibonacciRetracement { start, end, .. } => {
+            | DrawingGeometry::FibonacciRetracement { start, end, .. }
+            | DrawingGeometry::RiskRewardBox { start, end, .. } => {
                 refresh_anchor(start);
                 refresh_anchor(end);
             }
@@ -361,6 +362,9 @@ impl DrawingStore {
     #[must_use]
     pub fn is_capturing_pane_gesture(&self, pane: DrawingPaneTarget) -> bool {
         if self.active_tool != DrawingTool::Select {
+            if self.active_tool == DrawingTool::RiskRewardBox && pane != DrawingPaneTarget::Main {
+                return false;
+            }
             return true;
         }
         match self.phase {
@@ -379,6 +383,11 @@ impl DrawingStore {
         geometry: DrawingGeometry,
         style: Option<DrawingStyle>,
     ) -> Option<DrawingId> {
+        if matches!(geometry, DrawingGeometry::RiskRewardBox { .. })
+            && pane != DrawingPaneTarget::Main
+        {
+            return None;
+        }
         if !geometry.is_valid() {
             return None;
         }
@@ -409,7 +418,10 @@ impl DrawingStore {
         let mut chosen_selected: Option<DrawingId> = None;
         for (idx, mut d) in entries.into_iter().enumerate() {
             d.style.sanitize();
-            if !d.geometry.is_valid() {
+            if !d.geometry.is_valid()
+                || (matches!(d.geometry, DrawingGeometry::RiskRewardBox { .. })
+                    && d.pane != DrawingPaneTarget::Main)
+            {
                 continue;
             }
             if d.id == 0 || d.id == PREVIEW_DRAWING_ID {
@@ -623,6 +635,78 @@ impl DrawingStore {
         })
     }
 
+    /// Flips Long <-> Short around `start.value` (`entry_price`) on a selected unlocked `RiskRewardBox`.
+    pub fn reverse_selected_risk_reward(&mut self) -> bool {
+        self.mutate_selected(|d| {
+            if d.locked {
+                return false;
+            }
+            if let DrawingGeometry::RiskRewardBox {
+                start,
+                end,
+                stop_price,
+            } = &mut d.geometry
+            {
+                let Some(side) =
+                    DrawingGeometry::risk_reward_side_of(start.value, end.value, *stop_price)
+                else {
+                    return false;
+                };
+                let entry = start.value;
+                let reward_dist = (end.value - entry).abs();
+                let risk_dist = (entry - *stop_price).abs();
+                let (new_target, new_stop) = match side {
+                    crate::trading::PositionSide::Long => (
+                        (entry - reward_dist).max(entry * 0.05),
+                        (entry + risk_dist).min(super::MAX_ABS_DRAWING_VALUE),
+                    ),
+                    crate::trading::PositionSide::Short => (
+                        (entry + reward_dist).min(super::MAX_ABS_DRAWING_VALUE),
+                        (entry - risk_dist).max(entry * 0.05),
+                    ),
+                };
+                if DrawingGeometry::risk_reward_side_of(entry, new_target, new_stop).is_none() {
+                    return false;
+                }
+                end.value = new_target;
+                *stop_price = new_stop;
+                true
+            } else {
+                false
+            }
+        })
+    }
+
+    /// Updates `(entry, stop, target)` levels on a selected unlocked `RiskRewardBox` (e.g. from Risk Planner tick snapping).
+    pub fn update_selected_risk_reward_levels(
+        &mut self,
+        entry: f64,
+        stop: f64,
+        target: f64,
+    ) -> bool {
+        if DrawingGeometry::risk_reward_side_of(entry, target, stop).is_none() {
+            return false;
+        }
+        self.mutate_selected(|d| {
+            if d.locked {
+                return false;
+            }
+            if let DrawingGeometry::RiskRewardBox {
+                start,
+                end,
+                stop_price,
+            } = &mut d.geometry
+            {
+                start.value = entry;
+                end.value = target;
+                *stop_price = stop;
+                true
+            } else {
+                false
+            }
+        })
+    }
+
     pub fn undo(&mut self) -> bool {
         self.rollback_active_phase();
         let Some(cmd) = self.undo_stack.pop() else {
@@ -819,12 +903,30 @@ impl DrawingStore {
                             HandlePart::Anchor(0)
                             | HandlePart::RectCorner(0)
                             | HandlePart::RectCorner(3) => orig_a0,
+                            HandlePart::RrEntryLeft => {
+                                if orig_a0.bar_index <= orig_a1.bar_index {
+                                    orig_a0
+                                } else {
+                                    orig_a1
+                                }
+                            }
+                            HandlePart::RrEntryRight => {
+                                if orig_a0.bar_index <= orig_a1.bar_index {
+                                    orig_a1
+                                } else {
+                                    orig_a0
+                                }
+                            }
                             _ => orig_a1,
                         };
                         anchor.bar_index = src.bar_index;
                         anchor.timestamp = src.timestamp;
                     }
-                    apply_handle_drag(&mut d.geometry, target_handle, anchor);
+                    let mut next_geom = original.geometry.clone();
+                    apply_handle_drag(&mut next_geom, &original.geometry, target_handle, anchor);
+                    if next_geom.is_valid() {
+                        d.geometry = next_geom;
+                    }
                     if let Some(cutoff_ts) = self.replay_cutoff_timestamp {
                         d.created_at_timestamp = Some(
                             d.created_at_timestamp
@@ -943,7 +1045,11 @@ impl DrawingStore {
             tool @ (DrawingTool::TrendLine
             | DrawingTool::Ray
             | DrawingTool::Rectangle
-            | DrawingTool::FibonacciRetracement) => {
+            | DrawingTool::FibonacciRetracement
+            | DrawingTool::RiskRewardBox) => {
+                if tool == DrawingTool::RiskRewardBox && pane != DrawingPaneTarget::Main {
+                    return PointerCaptureOutcome::PassThroughToViewport;
+                }
                 if let Some(anchor) =
                     resolve_anchor(pane, local_pos, effective_magnet, proj, candles)
                 {
@@ -1342,11 +1448,60 @@ fn build_two_anchor_geometry(
             direction: FibDirection::StartToEnd,
             extend_right: false,
         }),
+        DrawingTool::RiskRewardBox => {
+            if a0.value <= 0.0 || a1.value <= 0.0 {
+                return None;
+            }
+            let entry = a0.value;
+            let flat_eps = (entry * 1.0e-4).max(1.0e-6);
+            let (end_anchor, stop_price) = if a1.value > entry + flat_eps {
+                // Upward drag -> Long setup with default 2.0R stop
+                let reward = a1.value - entry;
+                let stop = (entry - 0.5 * reward)
+                    .max(entry * 0.25)
+                    .min(entry - flat_eps);
+                (a1, stop)
+            } else if a1.value < entry - flat_eps {
+                // Downward drag -> Short setup with default 2.0R stop
+                let target_val = a1.value.max(entry * 0.05);
+                let reward = (entry - target_val).max(flat_eps);
+                let stop = (entry + 0.5 * reward).min(super::MAX_ABS_DRAWING_VALUE);
+                (
+                    DrawingAnchor {
+                        value: target_val,
+                        ..a1
+                    },
+                    stop,
+                )
+            } else {
+                // Pure horizontal drag -> clean Long 2.0R setup (+4% target / -2% stop)
+                let target_val = (entry * 1.04).min(super::MAX_ABS_DRAWING_VALUE);
+                let stop = (entry * 0.98).max(entry * 0.25);
+                (
+                    DrawingAnchor {
+                        value: target_val,
+                        ..a1
+                    },
+                    stop,
+                )
+            };
+            let candidate = DrawingGeometry::RiskRewardBox {
+                start: a0,
+                end: end_anchor,
+                stop_price,
+            };
+            candidate.is_valid().then_some(candidate)
+        }
         DrawingTool::Select | DrawingTool::HorizontalLine => None,
     }
 }
 
-fn apply_handle_drag(geom: &mut DrawingGeometry, handle: HandlePart, anchor: DrawingAnchor) {
+fn apply_handle_drag(
+    geom: &mut DrawingGeometry,
+    original_geom: &DrawingGeometry,
+    handle: HandlePart,
+    anchor: DrawingAnchor,
+) {
     if !anchor.is_valid() {
         return;
     }
@@ -1367,6 +1522,93 @@ fn apply_handle_drag(geom: &mut DrawingGeometry, handle: HandlePart, anchor: Dra
                     corner_a.bar_index = anchor.bar_index;
                     corner_a.timestamp = anchor.timestamp;
                     corner_b.value = anchor.value;
+                }
+                _ => {}
+            }
+        }
+        (
+            DrawingGeometry::RiskRewardBox {
+                start,
+                end,
+                stop_price,
+            },
+            HandlePart::RrEntryLeft
+            | HandlePart::RrEntryRight
+            | HandlePart::RrTarget
+            | HandlePart::RrStop,
+        ) => {
+            let DrawingGeometry::RiskRewardBox {
+                start: orig_start,
+                end: orig_end,
+                stop_price: orig_stop,
+            } = original_geom
+            else {
+                return;
+            };
+            let Some(orig_side) =
+                DrawingGeometry::risk_reward_side_of(orig_start.value, orig_end.value, *orig_stop)
+            else {
+                return;
+            };
+            let sep = (orig_start.value.abs() * 1.0e-4).max(1.0e-6);
+            let min_pos = (orig_start.value * 1.0e-4).max(1.0e-6);
+            let orig_risk_dist = (orig_start.value - *orig_stop).abs().max(sep);
+
+            match handle {
+                HandlePart::RrTarget => {
+                    if anchor.value >= orig_start.value {
+                        end.value = anchor
+                            .value
+                            .clamp(orig_start.value + sep, super::MAX_ABS_DRAWING_VALUE);
+                        *stop_price = if orig_side == crate::trading::PositionSide::Long {
+                            *orig_stop
+                        } else {
+                            let max_long_sl = (orig_start.value - sep).max(min_pos);
+                            (orig_start.value - orig_risk_dist).clamp(min_pos, max_long_sl)
+                        };
+                    } else {
+                        let max_short_tp = (orig_start.value - sep).max(min_pos);
+                        end.value = anchor.value.clamp(min_pos, max_short_tp);
+                        *stop_price = if orig_side == crate::trading::PositionSide::Short {
+                            *orig_stop
+                        } else {
+                            (orig_start.value + orig_risk_dist)
+                                .clamp(orig_start.value + sep, super::MAX_ABS_DRAWING_VALUE)
+                        };
+                    }
+                }
+                HandlePart::RrStop => match orig_side {
+                    crate::trading::PositionSide::Long => {
+                        let max_long_sl = (orig_start.value - sep).max(min_pos);
+                        *stop_price = anchor.value.clamp(min_pos, max_long_sl);
+                    }
+                    crate::trading::PositionSide::Short => {
+                        *stop_price = anchor
+                            .value
+                            .clamp(orig_start.value + sep, super::MAX_ABS_DRAWING_VALUE);
+                    }
+                },
+                HandlePart::RrEntryLeft | HandlePart::RrEntryRight => {
+                    let is_left = handle == HandlePart::RrEntryLeft;
+                    let start_is_left = orig_start.bar_index <= orig_end.bar_index;
+                    if is_left == start_is_left {
+                        start.bar_index = anchor.bar_index;
+                        start.timestamp = anchor.timestamp;
+                    } else {
+                        end.bar_index = anchor.bar_index;
+                        end.timestamp = anchor.timestamp;
+                    }
+                    let (lo_bound, hi_bound) = match orig_side {
+                        crate::trading::PositionSide::Long => {
+                            (*orig_stop + sep, orig_end.value - sep)
+                        }
+                        crate::trading::PositionSide::Short => {
+                            (orig_end.value + sep, *orig_stop - sep)
+                        }
+                    };
+                    if lo_bound > 0.0 && lo_bound <= hi_bound {
+                        start.value = anchor.value.clamp(lo_bound, hi_bound);
+                    }
                 }
                 _ => {}
             }
@@ -1432,7 +1674,8 @@ fn remap_drawing_geometry(
             corner_a: start,
             corner_b: end,
         }
-        | DrawingGeometry::FibonacciRetracement { start, end, .. } => {
+        | DrawingGeometry::FibonacciRetracement { start, end, .. }
+        | DrawingGeometry::RiskRewardBox { start, end, .. } => {
             remap_single_anchor(start, old_candles, old_tf, new_candles, new_tf);
             remap_single_anchor(end, old_candles, old_tf, new_candles, new_tf);
         }
@@ -1597,6 +1840,23 @@ fn translate_geometry_in_local_space(
                 direction,
                 extend_right,
             })
+        }
+        DrawingGeometry::RiskRewardBox { start, end, .. } => {
+            if original_local.len() < 3 {
+                return None;
+            }
+            let a0 = translate_single_anchor_local(start, original_local[0], dx, dy, proj)?;
+            let a1 = translate_single_anchor_local(end, original_local[1], dx, dy, proj)?;
+            let stop_moved = proj.local_to_anchor(LocalPoint::new(
+                original_local[2].x + dx,
+                original_local[2].y + dy,
+            ))?;
+            let candidate = DrawingGeometry::RiskRewardBox {
+                start: a0,
+                end: a1,
+                stop_price: stop_moved.value,
+            };
+            candidate.is_valid().then_some(candidate)
         }
     }
 }

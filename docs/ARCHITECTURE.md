@@ -1,19 +1,19 @@
-# SUMI TRADING WORKSTATION — ARCHITECTURE (`MILESTONE R09`)
+# SUMI TRADING WORKSTATION — ARCHITECTURE (`MILESTONE R10`)
 
-- **Updated By:** `SESSION-R09-20261114T091018+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Updated By:** `SESSION-R10-20261114T122730+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 - **Crate Name:** `sumi-workstation` (`v0.1.0`, Rust Edition 2024, `egui`/`eframe 0.36.2`, `wgpu 30.0.1`)
 
 ---
 
 ## 1. Crate & Directory Structure
 
-The workstation uses a single-crate library + binary architecture (`src/lib.rs` + `src/main.rs`) with strict module boundaries separating pure `f64`/`i64` domain, CSV/JSON data ingestion, multi-timeframe aggregation, viewport, technical indicator, interactive drawing, causal bar replay, paper trading execution, multi-symbol watchlist/scanner, causal alert, and deterministic strategy backtest engines (`wasm32-unknown-unknown`-verified via `cargo clippy --target wasm32-unknown-unknown --lib -- -D warnings`, zero new crates in `Cargo.toml`) from `egui` immediate-mode UI and native macOS Metal windowing/offscreen rendering:
+The workstation uses a single-crate library + binary architecture (`src/lib.rs` + `src/main.rs`) with strict module boundaries separating pure `f64`/`i64` domain, CSV/JSON data ingestion, multi-timeframe aggregation, viewport, technical indicator, interactive drawing, causal bar replay, paper trading execution, multi-symbol watchlist/scanner, causal alert, deterministic strategy backtest / Walk-Forward / multi-asset portfolio, and Vietnam market microstructure risk planner / trade journal engines (`wasm32-unknown-unknown`-verified via `cargo clippy --target wasm32-unknown-unknown --lib -- -D warnings`, zero new crates in `Cargo.toml`) from `egui` immediate-mode UI and native macOS Metal windowing/offscreen rendering:
 
 ```text
 /Users/mizuhara/workspace/sumi
 ├── Cargo.toml
 ├── src/
-│   ├── lib.rs                      # Crate root exporting alerts, app, backtest, chart, data, drawings, indicators, model, replay, scanner, trading, viewport
+│   ├── lib.rs                      # Crate root exporting alerts, app, backtest, chart, data, drawings, indicators, journal, model, replay, scanner, trading, viewport
 │   ├── main.rs                     # Native macOS entry point (routes SUMI_CAPTURE_BATCH / SUMI_SCREENSHOT_PATH to offscreen Metal)
 │   ├── model.rs                    # Pure OHLCV domain model (Candle with i64 UTC timestamp, PriceBounds, ViewportMapping)
 │   ├── data/                       # Milestone R06–R08 Zero-Dependency OHLCV Loader & Multi-Timeframe Engine (WASM-safe)
@@ -39,12 +39,12 @@ The workstation uses a single-crate library + binary architecture (`src/lib.rs` 
 │   │   ├── bands.rs                # Bollinger Bands (20, 2.0 population σ, overflow-safe scaled fallback)
 │   │   ├── oscillators.rs          # Wilder RSI (14), MACD (12, 26, 9), Wilder ATR (14) & reference levels
 │   │   └── tests.rs                # TA-Lib/Wilder golden fixtures, 100K pan invariance & Critic R04 suites
-│   ├── drawings/                   # Milestone R05–R07 Interactive Drawing & Annotation Engine (f64 + UTC + Causal, WASM-safe)
-│   │   ├── mod.rs                  # Drawing (created_at_timestamp + is_causally_visible), DrawingAnchor & 5 geometries
-│   │   ├── geometry.rs             # PaneDrawingProjection, ClipEdge Liang-Barsky ray/segment clipping & Fib levels
-│   │   ├── hit_test.rs             # Causal LWC priority hit-testing (SelectedHandle>Handle>Stroke>SelectedBody) & OHLC magnet
-│   │   ├── controller.rs           # DrawingStore, causal replay cutoff guards, remap_timeframe, 64-step Undo/Redo & serde safety
-│   │   └── tests.rs                # Liang-Barsky, 360° ray, Fib, magnet, log-drag & Critic R05 suites
+│   ├── drawings/                   # Milestone R05–R10 Interactive Drawing & Annotation Engine (f64 + UTC + Causal, WASM-safe)
+│   │   ├── mod.rs                  # Drawing (created_at_timestamp + is_causally_visible), DrawingAnchor & 6 geometries (+ RiskRewardBox)
+│   │   ├── geometry.rs             # PaneDrawingProjection, ClipEdge Liang-Barsky ray/segment clipping, Fib levels & RiskRewardBox zones
+│   │   ├── hit_test.rs             # Causal LWC priority hit-testing (RrEntryLeft/Right, RrTarget, RrStop handles) & OHLC magnet
+│   │   ├── controller.rs           # DrawingStore, non-drifting snapshot handle drag, remap_timeframe, 64-step Undo/Redo & serde safety
+│   │   └── tests.rs                # Liang-Barsky, 360° ray, Fib, RiskRewardBox drag/flip, magnet, log-drag & Critic R05/R10 suites
 │   ├── replay/                     # Milestone R07 Causal Bar Replay Engine (f64/i64, WASM-safe)
 │   │   ├── mod.rs                  # ReplaySpeed (1x..20x), ReplayStepUnit (ActiveBar, BaseBar), ReplayStatus & ReplayTransition
 │   │   ├── controller.rs           # ReplayController, DEF-001 prefix materialization, step/jump/tick state machine & serde safety
@@ -52,7 +52,7 @@ The workstation uses a single-crate library + binary architecture (`src/lib.rs` 
 │   ├── trading/                    # Milestone R07 Paper Trading Execution & Portfolio Engine (f64/i64, WASM-safe)
 │   │   ├── mod.rs                  # Public exports for AccountConfig, Order, Position, ExecutionFill, ClosedTrade & TradingSession
 │   │   ├── orders.rs               # OrderSide, PositionSide, OrderKind (Market/Limit/Stop), FillReason & PortfolioMetrics
-│   │   ├── portfolio.rs            # TradingSession, 4-waypoint OHLC matching, fee-conserving ledger & command-log rewind_to
+│   │   ├── portfolio.rs            # TradingSession, 4-waypoint OHLC matching, fee-conserving ledger, RiskRewardBox ticket extract & rewind_to
 │   │   └── tests.rs                # Gap-open/dual-touch brackets, 1m==15m parity, fee conservation, rewind & Critic R07 suites
 │   ├── scanner/                    # Milestone R08 Multi-Symbol Watchlist & Technical Scanner Engine (f64/i64, WASM-safe)
 │   │   ├── mod.rs                  # MarketRegime, ScanSignalKind, SymbolScanRow, HistoricalSignalHit & ScannerSignalContext
@@ -62,19 +62,26 @@ The workstation uses a single-crate library + binary architecture (`src/lib.rs` 
 │   │   ├── mod.rs                  # AlertCondition, AlertRule, AlertTriggerEvent, CrossDirection, AlertFrequency & AlertError
 │   │   ├── engine.rs               # AlertEngine, 4-waypoint/@Mark crossings, Wilder RSI/MACD, ray relative-offset & causal rewind
 │   │   └── tests.rs                # 4-waypoint/gap, RSI/MACD, parallel-safe ray/trendline, 1m==15m parity & Critic R08 suites
-│   ├── backtest/                   # Milestone R09 Deterministic Strategy Backtest Lab & Performance Tearsheet Engine (f64/i64, WASM-safe)
-│   │   ├── mod.rs                  # Public exports for StrategyPresetKind, BacktestConfig, BacktestRunResult, Sweep & Battle reports
+│   ├── backtest/                   # Milestone R09–R10 Strategy Backtest, Walk-Forward & Multi-Asset Portfolio Engine (f64/i64, WASM-safe)
+│   │   ├── mod.rs                  # Public exports for BacktestConfig, BacktestRunResult, Sweep, Battle, WalkForward & Portfolio reports
 │   │   ├── strategy.rs             # 6 composable presets, sizing modes, SL/TP/ATR trail/T+2 lockup, sanitize & 12-grid sweep builder
 │   │   ├── metrics.rs              # Institutional BacktestTearsheet (Sharpe, Sortino, Calmar, CAGR, R-Multiple, Exposure %) & RobustnessVerdict
-│   │   ├── engine.rs               # Causal Open[T+1] 4-step runner, MarginLiquidation, continuous IS/OOS partition, sweep & 13-sym battle
-│   │   └── tests.rs                # Next-bar causality, dual-touch SL>TP, T+2 trail ratchet, bankruptcy, cross-TF DEF-001 & Critic R09 suites
-│   ├── chart.rs                    # 5-Pane MultiPaneLayout (+ Equity Baseline Mesh), Trade Links, Replay/Trading/Alert Overlays & Mesh batching
-│   └── app.rs                      # SumiWorkstationApp shell, Strategy Lab Dock, Watchlist/Alerts/Trading Docks, Cmd+K & OffscreenWgpuHarness
+│   │   ├── engine.rs               # Causal Open[T+1] runner, SimulationCarryState, MarginLiquidation, continuous IS/OOS, sweep & battle
+│   │   ├── walk_forward.rs         # K-fold Rolling/Anchored WFO (continuous OOS carry + Pardo WFE) & bar-close Multi-Asset Portfolio
+│   │   └── tests.rs                # Next-bar causality, dual-touch, T+2, bankruptcy, WFO carry, mixed-TF portfolio & Critic R09/R10 suites
+│   ├── journal/                    # Milestone R10 Vietnam Market Microstructure Risk Planner & Structured Trade Journal (f64/i64, WASM-safe)
+│   │   ├── mod.rs                  # Public exports for ExchangeVenue, DailyPriceBand, TradePlanInput/Computed & TradeJournalStore
+│   │   ├── market_rules.rs         # HOSE/HNX/UPCOM/VN30F/VNINDEX/US/Crypto ticks, ±7%/±10%/±15% bands, x100k mult, 17% margin & TZ T+2
+│   │   ├── planner.rs              # All-in commission/slippage/tax_sell sizer, concentration cap, breakeven, net R & statutory warnings
+│   │   ├── ledger.rs               # DEF-001 causal TradeJournalStore, Paper rewind sync, SQN/Discipline %, safe RFC-4180 CSV & Markdown
+│   │   └── tests.rs                # HOSE tier-crossing bands, VN30F x100k sizing, local-TZ T+2, CSV formula guard & Critic R10 suite
+│   ├── chart.rs                    # 5-Pane MultiPaneLayout (Single/WFO/Portfolio Equity Mesh), Dual-Zone RiskRewardBox & Mesh batching
+│   └── app.rs                      # SumiWorkstationApp shell, VN Risk & Journal Dock, Strategy Lab (+ WFO), Watchlist/Alerts/Trading & Cmd+K
 ├── examples/
-│   └── viewport_bench.rs           # Reproducible 10K/50K/100K R03, --r04, --r05, --r06, --r07, --r08 & --r09 release benchmarks
+│   └── viewport_bench.rs           # Reproducible 10K/50K/100K R03, --r04, --r05, --r06, --r07, --r08, --r09 & --r10 release benchmarks
 └── docs/
     ├── operations/                 # SUMI_ORCHESTRATION_CHARTER.md (durable multi-session orchestration)
-    ├── research/                   # REA traces, LWC v5.2.0 & TA-Lib specs, viewport/indicator/drawing/data/replay/scanner/backtest designs
+    ├── research/                   # REA traces, LWC v5.2.0 & TA-Lib specs, viewport/indicator/drawing/data/replay/scanner/backtest/journal designs
     ├── evidence/                   # Offscreen & windowed Metal PNG captures, runtime JSON telemetry, benchmark reports
     └── sessions/                   # Chronological session registry
 ```
@@ -83,12 +90,12 @@ The workstation uses a single-crate library + binary architecture (`src/lib.rs` 
 
 ## 2. Coordinate Spaces, Timeframe Continuity & Causal Replay Boundaries
 
-Per [`docs/research/RUST_VIEWPORT_CAMERA_DESIGN.md`](research/RUST_VIEWPORT_CAMERA_DESIGN.md), [`docs/research/INDICATOR_AND_MULTIPANE_SPEC.md`](research/INDICATOR_AND_MULTIPANE_SPEC.md), [`docs/research/DRAWING_ENGINE_SPEC.md`](research/DRAWING_ENGINE_SPEC.md), [`docs/research/DATA_LOADER_AND_TIMEFRAME_SPEC.md`](research/DATA_LOADER_AND_TIMEFRAME_SPEC.md), [`docs/research/BAR_REPLAY_AND_PAPER_TRADING_SPEC.md`](research/BAR_REPLAY_AND_PAPER_TRADING_SPEC.md), [`docs/research/SCANNER_ALERTS_AND_COMMAND_PALETTE_SPEC.md`](research/SCANNER_ALERTS_AND_COMMAND_PALETTE_SPEC.md), and [`docs/research/STRATEGY_BACKTEST_LAB_SPEC.md`](research/STRATEGY_BACKTEST_LAB_SPEC.md), Sumi strictly separates horizontal time state, per-pane vertical price state, UTC timestamp continuity, causal replay frontiers, and screen layout offsets:
+Per [`docs/research/RUST_VIEWPORT_CAMERA_DESIGN.md`](research/RUST_VIEWPORT_CAMERA_DESIGN.md), [`docs/research/INDICATOR_AND_MULTIPANE_SPEC.md`](research/INDICATOR_AND_MULTIPANE_SPEC.md), [`docs/research/DRAWING_ENGINE_SPEC.md`](research/DRAWING_ENGINE_SPEC.md), [`docs/research/DATA_LOADER_AND_TIMEFRAME_SPEC.md`](research/DATA_LOADER_AND_TIMEFRAME_SPEC.md), [`docs/research/BAR_REPLAY_AND_PAPER_TRADING_SPEC.md`](research/BAR_REPLAY_AND_PAPER_TRADING_SPEC.md), [`docs/research/SCANNER_ALERTS_AND_COMMAND_PALETTE_SPEC.md`](research/SCANNER_ALERTS_AND_COMMAND_PALETTE_SPEC.md), [`docs/research/STRATEGY_BACKTEST_LAB_SPEC.md`](research/STRATEGY_BACKTEST_LAB_SPEC.md), and [`docs/research/RISK_PLANNER_JOURNAL_AND_PORTFOLIO_SPEC.md`](research/RISK_PLANNER_JOURNAL_AND_PORTFOLIO_SPEC.md), Sumi strictly separates horizontal time state, per-pane vertical price state, UTC + exchange-local civil time, causal replay frontiers, and screen layout offsets:
 
 1. **Logical / Data, Canonical UTC & Causal Cutoff Coordinates (`f64` / `i64`):**
-   - `bar_index` (`0..total_bars` for active `Candle` slices, aligned `Vec<Option<f64>>` indicator outputs, and bar-aligned `BacktestEquityPoint` curves; continuous `f64` `DrawingAnchor::bar_index` across historical `< 0` and future `>= total_bars` whitespace).
-   - `Candle::timestamp: i64` and `DrawingAnchor::timestamp: Option<f64>`, mapped bijectively via Hinnant O(1) calendar math (`src/data/calendar.rs`) across `Timeframe` (`1m`, `5m`, `15m`, `1h`, `4h`, `1D`, `1W`).
-   - When `ReplayController` is active at `base_cursor_index`, `materialize_candles` slices `&base_candles[..=base_cursor_index]` before rolling up into `active_timeframe`, and `replay_causal_close_timestamp` (`cursor_open_ts + base_tf.seconds() - 1`) gates `scanner/`, `AlertEngine::evaluate_causal`, `run_backtest_with_options`, `run_parameter_sweep`, and `run_multi_symbol_battle_with_close_cutoff` so zero future or unclosed coarse-timeframe bars ever leak (`DEF-001`).
+   - `bar_index` (`0..total_bars` for active `Candle` slices, aligned `Vec<Option<f64>>` indicator outputs, and bar-aligned `BacktestEquityPoint` / `stitched_oos_curve` / `map_equity_curve_to_candles` curves; continuous `f64` `DrawingAnchor::bar_index` across historical `< 0` and future `>= total_bars` whitespace).
+   - `Candle::timestamp: i64` and `DrawingAnchor::timestamp: Option<f64>`, mapped bijectively via Hinnant O(1) calendar math (`src/data/calendar.rs`) across `Timeframe` (`1m`, `5m`, `15m`, `1h`, `4h`, `1D`, `1W`), with exchange-local civil timezone offsets (`UTC+7` ICT / `UTC-5` EST) for statutory `T+2`/`T+1` settlement and prior-session reference prices.
+   - When `ReplayController` is active at `base_cursor_index`, `materialize_candles` slices `&base_candles[..=base_cursor_index]` before rolling up into `active_timeframe`, and `replay_causal_close_timestamp` (`cursor_open_ts + base_tf.seconds() - 1`) gates `scanner/`, `AlertEngine::evaluate_causal`, `TradeJournalStore::visible_entries`, `run_backtest_with_options`, `run_walk_forward_validation`, and `run_portfolio_backtest` so zero future or unclosed coarse-timeframe bars ever leak (`DEF-001`).
 2. **Pane-Local Coordinates (`f64`):**
    - `local_x ∈ [0.0, plot_width)` owned by [`TimeScale`](../src/viewport/time_scale.rs) — **shared** across `Main` and all active sub-panes (`RSI`, `MACD`, `ATR`, `Equity`), using one unified `conflation_factor(dpr)`.
    - `local_y ∈ [0.0, pane_plot_height)` owned by an **independent** [`PriceScale`](../src/viewport/price_scale.rs) per pane/axis (`main_price_scale`, `volume_price_scale`, `rsi_price_scale`, `macd_price_scale`, `atr_price_scale`, `equity_price_scale`).
@@ -97,19 +104,20 @@ Per [`docs/research/RUST_VIEWPORT_CAMERA_DESIGN.md`](research/RUST_VIEWPORT_CAME
 
 ---
 
-## 3. Data, Scanner, Alert, Replay, Paper Trading, Backtest, Indicator & Drawing Pipeline
+## 3. Domain & Rendering Subsystem Pipeline
 
-1. **Zero-Dependency CSV/JSON Ingestion & 13-Symbol Universe (`src/data/`):** Streams CSV/TSV (`103.7–191.1 MiB/s`) and JSON kline/envelope feeds (`134.9 MiB/s`) with multi-symbol discovery (`SymbolTracker`, `custom_peer_feeds`), `Vn30Basket`, and upward aggregation (`1m..1W`).
-2. **Single-Pass Multi-Symbol Watchlist & Signal Scanner (`src/scanner/`):** Evaluates `SymbolScanRow` + `HistoricalSignalHit` across all `13` bundled feeds (`20,797` bars) in **`1.799 ms`**, gating every symbol to `<= replay_cutoff` (`DEF-001`) and launching `BlindPractice` / `SignalReview` replay sessions in one click.
-3. **Causal Price, Indicator & Drawing-Line Alert Engine (`src/alerts/`):** Evaluates `PriceLevel`, `RsiThreshold`, `MacdHistogramZeroCross`, and `DrawingLine` (`HorizontalLine`, `TrendLine`, $360^\circ$ `Ray`) causally across live feeds and Bar Replay (`Once` alerts automatically re-arm on rewind).
-4. **Causal Replay & Timeframe-Invariant Paper Trading (`src/replay/`, `src/trading/`):** Advances `base_cursor_index` (`ActiveBar` or `BaseBar`, `1.25 µs` per `15m` step), matches `Market`/`Limit`/`Stop` orders and `SL`/`TP` brackets (`1m == 15m` bit-exact fill parity), conserves commissions, and reconstructs exact historical state on `rewind_to`.
-5. **Deterministic Strategy Backtest Lab & Performance Tearsheet (`src/backtest/`):** Executes `6` composable strategy presets over `100,000` bars in **`6.318–7.832 ms`** (`Open[T+1]` fills, pessimistic `SL`-before-`TP`, `MarginLiquidation`, post-close `ATR` trail, continuous single-pass `IS/OOS` partition, `77.29 µs` `12`-grid sweep, and `639.92 µs` `13`-symbol universe battle).
-6. **5-Pane Multi-Pane Layout, `Equity` Baseline Split Mesh & `egui::Mesh` Batching (`src/chart.rs`, `src/app.rs`):** Batches candlesticks, conflated indicator lines, volume, MACD histograms, Bollinger bands, analytically Y-clipped (`emit_y_clipped_baseline_trapezoid`) emerald/crimson Equity baseline meshes, pan-invariant Trade Connectors, horizontal dashed lines, execution fill arrows, and alert trigger diamonds (`0.190 ms` active 5-pane `95K` intraday, `0.412 ms` full workstation UI, **`1.355 ms`** median at `95K/100K` `1m` full-fit — well below `< 4.0 ms` `DECISION-RENDERER-002`).
+1. **Zero-Dependency CSV/JSON Ingestion & 13-Symbol Universe (`src/data/`):** Streams CSV/TSV (`103.7–191.1 MiB/s`) and JSON kline/envelope feeds (`134.9 MiB/s`) with multi-symbol discovery, `Vn30Basket`, and upward aggregation (`1m..1W`).
+2. **Single-Pass Multi-Symbol Watchlist & Signal Scanner (`src/scanner/`):** Evaluates `SymbolScanRow` + `HistoricalSignalHit` across all `13` bundled feeds (`20,797` bars) in **`1.799 ms`**, enforcing `<= replay_cutoff` (`DEF-001`) and launching `BlindPractice` / `SignalReview` replay sessions in one click.
+3. **Causal Price, Indicator & Drawing-Line Alert Engine (`src/alerts/`):** Evaluates `PriceLevel`, `RsiThreshold`, `MacdHistogramZeroCross`, and `DrawingLine` (`HorizontalLine`, `TrendLine`, $360^\circ$ `Ray`) causally across live feeds and Bar Replay.
+4. **Causal Replay & Timeframe-Invariant Paper Trading (`src/replay/`, `src/trading/`):** Advances `base_cursor_index` (`1.25 µs` per `15m` step), matches `Market`/`Limit`/`Stop` orders and `SL`/`TP` brackets (`1m == 15m` parity), extracts Order Tickets from `RiskRewardBox` drawings, and rewinds deterministically.
+5. **Vietnam Microstructure Risk Planner & Structured Trade Journal (`src/journal/`):** Evaluates `HOSE`/`HNX`/`UPCOM`/`VN30F`/`US`/`Crypto` ticks, daily price bands, `T+2` settlement, and all-in friction sizing (`101.12 µs` per `1,000` plans) alongside `DEF-001` causal `TradeJournalStore` (`SQN`, `Discipline %`, `Cost of Mistakes`, formula-safe RFC-4180 CSV & Markdown export in `601.12 µs` for `500` entries).
+6. **Strategy Backtest, Walk-Forward (`WFO`) & Multi-Asset Portfolio (`src/backtest/`):** Runs `100,000`-bar single backtests (`6.318–7.832 ms`), continuous-carry `K`-fold Rolling/Anchored Walk-Forward (`5.958 ms` across `6,667` `15m` bars), and bar-close `VN30` (`106.00 µs`) / `13`-feed `CausalInverseVolatility` (`2.855 ms`) portfolio simulations.
+7. **5-Pane Multi-Pane Layout, Dual-Zone `RiskRewardBox` & `egui::Mesh` Batching (`src/chart.rs`, `src/app.rs`):** Renders `SingleBacktest`, `WalkForwardOos`, or `MultiAssetPortfolio` equity curves inside `OscillatorPaneId::Equity` (`0.276–0.369 ms` full R10 workstation UI, **`1.355 ms`** `95K/100K` `1m` full-fit — well below `< 4.0 ms` `DECISION-RENDERER-002`).
 
 ---
 
 ## 4. Legacy Compatibility, Offscreen Metal Capture & Portability Rules
 
 - [`ViewportMapping`](../src/model.rs), `generate_synthetic_ohlcv`, `render_candlestick_chart`, `render_workstation_chart`, `render_workstation_chart_with_drawings`, and `render_workstation_chart_full` remain intact with zero breaking changes.
-- Automated verification captures (`SUMI_CAPTURE_BATCH=r04|r05|r06|r07|r08|r09` and `SUMI_SCREENSHOT_PATH`) execute offscreen on Apple M1 Metal via `OffscreenWgpuHarness` (`eframe::egui_wgpu::RenderState`, `Rgba8Unorm`, `2.0x` Retina), opening **zero** windows and never touching macOS focus or Dock.
-- `src/model.rs`, `src/data/`, `src/viewport/`, `src/indicators/`, `src/drawings/`, `src/replay/`, `src/trading/`, `src/scanner/`, `src/alerts/`, and `src/backtest/` use zero OS-specific APIs and pass `cargo clippy --target wasm32-unknown-unknown --lib -- -D warnings`.
+- Automated verification captures (`SUMI_CAPTURE_BATCH=r04|r05|r06|r07|r08|r09|r10` and `SUMI_SCREENSHOT_PATH`) execute offscreen on Apple M1 Metal via `OffscreenWgpuHarness` (`eframe::egui_wgpu::RenderState`, `Rgba8Unorm`, `2.0x` Retina), opening **zero** windows and never touching macOS focus or Dock.
+- `src/model.rs`, `src/data/`, `src/viewport/`, `src/indicators/`, `src/drawings/`, `src/replay/`, `src/trading/`, `src/scanner/`, `src/alerts/`, `src/backtest/`, and `src/journal/` use zero OS-specific APIs and pass `cargo clippy --target wasm32-unknown-unknown --lib -- -D warnings`.

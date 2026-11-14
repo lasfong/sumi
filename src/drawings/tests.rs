@@ -889,3 +889,314 @@ fn critic_r05_regression_u64_max_id_compaction_and_cross_pane_drag_hover_isolati
         "dragging a Main drawing across RSI must never leak hovered_hit onto RSI drawings"
     );
 }
+
+#[test]
+fn risk_reward_box_handles_linear_and_log_body_drag_invariance_flip_and_main_pane_exclusivity() {
+    let candles = generate_synthetic_ohlcv(120);
+    let (ts, ps_lin) = setup_pane_scales(
+        120,
+        800.0,
+        400.0,
+        60.0,
+        180.0,
+        PriceScaleMode::Normal,
+        false,
+    );
+    let (_, ps_log) = setup_pane_scales(
+        120,
+        800.0,
+        400.0,
+        60.0,
+        180.0,
+        PriceScaleMode::Logarithmic,
+        false,
+    );
+    let (_, ps_rsi) =
+        setup_pane_scales(120, 800.0, 120.0, 0.0, 100.0, PriceScaleMode::Normal, false);
+
+    let proj_lin = PaneDrawingProjection::new(&ts, &ps_lin, 800.0, 400.0, 100.0);
+    let proj_log = PaneDrawingProjection::new(&ts, &ps_log, 800.0, 400.0, 100.0);
+    let proj_rsi = PaneDrawingProjection::new(&ts, &ps_rsi, 800.0, 120.0, 1.0);
+
+    let mut store = DrawingStore::new();
+
+    // 1. Reject oscillator sub-pane placement & programmatic insertion:
+    let valid_rr = DrawingGeometry::RiskRewardBox {
+        start: DrawingAnchor::new(70.0, 100.0),
+        end: DrawingAnchor::new(95.0, 118.0),
+        stop_price: 94.0,
+    };
+    assert!(
+        store
+            .add_drawing(
+                DrawingPaneTarget::Oscillator(OscillatorPaneId::Rsi),
+                valid_rr.clone(),
+                None
+            )
+            .is_none(),
+        "RiskRewardBox must be Main-pane exclusive"
+    );
+    store.set_tool(DrawingTool::RiskRewardBox);
+    assert_eq!(
+        store.pointer_down(
+            DrawingPaneTarget::Oscillator(OscillatorPaneId::Rsi),
+            LocalPoint::new(300.0, 60.0),
+            false,
+            &proj_rsi,
+            &candles
+        ),
+        PointerCaptureOutcome::PassThroughToViewport
+    );
+
+    // 2. Interactive 2-click placement on Main pane (upward -> Long 2.0R):
+    let p_start = proj_lin
+        .anchor_to_local(DrawingAnchor::new(70.0, 100.0))
+        .unwrap();
+    let p_target = proj_lin
+        .anchor_to_local(DrawingAnchor::new(95.0, 116.0))
+        .unwrap();
+    assert_eq!(
+        store.pointer_down(DrawingPaneTarget::Main, p_start, false, &proj_lin, &candles),
+        PointerCaptureOutcome::CapturedByDrawing
+    );
+    store.pointer_move(
+        DrawingPaneTarget::Main,
+        p_target,
+        false,
+        &proj_lin,
+        &candles,
+    );
+    assert!(store.pointer_up(
+        DrawingPaneTarget::Main,
+        Some(p_target),
+        false,
+        &proj_lin,
+        &candles
+    ));
+    assert_eq!(store.drawings.len(), 1);
+    let rr_id = store.drawings[0].id;
+    let (_, entry0, stop0, target0, r0) = store.drawings[0]
+        .geometry
+        .risk_reward_metrics()
+        .expect("metrics");
+    assert!((entry0 - 100.0).abs() < 1e-6);
+    assert!((target0 - 116.0).abs() < 1e-6);
+    assert!((stop0 - 92.0).abs() < 1e-6);
+    assert!((r0 - 2.0).abs() < 1e-6);
+
+    // 3. Linear AND Logarithmic whole-body vertical drag preserves exact `gross_r` (`2.0R`):
+    for (label, proj) in [("Linear", &proj_lin), ("Logarithmic", &proj_log)] {
+        let projected = proj.project_drawing(&store.drawings[0]).unwrap();
+        assert_eq!(projected.handles.len(), 4);
+        let reward_rect = match &projected.shape {
+            ProjectedDrawingShape::RiskReward { reward_fill, .. } => reward_fill.unwrap(),
+            other => panic!("unexpected shape: {other:?}"),
+        };
+        let inside_pt = LocalPoint::new(
+            0.5 * (reward_rect.left + reward_rect.right),
+            0.5 * (reward_rect.top + reward_rect.bottom),
+        );
+        assert_eq!(
+            store.pointer_down(DrawingPaneTarget::Main, inside_pt, false, proj, &candles),
+            PointerCaptureOutcome::CapturedByDrawing
+        );
+        let moved_pt = LocalPoint::new(inside_pt.x + 12.0, inside_pt.y - 28.0);
+        store.pointer_move(DrawingPaneTarget::Main, moved_pt, false, proj, &candles);
+        assert!(store.pointer_up(
+            DrawingPaneTarget::Main,
+            Some(moved_pt),
+            false,
+            proj,
+            &candles
+        ));
+        let (_, _, _, _, r_after) = store.drawings[0].geometry.risk_reward_metrics().unwrap();
+        assert!(
+            (r_after - 2.0).abs() < 1e-9,
+            "{label} body drag must preserve gross_r == 2.0, got {r_after}"
+        );
+        assert!(store.undo());
+    }
+
+    // 4. Individual handle drag (`RrStop` & `RrTarget`) + clamping when dragged past entry:
+    let projected = proj_lin.project_drawing(&store.drawings[0]).unwrap();
+    let stop_handle = projected
+        .handles
+        .iter()
+        .find(|h| h.part == HandlePart::RrStop)
+        .unwrap()
+        .pos;
+    assert_eq!(
+        store.pointer_down(
+            DrawingPaneTarget::Main,
+            stop_handle,
+            false,
+            &proj_lin,
+            &candles
+        ),
+        PointerCaptureOutcome::CapturedByDrawing
+    );
+    // Attempt to drag stop ABOVE entry (`130.0`) -> must clamp cleanly strictly below entry (`100.0`)!
+    let above_entry_pt = proj_lin
+        .anchor_to_local(DrawingAnchor::new(82.5, 130.0))
+        .unwrap();
+    store.pointer_move(
+        DrawingPaneTarget::Main,
+        above_entry_pt,
+        false,
+        &proj_lin,
+        &candles,
+    );
+    assert!(store.pointer_up(
+        DrawingPaneTarget::Main,
+        Some(above_entry_pt),
+        false,
+        &proj_lin,
+        &candles
+    ));
+    assert!(store.drawings[0].geometry.is_valid());
+    let (side_clamped, en_c, sl_c, _, _) =
+        store.drawings[0].geometry.risk_reward_metrics().unwrap();
+    assert_eq!(side_clamped, crate::trading::PositionSide::Long);
+    assert!(sl_c < en_c);
+    assert!(store.undo());
+
+    // 5. Flip Long <-> Short (`reverse_selected_risk_reward`) + Undo/Redo:
+    store.selected_id = Some(rr_id);
+    assert!(store.reverse_selected_risk_reward());
+    let (flipped_side, en_f, sl_f, tp_f, r_f) =
+        store.drawings[0].geometry.risk_reward_metrics().unwrap();
+    assert_eq!(flipped_side, crate::trading::PositionSide::Short);
+    assert!((en_f - 100.0).abs() < 1e-6);
+    assert!((tp_f - 84.0).abs() < 1e-6);
+    assert!((sl_f - 108.0).abs() < 1e-6);
+    assert!((r_f - 2.0).abs() < 1e-6);
+    assert!(store.undo());
+    assert!(store.redo());
+}
+
+#[test]
+fn critic_r10_regression_rr_box_entry_handle_crossover_and_target_flip_symmetry() {
+    let candles = generate_synthetic_ohlcv(120);
+    let (ts, ps_lin) = setup_pane_scales(
+        120,
+        800.0,
+        400.0,
+        60.0,
+        180.0,
+        PriceScaleMode::Normal,
+        false,
+    );
+    let proj_lin = PaneDrawingProjection::new(&ts, &ps_lin, 800.0, 400.0, 100.0);
+
+    let mut store = DrawingStore::new();
+    let rr_id = store
+        .add_drawing(
+            DrawingPaneTarget::Main,
+            DrawingGeometry::RiskRewardBox {
+                start: DrawingAnchor::new(70.0, 100.0),
+                end: DrawingAnchor::new(85.0, 116.0),
+                stop_price: 92.0,
+            },
+            None,
+        )
+        .expect("valid RiskRewardBox");
+    store.selected_id = Some(rr_id);
+
+    // 1. C-05: Drag `RrEntryLeft` (`bar 70`) past `end` (`bar 95`) and back (`bar 68`) in a single continuous drag:
+    //    `end.bar_index` MUST remain untouched at `85.0` with zero drift!
+    let projected = proj_lin.project_drawing(&store.drawings[0]).unwrap();
+    let left_handle = projected
+        .handles
+        .iter()
+        .find(|h| h.part == HandlePart::RrEntryLeft)
+        .unwrap()
+        .pos;
+    assert_eq!(
+        store.pointer_down(
+            DrawingPaneTarget::Main,
+            left_handle,
+            false,
+            &proj_lin,
+            &candles
+        ),
+        PointerCaptureOutcome::CapturedByDrawing
+    );
+    let crossed_right = proj_lin
+        .anchor_to_local(DrawingAnchor::new(95.0, 101.0))
+        .unwrap();
+    store.pointer_move(
+        DrawingPaneTarget::Main,
+        crossed_right,
+        false,
+        &proj_lin,
+        &candles,
+    );
+    let dragged_back = proj_lin
+        .anchor_to_local(DrawingAnchor::new(68.0, 101.0))
+        .unwrap();
+    store.pointer_move(
+        DrawingPaneTarget::Main,
+        dragged_back,
+        false,
+        &proj_lin,
+        &candles,
+    );
+    assert!(store.pointer_up(
+        DrawingPaneTarget::Main,
+        Some(dragged_back),
+        false,
+        &proj_lin,
+        &candles
+    ));
+    let [a0, a1] = store.drawings[0].geometry.anchors();
+    assert!(
+        (a1.bar_index - 85.0).abs() < 1e-6,
+        "C-05: opposite anchor drifted during RrEntryLeft crossover: expected 85.0, got {}",
+        a1.bar_index
+    );
+    assert!((a0.bar_index - 68.0).abs() < 1e-6);
+
+    // 2. M-07: Drag `RrTarget` across `entry` (`100.0`) down to `84.0` -> smoothly flips to `Short`
+    //    and reflects `stop_price` above `entry` so risk & reward zones NEVER overlap!
+    let projected2 = proj_lin.project_drawing(&store.drawings[0]).unwrap();
+    let target_handle = projected2
+        .handles
+        .iter()
+        .find(|h| h.part == HandlePart::RrTarget)
+        .unwrap()
+        .pos;
+    assert_eq!(
+        store.pointer_down(
+            DrawingPaneTarget::Main,
+            target_handle,
+            false,
+            &proj_lin,
+            &candles
+        ),
+        PointerCaptureOutcome::CapturedByDrawing
+    );
+    let below_entry = proj_lin
+        .anchor_to_local(DrawingAnchor::new(85.0, 84.0))
+        .unwrap();
+    store.pointer_move(
+        DrawingPaneTarget::Main,
+        below_entry,
+        false,
+        &proj_lin,
+        &candles,
+    );
+    assert!(store.pointer_up(
+        DrawingPaneTarget::Main,
+        Some(below_entry),
+        false,
+        &proj_lin,
+        &candles
+    ));
+    let (side_flipped, en_v, sl_v, tp_v, _) =
+        store.drawings[0].geometry.risk_reward_metrics().unwrap();
+    assert_eq!(side_flipped, crate::trading::PositionSide::Short);
+    assert!(
+        tp_v < en_v && sl_v > en_v,
+        "M-07: flipped Short R:R box must keep stop > entry > target"
+    );
+}

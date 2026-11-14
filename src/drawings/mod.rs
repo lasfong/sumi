@@ -91,6 +91,7 @@ pub enum DrawingTool {
     Ray,
     Rectangle,
     FibonacciRetracement,
+    RiskRewardBox,
 }
 
 impl DrawingTool {
@@ -104,6 +105,7 @@ impl DrawingTool {
             Self::Ray => "Ray",
             Self::Rectangle => "Rect",
             Self::FibonacciRetracement => "Fib",
+            Self::RiskRewardBox => "Pos R:R",
         }
     }
 
@@ -113,7 +115,11 @@ impl DrawingTool {
         match self {
             Self::Select => 0,
             Self::HorizontalLine => 1,
-            Self::TrendLine | Self::Ray | Self::Rectangle | Self::FibonacciRetracement => 2,
+            Self::TrendLine
+            | Self::Ray
+            | Self::Rectangle
+            | Self::FibonacciRetracement
+            | Self::RiskRewardBox => 2,
         }
     }
 }
@@ -337,6 +343,12 @@ impl DrawingStyle {
                 dash: LineDashStyle::Solid,
                 fill_opacity: 0.11,
             },
+            DrawingTool::RiskRewardBox => Self {
+                color: DrawingColorPreset::Emerald,
+                line_width: 1.5,
+                dash: LineDashStyle::Solid,
+                fill_opacity: 0.16,
+            },
             DrawingTool::Select => Self {
                 color: DrawingColorPreset::Cyan,
                 line_width: 1.75,
@@ -384,9 +396,75 @@ pub enum DrawingGeometry {
         direction: FibDirection,
         extend_right: bool,
     },
+    /// Dual-zone Risk-Reward Position Tool (`Milestone R10`):
+    /// `start.value` = entry price, `end.value` = target price, `stop_price` = stop-loss price,
+    /// horizontal box span = `[min(start.bar_index, end.bar_index), max(start.bar_index, end.bar_index)]`.
+    RiskRewardBox {
+        start: DrawingAnchor,
+        end: DrawingAnchor,
+        stop_price: f64,
+    },
 }
 
 impl DrawingGeometry {
+    /// Validates strict positive prices and bracket ordering (`Long`: `stop < entry < target`,
+    /// `Short`: `target < entry < stop`) for a `RiskRewardBox`.
+    #[inline]
+    #[must_use]
+    pub fn risk_reward_side_of(
+        entry_price: f64,
+        target_price: f64,
+        stop_price: f64,
+    ) -> Option<crate::trading::PositionSide> {
+        if !entry_price.is_finite()
+            || !target_price.is_finite()
+            || !stop_price.is_finite()
+            || entry_price <= 0.0
+            || target_price <= 0.0
+            || stop_price <= 0.0
+            || entry_price > MAX_ABS_DRAWING_VALUE
+            || target_price > MAX_ABS_DRAWING_VALUE
+            || stop_price > MAX_ABS_DRAWING_VALUE
+        {
+            return None;
+        }
+        let eps = (entry_price.abs() * 1.0e-7).max(1.0e-9);
+        if target_price > entry_price + eps && stop_price < entry_price - eps {
+            Some(crate::trading::PositionSide::Long)
+        } else if target_price < entry_price - eps && stop_price > entry_price + eps {
+            Some(crate::trading::PositionSide::Short)
+        } else {
+            None
+        }
+    }
+
+    /// Returns `(side, entry_price, stop_price, target_price, gross_r_multiple)` when `self` is a valid `RiskRewardBox`.
+    #[inline]
+    #[must_use]
+    pub fn risk_reward_metrics(
+        &self,
+    ) -> Option<(crate::trading::PositionSide, f64, f64, f64, f64)> {
+        if let Self::RiskRewardBox {
+            start,
+            end,
+            stop_price,
+        } = *self
+        {
+            let side = Self::risk_reward_side_of(start.value, end.value, stop_price)?;
+            let risk = (start.value - stop_price).abs();
+            let reward = (end.value - start.value).abs();
+            if risk <= 1.0e-12 {
+                return None;
+            }
+            let gross_r = reward / risk;
+            gross_r
+                .is_finite()
+                .then_some((side, start.value, stop_price, end.value, gross_r))
+        } else {
+            None
+        }
+    }
+
     #[inline]
     #[must_use]
     pub const fn tool_kind(&self) -> DrawingTool {
@@ -396,6 +474,7 @@ impl DrawingGeometry {
             Self::Ray { .. } => DrawingTool::Ray,
             Self::Rectangle { .. } => DrawingTool::Rectangle,
             Self::FibonacciRetracement { .. } => DrawingTool::FibonacciRetracement,
+            Self::RiskRewardBox { .. } => DrawingTool::RiskRewardBox,
         }
     }
 
@@ -412,7 +491,8 @@ impl DrawingGeometry {
                 corner_a: start,
                 corner_b: end,
             }
-            | Self::FibonacciRetracement { start, end, .. } => [start, end],
+            | Self::FibonacciRetracement { start, end, .. }
+            | Self::RiskRewardBox { start, end, .. } => [start, end],
         }
     }
 
@@ -424,7 +504,8 @@ impl DrawingGeometry {
             Self::TrendLine { .. }
             | Self::Ray { .. }
             | Self::Rectangle { .. }
-            | Self::FibonacciRetracement { .. } => 2,
+            | Self::FibonacciRetracement { .. }
+            | Self::RiskRewardBox { .. } => 2,
         }
     }
 
@@ -440,6 +521,15 @@ impl DrawingGeometry {
             | Self::FibonacciRetracement { start, end, .. } => start.is_valid() && end.is_valid(),
             Self::Ray { origin, through } => {
                 origin.is_valid() && through.is_valid() && has_non_zero_direction(origin, through)
+            }
+            Self::RiskRewardBox {
+                start,
+                end,
+                stop_price,
+            } => {
+                start.is_valid()
+                    && end.is_valid()
+                    && Self::risk_reward_side_of(start.value, end.value, stop_price).is_some()
             }
         }
     }
@@ -486,6 +576,27 @@ impl DrawingGeometry {
                         return false;
                     }
                     *through = anchor;
+                    true
+                }
+                _ => false,
+            },
+            Self::RiskRewardBox {
+                start,
+                end,
+                stop_price,
+            } => match index {
+                0 => {
+                    if Self::risk_reward_side_of(anchor.value, end.value, *stop_price).is_none() {
+                        return false;
+                    }
+                    *start = anchor;
+                    true
+                }
+                1 => {
+                    if Self::risk_reward_side_of(start.value, anchor.value, *stop_price).is_none() {
+                        return false;
+                    }
+                    *end = anchor;
                     true
                 }
                 _ => false,
@@ -553,7 +664,15 @@ impl Drawing {
         let created_ts_ok = self.created_at_timestamp.is_none_or(|ts| {
             (ts as f64).is_finite() && (ts as f64).abs() <= MAX_ABS_ANCHOR_TIMESTAMP
         });
-        self.id > 0 && self.id < PREVIEW_DRAWING_ID && self.geometry.is_valid() && created_ts_ok
+        let pane_ok = match self.geometry {
+            DrawingGeometry::RiskRewardBox { .. } => self.pane == DrawingPaneTarget::Main,
+            _ => true,
+        };
+        self.id > 0
+            && self.id < PREVIEW_DRAWING_ID
+            && pane_ok
+            && self.geometry.is_valid()
+            && created_ts_ok
     }
 
     /// Evaluates whether this drawing is causally visible (`DEF-001`) at `replay_cutoff_timestamp`.
@@ -599,7 +718,8 @@ impl Drawing {
                 corner_a: start,
                 corner_b: end,
             }
-            | DrawingGeometry::FibonacciRetracement { start, end, .. } => {
+            | DrawingGeometry::FibonacciRetracement { start, end, .. }
+            | DrawingGeometry::RiskRewardBox { start, end, .. } => {
                 anchor_ok(start) && anchor_ok(end)
             }
         }
