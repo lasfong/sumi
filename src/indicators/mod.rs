@@ -82,12 +82,13 @@ pub trait Indicator: Send + Sync {
     fn evaluate(&self, candles: &[Candle]) -> IndicatorOutput;
 }
 
-/// Identifier for stacked oscillator sub-panes below the main candlestick pane.
+/// Identifier for stacked oscillator / strategy sub-panes below the main candlestick pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OscillatorPaneId {
     Rsi,
     Macd,
     Atr,
+    Equity,
 }
 
 impl OscillatorPaneId {
@@ -97,6 +98,7 @@ impl OscillatorPaneId {
             Self::Rsi => "osc-rsi",
             Self::Macd => "osc-macd",
             Self::Atr => "osc-atr",
+            Self::Equity => "osc-equity",
         }
     }
 
@@ -106,6 +108,7 @@ impl OscillatorPaneId {
             Self::Rsi => "RSI",
             Self::Macd => "MACD",
             Self::Atr => "ATR",
+            Self::Equity => "EQUITY",
         }
     }
 }

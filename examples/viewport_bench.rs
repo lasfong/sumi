@@ -4,7 +4,13 @@ use std::time::Instant;
 
 use egui::{Pos2, Rect, Vec2};
 use sumi_workstation::alerts::{AlertCondition, AlertEngine, AlertFrequency, CrossDirection};
-use sumi_workstation::app::{RightDockTab, ScannerDockTab, SumiWorkstationApp};
+use sumi_workstation::app::{RightDockTab, ScannerDockTab, StrategyLabSubTab, SumiWorkstationApp};
+use sumi_workstation::backtest::{
+    BacktestConfig, BacktestRunOptions, BacktestRunResult, PositionSizingMode, StopTakeConfig,
+    StrategyDirectionMode, StrategyParams, StrategyPresetKind, SweepRankingMetric,
+    run_all_presets_battle, run_backtest_with_options, run_multi_symbol_battle,
+    run_parameter_sweep,
+};
 use sumi_workstation::chart::{
     ChartDisplayConfig, ChartReplayTradingOverlay, ChartViewportState, render_candlestick_chart,
     render_shared_pane_candlestick_chart, render_workstation_chart, render_workstation_chart_full,
@@ -126,6 +132,10 @@ fn main() {
     }
     if std::env::args().any(|a| a == "--r08") {
         run_r08_scanner_alerts_palette_benchmark(&cpu_brand, mem_bytes, &rustc_ver, profile);
+        return;
+    }
+    if std::env::args().any(|a| a == "--r09") {
+        run_r09_backtest_lab_benchmark(&cpu_brand, mem_bytes, &rustc_ver, profile);
         return;
     }
 
@@ -1544,9 +1554,9 @@ fn run_r05_drawing_engine_benchmark(
                     DrawingPaneTarget::Oscillator(OscillatorPaneId::Macd) => {
                         macd_proj.project_drawing(d)
                     }
-                    DrawingPaneTarget::Oscillator(OscillatorPaneId::Atr) => {
-                        atr_proj.project_drawing(d)
-                    }
+                    DrawingPaneTarget::Oscillator(
+                        OscillatorPaneId::Atr | OscillatorPaneId::Equity,
+                    ) => atr_proj.project_drawing(d),
                 };
                 if p.is_some() {
                     count += 1;
@@ -4204,6 +4214,10 @@ fn bench_r08_chart_render(
                             replay_status_label: Some("PAUSED"),
                             trading_session: Some(trading),
                             alert_engine: Some(alerts),
+                            backtest_result: None,
+                            show_equity_pane: false,
+                            show_backtest_trades_on_chart: false,
+                            focused_backtest_trade_id: None,
                             replay_cutoff_timestamp,
                             frontier_base_timestamp: replay_cutoff_timestamp
                                 .or_else(|| candles.last().map(|c| c.timestamp)),
@@ -4254,6 +4268,10 @@ fn bench_r08_chart_render(
                         replay_status_label: Some("PAUSED"),
                         trading_session: Some(trading),
                         alert_engine: Some(alerts),
+                        backtest_result: None,
+                        show_equity_pane: false,
+                        show_backtest_trades_on_chart: false,
+                        focused_backtest_trade_id: None,
                         replay_cutoff_timestamp,
                         frontier_base_timestamp: replay_cutoff_timestamp
                             .or_else(|| candles.last().map(|c| c.timestamp)),
@@ -4571,6 +4589,919 @@ fn format_r08_markdown_report(
             d.input_units,
             d.output_items,
             d.stats.median_us,
+            d.stats.p95_us,
+            d.stats.max_us,
+        );
+    }
+
+    let _ = writeln!(
+        s,
+        "\n## 2. End-to-End Workstation Frame Budget (`DECISION-RENDERER-002` Gate: `< 4.0 ms`)\n"
+    );
+    let _ = writeln!(
+        s,
+        "| Bars | Workload | Scale | Conflation | Culled | Drawn | Vertices | Indices | UI Median (`ms`) | Tessellate Median (`ms`) | Total CPU Median (`ms`) | Total CPU P95 (`ms`) | `< 4.0ms` Hybrid Gate | 120 FPS (`8.33ms`) |"
+    );
+    let _ = writeln!(
+        s,
+        "| ---: | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: | :---: |"
+    );
+    for r in render {
+        let tot_med_ms = r.total_cpu_frame_stats.median_us / 1_000.0;
+        let tot_p95_ms = r.total_cpu_frame_stats.p95_us / 1_000.0;
+        let hybrid_gate = if tot_med_ms < 4.0 {
+            "PASS (<4ms)"
+        } else {
+            "TRIGGER_WGPU"
+        };
+        let pass_120 = if tot_med_ms <= 8.33 {
+            "PASS"
+        } else {
+            "EXCEEDS"
+        };
+        let _ = writeln!(
+            s,
+            "| `{}` | `{}` ({}) | `{}` | `{}x` | `{}` | `{}` | `{}` | `{}` | `{:.3}` | `{:.3}` | **`{:.3}`** | `{:.3}` | `{hybrid_gate}` | `{pass_120}` |",
+            r.dataset_bars,
+            r.workload_id,
+            r.description,
+            r.scale_mode,
+            r.conflation_factor,
+            r.culled_bars,
+            r.rendered_candles,
+            r.total_vertices,
+            r.total_indices,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            tot_med_ms,
+            tot_p95_ms,
+        );
+    }
+    s
+}
+
+#[derive(Debug, Clone)]
+struct R09DomainBenchCase {
+    case_id: &'static str,
+    description: &'static str,
+    input_units: usize,
+    output_items: usize,
+    stats: TimingStats,
+}
+
+fn run_r09_backtest_lab_benchmark(cpu_brand: &str, mem_bytes: u64, rustc_ver: &str, profile: &str) {
+    println!(
+        "=== Sumi R09 Strategy Backtest Lab, Equity/Drawdown Sub-Pane & Quantitative Tearsheet Benchmark ==="
+    );
+    println!(
+        "CPU: {cpu_brand} | RAM: {:.1} GiB | {rustc_ver} | profile={profile}",
+        (mem_bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+    );
+
+    let universe = load_bundled_watchlist_universe();
+    let candles_100k_1m = generate_intraday_vn30f_1m_report(100_000).candles;
+    let fpt_feed = universe
+        .iter()
+        .find(|e| e.symbol == "FPT")
+        .unwrap_or(&universe[0]);
+    let btc_json = build_btcusdt_15m_json_document(2_400);
+    let btc_15m = load_ohlcv_json(&btc_json, &DataLoadOptions::default())
+        .expect("load btc 15m")
+        .candles;
+    let btc_4h = aggregate_ohlcv(&btc_15m, Timeframe::M15, Timeframe::H4).expect("btc 4h");
+
+    let mut domain_cases = Vec::new();
+
+    // 1. 100,000-bar `SmaEmaTrendCross` + `70/30` IS/OOS split + `SeriesBlockIndex` equity/underwater + Tearsheet (`< 15.0 ms` gate)
+    let sma_cfg = BacktestConfig {
+        preset: StrategyPresetKind::SmaEmaTrendCross,
+        params: StrategyParams {
+            fast_sma: 20,
+            slow_ema: 50,
+            ..StrategyParams::default()
+        },
+        direction_mode: StrategyDirectionMode::LongShort,
+        sizing: PositionSizingMode::PercentEquity(95.0),
+        risk: StopTakeConfig {
+            stop_loss_pct: Some(2.5),
+            take_profit_pct: Some(6.0),
+            trailing_stop_atr_mult: Some(2.4),
+            min_holding_bars: 0,
+            ..StopTakeConfig::default()
+        },
+        in_sample_split_pct: Some(0.70),
+        ..BacktestConfig::default()
+    };
+    let mut sma_100k_samples = Vec::with_capacity(60);
+    let mut sma_100k_trades = 0_usize;
+    for step in 0..72 {
+        let t0 = Instant::now();
+        let res = run_backtest_with_options(
+            "VN30F1M",
+            Timeframe::M1,
+            std::hint::black_box(&candles_100k_1m),
+            std::hint::black_box(&sma_cfg),
+            BacktestRunOptions::default(),
+        );
+        sma_100k_trades = res.trades.len();
+        std::hint::black_box(res.tearsheet.total_return_pct);
+        let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        if step >= 12 {
+            sma_100k_samples.push(us);
+        }
+    }
+    domain_cases.push(R09DomainBenchCase {
+        case_id: "r09_backtest_100k_sma_ema_oos",
+        description: "100,000-bar 1m SmaEmaTrendCross + 70/30 IS/OOS + SeriesBlockIndex + Tearsheet (<15ms gate)",
+        input_units: candles_100k_1m.len(),
+        output_items: sma_100k_trades,
+        stats: TimingStats::from_samples(sma_100k_samples),
+    });
+
+    // 2. 100,000-bar `DonchianAtrBreakout` ($O(N)$ monotonic-deque prior channel + ATR trailing ratchet + OOS)
+    let don_cfg = BacktestConfig {
+        preset: StrategyPresetKind::DonchianAtrBreakout,
+        params: StrategyParams {
+            donchian_entry_period: 20,
+            donchian_exit_period: 10,
+            atr_period: 14,
+            ..StrategyParams::default()
+        },
+        direction_mode: StrategyDirectionMode::LongShort,
+        sizing: PositionSizingMode::RiskPercentPerTrade(1.5),
+        risk: StopTakeConfig {
+            stop_loss_pct: Some(2.0),
+            take_profit_pct: Some(5.0),
+            trailing_stop_atr_mult: Some(2.2),
+            min_holding_bars: 0,
+            ..StopTakeConfig::default()
+        },
+        in_sample_split_pct: Some(0.70),
+        ..BacktestConfig::default()
+    };
+    let mut don_100k_samples = Vec::with_capacity(60);
+    let mut don_100k_trades = 0_usize;
+    for step in 0..72 {
+        let t0 = Instant::now();
+        let res = run_backtest_with_options(
+            "VN30F1M",
+            Timeframe::M1,
+            std::hint::black_box(&candles_100k_1m),
+            std::hint::black_box(&don_cfg),
+            BacktestRunOptions::default(),
+        );
+        don_100k_trades = res.trades.len();
+        std::hint::black_box(res.tearsheet.max_drawdown_pct);
+        let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        if step >= 12 {
+            don_100k_samples.push(us);
+        }
+    }
+    domain_cases.push(R09DomainBenchCase {
+        case_id: "r09_backtest_100k_donchian_atr_oos",
+        description: "100,000-bar 1m O(N) monotonic-deque DonchianAtrBreakout + ATR trail + 70/30 IS/OOS",
+        input_units: candles_100k_1m.len(),
+        output_items: don_100k_trades,
+        stats: TimingStats::from_samples(don_100k_samples),
+    });
+
+    // 3. 12-variant parameter sweep on `FPT` (`VN30` `1D`)
+    let fpt_cfg = BacktestConfig {
+        preset: StrategyPresetKind::SmaEmaTrendCross,
+        direction_mode: StrategyDirectionMode::LongOnly,
+        in_sample_split_pct: Some(0.70),
+        ..BacktestConfig::default()
+    };
+    let mut sweep_samples = Vec::with_capacity(90);
+    let mut sweep_variants = 0_usize;
+    for step in 0..108 {
+        let t0 = Instant::now();
+        let rep = run_parameter_sweep(
+            "FPT",
+            fpt_feed.base_timeframe,
+            std::hint::black_box(&fpt_feed.candles),
+            std::hint::black_box(&fpt_cfg),
+            SweepRankingMetric::SharpeRatio,
+            BacktestRunOptions::default(),
+        );
+        sweep_variants = rep.variants.len();
+        std::hint::black_box(&rep);
+        let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        if step >= 18 {
+            sweep_samples.push(us);
+        }
+    }
+    domain_cases.push(R09DomainBenchCase {
+        case_id: "r09_sweep_12_grid_fpt_1d",
+        description: "12-variant deterministic parameter sweep + IS/OOS robustness on FPT 1D",
+        input_units: fpt_feed.candles.len() * 12,
+        output_items: sweep_variants,
+        stats: TimingStats::from_samples(sweep_samples),
+    });
+
+    // 4. 6-preset strategy battle on `BTCUSDT` `4h`
+    let btc_cfg = BacktestConfig {
+        preset: StrategyPresetKind::MacdMomentum,
+        direction_mode: StrategyDirectionMode::LongShort,
+        in_sample_split_pct: Some(0.70),
+        ..BacktestConfig::default()
+    };
+    let mut preset_samples = Vec::with_capacity(90);
+    let mut preset_rows = 0_usize;
+    for step in 0..108 {
+        let t0 = Instant::now();
+        let rows = run_all_presets_battle(
+            "BTCUSDT",
+            Timeframe::H4,
+            std::hint::black_box(&btc_4h),
+            std::hint::black_box(&btc_cfg),
+            SweepRankingMetric::SharpeRatio,
+            BacktestRunOptions::default(),
+        );
+        preset_rows = rows.len();
+        std::hint::black_box(&rows);
+        let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        if step >= 18 {
+            preset_samples.push(us);
+        }
+    }
+    domain_cases.push(R09DomainBenchCase {
+        case_id: "r09_6_preset_battle_btc_4h",
+        description: "All 6 strategy presets battle on BTCUSDT 4h with IS/OOS split",
+        input_units: btc_4h.len() * 6,
+        output_items: preset_rows,
+        stats: TimingStats::from_samples(preset_samples),
+    });
+
+    // 5. 13-symbol multi-asset Watchlist Universe Strategy Battle
+    let mut battle_samples = Vec::with_capacity(80);
+    let mut battle_rows = 0_usize;
+    let total_univ_bars: usize = universe.iter().map(|e| e.candles.len()).sum();
+    for step in 0..96 {
+        let t0 = Instant::now();
+        let rep = run_multi_symbol_battle(
+            std::hint::black_box(&universe),
+            Timeframe::D1,
+            std::hint::black_box(&fpt_cfg),
+            SweepRankingMetric::SharpeRatio,
+            None,
+        );
+        battle_rows = rep.rows.len();
+        std::hint::black_box(&rep);
+        let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        if step >= 16 {
+            battle_samples.push(us);
+        }
+    }
+    domain_cases.push(R09DomainBenchCase {
+        case_id: "r09_universe_13_symbol_battle",
+        description: "13-symbol multi-asset Watchlist Universe strategy battle (VN30 + CafeF + SPY + BTC + VN30F1M)",
+        input_units: total_univ_bars,
+        output_items: battle_rows,
+        stats: TimingStats::from_samples(battle_samples),
+    });
+
+    println!("\n[1] Strategy Backtest Engine, Parameter Sweep & Universe Battle Throughput");
+    for d in &domain_cases {
+        println!(
+            "  {:<36} | in={:<8} out={:<5} | med={:>8.2} µs ({:>6.3} ms) | p95={:>8.2} µs",
+            d.case_id,
+            d.input_units,
+            d.output_items,
+            d.stats.median_us,
+            d.stats.median_us / 1_000.0,
+            d.stats.p95_us
+        );
+    }
+
+    // Build 95,000-bar causal fixture with full backtest result, indicators, drawings, alerts & trading
+    let mut replay_95k = ReplayController::new();
+    replay_95k
+        .start_at_base_index(&candles_100k_1m, 94_999)
+        .expect("start 95k replay");
+    let mat_95k = replay_95k
+        .materialize_candles(&candles_100k_1m, Timeframe::M1, Timeframe::M1)
+        .expect("materialize 95k");
+    let cutoff_95k = replay_95k.cutoff_timestamp(&candles_100k_1m);
+
+    let ind_all = IndicatorConfig {
+        show_sma: true,
+        show_ema: true,
+        show_bbands: true,
+        show_rsi: true,
+        show_macd: true,
+        show_atr: true,
+        ..IndicatorConfig::default()
+    };
+    let mut cache_95k = IndicatorCache::new();
+    cache_95k.sync(&mat_95k, 1, &ind_all);
+
+    let ind_eq_only = IndicatorConfig {
+        show_sma: true,
+        show_ema: true,
+        show_bbands: false,
+        show_rsi: false,
+        show_macd: false,
+        show_atr: false,
+        ..IndicatorConfig::default()
+    };
+    let mut cache_95k_eq = IndicatorCache::new();
+    cache_95k_eq.sync(&mat_95k, 2, &ind_eq_only);
+
+    let bt_95k = run_backtest_with_options(
+        "VN30F1M",
+        Timeframe::M1,
+        &mat_95k,
+        &sma_cfg,
+        BacktestRunOptions {
+            replay_cutoff_timestamp: cutoff_95k,
+            incomplete_tail_bar: false,
+        },
+    );
+    let focus_tid_95k = bt_95k.trades.last().map(|t| t.trade_id);
+
+    let mut trading_95k = TradingSession::default();
+    trading_95k.reset_at(&candles_100k_1m, 90_000);
+    let _ = trading_95k.submit_order(
+        OrderRequest {
+            side: OrderSide::Buy,
+            kind: OrderKind::Market,
+            quantity: 5.0,
+            stop_loss: Some(candles_100k_1m[94_920].close - 4.0),
+            take_profit: Some(candles_100k_1m[94_920].close + 8.0),
+        },
+        &candles_100k_1m,
+        94_920,
+    );
+    trading_95k.advance_through_bars(&candles_100k_1m, 94_921, 94_999);
+
+    let mut drawings_95k = build_r05_benchmark_drawings(
+        &mat_95k,
+        mat_95k.len().saturating_sub(500),
+        mat_95k.len() - 1,
+    );
+    drawings_95k.remap_timeframe(&mat_95k, Timeframe::M1, &mat_95k, Timeframe::M1);
+    drawings_95k.set_replay_cutoff_timestamp(cutoff_95k, mat_95k.len());
+
+    let mut alerts_95k = build_r08_benchmark_alert_engine(
+        &candles_100k_1m,
+        &mat_95k,
+        Timeframe::M1,
+        90_000,
+        94_999,
+        &drawings_95k,
+    );
+    alerts_95k.evaluate_causal(
+        &candles_100k_1m,
+        Timeframe::M1,
+        &mat_95k,
+        Timeframe::M1,
+        94_999,
+        cutoff_95k,
+        &drawings_95k,
+    );
+
+    let mut render_cases = Vec::new();
+    render_cases.push(bench_r09_chart_full_case(
+        &mat_95k,
+        "VN30F1M",
+        "1m",
+        &ind_all,
+        &cache_95k,
+        &drawings_95k,
+        &trading_95k,
+        &alerts_95k,
+        &bt_95k,
+        focus_tid_95k,
+        cutoff_95k,
+        PriceScaleMode::Normal,
+        |vp| {
+            vp.time_scale.set_bar_spacing(8.0);
+            vp.time_scale.set_right_offset(12.0);
+        },
+        "r09_95k_1m_recent_5pane_equity",
+        "95K 1m causal bars, 5 active panes (Main+RSI+MACD+ATR+Equity) + Trade Links + Alerts + Trading",
+        16,
+        90,
+    ));
+    render_cases.push(bench_r09_chart_full_case(
+        &mat_95k,
+        "VN30F1M",
+        "1m",
+        &ind_eq_only,
+        &cache_95k_eq,
+        &drawings_95k,
+        &trading_95k,
+        &alerts_95k,
+        &bt_95k,
+        focus_tid_95k,
+        cutoff_95k,
+        PriceScaleMode::Logarithmic,
+        |vp| {
+            vp.fit_all();
+        },
+        "r09_95k_1m_full_fit_equity_conflated",
+        "95K 1m full-fit conflated (>=32x), Main + Equity SeriesBlockIndex M4 baseline Mesh + Trade Links",
+        16,
+        90,
+    ));
+    render_cases.push(bench_r09_full_workstation_ui(
+        &candles_100k_1m,
+        StrategyLabSubTab::Tearsheet,
+        true,
+        "r09_workstation_1280x800_tearsheet_equity",
+        "Full 1280x800 workstation UI (Watchlist + Main + RSI + Equity + Strategy Lab Tearsheet & IS/OOS)",
+        16,
+        90,
+    ));
+    render_cases.push(bench_r09_full_workstation_ui(
+        &candles_100k_1m,
+        StrategyLabSubTab::Sweep,
+        false,
+        "r09_workstation_1280x800_sweep_battle",
+        "Full 1280x800 workstation UI (Main + MACD + Equity + Strategy Lab 12-Grid Sweep & 6-Preset Battle)",
+        16,
+        90,
+    ));
+
+    println!("\n[2] End-to-End Workstation R09 Render & Tessellation Budgets (1280x800 @ 2.0x)");
+    for r in &render_cases {
+        println!(
+            "  {:<42} | confl={:>3}x | drawn={:>4} | verts={:>6} | ui={:>6.3}ms | tess={:>6.3}ms | total={:>6.3}ms (p95={:>6.3}ms)",
+            r.workload_id,
+            r.conflation_factor,
+            r.rendered_candles,
+            r.total_vertices,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.p95_us / 1_000.0,
+        );
+    }
+
+    let json = format_r09_json_report(
+        cpu_brand,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        &domain_cases,
+        &render_cases,
+    );
+    let md = format_r09_markdown_report(
+        cpu_brand,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        &domain_cases,
+        &render_cases,
+    );
+
+    std::fs::create_dir_all("docs/evidence").expect("create docs/evidence");
+    std::fs::write("docs/evidence/r09_backtest_lab_benchmark.json", json)
+        .expect("write r09 benchmark json");
+    std::fs::write("docs/evidence/r09_backtest_lab_benchmark.md", md)
+        .expect("write r09 benchmark md");
+    println!(
+        "\nSaved docs/evidence/r09_backtest_lab_benchmark.json and docs/evidence/r09_backtest_lab_benchmark.md"
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bench_r09_chart_full_case<F: FnOnce(&mut ChartViewportState)>(
+    candles: &[Candle],
+    symbol: &str,
+    timeframe: &str,
+    indicators: &IndicatorConfig,
+    cache: &IndicatorCache,
+    template_store: &DrawingStore,
+    trading: &TradingSession,
+    alerts: &AlertEngine,
+    backtest_result: &BacktestRunResult,
+    focused_trade_id: Option<u64>,
+    replay_cutoff_timestamp: Option<i64>,
+    scale_mode: PriceScaleMode,
+    setup_fn: F,
+    workload_id: &'static str,
+    description: &'static str,
+    warmup: usize,
+    iters: usize,
+) -> RenderCaseResult {
+    let ctx = egui::Context::default();
+    SumiWorkstationApp::configure_dark_workstation_visuals(&ctx);
+    let screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+    ctx.set_pixels_per_point(2.0);
+
+    let mut vp = ChartViewportState::new();
+    vp.time_scale.set_total_bars(candles.len());
+    vp.main_price_scale.set_mode(scale_mode);
+    vp.equity_stretch = 1.35;
+    let mut store = template_store.clone();
+
+    let cfg = ChartDisplayConfig {
+        symbol,
+        timeframe,
+        show_grid: true,
+        show_crosshair: true,
+        show_volume: true,
+    };
+
+    for _ in 0..2 {
+        let mut init_out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let _ = render_workstation_chart_full(
+                        ui,
+                        candles,
+                        &mut vp,
+                        cfg,
+                        indicators,
+                        cache,
+                        &mut store,
+                        ChartReplayTradingOverlay {
+                            replay_active: true,
+                            selecting_cut_bar: false,
+                            replay_status_label: Some("PAUSED"),
+                            trading_session: Some(trading),
+                            alert_engine: Some(alerts),
+                            backtest_result: Some(backtest_result),
+                            show_equity_pane: true,
+                            show_backtest_trades_on_chart: true,
+                            focused_backtest_trade_id: focused_trade_id,
+                            replay_cutoff_timestamp,
+                            frontier_base_timestamp: replay_cutoff_timestamp
+                                .or_else(|| candles.last().map(|c| c.timestamp)),
+                            modal_open: false,
+                        },
+                    );
+                });
+            },
+        );
+        init_out.textures_delta.clear();
+    }
+    setup_fn(&mut vp);
+
+    let mut ui_samples = Vec::with_capacity(iters);
+    let mut tess_samples = Vec::with_capacity(iters);
+    let mut total_samples = Vec::with_capacity(iters);
+    let mut last_rep = None;
+    let mut paint_shapes = 0_usize;
+    let mut clipped_primitives = 0_usize;
+    let mut total_vertices = 0_usize;
+    let mut total_indices = 0_usize;
+
+    for step in 0..(warmup + iters) {
+        let hover_x = 180.0 + ((step % 30) as f32) * 24.0;
+        let hover_y = if step % 2 == 0 { 220.0 } else { 610.0 };
+        let raw_input = egui::RawInput {
+            screen_rect,
+            time: Some(step as f64 * 0.016),
+            events: vec![egui::Event::PointerMoved(Pos2::new(hover_x, hover_y))],
+            ..Default::default()
+        };
+
+        let t_frame = Instant::now();
+        let t_ui = Instant::now();
+        let mut full_out = ctx.run_ui(raw_input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                last_rep = render_workstation_chart_full(
+                    ui,
+                    candles,
+                    &mut vp,
+                    cfg,
+                    indicators,
+                    cache,
+                    &mut store,
+                    ChartReplayTradingOverlay {
+                        replay_active: true,
+                        selecting_cut_bar: false,
+                        replay_status_label: Some("PAUSED"),
+                        trading_session: Some(trading),
+                        alert_engine: Some(alerts),
+                        backtest_result: Some(backtest_result),
+                        show_equity_pane: true,
+                        show_backtest_trades_on_chart: true,
+                        focused_backtest_trade_id: focused_trade_id,
+                        replay_cutoff_timestamp,
+                        frontier_base_timestamp: replay_cutoff_timestamp
+                            .or_else(|| candles.last().map(|c| c.timestamp)),
+                        modal_open: false,
+                    },
+                );
+            });
+        });
+        let ui_us = t_ui.elapsed().as_secs_f64() * 1_000_000.0;
+
+        paint_shapes = full_out.shapes.len();
+        let t_tess = Instant::now();
+        let primitives = ctx.tessellate(full_out.shapes, full_out.pixels_per_point);
+        let tess_us = t_tess.elapsed().as_secs_f64() * 1_000_000.0;
+        let total_us = t_frame.elapsed().as_secs_f64() * 1_000_000.0;
+        full_out.textures_delta.clear();
+
+        if step + 1 == warmup + iters {
+            clipped_primitives = primitives.len();
+            total_vertices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.vertices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+            total_indices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.indices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+        }
+
+        if step >= warmup {
+            ui_samples.push(ui_us);
+            tess_samples.push(tess_us);
+            total_samples.push(total_us);
+        }
+    }
+
+    let rep = last_rep.expect("r09 chart render report");
+    RenderCaseResult {
+        dataset_bars: candles.len(),
+        workload_id,
+        description,
+        scale_mode: scale_mode.label(),
+        conflation_enabled: true,
+        bar_spacing: rep.bar_spacing,
+        conflation_factor: rep.conflation_factor,
+        culled_bars: rep.culled_bar_count,
+        rendered_candles: rep.rendered_candle_count,
+        paint_shapes,
+        clipped_primitives,
+        total_vertices,
+        total_indices,
+        ui_build_stats: TimingStats::from_samples(ui_samples),
+        tessellate_stats: TimingStats::from_samples(tess_samples),
+        total_cpu_frame_stats: TimingStats::from_samples(total_samples),
+    }
+}
+
+fn bench_r09_full_workstation_ui(
+    candles_100k_1m: &[Candle],
+    sub_tab: StrategyLabSubTab,
+    show_scanner: bool,
+    workload_id: &'static str,
+    description: &'static str,
+    warmup: usize,
+    iters: usize,
+) -> RenderCaseResult {
+    let ctx = egui::Context::default();
+    SumiWorkstationApp::configure_dark_workstation_visuals(&ctx);
+    let screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+    ctx.set_pixels_per_point(2.0);
+
+    let mut app = SumiWorkstationApp::default();
+    let csv_100k = build_r06_csv_document(candles_100k_1m);
+    app.load_from_csv_str(&csv_100k, &DataLoadOptions::default())
+        .expect("load 100k csv into app");
+    app.set_timeframe(Timeframe::M15).expect("15m rollup");
+    app.indicators = IndicatorConfig {
+        show_sma: true,
+        show_ema: true,
+        show_bbands: !show_scanner,
+        show_rsi: show_scanner,
+        show_macd: !show_scanner,
+        show_atr: false,
+        ..IndicatorConfig::default()
+    };
+
+    assert!(app.start_replay_at_base_index(72_000));
+    app.populate_showcase_drawings();
+    app.show_replay_bar = true;
+    app.show_scanner_dock = show_scanner;
+    app.scanner_tab = ScannerDockTab::Watchlist;
+    app.show_trading_panel = false;
+    app.show_alerts_panel = false;
+    app.strategy_lab_tab = sub_tab;
+    app.open_strategy_lab();
+    if sub_tab == StrategyLabSubTab::Sweep {
+        app.run_active_parameter_sweep();
+    }
+    app.viewport.time_scale.set_bar_spacing(8.5);
+    app.viewport.time_scale.set_right_offset(8.0);
+
+    for _ in 0..2 {
+        let mut init_out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        init_out.textures_delta.clear();
+    }
+
+    let mut ui_samples = Vec::with_capacity(iters);
+    let mut tess_samples = Vec::with_capacity(iters);
+    let mut total_samples = Vec::with_capacity(iters);
+    let mut paint_shapes = 0_usize;
+    let mut clipped_primitives = 0_usize;
+    let mut total_vertices = 0_usize;
+    let mut total_indices = 0_usize;
+
+    for step in 0..(warmup + iters) {
+        let hover_x = 340.0 + ((step % 20) as f32) * 18.0;
+        let hover_y = if step % 2 == 0 { 240.0 } else { 580.0 };
+        let raw_input = egui::RawInput {
+            screen_rect,
+            time: Some(step as f64 * 0.016),
+            events: vec![egui::Event::PointerMoved(Pos2::new(hover_x, hover_y))],
+            ..Default::default()
+        };
+
+        let t_frame = Instant::now();
+        let t_ui = Instant::now();
+        let mut full_out = ctx.run_ui(raw_input, |ui| {
+            app.render_workstation_ui(ui);
+        });
+        let ui_us = t_ui.elapsed().as_secs_f64() * 1_000_000.0;
+
+        paint_shapes = full_out.shapes.len();
+        let t_tess = Instant::now();
+        let primitives = ctx.tessellate(full_out.shapes, full_out.pixels_per_point);
+        let tess_us = t_tess.elapsed().as_secs_f64() * 1_000_000.0;
+        let total_us = t_frame.elapsed().as_secs_f64() * 1_000_000.0;
+        full_out.textures_delta.clear();
+
+        if step + 1 == warmup + iters {
+            clipped_primitives = primitives.len();
+            total_vertices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.vertices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+            total_indices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.indices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+        }
+
+        if step >= warmup {
+            ui_samples.push(ui_us);
+            tess_samples.push(tess_us);
+            total_samples.push(total_us);
+        }
+    }
+
+    let rep = app.last_report.expect("full app r09 report");
+    RenderCaseResult {
+        dataset_bars: app.candles.len(),
+        workload_id,
+        description,
+        scale_mode: app.viewport.main_price_scale.mode().label(),
+        conflation_enabled: true,
+        bar_spacing: rep.bar_spacing,
+        conflation_factor: rep.conflation_factor,
+        culled_bars: rep.culled_bar_count,
+        rendered_candles: rep.rendered_candle_count,
+        paint_shapes,
+        clipped_primitives,
+        total_vertices,
+        total_indices,
+        ui_build_stats: TimingStats::from_samples(ui_samples),
+        tessellate_stats: TimingStats::from_samples(tess_samples),
+        total_cpu_frame_stats: TimingStats::from_samples(total_samples),
+    }
+}
+
+fn format_r09_json_report(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+    domain: &[R09DomainBenchCase],
+    render: &[RenderCaseResult],
+) -> String {
+    let mut s = String::with_capacity(8192);
+    let _ = writeln!(s, "{{");
+    let _ = writeln!(s, "  \"milestone\": \"R09\",");
+    let _ = writeln!(s, "  \"environment\": {{");
+    let _ = writeln!(s, "    \"cpu\": \"{}\",", cpu.replace('"', "\\\""));
+    let _ = writeln!(s, "    \"os\": \"{}\",", std::env::consts::OS);
+    let _ = writeln!(s, "    \"arch\": \"{}\",", std::env::consts::ARCH);
+    let _ = writeln!(s, "    \"ram_bytes\": {mem_bytes},");
+    let _ = writeln!(s, "    \"rustc\": \"{}\",", rustc_ver.replace('"', "\\\""));
+    let _ = writeln!(s, "    \"profile\": \"{profile}\",");
+    let _ = writeln!(s, "    \"viewport_logical_px\": [1280, 800],");
+    let _ = writeln!(s, "    \"pixels_per_point\": 2.0");
+    let _ = writeln!(s, "  }},");
+    let _ = writeln!(s, "  \"backtest_lab_domain\": [");
+    for (idx, d) in domain.iter().enumerate() {
+        let comma = if idx + 1 == domain.len() { "" } else { "," };
+        let _ = writeln!(
+            s,
+            "    {{ \"case_id\": \"{}\", \"description\": \"{}\", \"input_units\": {}, \"output_items\": {}, \"median_us\": {:.3}, \"median_ms\": {:.4}, \"p95_us\": {:.3}, \"max_us\": {:.3} }}{comma}",
+            d.case_id,
+            d.description.replace('"', "\\\""),
+            d.input_units,
+            d.output_items,
+            d.stats.median_us,
+            d.stats.median_us / 1_000.0,
+            d.stats.p95_us,
+            d.stats.max_us,
+        );
+    }
+    let _ = writeln!(s, "  ],");
+    let _ = writeln!(s, "  \"workstation_r09_workloads\": [");
+    for (idx, r) in render.iter().enumerate() {
+        let comma = if idx + 1 == render.len() { "" } else { "," };
+        let _ = writeln!(
+            s,
+            "    {{ \"dataset_bars\": {}, \"workload_id\": \"{}\", \"scale_mode\": \"{}\", \"bar_spacing\": {:.5}, \"conflation_factor\": {}, \"culled_bars\": {}, \"rendered_candles\": {}, \"paint_shapes\": {}, \"clipped_primitives\": {}, \"total_vertices\": {}, \"total_indices\": {}, \"ui_median_ms\": {:.4}, \"tessellate_median_ms\": {:.4}, \"total_cpu_median_ms\": {:.4}, \"total_cpu_p95_ms\": {:.4} }}{comma}",
+            r.dataset_bars,
+            r.workload_id,
+            r.scale_mode,
+            r.bar_spacing,
+            r.conflation_factor,
+            r.culled_bars,
+            r.rendered_candles,
+            r.paint_shapes,
+            r.clipped_primitives,
+            r.total_vertices,
+            r.total_indices,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.p95_us / 1_000.0,
+        );
+    }
+    let _ = writeln!(s, "  ]");
+    let _ = writeln!(s, "}}");
+    s
+}
+
+fn format_r09_markdown_report(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+    domain: &[R09DomainBenchCase],
+    render: &[RenderCaseResult],
+) -> String {
+    let mut s = String::with_capacity(8192);
+    let _ = writeln!(
+        s,
+        "# Milestone R09 — Deterministic Strategy Backtest Lab, Synchronized Equity/Drawdown Sub-Pane & Quantitative Tearsheet Benchmark Evidence\n"
+    );
+    let _ = writeln!(
+        s,
+        "- **Command:** `cargo run --release --example viewport_bench -- --r09`"
+    );
+    let _ = writeln!(
+        s,
+        "- **Hardware:** `{cpu}` (`{}-{}`), `{:.1} GiB` RAM",
+        std::env::consts::ARCH,
+        std::env::consts::OS,
+        (mem_bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+    );
+    let _ = writeln!(
+        s,
+        "- **Toolchain & Profile:** `{rustc_ver}` (`--{profile}`)"
+    );
+    let _ = writeln!(
+        s,
+        "- **Active Stack:** `100,000` `1m` Base Bars + Causal `run_backtest_with_options` (`Open[T+1]` fills, pessimistic `SL`-before-`TP`, post-close ATR trail, `70/30` `IS/OOS` split) + `12`-Grid Parameter Sweep + `13`-Symbol Universe Battle + 5 Synchronized Panes (`Main + RSI + MACD + ATR + Equity` 2-`Mesh` Baseline) + `O(log T)` Trade Links\n"
+    );
+
+    let _ = writeln!(
+        s,
+        "## 1. Strategy Backtest Engine, Parameter Sweep & Multi-Symbol Battle Throughput (`< 15.0 ms` 100K Gate)\n"
+    );
+    let _ = writeln!(
+        s,
+        "| Case ID | Description | Input Bars | Output Trades / Rows | Median (`µs`) | Median (`ms`) | P95 (`µs`) | Max (`µs`) |"
+    );
+    let _ = writeln!(
+        s,
+        "| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: |"
+    );
+    for d in domain {
+        let _ = writeln!(
+            s,
+            "| `{}` | {} | `{}` | `{}` | **`{:.2} µs`** | **`{:.3} ms`** | `{:.2} µs` | `{:.2} µs` |",
+            d.case_id,
+            d.description,
+            d.input_units,
+            d.output_items,
+            d.stats.median_us,
+            d.stats.median_us / 1_000.0,
             d.stats.p95_us,
             d.stats.max_us,
         );

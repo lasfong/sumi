@@ -2,6 +2,7 @@
 
 pub mod alerts;
 pub mod app;
+pub mod backtest;
 pub mod chart;
 pub mod data;
 pub mod drawings;

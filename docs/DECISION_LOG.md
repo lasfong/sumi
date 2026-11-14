@@ -1,7 +1,7 @@
 # SUMI TRADING WORKSTATION — DECISION LOG
 
 - **Session Identity (Created):** `SESSION-01-20261110T160909+0700`
-- **Updated By:** `SESSION-R08-20261112T140031+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Updated By:** `SESSION-R09-20261114T091018+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 
 ## Decisions Recorded in Session 01
 
@@ -171,3 +171,16 @@
   1. Implement `src/scanner/` (`mod.rs`, `engine.rs`, `tests.rs`) and expand `src/data/presets.rs` (`DataSourcePreset::Vn30Basket` `8` VN30 tickers + `custom_peer_feeds`) in pure `f64`/`i64` (`wasm32-unknown-unknown`-verified, zero new crates in `Cargo.toml`). Single-pass `evaluate_symbol_scan_and_signals` computes Watchlist rows and historical signals across all `13` bundled feeds (`20,797` bars) in **`1.799 ms`**, strictly enforcing `<= replay_cutoff` across all peer feeds, withholding unclosed higher-timeframe tail signals, and pinning `ScannerSignalContext` `BlindPractice` reveal timestamps to bucket close.
   2. Implement `src/alerts/` (`mod.rs`, `engine.rs`, `tests.rs`) supporting `PriceLevel` (4-waypoint OHLC + stateful `@Mark` departure), `RsiThreshold` (`RSI(14)`), `MacdHistogramZeroCross` (`MACD(12,26,9)`), and `DrawingLine` (`HorizontalLine` `1m==15m` parity, finite `TrendLine`, and $360^\circ$ `Ray` relative-offset crossings with linear slope extrapolation), chronologically sorted `eval_base_timestamp` trigger logs, and bit-exact causal Replay rewind (`Once` alerts automatically re-arm when rewound prior to their trigger).
   3. Integrate the keyboard-first `Cmd+K` / `Ctrl+K` Command Palette (`13.71 µs` fuzzy/prefix ranking + dynamic `alert <price>` synthesis) with full modal isolation (`disabled_alpha = 1.0` background panel lock, gesture/kinetic cancellation, `Tab`/`Delete`/`MouseWheel` consumption) and horizontal dashed-line + conflated line `egui::Mesh` batching so `95,001`-bar `1m` full-fit 4-pane + Replay + Trading + Alerts renders in **`3.067 ms`** median (`0.182 ms` recent `1m`, `0.407 ms` full workstation, `0.296 ms` `Cmd+K` modal), well inside the `< 4.0 ms` `DECISION-RENDERER-002` ceiling.
+
+---
+
+## Decisions Recorded in Session R09
+
+### DEC-R09-001 — Pure `f64`/`i64` WASM-Safe Deterministic Strategy Backtest Engine (`src/backtest/`), Continuous Causal `IS/OOS` Partition, Zero-Balance `MarginLiquidation`, & Synchronized 5th `Equity / Drawdown` Baseline Sub-Pane
+- **Date:** `2026-11-14`
+- **Session:** `SESSION-R09-20261114T091018+0700`
+- **Context:** Milestone R09 (`Wave 8`) implements Strategy Lab, causal backtesting, parameter sweeps, multi-symbol comparison, and synchronized equity/drawdown rendering after live REA MCP analysis (`ev_30052fc9...`, `ev_0e297ef9...`, `ev_2f44b96f...`, `ev_86aa8a13...`, `ev_72d6e059...`, `ev_54c92e4a...`, `ev_fe8c9f11...`, `ev_3e04368e...`, `ev_80e6acb9...`, `ev_4d180bfe...`, `ev_f81cc480...`, `ev_fee363ed...`) uncovered 6 legacy defects (detached `/backtest` & `/strategy-lab` pages with `YYYY-MM-DD` intraday equity collapsing and array-index SVG plots, row-by-row Pandas `df.iloc[i]` + `uuid.uuid4()` overhead, Long-only + hardcoded `sqrt(252)` Sharpe, missing `Sortino`/`Calmar`/`MaxDD Duration`/`Avg R`/`Exposure %`, intrabar optimism, and Bar Replay `DEF-001` future leakage).
+- **Decision:**
+  1. Implement `src/backtest/` (`mod.rs`, `strategy.rs`, `metrics.rs`, `engine.rs`, `tests.rs`) in pure `f64`/`i64` (`wasm32-unknown-unknown`-verified, zero new crates in `Cargo.toml`) executing `100,000` bars with `70/30` `IS/OOS` split in **`6.318–7.832 ms`** (`< 15.0 ms` budget). Enforce strict `Close[i] -> Open[i + 1]` causal fills (`EndOfSeriesCutoff` on final bar), pessimistic `SL`-before-`TP` intrabar resolution, post-close `ATR` trailing-stop ratcheting (active during Vietnam `T+2` `min_holding_bars`), and `BacktestExitReason::MarginLiquidation` (`compute_bankruptcy_raw_price`) so bankrupt leveraged/Short accounts liquidate at `0.0` without zombie resurrection while conserving `initial_cash + sum(net_pnl) == final_cash`.
+  2. Partition `in_sample_tearsheet` and `out_of_sample_tearsheet` directly from the single continuous `full_sim` (`&equity_curve[..split_idx]` vs `&equity_curve[split_idx..]` seeded with `initial_cash = equity_curve[split_idx - 1].equity`, and `exit_bar_index < split_idx` vs `>= split_idx`), conserving `100%` of boundary-straddling trades and `(1 + IS%) * (1 + OOS%) == (1 + Full%)`, and enforce inclusive causal close cutoffs (`replay_causal_close_timestamp = cursor_open_ts + base_tf.seconds() - 1`) across single runs, `12`-grid sweeps (`77.29 µs`), and `13`-symbol universe battles (`639.92 µs`).
+  3. Extend `MultiPaneLayout` to 5 synchronized panes (`Main + RSI + MACD + ATR + Equity`) via `OscillatorPaneId::Equity`, rendering `SeriesBlockIndex`-conflated emerald/crimson baseline-split trapezoids clipped analytically via `emit_y_clipped_baseline_trapezoid` into `egui::Mesh` + $O(\log T)$ pan-invariant Trade Connectors (`0.190 ms` active 5-pane `95K` intraday, `0.412 ms` full workstation UI, **`1.355 ms`** `95K/100K` `1m` full-fit — well below `< 4.0 ms` `DECISION-RENDERER-002`).

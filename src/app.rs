@@ -7,6 +7,15 @@ use crate::alerts::{
     AlertCondition, AlertEngine, AlertError, AlertFrequency, AlertId, AlertStatus, CrossDirection,
     truncate_utf8_bytes,
 };
+use crate::backtest::{
+    BacktestConfig, BacktestRunOptions, BacktestRunResult, MIN_STATISTICAL_SAMPLE_TRADES,
+    MultiSymbolBattleReport, ParameterSweepReport, PositionSizingMode, PresetBattleRow,
+    RobustnessVerdict, StrategyDirectionMode, StrategyPresetKind, SweepRankingMetric,
+    is_bucket_incomplete_at_close, run_all_presets_battle, run_backtest_with_options,
+    run_multi_symbol_battle_with_close_cutoff, run_parameter_sweep,
+};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::backtest::{StopTakeConfig, StrategyParams};
 use crate::chart::{
     ChartDisplayConfig, ChartRenderReport, ChartReplayTradingOverlay, ChartViewportState, palette,
     render_workstation_chart_full,
@@ -69,12 +78,38 @@ pub enum ScannerDockTab {
     Signals,
 }
 
-/// Active sub-view inside the unified right-side Paper Trading & Alerts dock (`Milestone R08`).
+/// Active sub-view inside the unified right-side Paper Trading, Alerts & Strategy Lab dock (`Milestones R08–R09`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum RightDockTab {
     #[default]
     Trading,
     Alerts,
+    StrategyLab,
+}
+
+/// Active sub-view inside the `Strategy Lab` right-side dock (`Milestone R09`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum StrategyLabSubTab {
+    #[default]
+    Tearsheet,
+    Trades,
+    Sweep,
+    Battle,
+}
+
+impl StrategyLabSubTab {
+    pub const ALL: [Self; 4] = [Self::Tearsheet, Self::Trades, Self::Sweep, Self::Battle];
+
+    #[inline]
+    #[must_use]
+    pub const fn short_label(self) -> &'static str {
+        match self {
+            Self::Tearsheet => "Stats",
+            Self::Trades => "Trades",
+            Self::Sweep => "Sweep",
+            Self::Battle => "Battle",
+        }
+    }
 }
 
 /// Alert condition template selected in the Alerts Manager quick-create form (`Milestone R08`).
@@ -115,6 +150,7 @@ pub enum PaletteCategory {
     Indicator,
     Drawing,
     Alert,
+    Backtest,
     Replay,
     Trading,
     Scale,
@@ -131,6 +167,7 @@ impl PaletteCategory {
             Self::Indicator => "INDIC",
             Self::Drawing => "DRAW",
             Self::Alert => "ALERT",
+            Self::Backtest => "STRAT",
             Self::Replay => "REPLAY",
             Self::Trading => "TRADE",
             Self::Scale => "SCALE",
@@ -147,6 +184,7 @@ impl PaletteCategory {
             Self::Indicator => Color32::from_rgb(179, 136, 255),
             Self::Drawing => Color32::from_rgb(255, 193, 7),
             Self::Alert => palette::ALERT_ARMED_AMBER,
+            Self::Backtest => palette::EQUITY_ABOVE_LINE,
             Self::Replay => palette::REPLAY_CUT_GOLD,
             Self::Trading => palette::TRADE_ENTRY_BLUE,
             Self::Scale => Color32::from_rgb(38, 198, 164),
@@ -155,7 +193,7 @@ impl PaletteCategory {
     }
 }
 
-/// Executable workstation action dispatched from the `Cmd+K` Command Palette (`Milestone R08`).
+/// Executable workstation action dispatched from the `Cmd+K` Command Palette (`Milestones R08–R09`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum PaletteAction {
     SelectWatchlistSymbol {
@@ -169,6 +207,12 @@ pub enum PaletteAction {
     ToggleScannerDock,
     OpenAlertsTab,
     OpenTradingTab,
+    OpenStrategyLab,
+    ToggleEquityPane,
+    ToggleBacktestTradesOnChart,
+    SelectStrategyPreset(StrategyPresetKind),
+    RunParameterSweep,
+    RunUniverseStrategyBattle,
     QuickPriceAlert {
         price: f64,
         direction: CrossDirection,
@@ -203,7 +247,11 @@ pub struct CommandPaletteState {
     pub request_focus: bool,
 }
 
-/// Primary application state for the Sumi Rust Trading Workstation (`Milestone R08`).
+type BacktestSyncKey = (u64, usize, Option<i64>, Option<i64>, bool, u64);
+type SweepSyncKey = (u64, Option<i64>, bool, u64, SweepRankingMetric);
+type BattleSyncKey = (String, u64, Timeframe, Option<i64>, u64, SweepRankingMetric);
+
+/// Primary application state for the Sumi Rust Trading Workstation (`Milestone R09`).
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 pub struct SumiWorkstationApp {
@@ -235,7 +283,13 @@ pub struct SumiWorkstationApp {
     pub show_replay_bar: bool,
     pub show_trading_panel: bool,
     pub show_alerts_panel: bool,
+    pub show_strategy_panel: bool,
+    pub show_equity_pane: bool,
+    pub show_backtest_trades: bool,
     pub right_dock_tab: RightDockTab,
+    pub strategy_lab_tab: StrategyLabSubTab,
+    pub backtest_config: BacktestConfig,
+    pub sweep_ranking: SweepRankingMetric,
     pub show_scanner_dock: bool,
     pub scanner_tab: ScannerDockTab,
     pub scanner_filter: ScannerFilter,
@@ -286,6 +340,22 @@ pub struct SumiWorkstationApp {
     #[serde(skip)]
     alerts_synced_key: Option<(u64, u64, Option<i64>, u64)>,
     #[serde(skip)]
+    pub backtest_result: Option<BacktestRunResult>,
+    #[serde(skip)]
+    pub sweep_report: Option<ParameterSweepReport>,
+    #[serde(skip)]
+    pub battle_report: Option<MultiSymbolBattleReport>,
+    #[serde(skip)]
+    pub preset_battle_rows: Vec<PresetBattleRow>,
+    #[serde(skip)]
+    pub focused_backtest_trade_id: Option<u64>,
+    #[serde(skip)]
+    backtest_synced_key: Option<BacktestSyncKey>,
+    #[serde(skip)]
+    sweep_synced_key: Option<SweepSyncKey>,
+    #[serde(skip)]
+    battle_synced_key: Option<BattleSyncKey>,
+    #[serde(skip)]
     viewport_focus_lock: Option<(f64, f64, f64)>,
     #[serde(skip)]
     pub indicator_cache: IndicatorCache,
@@ -335,7 +405,13 @@ impl Default for SumiWorkstationApp {
             show_replay_bar: false,
             show_trading_panel: false,
             show_alerts_panel: false,
+            show_strategy_panel: false,
+            show_equity_pane: false,
+            show_backtest_trades: false,
             right_dock_tab: RightDockTab::Trading,
+            strategy_lab_tab: StrategyLabSubTab::Tearsheet,
+            backtest_config: BacktestConfig::default(),
+            sweep_ranking: SweepRankingMetric::SharpeRatio,
             show_scanner_dock: false,
             scanner_tab: ScannerDockTab::Watchlist,
             scanner_filter: ScannerFilter::default(),
@@ -368,6 +444,14 @@ impl Default for SumiWorkstationApp {
             raw_historical_hits_cache: Vec::new(),
             scanner_synced_key: None,
             alerts_synced_key: None,
+            backtest_result: None,
+            sweep_report: None,
+            battle_report: None,
+            preset_battle_rows: Vec::new(),
+            focused_backtest_trade_id: None,
+            backtest_synced_key: None,
+            sweep_synced_key: None,
+            battle_synced_key: None,
             viewport_focus_lock: None,
             indicator_cache,
             dataset_generation: 1,
@@ -463,6 +547,7 @@ impl SumiWorkstationApp {
         truncate_utf8_bytes(&mut self.ticket_tp_input, 32);
         truncate_utf8_bytes(&mut self.alert_value_input, 32);
         truncate_utf8_bytes(&mut self.alert_message_input, 96);
+        self.backtest_config.sanitize();
         self.viewport_focus_lock = None;
         self.in_memory_custom_doc = None;
         self.in_memory_custom_doc_hash = 0;
@@ -472,6 +557,14 @@ impl SumiWorkstationApp {
         self.command_palette = CommandPaletteState::default();
         self.scanner_synced_key = None;
         self.alerts_synced_key = None;
+        self.backtest_result = None;
+        self.sweep_report = None;
+        self.battle_report = None;
+        self.preset_battle_rows.clear();
+        self.focused_backtest_trade_id = None;
+        self.backtest_synced_key = None;
+        self.sweep_synced_key = None;
+        self.battle_synced_key = None;
 
         let persisted_tf = Timeframe::parse_label(&self.timeframe).unwrap_or(self.active_timeframe);
         let (report, reset_to_clean_fallback) = if self.data_source == DataSourcePreset::CustomFile
@@ -935,6 +1028,8 @@ impl SumiWorkstationApp {
         self.viewport.rsi_price_scale.reset_auto_scale();
         self.viewport.macd_price_scale.reset_auto_scale();
         self.viewport.atr_price_scale.reset_auto_scale();
+        self.viewport.equity_price_scale.reset_auto_scale();
+        self.focused_backtest_trade_id = None;
 
         self.active_timeframe = target_tf;
         self.timeframe = target_tf.label().to_owned();
@@ -1162,6 +1257,8 @@ impl SumiWorkstationApp {
             .filter(|_| self.replay.is_active());
 
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
+        self.focused_backtest_trade_id = None;
+        self.viewport.equity_price_scale.reset_auto_scale();
         self.viewport.time_scale.set_total_bars(self.candles.len());
         if reset_viewport {
             self.viewport.reset_to_default();
@@ -1588,11 +1685,14 @@ impl SumiWorkstationApp {
         self.viewport.rsi_price_scale.reset_auto_scale();
         self.viewport.macd_price_scale.reset_auto_scale();
         self.viewport.atr_price_scale.reset_auto_scale();
+        self.viewport.equity_price_scale.reset_auto_scale();
+        self.focused_backtest_trade_id = None;
 
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
         self.indicator_cache
             .sync(&self.candles, self.dataset_generation, &self.indicators);
         self.sync_alerts_causal();
+        self.invalidate_or_sync_backtest_after_mutation();
         true
     }
 
@@ -1679,11 +1779,13 @@ impl SumiWorkstationApp {
         self.viewport.rsi_price_scale.reset_auto_scale();
         self.viewport.macd_price_scale.reset_auto_scale();
         self.viewport.atr_price_scale.reset_auto_scale();
+        self.viewport.equity_price_scale.reset_auto_scale();
 
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
         self.indicator_cache
             .sync(&self.candles, self.dataset_generation, &self.indicators);
         self.sync_alerts_causal();
+        self.invalidate_or_sync_backtest_after_mutation();
     }
 
     /// Steps causal Bar Replay forward by `steps` units (`ActiveBar` or `BaseBar`).
@@ -1776,11 +1878,13 @@ impl SumiWorkstationApp {
         self.viewport.rsi_price_scale.reset_auto_scale();
         self.viewport.macd_price_scale.reset_auto_scale();
         self.viewport.atr_price_scale.reset_auto_scale();
+        self.viewport.equity_price_scale.reset_auto_scale();
 
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
         self.indicator_cache
             .sync(&self.candles, self.dataset_generation, &self.indicators);
         self.sync_alerts_causal();
+        self.invalidate_or_sync_backtest_after_mutation();
     }
 
     /// Parses the workstation Order Ticket fields and submits `side` (`Buy` or `Sell`) at the
@@ -2393,6 +2497,312 @@ impl SumiWorkstationApp {
         ));
     }
 
+    // =========================================================================
+    // Milestone R09 — Deterministic Strategy Backtest Lab & Equity Pane API
+    // =========================================================================
+
+    /// Returns the inclusive end-of-bar causal timestamp (`cursor_open_ts + base_timeframe.seconds() - 1`)
+    /// when Bar Replay is active (`[CRITICAL-01]` cross-timeframe `DEF-001` gate).
+    #[inline]
+    #[must_use]
+    pub fn replay_causal_close_timestamp(&self) -> Option<i64> {
+        let open_ts = self.replay.cutoff_timestamp(&self.base_candles)?;
+        let span = self.base_timeframe.seconds().max(1).saturating_sub(1);
+        Some(open_ts.saturating_add(span))
+    }
+
+    /// Returns `true` when causal Bar Replay is active on an aggregated higher timeframe and the
+    /// current `base_cursor_index` has not yet closed the active higher-timeframe bucket (`DEF-001`,
+    /// `[MAJOR-04]`: pure prefix check without inspecting any future `base_candles[idx + 1]`!).
+    #[must_use]
+    pub fn is_active_tail_incomplete(&self) -> bool {
+        let Some(close_ts) = self.replay_causal_close_timestamp() else {
+            return false;
+        };
+        let Some(last_active) = self.candles.last() else {
+            return false;
+        };
+        is_bucket_incomplete_at_close(
+            last_active.timestamp,
+            close_ts,
+            self.base_timeframe,
+            self.active_timeframe,
+        )
+    }
+
+    fn invalidate_or_sync_backtest_after_mutation(&mut self) {
+        if self.show_strategy_panel || self.show_equity_pane || self.show_backtest_trades {
+            self.sync_backtest_causal();
+        } else {
+            self.backtest_result = None;
+            self.backtest_synced_key = None;
+            self.sweep_report = None;
+            self.preset_battle_rows.clear();
+            self.sweep_synced_key = None;
+            self.battle_report = None;
+            self.battle_synced_key = None;
+        }
+    }
+
+    /// Evaluates the causal strategy backtest (and refreshes/invalidates `Sweep` & `Battle` caches
+    /// across Bar Replay cutoffs per `DEF-001`) only when active and dirty (`0.000 ms` on hover/pan/zoom).
+    pub fn sync_backtest_causal(&mut self) {
+        let any_active =
+            self.show_strategy_panel || self.show_equity_pane || self.show_backtest_trades;
+        if !any_active {
+            return;
+        }
+        self.backtest_config.sanitize();
+        let replay_close_cutoff = self.replay_causal_close_timestamp();
+        let incomplete_tail = self.is_active_tail_incomplete();
+        let cfg_digest = compute_backtest_config_digest(&self.backtest_config);
+        let last_ts = self.candles.last().map(|c| c.timestamp);
+        let check_key = (
+            self.dataset_generation,
+            self.candles.len(),
+            last_ts,
+            replay_close_cutoff,
+            incomplete_tail,
+            cfg_digest,
+        );
+
+        if self.backtest_synced_key != Some(check_key) {
+            let opts = BacktestRunOptions {
+                replay_cutoff_timestamp: replay_close_cutoff,
+                incomplete_tail_bar: incomplete_tail,
+            };
+            let res = run_backtest_with_options(
+                &self.symbol,
+                self.active_timeframe,
+                &self.candles,
+                &self.backtest_config,
+                opts,
+            );
+            if let Some(tid) = self.focused_backtest_trade_id
+                && !res.trades.iter().any(|t| t.trade_id == tid)
+            {
+                self.focused_backtest_trade_id = None;
+            }
+            self.backtest_result = Some(res);
+            self.backtest_synced_key = Some(check_key);
+            if self.viewport.equity_price_scale.is_auto_scale() {
+                self.viewport.equity_price_scale.reset_auto_scale();
+            }
+        }
+
+        // Guard `Sweep` & `Battle` caches against stale full-history numbers during Bar Replay (`DEF-001`).
+        let sweep_key = (
+            self.dataset_generation,
+            replay_close_cutoff,
+            incomplete_tail,
+            cfg_digest,
+            self.sweep_ranking,
+        );
+        if self.sweep_synced_key != Some(sweep_key) {
+            if self.show_strategy_panel
+                && self.right_dock_tab == RightDockTab::StrategyLab
+                && self.strategy_lab_tab == StrategyLabSubTab::Sweep
+            {
+                self.run_active_parameter_sweep();
+            } else {
+                self.sweep_report = None;
+                self.preset_battle_rows.clear();
+                self.sweep_synced_key = None;
+            }
+        }
+
+        let battle_key = (
+            self.current_instrument_key(),
+            self.dataset_generation,
+            self.active_timeframe,
+            replay_close_cutoff,
+            cfg_digest,
+            self.sweep_ranking,
+        );
+        if self.battle_synced_key.as_ref() != Some(&battle_key) {
+            if self.show_strategy_panel
+                && self.right_dock_tab == RightDockTab::StrategyLab
+                && self.strategy_lab_tab == StrategyLabSubTab::Battle
+            {
+                self.run_universe_strategy_battle();
+            } else {
+                self.battle_report = None;
+                self.battle_synced_key = None;
+            }
+        }
+    }
+
+    /// Opens the right-dock Strategy Lab, activates the synchronized `Equity / Drawdown` sub-pane
+    /// and chart trade connectors, and computes the deterministic causal backtest immediately.
+    pub fn open_strategy_lab(&mut self) {
+        self.show_strategy_panel = true;
+        self.show_equity_pane = true;
+        self.show_backtest_trades = true;
+        self.right_dock_tab = RightDockTab::StrategyLab;
+        self.viewport.equity_price_scale.reset_auto_scale();
+        self.sync_backtest_causal();
+    }
+
+    /// Runs the deterministic 12-variant parameter grid sweep + 6-preset comparison on the active symbol.
+    pub fn run_active_parameter_sweep(&mut self) {
+        self.backtest_config.sanitize();
+        let replay_close_cutoff = self.replay_causal_close_timestamp();
+        let incomplete_tail = self.is_active_tail_incomplete();
+        let cfg_digest = compute_backtest_config_digest(&self.backtest_config);
+        let opts = BacktestRunOptions {
+            replay_cutoff_timestamp: replay_close_cutoff,
+            incomplete_tail_bar: incomplete_tail,
+        };
+        self.sweep_report = Some(run_parameter_sweep(
+            &self.symbol,
+            self.active_timeframe,
+            &self.candles,
+            &self.backtest_config,
+            self.sweep_ranking,
+            opts,
+        ));
+        self.preset_battle_rows = run_all_presets_battle(
+            &self.symbol,
+            self.active_timeframe,
+            &self.candles,
+            &self.backtest_config,
+            self.sweep_ranking,
+            opts,
+        );
+        self.sweep_synced_key = Some((
+            self.dataset_generation,
+            replay_close_cutoff,
+            incomplete_tail,
+            cfg_digest,
+            self.sweep_ranking,
+        ));
+    }
+
+    /// Runs the active `BacktestConfig` causally across the 13-instrument Watchlist universe (plus 6-preset comparison).
+    pub fn run_universe_strategy_battle(&mut self) {
+        self.ensure_watchlist_universe_loaded();
+        self.backtest_config.sanitize();
+        let replay_close_cutoff = self.replay_causal_close_timestamp();
+        let incomplete_tail = self.is_active_tail_incomplete();
+        let cfg_digest = compute_backtest_config_digest(&self.backtest_config);
+        let opts = BacktestRunOptions {
+            replay_cutoff_timestamp: replay_close_cutoff,
+            incomplete_tail_bar: incomplete_tail,
+        };
+        self.preset_battle_rows = run_all_presets_battle(
+            &self.symbol,
+            self.active_timeframe,
+            &self.candles,
+            &self.backtest_config,
+            self.sweep_ranking,
+            opts,
+        );
+
+        let feeds: Vec<WatchlistFeedEntry> = if self.data_source == DataSourcePreset::CustomFile
+            && !self.custom_peer_feeds.is_empty()
+        {
+            self.custom_peer_feeds.clone()
+        } else {
+            let mut list = self.watchlist_universe.clone();
+            let active_key = self.current_instrument_key();
+            if !list.iter().any(|e| e.instrument_id == active_key) && !self.base_candles.is_empty()
+            {
+                list.push(WatchlistFeedEntry {
+                    instrument_id: active_key,
+                    preset: self.data_source,
+                    symbol: self.symbol.clone(),
+                    base_timeframe: self.base_timeframe,
+                    candles: self.base_candles.clone(),
+                });
+            }
+            list
+        };
+
+        self.battle_report = Some(run_multi_symbol_battle_with_close_cutoff(
+            &feeds,
+            self.active_timeframe,
+            &self.backtest_config,
+            self.sweep_ranking,
+            replay_close_cutoff,
+        ));
+        self.battle_synced_key = Some((
+            self.current_instrument_key(),
+            self.dataset_generation,
+            self.active_timeframe,
+            replay_close_cutoff,
+            cfg_digest,
+            self.sweep_ranking,
+        ));
+    }
+
+    /// Centers the shared `TimeScale` camera onto `trade_id` and highlights its entry/exit halo on the chart.
+    pub fn focus_backtest_trade(&mut self, trade_id: u64) -> bool {
+        self.show_backtest_trades = true;
+        self.sync_backtest_causal();
+        let Some((entry_idx, exit_idx)) = self
+            .backtest_result
+            .as_ref()
+            .and_then(|res| res.trades.iter().find(|t| t.trade_id == trade_id))
+            .map(|t| (t.entry_bar_index, t.exit_bar_index))
+        else {
+            return false;
+        };
+        if self.candles.is_empty() {
+            return false;
+        }
+        self.focused_backtest_trade_id = Some(trade_id);
+        let plot_w = self.viewport.time_scale.width().max(320.0);
+        let span_bars = (exit_idx.saturating_sub(entry_idx) + 1).max(6) as f64;
+        let cur_bs = self.viewport.time_scale.bar_spacing();
+        let target_bs = if span_bars * cur_bs > plot_w * 0.68 {
+            (plot_w * 0.58 / span_bars).clamp(2.5, 16.0)
+        } else {
+            cur_bs.clamp(6.0, 16.0)
+        };
+        self.viewport.time_scale.set_bar_spacing(target_bs);
+        let mid_bar = (entry_idx + exit_idx) as f64 * 0.5;
+        let last_idx = (self.candles.len() - 1) as f64;
+        let right_offset = mid_bar + 0.5 * (plot_w / target_bs) - last_idx;
+        self.viewport.time_scale.set_right_offset(right_offset);
+        if self.viewport.main_price_scale.is_auto_scale() {
+            self.viewport.main_price_scale.reset_auto_scale();
+        }
+        self.viewport.equity_price_scale.reset_auto_scale();
+        true
+    }
+
+    /// Launches a causal Bar Replay session `5` bars before `trade_id`'s entry bar so the trader can
+    /// step bar-by-bar through signal confirmation, `Open[T+1]` fill, and SL/TP/trailing management.
+    pub fn replay_backtest_trade(&mut self, trade_id: u64) -> bool {
+        self.show_backtest_trades = true;
+        self.sync_backtest_causal();
+        let Some(entry_idx) = self
+            .backtest_result
+            .as_ref()
+            .and_then(|res| res.trades.iter().find(|t| t.trade_id == trade_id))
+            .map(|t| t.entry_bar_index)
+        else {
+            return false;
+        };
+        if self.base_candles.is_empty() || self.candles.is_empty() {
+            return false;
+        }
+        if self.replay.is_active() {
+            self.exit_replay();
+        }
+        let target_active_idx = entry_idx.saturating_sub(5).min(self.candles.len() - 1);
+        let Some(cut_base_idx) = ReplayController::resolve_cut_base_index(
+            &self.base_candles,
+            &self.candles,
+            self.active_timeframe,
+            target_active_idx,
+            None,
+        ) else {
+            return false;
+        };
+        self.start_replay_at_base_index(cut_base_idx)
+    }
+
     /// Arms a horizontal [`AlertCondition::PriceLevel`] alert at the current causal frontier.
     pub fn add_quick_price_alert(
         &mut self,
@@ -2826,6 +3236,74 @@ impl SumiWorkstationApp {
             PaletteAction::OpenTradingTab,
         );
         push_scored(
+            PaletteCategory::Backtest,
+            "Open Strategy Backtest Lab & Tearsheet".to_owned(),
+            format!(
+                "Active preset: {} · Synchronized Equity/Drawdown pane",
+                self.backtest_config.preset.short_label()
+            ),
+            "backtest strategy lab tearsheet sharpe sortino calmar equity drawdown".to_owned(),
+            PaletteAction::OpenStrategyLab,
+        );
+        push_scored(
+            PaletteCategory::Backtest,
+            "Toggle Synchronized Equity / Drawdown Sub-Pane".to_owned(),
+            if self.show_equity_pane {
+                "Currently ON · Hide baseline equity sub-pane".to_owned()
+            } else {
+                "Currently OFF · Show baseline equity & underwater DD pane".to_owned()
+            },
+            "backtest equity curve drawdown baseline pane".to_owned(),
+            PaletteAction::ToggleEquityPane,
+        );
+        push_scored(
+            PaletteCategory::Backtest,
+            "Toggle Backtest Entry/Exit Trade Links on Chart".to_owned(),
+            if self.show_backtest_trades {
+                "Currently ON · Hide entry/exit arrows & connectors".to_owned()
+            } else {
+                "Currently OFF · Show causal fill arrows & PnL connectors".to_owned()
+            },
+            "backtest trades markers links arrows entry exit chart".to_owned(),
+            PaletteAction::ToggleBacktestTradesOnChart,
+        );
+        push_scored(
+            PaletteCategory::Backtest,
+            format!(
+                "Run 12-Variant Parameter Sweep ({})",
+                self.backtest_config.preset.short_label()
+            ),
+            format!(
+                "Rank grid by {} with IS/OOS robustness check",
+                self.sweep_ranking.short_label()
+            ),
+            "backtest sweep optimize parameter grid sharpe oos".to_owned(),
+            PaletteAction::RunParameterSweep,
+        );
+        push_scored(
+            PaletteCategory::Backtest,
+            "Run 13-Symbol Universe Strategy Battle".to_owned(),
+            format!(
+                "Compare {} across VN30, HNX/UPCOM, Crypto & VN30F1M",
+                self.backtest_config.preset.short_label()
+            ),
+            "backtest universe battle multi symbol compare watchlist".to_owned(),
+            PaletteAction::RunUniverseStrategyBattle,
+        );
+        for preset in StrategyPresetKind::ALL {
+            push_scored(
+                PaletteCategory::Backtest,
+                format!("Strategy Preset: {}", preset.full_label()),
+                preset.summary_rule().to_owned(),
+                format!(
+                    "backtest strategy preset {} {}",
+                    preset.short_label(),
+                    preset.full_label()
+                ),
+                PaletteAction::SelectStrategyPreset(preset),
+            );
+        }
+        push_scored(
             PaletteCategory::Replay,
             "Toggle Bar Replay Transport Dock".to_owned(),
             "Show/hide causal replay controls".to_owned(),
@@ -2960,6 +3438,36 @@ impl SumiWorkstationApp {
             PaletteAction::OpenTradingTab => {
                 self.show_trading_panel = true;
                 self.right_dock_tab = RightDockTab::Trading;
+            }
+            PaletteAction::OpenStrategyLab => {
+                self.open_strategy_lab();
+            }
+            PaletteAction::ToggleEquityPane => {
+                self.show_equity_pane = !self.show_equity_pane;
+                if self.show_equity_pane {
+                    self.viewport.equity_price_scale.reset_auto_scale();
+                    self.sync_backtest_causal();
+                }
+            }
+            PaletteAction::ToggleBacktestTradesOnChart => {
+                self.show_backtest_trades = !self.show_backtest_trades;
+                if self.show_backtest_trades {
+                    self.sync_backtest_causal();
+                }
+            }
+            PaletteAction::SelectStrategyPreset(preset) => {
+                self.backtest_config.preset = preset;
+                self.open_strategy_lab();
+            }
+            PaletteAction::RunParameterSweep => {
+                self.open_strategy_lab();
+                self.strategy_lab_tab = StrategyLabSubTab::Sweep;
+                self.run_active_parameter_sweep();
+            }
+            PaletteAction::RunUniverseStrategyBattle => {
+                self.open_strategy_lab();
+                self.strategy_lab_tab = StrategyLabSubTab::Battle;
+                self.run_universe_strategy_battle();
             }
             PaletteAction::QuickPriceAlert { price, direction } => {
                 let _ = self.add_quick_price_alert(price, direction);
@@ -3187,6 +3695,80 @@ fn compute_alert_rules_digest(engine: &AlertEngine) -> u64 {
             }
         }
     }
+    h
+}
+
+fn compute_backtest_config_digest(cfg: &BacktestConfig) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325_u64;
+    let mix = |acc: &mut u64, val: u64| {
+        for b in val.to_le_bytes() {
+            *acc ^= u64::from(b);
+            *acc = acc.wrapping_mul(0x0100_0000_01b3);
+        }
+    };
+    let mix_opt = |acc: &mut u64, val: Option<f64>| match val {
+        None => mix(acc, 0),
+        Some(v) => {
+            mix(acc, 1);
+            mix(acc, v.to_bits());
+        }
+    };
+    mix(&mut h, cfg.preset as u64);
+    mix(&mut h, cfg.direction_mode as u64);
+    match cfg.sizing {
+        PositionSizingMode::PercentEquity(v) => {
+            mix(&mut h, 1);
+            mix(&mut h, v.to_bits());
+        }
+        PositionSizingMode::RiskPercentPerTrade(v) => {
+            mix(&mut h, 2);
+            mix(&mut h, v.to_bits());
+        }
+        PositionSizingMode::FixedNotional(v) => {
+            mix(&mut h, 3);
+            mix(&mut h, v.to_bits());
+        }
+    }
+    mix(&mut h, cfg.params.fast_sma as u64);
+    mix(&mut h, cfg.params.slow_ema as u64);
+    mix(&mut h, cfg.params.rsi_period as u64);
+    mix(&mut h, cfg.params.rsi_oversold.to_bits());
+    mix(&mut h, cfg.params.rsi_overbought.to_bits());
+    mix(&mut h, cfg.params.rsi_exit_midline.to_bits());
+    mix(&mut h, cfg.params.rsi_confluence_buy.to_bits());
+    mix(&mut h, cfg.params.rsi_confluence_sell.to_bits());
+    mix(&mut h, cfg.params.macd_fast as u64);
+    mix(&mut h, cfg.params.macd_slow as u64);
+    mix(&mut h, cfg.params.macd_signal as u64);
+    mix(&mut h, cfg.params.macd_trend_ema as u64);
+    mix(&mut h, cfg.params.bb_period as u64);
+    mix(&mut h, cfg.params.bb_std_mult.to_bits());
+    mix(&mut h, cfg.params.max_squeeze_bw_pct.to_bits());
+    mix(&mut h, cfg.params.donchian_entry_period as u64);
+    mix(&mut h, cfg.params.donchian_exit_period as u64);
+    mix(&mut h, cfg.params.atr_period as u64);
+
+    mix_opt(&mut h, cfg.risk.stop_loss_pct);
+    mix_opt(&mut h, cfg.risk.stop_loss_atr_mult);
+    mix_opt(&mut h, cfg.risk.take_profit_pct);
+    mix_opt(&mut h, cfg.risk.take_profit_rr_mult);
+    mix_opt(&mut h, cfg.risk.trailing_stop_atr_mult);
+    match cfg.risk.max_holding_bars {
+        None => mix(&mut h, 0),
+        Some(n) => {
+            mix(&mut h, 1);
+            mix(&mut h, n as u64);
+        }
+    }
+    mix(&mut h, cfg.risk.min_holding_bars as u64);
+
+    mix(&mut h, cfg.initial_cash.to_bits());
+    mix(&mut h, cfg.commission_bps.to_bits());
+    mix(&mut h, cfg.tax_sell_bps.to_bits());
+    mix(&mut h, cfg.slippage_bps.to_bits());
+    mix(&mut h, cfg.max_leverage.to_bits());
+    mix(&mut h, cfg.lot_step.to_bits());
+    mix_opt(&mut h, cfg.in_sample_split_pct);
     h
 }
 
@@ -3582,6 +4164,19 @@ impl SumiWorkstationApp {
                         self.right_dock_tab = RightDockTab::Alerts;
                     }
 
+                    if indicator_toggle_pill(
+                        ui,
+                        &mut self.show_strategy_panel,
+                        "Strategy Lab",
+                        palette::EQUITY_ABOVE_LINE,
+                    ) && self.show_strategy_panel
+                    {
+                        self.right_dock_tab = RightDockTab::StrategyLab;
+                        self.show_equity_pane = true;
+                        self.show_backtest_trades = true;
+                        self.viewport.equity_price_scale.reset_auto_scale();
+                    }
+
                     let mut palette_open = self.command_palette.open;
                     if indicator_toggle_pill(
                         ui,
@@ -3682,6 +4277,15 @@ impl SumiWorkstationApp {
                     ) && self.indicators.show_atr
                     {
                         self.viewport.atr_price_scale.reset_auto_scale();
+                    }
+                    if indicator_toggle_pill(
+                        ui,
+                        &mut self.show_equity_pane,
+                        "EQ",
+                        palette::EQUITY_ABOVE_LINE,
+                    ) && self.show_equity_pane
+                    {
+                        self.viewport.equity_price_scale.reset_auto_scale();
                     }
 
                     ui.separator();
@@ -3887,9 +4491,10 @@ impl SumiWorkstationApp {
                 }
             });
 
-        // Synchronize dirty-tracked indicator cache (0.000 ms on pan/zoom/hover frames!)
+        // Synchronize dirty-tracked indicator & strategy backtest caches (0.000 ms on pan/zoom/hover frames!)
         self.indicator_cache
             .sync(&self.candles, self.dataset_generation, &self.indicators);
+        self.sync_backtest_causal();
 
         // 2. Bottom Telemetry Status Bar
         let bottom_frame = Frame::new()
@@ -3940,11 +4545,23 @@ impl SumiWorkstationApp {
                             sb_cutoff.is_none_or(|cut| alert_event_eval_timestamp(ev) <= cut)
                         })
                         .count();
+                    let bt_tag = if (self.show_strategy_panel
+                        || self.show_equity_pane
+                        || self.show_backtest_trades)
+                        && let Some(ref bt) = self.backtest_result
+                    {
+                        format!(
+                            "  |  BT: {:+.1}% ({}T)",
+                            bt.tearsheet.total_return_pct, bt.tearsheet.num_trades
+                        )
+                    } else {
+                        String::new()
+                    };
                     if let Some(rep) = self.last_report {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(format!(
-                                    "R08  |  {} ({}->{})  |  RPL: {replay_tag}  |  ALT: {armed_alerts}A/{trig_events}T  |  EQ: ${:.0} ({:+.0})  |  {}P/{}D  |  BARS: {}/{} ({first_date}..{last_date}) {}x  |  {scale_mode}({auto_tag})  |  {:.0}×{:.0}",
+                                    "R09  |  {} ({}->{})  |  RPL: {replay_tag}  |  ALT: {armed_alerts}A/{trig_events}T  |  EQ: ${:.0} ({:+.0}){bt_tag}  |  {}P/{}D  |  BARS: {}/{} ({first_date}..{last_date}) {}x  |  {scale_mode}({auto_tag})  |  {:.0}×{:.0}",
                                     self.data_source.short_label(),
                                     self.base_timeframe,
                                     self.active_timeframe,
@@ -3968,7 +4585,7 @@ impl SumiWorkstationApp {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(format!(
-                                    "R08  |  RPL: {replay_tag}  |  ALT: {armed_alerts} armed  |  BARS: {} ({first_date}..{last_date})",
+                                    "R09  |  RPL: {replay_tag}  |  ALT: {armed_alerts} armed{bt_tag}  |  BARS: {} ({first_date}..{last_date})",
                                     self.candles.len()
                                 ))
                                 .monospace()
@@ -4002,22 +4619,50 @@ impl SumiWorkstationApp {
                 });
         }
 
-        // 3. Optional Unified Right-Side Paper Trading & Alerts Dock (`Milestones R07–R08`)
-        if self.show_trading_panel || self.show_alerts_panel {
-            if self.show_trading_panel && !self.show_alerts_panel {
-                self.right_dock_tab = RightDockTab::Trading;
-            } else if self.show_alerts_panel && !self.show_trading_panel {
-                self.right_dock_tab = RightDockTab::Alerts;
+        // 3. Optional Unified Right-Side Paper Trading, Alerts & Strategy Lab Dock (`Milestones R07–R09`)
+        if self.show_trading_panel || self.show_alerts_panel || self.show_strategy_panel {
+            match self.right_dock_tab {
+                RightDockTab::Trading if !self.show_trading_panel => {
+                    self.right_dock_tab = if self.show_strategy_panel {
+                        RightDockTab::StrategyLab
+                    } else {
+                        RightDockTab::Alerts
+                    };
+                }
+                RightDockTab::Alerts if !self.show_alerts_panel => {
+                    self.right_dock_tab = if self.show_strategy_panel {
+                        RightDockTab::StrategyLab
+                    } else {
+                        RightDockTab::Trading
+                    };
+                }
+                RightDockTab::StrategyLab if !self.show_strategy_panel => {
+                    self.right_dock_tab = if self.show_trading_panel {
+                        RightDockTab::Trading
+                    } else {
+                        RightDockTab::Alerts
+                    };
+                }
+                _ => {}
             }
             let right_frame = Frame::new()
                 .fill(palette::BG_WORKSTATION)
                 .inner_margin(Margin::symmetric(10, 8))
                 .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE));
 
-            egui::Panel::right("paper_trading_panel")
+            let win_w = ui.ctx().content_rect().width();
+            let (panel_id, def_w, min_w, max_w) =
+                if self.right_dock_tab == RightDockTab::StrategyLab {
+                    let def = if win_w < 1060.0 { 276.0 } else { 306.0 };
+                    ("strategy_lab_panel", def, 244.0, 380.0)
+                } else {
+                    ("paper_trading_panel", 258.0, 222.0, 320.0)
+                };
+
+            egui::Panel::right(panel_id)
                 .resizable(true)
-                .default_size(258.0)
-                .size_range(222.0..=320.0)
+                .default_size(def_w)
+                .size_range(min_w..=max_w)
                 .frame(right_frame)
                 .show(ui, |ui| {
                     if self.command_palette.open {
@@ -4055,12 +4700,20 @@ impl SumiWorkstationApp {
                     || self.trading.pending_orders().next().is_some();
                 let has_alert_visuals =
                     !self.alerts.rules.is_empty() || !self.alerts.triggers.is_empty();
+                let has_backtest_visuals =
+                    self.show_strategy_panel || self.show_equity_pane || self.show_backtest_trades;
                 let overlay = ChartReplayTradingOverlay {
                     replay_active: self.replay.is_active(),
                     selecting_cut_bar: self.replay.selecting_cut_bar,
                     replay_status_label,
                     trading_session: has_trading_visuals.then_some(&self.trading),
                     alert_engine: has_alert_visuals.then_some(&self.alerts),
+                    backtest_result: has_backtest_visuals
+                        .then_some(self.backtest_result.as_ref())
+                        .flatten(),
+                    show_equity_pane: self.show_equity_pane,
+                    show_backtest_trades_on_chart: self.show_backtest_trades,
+                    focused_backtest_trade_id: self.focused_backtest_trade_id,
                     replay_cutoff_timestamp,
                     frontier_base_timestamp,
                     modal_open: self.command_palette.open,
@@ -5321,11 +5974,11 @@ impl SumiWorkstationApp {
 
         ui.horizontal(|ui| {
             let sp_x = ui.spacing().item_spacing.x;
-            let half_w = ((ui.available_width() - sp_x - 2.0) * 0.5).max(68.0);
+            let tab_w = ((ui.available_width() - 2.0 * sp_x - 2.0) / 3.0).max(56.0);
             for (tab, lbl, accent) in [
                 (
                     RightDockTab::Trading,
-                    "Paper Trade".to_owned(),
+                    "Trade".to_owned(),
                     palette::TRADE_ENTRY_BLUE,
                 ),
                 (
@@ -5333,13 +5986,18 @@ impl SumiWorkstationApp {
                     if vis_rules == 0 {
                         "Alerts".to_owned()
                     } else {
-                        format!("Alerts ({armed_n}/{vis_rules})")
+                        format!("Alerts({armed_n}/{vis_rules})")
                     },
                     palette::ALERT_ARMED_AMBER,
                 ),
+                (
+                    RightDockTab::StrategyLab,
+                    "Strategy".to_owned(),
+                    palette::EQUITY_ABOVE_LINE,
+                ),
             ] {
                 let selected = self.right_dock_tab == tab;
-                let btn = Button::new(RichText::new(lbl).monospace().strong().size(10.5).color(
+                let btn = Button::new(RichText::new(lbl).monospace().strong().size(10.0).color(
                     if selected {
                         Color32::WHITE
                     } else {
@@ -5359,13 +6017,17 @@ impl SumiWorkstationApp {
                         palette::BORDER_SUBTLE
                     },
                 ))
-                .min_size(Vec2::new(half_w, 22.0));
+                .min_size(Vec2::new(tab_w, 22.0));
 
                 if ui.add(btn).clicked() {
                     self.right_dock_tab = tab;
                     match tab {
                         RightDockTab::Trading => self.show_trading_panel = true,
                         RightDockTab::Alerts => self.show_alerts_panel = true,
+                        RightDockTab::StrategyLab => {
+                            self.show_strategy_panel = true;
+                            self.sync_backtest_causal();
+                        }
                     }
                 }
             }
@@ -5375,6 +6037,1347 @@ impl SumiWorkstationApp {
         match self.right_dock_tab {
             RightDockTab::Trading => self.render_paper_trading_panel(ui),
             RightDockTab::Alerts => self.render_alerts_panel(ui),
+            RightDockTab::StrategyLab => self.render_strategy_lab_panel(ui),
+        }
+    }
+
+    fn render_strategy_lab_panel(&mut self, ui: &mut egui::Ui) {
+        self.sync_backtest_causal();
+        let pre_cfg_digest = compute_backtest_config_digest(&self.backtest_config);
+        let pre_ranking = self.sweep_ranking;
+        let pre_sub_tab = self.strategy_lab_tab;
+
+        let mut focus_trade_req: Option<u64> = None;
+        let mut replay_trade_req: Option<u64> = None;
+        let mut apply_sweep_cfg: Option<BacktestConfig> = None;
+        let mut apply_preset_req: Option<StrategyPresetKind> = None;
+        let mut select_symbol_req: Option<(DataSourcePreset, String)> = None;
+        let mut force_sweep = false;
+        let mut force_battle = false;
+
+        egui::ScrollArea::vertical()
+            .id_salt("sumi_strategy_lab_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(4.0, 5.0);
+
+                // Header Row + Causal Mode Badge + Chart Sync Toggles
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("STRATEGY LAB")
+                            .monospace()
+                            .strong()
+                            .size(11.5)
+                            .color(palette::TEXT_PRIMARY),
+                    );
+                    let (mode_lbl, mode_col) = if self.replay.is_active() {
+                        ("RPL CAUSAL", palette::REPLAY_CUT_GOLD)
+                    } else {
+                        ("LIVE CAUSAL", palette::EQUITY_ABOVE_LINE)
+                    };
+                    ui.label(
+                        RichText::new(mode_lbl)
+                            .monospace()
+                            .strong()
+                            .size(9.5)
+                            .color(mode_col),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let _ = indicator_toggle_pill(
+                            ui,
+                            &mut self.show_backtest_trades,
+                            "Links",
+                            palette::TRADE_LINK_WIN,
+                        );
+                        if indicator_toggle_pill(
+                            ui,
+                            &mut self.show_equity_pane,
+                            "EQ",
+                            palette::EQUITY_ABOVE_LINE,
+                        ) && self.show_equity_pane
+                        {
+                            self.viewport.equity_price_scale.reset_auto_scale();
+                        }
+                    });
+                });
+
+                // Strategy Configuration Card
+                Frame::new()
+                    .fill(Color32::from_rgb(17, 21, 30))
+                    .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                    .corner_radius(4.0)
+                    .inner_margin(Margin::symmetric(7, 6))
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+
+                        egui::ComboBox::from_id_salt("strategy_preset_combo")
+                            .selected_text(
+                                RichText::new(self.backtest_config.preset.full_label())
+                                    .monospace()
+                                    .strong()
+                                    .size(10.5)
+                                    .color(palette::TEXT_PRIMARY),
+                            )
+                            .width((ui.available_width() - 4.0).max(160.0))
+                            .show_ui(ui, |ui| {
+                                for preset in StrategyPresetKind::ALL {
+                                    let is_sel = self.backtest_config.preset == preset;
+                                    if ui.selectable_label(is_sel, preset.full_label()).clicked() {
+                                        self.backtest_config.preset = preset;
+                                    }
+                                }
+                            });
+
+                        ui.label(
+                            RichText::new(self.backtest_config.preset.summary_rule())
+                                .monospace()
+                                .size(9.2)
+                                .color(palette::TEXT_MUTED),
+                        );
+
+                        // Preset-specific compact parameters
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(4.0, 3.0);
+                            match self.backtest_config.preset {
+                                StrategyPresetKind::SmaEmaTrendCross => {
+                                    ui.label(RichText::new("SMA:").monospace().size(9.8));
+                                    ui.add(
+                                        egui::DragValue::new(
+                                            &mut self.backtest_config.params.fast_sma,
+                                        )
+                                        .range(2..=199)
+                                        .speed(1),
+                                    );
+                                    ui.label(RichText::new("EMA:").monospace().size(9.8));
+                                    ui.add(
+                                        egui::DragValue::new(
+                                            &mut self.backtest_config.params.slow_ema,
+                                        )
+                                        .range(3..=250)
+                                        .speed(1),
+                                    );
+                                }
+                                StrategyPresetKind::RsiMeanReversion => {
+                                    ui.label(RichText::new("P:").monospace().size(9.8));
+                                    ui.add(
+                                        egui::DragValue::new(
+                                            &mut self.backtest_config.params.rsi_period,
+                                        )
+                                        .range(2..=100),
+                                    );
+                                    ui.label(RichText::new("OS:").monospace().size(9.8));
+                                    ui.add(
+                                        egui::DragValue::new(
+                                            &mut self.backtest_config.params.rsi_oversold,
+                                        )
+                                        .range(5.0..=48.0)
+                                        .speed(0.5),
+                                    );
+                                    ui.label(RichText::new("OB:").monospace().size(9.8));
+                                    ui.add(
+                                        egui::DragValue::new(
+                                            &mut self.backtest_config.params.rsi_overbought,
+                                        )
+                                        .range(52.0..=95.0)
+                                        .speed(0.5),
+                                    );
+                                }
+                                StrategyPresetKind::MacdMomentum => {
+                                    ui.label(RichText::new("F/S/Sg:").monospace().size(9.6));
+                                    ui.add(
+                                        egui::DragValue::new(
+                                            &mut self.backtest_config.params.macd_fast,
+                                        )
+                                        .range(2..=80),
+                                    );
+                                    ui.add(
+                                        egui::DragValue::new(
+                                            &mut self.backtest_config.params.macd_slow,
+                                        )
+                                        .range(3..=160),
+                                    );
+                                    ui.add(
+                                        egui::DragValue::new(
+                                            &mut self.backtest_config.params.macd_signal,
+                                        )
+                                        .range(2..=60),
+                                    );
+                                    ui.label(RichText::new("EMA:").monospace().size(9.6));
+                                    ui.add(
+                                        egui::DragValue::new(
+                                            &mut self.backtest_config.params.macd_trend_ema,
+                                        )
+                                        .range(0..=200),
+                                    );
+                                }
+                                StrategyPresetKind::BollingerSqueezeBreakout => {
+                                    ui.label(RichText::new("BB:").monospace().size(9.8));
+                                    ui.add(
+                                        egui::DragValue::new(
+                                            &mut self.backtest_config.params.bb_period,
+                                        )
+                                        .range(5..=100),
+                                    );
+                                    ui.label(RichText::new("SD:").monospace().size(9.8));
+                                    ui.add(
+                                        egui::DragValue::new(
+                                            &mut self.backtest_config.params.bb_std_mult,
+                                        )
+                                        .range(0.5..=4.0)
+                                        .speed(0.1),
+                                    );
+                                    ui.label(RichText::new("Sqz%:").monospace().size(9.8));
+                                    ui.add(
+                                        egui::DragValue::new(
+                                            &mut self.backtest_config.params.max_squeeze_bw_pct,
+                                        )
+                                        .range(1.0..=60.0)
+                                        .speed(0.5),
+                                    );
+                                }
+                                StrategyPresetKind::DonchianAtrBreakout => {
+                                    ui.label(RichText::new("In:").monospace().size(9.8));
+                                    ui.add(
+                                        egui::DragValue::new(
+                                            &mut self.backtest_config.params.donchian_entry_period,
+                                        )
+                                        .range(3..=160),
+                                    );
+                                    ui.label(RichText::new("Out:").monospace().size(9.8));
+                                    ui.add(
+                                        egui::DragValue::new(
+                                            &mut self.backtest_config.params.donchian_exit_period,
+                                        )
+                                        .range(2..=120),
+                                    );
+                                    ui.label(RichText::new("ATR:").monospace().size(9.8));
+                                    ui.add(
+                                        egui::DragValue::new(
+                                            &mut self.backtest_config.params.atr_period,
+                                        )
+                                        .range(2..=80),
+                                    );
+                                }
+                                StrategyPresetKind::RsiBollingerConfluence => {
+                                    ui.label(RichText::new("RSI:").monospace().size(9.8));
+                                    ui.add(
+                                        egui::DragValue::new(
+                                            &mut self.backtest_config.params.rsi_period,
+                                        )
+                                        .range(2..=80),
+                                    );
+                                    ui.label(RichText::new("B/S:").monospace().size(9.8));
+                                    ui.add(
+                                        egui::DragValue::new(
+                                            &mut self.backtest_config.params.rsi_confluence_buy,
+                                        )
+                                        .range(5.0..=49.0)
+                                        .speed(0.5),
+                                    );
+                                    ui.add(
+                                        egui::DragValue::new(
+                                            &mut self.backtest_config.params.rsi_confluence_sell,
+                                        )
+                                        .range(51.0..=95.0)
+                                        .speed(0.5),
+                                    );
+                                }
+                            }
+                        });
+
+                        // Direction + Sizing + VN T+2 Spot Preset
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(4.0, 3.0);
+                            for dir in StrategyDirectionMode::ALL {
+                                let sel = self.backtest_config.direction_mode == dir;
+                                if ui
+                                    .selectable_label(
+                                        sel,
+                                        RichText::new(dir.short_label()).monospace().size(9.8),
+                                    )
+                                    .clicked()
+                                {
+                                    self.backtest_config.direction_mode = dir;
+                                }
+                            }
+                            ui.separator();
+                            let is_pct_eq = matches!(
+                                self.backtest_config.sizing,
+                                PositionSizingMode::PercentEquity(_)
+                            );
+                            let is_risk_sz = matches!(
+                                self.backtest_config.sizing,
+                                PositionSizingMode::RiskPercentPerTrade(_)
+                            );
+                            let pct_eq_lbl = match self.backtest_config.sizing {
+                                PositionSizingMode::PercentEquity(p)
+                                    if (p - 95.0).abs() > 0.05 =>
+                                {
+                                    format!("{p:.0}%Eq")
+                                }
+                                PositionSizingMode::FixedNotional(n) => {
+                                    if n >= 1000.0 {
+                                        format!("${:.0}k", n / 1000.0)
+                                    } else {
+                                        format!("${n:.0}")
+                                    }
+                                }
+                                _ => "95%Eq".to_owned(),
+                            };
+                            if ui
+                                .selectable_label(
+                                    is_pct_eq,
+                                    RichText::new(pct_eq_lbl).monospace().size(9.6),
+                                )
+                                .clicked()
+                            {
+                                self.backtest_config.sizing =
+                                    PositionSizingMode::PercentEquity(95.0);
+                            }
+                            if ui
+                                .selectable_label(
+                                    is_risk_sz,
+                                    RichText::new("1.5%R").monospace().size(9.6),
+                                )
+                                .clicked()
+                            {
+                                self.backtest_config.sizing =
+                                    PositionSizingMode::RiskPercentPerTrade(1.5);
+                            }
+                            let mut vn_spot = self.backtest_config.risk.min_holding_bars >= 2
+                                && self.backtest_config.tax_sell_bps >= 10.0;
+                            if indicator_toggle_pill(
+                                ui,
+                                &mut vn_spot,
+                                "VN T+2",
+                                Color32::from_rgb(255, 183, 77),
+                            ) {
+                                if vn_spot {
+                                    self.backtest_config.direction_mode =
+                                        StrategyDirectionMode::LongOnly;
+                                    self.backtest_config.risk.min_holding_bars = 2;
+                                    self.backtest_config.tax_sell_bps = 10.0;
+                                    self.backtest_config.lot_step = 100.0;
+                                } else {
+                                    self.backtest_config.risk.min_holding_bars = 0;
+                                    self.backtest_config.tax_sell_bps = 0.0;
+                                    self.backtest_config.lot_step = 0.0;
+                                }
+                            }
+                        });
+
+                        // SL / TP / ATR Trail / OOS Split Row
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(4.0, 3.0);
+
+                            let mut sl_on = self.backtest_config.risk.stop_loss_pct.is_some();
+                            if ui
+                                .checkbox(
+                                    &mut sl_on,
+                                    RichText::new("SL%").monospace().size(9.5),
+                                )
+                                .changed()
+                            {
+                                self.backtest_config.risk.stop_loss_pct =
+                                    sl_on.then_some(5.0);
+                            }
+                            if let Some(ref mut sl_v) = self.backtest_config.risk.stop_loss_pct {
+                                ui.add(
+                                    egui::DragValue::new(sl_v)
+                                        .range(0.2..=50.0)
+                                        .speed(0.2)
+                                        .fixed_decimals(1),
+                                );
+                            }
+
+                            let mut tp_on = self.backtest_config.risk.take_profit_pct.is_some();
+                            if ui
+                                .checkbox(
+                                    &mut tp_on,
+                                    RichText::new("TP%").monospace().size(9.5),
+                                )
+                                .changed()
+                            {
+                                self.backtest_config.risk.take_profit_pct =
+                                    tp_on.then_some(12.0);
+                            }
+                            if let Some(ref mut tp_v) = self.backtest_config.risk.take_profit_pct {
+                                ui.add(
+                                    egui::DragValue::new(tp_v)
+                                        .range(0.5..=200.0)
+                                        .speed(0.5)
+                                        .fixed_decimals(1),
+                                );
+                            }
+
+                            let mut tr_on =
+                                self.backtest_config.risk.trailing_stop_atr_mult.is_some();
+                            if ui
+                                .checkbox(
+                                    &mut tr_on,
+                                    RichText::new("TrATR").monospace().size(9.5),
+                                )
+                                .changed()
+                            {
+                                self.backtest_config.risk.trailing_stop_atr_mult =
+                                    tr_on.then_some(2.5);
+                            }
+                            if let Some(ref mut tr_v) =
+                                self.backtest_config.risk.trailing_stop_atr_mult
+                            {
+                                ui.add(
+                                    egui::DragValue::new(tr_v)
+                                        .range(0.5..=10.0)
+                                        .speed(0.1)
+                                        .fixed_decimals(1),
+                                );
+                            }
+
+                            let mut oos_on = self.backtest_config.in_sample_split_pct.is_some();
+                            if ui
+                                .checkbox(
+                                    &mut oos_on,
+                                    RichText::new("OOS 70/30").monospace().size(9.5),
+                                )
+                                .changed()
+                            {
+                                self.backtest_config.in_sample_split_pct =
+                                    oos_on.then_some(0.70);
+                            }
+                        });
+
+                        // Fee & Slippage bps compact row
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(4.0, 2.0);
+                            ui.label(
+                                RichText::new("Fee(bp):")
+                                    .monospace()
+                                    .size(9.4)
+                                    .color(palette::TEXT_MUTED),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut self.backtest_config.commission_bps)
+                                    .range(0.0..=150.0)
+                                    .speed(0.5)
+                                    .fixed_decimals(1),
+                            );
+                            ui.label(
+                                RichText::new("Slip(bp):")
+                                    .monospace()
+                                    .size(9.4)
+                                    .color(palette::TEXT_MUTED),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut self.backtest_config.slippage_bps)
+                                    .range(0.0..=150.0)
+                                    .speed(0.5)
+                                    .fixed_decimals(1),
+                            );
+                            ui.label(
+                                RichText::new(format!(
+                                    "Cash ${:.0}k",
+                                    self.backtest_config.initial_cash / 1000.0
+                                ))
+                                .monospace()
+                                .size(9.4)
+                                .color(palette::TEXT_MUTED),
+                            );
+                        });
+                    });
+
+                // 4-Way Sub-Tab Switcher (`Stats` | `Trades` | `Sweep` | `Battle`)
+                let trade_n = self
+                    .backtest_result
+                    .as_ref()
+                    .map_or(0, |r| r.trades.len());
+                ui.horizontal(|ui| {
+                    let sp_x = ui.spacing().item_spacing.x;
+                    let w4 = ((ui.available_width() - 3.0 * sp_x - 2.0) / 4.0).max(46.0);
+                    for sub in StrategyLabSubTab::ALL {
+                        let lbl = match sub {
+                            StrategyLabSubTab::Tearsheet => "Stats".to_owned(),
+                            StrategyLabSubTab::Trades => format!("Trd({trade_n})"),
+                            StrategyLabSubTab::Sweep => "Sweep".to_owned(),
+                            StrategyLabSubTab::Battle => "Battle".to_owned(),
+                        };
+                        let sel = self.strategy_lab_tab == sub;
+                        let btn = Button::new(
+                            RichText::new(lbl)
+                                .monospace()
+                                .strong()
+                                .size(9.8)
+                                .color(if sel {
+                                    Color32::WHITE
+                                } else {
+                                    palette::TEXT_MUTED
+                                }),
+                        )
+                        .fill(if sel {
+                            palette::EQUITY_ABOVE_LINE.gamma_multiply(0.24)
+                        } else {
+                            Color32::from_rgb(20, 24, 34)
+                        })
+                        .stroke(Stroke::new(
+                            1.0,
+                            if sel {
+                                palette::EQUITY_ABOVE_LINE
+                            } else {
+                                palette::BORDER_SUBTLE
+                            },
+                        ))
+                        .min_size(Vec2::new(w4, 21.0));
+                        if ui.add(btn).clicked() {
+                            self.strategy_lab_tab = sub;
+                        }
+                    }
+                });
+
+                match self.strategy_lab_tab {
+                    StrategyLabSubTab::Tearsheet => {
+                        if let Some(ref bt) = self.backtest_result {
+                            let ts = &bt.tearsheet;
+                            let ret_col = if ts.total_return_pct >= 0.0 {
+                                palette::EQUITY_ABOVE_LINE
+                            } else {
+                                palette::EQUITY_BELOW_LINE
+                            };
+
+                            // Hero Equity + Robustness Card
+                            Frame::new()
+                                .fill(Color32::from_rgb(18, 23, 33))
+                                .stroke(Stroke::new(1.0, ret_col.gamma_multiply(0.55)))
+                                .corner_radius(4.0)
+                                .inner_margin(Margin::symmetric(8, 6))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(format!("${:.0}", ts.final_equity))
+                                                .monospace()
+                                                .strong()
+                                                .size(13.5)
+                                                .color(palette::TEXT_PRIMARY),
+                                        );
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{:+.2}% ({:+.0})",
+                                                ts.total_return_pct, ts.total_return_abs
+                                            ))
+                                            .monospace()
+                                            .strong()
+                                            .size(11.5)
+                                            .color(ret_col),
+                                        );
+                                        if let Some(verdict) = bt.robustness {
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    let vc = robustness_badge_color(verdict);
+                                                    ui.label(
+                                                        RichText::new(verdict.label())
+                                                            .monospace()
+                                                            .strong()
+                                                            .size(9.5)
+                                                            .color(vc),
+                                                    );
+                                                },
+                                            );
+                                        }
+                                    });
+                                    if ts.low_sample_warning {
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "LOW SAMPLE: N={} < {} closed trades (statistical caution)",
+                                                ts.num_trades, MIN_STATISTICAL_SAMPLE_TRADES
+                                            ))
+                                            .monospace()
+                                            .size(9.2)
+                                            .color(palette::ALERT_ARMED_AMBER),
+                                        );
+                                    }
+                                });
+
+                            // Quantitative Performance Tearsheet Grid
+                            Frame::new()
+                                .fill(Color32::from_rgb(16, 20, 29))
+                                .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                                .corner_radius(4.0)
+                                .inner_margin(Margin::symmetric(7, 6))
+                                .show(ui, |ui| {
+                                    let cagr_s = ts.cagr_pct.map_or_else(
+                                        || "N/A(<7d)".to_owned(),
+                                        |v| format!("{v:+.2}%"),
+                                    );
+                                    let sharpe_s = ts
+                                        .sharpe_ratio
+                                        .map_or_else(|| "—".to_owned(), |v| format!("{v:.2}"));
+                                    let sortino_s = ts
+                                        .sortino_ratio
+                                        .map_or_else(|| "—".to_owned(), |v| format!("{v:.2}"));
+                                    let calmar_s = ts
+                                        .calmar_ratio
+                                        .map_or_else(|| "—".to_owned(), |v| format!("{v:.2}"));
+                                    let pf_s = if let Some(pf) = ts.profit_factor {
+                                        format!("{pf:.2}")
+                                    } else if ts.num_winners > 0 && ts.num_losers == 0 {
+                                        "∞".to_owned()
+                                    } else {
+                                        "—".to_owned()
+                                    };
+                                    let exp_s = ts
+                                        .expectancy_net
+                                        .map_or_else(|| "—".to_owned(), |v| format!("{v:+.0}"));
+                                    let r_s = ts
+                                        .avg_r_multiple
+                                        .map_or_else(|| "—".to_owned(), |v| format!("{v:+.2}R"));
+
+                                    egui::Grid::new("strategy_tearsheet_grid")
+                                        .num_columns(2)
+                                        .spacing([8.0, 3.5])
+                                        .striped(true)
+                                        .show(ui, |ui| {
+                                            let row = |ui: &mut egui::Ui,
+                                                       k: &str,
+                                                       v: String,
+                                                       col: Color32| {
+                                                ui.label(
+                                                    RichText::new(k)
+                                                        .monospace()
+                                                        .size(9.6)
+                                                        .color(palette::TEXT_MUTED),
+                                                );
+                                                ui.label(
+                                                    RichText::new(v)
+                                                        .monospace()
+                                                        .strong()
+                                                        .size(9.8)
+                                                        .color(col),
+                                                );
+                                                ui.end_row();
+                                            };
+
+                                            row(
+                                                ui,
+                                                "CAGR (Ann.)",
+                                                cagr_s,
+                                                palette::TEXT_PRIMARY,
+                                            );
+                                            row(
+                                                ui,
+                                                "Realized PnL",
+                                                format!("${:+.0}", ts.realized_net_profit),
+                                                if ts.realized_net_profit >= 0.0 {
+                                                    palette::BULLISH
+                                                } else {
+                                                    palette::BEARISH
+                                                },
+                                            );
+                                            row(
+                                                ui,
+                                                "Max Drawdown",
+                                                format!(
+                                                    "-{:.2}% ({}b)",
+                                                    ts.max_drawdown_pct,
+                                                    ts.max_drawdown_duration_bars
+                                                ),
+                                                palette::EQUITY_BELOW_LINE,
+                                            );
+                                            row(
+                                                ui,
+                                                "Sharpe / Sortino",
+                                                format!("{sharpe_s} / {sortino_s}"),
+                                                palette::TEXT_PRIMARY,
+                                            );
+                                            row(ui, "Calmar Ratio", calmar_s, palette::TEXT_PRIMARY);
+                                            row(
+                                                ui,
+                                                "Win Rate",
+                                                format!(
+                                                    "{:.1}% ({}W/{}L)",
+                                                    ts.win_rate_pct, ts.num_winners, ts.num_losers
+                                                ),
+                                                palette::TEXT_PRIMARY,
+                                            );
+                                            row(
+                                                ui,
+                                                "Profit Factor",
+                                                pf_s,
+                                                palette::TEXT_PRIMARY,
+                                            );
+                                            row(
+                                                ui,
+                                                "Expectancy / R",
+                                                format!("${exp_s} · {r_s}"),
+                                                palette::TEXT_PRIMARY,
+                                            );
+                                            row(
+                                                ui,
+                                                "Avg Win / Loss",
+                                                format!(
+                                                    "{:+.2}% / {:.2}%",
+                                                    ts.avg_win_pct, ts.avg_loss_pct
+                                                ),
+                                                palette::TEXT_PRIMARY,
+                                            );
+                                            row(
+                                                ui,
+                                                "Exposure / Hold",
+                                                format!(
+                                                    "{:.1}% · {:.1}b",
+                                                    ts.exposure_pct, ts.avg_bars_held
+                                                ),
+                                                palette::TEXT_PRIMARY,
+                                            );
+                                            row(
+                                                ui,
+                                                "Fees+Tax / Unfill",
+                                                format!(
+                                                    "${:.0} · {} cut",
+                                                    ts.total_fees_and_tax,
+                                                    bt.unexecuted_signals.len()
+                                                ),
+                                                palette::TEXT_MUTED,
+                                            );
+                                        });
+                                });
+
+                            // In-Sample vs Out-of-Sample Split Card
+                            if let (Some(is_s), Some(oos_s), Some(split_i)) = (
+                                bt.in_sample_tearsheet.as_ref(),
+                                bt.out_of_sample_tearsheet.as_ref(),
+                                bt.split_bar_index,
+                            ) {
+                                Frame::new()
+                                    .fill(Color32::from_rgb(17, 22, 32))
+                                    .stroke(Stroke::new(
+                                        1.0,
+                                        palette::BACKTEST_OOS_SPLIT.gamma_multiply(0.65),
+                                    ))
+                                    .corner_radius(4.0)
+                                    .inner_margin(Margin::symmetric(7, 5))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "IS (0..{split_i}) vs OOS ({split_i}..{})",
+                                                bt.bar_count
+                                            ))
+                                            .monospace()
+                                            .strong()
+                                            .size(9.8)
+                                            .color(palette::BACKTEST_OOS_SPLIT),
+                                        );
+                                        egui::Grid::new("is_oos_split_grid")
+                                            .num_columns(3)
+                                            .spacing([10.0, 2.5])
+                                            .show(ui, |ui| {
+                                                ui.label(
+                                                    RichText::new("Metric")
+                                                        .monospace()
+                                                        .size(9.2)
+                                                        .color(palette::TEXT_MUTED),
+                                                );
+                                                ui.label(
+                                                    RichText::new("IS (70%)")
+                                                        .monospace()
+                                                        .strong()
+                                                        .size(9.2)
+                                                        .color(palette::TEXT_PRIMARY),
+                                                );
+                                                ui.label(
+                                                    RichText::new("OOS (30%)")
+                                                        .monospace()
+                                                        .strong()
+                                                        .size(9.2)
+                                                        .color(palette::BACKTEST_OOS_SPLIT),
+                                                );
+                                                ui.end_row();
+
+                                                let cmp_row = |ui: &mut egui::Ui,
+                                                               m: &str,
+                                                               v1: String,
+                                                               v2: String| {
+                                                    ui.label(
+                                                        RichText::new(m)
+                                                            .monospace()
+                                                            .size(9.4)
+                                                            .color(palette::TEXT_MUTED),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new(v1)
+                                                            .monospace()
+                                                            .size(9.5)
+                                                            .color(palette::TEXT_PRIMARY),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new(v2)
+                                                            .monospace()
+                                                            .strong()
+                                                            .size(9.5)
+                                                            .color(palette::TEXT_PRIMARY),
+                                                    );
+                                                    ui.end_row();
+                                                };
+
+                                                cmp_row(
+                                                    ui,
+                                                    "Return",
+                                                    format!("{:+.2}%", is_s.total_return_pct),
+                                                    format!("{:+.2}%", oos_s.total_return_pct),
+                                                );
+                                                cmp_row(
+                                                    ui,
+                                                    "MaxDD",
+                                                    format!("-{:.2}%", is_s.max_drawdown_pct),
+                                                    format!("-{:.2}%", oos_s.max_drawdown_pct),
+                                                );
+                                                cmp_row(
+                                                    ui,
+                                                    "Sharpe",
+                                                    is_s.sharpe_ratio.map_or_else(
+                                                        || "—".to_owned(),
+                                                        |v| format!("{v:.2}"),
+                                                    ),
+                                                    oos_s.sharpe_ratio.map_or_else(
+                                                        || "—".to_owned(),
+                                                        |v| format!("{v:.2}"),
+                                                    ),
+                                                );
+                                                cmp_row(
+                                                    ui,
+                                                    "Win / Trd",
+                                                    format!(
+                                                        "{:.0}% ({})",
+                                                        is_s.win_rate_pct, is_s.num_trades
+                                                    ),
+                                                    format!(
+                                                        "{:.0}% ({})",
+                                                        oos_s.win_rate_pct, oos_s.num_trades
+                                                    ),
+                                                );
+                                            });
+                                    });
+                            }
+
+                            if let Some(ref open_pos) = bt.open_position {
+                                let p_col = if open_pos.unrealized_pnl >= 0.0 {
+                                    palette::BULLISH
+                                } else {
+                                    palette::BEARISH
+                                };
+                                Frame::new()
+                                    .fill(Color32::from_rgb(19, 25, 36))
+                                    .stroke(Stroke::new(1.0, p_col.gamma_multiply(0.6)))
+                                    .corner_radius(4.0)
+                                    .inner_margin(Margin::symmetric(7, 5))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "OPEN {} {:.2} @ {:.2}  |  uPnL {:+.0} ({:+.2}%)",
+                                                open_pos.side.short_label(),
+                                                open_pos.quantity,
+                                                open_pos.entry_price,
+                                                open_pos.unrealized_pnl,
+                                                open_pos.unrealized_return_pct
+                                            ))
+                                            .monospace()
+                                            .strong()
+                                            .size(9.5)
+                                            .color(p_col),
+                                        );
+                                    });
+                            }
+                        }
+                    }
+
+                    StrategyLabSubTab::Trades => {
+                        if let Some(ref bt) = self.backtest_result {
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} closed trades (newest first · causal Open[T+1] fills)",
+                                    bt.trades.len()
+                                ))
+                                .monospace()
+                                .size(9.4)
+                                .color(palette::TEXT_MUTED),
+                            );
+                            if bt.trades.is_empty() {
+                                ui.label(
+                                    RichText::new("No closed round-trip trades in causal window.")
+                                        .monospace()
+                                        .size(10.0)
+                                        .color(palette::TEXT_MUTED),
+                                );
+                            }
+                            for tr in bt.trades.iter().rev().take(80) {
+                                let is_win = tr.net_pnl > 0.0;
+                                let t_col = if is_win {
+                                    palette::TRADE_LINK_WIN
+                                } else {
+                                    palette::TRADE_LINK_LOSS
+                                };
+                                let is_focused =
+                                    self.focused_backtest_trade_id == Some(tr.trade_id);
+                                Frame::new()
+                                    .fill(if is_focused {
+                                        Color32::from_rgb(28, 33, 46)
+                                    } else {
+                                        Color32::from_rgb(17, 21, 30)
+                                    })
+                                    .stroke(Stroke::new(
+                                        if is_focused { 1.4 } else { 1.0 },
+                                        if is_focused {
+                                            palette::TRADE_FOCUS_HALO
+                                        } else {
+                                            palette::BORDER_SUBTLE
+                                        },
+                                    ))
+                                    .corner_radius(4.0)
+                                    .inner_margin(Margin::symmetric(6, 5))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            let r_tag = tr.r_multiple.map_or_else(
+                                                String::new,
+                                                |r| format!(" · {r:+.2}R"),
+                                            );
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "#{} {} {:+.2}% ({:+.0}){r_tag} [{}]",
+                                                    tr.trade_id,
+                                                    tr.side.short_label(),
+                                                    tr.return_pct,
+                                                    tr.net_pnl,
+                                                    tr.exit_reason.short_label()
+                                                ))
+                                                .monospace()
+                                                .strong()
+                                                .size(9.6)
+                                                .color(t_col),
+                                            );
+                                        });
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{:.2} -> {:.2} ({}b) · MAE {:.1}% / MFE {:+.1}%",
+                                                tr.entry_price,
+                                                tr.exit_price,
+                                                tr.bars_held,
+                                                tr.mae_pct,
+                                                tr.mfe_pct
+                                            ))
+                                            .monospace()
+                                            .size(9.1)
+                                            .color(palette::TEXT_MUTED),
+                                        );
+                                        ui.horizontal(|ui| {
+                                            if ui
+                                                .small_button(
+                                                    RichText::new(if is_focused {
+                                                        "Focused ★"
+                                                    } else {
+                                                        "Focus Chart"
+                                                    })
+                                                    .monospace()
+                                                    .size(9.2),
+                                                )
+                                                .clicked()
+                                            {
+                                                focus_trade_req = Some(tr.trade_id);
+                                            }
+                                            if ui
+                                                .small_button(
+                                                    RichText::new("Replay -5b")
+                                                        .monospace()
+                                                        .size(9.2),
+                                                )
+                                                .clicked()
+                                            {
+                                                replay_trade_req = Some(tr.trade_id);
+                                            }
+                                        });
+                                    });
+                            }
+                        }
+                    }
+
+                    StrategyLabSubTab::Sweep => {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Rank:")
+                                    .monospace()
+                                    .size(9.5)
+                                    .color(palette::TEXT_MUTED),
+                            );
+                            for m in SweepRankingMetric::ALL {
+                                if ui
+                                    .selectable_label(
+                                        self.sweep_ranking == m,
+                                        RichText::new(m.short_label()).monospace().size(9.4),
+                                    )
+                                    .clicked()
+                                {
+                                    self.sweep_ranking = m;
+                                }
+                            }
+                            if ui
+                                .small_button(RichText::new("Run").monospace().size(9.4))
+                                .clicked()
+                            {
+                                force_sweep = true;
+                            }
+                        });
+
+                        if let Some(ref sweep) = self.sweep_report {
+                            Frame::new()
+                                .fill(Color32::from_rgb(16, 20, 29))
+                                .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                                .corner_radius(4.0)
+                                .inner_margin(Margin::symmetric(6, 5))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "12-GRID SWEEP · {} {}",
+                                            sweep.symbol, sweep.timeframe
+                                        ))
+                                        .monospace()
+                                        .strong()
+                                        .size(9.6)
+                                        .color(palette::TEXT_PRIMARY),
+                                    );
+                                    egui::Grid::new("strategy_sweep_grid")
+                                        .num_columns(5)
+                                        .spacing([5.0, 2.5])
+                                        .striped(true)
+                                        .show(ui, |ui| {
+                                            for hdr in ["#", "Variant", "Ret%", "Shp", "OOS%"] {
+                                                ui.label(
+                                                    RichText::new(hdr)
+                                                        .monospace()
+                                                        .strong()
+                                                        .size(9.0)
+                                                        .color(palette::TEXT_MUTED),
+                                                );
+                                            }
+                                            ui.end_row();
+                                            for row in &sweep.variants {
+                                                let col = if row.tearsheet.total_return_pct >= 0.0 {
+                                                    palette::BULLISH
+                                                } else {
+                                                    palette::BEARISH
+                                                };
+                                                ui.label(
+                                                    RichText::new(format!("{}", row.rank))
+                                                        .monospace()
+                                                        .size(9.1)
+                                                        .color(palette::TEXT_MUTED),
+                                                );
+                                                if ui
+                                                    .link(
+                                                        RichText::new(&row.label)
+                                                            .monospace()
+                                                            .size(9.1)
+                                                            .color(palette::TEXT_PRIMARY),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    apply_sweep_cfg = Some(row.config.clone());
+                                                }
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "{:+.1}%",
+                                                        row.tearsheet.total_return_pct
+                                                    ))
+                                                    .monospace()
+                                                    .strong()
+                                                    .size(9.1)
+                                                    .color(col),
+                                                );
+                                                ui.label(
+                                                    RichText::new(
+                                                        row.tearsheet.sharpe_ratio.map_or_else(
+                                                            || "—".to_owned(),
+                                                            |v| format!("{v:.2}"),
+                                                        ),
+                                                    )
+                                                    .monospace()
+                                                    .size(9.1),
+                                                );
+                                                ui.label(
+                                                    RichText::new(
+                                                        row.out_of_sample_return_pct.map_or_else(
+                                                            || "—".to_owned(),
+                                                            |v| format!("{v:+.1}%"),
+                                                        ),
+                                                    )
+                                                    .monospace()
+                                                    .size(9.1),
+                                                );
+                                                ui.end_row();
+                                            }
+                                        });
+                                });
+                        }
+
+                        if !self.preset_battle_rows.is_empty() {
+                            Frame::new()
+                                .fill(Color32::from_rgb(16, 20, 29))
+                                .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                                .corner_radius(4.0)
+                                .inner_margin(Margin::symmetric(6, 5))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "6-PRESET BATTLE ON {}",
+                                            self.symbol
+                                        ))
+                                        .monospace()
+                                        .strong()
+                                        .size(9.6)
+                                        .color(palette::BACKTEST_OOS_SPLIT),
+                                    );
+                                    egui::Grid::new("preset_battle_grid_sweep")
+                                        .num_columns(4)
+                                        .spacing([6.0, 2.5])
+                                        .striped(true)
+                                        .show(ui, |ui| {
+                                            for hdr in ["Preset", "Ret%", "MaxDD", "Shp"] {
+                                                ui.label(
+                                                    RichText::new(hdr)
+                                                        .monospace()
+                                                        .strong()
+                                                        .size(9.0)
+                                                        .color(palette::TEXT_MUTED),
+                                                );
+                                            }
+                                            ui.end_row();
+                                            for pr in &self.preset_battle_rows {
+                                                let col = if pr.tearsheet.total_return_pct >= 0.0 {
+                                                    palette::BULLISH
+                                                } else {
+                                                    palette::BEARISH
+                                                };
+                                                if ui
+                                                    .link(
+                                                        RichText::new(pr.preset.short_label())
+                                                            .monospace()
+                                                            .size(9.2)
+                                                            .color(palette::TEXT_PRIMARY),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    apply_preset_req = Some(pr.preset);
+                                                }
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "{:+.1}%",
+                                                        pr.tearsheet.total_return_pct
+                                                    ))
+                                                    .monospace()
+                                                    .strong()
+                                                    .size(9.2)
+                                                    .color(col),
+                                                );
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "-{:.1}%",
+                                                        pr.tearsheet.max_drawdown_pct
+                                                    ))
+                                                    .monospace()
+                                                    .size(9.1)
+                                                    .color(palette::EQUITY_BELOW_LINE),
+                                                );
+                                                ui.label(
+                                                    RichText::new(
+                                                        pr.tearsheet.sharpe_ratio.map_or_else(
+                                                            || "—".to_owned(),
+                                                            |v| format!("{v:.2}"),
+                                                        ),
+                                                    )
+                                                    .monospace()
+                                                    .size(9.1),
+                                                );
+                                                ui.end_row();
+                                            }
+                                        });
+                                });
+                        }
+                    }
+
+                    StrategyLabSubTab::Battle => {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Rank:")
+                                    .monospace()
+                                    .size(9.5)
+                                    .color(palette::TEXT_MUTED),
+                            );
+                            for m in SweepRankingMetric::ALL {
+                                if ui
+                                    .selectable_label(
+                                        self.sweep_ranking == m,
+                                        RichText::new(m.short_label()).monospace().size(9.4),
+                                    )
+                                    .clicked()
+                                {
+                                    self.sweep_ranking = m;
+                                }
+                            }
+                            if ui
+                                .small_button(RichText::new("Run").monospace().size(9.4))
+                                .clicked()
+                            {
+                                force_battle = true;
+                            }
+                        });
+
+                        if let Some(ref battle) = self.battle_report {
+                            Frame::new()
+                                .fill(Color32::from_rgb(16, 20, 29))
+                                .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                                .corner_radius(4.0)
+                                .inner_margin(Margin::symmetric(6, 5))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "UNIVERSE BATTLE ({}/{}) · Avg {:+.1}%",
+                                            battle.profitable_symbols,
+                                            battle.rows.len(),
+                                            battle.average_return_pct
+                                        ))
+                                        .monospace()
+                                        .strong()
+                                        .size(9.6)
+                                        .color(palette::EQUITY_ABOVE_LINE),
+                                    );
+                                    egui::Grid::new("universe_battle_grid")
+                                        .num_columns(5)
+                                        .spacing([6.0, 2.5])
+                                        .striped(true)
+                                        .show(ui, |ui| {
+                                            for hdr in ["#", "Symbol", "Ret%", "DD%", "Shp"] {
+                                                ui.label(
+                                                    RichText::new(hdr)
+                                                        .monospace()
+                                                        .strong()
+                                                        .size(9.0)
+                                                        .color(palette::TEXT_MUTED),
+                                                );
+                                            }
+                                            ui.end_row();
+                                            for row in &battle.rows {
+                                                let col = if row.tearsheet.total_return_pct >= 0.0 {
+                                                    palette::BULLISH
+                                                } else {
+                                                    palette::BEARISH
+                                                };
+                                                ui.label(
+                                                    RichText::new(format!("{}", row.rank))
+                                                        .monospace()
+                                                        .size(9.1)
+                                                        .color(palette::TEXT_MUTED),
+                                                );
+                                                let sym_lbl = format!(
+                                                    "{}·{}",
+                                                    row.symbol, row.timeframe
+                                                );
+                                                if ui
+                                                    .link(
+                                                        RichText::new(sym_lbl)
+                                                            .monospace()
+                                                            .strong()
+                                                            .size(9.1)
+                                                            .color(palette::TEXT_PRIMARY),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    if let Some(preset) = self
+                                                        .watchlist_universe
+                                                        .iter()
+                                                        .find(|e| {
+                                                            e.instrument_id == row.instrument_id
+                                                        })
+                                                        .map(|e| e.preset)
+                                                    {
+                                                        select_symbol_req =
+                                                            Some((preset, row.symbol.clone()));
+                                                    } else if self
+                                                        .custom_peer_feeds
+                                                        .iter()
+                                                        .any(|e| {
+                                                            e.instrument_id == row.instrument_id
+                                                        })
+                                                    {
+                                                        select_symbol_req = Some((
+                                                            DataSourcePreset::CustomFile,
+                                                            row.symbol.clone(),
+                                                        ));
+                                                    }
+                                                }
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "{:+.1}%",
+                                                        row.tearsheet.total_return_pct
+                                                    ))
+                                                    .monospace()
+                                                    .strong()
+                                                    .size(9.1)
+                                                    .color(col),
+                                                );
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "-{:.1}%",
+                                                        row.tearsheet.max_drawdown_pct
+                                                    ))
+                                                    .monospace()
+                                                    .size(9.1)
+                                                    .color(palette::EQUITY_BELOW_LINE),
+                                                );
+                                                ui.label(
+                                                    RichText::new(
+                                                        row.tearsheet.sharpe_ratio.map_or_else(
+                                                            || "—".to_owned(),
+                                                            |v| format!("{v:.2}"),
+                                                        ),
+                                                    )
+                                                    .monospace()
+                                                    .size(9.1),
+                                                );
+                                                ui.end_row();
+                                            }
+                                        });
+                                });
+                        }
+                    }
+                }
+            });
+
+        if let Some(cfg) = apply_sweep_cfg {
+            self.backtest_config = cfg;
+        }
+        if let Some(preset) = apply_preset_req {
+            self.backtest_config.preset = preset;
+        }
+        if let Some((preset, sym)) = select_symbol_req {
+            self.select_watchlist_instrument(preset, &sym);
+            self.show_strategy_panel = true;
+            self.right_dock_tab = RightDockTab::StrategyLab;
+        }
+        if force_sweep {
+            self.run_active_parameter_sweep();
+        }
+        if force_battle {
+            self.run_universe_strategy_battle();
+        }
+        if let Some(tid) = focus_trade_req {
+            let _ = self.focus_backtest_trade(tid);
+        }
+        if let Some(tid) = replay_trade_req {
+            let _ = self.replay_backtest_trade(tid);
+        }
+
+        self.backtest_config.sanitize();
+        if compute_backtest_config_digest(&self.backtest_config) != pre_cfg_digest
+            || self.sweep_ranking != pre_ranking
+            || self.strategy_lab_tab != pre_sub_tab
+        {
+            self.sync_backtest_causal();
         }
     }
 
@@ -6022,6 +8025,17 @@ fn regime_badge_color(regime: MarketRegime) -> Color32 {
     }
 }
 
+fn robustness_badge_color(verdict: RobustnessVerdict) -> Color32 {
+    match verdict {
+        RobustnessVerdict::Robust => palette::EQUITY_ABOVE_LINE,
+        RobustnessVerdict::Stable => Color32::from_rgb(77, 208, 225),
+        RobustnessVerdict::Degraded | RobustnessVerdict::LowSample => palette::ALERT_ARMED_AMBER,
+        RobustnessVerdict::Overfitted | RobustnessVerdict::Unprofitable => {
+            palette::EQUITY_BELOW_LINE
+        }
+    }
+}
+
 fn format_scanner_price(price: f64) -> String {
     if !price.is_finite() {
         "-".to_owned()
@@ -6367,11 +8381,11 @@ impl SumiWorkstationApp {
     }
 
     /// Executes all 3 Retina (`2.0x`) Metal/`wgpu` verification scenarios for `"r04"`, `"r05"`, `"r06"`,
-    /// `"r07"`, or `"r08"` offscreen in one headless GPU session (zero windows, zero Dock icons, zero occlusion stalls).
+    /// `"r07"`, `"r08"`, or `"r09"` offscreen in one headless GPU session (zero windows, zero Dock icons, zero occlusion stalls).
     pub fn run_offscreen_wgpu_capture_batch(batch_name: &str) -> Result<(), String> {
-        if !matches!(batch_name, "r04" | "r05" | "r06" | "r07" | "r08") {
+        if !matches!(batch_name, "r04" | "r05" | "r06" | "r07" | "r08" | "r09") {
             return Err(format!(
-                "unknown SUMI_CAPTURE_BATCH '{batch_name}' (expected 'r04', 'r05', 'r06', 'r07', or 'r08')"
+                "unknown SUMI_CAPTURE_BATCH '{batch_name}' (expected 'r04', 'r05', 'r06', 'r07', 'r08', or 'r09')"
             ));
         }
         std::fs::create_dir_all("docs/evidence")
@@ -6387,6 +8401,7 @@ impl SumiWorkstationApp {
                 "r06" => app.apply_r06_batch_step_state(step),
                 "r07" => app.apply_r07_batch_step_state(step),
                 "r08" => app.apply_r08_batch_step_state(step),
+                "r09" => app.apply_r09_batch_step_state(step),
                 _ => unreachable!(),
             };
             let image = harness.capture_app_frame(&mut app, logical_w, logical_h, 6)?;
@@ -7230,6 +9245,244 @@ impl SumiWorkstationApp {
         }
     }
 
+    fn apply_r09_batch_step_state(
+        &mut self,
+        step: usize,
+    ) -> (u32, u32, &'static str, &'static str) {
+        self.close_command_palette();
+        self.show_import_bar = false;
+        self.alerts.clear_all();
+        self.drawings = DrawingStore::new();
+        self.trading = TradingSession::default();
+
+        match step {
+            0 => {
+                // Scenario 0: `1280x800` (`2560x1600` Retina), `FPT` (`VN30` `1D`), Strategy Lab Tearsheet +
+                // IS/OOS Split (`70%/30%`) + Synchronized `Equity / Drawdown` Baseline Sub-Pane + Focused Trade Links!
+                self.exit_replay();
+                self.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+                self.indicators = IndicatorConfig {
+                    show_sma: true,
+                    show_ema: true,
+                    show_bbands: false,
+                    show_rsi: true,
+                    show_macd: false,
+                    show_atr: false,
+                    sma_period: 15,
+                    ema_period: 40,
+                    ..IndicatorConfig::default()
+                };
+                self.set_scale_mode(PriceScaleMode::Normal);
+                self.viewport.reset_pane_stretches();
+                self.viewport.equity_stretch = 1.45;
+                self.viewport.rsi_stretch = 0.85;
+
+                self.backtest_config = BacktestConfig {
+                    preset: StrategyPresetKind::MacdMomentum,
+                    params: StrategyParams {
+                        macd_fast: 6,
+                        macd_slow: 16,
+                        macd_signal: 5,
+                        macd_trend_ema: 30,
+                        ..StrategyParams::default()
+                    },
+                    direction_mode: StrategyDirectionMode::LongOnly,
+                    sizing: PositionSizingMode::PercentEquity(95.0),
+                    risk: StopTakeConfig {
+                        stop_loss_pct: Some(3.2),
+                        take_profit_pct: Some(8.5),
+                        trailing_stop_atr_mult: Some(2.2),
+                        min_holding_bars: 2,
+                        ..StopTakeConfig::default()
+                    },
+                    initial_cash: 100_000.0,
+                    commission_bps: 15.0,
+                    tax_sell_bps: 10.0,
+                    slippage_bps: 5.0,
+                    max_leverage: 1.0,
+                    lot_step: 100.0,
+                    in_sample_split_pct: Some(0.70),
+                };
+
+                self.show_scanner_dock = false;
+                self.show_replay_bar = false;
+                self.show_trading_panel = false;
+                self.show_alerts_panel = false;
+                self.strategy_lab_tab = StrategyLabSubTab::Tearsheet;
+                self.open_strategy_lab();
+
+                // Fit full series so both In-Sample (`70%`) and Out-of-Sample (`30%`) + `IS | OOS` split marker
+                // + both above-baseline emerald growth and below-baseline crimson dips are clearly visible!
+                self.viewport.time_scale.set_width(880.0);
+                self.viewport.fit_all();
+                if let Some(last_tid) = self
+                    .backtest_result
+                    .as_ref()
+                    .and_then(|r| r.trades.last().map(|t| t.trade_id))
+                {
+                    self.focused_backtest_trade_id = Some(last_tid);
+                }
+
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r09_strategy_backtest_equity_pane_fpt_1280x800.png",
+                    "docs/evidence/r09_strategy_backtest_equity_pane_fpt_1280x800.json",
+                )
+            }
+            1 => {
+                // Scenario 1: `1280x800` (`2560x1600` Retina), `BTCUSDT` `1h -> 4h`, `LongShort` Strategy,
+                // 12-Variant Parameter Sweep Grid + 6-Preset Strategy Battle + Synchronized `IS | OOS` Equity Curve!
+                self.exit_replay();
+                self.select_watchlist_instrument(DataSourcePreset::BtcUsdt15mJson, "BTCUSDT");
+                let _ = self.set_timeframe(Timeframe::H4);
+                self.indicators = IndicatorConfig {
+                    show_sma: false,
+                    show_ema: true,
+                    show_bbands: true,
+                    show_rsi: false,
+                    show_macd: true,
+                    show_atr: false,
+                    ..IndicatorConfig::default()
+                };
+                self.set_scale_mode(PriceScaleMode::Normal);
+                self.viewport.reset_pane_stretches();
+                self.viewport.equity_stretch = 1.45;
+                self.viewport.macd_stretch = 0.85;
+
+                self.backtest_config = BacktestConfig {
+                    preset: StrategyPresetKind::MacdMomentum,
+                    params: StrategyParams {
+                        macd_fast: 12,
+                        macd_slow: 26,
+                        macd_signal: 9,
+                        macd_trend_ema: 34,
+                        ..StrategyParams::default()
+                    },
+                    direction_mode: StrategyDirectionMode::LongShort,
+                    sizing: PositionSizingMode::PercentEquity(95.0),
+                    risk: StopTakeConfig {
+                        stop_loss_pct: Some(3.5),
+                        take_profit_pct: Some(9.0),
+                        trailing_stop_atr_mult: Some(2.4),
+                        min_holding_bars: 0,
+                        ..StopTakeConfig::default()
+                    },
+                    initial_cash: 100_000.0,
+                    commission_bps: 8.0,
+                    tax_sell_bps: 0.0,
+                    slippage_bps: 4.0,
+                    max_leverage: 1.0,
+                    lot_step: 0.0,
+                    in_sample_split_pct: Some(0.70),
+                };
+                self.sweep_ranking = SweepRankingMetric::SharpeRatio;
+
+                self.show_scanner_dock = false;
+                self.show_replay_bar = false;
+                self.show_trading_panel = false;
+                self.show_alerts_panel = false;
+                self.open_strategy_lab();
+                self.strategy_lab_tab = StrategyLabSubTab::Sweep;
+                self.run_active_parameter_sweep();
+                self.run_universe_strategy_battle();
+                // Apply rank #1 sweep variant so chart displays the top-ranked configuration!
+                if let Some(best_cfg) = self
+                    .sweep_report
+                    .as_ref()
+                    .and_then(|s| s.variants.first().map(|v| v.config.clone()))
+                {
+                    self.backtest_config = best_cfg;
+                    self.sync_backtest_causal();
+                }
+                self.viewport.time_scale.set_width(880.0);
+                self.viewport.fit_all();
+
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r09_param_sweep_and_battle_btc_4h_1280x800.png",
+                    "docs/evidence/r09_param_sweep_and_battle_btc_4h_1280x800.json",
+                )
+            }
+            _ => {
+                // Scenario 2: Compact `960x640` (`1920x1280` Retina), Intraday `VN30F1M` `1m -> 5m` under
+                // active Causal Bar Replay (`DEF-001` zero-lookahead cutoff) + `Trades` Log + Focused Trade Halo!
+                self.exit_replay();
+                self.select_watchlist_instrument(DataSourcePreset::IntradayVn30F1m, "VN30F1M");
+                let _ = self.set_timeframe(Timeframe::M5);
+                self.indicators = IndicatorConfig {
+                    show_sma: true,
+                    show_ema: true,
+                    show_bbands: false,
+                    show_rsi: false,
+                    show_macd: false,
+                    show_atr: true,
+                    sma_period: 12,
+                    ema_period: 30,
+                    ..IndicatorConfig::default()
+                };
+                self.set_scale_mode(PriceScaleMode::Normal);
+                self.viewport.reset_pane_stretches();
+                self.viewport.equity_stretch = 1.45;
+                self.viewport.atr_stretch = 0.80;
+
+                if self.base_candles.len() >= 20 {
+                    let cut_base = (self.base_candles.len() * 82) / 100;
+                    let _ = self.start_replay_at_base_index(cut_base);
+                }
+
+                self.backtest_config = BacktestConfig {
+                    preset: StrategyPresetKind::DonchianAtrBreakout,
+                    params: StrategyParams {
+                        donchian_entry_period: 15,
+                        donchian_exit_period: 8,
+                        atr_period: 14,
+                        ..StrategyParams::default()
+                    },
+                    direction_mode: StrategyDirectionMode::LongShort,
+                    sizing: PositionSizingMode::RiskPercentPerTrade(1.5),
+                    risk: StopTakeConfig {
+                        stop_loss_pct: Some(1.2),
+                        take_profit_pct: Some(2.8),
+                        trailing_stop_atr_mult: Some(2.0),
+                        min_holding_bars: 0,
+                        ..StopTakeConfig::default()
+                    },
+                    initial_cash: 100_000.0,
+                    commission_bps: 3.0,
+                    tax_sell_bps: 0.0,
+                    slippage_bps: 2.0,
+                    max_leverage: 2.0,
+                    lot_step: 1.0,
+                    in_sample_split_pct: Some(0.70),
+                };
+
+                self.show_scanner_dock = false;
+                self.show_replay_bar = true;
+                self.show_trading_panel = false;
+                self.show_alerts_panel = false;
+                self.open_strategy_lab();
+                self.strategy_lab_tab = StrategyLabSubTab::Trades;
+                self.viewport.time_scale.set_width(590.0);
+                if let Some(focus_tid) = self
+                    .backtest_result
+                    .as_ref()
+                    .and_then(|r| r.trades.last().map(|t| t.trade_id))
+                {
+                    let _ = self.focus_backtest_trade(focus_tid);
+                }
+
+                (
+                    960,
+                    640,
+                    "docs/evidence/r09_intraday_vn30f_trade_inspect_960x640.png",
+                    "docs/evidence/r09_intraday_vn30f_trade_inspect_960x640.json",
+                )
+            }
+        }
+    }
+
     fn persist_capture_artifacts(
         &self,
         screenshot_path: &str,
@@ -7271,8 +9524,24 @@ impl SumiWorkstationApp {
                 || "null".to_owned(),
                 |ctx| ctx.is_revealed(replay_cutoff).to_string(),
             );
+            let bt_active =
+                self.show_strategy_panel || self.show_equity_pane || self.show_backtest_trades;
+            let bt_ref = bt_active.then_some(self.backtest_result.as_ref()).flatten();
+            let bt_preset_json = bt_ref.map_or_else(
+                || "null".to_owned(),
+                |b| format!("\"{}\"", b.config.preset.short_label()),
+            );
+            let bt_trades_count = bt_ref.map_or(0, |b| b.tearsheet.num_trades);
+            let bt_ret_pct = bt_ref.map_or(0.0, |b| b.tearsheet.total_return_pct);
+            let bt_mdd_pct = bt_ref.map_or(0.0, |b| b.tearsheet.max_drawdown_pct);
+            let bt_sharpe_json = bt_ref
+                .and_then(|b| b.tearsheet.sharpe_ratio)
+                .map_or_else(|| "null".to_owned(), |v| format!("{v:.4}"));
+            let bt_rob_json = bt_ref
+                .and_then(|b| b.robustness)
+                .map_or_else(|| "null".to_owned(), |v| format!("\"{}\"", v.label()));
             let json = format!(
-                "{{\n  \"symbol\": \"{}\",\n  \"timeframe\": \"{}\",\n  \"base_timeframe\": \"{}\",\n  \"data_source\": \"{}\",\n  \"available_symbols\": [{}],\n  \"base_candles\": {},\n  \"total_candles\": {},\n  \"culled_candles\": {},\n  \"rendered_candles\": {},\n  \"conflation_factor\": {},\n  \"bar_spacing\": {:.6},\n  \"right_offset\": {:.6},\n  \"scale_mode\": \"{}\",\n  \"auto_scale\": {},\n  \"pane_count\": {},\n  \"active_overlay_count\": {},\n  \"drawing_count\": {},\n  \"active_drawing_tool\": \"{}\",\n  \"selected_drawing_id\": {},\n  \"magnet_mode\": \"{}\",\n  \"replay_active\": {},\n  \"replay_status\": \"{}\",\n  \"replay_base_cursor\": {},\n  \"replay_step_unit\": \"{}\",\n  \"show_trading_panel\": {},\n  \"show_scanner_dock\": {},\n  \"show_alerts_panel\": {},\n  \"command_palette_open\": {},\n  \"alert_rule_count\": {},\n  \"alert_trigger_count\": {},\n  \"active_alert_lines\": {},\n  \"rendered_alert_markers\": {},\n  \"scanner_signal_revealed\": {},\n  \"active_price_lines\": {},\n  \"rendered_fill_markers\": {},\n  \"equity\": {:.2},\n  \"net_pnl\": {:.2},\n  \"fill_count\": {},\n  \"closed_trade_count\": {},\n  \"pending_order_count\": {},\n  \"open_position_side\": {},\n  \"stretches\": [{:.3}, {:.3}, {:.3}, {:.3}],\n  \"base_value\": {:.4},\n  \"screenshot_px\": [{}, {}],\n  \"outer_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"plot_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"price_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"time_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"raw_price_min\": {:.2},\n  \"raw_price_max\": {:.2}\n}}\n",
+                "{{\n  \"symbol\": \"{}\",\n  \"timeframe\": \"{}\",\n  \"base_timeframe\": \"{}\",\n  \"data_source\": \"{}\",\n  \"available_symbols\": [{}],\n  \"base_candles\": {},\n  \"total_candles\": {},\n  \"culled_candles\": {},\n  \"rendered_candles\": {},\n  \"conflation_factor\": {},\n  \"bar_spacing\": {:.6},\n  \"right_offset\": {:.6},\n  \"scale_mode\": \"{}\",\n  \"auto_scale\": {},\n  \"pane_count\": {},\n  \"active_overlay_count\": {},\n  \"drawing_count\": {},\n  \"active_drawing_tool\": \"{}\",\n  \"selected_drawing_id\": {},\n  \"magnet_mode\": \"{}\",\n  \"replay_active\": {},\n  \"replay_status\": \"{}\",\n  \"replay_base_cursor\": {},\n  \"replay_step_unit\": \"{}\",\n  \"show_trading_panel\": {},\n  \"show_scanner_dock\": {},\n  \"show_alerts_panel\": {},\n  \"show_strategy_panel\": {},\n  \"show_equity_pane\": {},\n  \"equity_pane_active\": {},\n  \"show_backtest_trades\": {},\n  \"rendered_backtest_trades\": {},\n  \"backtest_preset\": {},\n  \"backtest_trade_count\": {},\n  \"backtest_return_pct\": {:.4},\n  \"backtest_max_dd_pct\": {:.4},\n  \"backtest_sharpe\": {},\n  \"backtest_robustness\": {},\n  \"command_palette_open\": {},\n  \"alert_rule_count\": {},\n  \"alert_trigger_count\": {},\n  \"active_alert_lines\": {},\n  \"rendered_alert_markers\": {},\n  \"scanner_signal_revealed\": {},\n  \"active_price_lines\": {},\n  \"rendered_fill_markers\": {},\n  \"equity\": {:.2},\n  \"net_pnl\": {:.2},\n  \"fill_count\": {},\n  \"closed_trade_count\": {},\n  \"pending_order_count\": {},\n  \"open_position_side\": {},\n  \"stretches\": [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}],\n  \"base_value\": {:.4},\n  \"screenshot_px\": [{}, {}],\n  \"outer_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"plot_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"price_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"time_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"raw_price_min\": {:.2},\n  \"raw_price_max\": {:.2}\n}}\n",
                 self.symbol,
                 self.timeframe,
                 self.base_timeframe,
@@ -7300,6 +9569,17 @@ impl SumiWorkstationApp {
                 self.show_trading_panel,
                 self.show_scanner_dock,
                 self.show_alerts_panel,
+                self.show_strategy_panel,
+                self.show_equity_pane,
+                rep.equity_pane_active,
+                self.show_backtest_trades,
+                rep.rendered_backtest_trade_count,
+                bt_preset_json,
+                bt_trades_count,
+                bt_ret_pct,
+                bt_mdd_pct,
+                bt_sharpe_json,
+                bt_rob_json,
                 self.command_palette.open,
                 self.alerts.rules.len(),
                 self.alerts.triggers.len(),
@@ -7318,6 +9598,7 @@ impl SumiWorkstationApp {
                 self.viewport.rsi_stretch,
                 self.viewport.macd_stretch,
                 self.viewport.atr_stretch,
+                self.viewport.equity_stretch,
                 rep.base_value,
                 image.width(),
                 image.height(),
@@ -8679,6 +10960,177 @@ mod tests {
             (app.viewport.time_scale.right_offset() - ro_before).abs() < 1e-9
                 && (app.viewport.time_scale.bar_spacing() - bs_before).abs() < 1e-9,
             "outside-modal scroll wheel must not pan or zoom the chart while Cmd+K is open"
+        );
+    }
+
+    #[test]
+    fn strategy_lab_causal_sync_across_bar_replay_and_sweep_invalidation() {
+        let mut app = SumiWorkstationApp::default();
+        app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+        app.open_strategy_lab();
+        app.strategy_lab_tab = StrategyLabSubTab::Tearsheet;
+        app.run_active_parameter_sweep();
+        app.run_universe_strategy_battle();
+
+        let full_bars = app.candles.len();
+        assert!(full_bars >= 120);
+        assert_eq!(
+            app.backtest_result.as_ref().expect("full bt").bar_count,
+            full_bars
+        );
+        assert!(app.sweep_report.is_some());
+        assert!(app.battle_report.is_some());
+
+        // Cut causal Bar Replay at bar `90` (`DEF-001`) -> `sync_backtest_causal` MUST slice `backtest_result`
+        // to `91` bars AND invalidate stale full-history `sweep_report` & `battle_report`!
+        assert!(app.start_replay_at_base_index(90));
+        app.sync_backtest_causal();
+        let cut_bt = app.backtest_result.as_ref().expect("causal replay bt");
+        assert_eq!(cut_bt.bar_count, 91);
+        assert_eq!(cut_bt.last_timestamp, Some(app.base_candles[90].timestamp));
+        let prev_sweep_ts = cut_bt.last_timestamp;
+        assert!(
+            app.sweep_report.is_none() && app.battle_report.is_none(),
+            "stale full-history sweep/battle reports must be invalidated when entering Bar Replay"
+        );
+
+        // Switching to `Sweep` tab during Replay computes a strictly causal `91`-bar sweep!
+        app.strategy_lab_tab = StrategyLabSubTab::Sweep;
+        app.sync_backtest_causal();
+        assert!(app.sweep_report.is_some());
+
+        // Stepping Replay forward by 5 bars updates `backtest_result` (`96` bars) and refreshes `Sweep`!
+        assert!(app.step_replay_forward(5));
+        app.sync_backtest_causal();
+        let stepped_bt = app.backtest_result.as_ref().expect("stepped bt");
+        assert_eq!(stepped_bt.bar_count, 96);
+        assert!(stepped_bt.last_timestamp > prev_sweep_ts);
+    }
+
+    #[test]
+    fn command_palette_strategy_lab_actions_trade_focus_and_trade_replay() {
+        let mut app = SumiWorkstationApp::default();
+        app.select_watchlist_instrument(DataSourcePreset::BtcUsdt15mJson, "BTCUSDT");
+        let _ = app.set_timeframe(Timeframe::H1);
+
+        // 1. `Cmd+K` query `"backtest"` surfaces Strategy Lab actions cleanly!
+        app.open_command_palette();
+        app.command_palette.query = "backtest sweep".to_owned();
+        let cands = app.build_command_palette_candidates();
+        assert!(
+            cands
+                .iter()
+                .any(|c| matches!(c.action, PaletteAction::RunParameterSweep)),
+            "Cmd+K query 'backtest sweep' must rank RunParameterSweep"
+        );
+        app.execute_palette_action(PaletteAction::SelectStrategyPreset(
+            StrategyPresetKind::MacdMomentum,
+        ));
+        assert!(app.show_strategy_panel);
+        assert!(app.show_equity_pane);
+        assert!(app.show_backtest_trades);
+        assert_eq!(app.backtest_config.preset, StrategyPresetKind::MacdMomentum);
+
+        // 2. Focus a closed trade -> centers `TimeScale` around the trade & sets `focused_backtest_trade_id`!
+        let first_trade = app
+            .backtest_result
+            .as_ref()
+            .and_then(|r| r.trades.first().cloned())
+            .expect("at least one trade on BTCUSDT 1h MacdMomentum");
+        assert!(app.focus_backtest_trade(first_trade.trade_id));
+        assert_eq!(app.focused_backtest_trade_id, Some(first_trade.trade_id));
+
+        // 3. Replay a closed trade -> starts causal Bar Replay 5 bars prior to `entry_bar_index`!
+        assert!(app.replay_backtest_trade(first_trade.trade_id));
+        assert!(app.replay.is_active());
+        assert!(app.candles.len() <= first_trade.entry_bar_index + 1);
+        assert_eq!(
+            app.backtest_result
+                .as_ref()
+                .expect("synced replay bt")
+                .bar_count,
+            app.candles.len(),
+            "MAJOR-03: replay_backtest_trade must synchronize backtest_result immediately without manual sync call"
+        );
+    }
+
+    #[test]
+    fn critic_r09_regression_auto_sync_on_replay_transitions_and_headless_trade_replay() {
+        let mut app = SumiWorkstationApp::default();
+        app.select_watchlist_instrument(DataSourcePreset::IntradayVn30F1m, "VN30F1M");
+        let _ = app.set_timeframe(Timeframe::M15);
+        app.open_strategy_lab();
+
+        let full_active_len = app.candles.len();
+        assert_eq!(
+            app.backtest_result.as_ref().expect("full bt").bar_count,
+            full_active_len
+        );
+
+        // 1. Cut Replay on an interior `1m` sub-bar (`idx = 152`, `2` minutes into a `15m` bucket)
+        // WITHOUT calling `sync_backtest_causal()` manually!
+        assert!(app.start_replay_at_base_index(152));
+        assert!(
+            app.is_active_tail_incomplete(),
+            "MAJOR-04: interior 1m sub-bar inside 15m bucket must report incomplete_tail_bar = true"
+        );
+        assert_eq!(
+            app.backtest_result
+                .as_ref()
+                .expect("auto-synced cut bt")
+                .bar_count,
+            app.candles.len()
+        );
+
+        // 2. Step forward & backward WITHOUT manual `sync_backtest_causal()` -> always stays 1:1 synced!
+        assert!(app.step_replay_forward(3));
+        assert_eq!(
+            app.backtest_result
+                .as_ref()
+                .expect("stepped fwd bt")
+                .bar_count,
+            app.candles.len()
+        );
+        assert!(app.step_replay_backward(1));
+        assert_eq!(
+            app.backtest_result
+                .as_ref()
+                .expect("stepped back bt")
+                .bar_count,
+            app.candles.len()
+        );
+
+        // 3. Exit replay -> immediately restores full causal backtest!
+        app.exit_replay();
+        assert_eq!(
+            app.backtest_result.as_ref().expect("restored bt").bar_count,
+            full_active_len
+        );
+
+        // 4. Turn ALL 3 Strategy UI flags off (`false`) and call `replay_backtest_trade(tid)` headlessly!
+        let sample_tid = app
+            .backtest_result
+            .as_ref()
+            .and_then(|r| r.trades.last().map(|t| t.trade_id))
+            .expect("at least one trade on VN30F1M 15m");
+        app.show_strategy_panel = false;
+        app.show_equity_pane = false;
+        app.show_backtest_trades = false;
+        app.backtest_result = None;
+        app.backtest_synced_key = None;
+
+        assert!(
+            app.replay_backtest_trade(sample_tid),
+            "MAJOR-03: headless replay_backtest_trade must succeed even when UI flags started false"
+        );
+        assert!(app.show_backtest_trades);
+        assert!(app.replay.is_active());
+        assert_eq!(
+            app.backtest_result
+                .as_ref()
+                .expect("headless trade replay bt")
+                .bar_count,
+            app.candles.len()
         );
     }
 }

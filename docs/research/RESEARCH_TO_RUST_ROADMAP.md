@@ -1,7 +1,7 @@
 # RESEARCH TO RUST ROADMAP — SESSION R01
 
 - **Session Identity:** `SESSION-R01-20261110T202837+0700`
-- **Updated By:** `SESSION-R08-20261112T140031+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Updated By:** `SESSION-R09-20261114T091018+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 - **Principle:** No Rust implementation begins without prior REA or reference-source research evidence.
 
 ---
@@ -228,14 +228,47 @@ cargo test app::tests::critic_r08_regression_cmd_k_modal_tab_delete_gesture_and_
 
 ---
 
-## Wave 8 — Deterministic Strategy Backtest Lab, Equity Curve Sub-Pane & Performance Tearsheet (`PROPOSED — MILESTONE R09`)
+## Wave 8 — Deterministic Strategy Backtest Lab, Equity Curve Sub-Pane & Performance Tearsheet (`COMPLETE — SESSION R09`)
+
+### Completed Research & Audit Gates (`VERIFIED`)
+- [x] Executed 11 live REA MCP JS/TS operations (`14` exact 64-hex Evidence IDs: `ev_30052fc9...`, `ev_3efaddb8...`, `ev_0e297ef9...`, `ev_f6890cd1...`, `ev_2f44b96f...`, `ev_86aa8a13...`, `ev_72d6e059...`, `ev_54c92e4a...`, `ev_fe8c9f11...`, `ev_3e04368e...`, `ev_80e6acb9...`, `ev_4d180bfe...`, `ev_f81cc480...`, `ev_fee363ed...`) across `ARCHIVE/frontend` strategy/backtest/analytics (`10` files) and `lightweight-charts-5.2.0` `area`/`baseline` series & renderers (`8` files), plus 4 final binary REA Evidence IDs (`ev_1da8bd9d...`, `ev_bbe704de...`, `ev_c32a6cf5...`, `ev_ab19c6e7...`).
+- [x] Authored [`docs/research/STRATEGY_BACKTEST_LAB_SPEC.md`](STRATEGY_BACKTEST_LAB_SPEC.md) rectifying all 6 legacy strategy lab, backtest, tearsheet, and equity-curve rendering defects.
+
+### Shipped Rust Deliverables (`IMPLEMENTATION_PASS`)
+| Component | Research Source | Shipped Rust Target | Status |
+|---|---|---|---|
+| Pure `f64`/`i64` WASM-safe Rule/Signal Strategy Backtest Engine (`6` presets, `Open[T+1]` fills, `MarginLiquidation`, continuous `IS/OOS` partition, `12`-grid sweep & `13`-sym battle) | `ARCHIVE/frontend/src/pages/StrategyLabPage.tsx` + `ARCHIVE/backend/app/domain/backtest/*` | `src/backtest/` | ✅ SHIPPED |
+| Synchronized `Equity / Drawdown` 5th Sub-Pane (Y-clipped emerald/crimson baseline `egui::Mesh`) & $O(\log T)$ Trade Entry/Exit Links | `LWC v5.2.0` `baseline-series` / `baseline-renderer-area` + `MultiPaneLayout` | `src/chart.rs` | ✅ SHIPPED |
+| Strategy Lab Dock (`Stats` Tearsheet, `Trd` Inspector + `Replay -5b`, `Sweep`, `Battle`) & `Cmd+K` Strategy Actions | `STRATEGY_BACKTEST_LAB_SPEC.md` | `src/app.rs` | ✅ SHIPPED |
+
+### Verified Acceptance Tests (`cargo test` — 122/122 PASS)
+```bash
+cargo test backtest::tests::next_bar_open_causality_and_final_bar_cutoff_guard
+cargo test backtest::tests::pessimistic_sl_before_tp_on_dual_touch_and_post_close_trailing_stop_anti_lookahead
+cargo test backtest::tests::min_holding_bars_t_plus_2_lockup_and_lot_step_rounding
+cargo test backtest::tests::tearsheet_sortino_cagr_breakeven_and_zero_loss_profit_factor_invariants
+cargo test backtest::tests::replay_cutoff_zero_lookahead_and_cash_fee_tax_conservation_across_all_presets
+cargo test backtest::tests::parameter_sweep_multi_symbol_battle_and_100k_bar_throughput
+cargo test backtest::tests::critic_r09_regression_cross_timeframe_cutoff_prevents_intraday_daily_lookahead
+cargo test backtest::tests::critic_r09_regression_robustness_never_rewards_losing_is_and_continuous_oos_conservation
+cargo test backtest::tests::critic_r09_regression_margin_liquidation_prevents_zombie_account_resurrection
+cargo test backtest::tests::critic_r09_regression_t_plus_2_trailing_ratchet_marubozu_slippage_and_mae_mfe_bounds
+cargo test chart::tests::equity_baseline_pane_layout_separator_resize_and_conflated_render
+cargo test chart::tests::critic_r09_regression_equity_y_clipped_trapezoid_and_pan_invariant_trade_decimation
+cargo test app::tests::strategy_lab_causal_sync_across_bar_replay_and_sweep_invalidation
+cargo test app::tests::command_palette_strategy_lab_actions_trade_focus_and_trade_replay
+cargo test app::tests::critic_r09_regression_auto_sync_on_replay_transitions_and_headless_trade_replay
+```
+
+---
+
+## Wave 9 — Vietnam Market Microstructure & Risk Planner, Structured Trade Journal & Rolling Walk-Forward Portfolio Analytics (`PROPOSED — MILESTONE R10`)
 
 ### Proposed Deliverables (Awaiting Product Owner Authorization)
 | Component | Research Source | Rust Target | Status |
 |---|---|---|---|
-| Pure `f64`/`i64` WASM-safe Rule/Signal Strategy Backtest Engine (composable `SMA/EMA`, `RSI`, `MACD`, `BB`, `ATR` trailing & position sizing over `TradingSession`) | `ARCHIVE/frontend/src/pages/StrategyLabPage.tsx` + `ARCHIVE/backend/app/domain/backtest/*` | `src/backtest/` | Proposed (`Milestone R09`) |
-| Synchronized `Equity / Drawdown` Oscillator Sub-Pane & On-Chart Trade Entry/Exit Links | `LWC v5.2.0` area/baseline series + `MultiPaneLayout` | `src/chart.rs` | Proposed (`Milestone R09`) |
-| Strategy Lab Dock, Parameter Sweep Comparison & Quantitative Tearsheet (`Sharpe`, `Sortino`, `CAGR`, `MaxDD`, `Profit Factor`, `Expectancy`, `R-Multiple` distribution) | `ARCHIVE/frontend/src/pages/StrategyLabPage.tsx` | `src/app.rs` | Proposed (`Milestone R09`) |
+| Pure `f64`/`i64` WASM-safe Exchange Microstructure & Trade Risk Planner (`HOSE`/`HNX`/`UPCOM`/`VN30F`/`US`/`Crypto` tick ladders, daily price bands `±7%/±10%/±15%`, `T+2.5` cash/share settlement schedule & R-multiple position sizer) | `ARCHIVE/backend/app/domain/{market_rules.py,trade_planning.py,accounting.py}` | `src/risk/` / `src/journal/` | Proposed (`Milestone R10`) |
+| Structured Post-Trade Journal, Behavioral Tagging (`Setup`, `Mistake`, `Conviction`), Rolling Walk-Forward / Multi-Asset Portfolio Analytics & Markdown/CSV Report Export | `ARCHIVE/frontend/src/pages/{JournalPage.tsx,DashboardPage.tsx}` | `src/journal/`, `src/backtest/`, `src/app.rs` | Proposed (`Milestone R10`) |
 
 ---
 

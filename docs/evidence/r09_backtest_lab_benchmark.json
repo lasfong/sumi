@@ -1,0 +1,26 @@
+{
+  "milestone": "R09",
+  "environment": {
+    "cpu": "Apple M1",
+    "os": "macos",
+    "arch": "aarch64",
+    "ram_bytes": 17179869184,
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "profile": "release",
+    "viewport_logical_px": [1280, 800],
+    "pixels_per_point": 2.0
+  },
+  "backtest_lab_domain": [
+    { "case_id": "r09_backtest_100k_sma_ema_oos", "description": "100,000-bar 1m SmaEmaTrendCross + 70/30 IS/OOS + SeriesBlockIndex + Tearsheet (<15ms gate)", "input_units": 100000, "output_items": 2863, "median_us": 6318.292, "median_ms": 6.3183, "p95_us": 9071.333, "max_us": 10702.875 },
+    { "case_id": "r09_backtest_100k_donchian_atr_oos", "description": "100,000-bar 1m O(N) monotonic-deque DonchianAtrBreakout + ATR trail + 70/30 IS/OOS", "input_units": 100000, "output_items": 1636, "median_us": 7832.166, "median_ms": 7.8322, "p95_us": 8325.000, "max_us": 8521.833 },
+    { "case_id": "r09_sweep_12_grid_fpt_1d", "description": "12-variant deterministic parameter sweep + IS/OOS robustness on FPT 1D", "input_units": 2160, "output_items": 12, "median_us": 77.292, "median_ms": 0.0773, "p95_us": 95.375, "max_us": 133.875 },
+    { "case_id": "r09_6_preset_battle_btc_4h", "description": "All 6 strategy presets battle on BTCUSDT 4h with IS/OOS split", "input_units": 900, "output_items": 6, "median_us": 44.125, "median_ms": 0.0441, "p95_us": 44.291, "max_us": 49.833 },
+    { "case_id": "r09_universe_13_symbol_battle", "description": "13-symbol multi-asset Watchlist Universe strategy battle (VN30 + CafeF + SPY + BTC + VN30F1M)", "input_units": 20797, "output_items": 13, "median_us": 639.916, "median_ms": 0.6399, "p95_us": 747.250, "max_us": 1067.125 }
+  ],
+  "workstation_r09_workloads": [
+    { "dataset_bars": 95000, "workload_id": "r09_95k_1m_recent_5pane_equity", "scale_mode": "Linear", "bar_spacing": 8.00000, "conflation_factor": 1, "culled_bars": 137, "rendered_candles": 136, "paint_shapes": 280, "clipped_primitives": 40, "total_vertices": 16614, "total_indices": 47040, "ui_median_ms": 0.1210, "tessellate_median_ms": 0.0686, "total_cpu_median_ms": 0.1900, "total_cpu_p95_ms": 0.2457 },
+    { "dataset_bars": 95000, "workload_id": "r09_95k_1m_full_fit_equity_conflated", "scale_mode": "Log", "bar_spacing": 0.01240, "conflation_factor": 32, "culled_bars": 95000, "rendered_candles": 2968, "paint_shapes": 313, "clipped_primitives": 21, "total_vertices": 131236, "total_indices": 205710, "ui_median_ms": 1.1580, "tessellate_median_ms": 0.1907, "total_cpu_median_ms": 1.3547, "total_cpu_p95_ms": 1.9347 },
+    { "dataset_bars": 4801, "workload_id": "r09_workstation_1280x800_tearsheet_equity", "scale_mode": "Linear", "bar_spacing": 8.50000, "conflation_factor": 1, "culled_bars": 64, "rendered_candles": 62, "paint_shapes": 591, "clipped_primitives": 39, "total_vertices": 21240, "total_indices": 68217, "ui_median_ms": 0.3054, "tessellate_median_ms": 0.1035, "total_cpu_median_ms": 0.4116, "total_cpu_p95_ms": 0.5062 },
+    { "dataset_bars": 4801, "workload_id": "r09_workstation_1280x800_sweep_battle", "scale_mode": "Linear", "bar_spacing": 8.50000, "conflation_factor": 1, "culled_bars": 96, "rendered_candles": 95, "paint_shapes": 569, "clipped_primitives": 34, "total_vertices": 23994, "total_indices": 74679, "ui_median_ms": 0.2623, "tessellate_median_ms": 0.1078, "total_cpu_median_ms": 0.3707, "total_cpu_p95_ms": 0.4477 }
+  ]
+}

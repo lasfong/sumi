@@ -10,6 +10,7 @@ use crate::alerts::{
     AlertCondition, AlertEngine, AlertStatus, AlertTriggerEvent, CrossDirection,
     drawing_line_value_at_bar,
 };
+use crate::backtest::{BacktestExitReason, BacktestRunResult, BacktestTrade};
 use crate::drawings::{
     Drawing, DrawingColorPreset, DrawingGeometry, DrawingId, DrawingInteractionPhase,
     DrawingPaneTarget, DrawingStore, DrawingTool, HandlePart, HitTarget, LineDashStyle, LocalPoint,
@@ -79,6 +80,17 @@ pub mod palette {
     pub const ALERT_ARMED_AMBER: Color32 = Color32::from_rgb(255, 167, 38); // #FFA726
     pub const ALERT_TRIGGERED_GOLD: Color32 = Color32::from_rgb(255, 213, 79); // #FFD54F
     pub const ALERT_AXIS_TEXT_DARK: Color32 = Color32::from_rgb(18, 20, 26); // #12141A
+
+    // Milestone R09 — Strategy Backtest Lab & Baseline Equity Curve Palette
+    pub const EQUITY_ABOVE_LINE: Color32 = Color32::from_rgb(38, 166, 154); // #26A69A Emerald
+    pub const EQUITY_ABOVE_FILL: Color32 = Color32::from_rgba_premultiplied(7, 29, 27, 44);
+    pub const EQUITY_BELOW_LINE: Color32 = Color32::from_rgb(239, 83, 80); // #EF5350 Crimson
+    pub const EQUITY_BELOW_FILL: Color32 = Color32::from_rgba_premultiplied(45, 16, 15, 48);
+    pub const EQUITY_BASELINE_REF: Color32 = Color32::from_rgb(132, 142, 156);
+    pub const BACKTEST_OOS_SPLIT: Color32 = Color32::from_rgb(255, 183, 77); // #FFB74D
+    pub const TRADE_LINK_WIN: Color32 = Color32::from_rgb(0, 230, 118); // #00E676
+    pub const TRADE_LINK_LOSS: Color32 = Color32::from_rgb(255, 82, 82); // #FF5252
+    pub const TRADE_FOCUS_HALO: Color32 = Color32::from_rgb(255, 213, 79); // #FFD54F
 }
 
 /// Layout regions computed dynamically from the available chart area on every frame (single-pane view).
@@ -354,12 +366,20 @@ fn default_atr_price_scale() -> PriceScale {
     PriceScale::new("atr-right", PriceScaleOptions::sumi_oscillator())
 }
 
+fn default_equity_price_scale() -> PriceScale {
+    PriceScale::new("equity-right", PriceScaleOptions::sumi_oscillator())
+}
+
 const fn default_main_stretch() -> f32 {
     4.0
 }
 
 const fn default_sub_stretch() -> f32 {
     1.0
+}
+
+const fn default_equity_stretch() -> f32 {
+    1.25
 }
 
 #[inline]
@@ -372,8 +392,8 @@ fn sanitize_stretch(val: f32, fallback: f32) -> f32 {
 }
 
 /// Modular viewport state coordinating the shared horizontal `TimeScale` and independent per-pane
-/// `PriceScale` instances (`main-right`, `volume-overlay`, `rsi-right`, `macd-right`, `atr-right`),
-/// proportional multi-pane stretch ratios, and inertial kinetic scrolling.
+/// `PriceScale` instances (`main-right`, `volume-overlay`, `rsi-right`, `macd-right`, `atr-right`,
+/// `equity-right`), proportional multi-pane stretch ratios, and inertial kinetic scrolling.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChartViewportState {
     pub time_scale: TimeScale,
@@ -386,6 +406,8 @@ pub struct ChartViewportState {
     pub macd_price_scale: PriceScale,
     #[serde(default = "default_atr_price_scale")]
     pub atr_price_scale: PriceScale,
+    #[serde(default = "default_equity_price_scale")]
+    pub equity_price_scale: PriceScale,
 
     #[serde(default = "default_main_stretch")]
     pub main_stretch: f32,
@@ -395,6 +417,8 @@ pub struct ChartViewportState {
     pub macd_stretch: f32,
     #[serde(default = "default_sub_stretch")]
     pub atr_stretch: f32,
+    #[serde(default = "default_equity_stretch")]
+    pub equity_stretch: f32,
 
     #[serde(skip)]
     pub kinetic: Option<KineticAnimation>,
@@ -421,10 +445,12 @@ impl ChartViewportState {
             rsi_price_scale: default_rsi_price_scale(),
             macd_price_scale: default_macd_price_scale(),
             atr_price_scale: default_atr_price_scale(),
+            equity_price_scale: default_equity_price_scale(),
             main_stretch: default_main_stretch(),
             rsi_stretch: default_sub_stretch(),
             macd_stretch: default_sub_stretch(),
             atr_stretch: default_sub_stretch(),
+            equity_stretch: default_equity_stretch(),
             kinetic: None,
             separator_drag: None,
         }
@@ -440,17 +466,21 @@ impl ChartViewportState {
         self.rsi_price_scale.sanitize_deserialized();
         self.macd_price_scale.sanitize_deserialized();
         self.atr_price_scale.sanitize_deserialized();
-        // Oscillator sub-panes always operate in Linear vertical space (`RSI`, `MACD`, `ATR`).
+        self.equity_price_scale.sanitize_deserialized();
+        // Oscillator / Equity sub-panes always operate in Linear vertical space (`RSI`, `MACD`, `ATR`, `Equity`).
         self.rsi_price_scale
             .set_mode(crate::viewport::PriceScaleMode::Normal);
         self.macd_price_scale
             .set_mode(crate::viewport::PriceScaleMode::Normal);
         self.atr_price_scale
             .set_mode(crate::viewport::PriceScaleMode::Normal);
+        self.equity_price_scale
+            .set_mode(crate::viewport::PriceScaleMode::Normal);
         self.main_stretch = sanitize_stretch(self.main_stretch, default_main_stretch());
         self.rsi_stretch = sanitize_stretch(self.rsi_stretch, default_sub_stretch());
         self.macd_stretch = sanitize_stretch(self.macd_stretch, default_sub_stretch());
         self.atr_stretch = sanitize_stretch(self.atr_stretch, default_sub_stretch());
+        self.equity_stretch = sanitize_stretch(self.equity_stretch, default_equity_stretch());
     }
 
     #[must_use]
@@ -459,6 +489,7 @@ impl ChartViewportState {
             OscillatorPaneId::Rsi => &self.rsi_price_scale,
             OscillatorPaneId::Macd => &self.macd_price_scale,
             OscillatorPaneId::Atr => &self.atr_price_scale,
+            OscillatorPaneId::Equity => &self.equity_price_scale,
         }
     }
 
@@ -467,6 +498,7 @@ impl ChartViewportState {
             OscillatorPaneId::Rsi => &mut self.rsi_price_scale,
             OscillatorPaneId::Macd => &mut self.macd_price_scale,
             OscillatorPaneId::Atr => &mut self.atr_price_scale,
+            OscillatorPaneId::Equity => &mut self.equity_price_scale,
         }
     }
 
@@ -476,6 +508,7 @@ impl ChartViewportState {
             OscillatorPaneId::Rsi => self.rsi_stretch,
             OscillatorPaneId::Macd => self.macd_stretch,
             OscillatorPaneId::Atr => self.atr_stretch,
+            OscillatorPaneId::Equity => self.equity_stretch,
         }
     }
 
@@ -485,6 +518,7 @@ impl ChartViewportState {
             OscillatorPaneId::Rsi => self.rsi_stretch = s,
             OscillatorPaneId::Macd => self.macd_stretch = s,
             OscillatorPaneId::Atr => self.atr_stretch = s,
+            OscillatorPaneId::Equity => self.equity_stretch = s,
         }
     }
 
@@ -503,13 +537,14 @@ impl ChartViewportState {
         }
     }
 
-    /// Resets proportional pane stretch ratios to `Main = 4.0`, `Oscillator = 1.0` (`PaneManager.ts:76–77`).
+    /// Resets proportional pane stretch ratios to `Main = 4.0`, `Oscillator = 1.0`, `Equity = 1.25` (`PaneManager.ts:76–77`).
     pub fn reset_pane_stretches(&mut self) {
         self.separator_drag = None;
         self.main_stretch = default_main_stretch();
         self.rsi_stretch = default_sub_stretch();
         self.macd_stretch = default_sub_stretch();
         self.atr_stretch = default_sub_stretch();
+        self.equity_stretch = default_equity_stretch();
     }
 
     /// Applies an exact LWC-style adjacent-pair stretch transfer (`pane-separator.ts:181–220`)
@@ -552,6 +587,7 @@ impl ChartViewportState {
         self.rsi_price_scale.reset_auto_scale();
         self.macd_price_scale.reset_auto_scale();
         self.atr_price_scale.reset_auto_scale();
+        self.equity_price_scale.reset_auto_scale();
     }
 
     /// Restores default `bar_spacing` (`8.0`), default future `right_offset` (`12.0`), and all price autoscales.
@@ -564,6 +600,7 @@ impl ChartViewportState {
         self.rsi_price_scale.reset_auto_scale();
         self.macd_price_scale.reset_auto_scale();
         self.atr_price_scale.reset_auto_scale();
+        self.equity_price_scale.reset_auto_scale();
     }
 
     /// Cancels transient kinetic scrolling and pane-splitter drag gestures (e.g. when a modal opens).
@@ -601,7 +638,7 @@ pub struct ChartDisplayConfig<'a> {
     pub show_volume: bool,
 }
 
-/// Optional Bar Replay, Paper Trading & Alert visual overlay state passed to [`render_workstation_chart_full`].
+/// Optional Bar Replay, Paper Trading, Alert & Strategy Backtest Lab visual overlay state passed to [`render_workstation_chart_full`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ChartReplayTradingOverlay<'a> {
     pub replay_active: bool,
@@ -609,6 +646,10 @@ pub struct ChartReplayTradingOverlay<'a> {
     pub replay_status_label: Option<&'a str>,
     pub trading_session: Option<&'a TradingSession>,
     pub alert_engine: Option<&'a AlertEngine>,
+    pub backtest_result: Option<&'a BacktestRunResult>,
+    pub show_equity_pane: bool,
+    pub show_backtest_trades_on_chart: bool,
+    pub focused_backtest_trade_id: Option<u64>,
     pub replay_cutoff_timestamp: Option<i64>,
     pub frontier_base_timestamp: Option<i64>,
     pub modal_open: bool,
@@ -643,6 +684,8 @@ pub struct ChartRenderReport {
     pub active_price_line_count: usize,
     pub active_alert_line_count: usize,
     pub rendered_alert_marker_count: usize,
+    pub equity_pane_active: bool,
+    pub rendered_backtest_trade_count: usize,
 }
 
 /// Renders the native candlestick chart, volume histogram, price/time axes, crosshair, and OHLCV overlay
@@ -766,7 +809,12 @@ fn render_workstation_chart_inner(
         .applied_config()
         .unwrap_or(&fallback_clean_indicators);
 
-    let active_osc_ids = indicators.active_oscillator_panes();
+    let mut active_osc_ids = indicators.active_oscillator_panes();
+    let equity_pane_active =
+        replay_trading.show_equity_pane && replay_trading.backtest_result.is_some();
+    if equity_pane_active && !active_osc_ids.contains(&OscillatorPaneId::Equity) {
+        active_osc_ids.push(OscillatorPaneId::Equity);
+    }
     let active_osc_specs: Vec<(OscillatorPaneId, f32)> = active_osc_ids
         .iter()
         .map(|&id| (id, viewport.oscillator_stretch(id)))
@@ -1019,6 +1067,7 @@ fn render_workstation_chart_inner(
                 osc.id,
                 viewport.oscillator_price_scale_mut(osc.id),
                 indicator_cache,
+                replay_trading.backtest_result,
                 init_strict.clone(),
             );
         }
@@ -1155,12 +1204,14 @@ fn render_workstation_chart_inner(
                     rsi_price_scale,
                     macd_price_scale,
                     atr_price_scale,
+                    equity_price_scale,
                     ..
                 } = viewport;
                 let osc_ps = match osc_id {
                     OscillatorPaneId::Rsi => rsi_price_scale,
                     OscillatorPaneId::Macd => macd_price_scale,
                     OscillatorPaneId::Atr => atr_price_scale,
+                    OscillatorPaneId::Equity => equity_price_scale,
                 };
                 handle_plot_interactions(
                     ui,
@@ -1214,6 +1265,7 @@ fn render_workstation_chart_inner(
             osc.id,
             viewport.oscillator_price_scale_mut(osc.id),
             indicator_cache,
+            replay_trading.backtest_result,
             strict_range.clone(),
         );
     }
@@ -1410,6 +1462,39 @@ fn render_workstation_chart_inner(
             (0, 0)
         };
 
+    let rendered_backtest_trade_count = if let Some(bt) = replay_trading.backtest_result {
+        if (replay_trading.show_backtest_trades_on_chart || equity_pane_active)
+            && let Some(split_idx) = bt.split_bar_index
+        {
+            paint_oos_split_marker(
+                &main_plot_painter,
+                multi_layout.main_plot_rect,
+                bt.bar_count,
+                candles.len(),
+                split_idx,
+                &main_vp,
+                false,
+            );
+        }
+        if replay_trading.show_backtest_trades_on_chart {
+            paint_backtest_trade_links(
+                &main_plot_painter,
+                multi_layout.main_plot_rect,
+                candles,
+                culling_range.clone(),
+                conflation_factor,
+                &main_vp,
+                bt,
+                replay_trading.focused_backtest_trade_id,
+                replay_trading.replay_cutoff_timestamp,
+            )
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
     if replay_trading.replay_active && !replay_trading.selecting_cut_bar {
         paint_replay_frontier(
             &main_plot_painter,
@@ -1422,11 +1507,19 @@ fn render_workstation_chart_inner(
         );
     }
 
-    // 10. Paint Stacked Oscillator Sub-Panes (`RSI`, `MACD`, `ATR`)
+    // 10. Paint Stacked Oscillator / Strategy Sub-Panes (`RSI`, `MACD`, `ATR`, `Equity`)
+    let equity_base_val = replay_trading
+        .backtest_result
+        .map_or(100_000.0, |bt| bt.config.initial_cash.max(1.0));
     for osc in &multi_layout.oscillators {
         let osc_ps = viewport.oscillator_price_scale(osc.id);
         let osc_plot_f64 = PlotRect::from_egui(osc.plot_rect);
-        let osc_vp = PaneViewport::new(&viewport.time_scale, osc_ps, osc_plot_f64, 1.0);
+        let osc_bv = if osc.id == OscillatorPaneId::Equity {
+            equity_base_val
+        } else {
+            1.0
+        };
+        let osc_vp = PaneViewport::new(&viewport.time_scale, osc_ps, osc_plot_f64, osc_bv);
 
         paint_horizontal_price_grid_and_ticks(
             &painter,
@@ -1434,7 +1527,7 @@ fn render_workstation_chart_inner(
             osc.price_axis_rect,
             osc_ps,
             &osc_vp,
-            1.0,
+            osc_bv,
             config.show_grid,
             42.0,
             2,
@@ -1487,6 +1580,22 @@ fn render_workstation_chart_inner(
                     &osc_vp,
                     Stroke::new(1.5, palette::IND_ATR),
                 );
+            }
+            OscillatorPaneId::Equity => {
+                if let Some(bt) = replay_trading.backtest_result {
+                    paint_equity_baseline_pane(
+                        &painter,
+                        &osc_painter,
+                        osc.plot_rect,
+                        osc.price_axis_rect,
+                        bt,
+                        candles.len(),
+                        culling_range.clone(),
+                        conflation_factor,
+                        osc_ps,
+                        &osc_vp,
+                    );
+                }
             }
         }
 
@@ -1640,11 +1749,16 @@ fn render_workstation_chart_inner(
                     cross_stroke,
                 );
                 if let Some(ov) = hovered_oscillator_value {
+                    let osc_bv = if id == OscillatorPaneId::Equity {
+                        equity_base_val
+                    } else {
+                        1.0
+                    };
                     paint_axis_cursor_pill(
                         &painter,
                         ax_rect,
                         pos.y,
-                        &viewport.oscillator_price_scale(id).format_price(ov, 1.0),
+                        &viewport.oscillator_price_scale(id).format_price(ov, osc_bv),
                     );
                 }
             }
@@ -1783,6 +1897,7 @@ fn render_workstation_chart_inner(
             osc.id,
             indicators,
             indicator_cache,
+            replay_trading.backtest_result,
             hud_series_index,
         );
     }
@@ -1841,6 +1956,8 @@ fn render_workstation_chart_inner(
         active_price_line_count,
         active_alert_line_count,
         rendered_alert_marker_count,
+        equity_pane_active,
+        rendered_backtest_trade_count,
     })
 }
 
@@ -2149,6 +2266,8 @@ pub fn render_shared_pane_candlestick_chart(
         active_price_line_count: 0,
         active_alert_line_count: 0,
         rendered_alert_marker_count: 0,
+        equity_pane_active: false,
+        rendered_backtest_trade_count: 0,
     })
 }
 
@@ -2888,6 +3007,680 @@ fn paint_macd_pane(
     );
 }
 
+#[inline]
+fn clip_screen_segment_to_rect(p0: Pos2, p1: Pos2, rect: Rect) -> Option<(Pos2, Pos2)> {
+    let min_x = f64::from(rect.left());
+    let max_x = f64::from(rect.right());
+    let min_y = f64::from(rect.top());
+    let max_y = f64::from(rect.bottom());
+
+    let x0 = f64::from(p0.x);
+    let y0 = f64::from(p0.y);
+    let dx = f64::from(p1.x) - x0;
+    let dy = f64::from(p1.y) - y0;
+
+    let mut t0 = 0.0_f64;
+    let mut t1 = 1.0_f64;
+    for (p, q) in [
+        (-dx, x0 - min_x),
+        (dx, max_x - x0),
+        (-dy, y0 - min_y),
+        (dy, max_y - y0),
+    ] {
+        if p.abs() <= 1e-12 {
+            if q < 0.0 {
+                return None;
+            }
+        } else {
+            let r = q / p;
+            if p < 0.0 {
+                if r > t1 {
+                    return None;
+                }
+                if r > t0 {
+                    t0 = r;
+                }
+            } else {
+                if r < t0 {
+                    return None;
+                }
+                if r < t1 {
+                    t1 = r;
+                }
+            }
+        }
+    }
+    Some((
+        Pos2::new((x0 + t0 * dx) as f32, (y0 + t0 * dy) as f32),
+        Pos2::new((x0 + t1 * dx) as f32, (y0 + t1 * dy) as f32),
+    ))
+}
+
+#[inline]
+fn emit_mesh_thick_segment(mesh: &mut Mesh, p0: Pos2, p1: Pos2, half_w: f32, color: Color32) {
+    let dx = p1.x - p0.x;
+    let dy = p1.y - p0.y;
+    let len_sq = dx * dx + dy * dy;
+    if len_sq <= 1e-6 {
+        let r = half_w.max(1.0);
+        mesh.add_colored_rect(Rect::from_center_size(p0, Vec2::splat(r * 2.0)), color);
+        return;
+    }
+    let inv = len_sq.sqrt().recip() * half_w;
+    let nx = -dy * inv;
+    let ny = dx * inv;
+    let Ok(b) = u32::try_from(mesh.vertices.len()) else {
+        return;
+    };
+    if b > u32::MAX - 4 {
+        return;
+    }
+    mesh.colored_vertex(Pos2::new(p0.x + nx, p0.y + ny), color);
+    mesh.colored_vertex(Pos2::new(p0.x - nx, p0.y - ny), color);
+    mesh.colored_vertex(Pos2::new(p1.x - nx, p1.y - ny), color);
+    mesh.colored_vertex(Pos2::new(p1.x + nx, p1.y + ny), color);
+    mesh.add_triangle(b, b + 1, b + 2);
+    mesh.add_triangle(b, b + 2, b + 3);
+}
+
+/// Emits a vertical-trapezoid slice between `(x0, y0) -> (x1, y1)` and `clamped_base_y`, splitting
+/// analytically at `y = plot_top` and `y = plot_bot` (`[MAJOR-05]`) so the shaded polygon matches
+/// the clipped stroke segment slope sub-pixel-identically without `f32` overflow at extreme zoom!
+#[allow(clippy::too_many_arguments)]
+fn emit_y_clipped_baseline_trapezoid(
+    fill_mesh: &mut Mesh,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    clamped_base_y: f32,
+    plot_top: f32,
+    plot_bot: f32,
+    fill_col: Color32,
+) {
+    if (x1 - x0).abs() <= 1e-4 {
+        return;
+    }
+    // Collect sorted split parameters `t in [0.0, 1.0]` where `y(t)` crosses `plot_top` or `plot_bot`.
+    let dy = y1 - y0;
+    let mut ts = [0.0_f32, 1.0_f32, 1.0_f32, 1.0_f32];
+    let mut n = 2_usize;
+    if dy.abs() > 1e-5 {
+        for bound_y in [plot_top, plot_bot] {
+            let t = (bound_y - y0) / dy;
+            if t > 1e-4 && t < 1.0 - 1e-4 {
+                ts[n] = t;
+                n += 1;
+            }
+        }
+        ts[..n].sort_by(|a, b| a.total_cmp(b));
+    }
+
+    for k in 0..(n - 1) {
+        let ta = ts[k];
+        let tb = ts[k + 1];
+        if tb - ta <= 1e-5 {
+            continue;
+        }
+        let xa = x0 + ta * (x1 - x0);
+        let xb = x0 + tb * (x1 - x0);
+        let ya = (y0 + ta * dy).clamp(plot_top, plot_bot);
+        let yb = (y0 + tb * dy).clamp(plot_top, plot_bot);
+        let top_a = ya.min(clamped_base_y);
+        let bot_a = ya.max(clamped_base_y);
+        let top_b = yb.min(clamped_base_y);
+        let bot_b = yb.max(clamped_base_y);
+        if (bot_a - top_a) > 0.05 || (bot_b - top_b) > 0.05 {
+            let Ok(bv) = u32::try_from(fill_mesh.vertices.len()) else {
+                return;
+            };
+            if bv > u32::MAX - 4 {
+                return;
+            }
+            fill_mesh.colored_vertex(Pos2::new(xa, top_a), fill_col);
+            fill_mesh.colored_vertex(Pos2::new(xa, bot_a), fill_col);
+            fill_mesh.colored_vertex(Pos2::new(xb, top_b), fill_col);
+            fill_mesh.colored_vertex(Pos2::new(xb, bot_b), fill_col);
+            fill_mesh.add_triangle(bv, bv + 1, bv + 2);
+            fill_mesh.add_triangle(bv + 1, bv + 3, bv + 2);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_oos_split_marker(
+    plot_painter: &egui::Painter,
+    plot_rect: Rect,
+    bt_bar_count: usize,
+    candle_len: usize,
+    split_idx: usize,
+    vp: &PaneViewport<'_>,
+    show_labels: bool,
+) {
+    if split_idx == 0 || split_idx >= bt_bar_count.min(candle_len) {
+        return;
+    }
+    let Some(sx) = vp.float_index_to_screen_x((split_idx as f64) - 0.5) else {
+        return;
+    };
+    let x = sx as f32;
+    if x < plot_rect.left() - 2.0 || x > plot_rect.right() + 2.0 {
+        return;
+    }
+
+    let mut y = plot_rect.top();
+    let bot = plot_rect.bottom();
+    let stroke = Stroke::new(1.25, palette::BACKTEST_OOS_SPLIT.gamma_multiply(0.85));
+    while y < bot {
+        let y_end = (y + 5.0).min(bot);
+        plot_painter.line_segment([Pos2::new(x, y), Pos2::new(x, y_end)], stroke);
+        y += 9.0;
+    }
+
+    if show_labels && plot_rect.height() >= 38.0 {
+        let tag_y = (plot_rect.bottom() - 11.0).max(plot_rect.top() + 10.0);
+        if x - plot_rect.left() >= 28.0 {
+            plot_painter.text(
+                Pos2::new(x - 5.0, tag_y),
+                Align2::RIGHT_CENTER,
+                "IS",
+                FontId::monospace(9.5),
+                palette::TEXT_MUTED,
+            );
+        }
+        if plot_rect.right() - x >= 34.0 {
+            plot_painter.text(
+                Pos2::new(x + 5.0, tag_y),
+                Align2::LEFT_CENTER,
+                "OOS",
+                FontId::monospace(9.5),
+                palette::BACKTEST_OOS_SPLIT,
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_equity_baseline_pane(
+    axis_painter: &egui::Painter,
+    plot_painter: &egui::Painter,
+    plot_rect: Rect,
+    price_axis_rect: Rect,
+    bt: &BacktestRunResult,
+    candle_len: usize,
+    culling_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    price_scale: &PriceScale,
+    vp: &PaneViewport<'_>,
+) {
+    let baseline = bt.config.initial_cash.max(1.0);
+    let Some(base_sy) = vp.price_to_screen_y(baseline) else {
+        return;
+    };
+    let base_y = base_sy as f32;
+    let clamped_base_y = base_y.clamp(plot_rect.top(), plot_rect.bottom());
+
+    // 1. Dashed horizontal `Initial Capital` (`0.0%`) baseline guide + subtle right-axis marker
+    if base_y >= plot_rect.top() && base_y <= plot_rect.bottom() {
+        let mut ref_mesh = Mesh::with_texture(egui::TextureId::default());
+        append_horizontal_styled_line_mesh(
+            &mut ref_mesh,
+            plot_rect.left(),
+            plot_rect.right(),
+            base_y,
+            1.0,
+            palette::EQUITY_BASELINE_REF.gamma_multiply(0.65),
+            LineDashStyle::Dashed,
+        );
+        if !ref_mesh.is_empty() {
+            plot_painter.add(Shape::mesh(ref_mesh));
+        }
+
+        let pill_y = base_y.clamp(price_axis_rect.top() + 8.0, price_axis_rect.bottom() - 8.0);
+        let pill_rect = Rect::from_min_max(
+            Pos2::new(price_axis_rect.left() + 2.0, pill_y - 7.5),
+            Pos2::new(price_axis_rect.right() - 2.0, pill_y + 7.5),
+        );
+        axis_painter.rect_filled(pill_rect, 2.5, Color32::from_rgb(31, 39, 53));
+        axis_painter.rect_stroke(
+            pill_rect,
+            2.5,
+            Stroke::new(1.0, palette::EQUITY_BASELINE_REF.gamma_multiply(0.55)),
+            StrokeKind::Inside,
+        );
+        axis_painter.text(
+            Pos2::new(price_axis_rect.left() + 6.0, pill_y),
+            Align2::LEFT_CENTER,
+            price_scale.format_price(baseline, 1.0),
+            FontId::monospace(9.8),
+            palette::TEXT_PRIMARY,
+        );
+    }
+
+    // 2. Optional `IS | OOS` walk-forward split boundary
+    if let Some(split_idx) = bt.split_bar_index {
+        paint_oos_split_marker(
+            plot_painter,
+            plot_rect,
+            bt.bar_count,
+            candle_len,
+            split_idx,
+            vp,
+            true,
+        );
+    }
+
+    // 3. Single-pass `egui::Mesh` Baseline-Split Area + Stroke (`LWC BaselineSeries` exact crossing split)
+    let total = bt.equity_values.len().min(candle_len);
+    let step = conflation_factor.max(1);
+    let clamped_start = culling_range.start.min(total);
+    let clamped_end = culling_range.end.min(total);
+    if clamped_start >= clamped_end {
+        return;
+    }
+
+    let est_samples = ((clamped_end - clamped_start) / step).saturating_add(4);
+    let mut fill_mesh = Mesh::with_texture(egui::TextureId::default());
+    fill_mesh.vertices.reserve(est_samples * 4);
+    fill_mesh.indices.reserve(est_samples * 6);
+    let mut stroke_mesh = Mesh::with_texture(egui::TextureId::default());
+    stroke_mesh.vertices.reserve(est_samples * 4);
+    stroke_mesh.indices.reserve(est_samples * 6);
+
+    let plot_top = plot_rect.top();
+    let plot_bot = plot_rect.bottom();
+    let half_w = 0.80_f32;
+
+    let mut emit_same_side = |x0: f32, y0: f32, x1: f32, y1: f32, is_above: bool| {
+        let (fill_col, line_col) = if is_above {
+            (palette::EQUITY_ABOVE_FILL, palette::EQUITY_ABOVE_LINE)
+        } else {
+            (palette::EQUITY_BELOW_FILL, palette::EQUITY_BELOW_LINE)
+        };
+
+        emit_y_clipped_baseline_trapezoid(
+            &mut fill_mesh,
+            x0,
+            y0,
+            x1,
+            y1,
+            clamped_base_y,
+            plot_top,
+            plot_bot,
+            fill_col,
+        );
+
+        if let Some((cp0, cp1)) =
+            clip_screen_segment_to_rect(Pos2::new(x0, y0), Pos2::new(x1, y1), plot_rect.expand(2.0))
+        {
+            emit_mesh_thick_segment(&mut stroke_mesh, cp0, cp1, half_w, line_col);
+        }
+    };
+
+    let mut prev_pt: Option<(f32, f32, f64)> = None;
+    let mut push_sample = |x: f32, y: f32, val: f64, prev: &mut Option<(f32, f32, f64)>| {
+        let d1 = val - baseline;
+        if let Some((x0, y0, d0)) = *prev {
+            if (d0 > 0.0 && d1 < 0.0) || (d0 < 0.0 && d1 > 0.0) {
+                let denom = y - y0;
+                let t = if denom.abs() > 1e-6 {
+                    ((base_y - y0) / denom).clamp(0.0, 1.0)
+                } else {
+                    0.5
+                };
+                let x_cross = x0 + t * (x - x0);
+                emit_same_side(x0, y0, x_cross, base_y, d0 >= 0.0);
+                emit_same_side(x_cross, base_y, x, y, d1 >= 0.0);
+            } else {
+                let is_above = if d0.abs() >= d1.abs() {
+                    d0 >= 0.0
+                } else {
+                    d1 >= 0.0
+                };
+                emit_same_side(x0, y0, x, y, is_above);
+            }
+        }
+        *prev = Some((x, y, d1));
+    };
+
+    if step == 1 {
+        let sample_start = clamped_start.saturating_sub(1);
+        let sample_end = (clamped_end + 1).min(total);
+        for idx in sample_start..sample_end {
+            if let Some(v) = bt.equity_values[idx].filter(|v| v.is_finite())
+                && let (Some(sx), Some(sy)) = (
+                    vp.float_index_to_screen_x(idx as f64),
+                    vp.price_to_screen_y(v),
+                )
+            {
+                push_sample(sx as f32, sy as f32, v, &mut prev_pt);
+            } else {
+                prev_pt = None;
+            }
+        }
+    } else {
+        let aligned_start = (clamped_start / step).saturating_sub(1) * step;
+        let aligned_end = clamped_end
+            .div_ceil(step)
+            .saturating_add(1)
+            .saturating_mul(step)
+            .min(total);
+        let mut b_start = aligned_start;
+        while b_start < aligned_end {
+            let b_end = (b_start + step).min(total);
+            if let Some(env) = bucket_line_envelope_indexed(
+                &bt.equity_values,
+                Some(&bt.equity_idx),
+                b_start,
+                b_end,
+            ) && let (Some(sx), Some(sy_in), Some(sy_out)) = (
+                vp.float_index_to_screen_x(env.center_logical_index),
+                vp.price_to_screen_y(env.entry_val),
+                vp.price_to_screen_y(env.exit_val),
+            ) {
+                let x = sx as f32;
+                if env.has_leading_gap {
+                    prev_pt = None;
+                }
+                let y_in = sy_in as f32;
+                let y_out = sy_out as f32;
+                if env.has_internal_gap {
+                    push_sample(x, y_in, env.entry_val, &mut prev_pt);
+                    prev_pt = None;
+                    push_sample(x, y_out, env.exit_val, &mut prev_pt);
+                } else if env.is_single || (y_out - y_in).abs() < 0.65 {
+                    let mid_y = 0.5 * (y_in + y_out);
+                    let mid_v = 0.5 * (env.entry_val + env.exit_val);
+                    push_sample(x, mid_y, mid_v, &mut prev_pt);
+                } else {
+                    push_sample(x, y_in, env.entry_val, &mut prev_pt);
+                    push_sample(x, y_out, env.exit_val, &mut prev_pt);
+                }
+                if env.has_trailing_gap {
+                    prev_pt = None;
+                }
+            } else {
+                prev_pt = None;
+            }
+            b_start = b_end;
+        }
+    }
+
+    if !fill_mesh.is_empty() {
+        plot_painter.add(Shape::mesh(fill_mesh));
+    }
+    if !stroke_mesh.is_empty() {
+        plot_painter.add(Shape::mesh(stroke_mesh));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_backtest_trade_links(
+    plot_painter: &egui::Painter,
+    plot_rect: Rect,
+    candles: &[Candle],
+    culling_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    main_vp: &PaneViewport<'_>,
+    bt: &BacktestRunResult,
+    focused_trade_id: Option<u64>,
+    replay_cutoff_timestamp: Option<i64>,
+) -> usize {
+    if bt.trades.is_empty() || candles.is_empty() || culling_range.is_empty() {
+        return 0;
+    }
+
+    let cf = conflation_factor.max(1);
+    let vis_start = if cf > 1 {
+        (culling_range.start / cf) * cf
+    } else {
+        culling_range.start
+    }
+    .min(candles.len());
+    let vis_end = if cf > 1 {
+        culling_range
+            .end
+            .div_ceil(cf)
+            .saturating_mul(cf)
+            .min(candles.len())
+    } else {
+        culling_range.end.min(candles.len())
+    };
+    if vis_start >= vis_end {
+        return 0;
+    }
+
+    let resolve_bar_idx = |bar_idx: usize, ts: i64| -> usize {
+        if bt.bar_count == candles.len() && candles.get(bar_idx).is_some_and(|c| c.timestamp == ts)
+        {
+            bar_idx
+        } else {
+            candles
+                .partition_point(|c| c.timestamp <= ts)
+                .saturating_sub(1)
+                .min(candles.len() - 1)
+        }
+    };
+
+    let resolve_logical_x = |idx: usize| -> f64 {
+        if cf > 1 {
+            conflated_candle_at(candles, idx, cf).map_or(idx as f64, |b| b.center_logical_index)
+        } else {
+            idx as f64
+        }
+    };
+
+    // O(log T) interval overlap query on non-overlapping chronological trades
+    let first_vis = if bt.bar_count == candles.len() {
+        bt.trades.partition_point(|t| t.exit_bar_index < vis_start)
+    } else {
+        let min_ts = candles[vis_start].timestamp;
+        bt.trades.partition_point(|t| t.exit_timestamp < min_ts)
+    };
+    let last_vis = if bt.bar_count == candles.len() {
+        bt.trades.partition_point(|t| t.entry_bar_index <= vis_end)
+    } else if vis_end < candles.len() {
+        let max_ts = candles[vis_end].timestamp;
+        bt.trades.partition_point(|t| t.entry_timestamp <= max_ts)
+    } else {
+        bt.trades.len()
+    };
+
+    let Some(vis_slice) = bt.trades.get(first_vis..last_vis) else {
+        return 0;
+    };
+    if vis_slice.is_empty() {
+        return 0;
+    }
+
+    const MAX_RENDERED_LINKS: usize = 192;
+    let stride = vis_slice.len().div_ceil(MAX_RENDERED_LINKS).max(1);
+    let cap = vis_slice.len().min(MAX_RENDERED_LINKS) + 2;
+
+    let mut mesh = Mesh::with_texture(egui::TextureId::default());
+    mesh.vertices.reserve(cap * 16);
+    mesh.indices.reserve(cap * 24);
+    let border_col = Color32::from_rgba_unmultiplied(10, 14, 20, 228);
+    let clip_rect = plot_rect.expand(3.0);
+
+    let mut rendered = 0_usize;
+    let mut focused_badge: Option<(Pos2, &BacktestTrade, Color32)> = None;
+
+    for (local_k, trade) in vis_slice.iter().enumerate() {
+        let is_focused = focused_trade_id == Some(trade.trade_id);
+        let global_k = first_vis + local_k;
+        if !is_focused && stride > 1 && !global_k.is_multiple_of(stride) {
+            continue;
+        }
+        if let Some(cutoff) = replay_cutoff_timestamp
+            && trade.exit_timestamp > cutoff
+        {
+            continue;
+        }
+
+        let entry_idx = resolve_bar_idx(trade.entry_bar_index, trade.entry_timestamp);
+        let exit_idx = resolve_bar_idx(trade.exit_bar_index, trade.exit_timestamp);
+        let (Some(ex0), Some(ey0), Some(ex1), Some(ey1)) = (
+            main_vp.float_index_to_screen_x(resolve_logical_x(entry_idx)),
+            main_vp.price_to_screen_y(trade.entry_price),
+            main_vp.float_index_to_screen_x(resolve_logical_x(exit_idx)),
+            main_vp.price_to_screen_y(trade.exit_price),
+        ) else {
+            continue;
+        };
+
+        let p0 = Pos2::new(ex0 as f32, ey0 as f32);
+        let p1 = Pos2::new(ex1 as f32, ey1 as f32);
+        let Some((cp0, cp1)) = clip_screen_segment_to_rect(p0, p1, clip_rect) else {
+            continue;
+        };
+
+        let base_col = if trade.net_pnl >= 0.0 {
+            palette::TRADE_LINK_WIN
+        } else {
+            palette::TRADE_LINK_LOSS
+        };
+
+        if is_focused {
+            emit_mesh_thick_segment(
+                &mut mesh,
+                cp0,
+                cp1,
+                2.5,
+                palette::TRADE_FOCUS_HALO.gamma_multiply(0.45),
+            );
+            emit_mesh_thick_segment(&mut mesh, cp0, cp1, 1.15, palette::TRADE_FOCUS_HALO);
+            let mid = Pos2::new(0.5 * (cp0.x + cp1.x), 0.5 * (cp0.y + cp1.y) - 14.0);
+            focused_badge = Some((mid, trade, base_col));
+        } else {
+            let line_alpha = if cf >= 4 { 0.45 } else { 0.68 };
+            emit_mesh_thick_segment(
+                &mut mesh,
+                cp0,
+                cp1,
+                0.72,
+                base_col.gamma_multiply(line_alpha),
+            );
+        }
+
+        let marker_r = if is_focused {
+            5.0_f32
+        } else if cf >= 8 {
+            2.6_f32
+        } else {
+            3.8_f32
+        };
+
+        // Entry arrow triangle at `p0` if inside `plot_rect`
+        if plot_rect.contains(p0) {
+            let entry_col = match trade.side {
+                PositionSide::Long => palette::MARKER_BUY_ARROW,
+                PositionSide::Short => palette::MARKER_SELL_ARROW,
+            };
+            let dir = match trade.side {
+                PositionSide::Long => -1.0_f32, // tip points UP
+                PositionSide::Short => 1.0_f32, // tip points DOWN
+            };
+            let tip = Pos2::new(p0.x, p0.y + dir * marker_r);
+            let bl = Pos2::new(p0.x - marker_r * 0.88, p0.y - dir * marker_r * 0.85);
+            let br = Pos2::new(p0.x + marker_r * 0.88, p0.y - dir * marker_r * 0.85);
+            let Ok(hb) = u32::try_from(mesh.vertices.len()) else {
+                break;
+            };
+            if hb > u32::MAX - 8 {
+                break;
+            }
+            mesh.colored_vertex(Pos2::new(tip.x, tip.y + dir * 0.9), border_col);
+            mesh.colored_vertex(Pos2::new(bl.x - 0.8, bl.y - dir * 0.7), border_col);
+            mesh.colored_vertex(Pos2::new(br.x + 0.8, br.y - dir * 0.7), border_col);
+            mesh.add_triangle(hb, hb + 1, hb + 2);
+
+            let ib = hb + 3;
+            mesh.colored_vertex(tip, entry_col);
+            mesh.colored_vertex(bl, entry_col);
+            mesh.colored_vertex(br, entry_col);
+            mesh.add_triangle(ib, ib + 1, ib + 2);
+        }
+
+        // Exit diamond at `p1` if inside `plot_rect`
+        if plot_rect.contains(p1) {
+            let exit_col = match trade.exit_reason {
+                BacktestExitReason::StopLoss | BacktestExitReason::MarginLiquidation => {
+                    palette::TRADE_STOP_LOSS
+                }
+                BacktestExitReason::TakeProfit => palette::TRADE_TAKE_PROFIT,
+                _ => base_col,
+            };
+            let dr = (marker_r * 0.92).max(2.3);
+            let outer = dr + 0.95;
+            let Ok(ob) = u32::try_from(mesh.vertices.len()) else {
+                break;
+            };
+            if ob > u32::MAX - 10 {
+                break;
+            }
+            mesh.colored_vertex(Pos2::new(p1.x, p1.y - outer), border_col);
+            mesh.colored_vertex(Pos2::new(p1.x + outer, p1.y), border_col);
+            mesh.colored_vertex(Pos2::new(p1.x, p1.y + outer), border_col);
+            mesh.colored_vertex(Pos2::new(p1.x - outer, p1.y), border_col);
+            mesh.add_triangle(ob, ob + 1, ob + 2);
+            mesh.add_triangle(ob, ob + 2, ob + 3);
+
+            let ib = ob + 4;
+            mesh.colored_vertex(Pos2::new(p1.x, p1.y - dr), exit_col);
+            mesh.colored_vertex(Pos2::new(p1.x + dr, p1.y), exit_col);
+            mesh.colored_vertex(Pos2::new(p1.x, p1.y + dr), exit_col);
+            mesh.colored_vertex(Pos2::new(p1.x - dr, p1.y), exit_col);
+            mesh.add_triangle(ib, ib + 1, ib + 2);
+            mesh.add_triangle(ib, ib + 2, ib + 3);
+        }
+
+        rendered += 1;
+    }
+
+    if !mesh.is_empty() {
+        plot_painter.add(Shape::mesh(mesh));
+    }
+
+    if let Some((anchor, trade, col)) = focused_badge {
+        let r_txt = trade
+            .r_multiple
+            .map_or_else(String::new, |r| format!(" ({r:+.2}R)"));
+        let label = format!(
+            "#{} {} {:+.2}%{r_txt} · {}",
+            trade.trade_id,
+            match trade.side {
+                PositionSide::Long => "LONG",
+                PositionSide::Short => "SHORT",
+            },
+            trade.return_pct,
+            trade.exit_reason.short_label()
+        );
+        let galley = plot_painter.layout_no_wrap(label, FontId::monospace(10.0), col);
+        let pad = Vec2::new(6.0, 2.5);
+        let size = galley.size() + pad * 2.0;
+        let bx = (anchor.x - size.x * 0.5).clamp(
+            plot_rect.left() + 6.0,
+            (plot_rect.right() - size.x - 6.0).max(plot_rect.left() + 6.0),
+        );
+        let by = (anchor.y - size.y * 0.5).clamp(
+            plot_rect.top() + 36.0,
+            (plot_rect.bottom() - size.y - 6.0).max(plot_rect.top() + 36.0),
+        );
+        let badge_rect = Rect::from_min_size(Pos2::new(bx, by), size);
+        plot_painter.rect_filled(badge_rect, 3.5, palette::BG_FLOATING_HUD);
+        plot_painter.rect_stroke(
+            badge_rect,
+            3.5,
+            Stroke::new(1.1, palette::TRADE_FOCUS_HALO),
+            StrokeKind::Inside,
+        );
+        plot_painter.galley(badge_rect.min + pad, galley, col);
+    }
+
+    rendered
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_latest_close_line_and_pill(
     painter: &egui::Painter,
@@ -3047,24 +3840,54 @@ fn paint_main_ohlcv_hud(
     } else {
         format!("{:.0}K", inspected_bucket.volume / 1_000.0)
     };
-    let hud_text = format!(
-        "{} · {}{confl_badge} · {}   O {:.2}   H {:.2}   L {:.2}   C {:.2}   {sign}{:.2} ({sign}{:.2}%)   Vol {vol_str}",
-        config.symbol,
-        config.timeframe,
-        inspected_bucket.date_label,
-        inspected_bucket.open,
-        inspected_bucket.high,
-        inspected_bucket.low,
-        inspected_bucket.close,
-        inspected_bucket.change(),
-        inspected_bucket.change_pct(),
-    );
+    let is_compact_hud = plot_rect.width() < 660.0;
+    let compact_date = if is_compact_hud && inspected_bucket.date_label.len() > 12 {
+        inspected_bucket
+            .date_label
+            .get(5..)
+            .unwrap_or(inspected_bucket.date_label)
+    } else {
+        inspected_bucket.date_label
+    };
+    let (hud_text, hud_font_size) = if is_compact_hud {
+        (
+            format!(
+                "{}·{}{confl_badge} {}  O{:.2} H{:.2} L{:.2} C{:.2} ({sign}{:.2}%) V{vol_str}",
+                config.symbol,
+                config.timeframe,
+                compact_date,
+                inspected_bucket.open,
+                inspected_bucket.high,
+                inspected_bucket.low,
+                inspected_bucket.close,
+                inspected_bucket.change_pct(),
+            ),
+            10.5_f32,
+        )
+    } else {
+        (
+            format!(
+                "{} · {}{confl_badge} · {}   O {:.2}   H {:.2}   L {:.2}   C {:.2}   {sign}{:.2} ({sign}{:.2}%)   Vol {vol_str}",
+                config.symbol,
+                config.timeframe,
+                inspected_bucket.date_label,
+                inspected_bucket.open,
+                inspected_bucket.high,
+                inspected_bucket.low,
+                inspected_bucket.close,
+                inspected_bucket.change(),
+                inspected_bucket.change_pct(),
+            ),
+            11.5_f32,
+        )
+    };
     let value_color = if inspected_bucket.is_bullish() {
         palette::BULLISH
     } else {
         palette::BEARISH
     };
-    let hud_galley = painter.layout_no_wrap(hud_text, FontId::monospace(11.5), value_color);
+    let hud_galley =
+        painter.layout_no_wrap(hud_text, FontId::monospace(hud_font_size), value_color);
     let desired_hud_w = (hud_galley.size().x + 22.0).max(160.0);
     let hud_rect = Rect::from_min_size(
         Pos2::new(plot_rect.left() + 12.0, plot_rect.top() + 8.0),
@@ -3190,12 +4013,14 @@ fn paint_main_overlay_hud(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_oscillator_hud(
     painter: &egui::Painter,
     plot_rect: Rect,
     id: OscillatorPaneId,
     indicators: &IndicatorConfig,
     cache: &IndicatorCache,
+    backtest_result: Option<&BacktestRunResult>,
     idx: usize,
 ) {
     let mut job = LayoutJob::default();
@@ -3288,6 +4113,86 @@ fn paint_oscillator_hud(
                     ..Default::default()
                 },
             );
+        }
+        OscillatorPaneId::Equity => {
+            if let Some(bt) = backtest_result {
+                let clamped_idx = idx.min(bt.equity_curve.len().saturating_sub(1));
+                let pt = bt.equity_curve.get(clamped_idx);
+                let base = bt.config.initial_cash.max(1.0);
+                let eq = pt.map_or(base, |p| p.equity);
+                let ret_pct = ((eq - base) / base) * 100.0;
+                let dd_pct = pt.map_or(0.0, |p| p.underwater_pct);
+                let ret_col = if ret_pct >= 0.0 {
+                    palette::EQUITY_ABOVE_LINE
+                } else {
+                    palette::EQUITY_BELOW_LINE
+                };
+                job.append(
+                    &format!(
+                        "EQUITY [{} · {}]  ",
+                        bt.config.preset.short_label(),
+                        bt.config.direction_mode.short_label()
+                    ),
+                    0.0,
+                    TextFormat {
+                        font_id: font.clone(),
+                        color: palette::TEXT_PRIMARY,
+                        ..Default::default()
+                    },
+                );
+                job.append(
+                    &format!("{eq:.0} ({ret_pct:+.2}%)   "),
+                    0.0,
+                    TextFormat {
+                        font_id: font.clone(),
+                        color: ret_col,
+                        ..Default::default()
+                    },
+                );
+                job.append(
+                    &format!("DD {dd_pct:.2}%"),
+                    0.0,
+                    TextFormat {
+                        font_id: font.clone(),
+                        color: if dd_pct < -0.01 {
+                            palette::EQUITY_BELOW_LINE
+                        } else {
+                            palette::TEXT_MUTED
+                        },
+                        ..Default::default()
+                    },
+                );
+                if let Some(split_idx) = bt.split_bar_index {
+                    let phase_lbl = if clamped_idx >= split_idx {
+                        "   [OOS]"
+                    } else {
+                        "   [IS]"
+                    };
+                    job.append(
+                        phase_lbl,
+                        0.0,
+                        TextFormat {
+                            font_id: font,
+                            color: if clamped_idx >= split_idx {
+                                palette::BACKTEST_OOS_SPLIT
+                            } else {
+                                palette::TEXT_MUTED
+                            },
+                            ..Default::default()
+                        },
+                    );
+                }
+            } else {
+                job.append(
+                    "EQUITY  —",
+                    0.0,
+                    TextFormat {
+                        font_id: font,
+                        color: palette::TEXT_MUTED,
+                        ..Default::default()
+                    },
+                );
+            }
         }
     }
 
@@ -3576,6 +4481,7 @@ fn refresh_oscillator_autoscale(
     id: OscillatorPaneId,
     price_scale: &mut PriceScale,
     cache: &IndicatorCache,
+    backtest_result: Option<&BacktestRunResult>,
     strict_range: std::ops::Range<usize>,
 ) {
     if !price_scale.is_auto_scale() {
@@ -3617,6 +4523,27 @@ fn refresh_oscillator_autoscale(
                 .range_bounds(&cache.atr, strict_range)
                 .unwrap_or((0.0, 1.0));
             price_scale.autoscale_raw_bounds(min_v, max_v, 1.0);
+        }
+        OscillatorPaneId::Equity => {
+            if let Some(bt) = backtest_result {
+                let base = bt.config.initial_cash.max(1.0);
+                let total = bt.equity_values.len();
+                let clamped = strict_range.start.min(total)..strict_range.end.min(total);
+                let (raw_min, raw_max) = bt
+                    .equity_idx
+                    .range_bounds(&bt.equity_values, clamped)
+                    .unwrap_or((base, base));
+                let min_v = raw_min.min(base);
+                let max_v = raw_max.max(base);
+                let pad = if (max_v - min_v).abs() < base * 1e-4 {
+                    base * 0.02
+                } else {
+                    0.0
+                };
+                price_scale.autoscale_raw_bounds(min_v - pad, max_v + pad, base);
+            } else {
+                price_scale.autoscale_raw_bounds(0.0, 100.0, 100.0);
+            }
         }
     }
 }
@@ -6356,5 +7283,369 @@ mod tests {
             (r_after_locked_pan.right_offset - ro_before_locked_pan).abs() > 1.0,
             "dragging over a locked drawing must pan shared TimeScale unimpeded"
         );
+    }
+
+    #[test]
+    fn equity_baseline_pane_layout_separator_resize_and_conflated_render() {
+        use crate::backtest::{
+            BacktestConfig, BacktestRunOptions, StrategyDirectionMode, StrategyPresetKind,
+            run_backtest_with_options,
+        };
+        use crate::data::Timeframe;
+
+        let candles = generate_synthetic_ohlcv(4_000);
+        let cfg = BacktestConfig {
+            preset: StrategyPresetKind::SmaEmaTrendCross,
+            direction_mode: StrategyDirectionMode::LongShort,
+            in_sample_split_pct: Some(0.70),
+            ..BacktestConfig::default()
+        };
+        let bt = run_backtest_with_options(
+            "SYNTH",
+            Timeframe::D1,
+            &candles,
+            &cfg,
+            BacktestRunOptions::default(),
+        );
+        let ind = IndicatorConfig {
+            show_sma: true,
+            show_ema: true,
+            show_bbands: false,
+            show_rsi: true,
+            show_macd: true,
+            show_atr: true,
+            ..IndicatorConfig::default()
+        };
+        let mut cache = IndicatorCache::new();
+        cache.sync(&candles, 1, &ind);
+
+        let mut vp = ChartViewportState::new();
+        vp.time_scale.set_total_bars(candles.len());
+        let mut drawings = DrawingStore::new();
+
+        let ctx = egui::Context::default();
+        let screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut rep_opt = None;
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    rep_opt = render_workstation_chart_full(
+                        ui,
+                        &candles,
+                        &mut vp,
+                        ChartDisplayConfig {
+                            symbol: "SYNTH",
+                            timeframe: "1D",
+                            show_grid: true,
+                            show_crosshair: true,
+                            show_volume: true,
+                        },
+                        &ind,
+                        &cache,
+                        &mut drawings,
+                        ChartReplayTradingOverlay {
+                            backtest_result: Some(&bt),
+                            show_equity_pane: true,
+                            show_backtest_trades_on_chart: true,
+                            focused_backtest_trade_id: bt.trades.first().map(|t| t.trade_id),
+                            ..ChartReplayTradingOverlay::default()
+                        },
+                    );
+                });
+            },
+        );
+        out.textures_delta.clear();
+        let rep = rep_opt.expect("5-pane render report");
+        assert_eq!(
+            rep.pane_count, 5,
+            "Main + RSI + MACD + ATR + Equity must produce 5 synchronized panes"
+        );
+        assert!(rep.equity_pane_active);
+
+        // Separator drag between ATR (`Some(Atr)`) and Equity (`Equity`) adjusts stretches cleanly!
+        let prev_eq_stretch = vp.equity_stretch;
+        vp.apply_separator_drag_delta(
+            Some(OscillatorPaneId::Atr),
+            OscillatorPaneId::Equity,
+            120.0,
+            -24.0,
+        );
+        assert!(vp.equity_stretch > prev_eq_stretch);
+
+        // Full-fit (`conflation > 1`) renders 2-Mesh baseline equity + trade links cleanly!
+        vp.fit_all();
+        let mut fit_rep_opt = None;
+        let mut fit_out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    fit_rep_opt = render_workstation_chart_full(
+                        ui,
+                        &candles,
+                        &mut vp,
+                        ChartDisplayConfig {
+                            symbol: "SYNTH",
+                            timeframe: "1D",
+                            show_grid: true,
+                            show_crosshair: true,
+                            show_volume: true,
+                        },
+                        &ind,
+                        &cache,
+                        &mut drawings,
+                        ChartReplayTradingOverlay {
+                            backtest_result: Some(&bt),
+                            show_equity_pane: true,
+                            show_backtest_trades_on_chart: true,
+                            focused_backtest_trade_id: bt.trades.last().map(|t| t.trade_id),
+                            ..ChartReplayTradingOverlay::default()
+                        },
+                    );
+                });
+            },
+        );
+        fit_out.textures_delta.clear();
+        let fit_rep = fit_rep_opt.expect("conflated equity render report");
+        assert!(fit_rep.conflation_factor >= 2);
+        assert!(fit_rep.equity_pane_active);
+        assert_eq!(fit_rep.rendered_backtest_trade_count, bt.trades.len());
+    }
+
+    #[test]
+    fn backtest_trade_links_binary_search_culling_offscreen_span_and_replay_cutoff() {
+        use crate::backtest::{
+            BacktestConfig, BacktestExitReason, BacktestRunOptions, BacktestTrade,
+            run_backtest_with_options,
+        };
+        use crate::data::Timeframe;
+        use crate::trading::PositionSide;
+
+        let candles = generate_synthetic_ohlcv(300);
+        let mut bt = run_backtest_with_options(
+            "SPAN",
+            Timeframe::D1,
+            &candles,
+            &BacktestConfig::default(),
+            BacktestRunOptions::default(),
+        );
+        // Inject two explicit trades:
+        // Trade #1 spans `[10 ..= 280]` (enters far left of viewport, exits far right of viewport `[100..200]`)!
+        // Trade #2 spans `[140 ..= 160]` (inside viewport, exits at bar `160`)!
+        bt.trades = vec![
+            BacktestTrade {
+                trade_id: 1,
+                side: PositionSide::Long,
+                quantity: 10.0,
+                entry_bar_index: 10,
+                exit_bar_index: 280,
+                entry_timestamp: candles[10].timestamp,
+                exit_timestamp: candles[280].timestamp,
+                entry_price: candles[10].open,
+                exit_price: candles[280].close,
+                bars_held: 270,
+                gross_pnl: 500.0,
+                entry_fee: 1.0,
+                exit_fee: 1.0,
+                exit_tax: 0.0,
+                net_pnl: 498.0,
+                return_pct: 5.0,
+                r_multiple: Some(1.5),
+                mae_pct: -1.0,
+                mfe_pct: 6.0,
+                exit_reason: BacktestExitReason::SignalExit,
+            },
+            BacktestTrade {
+                trade_id: 2,
+                side: PositionSide::Short,
+                quantity: 10.0,
+                entry_bar_index: 140,
+                exit_bar_index: 160,
+                entry_timestamp: candles[140].timestamp,
+                exit_timestamp: candles[160].timestamp,
+                entry_price: candles[140].open,
+                exit_price: candles[160].close,
+                bars_held: 20,
+                gross_pnl: -120.0,
+                entry_fee: 1.0,
+                exit_fee: 1.0,
+                exit_tax: 0.0,
+                net_pnl: -122.0,
+                return_pct: -1.2,
+                r_multiple: Some(-1.0),
+                mae_pct: -1.5,
+                mfe_pct: 0.4,
+                exit_reason: BacktestExitReason::StopLoss,
+            },
+        ];
+
+        let ind = IndicatorConfig::default();
+        let mut cache = IndicatorCache::new();
+        cache.sync(&candles, 1, &ind);
+        let mut vp = ChartViewportState::new();
+        vp.time_scale.set_total_bars(candles.len());
+        vp.time_scale.set_width(800.0);
+        vp.time_scale.set_bar_spacing(10.0); // ~80 visible bars
+        // Position viewport around bars `110..190` so Trade #1's endpoints (`10`, `280`) are BOTH off-screen!
+        vp.time_scale.set_right_offset(-109.0);
+        let mut drawings = DrawingStore::new();
+
+        let ctx = egui::Context::default();
+        let screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 640.0)));
+
+        // 1. Live mode (`replay_cutoff_timestamp: None`): BOTH spanning Trade #1 and local Trade #2 must render!
+        let mut rep_live = None;
+        let mut out1 = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    rep_live = render_workstation_chart_full(
+                        ui,
+                        &candles,
+                        &mut vp,
+                        ChartDisplayConfig {
+                            symbol: "SPAN",
+                            timeframe: "1D",
+                            show_grid: true,
+                            show_crosshair: false,
+                            show_volume: false,
+                        },
+                        &ind,
+                        &cache,
+                        &mut drawings,
+                        ChartReplayTradingOverlay {
+                            backtest_result: Some(&bt),
+                            show_equity_pane: false,
+                            show_backtest_trades_on_chart: true,
+                            focused_backtest_trade_id: Some(1),
+                            replay_cutoff_timestamp: None,
+                            ..ChartReplayTradingOverlay::default()
+                        },
+                    );
+                });
+            },
+        );
+        out1.textures_delta.clear();
+        assert_eq!(
+            rep_live.expect("live report").rendered_backtest_trade_count,
+            2,
+            "off-screen-endpoint spanning trade [10..280] must still render its clipped connector across [110..190]"
+        );
+
+        // 2. Causal Replay cutoff at bar `200` (`DEF-001`): Trade #1 exits at `280 > 200`, so ONLY Trade #2 (`exit=160 <= 200`) may render!
+        let mut rep_cut = None;
+        let mut out2 = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    rep_cut = render_workstation_chart_full(
+                        ui,
+                        &candles,
+                        &mut vp,
+                        ChartDisplayConfig {
+                            symbol: "SPAN",
+                            timeframe: "1D",
+                            show_grid: true,
+                            show_crosshair: false,
+                            show_volume: false,
+                        },
+                        &ind,
+                        &cache,
+                        &mut drawings,
+                        ChartReplayTradingOverlay {
+                            replay_active: true,
+                            backtest_result: Some(&bt),
+                            show_equity_pane: false,
+                            show_backtest_trades_on_chart: true,
+                            focused_backtest_trade_id: Some(1),
+                            replay_cutoff_timestamp: Some(candles[200].timestamp),
+                            ..ChartReplayTradingOverlay::default()
+                        },
+                    );
+                });
+            },
+        );
+        out2.textures_delta.clear();
+        assert_eq!(
+            rep_cut
+                .expect("cutoff report")
+                .rendered_backtest_trade_count,
+            1,
+            "DEF-001: trade exiting after replay_cutoff_timestamp must never render on chart"
+        );
+    }
+
+    #[test]
+    fn critic_r09_regression_equity_y_clipped_trapezoid_and_pan_invariant_trade_decimation() {
+        // 1. Verify `emit_y_clipped_baseline_trapezoid` splits cleanly at `plot_top = 100.0` and `plot_bot = 300.0`,
+        // keeping 100% of mesh vertices inside `[100.0, 300.0]` and intersecting `plot_top` at exact midpoint `x = 50.0`!
+        let mut fill_mesh = Mesh::with_texture(egui::TextureId::default());
+        emit_y_clipped_baseline_trapezoid(
+            &mut fill_mesh,
+            0.0,
+            140.0, // inside plot
+            100.0,
+            60.0, // 40px above `plot_top = 100.0` -> crosses `plot_top` at `t = 0.5` (`x = 50.0`)!
+            220.0, // baseline inside plot
+            100.0,
+            300.0,
+            palette::EQUITY_ABOVE_FILL,
+        );
+        assert_eq!(
+            fill_mesh.vertices.len(),
+            8,
+            "must split into 2 exact sub-trapezoids (8 vertices)"
+        );
+        for v in &fill_mesh.vertices {
+            assert!(
+                v.pos.y >= 100.0 - 1e-4 && v.pos.y <= 300.0 + 1e-4,
+                "vertex y={} escaped [plot_top, plot_bot]",
+                v.pos.y
+            );
+        }
+        assert!(
+            fill_mesh
+                .vertices
+                .iter()
+                .any(|v| (v.pos.x - 50.0).abs() < 1e-3 && (v.pos.y - 100.0).abs() < 1e-3),
+            "trapezoid split must intersect plot_top at exact analytical x_clip = 50.0"
+        );
+
+        // 2. Verify global-index decimation (`global_k % stride == 0`) is invariant when `first_vis` shifts by 1!
+        let stride = 2_usize;
+        let selected_at_pan_0: Vec<usize> = (10..260)
+            .enumerate()
+            .filter_map(|(local_k, trade_idx)| {
+                let global_k = 10 + local_k;
+                global_k.is_multiple_of(stride).then_some(trade_idx)
+            })
+            .collect();
+        let selected_at_pan_1: Vec<usize> = (11..261)
+            .enumerate()
+            .filter_map(|(local_k, trade_idx)| {
+                let global_k = 11 + local_k;
+                global_k.is_multiple_of(stride).then_some(trade_idx)
+            })
+            .collect();
+        // Every shared visible trade in `[11..260)` must have identical selection status (zero panning strobe!).
+        for tid in 11..260 {
+            assert_eq!(
+                selected_at_pan_0.contains(&tid),
+                selected_at_pan_1.contains(&tid),
+                "trade #{tid} strobed when panning by 1 bar"
+            );
+        }
     }
 }
