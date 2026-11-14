@@ -63,7 +63,9 @@ pub fn drawing_line_value_at_bar(drawing: &Drawing, bar_index: usize) -> Option<
         }
         DrawingGeometry::Rectangle { .. }
         | DrawingGeometry::FibonacciRetracement { .. }
-        | DrawingGeometry::RiskRewardBox { .. } => None,
+        | DrawingGeometry::RiskRewardBox { .. }
+        | DrawingGeometry::FixedRangeVolumeProfile { .. }
+        | DrawingGeometry::AnchoredVwap { .. } => None,
     }
 }
 
@@ -310,7 +312,9 @@ fn validate_condition(
                     }
                     DrawingGeometry::Rectangle { .. }
                     | DrawingGeometry::FibonacciRetracement { .. }
-                    | DrawingGeometry::RiskRewardBox { .. } => {
+                    | DrawingGeometry::RiskRewardBox { .. }
+                    | DrawingGeometry::FixedRangeVolumeProfile { .. }
+                    | DrawingGeometry::AnchoredVwap { .. } => {
                         Err(AlertError::UnsupportedDrawingGeometry)
                     }
                 }

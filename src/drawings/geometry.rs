@@ -1,3 +1,5 @@
+use crate::indicators::compute_anchored_vwap;
+use crate::model::Candle;
 use crate::viewport::{PriceScale, TimeScale};
 
 use super::{Drawing, DrawingAnchor, DrawingGeometry, FIBONACCI_RATIOS, FibDirection};
@@ -197,6 +199,24 @@ pub enum ProjectedDrawingShape {
         stop_line: Option<LocalSegment>,
         side_borders: [Option<LocalSegment>; 2],
     },
+    FixedRangeProfile {
+        raw_x_left: f64,
+        raw_x_right: f64,
+        clipped_box: Option<LocalRect>,
+        left_border: Option<LocalSegment>,
+        right_border: Option<LocalSegment>,
+        min_bar_index: f64,
+        max_bar_index: f64,
+        row_count: u16,
+    },
+    AnchoredVwap {
+        anchor_local: LocalPoint,
+        anchor_marker: Option<LocalSegment>,
+        anchor_bar_index: f64,
+        anchor_value: f64,
+        show_bands: bool,
+        tail_segments: Vec<LocalSegment>,
+    },
 }
 
 /// Complete pane-local projection of a [`Drawing`].
@@ -217,6 +237,7 @@ pub struct PaneDrawingProjection<'a> {
     pub width: f64,
     pub height: f64,
     pub base_value: f64,
+    pub candles: Option<&'a [Candle]>,
 }
 
 impl<'a> PaneDrawingProjection<'a> {
@@ -235,7 +256,15 @@ impl<'a> PaneDrawingProjection<'a> {
             width,
             height,
             base_value,
+            candles: None,
         }
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn with_candles(mut self, candles: &'a [Candle]) -> Self {
+        self.candles = Some(candles);
+        self
     }
 
     #[inline]
@@ -602,6 +631,160 @@ impl<'a> PaneDrawingProjection<'a> {
                         target_line,
                         stop_line,
                         side_borders,
+                    },
+                })
+            }
+            DrawingGeometry::FixedRangeVolumeProfile {
+                start,
+                end,
+                row_count,
+            } => {
+                let p0 = self.anchor_to_local(start)?;
+                let p1 = self.anchor_to_local(end)?;
+                let raw_x_left = p0.x.min(p1.x);
+                let raw_x_right = p0.x.max(p1.x).max(raw_x_left + 16.0);
+                let full_strip = LocalRect {
+                    left: raw_x_left,
+                    top: bounds.top,
+                    right: raw_x_right,
+                    bottom: bounds.bottom,
+                };
+                let clipped_box = full_strip
+                    .intersect(bounds)
+                    .filter(|r| r.width() > 0.0 && r.height() > 0.0);
+                let left_border = clip_parametric_line(
+                    LocalPoint::new(raw_x_left, bounds.top),
+                    LocalPoint::new(raw_x_left, bounds.bottom),
+                    0.0,
+                    1.0,
+                    bounds,
+                );
+                let right_border = clip_parametric_line(
+                    LocalPoint::new(raw_x_right, bounds.top),
+                    LocalPoint::new(raw_x_right, bounds.bottom),
+                    0.0,
+                    1.0,
+                    bounds,
+                );
+                let clamp_frvp_y = |y: f64| -> f64 {
+                    if bounds.height() >= 20.0 {
+                        y.clamp(bounds.top + 10.0, bounds.bottom - 10.0)
+                    } else {
+                        0.5 * (bounds.top + bounds.bottom)
+                    }
+                };
+                let mut handles = Vec::with_capacity(2);
+                if p0.x.is_finite() && p0.x >= bounds.left - 8.0 && p0.x <= bounds.right + 8.0 {
+                    handles.push(ProjectedHandle {
+                        part: HandlePart::Anchor(0),
+                        pos: LocalPoint::new(p0.x, clamp_frvp_y(p0.y)),
+                    });
+                }
+                if p1.x.is_finite() && p1.x >= bounds.left - 8.0 && p1.x <= bounds.right + 8.0 {
+                    handles.push(ProjectedHandle {
+                        part: HandlePart::Anchor(1),
+                        pos: LocalPoint::new(p1.x, clamp_frvp_y(p1.y)),
+                    });
+                }
+                Some(ProjectedDrawing {
+                    id: drawing.id,
+                    locked: drawing.locked,
+                    anchors_local: vec![p0, p1],
+                    handles,
+                    shape: ProjectedDrawingShape::FixedRangeProfile {
+                        raw_x_left,
+                        raw_x_right,
+                        clipped_box,
+                        left_border,
+                        right_border,
+                        min_bar_index: start.bar_index.min(end.bar_index),
+                        max_bar_index: start.bar_index.max(end.bar_index),
+                        row_count,
+                    },
+                })
+            }
+            DrawingGeometry::AnchoredVwap { anchor, show_bands } => {
+                let p0 = self.anchor_to_local(anchor)?;
+                let marker_half = 18.0_f64;
+                let anchor_marker = clip_parametric_line(
+                    LocalPoint::new(p0.x, p0.y - marker_half),
+                    LocalPoint::new(p0.x, p0.y + marker_half),
+                    0.0,
+                    1.0,
+                    bounds,
+                );
+                let mut handles = Vec::with_capacity(1);
+                if bounds.contains_with_margin(p0, 8.0) {
+                    handles.push(ProjectedHandle {
+                        part: HandlePart::Anchor(0),
+                        pos: p0,
+                    });
+                }
+                let mut tail_segments = Vec::new();
+                if let Some(candles) = self.candles
+                    && !candles.is_empty()
+                    && anchor.bar_index >= -0.5
+                {
+                    let a_idx = anchor.bar_index.round().max(0.0) as usize;
+                    if a_idx < candles.len() {
+                        let vwap_out = compute_anchored_vwap(&candles[a_idx..], 0, 1.0, 2.0);
+                        let strict = self.time_scale.strict_visible_data_range();
+                        let vis_start =
+                            strict.start.saturating_sub(2).max(a_idx).min(candles.len());
+                        let vis_end = strict
+                            .end
+                            .saturating_add(2)
+                            .min(candles.len())
+                            .max(vis_start);
+                        let step = ((vis_end - vis_start) / 256).max(1);
+                        let map_pt = |idx: usize| -> Option<LocalPoint> {
+                            let val = vwap_out.vwap.get(idx - a_idx).copied().flatten()?;
+                            if !val.is_finite() {
+                                return None;
+                            }
+                            let x = self.time_scale.float_index_to_local_x(idx as f64)?;
+                            let y = self.price_scale.price_to_local_y(val, self.base_value)?;
+                            (x.is_finite() && y.is_finite()).then_some(LocalPoint::new(x, y))
+                        };
+                        let mut prev_pt: Option<LocalPoint> = None;
+                        let mut k = vis_start;
+                        while k < vis_end {
+                            if let Some(curr) = map_pt(k) {
+                                if let Some(prev) = prev_pt
+                                    && let Some(seg) =
+                                        clip_parametric_line(prev, curr, 0.0, 1.0, bounds)
+                                {
+                                    tail_segments.push(seg);
+                                }
+                                prev_pt = Some(curr);
+                            } else {
+                                prev_pt = None;
+                            }
+                            k += step;
+                        }
+                        if step > 1
+                            && vis_end > vis_start + 1
+                            && !(vis_end - 1 - vis_start).is_multiple_of(step)
+                            && let Some(curr) = map_pt(vis_end - 1)
+                            && let Some(prev) = prev_pt
+                            && let Some(seg) = clip_parametric_line(prev, curr, 0.0, 1.0, bounds)
+                        {
+                            tail_segments.push(seg);
+                        }
+                    }
+                }
+                Some(ProjectedDrawing {
+                    id: drawing.id,
+                    locked: drawing.locked,
+                    anchors_local: vec![p0],
+                    handles,
+                    shape: ProjectedDrawingShape::AnchoredVwap {
+                        anchor_local: p0,
+                        anchor_marker,
+                        anchor_bar_index: anchor.bar_index,
+                        anchor_value: anchor.value,
+                        show_bands,
+                        tail_segments,
                     },
                 })
             }

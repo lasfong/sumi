@@ -7,6 +7,9 @@
 pub mod bands;
 pub mod moving_averages;
 pub mod oscillators;
+pub mod relative_strength;
+pub mod volume_profile;
+pub mod vwap;
 
 #[cfg(test)]
 mod tests;
@@ -15,6 +18,7 @@ use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
+use crate::data::Timeframe;
 use crate::model::Candle;
 
 pub use bands::{
@@ -29,6 +33,15 @@ pub use oscillators::{
     RSI_REFERENCE_LEVELS, RsiIndicator, compute_atr, compute_macd, compute_macd_slices,
     compute_rsi, compute_rsi_slices, true_range,
 };
+pub use relative_strength::{
+    MAX_BENCHMARK_CARRY_SECONDS, RS_REFERENCE_LEVELS, RelativeStrengthOutput,
+    compute_rebased_comparison_series, compute_relative_strength,
+};
+pub use volume_profile::{
+    MAX_VOLUME_PROFILE_ROWS, MIN_VOLUME_PROFILE_ROWS, VolumeProfileBin, VolumeProfileConfig,
+    VolumeProfileResult, compute_volume_profile, intrabar_buy_fraction,
+};
+pub use vwap::{VwapBandsOutput, compute_anchored_vwap, compute_session_vwap, session_bucket_key};
 
 /// Target pane placement for an indicator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +102,7 @@ pub enum OscillatorPaneId {
     Macd,
     Atr,
     Equity,
+    RelativeStrength,
 }
 
 impl OscillatorPaneId {
@@ -99,6 +113,7 @@ impl OscillatorPaneId {
             Self::Macd => "osc-macd",
             Self::Atr => "osc-atr",
             Self::Equity => "osc-equity",
+            Self::RelativeStrength => "osc-rs",
         }
     }
 
@@ -109,6 +124,7 @@ impl OscillatorPaneId {
             Self::Macd => "MACD",
             Self::Atr => "ATR",
             Self::Equity => "EQUITY",
+            Self::RelativeStrength => "RS",
         }
     }
 }
@@ -125,6 +141,12 @@ pub struct IndicatorConfig {
     pub show_bbands: bool,
     pub bb_period: usize,
     pub bb_std_mult: f64,
+    pub show_vwap: bool,
+    pub vwap_band_1: f64,
+    pub vwap_band_2: f64,
+    pub show_vrvp: bool,
+    pub vrvp_rows: usize,
+    pub vrvp_value_area_pct: f64,
 
     // Stacked oscillator sub-panes
     pub show_rsi: bool,
@@ -135,6 +157,8 @@ pub struct IndicatorConfig {
     pub macd_signal: usize,
     pub show_atr: bool,
     pub atr_period: usize,
+    pub show_rs: bool,
+    pub rs_sma_period: usize,
 }
 
 impl Default for IndicatorConfig {
@@ -147,6 +171,12 @@ impl Default for IndicatorConfig {
             show_bbands: false,
             bb_period: 20,
             bb_std_mult: 2.0,
+            show_vwap: false,
+            vwap_band_1: 1.0,
+            vwap_band_2: 2.0,
+            show_vrvp: false,
+            vrvp_rows: 40,
+            vrvp_value_area_pct: 0.70,
             show_rsi: true,
             rsi_period: 14,
             show_macd: false,
@@ -155,6 +185,8 @@ impl Default for IndicatorConfig {
             macd_signal: 9,
             show_atr: false,
             atr_period: 14,
+            show_rs: false,
+            rs_sma_period: 20,
         }
     }
 }
@@ -170,6 +202,27 @@ impl IndicatorConfig {
         } else {
             self.bb_std_mult = self.bb_std_mult.clamp(0.1, 20.0);
         }
+        if !self.vwap_band_1.is_finite() {
+            self.vwap_band_1 = 1.0;
+        } else {
+            self.vwap_band_1 = self.vwap_band_1.clamp(0.1, 10.0);
+        }
+        if !self.vwap_band_2.is_finite() {
+            self.vwap_band_2 = 2.0;
+        } else {
+            self.vwap_band_2 = self.vwap_band_2.clamp(0.2, 15.0);
+        }
+        if self.vwap_band_2 < self.vwap_band_1 {
+            std::mem::swap(&mut self.vwap_band_1, &mut self.vwap_band_2);
+        }
+        self.vrvp_rows = self
+            .vrvp_rows
+            .clamp(MIN_VOLUME_PROFILE_ROWS, MAX_VOLUME_PROFILE_ROWS);
+        if !self.vrvp_value_area_pct.is_finite() {
+            self.vrvp_value_area_pct = 0.70;
+        } else {
+            self.vrvp_value_area_pct = self.vrvp_value_area_pct.clamp(0.10, 0.95);
+        }
         self.rsi_period = self.rsi_period.clamp(2, 5_000);
         self.macd_fast = self.macd_fast.clamp(2, 5_000);
         self.macd_slow = self.macd_slow.clamp(2, 5_000);
@@ -178,12 +231,13 @@ impl IndicatorConfig {
         }
         self.macd_signal = self.macd_signal.clamp(1, 5_000);
         self.atr_period = self.atr_period.clamp(1, 5_000);
+        self.rs_sma_period = self.rs_sma_period.clamp(1, 5_000);
     }
 
     /// Returns the ordered list of active oscillator sub-panes below the main price pane.
     #[must_use]
     pub fn active_oscillator_panes(&self) -> Vec<OscillatorPaneId> {
-        let mut panes = Vec::with_capacity(3);
+        let mut panes = Vec::with_capacity(4);
         if self.show_rsi {
             panes.push(OscillatorPaneId::Rsi);
         }
@@ -193,12 +247,15 @@ impl IndicatorConfig {
         if self.show_atr {
             panes.push(OscillatorPaneId::Atr);
         }
+        if self.show_rs {
+            panes.push(OscillatorPaneId::RelativeStrength);
+        }
         panes
     }
 
     #[must_use]
     pub const fn any_overlay_enabled(&self) -> bool {
-        self.show_sma || self.show_ema || self.show_bbands
+        self.show_sma || self.show_ema || self.show_bbands || self.show_vwap || self.show_vrvp
     }
 }
 
@@ -342,6 +399,36 @@ impl SeriesBlockIndex {
 
         (min_v.is_finite() && max_v.is_finite()).then_some((min_v, max_v))
     }
+
+    /// Returns the first index `i` in `range` where `series[i]` is finite, skipping empty `16`-bar
+    /// blocks via the precomputed block index.
+    #[must_use]
+    pub fn first_valid_index(&self, series: &[Option<f64>], range: Range<usize>) -> Option<usize> {
+        let start = range.start.min(series.len());
+        let end = range.end.min(series.len());
+        if start >= end {
+            return None;
+        }
+        if !self.is_synced_with(series) {
+            return (start..end).find(|&i| series[i].is_some_and(f64::is_finite));
+        }
+        let first_blk = start / Self::BLOCK_SIZE;
+        let last_blk = (end - 1) / Self::BLOCK_SIZE;
+        for blk_idx in first_blk..=last_blk {
+            if let Some(blk) = &self.blocks[blk_idx] {
+                if blk.first_idx >= start && blk.first_idx < end {
+                    return Some(blk.first_idx);
+                }
+                let sub_s = start.max(blk_idx * Self::BLOCK_SIZE);
+                let sub_e = end.min((blk_idx + 1) * Self::BLOCK_SIZE);
+                if let Some(found) = (sub_s..sub_e).find(|&i| series[i].is_some_and(f64::is_finite))
+                {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
 }
 
 /// Dirty-tracked cache of computed indicator series (plus 16-bar block indices) so panning,
@@ -359,6 +446,13 @@ pub struct IndicatorCache {
     pub bb_upper_idx: SeriesBlockIndex,
     pub bb_middle_idx: SeriesBlockIndex,
     pub bb_lower_idx: SeriesBlockIndex,
+    pub vwap: VwapBandsOutput,
+    pub vwap_idx: SeriesBlockIndex,
+    pub vwap_u1_idx: SeriesBlockIndex,
+    pub vwap_l1_idx: SeriesBlockIndex,
+    pub vwap_u2_idx: SeriesBlockIndex,
+    pub vwap_l2_idx: SeriesBlockIndex,
+    vwap_context: Option<(Timeframe, i64)>,
     pub rsi: Vec<Option<f64>>,
     pub rsi_idx: SeriesBlockIndex,
     pub macd: MacdOutput,
@@ -367,6 +461,21 @@ pub struct IndicatorCache {
     pub macd_hist_idx: SeriesBlockIndex,
     pub atr: Vec<Option<f64>>,
     pub atr_idx: SeriesBlockIndex,
+    pub rs: RelativeStrengthOutput,
+    pub rs_line_idx: SeriesBlockIndex,
+    pub rs_sma_idx: SeriesBlockIndex,
+    rs_cache_key: Option<RsCacheKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RsCacheKey {
+    dataset_generation: u64,
+    dataset_len: usize,
+    symbol_tf: Timeframe,
+    benchmark_key: String,
+    benchmark_generation: u64,
+    replay_causal_close_timestamp: Option<i64>,
+    sma_period: usize,
 }
 
 impl IndicatorCache {
@@ -381,9 +490,30 @@ impl IndicatorCache {
         self.applied_config.as_ref()
     }
 
+    /// Returns the dataset generation token recorded by the most recent `sync` call.
+    #[must_use]
+    pub const fn dataset_generation(&self) -> u64 {
+        self.dataset_generation
+    }
+
     /// Ensures all currently enabled indicators in `config` are up-to-date for `(candles, dataset_generation)`.
-    /// Recomputes **only** the specific indicator(s) whose toggle, parameter, or dataset generation changed.
+    /// Uses daily UTC session defaults for `VWAP`; prefer [`Self::sync_with_session_context`] when
+    /// venue timezone and active chart timeframe are known.
     pub fn sync(&mut self, candles: &[Candle], dataset_generation: u64, config: &IndicatorConfig) {
+        let (tf, utc_off) = self.vwap_context.unwrap_or((Timeframe::D1, 0));
+        self.sync_with_session_context(candles, dataset_generation, config, tf, utc_off);
+    }
+
+    /// Ensures all currently enabled indicators in `config` (including timezone-aware `Session VWAP`)
+    /// are up-to-date for `(candles, dataset_generation, timeframe, utc_offset_seconds)`.
+    pub fn sync_with_session_context(
+        &mut self,
+        candles: &[Candle],
+        dataset_generation: u64,
+        config: &IndicatorConfig,
+        timeframe: Timeframe,
+        utc_offset_seconds: i64,
+    ) {
         let mut clean_cfg = config.clone();
         clean_cfg.sanitize_deserialized();
 
@@ -399,6 +529,13 @@ impl IndicatorCache {
             self.bb_upper_idx.clear();
             self.bb_middle_idx.clear();
             self.bb_lower_idx.clear();
+            self.vwap = VwapBandsOutput::default();
+            self.vwap_idx.clear();
+            self.vwap_u1_idx.clear();
+            self.vwap_l1_idx.clear();
+            self.vwap_u2_idx.clear();
+            self.vwap_l2_idx.clear();
+            self.vwap_context = None;
             self.rsi.clear();
             self.rsi_idx.clear();
             self.macd = MacdOutput::default();
@@ -407,6 +544,10 @@ impl IndicatorCache {
             self.macd_hist_idx.clear();
             self.atr.clear();
             self.atr_idx.clear();
+            self.rs = RelativeStrengthOutput::default();
+            self.rs_line_idx.clear();
+            self.rs_sma_idx.clear();
+            self.rs_cache_key = None;
             None
         } else {
             self.applied_config.as_ref()
@@ -424,6 +565,13 @@ impl IndicatorCache {
                 || prev_cfg.is_none_or(|p| {
                     p.bb_period != clean_cfg.bb_period
                         || (p.bb_std_mult - clean_cfg.bb_std_mult).abs() > 1e-12
+                }));
+        let need_vwap = clean_cfg.show_vwap
+            && (self.vwap.vwap.len() != candles.len()
+                || self.vwap_context != Some((timeframe, utc_offset_seconds))
+                || prev_cfg.is_none_or(|p| {
+                    (p.vwap_band_1 - clean_cfg.vwap_band_1).abs() > 1e-12
+                        || (p.vwap_band_2 - clean_cfg.vwap_band_2).abs() > 1e-12
                 }));
         let need_rsi = clean_cfg.show_rsi
             && (self.rsi.len() != candles.len()
@@ -472,6 +620,21 @@ impl IndicatorCache {
                 self.macd_hist_idx = SeriesBlockIndex::build(&self.macd.histogram);
             }
         }
+        if need_vwap {
+            self.vwap = compute_session_vwap(
+                candles,
+                timeframe,
+                utc_offset_seconds,
+                clean_cfg.vwap_band_1,
+                clean_cfg.vwap_band_2,
+            );
+            self.vwap_idx = SeriesBlockIndex::build(&self.vwap.vwap);
+            self.vwap_u1_idx = SeriesBlockIndex::build(&self.vwap.upper_1);
+            self.vwap_l1_idx = SeriesBlockIndex::build(&self.vwap.lower_1);
+            self.vwap_u2_idx = SeriesBlockIndex::build(&self.vwap.upper_2);
+            self.vwap_l2_idx = SeriesBlockIndex::build(&self.vwap.lower_2);
+            self.vwap_context = Some((timeframe, utc_offset_seconds));
+        }
         if need_atr {
             self.atr = compute_atr(candles, clean_cfg.atr_period);
             self.atr_idx = SeriesBlockIndex::build(&self.atr);
@@ -480,6 +643,58 @@ impl IndicatorCache {
         self.dataset_generation = dataset_generation;
         self.dataset_len = candles.len();
         self.applied_config = Some(clean_cfg);
+    }
+
+    /// Synchronizes the causal Relative Strength (`RS vs Benchmark`) series and block indices.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sync_relative_strength(
+        &mut self,
+        symbol_candles: &[Candle],
+        dataset_generation: u64,
+        symbol_tf: Timeframe,
+        benchmark_key: &str,
+        benchmark_generation: u64,
+        benchmark_candles: &[Candle],
+        benchmark_tf: Timeframe,
+        sma_period: usize,
+        replay_causal_close_timestamp: Option<i64>,
+    ) {
+        let clean_sma = sma_period.clamp(1, 5_000);
+        let target_key = RsCacheKey {
+            dataset_generation,
+            dataset_len: symbol_candles.len(),
+            symbol_tf,
+            benchmark_key: benchmark_key.to_owned(),
+            benchmark_generation,
+            replay_causal_close_timestamp,
+            sma_period: clean_sma,
+        };
+        if self.rs_cache_key.as_ref() == Some(&target_key)
+            && self.rs.rs_line.len() == symbol_candles.len()
+        {
+            return;
+        }
+        self.rs = compute_relative_strength(
+            symbol_candles,
+            symbol_tf,
+            benchmark_candles,
+            benchmark_tf,
+            clean_sma,
+            replay_causal_close_timestamp,
+        );
+        self.rs_line_idx = SeriesBlockIndex::build(&self.rs.rs_line);
+        self.rs_sma_idx = SeriesBlockIndex::build(&self.rs.rs_sma);
+        self.rs_cache_key = Some(target_key);
+    }
+
+    /// Clears cached Relative Strength state when benchmark comparison is disabled.
+    pub fn clear_relative_strength(&mut self) {
+        if self.rs_cache_key.is_some() || !self.rs.rs_line.is_empty() {
+            self.rs = RelativeStrengthOutput::default();
+            self.rs_line_idx.clear();
+            self.rs_sma_idx.clear();
+            self.rs_cache_key = None;
+        }
     }
 }
 

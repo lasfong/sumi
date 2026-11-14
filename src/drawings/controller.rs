@@ -58,6 +58,7 @@ pub enum DrawingInteractionPhase {
     #[default]
     Idle,
     PlacingSingle {
+        tool: DrawingTool,
         pane: DrawingPaneTarget,
         preview_anchor: DrawingAnchor,
     },
@@ -170,6 +171,9 @@ impl DrawingStore {
         let mut max_id: DrawingId = 0;
         self.drawings.retain_mut(|d| {
             d.style.sanitize();
+            if let DrawingGeometry::FixedRangeVolumeProfile { row_count, .. } = &mut d.geometry {
+                *row_count = (*row_count).clamp(8, 200);
+            }
             if !d.is_valid() || !seen.insert(d.id) {
                 return false;
             }
@@ -314,7 +318,8 @@ impl DrawingStore {
             }
         };
         let refresh_geom = |geom: &mut DrawingGeometry| match geom {
-            DrawingGeometry::HorizontalLine { anchor } => refresh_anchor(anchor),
+            DrawingGeometry::HorizontalLine { anchor }
+            | DrawingGeometry::AnchoredVwap { anchor, .. } => refresh_anchor(anchor),
             DrawingGeometry::TrendLine { start, end }
             | DrawingGeometry::Ray {
                 origin: start,
@@ -325,7 +330,8 @@ impl DrawingStore {
                 corner_b: end,
             }
             | DrawingGeometry::FibonacciRetracement { start, end, .. }
-            | DrawingGeometry::RiskRewardBox { start, end, .. } => {
+            | DrawingGeometry::RiskRewardBox { start, end, .. }
+            | DrawingGeometry::FixedRangeVolumeProfile { start, end, .. } => {
                 refresh_anchor(start);
                 refresh_anchor(end);
             }
@@ -362,7 +368,13 @@ impl DrawingStore {
     #[must_use]
     pub fn is_capturing_pane_gesture(&self, pane: DrawingPaneTarget) -> bool {
         if self.active_tool != DrawingTool::Select {
-            if self.active_tool == DrawingTool::RiskRewardBox && pane != DrawingPaneTarget::Main {
+            if matches!(
+                self.active_tool,
+                DrawingTool::RiskRewardBox
+                    | DrawingTool::FixedRangeVolumeProfile
+                    | DrawingTool::AnchoredVwap
+            ) && pane != DrawingPaneTarget::Main
+            {
                 return false;
             }
             return true;
@@ -383,8 +395,12 @@ impl DrawingStore {
         geometry: DrawingGeometry,
         style: Option<DrawingStyle>,
     ) -> Option<DrawingId> {
-        if matches!(geometry, DrawingGeometry::RiskRewardBox { .. })
-            && pane != DrawingPaneTarget::Main
+        if matches!(
+            geometry,
+            DrawingGeometry::RiskRewardBox { .. }
+                | DrawingGeometry::FixedRangeVolumeProfile { .. }
+                | DrawingGeometry::AnchoredVwap { .. }
+        ) && pane != DrawingPaneTarget::Main
         {
             return None;
         }
@@ -419,8 +435,12 @@ impl DrawingStore {
         for (idx, mut d) in entries.into_iter().enumerate() {
             d.style.sanitize();
             if !d.geometry.is_valid()
-                || (matches!(d.geometry, DrawingGeometry::RiskRewardBox { .. })
-                    && d.pane != DrawingPaneTarget::Main)
+                || (matches!(
+                    d.geometry,
+                    DrawingGeometry::RiskRewardBox { .. }
+                        | DrawingGeometry::FixedRangeVolumeProfile { .. }
+                        | DrawingGeometry::AnchoredVwap { .. }
+                ) && d.pane != DrawingPaneTarget::Main)
             {
                 continue;
             }
@@ -707,6 +727,41 @@ impl DrawingStore {
         })
     }
 
+    /// Toggles `show_bands` on a selected unlocked `AnchoredVwap` drawing (`Milestone R11`).
+    pub fn toggle_selected_avwap_bands(&mut self) -> bool {
+        self.mutate_selected(|d| {
+            if d.locked {
+                return false;
+            }
+            if let DrawingGeometry::AnchoredVwap { show_bands, .. } = &mut d.geometry {
+                *show_bands = !*show_bands;
+                true
+            } else {
+                false
+            }
+        })
+    }
+
+    /// Cycles histogram bin count (`16 -> 24 -> 32 -> 48 -> 16`) on a selected unlocked `FixedRangeVolumeProfile` (`Milestone R11`).
+    pub fn cycle_selected_frvp_rows(&mut self) -> bool {
+        self.mutate_selected(|d| {
+            if d.locked {
+                return false;
+            }
+            if let DrawingGeometry::FixedRangeVolumeProfile { row_count, .. } = &mut d.geometry {
+                *row_count = match *row_count {
+                    0..=19 => 24,
+                    20..=28 => 32,
+                    29..=40 => 48,
+                    _ => 16,
+                };
+                true
+            } else {
+                false
+            }
+        })
+    }
+
     pub fn undo(&mut self) -> bool {
         self.rollback_active_phase();
         let Some(cmd) = self.undo_stack.pop() else {
@@ -787,18 +842,32 @@ impl DrawingStore {
     pub fn preview_drawing(&self) -> Option<Drawing> {
         match self.phase {
             DrawingInteractionPhase::PlacingSingle {
+                tool,
                 pane,
                 preview_anchor,
             } => {
-                let geom = DrawingGeometry::HorizontalLine {
-                    anchor: preview_anchor,
+                let geom = match tool {
+                    DrawingTool::AnchoredVwap => {
+                        let mut clamped = preview_anchor;
+                        if clamped.bar_index < 0.0 {
+                            clamped.bar_index = 0.0;
+                            clamped.timestamp = None;
+                        }
+                        DrawingGeometry::AnchoredVwap {
+                            anchor: clamped,
+                            show_bands: true,
+                        }
+                    }
+                    _ => DrawingGeometry::HorizontalLine {
+                        anchor: preview_anchor,
+                    },
                 };
                 geom.is_valid().then(|| {
                     Drawing::new(
                         PREVIEW_DRAWING_ID,
                         pane,
                         geom,
-                        DrawingStyle::default_for_tool(DrawingTool::HorizontalLine),
+                        DrawingStyle::default_for_tool(tool),
                     )
                 })
             }
@@ -922,8 +991,15 @@ impl DrawingStore {
                         anchor.bar_index = src.bar_index;
                         anchor.timestamp = src.timestamp;
                     }
+                    if matches!(original.geometry, DrawingGeometry::AnchoredVwap { .. })
+                        && anchor.bar_index < 0.0
+                    {
+                        anchor.bar_index = 0.0;
+                        anchor.timestamp = candles.first().map(|c| c.timestamp as f64);
+                    }
                     let mut next_geom = original.geometry.clone();
                     apply_handle_drag(&mut next_geom, &original.geometry, target_handle, anchor);
+                    clamp_avwap_geom_left(&mut next_geom, candles);
                     if next_geom.is_valid() {
                         d.geometry = next_geom;
                     }
@@ -953,7 +1029,7 @@ impl DrawingStore {
                 let target_id = *drawing_id;
                 let dx = local_pos.x - start_local.x;
                 let dy = local_pos.y - start_local.y;
-                if let Some(translated_geom) = translate_geometry_in_local_space(
+                if let Some(mut translated_geom) = translate_geometry_in_local_space(
                     &original.geometry,
                     original_anchors_local,
                     dx,
@@ -962,6 +1038,7 @@ impl DrawingStore {
                 ) && let Some(d) = self.drawings.iter_mut().find(|d| d.id == target_id)
                     && !d.locked
                 {
+                    clamp_avwap_geom_left(&mut translated_geom, candles);
                     d.geometry = translated_geom;
                     if let Some(cutoff_ts) = self.replay_cutoff_timestamp {
                         d.created_at_timestamp = Some(
@@ -973,10 +1050,11 @@ impl DrawingStore {
             }
             DrawingInteractionPhase::Idle => {
                 if self.active_tool == DrawingTool::Select {
+                    let hit_proj = (*proj).with_candles(candles);
                     self.hovered_hit = hit_test_pane_drawings_causal(
                         &self.drawings,
                         pane,
-                        proj,
+                        &hit_proj,
                         local_pos,
                         self.selected_id,
                         self.replay_cutoff_timestamp,
@@ -1031,11 +1109,19 @@ impl DrawingStore {
 
         // 2. Start a new drawing placement when a creation tool is active.
         match self.active_tool {
-            DrawingTool::HorizontalLine => {
-                if let Some(anchor) =
+            tool @ (DrawingTool::HorizontalLine | DrawingTool::AnchoredVwap) => {
+                if tool == DrawingTool::AnchoredVwap && pane != DrawingPaneTarget::Main {
+                    return PointerCaptureOutcome::PassThroughToViewport;
+                }
+                if let Some(mut anchor) =
                     resolve_anchor(pane, local_pos, effective_magnet, proj, candles)
                 {
+                    if tool == DrawingTool::AnchoredVwap && anchor.bar_index < 0.0 {
+                        anchor.bar_index = 0.0;
+                        anchor.timestamp = candles.first().map(|c| c.timestamp as f64);
+                    }
                     self.phase = DrawingInteractionPhase::PlacingSingle {
+                        tool,
                         pane,
                         preview_anchor: anchor,
                     };
@@ -1046,8 +1132,13 @@ impl DrawingStore {
             | DrawingTool::Ray
             | DrawingTool::Rectangle
             | DrawingTool::FibonacciRetracement
-            | DrawingTool::RiskRewardBox) => {
-                if tool == DrawingTool::RiskRewardBox && pane != DrawingPaneTarget::Main {
+            | DrawingTool::RiskRewardBox
+            | DrawingTool::FixedRangeVolumeProfile) => {
+                if matches!(
+                    tool,
+                    DrawingTool::RiskRewardBox | DrawingTool::FixedRangeVolumeProfile
+                ) && pane != DrawingPaneTarget::Main
+                {
                     return PointerCaptureOutcome::PassThroughToViewport;
                 }
                 if let Some(anchor) =
@@ -1069,10 +1160,11 @@ impl DrawingStore {
         }
 
         // 3. In `Select` cursor mode, hit-test drawings on `pane`.
+        let hit_proj = (*proj).with_candles(candles);
         if let Some(hit) = hit_test_pane_drawings_causal(
             &self.drawings,
             pane,
-            proj,
+            &hit_proj,
             local_pos,
             self.selected_id,
             self.replay_cutoff_timestamp,
@@ -1148,21 +1240,35 @@ impl DrawingStore {
         match current_phase {
             DrawingInteractionPhase::Idle => false,
             DrawingInteractionPhase::PlacingSingle {
+                tool,
                 pane: placing_pane,
                 preview_anchor,
             } => {
                 if placing_pane != pane {
                     self.phase = DrawingInteractionPhase::PlacingSingle {
+                        tool,
                         pane: placing_pane,
                         preview_anchor,
                     };
                     return false;
                 }
-                let final_anchor = local_pos
+                let mut final_anchor = local_pos
                     .and_then(|pt| resolve_anchor(pane, pt, effective_magnet, proj, candles))
                     .unwrap_or(preview_anchor);
-                let geom = DrawingGeometry::HorizontalLine {
-                    anchor: final_anchor,
+                let geom = match tool {
+                    DrawingTool::AnchoredVwap => {
+                        if final_anchor.bar_index < 0.0 {
+                            final_anchor.bar_index = 0.0;
+                            final_anchor.timestamp = candles.first().map(|c| c.timestamp as f64);
+                        }
+                        DrawingGeometry::AnchoredVwap {
+                            anchor: final_anchor,
+                            show_bands: true,
+                        }
+                    }
+                    _ => DrawingGeometry::HorizontalLine {
+                        anchor: final_anchor,
+                    },
                 };
                 if let Some(new_id) = self.add_drawing(pane, geom, None) {
                     self.selected_id = Some(new_id);
@@ -1492,7 +1598,13 @@ fn build_two_anchor_geometry(
             };
             candidate.is_valid().then_some(candidate)
         }
-        DrawingTool::Select | DrawingTool::HorizontalLine => None,
+        DrawingTool::FixedRangeVolumeProfile => ((a1.bar_index - a0.bar_index).abs() >= 0.5)
+            .then_some(DrawingGeometry::FixedRangeVolumeProfile {
+                start: a0,
+                end: a1,
+                row_count: 24,
+            }),
+        DrawingTool::Select | DrawingTool::HorizontalLine | DrawingTool::AnchoredVwap => None,
     }
 }
 
@@ -1666,7 +1778,8 @@ fn remap_drawing_geometry(
     new_tf: Timeframe,
 ) {
     match geom {
-        DrawingGeometry::HorizontalLine { anchor } => {
+        DrawingGeometry::HorizontalLine { anchor }
+        | DrawingGeometry::AnchoredVwap { anchor, .. } => {
             remap_single_anchor(anchor, old_candles, old_tf, new_candles, new_tf);
         }
         DrawingGeometry::TrendLine { start, end }
@@ -1675,7 +1788,8 @@ fn remap_drawing_geometry(
             corner_b: end,
         }
         | DrawingGeometry::FibonacciRetracement { start, end, .. }
-        | DrawingGeometry::RiskRewardBox { start, end, .. } => {
+        | DrawingGeometry::RiskRewardBox { start, end, .. }
+        | DrawingGeometry::FixedRangeVolumeProfile { start, end, .. } => {
             remap_single_anchor(start, old_candles, old_tf, new_candles, new_tf);
             remap_single_anchor(end, old_candles, old_tf, new_candles, new_tf);
         }
@@ -1775,6 +1889,16 @@ fn translate_single_anchor_local(
     next_anchor.is_valid().then_some(next_anchor)
 }
 
+#[inline]
+fn clamp_avwap_geom_left(geom: &mut DrawingGeometry, candles: &[Candle]) {
+    if let DrawingGeometry::AnchoredVwap { anchor, .. } = geom
+        && anchor.bar_index < 0.0
+    {
+        anchor.bar_index = 0.0;
+        anchor.timestamp = candles.first().map(|c| c.timestamp as f64);
+    }
+}
+
 fn translate_geometry_in_local_space(
     original: &DrawingGeometry,
     original_local: &[LocalPoint],
@@ -1855,6 +1979,35 @@ fn translate_geometry_in_local_space(
                 start: a0,
                 end: a1,
                 stop_price: stop_moved.value,
+            };
+            candidate.is_valid().then_some(candidate)
+        }
+        DrawingGeometry::FixedRangeVolumeProfile {
+            start,
+            end,
+            row_count,
+        } => {
+            if original_local.len() < 2 {
+                return None;
+            }
+            let a0 = translate_single_anchor_local(start, original_local[0], dx, dy, proj)?;
+            let a1 = translate_single_anchor_local(end, original_local[1], dx, dy, proj)?;
+            let candidate = DrawingGeometry::FixedRangeVolumeProfile {
+                start: a0,
+                end: a1,
+                row_count,
+            };
+            candidate.is_valid().then_some(candidate)
+        }
+        DrawingGeometry::AnchoredVwap { anchor, show_bands } => {
+            let orig_pt = *original_local.first()?;
+            let mut next_anchor = translate_single_anchor_local(anchor, orig_pt, dx, dy, proj)?;
+            if next_anchor.bar_index < 0.0 {
+                next_anchor.bar_index = 0.0;
+            }
+            let candidate = DrawingGeometry::AnchoredVwap {
+                anchor: next_anchor,
+                show_bands,
             };
             candidate.is_valid().then_some(candidate)
         }

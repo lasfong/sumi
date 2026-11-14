@@ -18,8 +18,9 @@ use crate::drawings::{
 };
 use crate::indicators::{
     BucketLineEnvelope, IndicatorCache, IndicatorConfig, MACD_REFERENCE_LEVELS, OscillatorPaneId,
-    RSI_REFERENCE_LEVELS, SeriesBlockIndex, bucket_line_envelope_indexed,
-    visit_conflated_histogram_bars_indexed,
+    RS_REFERENCE_LEVELS, RSI_REFERENCE_LEVELS, SeriesBlockIndex, VolumeProfileConfig,
+    VolumeProfileResult, VwapBandsOutput, bucket_line_envelope_indexed, compute_anchored_vwap,
+    compute_volume_profile, visit_conflated_histogram_bars_indexed,
 };
 use crate::model::{Candle, PriceBounds};
 use crate::trading::{ExecutionFill, OrderSide, PositionSide, TradingSession};
@@ -91,6 +92,23 @@ pub mod palette {
     pub const TRADE_LINK_WIN: Color32 = Color32::from_rgb(0, 230, 118); // #00E676
     pub const TRADE_LINK_LOSS: Color32 = Color32::from_rgb(255, 82, 82); // #FF5252
     pub const TRADE_FOCUS_HALO: Color32 = Color32::from_rgb(255, 213, 79); // #FFD54F
+
+    // Milestone R11 — Volume Profile (VRVP/FRVP), Session/Anchored VWAP & Relative Strength Palette
+    pub const IND_VWAP_LINE: Color32 = Color32::from_rgb(206, 147, 216); // #CE93D8 Crisp Lavender-Violet
+    pub const IND_VWAP_BAND_1: Color32 = Color32::from_rgb(171, 71, 188); // #AB47BC Medium Orchid
+    pub const IND_VWAP_BAND_2: Color32 = Color32::from_rgb(126, 87, 194); // #7E57C2 Deep Indigo-Violet
+    pub const IND_VWAP_FILL_1: Color32 = Color32::from_rgba_premultiplied(19, 8, 21, 28);
+    pub const IND_VWAP_FILL_2: Color32 = Color32::from_rgba_premultiplied(9, 6, 14, 18);
+    pub const VRVP_BUY_VA: Color32 = Color32::from_rgba_premultiplied(14, 62, 58, 96);
+    pub const VRVP_SELL_VA: Color32 = Color32::from_rgba_premultiplied(90, 31, 30, 96);
+    pub const VRVP_BUY_OUT: Color32 = Color32::from_rgba_premultiplied(7, 30, 28, 46);
+    pub const VRVP_SELL_OUT: Color32 = Color32::from_rgba_premultiplied(43, 15, 14, 46);
+    pub const VRVP_POC_GOLD: Color32 = Color32::from_rgb(255, 213, 79); // #FFD54F
+    pub const VRVP_VA_LINE: Color32 = Color32::from_rgb(79, 195, 247); // #4FC3F7
+    pub const COMPARE_BENCH_LINE: Color32 = Color32::from_rgb(255, 167, 38); // #FFA726 Vivid Orange
+    pub const IND_RS_LINE: Color32 = Color32::from_rgb(38, 198, 218); // #26C6DA Teal-Cyan
+    pub const IND_RS_SMA: Color32 = Color32::from_rgb(255, 202, 40); // #FFCA28 Amber
+    pub const IND_RS_BASELINE: Color32 = Color32::from_rgb(120, 123, 134);
 }
 
 /// Layout regions computed dynamically from the available chart area on every frame (single-pane view).
@@ -370,6 +388,10 @@ fn default_equity_price_scale() -> PriceScale {
     PriceScale::new("equity-right", PriceScaleOptions::sumi_oscillator())
 }
 
+fn default_rs_price_scale() -> PriceScale {
+    PriceScale::new("rs-right", PriceScaleOptions::sumi_oscillator())
+}
+
 const fn default_main_stretch() -> f32 {
     4.0
 }
@@ -391,9 +413,242 @@ fn sanitize_stretch(val: f32, fallback: f32) -> f32 {
     }
 }
 
+#[inline]
+fn hash_candle_into(h: &mut u64, c: &Candle) {
+    for bits in [
+        c.timestamp as u64,
+        c.open.to_bits(),
+        c.high.to_bits(),
+        c.low.to_bits(),
+        c.close.to_bits(),
+        c.volume.to_bits(),
+    ] {
+        *h ^= bits;
+        *h = h.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        *h ^= *h >> 30;
+    }
+}
+
+/// Computes a fast deterministic seeded content fingerprint for `candles` used by [`R11RenderMemo`].
+/// Hashes every bar for `<= 2048` bars and samples 65 evenly spaced bars plus `n - 2` (`O(1)`) above `2048`.
+pub(crate) fn candles_fast_fingerprint_seeded(candles: &[Candle], seed: u64) -> u64 {
+    let n = candles.len();
+    if n == 0 {
+        return seed;
+    }
+    let mut h: u64 = seed ^ 0x517C_C1B7_2722_0A95 ^ (n as u64);
+    if n <= 2048 {
+        for c in candles {
+            hash_candle_into(&mut h, c);
+        }
+        return h;
+    }
+    let mut prev = usize::MAX;
+    for step in 0..=64_usize {
+        let idx = (step * (n - 1)) / 64;
+        if idx != prev {
+            if idx == n - 1 && prev != n - 2 {
+                hash_candle_into(&mut h, &candles[n - 2]);
+            }
+            hash_candle_into(&mut h, &candles[idx]);
+            prev = idx;
+        }
+    }
+    h
+}
+
+/// Computes a fast deterministic content fingerprint for `candles` used by [`R11RenderMemo`].
+pub(crate) fn candles_fast_fingerprint(candles: &[Candle]) -> u64 {
+    candles_fast_fingerprint_seeded(candles, 0)
+}
+
+#[inline]
+fn r11_subslice_seed(candles_fp: u64) -> u64 {
+    candles_fp
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .rotate_left(13)
+        ^ 0xBF58_476D_1CE4_E5B9
+}
+
+const MAX_R11_DRAWING_MEMO_ENTRIES: usize = 16;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VrvpMemoKey {
+    candles_fp: u64,
+    start: usize,
+    end: usize,
+    row_count: usize,
+    va_pct_bits: u64,
+}
+
+#[derive(Debug, Clone)]
+struct VrvpMemoEntry {
+    key: VrvpMemoKey,
+    result: Option<std::sync::Arc<VolumeProfileResult>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FrvpMemoKey {
+    candles_fp: u64,
+    start: usize,
+    end_inclusive: usize,
+    row_count: usize,
+    va_pct_bits: u64,
+}
+
+#[derive(Debug, Clone)]
+struct FrvpMemoEntry {
+    key: FrvpMemoKey,
+    result: Option<std::sync::Arc<VolumeProfileResult>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AvwapMemoKey {
+    candles_fp: u64,
+    anchor_index: usize,
+    causal_end: usize,
+    mult_1_bits: u64,
+    mult_2_bits: u64,
+}
+
+#[derive(Debug, Clone)]
+struct AvwapMemoEntry {
+    key: AvwapMemoKey,
+    result: std::sync::Arc<VwapBandsOutput>,
+}
+
+/// Frame-to-frame viewport memoization cache for R11 order-flow computations (`VRVP`, `FRVP`, `AVWAP`).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct R11RenderMemo {
+    vrvp: Option<VrvpMemoEntry>,
+    frvp: Vec<FrvpMemoEntry>,
+    avwap: Vec<AvwapMemoEntry>,
+}
+
+impl R11RenderMemo {
+    pub(crate) fn clear(&mut self) {
+        self.vrvp = None;
+        self.frvp.clear();
+        self.avwap.clear();
+    }
+
+    pub(crate) fn get_or_compute_vrvp(
+        &mut self,
+        candles: &[Candle],
+        candles_fp: u64,
+        range: std::ops::Range<usize>,
+        cfg: VolumeProfileConfig,
+    ) -> Option<std::sync::Arc<VolumeProfileResult>> {
+        if range.start >= range.end || range.end > candles.len() {
+            return None;
+        }
+        let slice_fp =
+            candles_fast_fingerprint_seeded(&candles[range.clone()], r11_subslice_seed(candles_fp));
+        let key = VrvpMemoKey {
+            candles_fp: slice_fp,
+            start: range.start,
+            end: range.end,
+            row_count: cfg.row_count,
+            va_pct_bits: cfg.value_area_pct.to_bits(),
+        };
+        if let Some(entry) = &self.vrvp
+            && entry.key == key
+        {
+            return entry.result.clone();
+        }
+        let computed = compute_volume_profile(&candles[range], cfg).map(std::sync::Arc::new);
+        self.vrvp = Some(VrvpMemoEntry {
+            key,
+            result: computed.clone(),
+        });
+        computed
+    }
+
+    pub(crate) fn get_or_compute_frvp(
+        &mut self,
+        candles: &[Candle],
+        candles_fp: u64,
+        start: usize,
+        end_inclusive: usize,
+        cfg: VolumeProfileConfig,
+    ) -> Option<std::sync::Arc<VolumeProfileResult>> {
+        if start > end_inclusive || end_inclusive >= candles.len() {
+            return None;
+        }
+        let span = &candles[start..=end_inclusive];
+        let slice_fp = candles_fast_fingerprint_seeded(span, r11_subslice_seed(candles_fp));
+        let key = FrvpMemoKey {
+            candles_fp: slice_fp,
+            start,
+            end_inclusive,
+            row_count: cfg.row_count,
+            va_pct_bits: cfg.value_area_pct.to_bits(),
+        };
+        if let Some(idx) = self.frvp.iter().position(|e| e.key == key) {
+            if idx + 1 < self.frvp.len() {
+                let entry = self.frvp.remove(idx);
+                let res = entry.result.clone();
+                self.frvp.push(entry);
+                return res;
+            }
+            return self.frvp[idx].result.clone();
+        }
+        let computed = compute_volume_profile(span, cfg).map(std::sync::Arc::new);
+        if self.frvp.len() >= MAX_R11_DRAWING_MEMO_ENTRIES {
+            self.frvp.remove(0);
+        }
+        self.frvp.push(FrvpMemoEntry {
+            key,
+            result: computed.clone(),
+        });
+        computed
+    }
+
+    pub(crate) fn get_or_compute_avwap(
+        &mut self,
+        candles: &[Candle],
+        candles_fp: u64,
+        anchor_index: usize,
+        causal_end: usize,
+        mult_1: f64,
+        mult_2: f64,
+    ) -> std::sync::Arc<VwapBandsOutput> {
+        if anchor_index >= causal_end || causal_end > candles.len() {
+            return std::sync::Arc::new(VwapBandsOutput::default());
+        }
+        let tail = &candles[anchor_index..causal_end];
+        let slice_fp = candles_fast_fingerprint_seeded(tail, r11_subslice_seed(candles_fp));
+        let key = AvwapMemoKey {
+            candles_fp: slice_fp,
+            anchor_index,
+            causal_end,
+            mult_1_bits: mult_1.to_bits(),
+            mult_2_bits: mult_2.to_bits(),
+        };
+        if let Some(idx) = self.avwap.iter().position(|e| e.key == key) {
+            if idx + 1 < self.avwap.len() {
+                let entry = self.avwap.remove(idx);
+                let res = entry.result.clone();
+                self.avwap.push(entry);
+                return res;
+            }
+            return self.avwap[idx].result.clone();
+        }
+        let computed = std::sync::Arc::new(compute_anchored_vwap(tail, 0, mult_1, mult_2));
+        if self.avwap.len() >= MAX_R11_DRAWING_MEMO_ENTRIES {
+            self.avwap.remove(0);
+        }
+        self.avwap.push(AvwapMemoEntry {
+            key,
+            result: computed.clone(),
+        });
+        computed
+    }
+}
+
 /// Modular viewport state coordinating the shared horizontal `TimeScale` and independent per-pane
 /// `PriceScale` instances (`main-right`, `volume-overlay`, `rsi-right`, `macd-right`, `atr-right`,
-/// `equity-right`), proportional multi-pane stretch ratios, and inertial kinetic scrolling.
+/// `rs-right`, `equity-right`), proportional multi-pane stretch ratios, and inertial kinetic scrolling.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChartViewportState {
     pub time_scale: TimeScale,
@@ -406,6 +661,8 @@ pub struct ChartViewportState {
     pub macd_price_scale: PriceScale,
     #[serde(default = "default_atr_price_scale")]
     pub atr_price_scale: PriceScale,
+    #[serde(default = "default_rs_price_scale")]
+    pub rs_price_scale: PriceScale,
     #[serde(default = "default_equity_price_scale")]
     pub equity_price_scale: PriceScale,
 
@@ -417,6 +674,8 @@ pub struct ChartViewportState {
     pub macd_stretch: f32,
     #[serde(default = "default_sub_stretch")]
     pub atr_stretch: f32,
+    #[serde(default = "default_sub_stretch")]
+    pub rs_stretch: f32,
     #[serde(default = "default_equity_stretch")]
     pub equity_stretch: f32,
 
@@ -424,6 +683,8 @@ pub struct ChartViewportState {
     pub kinetic: Option<KineticAnimation>,
     #[serde(skip)]
     separator_drag: Option<SeparatorDragState>,
+    #[serde(skip)]
+    pub(crate) r11_memo: R11RenderMemo,
 }
 
 impl Default for ChartViewportState {
@@ -445,14 +706,17 @@ impl ChartViewportState {
             rsi_price_scale: default_rsi_price_scale(),
             macd_price_scale: default_macd_price_scale(),
             atr_price_scale: default_atr_price_scale(),
+            rs_price_scale: default_rs_price_scale(),
             equity_price_scale: default_equity_price_scale(),
             main_stretch: default_main_stretch(),
             rsi_stretch: default_sub_stretch(),
             macd_stretch: default_sub_stretch(),
             atr_stretch: default_sub_stretch(),
+            rs_stretch: default_sub_stretch(),
             equity_stretch: default_equity_stretch(),
             kinetic: None,
             separator_drag: None,
+            r11_memo: R11RenderMemo::default(),
         }
     }
 
@@ -460,19 +724,23 @@ impl ChartViewportState {
     pub fn sanitize_deserialized(&mut self) {
         self.kinetic = None;
         self.separator_drag = None;
+        self.r11_memo.clear();
         self.time_scale.sanitize_deserialized();
         self.main_price_scale.sanitize_deserialized();
         self.volume_price_scale.sanitize_deserialized();
         self.rsi_price_scale.sanitize_deserialized();
         self.macd_price_scale.sanitize_deserialized();
         self.atr_price_scale.sanitize_deserialized();
+        self.rs_price_scale.sanitize_deserialized();
         self.equity_price_scale.sanitize_deserialized();
-        // Oscillator / Equity sub-panes always operate in Linear vertical space (`RSI`, `MACD`, `ATR`, `Equity`).
+        // Oscillator / Equity sub-panes always operate in Linear vertical space (`RSI`, `MACD`, `ATR`, `RS`, `Equity`).
         self.rsi_price_scale
             .set_mode(crate::viewport::PriceScaleMode::Normal);
         self.macd_price_scale
             .set_mode(crate::viewport::PriceScaleMode::Normal);
         self.atr_price_scale
+            .set_mode(crate::viewport::PriceScaleMode::Normal);
+        self.rs_price_scale
             .set_mode(crate::viewport::PriceScaleMode::Normal);
         self.equity_price_scale
             .set_mode(crate::viewport::PriceScaleMode::Normal);
@@ -480,6 +748,7 @@ impl ChartViewportState {
         self.rsi_stretch = sanitize_stretch(self.rsi_stretch, default_sub_stretch());
         self.macd_stretch = sanitize_stretch(self.macd_stretch, default_sub_stretch());
         self.atr_stretch = sanitize_stretch(self.atr_stretch, default_sub_stretch());
+        self.rs_stretch = sanitize_stretch(self.rs_stretch, default_sub_stretch());
         self.equity_stretch = sanitize_stretch(self.equity_stretch, default_equity_stretch());
     }
 
@@ -489,6 +758,7 @@ impl ChartViewportState {
             OscillatorPaneId::Rsi => &self.rsi_price_scale,
             OscillatorPaneId::Macd => &self.macd_price_scale,
             OscillatorPaneId::Atr => &self.atr_price_scale,
+            OscillatorPaneId::RelativeStrength => &self.rs_price_scale,
             OscillatorPaneId::Equity => &self.equity_price_scale,
         }
     }
@@ -498,6 +768,7 @@ impl ChartViewportState {
             OscillatorPaneId::Rsi => &mut self.rsi_price_scale,
             OscillatorPaneId::Macd => &mut self.macd_price_scale,
             OscillatorPaneId::Atr => &mut self.atr_price_scale,
+            OscillatorPaneId::RelativeStrength => &mut self.rs_price_scale,
             OscillatorPaneId::Equity => &mut self.equity_price_scale,
         }
     }
@@ -508,6 +779,7 @@ impl ChartViewportState {
             OscillatorPaneId::Rsi => self.rsi_stretch,
             OscillatorPaneId::Macd => self.macd_stretch,
             OscillatorPaneId::Atr => self.atr_stretch,
+            OscillatorPaneId::RelativeStrength => self.rs_stretch,
             OscillatorPaneId::Equity => self.equity_stretch,
         }
     }
@@ -518,6 +790,7 @@ impl ChartViewportState {
             OscillatorPaneId::Rsi => self.rsi_stretch = s,
             OscillatorPaneId::Macd => self.macd_stretch = s,
             OscillatorPaneId::Atr => self.atr_stretch = s,
+            OscillatorPaneId::RelativeStrength => self.rs_stretch = s,
             OscillatorPaneId::Equity => self.equity_stretch = s,
         }
     }
@@ -544,6 +817,7 @@ impl ChartViewportState {
         self.rsi_stretch = default_sub_stretch();
         self.macd_stretch = default_sub_stretch();
         self.atr_stretch = default_sub_stretch();
+        self.rs_stretch = default_sub_stretch();
         self.equity_stretch = default_equity_stretch();
     }
 
@@ -587,6 +861,7 @@ impl ChartViewportState {
         self.rsi_price_scale.reset_auto_scale();
         self.macd_price_scale.reset_auto_scale();
         self.atr_price_scale.reset_auto_scale();
+        self.rs_price_scale.reset_auto_scale();
         self.equity_price_scale.reset_auto_scale();
     }
 
@@ -594,12 +869,14 @@ impl ChartViewportState {
     pub fn reset_to_default(&mut self) {
         self.kinetic = None;
         self.separator_drag = None;
+        self.r11_memo.clear();
         self.time_scale.restore_default();
         self.main_price_scale.reset_auto_scale();
         self.volume_price_scale.reset_auto_scale();
         self.rsi_price_scale.reset_auto_scale();
         self.macd_price_scale.reset_auto_scale();
         self.atr_price_scale.reset_auto_scale();
+        self.rs_price_scale.reset_auto_scale();
         self.equity_price_scale.reset_auto_scale();
     }
 
@@ -667,6 +944,8 @@ pub struct ChartReplayTradingOverlay<'a> {
     pub focused_backtest_trade_id: Option<u64>,
     pub replay_cutoff_timestamp: Option<i64>,
     pub frontier_base_timestamp: Option<i64>,
+    pub compare_overlay: Option<(&'a str, &'a [Option<f64>], &'a SeriesBlockIndex)>,
+    pub rs_benchmark_label: Option<&'a str>,
     pub modal_open: bool,
 }
 
@@ -701,6 +980,8 @@ pub struct ChartRenderReport {
     pub rendered_alert_marker_count: usize,
     pub equity_pane_active: bool,
     pub rendered_backtest_trade_count: usize,
+    pub vrvp_poc_price: Option<f64>,
+    pub active_frvp_count: usize,
 }
 
 /// Renders the native candlestick chart, volume histogram, price/time axes, crosshair, and OHLCV overlay
@@ -1066,6 +1347,7 @@ fn render_workstation_chart_inner(
             config.show_volume,
             init_cf,
             Some((indicators, indicator_cache)),
+            replay_trading.compare_overlay,
         )
         .map_or_else(|| candles[init_strict.start].close, |(bv, _)| bv)
     } else {
@@ -1119,7 +1401,8 @@ fn render_workstation_chart_inner(
                     main_plot_f64.width,
                     main_plot_f64.height,
                     pre_base_value,
-                );
+                )
+                .with_candles(candles);
                 suppress_main_drag_pan = drive_pane_drawing_input(
                     store,
                     DrawingPaneTarget::Main,
@@ -1149,7 +1432,8 @@ fn render_workstation_chart_inner(
                         osc_plot_f64.width,
                         osc_plot_f64.height,
                         1.0,
-                    );
+                    )
+                    .with_candles(candles);
                     let captured = drive_pane_drawing_input(
                         store,
                         DrawingPaneTarget::Oscillator(osc_id),
@@ -1220,6 +1504,7 @@ fn render_workstation_chart_inner(
                     rsi_price_scale,
                     macd_price_scale,
                     atr_price_scale,
+                    rs_price_scale,
                     equity_price_scale,
                     ..
                 } = viewport;
@@ -1227,6 +1512,7 @@ fn render_workstation_chart_inner(
                     OscillatorPaneId::Rsi => rsi_price_scale,
                     OscillatorPaneId::Macd => macd_price_scale,
                     OscillatorPaneId::Atr => atr_price_scale,
+                    OscillatorPaneId::RelativeStrength => rs_price_scale,
                     OscillatorPaneId::Equity => equity_price_scale,
                 };
                 handle_plot_interactions(
@@ -1271,11 +1557,15 @@ fn render_workstation_chart_inner(
         config.show_volume,
         conflation_factor,
         Some((indicators, indicator_cache)),
+        replay_trading.compare_overlay,
     )?;
     let strict_range = non_empty_candle_range(
         viewport.time_scale.strict_visible_data_range(),
         candles.len(),
     );
+    let compare_scale = replay_trading.compare_overlay.map_or(1.0, |(_, s, idx)| {
+        compute_compare_viewport_scale(candles, s, idx, strict_range.clone())
+    });
     for osc in &multi_layout.oscillators {
         refresh_oscillator_autoscale(
             osc.id,
@@ -1352,6 +1642,54 @@ fn render_workstation_chart_inner(
     }
     paint_bottom_time_axis_labels(&painter, multi_layout.time_axis_rect, &time_grid_ticks);
 
+    let main_plot_painter = painter.with_clip_rect(multi_layout.main_plot_rect);
+    let mut active_overlay_count = 0_usize;
+    let candles_fp = if indicators.show_vrvp || drawings.is_some() {
+        candles_fast_fingerprint(candles) ^ indicator_cache.dataset_generation().rotate_left(17)
+    } else {
+        0
+    };
+    let vrvp_result = if indicators.show_vrvp {
+        let vp_cfg = VolumeProfileConfig {
+            row_count: indicators.vrvp_rows,
+            value_area_pct: indicators.vrvp_value_area_pct,
+        };
+        let res = viewport.r11_memo.get_or_compute_vrvp(
+            candles,
+            candles_fp,
+            strict_range.clone(),
+            vp_cfg,
+        );
+        if res.is_some() {
+            active_overlay_count += 1;
+        }
+        res
+    } else {
+        None
+    };
+    let vrvp_poc_price = vrvp_result.as_deref().map(|r| r.poc_price);
+    if let Some(vrvp) = vrvp_result.as_deref() {
+        let right_edge = multi_layout.main_plot_rect.right() - 2.0;
+        let max_profile_w = (multi_layout.main_plot_rect.width() * 0.22).clamp(48.0, 180.0);
+        paint_volume_profile_bars(
+            &main_plot_painter,
+            &main_vp,
+            vrvp,
+            right_edge,
+            max_profile_w,
+            true,
+            (
+                (right_edge - max_profile_w).max(multi_layout.main_plot_rect.left()),
+                multi_layout.main_plot_rect.right(),
+            ),
+            palette::VRVP_POC_GOLD,
+            palette::VRVP_VA_LINE,
+            false,
+            false,
+            None,
+        );
+    }
+
     let effective_bar_spacing = viewport.time_scale.bar_spacing() * (conflation_factor as f64);
     let bar_metrics = CandlestickBarMetrics::compute(effective_bar_spacing, ppp);
     let rendered_candle_count = paint_candlesticks_and_volume(
@@ -1367,9 +1705,7 @@ fn render_workstation_chart_inner(
         config.show_volume,
     );
 
-    // Main-Pane Technical Overlays (`BollingerBands` ribbon + `SMA` + `EMA`) aligned to exact `conflation_factor`
-    let main_plot_painter = painter.with_clip_rect(multi_layout.main_plot_rect);
-    let mut active_overlay_count = 0_usize;
+    // Main-Pane Technical Overlays (`BollingerBands`, `SMA`, `EMA`, `Session VWAP`, `Compare Benchmark`)
     if indicators.show_bbands {
         active_overlay_count += 1;
         paint_bollinger_bands(
@@ -1404,6 +1740,39 @@ fn render_workstation_chart_inner(
             Stroke::new(1.6, palette::IND_EMA),
         );
     }
+    if indicators.show_vwap {
+        active_overlay_count += 1;
+        paint_vwap_output(
+            &main_plot_painter,
+            &indicator_cache.vwap,
+            Some((
+                &indicator_cache.vwap_idx,
+                &indicator_cache.vwap_u1_idx,
+                &indicator_cache.vwap_l1_idx,
+                &indicator_cache.vwap_u2_idx,
+                &indicator_cache.vwap_l2_idx,
+            )),
+            culling_range.clone(),
+            conflation_factor,
+            &main_vp,
+            indicators.vwap_band_1 > 0.0,
+            indicators.vwap_band_2 > 0.0,
+            palette::IND_VWAP_LINE,
+        );
+    }
+    if let Some((_, cmp_series, cmp_idx)) = replay_trading.compare_overlay {
+        active_overlay_count += 1;
+        paint_conflated_line_series_scaled(
+            &main_plot_painter,
+            cmp_series,
+            Some(cmp_idx),
+            culling_range.clone(),
+            conflation_factor,
+            &main_vp,
+            Stroke::new(1.5, palette::COMPARE_BENCH_LINE),
+            compare_scale,
+        );
+    }
 
     paint_latest_close_line_and_pill(
         &painter,
@@ -1423,7 +1792,8 @@ fn render_workstation_chart_inner(
             main_plot_f64.width,
             main_plot_f64.height,
             base_value,
-        );
+        )
+        .with_candles(candles);
         paint_pane_drawings(
             &painter,
             &main_plot_painter,
@@ -1434,7 +1804,12 @@ fn render_workstation_chart_inner(
             &main_draw_proj,
             &viewport.main_price_scale,
             base_value,
-            candles.len(),
+            candles,
+            culling_range.clone(),
+            conflation_factor,
+            &main_vp,
+            Some(&mut viewport.r11_memo),
+            candles_fp,
         );
     }
 
@@ -1564,10 +1939,10 @@ fn render_workstation_chart_inner(
     for osc in &multi_layout.oscillators {
         let osc_ps = viewport.oscillator_price_scale(osc.id);
         let osc_plot_f64 = PlotRect::from_egui(osc.plot_rect);
-        let osc_bv = if osc.id == OscillatorPaneId::Equity {
-            equity_base_val
-        } else {
-            1.0
+        let osc_bv = match osc.id {
+            OscillatorPaneId::Equity => equity_base_val,
+            OscillatorPaneId::RelativeStrength => 100.0,
+            OscillatorPaneId::Rsi | OscillatorPaneId::Macd | OscillatorPaneId::Atr => 1.0,
         };
         let osc_vp = PaneViewport::new(&viewport.time_scale, osc_ps, osc_plot_f64, osc_bv);
 
@@ -1631,6 +2006,16 @@ fn render_workstation_chart_inner(
                     Stroke::new(1.5, palette::IND_ATR),
                 );
             }
+            OscillatorPaneId::RelativeStrength => {
+                paint_relative_strength_pane(
+                    &osc_painter,
+                    osc.plot_rect,
+                    indicator_cache,
+                    culling_range.clone(),
+                    conflation_factor,
+                    &osc_vp,
+                );
+            }
             OscillatorPaneId::Equity => {
                 if let Some(eq_ov) = replay_trading.equity_override {
                     paint_equity_baseline_pane(
@@ -1678,8 +2063,9 @@ fn render_workstation_chart_inner(
                 osc_ps,
                 osc_plot_f64.width,
                 osc_plot_f64.height,
-                1.0,
-            );
+                osc_bv,
+            )
+            .with_candles(candles);
             paint_pane_drawings(
                 &painter,
                 &osc_painter,
@@ -1689,8 +2075,13 @@ fn render_workstation_chart_inner(
                 store,
                 &osc_draw_proj,
                 osc_ps,
-                1.0,
-                candles.len(),
+                osc_bv,
+                candles,
+                culling_range.clone(),
+                conflation_factor,
+                &osc_vp,
+                None,
+                candles_fp,
             );
         }
     }
@@ -1744,10 +2135,10 @@ fn render_workstation_chart_inner(
             }
             HoveredPane::Oscillator(id, p_rect, _, pos) => {
                 hovered_oscillator = Some(id);
-                let osc_bv = if id == OscillatorPaneId::Equity {
-                    equity_base_val
-                } else {
-                    1.0
+                let osc_bv = match id {
+                    OscillatorPaneId::Equity => equity_base_val,
+                    OscillatorPaneId::RelativeStrength => 100.0,
+                    OscillatorPaneId::Rsi | OscillatorPaneId::Macd | OscillatorPaneId::Atr => 1.0,
                 };
                 let osc_vp = PaneViewport::new(
                     &viewport.time_scale,
@@ -1827,10 +2218,12 @@ fn render_workstation_chart_inner(
                     cross_stroke,
                 );
                 if let Some(ov) = hovered_oscillator_value {
-                    let osc_bv = if id == OscillatorPaneId::Equity {
-                        equity_base_val
-                    } else {
-                        1.0
+                    let osc_bv = match id {
+                        OscillatorPaneId::Equity => equity_base_val,
+                        OscillatorPaneId::RelativeStrength => 100.0,
+                        OscillatorPaneId::Rsi | OscillatorPaneId::Macd | OscillatorPaneId::Atr => {
+                            1.0
+                        }
                     };
                     paint_axis_cursor_pill(
                         &painter,
@@ -1966,6 +2359,12 @@ fn render_workstation_chart_inner(
             indicators,
             indicator_cache,
             hud_series_index,
+            vrvp_result.as_deref(),
+            replay_trading
+                .compare_overlay
+                .map(|(sym, series, _)| (sym, series, compare_scale)),
+            &viewport.main_price_scale,
+            base_value,
         );
     }
     for osc in &multi_layout.oscillators {
@@ -1977,11 +2376,12 @@ fn render_workstation_chart_inner(
             indicator_cache,
             replay_trading.backtest_result,
             replay_trading.equity_override,
+            replay_trading.rs_benchmark_label,
             hud_series_index,
         );
     }
 
-    let (drawing_count, active_drawing_tool, selected_drawing_id, magnet_mode) =
+    let (drawing_count, active_frvp_count, active_drawing_tool, selected_drawing_id, magnet_mode) =
         if let Some(store) = drawings.as_deref() {
             let cutoff = store.replay_cutoff_timestamp();
             let visible_count = store
@@ -1995,14 +2395,23 @@ fn render_workstation_chart_inner(
                         }
                 })
                 .count();
+            let frvp_count = store
+                .drawings
+                .iter()
+                .filter(|d| {
+                    d.is_causally_visible(cutoff, candles.len())
+                        && matches!(d.geometry, DrawingGeometry::FixedRangeVolumeProfile { .. })
+                })
+                .count();
             (
                 visible_count,
+                frvp_count,
                 store.active_tool,
                 store.selected_id,
                 store.magnet_mode,
             )
         } else {
-            (0, DrawingTool::Select, None, MagnetMode::Off)
+            (0, 0, DrawingTool::Select, None, MagnetMode::Off)
         };
 
     Some(ChartRenderReport {
@@ -2037,6 +2446,8 @@ fn render_workstation_chart_inner(
         rendered_alert_marker_count,
         equity_pane_active,
         rendered_backtest_trade_count,
+        vrvp_poc_price,
+        active_frvp_count,
     })
 }
 
@@ -2101,6 +2512,7 @@ pub fn render_shared_pane_candlestick_chart(
             config.show_volume,
             init_cf,
             None,
+            None,
         );
     }
 
@@ -2144,6 +2556,7 @@ pub fn render_shared_pane_candlestick_chart(
         volume_price_scale,
         config.show_volume,
         conflation_factor,
+        None,
         None,
     )?;
     let culling_range =
@@ -2347,6 +2760,8 @@ pub fn render_shared_pane_candlestick_chart(
         rendered_alert_marker_count: 0,
         equity_pane_active: false,
         rendered_backtest_trade_count: 0,
+        vrvp_poc_price: None,
+        active_frvp_count: 0,
     })
 }
 
@@ -2650,11 +3065,28 @@ fn resolve_bucket_screen_ys(
     env: &BucketLineEnvelope,
     vp: &PaneViewport<'_>,
 ) -> Option<(f32, f32, bool)> {
-    let sy0 = vp.price_to_screen_y(env.entry_val)? as f32;
+    resolve_bucket_screen_ys_scaled(env, vp, 1.0)
+}
+
+#[inline]
+fn resolve_bucket_screen_ys_scaled(
+    env: &BucketLineEnvelope,
+    vp: &PaneViewport<'_>,
+    value_scale: f64,
+) -> Option<(f32, f32, bool)> {
+    let v0 = env.entry_val * value_scale;
+    if !v0.is_finite() {
+        return None;
+    }
+    let sy0 = vp.price_to_screen_y(v0)? as f32;
     if env.is_single {
         return Some((sy0, sy0, true));
     }
-    let sy1 = vp.price_to_screen_y(env.exit_val)? as f32;
+    let v1 = env.exit_val * value_scale;
+    if !v1.is_finite() {
+        return None;
+    }
+    let sy1 = vp.price_to_screen_y(v1)? as f32;
     if env.has_internal_gap {
         return Some((sy0, sy1, false));
     }
@@ -2668,6 +3100,140 @@ fn resolve_bucket_screen_ys(
     }
 }
 
+/// Appends a pre-baked triangle quad strip along `pts` into `mesh` to avoid per-segment stroke feathering.
+fn append_polyline_quad_strip(mesh: &mut Mesh, pts: &[Pos2], stroke: Stroke) {
+    if pts.len() >= 2 {
+        let half_w = (stroke.width * 0.5).max(0.55);
+        for seg in pts.windows(2) {
+            let p0 = seg[0];
+            let p1 = seg[1];
+            let dx = p1.x - p0.x;
+            let dy = p1.y - p0.y;
+            let len_sq = dx * dx + dy * dy;
+            if len_sq <= 1e-6 {
+                continue;
+            }
+            let inv = len_sq.sqrt().recip() * half_w;
+            let nx = -dy * inv;
+            let ny = dx * inv;
+            let b = mesh.vertices.len() as u32;
+            mesh.colored_vertex(Pos2::new(p0.x + nx, p0.y + ny), stroke.color);
+            mesh.colored_vertex(Pos2::new(p0.x - nx, p0.y - ny), stroke.color);
+            mesh.colored_vertex(Pos2::new(p1.x - nx, p1.y - ny), stroke.color);
+            mesh.colored_vertex(Pos2::new(p1.x + nx, p1.y + ny), stroke.color);
+            mesh.add_triangle(b, b + 1, b + 2);
+            mesh.add_triangle(b, b + 2, b + 3);
+        }
+    } else if let Some(&single_pt) = pts.first() {
+        let r = (stroke.width * 0.9).max(1.2);
+        mesh.add_colored_rect(
+            Rect::from_center_size(single_pt, Vec2::splat(r * 2.0)),
+            stroke.color,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_conflated_line_segment(
+    painter: &egui::Painter,
+    dense_mesh: &mut Option<Mesh>,
+    series: &[Option<f64>],
+    block_index: Option<&SeriesBlockIndex>,
+    global_offset: usize,
+    hard_range: std::ops::Range<usize>,
+    visible_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    vp: &PaneViewport<'_>,
+    stroke: Stroke,
+    value_scale: f64,
+) {
+    let step = conflation_factor.max(1);
+    let total = series.len();
+    let hard_start = hard_range.start.min(total);
+    let hard_end = hard_range.end.min(total);
+    let vis_start = visible_range.start.max(hard_start).min(hard_end);
+    let vis_end = visible_range.end.max(vis_start).min(hard_end);
+    if vis_start >= vis_end {
+        return;
+    }
+
+    let mut current_pts: Vec<Pos2> =
+        Vec::with_capacity(((vis_end - vis_start) / step + 4).min(256));
+    let flush_segment =
+        |painter: &egui::Painter, dense_mesh: &mut Option<Mesh>, pts: &mut Vec<Pos2>| {
+            if let Some(mesh) = dense_mesh.as_mut() {
+                append_polyline_quad_strip(mesh, pts, stroke);
+                pts.clear();
+            } else if pts.len() >= 2 {
+                painter.add(Shape::line(std::mem::take(pts), stroke));
+            } else if let Some(&single_pt) = pts.first() {
+                painter.circle_filled(single_pt, (stroke.width * 0.9).max(1.2), stroke.color);
+                pts.clear();
+            }
+        };
+
+    if step == 1 {
+        for (idx, item) in series.iter().enumerate().take(vis_end).skip(vis_start) {
+            if let Some(v) = item.map(|raw| raw * value_scale).filter(|v| v.is_finite())
+                && let (Some(sx), Some(sy)) = (
+                    vp.float_index_to_screen_x((global_offset + idx) as f64),
+                    vp.price_to_screen_y(v),
+                )
+            {
+                current_pts.push(Pos2::new(sx as f32, sy as f32));
+            } else {
+                flush_segment(painter, dense_mesh, &mut current_pts);
+            }
+        }
+        flush_segment(painter, dense_mesh, &mut current_pts);
+        return;
+    }
+
+    let g_hard_start = global_offset + hard_start;
+    let g_hard_end = global_offset + hard_end;
+    let aligned_global_start = ((global_offset + vis_start) / step) * step;
+    let aligned_global_end = (global_offset + vis_end)
+        .div_ceil(step)
+        .saturating_mul(step)
+        .min(g_hard_end);
+    let mut g_start = aligned_global_start;
+
+    while g_start < aligned_global_end {
+        let g_end = (g_start + step).min(g_hard_end);
+        let b_start = g_start.max(g_hard_start).saturating_sub(global_offset);
+        let b_end = g_end.saturating_sub(global_offset).min(hard_end);
+        if b_start < b_end
+            && let Some(env) = bucket_line_envelope_indexed(series, block_index, b_start, b_end)
+            && let (Some(sx), Some((y_entry, y_exit, single))) = (
+                vp.float_index_to_screen_x(global_offset as f64 + env.center_logical_index),
+                resolve_bucket_screen_ys_scaled(&env, vp, value_scale),
+            )
+        {
+            let x = sx as f32;
+            if env.has_leading_gap {
+                flush_segment(painter, dense_mesh, &mut current_pts);
+            }
+            if env.has_internal_gap {
+                current_pts.push(Pos2::new(x, y_entry));
+                flush_segment(painter, dense_mesh, &mut current_pts);
+                current_pts.push(Pos2::new(x, y_exit));
+            } else if single {
+                current_pts.push(Pos2::new(x, y_entry));
+            } else {
+                current_pts.push(Pos2::new(x, y_entry));
+                current_pts.push(Pos2::new(x, y_exit));
+            }
+            if env.has_trailing_gap {
+                flush_segment(painter, dense_mesh, &mut current_pts);
+            }
+        } else {
+            flush_segment(painter, dense_mesh, &mut current_pts);
+        }
+        g_start = g_start.saturating_add(step);
+    }
+    flush_segment(painter, dense_mesh, &mut current_pts);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_conflated_line_series(
     painter: &egui::Painter,
@@ -2678,114 +3244,45 @@ fn paint_conflated_line_series(
     vp: &PaneViewport<'_>,
     stroke: Stroke,
 ) {
+    paint_conflated_line_series_scaled(
+        painter,
+        series,
+        block_index,
+        culling_range,
+        conflation_factor,
+        vp,
+        stroke,
+        1.0,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_conflated_line_series_scaled(
+    painter: &egui::Painter,
+    series: &[Option<f64>],
+    block_index: Option<&SeriesBlockIndex>,
+    culling_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    vp: &PaneViewport<'_>,
+    stroke: Stroke,
+    value_scale: f64,
+) {
     let step = conflation_factor.max(1);
     let total = series.len();
-    let clamped_start = culling_range.start.min(total);
-    let clamped_end = culling_range.end.min(total);
-    if clamped_start >= clamped_end {
-        return;
-    }
-
     let mut dense_mesh = (step >= 8).then(|| Mesh::with_texture(egui::TextureId::default()));
-    let half_w = (stroke.width * 0.5).max(0.55);
-    let mut current_pts: Vec<Pos2> = Vec::with_capacity(256);
-    let mut flush_segment = |painter: &egui::Painter, pts: &mut Vec<Pos2>| {
-        if let Some(mesh) = dense_mesh.as_mut() {
-            if pts.len() >= 2 {
-                for seg in pts.windows(2) {
-                    let p0 = seg[0];
-                    let p1 = seg[1];
-                    let dx = p1.x - p0.x;
-                    let dy = p1.y - p0.y;
-                    let len_sq = dx * dx + dy * dy;
-                    if len_sq <= 1e-6 {
-                        continue;
-                    }
-                    let inv = len_sq.sqrt().recip() * half_w;
-                    let nx = -dy * inv;
-                    let ny = dx * inv;
-                    let b = mesh.vertices.len() as u32;
-                    mesh.colored_vertex(Pos2::new(p0.x + nx, p0.y + ny), stroke.color);
-                    mesh.colored_vertex(Pos2::new(p0.x - nx, p0.y - ny), stroke.color);
-                    mesh.colored_vertex(Pos2::new(p1.x - nx, p1.y - ny), stroke.color);
-                    mesh.colored_vertex(Pos2::new(p1.x + nx, p1.y + ny), stroke.color);
-                    mesh.add_triangle(b, b + 1, b + 2);
-                    mesh.add_triangle(b, b + 2, b + 3);
-                }
-                pts.clear();
-            } else if let Some(&single_pt) = pts.first() {
-                let r = (stroke.width * 0.9).max(1.2);
-                mesh.add_colored_rect(
-                    Rect::from_center_size(single_pt, Vec2::splat(r * 2.0)),
-                    stroke.color,
-                );
-                pts.clear();
-            }
-        } else if pts.len() >= 2 {
-            painter.add(Shape::line(std::mem::take(pts), stroke));
-        } else if let Some(&single_pt) = pts.first() {
-            painter.circle_filled(single_pt, (stroke.width * 0.9).max(1.2), stroke.color);
-            pts.clear();
-        }
-    };
-
-    if step == 1 {
-        for (idx, item) in series
-            .iter()
-            .enumerate()
-            .take(clamped_end)
-            .skip(clamped_start)
-        {
-            if let Some(v) = item.filter(|v| v.is_finite())
-                && let (Some(sx), Some(sy)) = (
-                    vp.float_index_to_screen_x(idx as f64),
-                    vp.price_to_screen_y(v),
-                )
-            {
-                current_pts.push(Pos2::new(sx as f32, sy as f32));
-            } else {
-                flush_segment(painter, &mut current_pts);
-            }
-        }
-        flush_segment(painter, &mut current_pts);
-        return;
-    }
-
-    let aligned_start = (clamped_start / step) * step;
-    let aligned_end = clamped_end.div_ceil(step).saturating_mul(step).min(total);
-    let mut b_start = aligned_start;
-
-    while b_start < aligned_end {
-        let b_end = (b_start + step).min(total);
-        if let Some(env) = bucket_line_envelope_indexed(series, block_index, b_start, b_end)
-            && let (Some(sx), Some((y_entry, y_exit, single))) = (
-                vp.float_index_to_screen_x(env.center_logical_index),
-                resolve_bucket_screen_ys(&env, vp),
-            )
-        {
-            let x = sx as f32;
-            if env.has_leading_gap {
-                flush_segment(painter, &mut current_pts);
-            }
-            if env.has_internal_gap {
-                current_pts.push(Pos2::new(x, y_entry));
-                flush_segment(painter, &mut current_pts);
-                current_pts.push(Pos2::new(x, y_exit));
-            } else if single {
-                current_pts.push(Pos2::new(x, y_entry));
-            } else {
-                current_pts.push(Pos2::new(x, y_entry));
-                current_pts.push(Pos2::new(x, y_exit));
-            }
-            if env.has_trailing_gap {
-                flush_segment(painter, &mut current_pts);
-            }
-        } else {
-            flush_segment(painter, &mut current_pts);
-        }
-        b_start = b_end;
-    }
-    flush_segment(painter, &mut current_pts);
+    append_conflated_line_segment(
+        painter,
+        &mut dense_mesh,
+        series,
+        block_index,
+        0,
+        0..total,
+        culling_range,
+        step,
+        vp,
+        stroke,
+        value_scale,
+    );
     if let Some(mesh) = dense_mesh
         && !mesh.is_empty()
     {
@@ -2899,6 +3396,653 @@ fn paint_bollinger_bands(
         conflation_factor,
         vp,
         edge_stroke,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_band_ribbon_into_mesh(
+    mesh: &mut Mesh,
+    upper: &[Option<f64>],
+    upper_idx: Option<&SeriesBlockIndex>,
+    lower: &[Option<f64>],
+    lower_idx: Option<&SeriesBlockIndex>,
+    global_offset: usize,
+    hard_range: std::ops::Range<usize>,
+    visible_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    vp: &PaneViewport<'_>,
+    fill_color: Color32,
+) {
+    let step = conflation_factor.max(1);
+    let total = upper.len().min(lower.len());
+    let hard_start = hard_range.start.min(total);
+    let hard_end = hard_range.end.min(total);
+    let vis_start = visible_range.start.max(hard_start).min(hard_end);
+    let vis_end = visible_range.end.max(vis_start).min(hard_end);
+    if vis_start >= vis_end {
+        return;
+    }
+
+    let mut prev_exit: Option<(f32, f32, f32)> = None;
+    #[allow(clippy::too_many_arguments)]
+    let push_pair = |mesh: &mut Mesh,
+                     prev_exit: &mut Option<(f32, f32, f32)>,
+                     x: f32,
+                     u_in: f32,
+                     u_out: f32,
+                     l_in: f32,
+                     l_out: f32,
+                     lead_gap: bool,
+                     trail_gap: bool| {
+        if lead_gap {
+            *prev_exit = None;
+        }
+        if let Some((px, pu_out, pl_out)) = *prev_exit {
+            let tl = pu_out.min(pl_out);
+            let bl = pu_out.max(pl_out);
+            let tr = u_in.min(l_in);
+            let br = u_in.max(l_in);
+            let base_v = mesh.vertices.len() as u32;
+            mesh.colored_vertex(Pos2::new(px, tl), fill_color);
+            mesh.colored_vertex(Pos2::new(px, bl), fill_color);
+            mesh.colored_vertex(Pos2::new(x, tr), fill_color);
+            mesh.colored_vertex(Pos2::new(x, br), fill_color);
+            mesh.add_triangle(base_v, base_v + 1, base_v + 2);
+            mesh.add_triangle(base_v + 1, base_v + 3, base_v + 2);
+        }
+        if trail_gap {
+            *prev_exit = None;
+        } else {
+            *prev_exit = Some((x, u_out, l_out));
+        }
+    };
+
+    if step == 1 {
+        for idx in vis_start..vis_end {
+            if let (Some(uv), Some(lv)) = (
+                upper[idx].filter(|v| v.is_finite()),
+                lower[idx].filter(|v| v.is_finite()),
+            ) && let (Some(sx), Some(uy), Some(ly)) = (
+                vp.float_index_to_screen_x((global_offset + idx) as f64),
+                vp.price_to_screen_y(uv),
+                vp.price_to_screen_y(lv),
+            ) {
+                let uyf = uy as f32;
+                let lyf = ly as f32;
+                push_pair(
+                    mesh,
+                    &mut prev_exit,
+                    sx as f32,
+                    uyf,
+                    uyf,
+                    lyf,
+                    lyf,
+                    false,
+                    false,
+                );
+            } else {
+                prev_exit = None;
+            }
+        }
+        return;
+    }
+
+    let g_hard_start = global_offset + hard_start;
+    let g_hard_end = global_offset + hard_end;
+    let aligned_global_start = ((global_offset + vis_start) / step) * step;
+    let aligned_global_end = (global_offset + vis_end)
+        .div_ceil(step)
+        .saturating_mul(step)
+        .min(g_hard_end);
+    let mut g_start = aligned_global_start;
+
+    while g_start < aligned_global_end {
+        let g_end = (g_start + step).min(g_hard_end);
+        let b_start = g_start.max(g_hard_start).saturating_sub(global_offset);
+        let b_end = g_end.saturating_sub(global_offset).min(hard_end);
+        let u_env_opt = (b_start < b_end)
+            .then(|| bucket_line_envelope_indexed(upper, upper_idx, b_start, b_end))
+            .flatten();
+        let l_env_opt = (b_start < b_end)
+            .then(|| bucket_line_envelope_indexed(lower, lower_idx, b_start, b_end))
+            .flatten();
+
+        if let (Some(u_env), Some(l_env)) = (u_env_opt, l_env_opt)
+            && let (Some(sx), Some((u_in, u_out, _)), Some((l_in, l_out, _))) = (
+                vp.float_index_to_screen_x(global_offset as f64 + u_env.center_logical_index),
+                resolve_bucket_screen_ys(&u_env, vp),
+                resolve_bucket_screen_ys(&l_env, vp),
+            )
+        {
+            push_pair(
+                mesh,
+                &mut prev_exit,
+                sx as f32,
+                u_in,
+                u_out,
+                l_in,
+                l_out,
+                u_env.has_leading_gap || l_env.has_leading_gap,
+                u_env.has_trailing_gap || l_env.has_trailing_gap,
+            );
+        } else {
+            prev_exit = None;
+        }
+        g_start = g_start.saturating_add(step);
+    }
+}
+
+#[inline]
+fn premultiplied_tint(color: Color32, alpha: u8) -> Color32 {
+    let a = u16::from(alpha);
+    Color32::from_rgba_premultiplied(
+        ((u16::from(color.r()) * a) / 255) as u8,
+        ((u16::from(color.g()) * a) / 255) as u8,
+        ((u16::from(color.b()) * a) / 255) as u8,
+        alpha,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_vwap_output(
+    painter: &egui::Painter,
+    vwap: &VwapBandsOutput,
+    indices: Option<(
+        &SeriesBlockIndex,
+        &SeriesBlockIndex,
+        &SeriesBlockIndex,
+        &SeriesBlockIndex,
+        &SeriesBlockIndex,
+    )>,
+    culling_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    vp: &PaneViewport<'_>,
+    show_band_1: bool,
+    show_band_2: bool,
+    line_color: Color32,
+) {
+    let total = vwap.vwap.len();
+    let start = culling_range.start.min(total);
+    let end = culling_range.end.min(total);
+    if start >= end {
+        return;
+    }
+
+    let band1_stroke = Stroke::new(1.0, line_color.gamma_multiply(0.60));
+    let band2_stroke = Stroke::new(1.0, line_color.gamma_multiply(0.38));
+    let band1_fill = if line_color == palette::IND_VWAP_LINE {
+        palette::IND_VWAP_FILL_1
+    } else {
+        premultiplied_tint(line_color, 26)
+    };
+    let band2_fill = if line_color == palette::IND_VWAP_LINE {
+        palette::IND_VWAP_FILL_2
+    } else {
+        premultiplied_tint(line_color, 16)
+    };
+    let main_stroke = Stroke::new(1.7, line_color);
+
+    let starts = &vwap.session_starts;
+    let first_pos = starts.partition_point(|&s| s <= start).saturating_sub(1);
+    let last_pos = starts.partition_point(|&s| s < end);
+    let visible_sessions = if starts.is_empty() {
+        1
+    } else {
+        last_pos.saturating_sub(first_pos).max(1)
+    };
+    let step = conflation_factor.max(1);
+    let use_line_mesh = step >= 8 || visible_sessions > 128;
+
+    let (idx_v, idx_u1, idx_l1, idx_u2, idx_l2) = match indices {
+        Some((v, u1, l1, u2, l2)) => (Some(v), Some(u1), Some(l1), Some(u2), Some(l2)),
+        None => (None, None, None, None, None),
+    };
+
+    let mut band2_mesh = show_band_2.then(Mesh::default);
+    let mut band1_mesh = show_band_1.then(Mesh::default);
+    let mut band_border_mesh = ((show_band_2 || show_band_1) && step < 8 && visible_sessions > 128)
+        .then(|| Mesh::with_texture(egui::TextureId::default()));
+    let mut main_line_mesh = use_line_mesh.then(|| Mesh::with_texture(egui::TextureId::default()));
+
+    // Always segment strictly per session boundary across EVERY conflation zoom level (`1x`, `4x`, `16x`, ...),
+    // accumulating ribbons and dense strokes into shared meshes while never bridging across resets.
+    let mut render_session_slice =
+        |hard_range: std::ops::Range<usize>, vis_range: std::ops::Range<usize>| {
+            if show_band_2 {
+                if let Some(mesh) = band2_mesh.as_mut() {
+                    append_band_ribbon_into_mesh(
+                        mesh,
+                        &vwap.upper_2,
+                        idx_u2,
+                        &vwap.lower_2,
+                        idx_l2,
+                        0,
+                        hard_range.clone(),
+                        vis_range.clone(),
+                        step,
+                        vp,
+                        band2_fill,
+                    );
+                }
+                if step < 8 {
+                    append_conflated_line_segment(
+                        painter,
+                        &mut band_border_mesh,
+                        &vwap.upper_2,
+                        idx_u2,
+                        0,
+                        hard_range.clone(),
+                        vis_range.clone(),
+                        step,
+                        vp,
+                        band2_stroke,
+                        1.0,
+                    );
+                    append_conflated_line_segment(
+                        painter,
+                        &mut band_border_mesh,
+                        &vwap.lower_2,
+                        idx_l2,
+                        0,
+                        hard_range.clone(),
+                        vis_range.clone(),
+                        step,
+                        vp,
+                        band2_stroke,
+                        1.0,
+                    );
+                }
+            }
+            if show_band_1 {
+                if let Some(mesh) = band1_mesh.as_mut() {
+                    append_band_ribbon_into_mesh(
+                        mesh,
+                        &vwap.upper_1,
+                        idx_u1,
+                        &vwap.lower_1,
+                        idx_l1,
+                        0,
+                        hard_range.clone(),
+                        vis_range.clone(),
+                        step,
+                        vp,
+                        band1_fill,
+                    );
+                }
+                if step < 8 {
+                    append_conflated_line_segment(
+                        painter,
+                        &mut band_border_mesh,
+                        &vwap.upper_1,
+                        idx_u1,
+                        0,
+                        hard_range.clone(),
+                        vis_range.clone(),
+                        step,
+                        vp,
+                        band1_stroke,
+                        1.0,
+                    );
+                    append_conflated_line_segment(
+                        painter,
+                        &mut band_border_mesh,
+                        &vwap.lower_1,
+                        idx_l1,
+                        0,
+                        hard_range.clone(),
+                        vis_range.clone(),
+                        step,
+                        vp,
+                        band1_stroke,
+                        1.0,
+                    );
+                }
+            }
+            append_conflated_line_segment(
+                painter,
+                &mut main_line_mesh,
+                &vwap.vwap,
+                idx_v,
+                0,
+                hard_range,
+                vis_range,
+                step,
+                vp,
+                main_stroke,
+                1.0,
+            );
+        };
+
+    if starts.is_empty() {
+        render_session_slice(0..total, start..end);
+    } else {
+        for si in first_pos..last_pos {
+            let hard_start = starts[si].min(total);
+            let hard_end = starts.get(si + 1).copied().unwrap_or(total).min(total);
+            let vis_start = hard_start.max(start);
+            let vis_end = hard_end.min(end);
+            if vis_start < vis_end {
+                render_session_slice(hard_start..hard_end, vis_start..vis_end);
+            }
+        }
+    }
+
+    if let Some(mesh) = band2_mesh
+        && !mesh.indices.is_empty()
+    {
+        painter.add(Shape::mesh(mesh));
+    }
+    if let Some(mesh) = band1_mesh
+        && !mesh.indices.is_empty()
+    {
+        painter.add(Shape::mesh(mesh));
+    }
+    if let Some(mesh) = band_border_mesh
+        && !mesh.is_empty()
+    {
+        painter.add(Shape::mesh(mesh));
+    }
+    if let Some(mesh) = main_line_mesh
+        && !mesh.is_empty()
+    {
+        painter.add(Shape::mesh(mesh));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_anchored_vwap_tail(
+    painter: &egui::Painter,
+    vwap: &VwapBandsOutput,
+    global_offset: usize,
+    local_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    vp: &PaneViewport<'_>,
+    show_bands: bool,
+    line_color: Color32,
+) {
+    let total = vwap.vwap.len();
+    let s = local_range.start.min(total);
+    let e = local_range.end.min(total);
+    if s >= e {
+        return;
+    }
+
+    let step = conflation_factor.max(1);
+    let band_fill = premultiplied_tint(line_color, 24);
+    let band_stroke = Stroke::new(1.0, line_color.gamma_multiply(0.55));
+    let main_stroke = Stroke::new(1.7, line_color);
+
+    if show_bands {
+        let mut band_mesh = Mesh::default();
+        append_band_ribbon_into_mesh(
+            &mut band_mesh,
+            &vwap.upper_1,
+            None,
+            &vwap.lower_1,
+            None,
+            global_offset,
+            0..total,
+            s..e,
+            step,
+            vp,
+            band_fill,
+        );
+        if !band_mesh.indices.is_empty() {
+            painter.add(Shape::mesh(band_mesh));
+        }
+        if step < 8 {
+            let mut border_mesh = None;
+            append_conflated_line_segment(
+                painter,
+                &mut border_mesh,
+                &vwap.upper_1,
+                None,
+                global_offset,
+                0..total,
+                s..e,
+                step,
+                vp,
+                band_stroke,
+                1.0,
+            );
+            append_conflated_line_segment(
+                painter,
+                &mut border_mesh,
+                &vwap.lower_1,
+                None,
+                global_offset,
+                0..total,
+                s..e,
+                step,
+                vp,
+                band_stroke,
+                1.0,
+            );
+        }
+    }
+
+    let mut line_mesh = (step >= 8).then(|| Mesh::with_texture(egui::TextureId::default()));
+    append_conflated_line_segment(
+        painter,
+        &mut line_mesh,
+        &vwap.vwap,
+        None,
+        global_offset,
+        0..total,
+        s..e,
+        step,
+        vp,
+        main_stroke,
+        1.0,
+    );
+    if let Some(mesh) = line_mesh
+        && !mesh.is_empty()
+    {
+        painter.add(Shape::mesh(mesh));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_volume_profile_bars(
+    painter: &egui::Painter,
+    vp: &PaneViewport<'_>,
+    profile: &VolumeProfileResult,
+    x_anchor: f32,
+    max_bar_width: f32,
+    align_right: bool,
+    line_span_x: (f32, f32),
+    poc_color: Color32,
+    va_line_color: Color32,
+    is_selected: bool,
+    show_poc_tag: bool,
+    poc_label: Option<&str>,
+) {
+    if profile.max_bin_volume <= 0.0 || max_bar_width <= 1.0 {
+        return;
+    }
+
+    let mut mesh = Mesh::with_texture(egui::TextureId::default());
+    mesh.vertices.reserve(profile.bins.len() * 8);
+    mesh.indices.reserve(profile.bins.len() * 12);
+
+    let buy_va = if is_selected {
+        Color32::from_rgba_premultiplied(18, 78, 72, 122)
+    } else {
+        palette::VRVP_BUY_VA
+    };
+    let sell_va = if is_selected {
+        Color32::from_rgba_premultiplied(114, 39, 38, 122)
+    } else {
+        palette::VRVP_SELL_VA
+    };
+    let buy_out = if is_selected {
+        Color32::from_rgba_premultiplied(9, 40, 37, 64)
+    } else {
+        palette::VRVP_BUY_OUT
+    };
+    let sell_out = if is_selected {
+        Color32::from_rgba_premultiplied(57, 20, 19, 64)
+    } else {
+        palette::VRVP_SELL_OUT
+    };
+
+    for bin in &profile.bins {
+        if bin.total_volume <= 0.0 {
+            continue;
+        }
+        let (Some(y_lo), Some(y_hi)) = (
+            vp.price_to_screen_y(bin.price_low),
+            vp.price_to_screen_y(bin.price_high),
+        ) else {
+            continue;
+        };
+        let raw_top = (y_hi.min(y_lo)) as f32;
+        let raw_bot = (y_hi.max(y_lo)) as f32;
+        if !raw_top.is_finite() || !raw_bot.is_finite() {
+            continue;
+        }
+        let h = (raw_bot - raw_top).max(1.2);
+        let gap = if h >= 3.5 { 0.45_f32 } else { 0.0 };
+        let y0 = raw_top + gap * 0.5;
+        let y1 = (raw_top + h - gap * 0.5).max(y0 + 0.8);
+
+        let total_w = ((bin.total_volume / profile.max_bin_volume) as f32 * max_bar_width)
+            .clamp(1.2, max_bar_width);
+        let buy_frac = (bin.buy_volume / bin.total_volume).clamp(0.0, 1.0) as f32;
+        let buy_w = total_w * buy_frac;
+        let sell_w = (total_w - buy_w).max(0.0);
+
+        let (buy_col, sell_col) = if bin.in_value_area {
+            (buy_va, sell_va)
+        } else {
+            (buy_out, sell_out)
+        };
+
+        if align_right {
+            let x_right = x_anchor;
+            let x_mid = x_right - sell_w;
+            let x_left = x_right - total_w;
+            if buy_w > 0.25 {
+                mesh.add_colored_rect(
+                    Rect::from_min_max(Pos2::new(x_left, y0), Pos2::new(x_mid, y1)),
+                    buy_col,
+                );
+            }
+            if sell_w > 0.25 {
+                mesh.add_colored_rect(
+                    Rect::from_min_max(Pos2::new(x_mid, y0), Pos2::new(x_right, y1)),
+                    sell_col,
+                );
+            }
+        } else {
+            let x_left = x_anchor;
+            let x_mid = x_left + buy_w;
+            let x_right = x_left + total_w;
+            if buy_w > 0.25 {
+                mesh.add_colored_rect(
+                    Rect::from_min_max(Pos2::new(x_left, y0), Pos2::new(x_mid, y1)),
+                    buy_col,
+                );
+            }
+            if sell_w > 0.25 {
+                mesh.add_colored_rect(
+                    Rect::from_min_max(Pos2::new(x_mid, y0), Pos2::new(x_right, y1)),
+                    sell_col,
+                );
+            }
+        }
+    }
+
+    if !mesh.is_empty() {
+        painter.add(Shape::mesh(mesh));
+    }
+
+    let x0 = line_span_x.0;
+    let x1 = line_span_x.1;
+    if x1 - x0 > 2.0 {
+        for level_price in [profile.vah_price, profile.val_price] {
+            if let Some(sy) = vp.price_to_screen_y(level_price) {
+                let y = sy as f32;
+                let p0 = Pos2::new(x0, y);
+                let p1 = Pos2::new(x1, y);
+                paint_styled_segment_phased(
+                    painter,
+                    p0,
+                    p1,
+                    p0,
+                    Stroke::new(1.05, va_line_color.gamma_multiply(0.82)),
+                    LineDashStyle::Dashed,
+                );
+            }
+        }
+        if let Some(py) = vp.price_to_screen_y(profile.poc_price) {
+            let y = py as f32;
+            painter.line_segment(
+                [Pos2::new(x0, y), Pos2::new(x1, y)],
+                Stroke::new(2.0, poc_color),
+            );
+            if show_poc_tag
+                && let Some(lbl) = poc_label
+                && !lbl.is_empty()
+            {
+                let galley =
+                    painter.layout_no_wrap(lbl.to_owned(), FontId::monospace(10.0), poc_color);
+                let pill_pos = Pos2::new(x0 + 5.0, y - galley.size().y - 4.0);
+                let bg_rect =
+                    Rect::from_min_size(pill_pos, galley.size()).expand2(Vec2::new(4.0, 2.0));
+                painter.rect_filled(
+                    bg_rect,
+                    3.0,
+                    Color32::from_rgba_unmultiplied(13, 17, 26, 215),
+                );
+                painter.galley(pill_pos, galley, Color32::WHITE);
+            }
+        }
+    }
+}
+
+fn paint_relative_strength_pane(
+    painter: &egui::Painter,
+    plot_rect: Rect,
+    cache: &IndicatorCache,
+    culling_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    vp: &PaneViewport<'_>,
+) {
+    let base_ref = RS_REFERENCE_LEVELS[0].value;
+    if let Some(sy) = vp.price_to_screen_y(base_ref) {
+        let y = sy as f32;
+        if y >= plot_rect.top() && y <= plot_rect.bottom() {
+            let p0 = Pos2::new(plot_rect.left(), y);
+            let p1 = Pos2::new(plot_rect.right(), y);
+            paint_styled_segment_phased(
+                painter,
+                p0,
+                p1,
+                p0,
+                Stroke::new(1.0, palette::IND_RS_BASELINE.gamma_multiply(0.75)),
+                LineDashStyle::Dashed,
+            );
+        }
+    }
+
+    paint_conflated_line_series(
+        painter,
+        &cache.rs.rs_sma,
+        Some(&cache.rs_sma_idx),
+        culling_range.clone(),
+        conflation_factor,
+        vp,
+        Stroke::new(1.25, palette::IND_RS_SMA),
+    );
+    paint_conflated_line_series(
+        painter,
+        &cache.rs.rs_line,
+        Some(&cache.rs_line_idx),
+        culling_range,
+        conflation_factor,
+        vp,
+        Stroke::new(1.65, palette::IND_RS_LINE),
     );
 }
 
@@ -3994,18 +5138,23 @@ fn paint_main_ohlcv_hud(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_main_overlay_hud(
     painter: &egui::Painter,
     plot_rect: Rect,
     indicators: &IndicatorConfig,
     cache: &IndicatorCache,
     idx: usize,
+    vrvp: Option<&VolumeProfileResult>,
+    compare_info: Option<(&str, &[Option<f64>], f64)>,
+    price_scale: &PriceScale,
+    base_value: f64,
 ) {
     if plot_rect.height() < 64.0 {
         return;
     }
     let mut job = LayoutJob::default();
-    let font = FontId::monospace(11.0);
+    let font = FontId::monospace(10.8);
     let mut has_item = false;
 
     let append_sep = |job: &mut LayoutJob, has_item: &mut bool| {
@@ -4078,8 +5227,81 @@ fn paint_main_overlay_hud(
             ),
             0.0,
             TextFormat {
-                font_id: font,
+                font_id: font.clone(),
                 color: palette::IND_BB_BORDER,
+                ..Default::default()
+            },
+        );
+    }
+    if indicators.show_vwap {
+        append_sep(&mut job, &mut has_item);
+        let fmt_opt = |s: &[Option<f64>]| {
+            s.get(idx).copied().flatten().map_or_else(
+                || "—".to_owned(),
+                |v| price_scale.format_price(v, base_value),
+            )
+        };
+        let label = if plot_rect.width() >= 960.0 && indicators.vwap_band_1 > 0.0 {
+            format!(
+                "VWAP {} (±1σ {}/{})",
+                fmt_opt(&cache.vwap.vwap),
+                fmt_opt(&cache.vwap.lower_1),
+                fmt_opt(&cache.vwap.upper_1),
+            )
+        } else {
+            format!("VWAP {}", fmt_opt(&cache.vwap.vwap))
+        };
+        job.append(
+            &label,
+            0.0,
+            TextFormat {
+                font_id: font.clone(),
+                color: palette::IND_VWAP_LINE,
+                ..Default::default()
+            },
+        );
+    }
+    if let Some(profile) = vrvp {
+        append_sep(&mut job, &mut has_item);
+        let poc_str = price_scale.format_price(profile.poc_price, base_value);
+        let label = if plot_rect.width() >= 960.0 {
+            format!(
+                "VRVP POC {poc_str} ({}–{})",
+                price_scale.format_price(profile.val_price, base_value),
+                price_scale.format_price(profile.vah_price, base_value),
+            )
+        } else {
+            format!("VRVP POC {poc_str}")
+        };
+        job.append(
+            &label,
+            0.0,
+            TextFormat {
+                font_id: font.clone(),
+                color: palette::VRVP_POC_GOLD,
+                ..Default::default()
+            },
+        );
+    }
+    if let Some((bench_sym, cmp_series, cmp_scale)) = compare_info {
+        append_sep(&mut job, &mut has_item);
+        let val = cmp_series
+            .get(idx)
+            .copied()
+            .flatten()
+            .filter(|v| v.is_finite())
+            .map(|v| v * cmp_scale)
+            .filter(|v| v.is_finite())
+            .map_or_else(
+                || "—".to_owned(),
+                |v| price_scale.format_price(v, base_value),
+            );
+        job.append(
+            &format!("CMP({bench_sym}) {val}"),
+            0.0,
+            TextFormat {
+                font_id: font,
+                color: palette::COMPARE_BENCH_LINE,
                 ..Default::default()
             },
         );
@@ -4103,6 +5325,7 @@ fn paint_oscillator_hud(
     cache: &IndicatorCache,
     backtest_result: Option<&BacktestRunResult>,
     equity_override: Option<EquityCurveOverlay<'_>>,
+    rs_benchmark_label: Option<&str>,
     idx: usize,
 ) {
     let mut job = LayoutJob::default();
@@ -4195,6 +5418,50 @@ fn paint_oscillator_hud(
                     ..Default::default()
                 },
             );
+        }
+        OscillatorPaneId::RelativeStrength => {
+            let rs_opt = cache.rs.rs_line.get(idx).copied().flatten();
+            let sma_opt = cache.rs.rs_sma.get(idx).copied().flatten();
+            let bench_name = rs_benchmark_label.unwrap_or("BENCHMARK");
+            let rs_str = rs_opt.map_or_else(|| "—".to_owned(), |v| format!("{v:.2}"));
+            let sma_str = sma_opt.map_or_else(|| "—".to_owned(), |v| format!("{v:.2}"));
+            job.append(
+                &format!(
+                    "RS(vs {bench_name}, {})  {rs_str}",
+                    indicators.rs_sma_period
+                ),
+                0.0,
+                TextFormat {
+                    font_id: font.clone(),
+                    color: palette::IND_RS_LINE,
+                    ..Default::default()
+                },
+            );
+            job.append(
+                &format!("   SMA {sma_str}"),
+                0.0,
+                TextFormat {
+                    font_id: font.clone(),
+                    color: palette::IND_RS_SMA,
+                    ..Default::default()
+                },
+            );
+            if let Some(rs_val) = rs_opt {
+                let rel_pct = rs_val - 100.0;
+                job.append(
+                    &format!("   [{rel_pct:+.2}%]"),
+                    0.0,
+                    TextFormat {
+                        font_id: font,
+                        color: if rel_pct >= 0.0 {
+                            palette::BULLISH
+                        } else {
+                            palette::BEARISH
+                        },
+                        ..Default::default()
+                    },
+                );
+            }
         }
         OscillatorPaneId::Equity => {
             if let Some(eq_ov) = equity_override {
@@ -4567,6 +5834,35 @@ fn handle_time_axis_interactions(
     }
 }
 
+#[inline]
+fn compute_compare_viewport_scale(
+    candles: &[Candle],
+    cmp_series: &[Option<f64>],
+    cmp_idx: &SeriesBlockIndex,
+    strict_range: std::ops::Range<usize>,
+) -> f64 {
+    let n = candles.len().min(cmp_series.len());
+    let s = strict_range.start.min(n);
+    let e = strict_range.end.min(n);
+    let scan_from = cmp_idx.first_valid_index(cmp_series, s..e).unwrap_or(s);
+    for i in scan_from..e {
+        let sc = candles[i].close;
+        if sc.is_finite()
+            && sc > 0.0
+            && let Some(cv) = cmp_series[i]
+            && cv.is_finite()
+            && cv > 0.0
+        {
+            let ratio = sc / cv;
+            if ratio.is_finite() && ratio > 0.0 {
+                return ratio;
+            }
+        }
+    }
+    1.0
+}
+
+#[allow(clippy::too_many_arguments)]
 fn refresh_main_pane_autoscale_and_bounds(
     candles: &[Candle],
     time_scale: &TimeScale,
@@ -4575,6 +5871,7 @@ fn refresh_main_pane_autoscale_and_bounds(
     show_volume: bool,
     conflation_factor: usize,
     overlays: Option<(&IndicatorConfig, &IndicatorCache)>,
+    compare_overlay: Option<(&str, &[Option<f64>], &SeriesBlockIndex)>,
 ) -> Option<(f64, PriceBounds)> {
     let strict_range =
         non_empty_candle_range(time_scale.strict_visible_data_range(), candles.len());
@@ -4599,10 +5896,8 @@ fn refresh_main_pane_autoscale_and_bounds(
         }
     }
 
-    // Include visible main-pane overlays (`SMA`, `EMA`, `BollingerBands`) in `main_price_scale` autoscale!
-    if main_price_scale.is_auto_scale()
-        && let Some((cfg, cache)) = overlays
-    {
+    // Include visible main-pane overlays (`SMA`, `EMA`, `BollingerBands`, `Session VWAP`, `Compare`) in `main_price_scale` autoscale!
+    if main_price_scale.is_auto_scale() {
         let mut merge_ov = |bounds_opt: Option<(f64, f64)>| {
             if let Some((ov_min, ov_max)) = bounds_opt {
                 if !main_price_scale.is_log() || ov_min > 0.0 {
@@ -4613,23 +5908,66 @@ fn refresh_main_pane_autoscale_and_bounds(
                 }
             }
         };
-        if cfg.show_sma {
-            merge_ov(cache.sma_idx.range_bounds(&cache.sma, strict_range.clone()));
+        if let Some((cfg, cache)) = overlays {
+            if cfg.show_sma {
+                merge_ov(cache.sma_idx.range_bounds(&cache.sma, strict_range.clone()));
+            }
+            if cfg.show_ema {
+                merge_ov(cache.ema_idx.range_bounds(&cache.ema, strict_range.clone()));
+            }
+            if cfg.show_bbands {
+                merge_ov(
+                    cache
+                        .bb_upper_idx
+                        .range_bounds(&cache.bbands.upper, strict_range.clone()),
+                );
+                merge_ov(
+                    cache
+                        .bb_lower_idx
+                        .range_bounds(&cache.bbands.lower, strict_range.clone()),
+                );
+            }
+            if cfg.show_vwap {
+                merge_ov(
+                    cache
+                        .vwap_idx
+                        .range_bounds(&cache.vwap.vwap, strict_range.clone()),
+                );
+                if cfg.vwap_band_1 > 0.0 {
+                    merge_ov(
+                        cache
+                            .vwap_u1_idx
+                            .range_bounds(&cache.vwap.upper_1, strict_range.clone()),
+                    );
+                    merge_ov(
+                        cache
+                            .vwap_l1_idx
+                            .range_bounds(&cache.vwap.lower_1, strict_range.clone()),
+                    );
+                }
+                if cfg.vwap_band_2 > 0.0 {
+                    merge_ov(
+                        cache
+                            .vwap_u2_idx
+                            .range_bounds(&cache.vwap.upper_2, strict_range.clone()),
+                    );
+                    merge_ov(
+                        cache
+                            .vwap_l2_idx
+                            .range_bounds(&cache.vwap.lower_2, strict_range.clone()),
+                    );
+                }
+            }
         }
-        if cfg.show_ema {
-            merge_ov(cache.ema_idx.range_bounds(&cache.ema, strict_range.clone()));
-        }
-        if cfg.show_bbands {
-            merge_ov(
-                cache
-                    .bb_upper_idx
-                    .range_bounds(&cache.bbands.upper, strict_range.clone()),
-            );
-            merge_ov(
-                cache
-                    .bb_lower_idx
-                    .range_bounds(&cache.bbands.lower, strict_range),
-            );
+        if let Some((_, cmp_series, cmp_idx)) = compare_overlay {
+            let cmp_scale =
+                compute_compare_viewport_scale(candles, cmp_series, cmp_idx, strict_range.clone());
+            let clamped =
+                strict_range.start.min(cmp_series.len())..strict_range.end.min(cmp_series.len());
+            let scaled_bounds = cmp_idx
+                .range_bounds(cmp_series, clamped)
+                .map(|(lo, hi)| (lo * cmp_scale, hi * cmp_scale));
+            merge_ov(scaled_bounds);
         }
     }
 
@@ -4690,6 +6028,32 @@ fn refresh_oscillator_autoscale(
                 .range_bounds(&cache.atr, strict_range)
                 .unwrap_or((0.0, 1.0));
             price_scale.autoscale_raw_bounds(min_v, max_v, 1.0);
+        }
+        OscillatorPaneId::RelativeStrength => {
+            let line_b = cache
+                .rs_line_idx
+                .range_bounds(&cache.rs.rs_line, strict_range.clone());
+            let sma_b = cache
+                .rs_sma_idx
+                .range_bounds(&cache.rs.rs_sma, strict_range);
+            let mut min_v = 99.5_f64;
+            let mut max_v = 100.5_f64;
+            let mut has_data = false;
+            for (lo, hi) in [line_b, sma_b].into_iter().flatten() {
+                if !has_data {
+                    min_v = lo.min(100.0);
+                    max_v = hi.max(100.0);
+                    has_data = true;
+                } else {
+                    min_v = min_v.min(lo);
+                    max_v = max_v.max(hi);
+                }
+            }
+            if !has_data {
+                min_v = 95.0;
+                max_v = 105.0;
+            }
+            price_scale.autoscale_raw_bounds(min_v.min(99.5), max_v.max(100.5), 100.0);
         }
         OscillatorPaneId::Equity => {
             if let Some(eq_ov) = equity_override {
@@ -4914,10 +6278,11 @@ fn drive_pane_drawing_input(
         && matches!(store.phase(), DrawingInteractionPhase::Idle)
     {
         let hit_any = ptr.latest_pos.is_some_and(|lp| {
+            let hit_proj = (*proj).with_candles(candles);
             crate::drawings::hit_test_pane_drawings_causal(
                 &store.drawings,
                 pane,
-                proj,
+                &hit_proj,
                 to_local(lp),
                 store.selected_id,
                 store.replay_cutoff_timestamp(),
@@ -6223,11 +7588,16 @@ fn paint_pane_drawings(
     proj: &PaneDrawingProjection<'_>,
     price_scale: &PriceScale,
     base_value: f64,
-    visible_candle_count: usize,
+    candles: &[Candle],
+    culling_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    pane_vp: &PaneViewport<'_>,
+    mut r11_memo: Option<&mut R11RenderMemo>,
+    candles_fp: u64,
 ) {
     let cutoff = store.replay_cutoff_timestamp();
     for drawing in &store.drawings {
-        if !drawing.is_causally_visible(cutoff, visible_candle_count) || drawing.pane != pane {
+        if !drawing.is_causally_visible(cutoff, candles.len()) || drawing.pane != pane {
             continue;
         }
         let is_selected = store.selected_id == Some(drawing.id);
@@ -6243,9 +7613,15 @@ fn paint_pane_drawings(
             proj,
             price_scale,
             base_value,
+            candles,
+            culling_range.clone(),
+            conflation_factor,
+            pane_vp,
             is_selected,
             is_hovered,
             false,
+            r11_memo.as_deref_mut(),
+            candles_fp,
         );
     }
 
@@ -6261,9 +7637,15 @@ fn paint_pane_drawings(
             proj,
             price_scale,
             base_value,
+            candles,
+            culling_range,
+            conflation_factor,
+            pane_vp,
             true,
             false,
             true,
+            None,
+            candles_fp,
         );
     }
 }
@@ -6278,9 +7660,15 @@ fn paint_single_drawing(
     proj: &PaneDrawingProjection<'_>,
     price_scale: &PriceScale,
     base_value: f64,
+    candles: &[Candle],
+    culling_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    pane_vp: &PaneViewport<'_>,
     is_selected: bool,
     is_hovered: bool,
     is_preview: bool,
+    r11_memo: Option<&mut R11RenderMemo>,
+    candles_fp: u64,
 ) {
     let Some(projected) = proj.project_drawing(drawing) else {
         return;
@@ -6684,6 +8072,190 @@ fn paint_single_drawing(
                             Pos2::new(price_axis_rect.left() + 6.0, sy),
                             Align2::LEFT_CENTER,
                             price_scale.format_price(val, base_value),
+                            FontId::monospace(10.0),
+                            palette::BG_WORKSTATION,
+                        );
+                    }
+                }
+            }
+        }
+        ProjectedDrawingShape::FixedRangeProfile {
+            raw_x_left,
+            raw_x_right,
+            clipped_box,
+            left_border,
+            right_border,
+            min_bar_index,
+            max_bar_index,
+            row_count,
+        } => {
+            if let Some(box_rect) = clipped_box {
+                let srect = Rect::from_min_max(
+                    local_to_screen_pos(plot_rect, LocalPoint::new(box_rect.left, box_rect.top)),
+                    local_to_screen_pos(
+                        plot_rect,
+                        LocalPoint::new(box_rect.right, box_rect.bottom),
+                    ),
+                );
+                let fill_alpha = if is_selected { 0.09 } else { 0.05 };
+                plot_painter.rect_filled(
+                    srect,
+                    0.0,
+                    drawing_premultiplied_fill(drawing.style.color, fill_alpha),
+                );
+            }
+            for seg in [left_border, right_border].into_iter().flatten() {
+                let p0 = local_to_screen_pos(plot_rect, seg.start);
+                let p1 = local_to_screen_pos(plot_rect, seg.end);
+                if let Some(glow) = highlight_glow {
+                    plot_painter.line_segment([p0, p1], glow);
+                }
+                paint_styled_segment_phased(
+                    plot_painter,
+                    p0,
+                    p1,
+                    p0,
+                    Stroke::new(stroke_w.max(1.1), base_color.gamma_multiply(0.75)),
+                    dash,
+                );
+            }
+
+            if !candles.is_empty() && *max_bar_index >= 0.0 {
+                let s = (*min_bar_index).round().max(0.0) as usize;
+                let e = ((*max_bar_index).round().max(0.0) as usize).min(candles.len() - 1);
+                let vp_cfg = VolumeProfileConfig {
+                    row_count: (*row_count).max(8) as usize,
+                    value_area_pct: 0.70,
+                };
+                let profile = if s <= e {
+                    match r11_memo {
+                        Some(memo) => memo.get_or_compute_frvp(candles, candles_fp, s, e, vp_cfg),
+                        None => {
+                            compute_volume_profile(&candles[s..=e], vp_cfg).map(std::sync::Arc::new)
+                        }
+                    }
+                } else {
+                    None
+                };
+                if let Some(profile) = profile.as_deref() {
+                    let left_sx = plot_rect.left() + (*raw_x_left as f32);
+                    let right_sx = plot_rect.left() + (*raw_x_right as f32);
+                    if right_sx >= plot_rect.left() && left_sx <= plot_rect.right() {
+                        let span_w = (right_sx - left_sx).abs().max(12.0);
+                        let max_bar_w = (span_w * 0.65).clamp(18.0, 220.0);
+                        let span_lo = left_sx.max(plot_rect.left());
+                        let span_hi = right_sx.min(plot_rect.right());
+                        let poc_txt = format!(
+                            "FRVP({}) POC {}",
+                            profile.bins.len(),
+                            price_scale.format_price(profile.poc_price, base_value)
+                        );
+                        paint_volume_profile_bars(
+                            plot_painter,
+                            pane_vp,
+                            profile,
+                            left_sx,
+                            max_bar_w,
+                            false,
+                            (span_lo, span_hi),
+                            palette::VRVP_POC_GOLD,
+                            palette::VRVP_VA_LINE,
+                            is_selected,
+                            span_w >= 92.0,
+                            Some(&poc_txt),
+                        );
+                        if is_selected
+                            && let Some(ly) =
+                                price_scale.price_to_local_y(profile.poc_price, base_value)
+                        {
+                            let sy = (plot_rect.top() + (ly as f32))
+                                .clamp(price_axis_rect.top() + 9.5, price_axis_rect.bottom() - 9.5);
+                            let badge_rect = Rect::from_min_max(
+                                Pos2::new(price_axis_rect.left() + 2.0, sy - 8.5),
+                                Pos2::new(price_axis_rect.right() - 4.0, sy + 8.5),
+                            );
+                            axis_painter.rect_filled(badge_rect, 3.0, palette::VRVP_POC_GOLD);
+                            axis_painter.text(
+                                Pos2::new(price_axis_rect.left() + 6.0, sy),
+                                Align2::LEFT_CENTER,
+                                price_scale.format_price(profile.poc_price, base_value),
+                                FontId::monospace(10.0),
+                                palette::BG_WORKSTATION,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        ProjectedDrawingShape::AnchoredVwap {
+            anchor_local,
+            anchor_marker,
+            anchor_bar_index,
+            show_bands,
+            ..
+        } => {
+            if let Some(seg) = anchor_marker {
+                let p0 = local_to_screen_pos(plot_rect, seg.start);
+                let p1 = local_to_screen_pos(plot_rect, seg.end);
+                plot_painter
+                    .line_segment([p0, p1], Stroke::new(1.2, base_color.gamma_multiply(0.6)));
+            }
+            if *anchor_bar_index >= -0.5 && !candles.is_empty() {
+                let causal_end = candles.len();
+                let a_idx = (*anchor_bar_index).round().max(0.0) as usize;
+                if a_idx < causal_end {
+                    let vwap_out = match r11_memo {
+                        Some(memo) => memo
+                            .get_or_compute_avwap(candles, candles_fp, a_idx, causal_end, 1.0, 2.0),
+                        None => {
+                            let tail = &candles[a_idx..causal_end];
+                            std::sync::Arc::new(compute_anchored_vwap(tail, 0, 1.0, 2.0))
+                        }
+                    };
+                    let render_end = culling_range.end.min(causal_end);
+                    let visible_start = a_idx.max(culling_range.start);
+                    if visible_start < render_end {
+                        paint_anchored_vwap_tail(
+                            plot_painter,
+                            vwap_out.as_ref(),
+                            a_idx,
+                            (visible_start - a_idx)..(render_end - a_idx),
+                            conflation_factor,
+                            pane_vp,
+                            *show_bands,
+                            base_color,
+                        );
+                    }
+                    let ap = local_to_screen_pos(plot_rect, *anchor_local);
+                    if plot_rect.expand(8.0).contains(ap) {
+                        plot_painter.circle_filled(ap, 4.5, base_color);
+                        plot_painter.circle_stroke(ap, 6.2, Stroke::new(1.3, Color32::WHITE));
+                        if is_selected || is_hovered {
+                            let label = if *show_bands { "AVWAP ±1σ" } else { "AVWAP" };
+                            plot_painter.text(
+                                Pos2::new(ap.x + 8.0, (ap.y - 10.0).max(plot_rect.top() + 10.0)),
+                                Align2::LEFT_CENTER,
+                                label,
+                                FontId::monospace(10.0),
+                                base_color,
+                            );
+                        }
+                    }
+                    if is_selected
+                        && let Some(last_v) = vwap_out.vwap.last().copied().flatten()
+                        && let Some(ly) = price_scale.price_to_local_y(last_v, base_value)
+                    {
+                        let sy = (plot_rect.top() + (ly as f32))
+                            .clamp(price_axis_rect.top() + 9.5, price_axis_rect.bottom() - 9.5);
+                        let badge_rect = Rect::from_min_max(
+                            Pos2::new(price_axis_rect.left() + 2.0, sy - 8.5),
+                            Pos2::new(price_axis_rect.right() - 4.0, sy + 8.5),
+                        );
+                        axis_painter.rect_filled(badge_rect, 3.0, base_color);
+                        axis_painter.text(
+                            Pos2::new(price_axis_rect.left() + 6.0, sy),
+                            Align2::LEFT_CENTER,
+                            price_scale.format_price(last_v, base_value),
                             FontId::monospace(10.0),
                             palette::BG_WORKSTATION,
                         );
@@ -7975,5 +9547,479 @@ mod tests {
                 "trade #{tid} strobed when panning by 1 bar"
             );
         }
+    }
+
+    #[test]
+    fn r11_render_memo_invalidates_on_mid_array_last_bar_and_generation_changes() {
+        let build_bars = |len: usize| -> Vec<Candle> {
+            (0..len)
+                .map(|i| {
+                    let base = 100.0 + (i as f64) * 0.15 + ((i % 7) as f64) * 0.25;
+                    Candle {
+                        timestamp: 1_700_000_000 + (i as i64) * 60,
+                        date_label: format!("2026-01-{:02}", (i % 28) + 1),
+                        open: base,
+                        high: base + 1.2,
+                        low: base - 0.8,
+                        close: base + 0.5,
+                        volume: 1_000.0 + (i as f64) * 10.0,
+                    }
+                })
+                .collect()
+        };
+
+        let mut viewport = ChartViewportState::new();
+        let mut candles = build_bars(300);
+        let cfg = VolumeProfileConfig::default();
+        let gen0: u64 = 1;
+        let fp0 = candles_fast_fingerprint(&candles) ^ gen0.rotate_left(17);
+
+        let v1 = viewport
+            .r11_memo
+            .get_or_compute_vrvp(&candles, fp0, 50..250, cfg)
+            .expect("vrvp");
+        let v2 = viewport
+            .r11_memo
+            .get_or_compute_vrvp(&candles, fp0, 50..250, cfg)
+            .expect("vrvp cache hit");
+        assert!(
+            std::sync::Arc::ptr_eq(&v1, &v2),
+            "VRVP memo must reuse Arc on unchanged frame"
+        );
+
+        let f1 = viewport
+            .r11_memo
+            .get_or_compute_frvp(&candles, fp0, 80, 220, cfg)
+            .expect("frvp");
+        let f2 = viewport
+            .r11_memo
+            .get_or_compute_frvp(&candles, fp0, 80, 220, cfg)
+            .expect("frvp cache hit");
+        assert!(
+            std::sync::Arc::ptr_eq(&f1, &f2),
+            "FRVP memo must reuse Arc on unchanged frame"
+        );
+
+        let a1 = viewport
+            .r11_memo
+            .get_or_compute_avwap(&candles, fp0, 60, 280, 1.0, 2.0);
+        let a2 = viewport
+            .r11_memo
+            .get_or_compute_avwap(&candles, fp0, 60, 280, 1.0, 2.0);
+        assert!(
+            std::sync::Arc::ptr_eq(&a1, &a2),
+            "AVWAP memo must reuse Arc on unchanged frame"
+        );
+
+        // Mutate an off-stride mid-array bar (index 137): all three memos must invalidate.
+        candles[137].volume += 2_500_000.0;
+        candles[137].close += 18.0;
+        candles[137].high += 20.0;
+        let fp_mid = candles_fast_fingerprint(&candles) ^ gen0.rotate_left(17);
+        let v_mid = viewport
+            .r11_memo
+            .get_or_compute_vrvp(&candles, fp_mid, 50..250, cfg)
+            .expect("vrvp recompute");
+        let f_mid = viewport
+            .r11_memo
+            .get_or_compute_frvp(&candles, fp_mid, 80, 220, cfg)
+            .expect("frvp recompute");
+        let a_mid = viewport
+            .r11_memo
+            .get_or_compute_avwap(&candles, fp_mid, 60, 280, 1.0, 2.0);
+        assert!(!std::sync::Arc::ptr_eq(&v1, &v_mid));
+        assert!(!std::sync::Arc::ptr_eq(&f1, &f_mid));
+        assert!(!std::sync::Arc::ptr_eq(&a1, &a_mid));
+
+        // Mutate the last bar inside the active range (219 for FRVP, 249 for VRVP, 279 for AVWAP).
+        candles[219].volume += 900_000.0;
+        let fp_last_frvp = candles_fast_fingerprint(&candles) ^ gen0.rotate_left(17);
+        let f_last = viewport
+            .r11_memo
+            .get_or_compute_frvp(&candles, fp_last_frvp, 80, 220, cfg)
+            .expect("frvp last-bar recompute");
+        assert!(!std::sync::Arc::ptr_eq(&f_mid, &f_last));
+
+        candles[299].close += 5.0;
+        let fp_last = candles_fast_fingerprint(&candles) ^ gen0.rotate_left(17);
+        let v_last = viewport
+            .r11_memo
+            .get_or_compute_vrvp(&candles, fp_last, 50..250, cfg)
+            .expect("vrvp tail recompute");
+        let a_last = viewport
+            .r11_memo
+            .get_or_compute_avwap(&candles, fp_last, 60, 300, 1.0, 2.0);
+        assert!(!std::sync::Arc::ptr_eq(&v_mid, &v_last));
+        assert!(!std::sync::Arc::ptr_eq(&a_mid, &a_last));
+
+        // Large dataset (> 1024 bars): bumping dataset_generation forces recompute cleanly.
+        let large = build_bars(2048);
+        let fp_large_g1 = candles_fast_fingerprint(&large) ^ 1_u64.rotate_left(17);
+        let fp_large_g2 = candles_fast_fingerprint(&large) ^ 2_u64.rotate_left(17);
+        let lg1 = viewport
+            .r11_memo
+            .get_or_compute_vrvp(&large, fp_large_g1, 0..2048, cfg)
+            .expect("large g1");
+        let lg2 = viewport
+            .r11_memo
+            .get_or_compute_vrvp(&large, fp_large_g2, 0..2048, cfg)
+            .expect("large g2");
+        assert!(!std::sync::Arc::ptr_eq(&lg1, &lg2));
+
+        // Bounded LRU cap (<= 16 entries) + explicit clear on sanitize_deserialized / reset_to_default.
+        for k in 0..24_usize {
+            let _ = viewport
+                .r11_memo
+                .get_or_compute_frvp(&candles, fp_last, k, k + 40, cfg);
+        }
+        assert!(viewport.r11_memo.frvp.len() <= MAX_R11_DRAWING_MEMO_ENTRIES);
+
+        viewport.sanitize_deserialized();
+        assert!(viewport.r11_memo.vrvp.is_none());
+        assert!(viewport.r11_memo.frvp.is_empty());
+        assert!(viewport.r11_memo.avwap.is_empty());
+
+        let _ = viewport
+            .r11_memo
+            .get_or_compute_avwap(&candles, fp_last, 60, 300, 1.0, 2.0);
+        assert!(!viewport.r11_memo.avwap.is_empty());
+        viewport.reset_to_default();
+        assert!(viewport.r11_memo.avwap.is_empty());
+    }
+
+    fn collect_vwap_paint_shapes(
+        vwap: &VwapBandsOutput,
+        n_bars: usize,
+        conflation_factor: usize,
+        min_price: f64,
+        max_price: f64,
+    ) -> (Vec<egui::Shape>, f32, f32) {
+        let ctx = egui::Context::default();
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 400.0));
+        let mut ts = crate::viewport::TimeScale::with_data(
+            n_bars,
+            f64::from(rect.width()),
+            crate::viewport::HorzScaleOptions::default(),
+        );
+        ts.set_bar_spacing((f64::from(rect.width()) / (n_bars as f64)).max(1.0));
+        ts.set_right_offset(0.0);
+        let mut ps = crate::viewport::PriceScale::new(
+            "right",
+            crate::viewport::PriceScaleOptions::default(),
+        );
+        ps.set_height(f64::from(rect.height()));
+        ps.set_auto_scale(false);
+        ps.set_raw_price_range(min_price, max_price, min_price);
+        let vp = PaneViewport::new(&ts, &ps, PlotRect::from_egui(rect), min_price);
+
+        let mut full_out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(rect),
+                ..Default::default()
+            },
+            |ui| {
+                let painter = ui.painter_at(rect);
+                paint_vwap_output(
+                    &painter,
+                    vwap,
+                    None,
+                    0..n_bars,
+                    conflation_factor,
+                    &vp,
+                    true,
+                    true,
+                    palette::IND_VWAP_LINE,
+                );
+            },
+        );
+        full_out.textures_delta.clear();
+        let x_before = vp.float_index_to_screen_x(31.0).unwrap() as f32;
+        let x_after = vp.float_index_to_screen_x(32.0).unwrap() as f32;
+        (
+            full_out.shapes.into_iter().map(|cs| cs.shape).collect(),
+            x_before,
+            x_after,
+        )
+    }
+
+    fn assert_no_session_bridge_in_shape(shape: &egui::Shape, split_y_low: f32, split_y_high: f32) {
+        match shape {
+            egui::Shape::Vec(children) => {
+                for ch in children {
+                    assert_no_session_bridge_in_shape(ch, split_y_low, split_y_high);
+                }
+            }
+            egui::Shape::LineSegment { points, .. } => {
+                let min_y = points[0].y.min(points[1].y);
+                let max_y = points[0].y.max(points[1].y);
+                assert!(
+                    !(min_y < split_y_low && max_y > split_y_high),
+                    "LineSegment bridged overnight VWAP reset: {points:?}"
+                );
+            }
+            egui::Shape::Path(path) => {
+                for seg in path.points.windows(2) {
+                    let min_y = seg[0].y.min(seg[1].y);
+                    let max_y = seg[0].y.max(seg[1].y);
+                    assert!(
+                        !(min_y < split_y_low && max_y > split_y_high),
+                        "Path bridged overnight VWAP reset: {seg:?}"
+                    );
+                }
+            }
+            egui::Shape::Mesh(mesh) => {
+                for &tri in mesh.indices.as_chunks::<3>().0 {
+                    let p0 = mesh.vertices[tri[0] as usize].pos;
+                    let p1 = mesh.vertices[tri[1] as usize].pos;
+                    let p2 = mesh.vertices[tri[2] as usize].pos;
+                    let min_y = p0.y.min(p1.y).min(p2.y);
+                    let max_y = p0.y.max(p1.y).max(p2.y);
+                    assert!(
+                        !(min_y < split_y_low && max_y > split_y_high),
+                        "Mesh triangle bridged overnight VWAP reset: min_y={min_y} max_y={max_y}"
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn critic_r11_regression_vwap_zoomed_out_session_breaks() {
+        // B1: Session resets (`0..32` near 100.0 vs `32..64` near 500.0) must NEVER bridge at conflation 4x or 16x.
+        let mut vwap = VwapBandsOutput {
+            vwap: vec![Some(100.0); 32],
+            upper_1: vec![Some(105.0); 32],
+            lower_1: vec![Some(95.0); 32],
+            upper_2: vec![Some(110.0); 32],
+            lower_2: vec![Some(90.0); 32],
+            session_starts: vec![0, 32],
+        };
+        vwap.vwap.extend(vec![Some(500.0); 32]);
+        vwap.upper_1.extend(vec![Some(505.0); 32]);
+        vwap.lower_1.extend(vec![Some(495.0); 32]);
+        vwap.upper_2.extend(vec![Some(510.0); 32]);
+        vwap.lower_2.extend(vec![Some(490.0); 32]);
+
+        for conflation in [4_usize, 16_usize] {
+            let (shapes, _xb, _xa) = collect_vwap_paint_shapes(&vwap, 64, conflation, 50.0, 550.0);
+            assert!(!shapes.is_empty());
+            for sh in &shapes {
+                assert_no_session_bridge_in_shape(sh, 150.0, 260.0);
+            }
+        }
+    }
+
+    #[test]
+    fn critic_r11_regression_r11_memo_no_xor_cancel_and_avwap_pan_invariance() {
+        // M1 (a): `r11_subslice_seed` prevents XOR self-cancellation (`fp ^ fp == 0`) on full `0..len` slices.
+        let make_candles = |offset: f64| -> Vec<Candle> {
+            (0..60)
+                .map(|i| {
+                    let b = offset + (i as f64) * 0.5;
+                    Candle {
+                        timestamp: 1_700_000_000 + (i as i64) * 3_600,
+                        date_label: format!("c{i}"),
+                        open: b,
+                        high: b + 1.0,
+                        low: b - 1.0,
+                        close: b + 0.25,
+                        volume: 15_000.0 + (i as f64) * 100.0,
+                    }
+                })
+                .collect()
+        };
+        let ds_a = make_candles(100.0);
+        let ds_b = make_candles(320.0);
+        let mut memo = R11RenderMemo::default();
+        let cfg = VolumeProfileConfig {
+            row_count: 16,
+            value_area_pct: 0.70,
+        };
+        let va = memo
+            .get_or_compute_vrvp(&ds_a, candles_fast_fingerprint(&ds_a), 0..ds_a.len(), cfg)
+            .unwrap();
+        let vb = memo
+            .get_or_compute_vrvp(&ds_b, candles_fast_fingerprint(&ds_b), 0..ds_b.len(), cfg)
+            .unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&va, &vb));
+
+        let fa = memo
+            .get_or_compute_frvp(
+                &ds_a,
+                candles_fast_fingerprint(&ds_a),
+                0,
+                ds_a.len() - 1,
+                cfg,
+            )
+            .unwrap();
+        let fb = memo
+            .get_or_compute_frvp(
+                &ds_b,
+                candles_fast_fingerprint(&ds_b),
+                0,
+                ds_b.len() - 1,
+                cfg,
+            )
+            .unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&fa, &fb));
+
+        let fp_a = candles_fast_fingerprint(&ds_a);
+        let fp_b = candles_fast_fingerprint(&ds_b);
+        let aa = memo.get_or_compute_avwap(&ds_a, fp_a, 0, ds_a.len(), 1.0, 2.0);
+        let ab = memo.get_or_compute_avwap(&ds_b, fp_b, 0, ds_b.len(), 1.0, 2.0);
+        assert!(!std::sync::Arc::ptr_eq(&aa, &ab));
+
+        // M1 (b): `candles_fast_fingerprint` detects mutation at `n - 2` even when `n > 2048`.
+        let mut big_a = make_candles(100.0);
+        while big_a.len() < 2600 {
+            let next_i = big_a.len();
+            big_a.push(Candle {
+                timestamp: 1_700_000_000 + (next_i as i64) * 60,
+                date_label: format!("big{next_i}"),
+                open: 150.0,
+                high: 151.0,
+                low: 149.0,
+                close: 150.0,
+                volume: 5000.0,
+            });
+        }
+        let mut big_b = big_a.clone();
+        let n2 = big_b.len() - 2;
+        big_b[n2].close += 25.0;
+        assert_ne!(
+            candles_fast_fingerprint(&big_a),
+            candles_fast_fingerprint(&big_b)
+        );
+
+        // M1 (c): Keeping `causal_end = candles.len()` ensures AVWAP memo hits during panning while range slices shrink.
+        let aa_again = memo.get_or_compute_avwap(&ds_a, fp_a, 0, ds_a.len(), 1.0, 2.0);
+        assert!(std::sync::Arc::ptr_eq(
+            &memo.get_or_compute_avwap(&ds_a, fp_a, 0, ds_a.len(), 1.0, 2.0),
+            &aa_again
+        ));
+
+        // M2: `paint_anchored_vwap_tail` must keep global bucket centers invariant on pan, split None gaps,
+        // and render visible geometry even for a single-bar tail (`local_range = 0..1`).
+        let mut gapped = VwapBandsOutput {
+            vwap: (0..40)
+                .map(|i| {
+                    if (14..18).contains(&i) {
+                        None
+                    } else {
+                        Some(if i < 14 { 100.0 } else { 300.0 })
+                    }
+                })
+                .collect(),
+            upper_1: (0..40)
+                .map(|i| {
+                    if (14..18).contains(&i) {
+                        None
+                    } else {
+                        Some(if i < 14 { 104.0 } else { 304.0 })
+                    }
+                })
+                .collect(),
+            lower_1: (0..40)
+                .map(|i| {
+                    if (14..18).contains(&i) {
+                        None
+                    } else {
+                        Some(if i < 14 { 96.0 } else { 296.0 })
+                    }
+                })
+                .collect(),
+            upper_2: vec![None; 40],
+            lower_2: vec![None; 40],
+            session_starts: Vec::new(),
+        };
+        let ctx = egui::Context::default();
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 400.0));
+        let mut ts = crate::viewport::TimeScale::with_data(
+            60,
+            800.0,
+            crate::viewport::HorzScaleOptions::default(),
+        );
+        ts.set_bar_spacing(12.0);
+        ts.set_right_offset(0.0);
+        let mut ps = crate::viewport::PriceScale::new(
+            "right",
+            crate::viewport::PriceScaleOptions::default(),
+        );
+        ps.set_height(400.0);
+        ps.set_auto_scale(false);
+        ps.set_raw_price_range(80.0, 320.0, 100.0);
+        let vp = PaneViewport::new(&ts, &ps, PlotRect::from_egui(rect), 100.0);
+
+        let extract_xs = |local_s: usize| -> Vec<i32> {
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(rect),
+                    ..Default::default()
+                },
+                |ui| {
+                    let p = ui.painter_at(rect);
+                    paint_anchored_vwap_tail(
+                        &p,
+                        &gapped,
+                        10,
+                        local_s..40,
+                        4,
+                        &vp,
+                        true,
+                        palette::IND_VWAP_LINE,
+                    );
+                },
+            );
+            out.textures_delta.clear();
+            for cs in &out.shapes {
+                assert_no_session_bridge_in_shape(&cs.shape, 120.0, 260.0);
+            }
+            let mut xs = Vec::new();
+            for cs in &out.shapes {
+                if let egui::Shape::Path(path) = &cs.shape {
+                    for pt in &path.points {
+                        xs.push((pt.x * 100.0).round() as i32);
+                    }
+                }
+            }
+            xs
+        };
+        let xs_0 = extract_xs(0);
+        let xs_5 = extract_xs(5); // panned past bar 0..4; shared bucket `>= 20` must align identically
+        assert!(!xs_0.is_empty());
+        assert!(
+            xs_5.iter().all(|x| xs_0.contains(x)),
+            "AVWAP bucket X shifted on pan: xs_0={xs_0:?} xs_5={xs_5:?}"
+        );
+
+        // Single-bar AVWAP tail must emit a visible shape (not silently skipped!).
+        gapped.vwap = vec![Some(200.0)];
+        gapped.upper_1 = vec![Some(200.0)];
+        gapped.lower_1 = vec![Some(200.0)];
+        let mut single_out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(rect),
+                ..Default::default()
+            },
+            |ui| {
+                let p = ui.painter_at(rect);
+                paint_anchored_vwap_tail(
+                    &p,
+                    &gapped,
+                    10,
+                    0..1,
+                    1,
+                    &vp,
+                    true,
+                    palette::IND_VWAP_LINE,
+                );
+            },
+        );
+        single_out.textures_delta.clear();
+        assert!(
+            !single_out.shapes.is_empty(),
+            "single-bar AVWAP must render visible point"
+        );
     }
 }

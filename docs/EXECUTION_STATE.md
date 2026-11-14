@@ -1,9 +1,9 @@
 # SUMI TRADING WORKSTATION — EXECUTION STATE
 
-- **Session Identity:** `SESSION-R10-20261114T122730+0700` (`SUMI PROGRAM ORCHESTRATOR`)
-- **Previous Session:** `SESSION-R09-20261114T091018+0700` (`IMPLEMENTATION_PASS` — Committed cleanly at `d06ae78`)
-- **Timestamp (Updated):** `2026-11-14T16:42:00+07:00`
-- **Program Status:** `IMPLEMENTATION_PASS` (`Milestone R10 / Wave 9 Vietnam Market Microstructure & Risk Planner, On-Chart Risk-Reward Position Tool, Structured Trade Journal & Rolling Walk-Forward Portfolio Analytics Shipped, Critic-Hardened & Independently Audited`)
+- **Session Identity:** `SESSION-R11-20261114T231200+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Previous Session:** `SESSION-R10-20261114T122730+0700` (`IMPLEMENTATION_PASS` — Committed cleanly at `b06fd69`)
+- **Timestamp (Updated):** `2026-11-15T01:07:30+07:00`
+- **Program Status:** `IMPLEMENTATION_PASS` (`Milestone R11 / Wave 10 Order-Flow Volume Profile VRVP/FRVP, Exchange-Session & Anchored VWAP Bands, Causal RS vs VNINDEX & Rebased Benchmark Comparison Shipped, Critic-Hardened & Independently Audited`)
 
 ---
 
@@ -11,7 +11,7 @@
 
 - **Working Directory:** `/Users/mizuhara/workspace/sumi`
 - **Git Branch:** `master`
-- **Batch Commit Policy (`DEC-R04-001`):** Authorized by Product Owner on `2026-11-11` — each verified milestone/batch plan is committed cleanly on `master` (`98ec576` for R03, `50a7845` for R04, `b04d2dc` for R05, `0c83290` for R06, `0e76e72` for R07, `62105d6` for R08, `d06ae78` for R09; Milestone R10 committed cleanly at the close of Session R10).
+- **Batch Commit Policy (`DEC-R04-001`):** Authorized by Product Owner on `2026-11-11` — each verified milestone/batch plan is committed cleanly on `master` (`98ec576` for R03, `50a7845` for R04, `b04d2dc` for R05, `0c83290` for R06, `0e76e72` for R07, `62105d6` for R08, `d06ae78` for R09, `b06fd69` for R10; Milestone R11 committed cleanly at the close of Session R11).
 - **Git Tags:** `v2.0.0-rc1`, `v2.0.0-rc2` (untouched)
 - **Legacy Project Archive:** Untouched read-only reference at `/Users/mizuhara/workspace/sumi/ARCHIVE`
 - **Authorized Open-Source References (`research_repos/`, gitignored):**
@@ -27,8 +27,8 @@
 - **Crate Dependencies (`Cargo.toml` / `Cargo.lock`):** `0` new dependencies added (`git diff Cargo.toml Cargo.lock` empty).
 - **Antigravity Orchestration (`VERIFIED`):**
   - Durable charter: [`docs/operations/SUMI_ORCHESTRATION_CHARTER.md`](operations/SUMI_ORCHESTRATION_CHARTER.md)
-  - Specialized subagents invoked in R10: `sumi-critic` (`19/19` adversarial findings remediated across `5 CRITICAL`, `9 MAJOR`, `5 MINOR` with `4` dedicated `critic_r10_regression_*` suites) and `sumi-auditor` (independent verification sign-off).
-- **REA MCP (`rea-agents@6.8.0`):** `VERIFIED` — `13` live REA MCP operations (`17` exact 64-hex Evidence IDs: `13` JS/TS + `4` binary) executed in R10 across `ARCHIVE/frontend` journal/dashboard/decision/batch files, `LWC v5.2.0` primitive/range-hit-test/price-formatter files, and the final R10 release Mach-O binary (`5dd7e72be2b0249a98547397cf5cdcee177af319cde0fdd0b760ea8f899dbfa8`), cumulative `107` live REA operations across R01–R10. Zero contact with TradingView Desktop (`DEC-006`).
+  - Specialized subagents invoked in R11: `sumi-critic` (`8/8` adversarial findings `B1`–`B3`, `M1`–`M5` remediated with `9` dedicated `critic_r11_regression_*` tests) and `sumi-auditor` (independent read-only audit).
+- **REA MCP (`rea-agents@6.8.0`):** `VERIFIED` — `13` live REA MCP operations (`19` exact 64-hex Evidence IDs: `15` JS/TS + `4` binary) executed in R11 across `ARCHIVE/frontend` (`TechnicalFlowBBViewer.tsx`, `indicatorDomain.ts`, etc.), `LWC v5.2.0` (`histogram-*`, `pane-primitive-wrapper.ts`), and the final R11 release Mach-O binary (`e9dcb085a076ad12d46981a88dbde0459536675deee843c65641fc2c7f0ff6bc`), cumulative `120` live REA operations across R01–R11. Zero contact with TradingView Desktop (`DEC-006`).
 
 ---
 
@@ -48,7 +48,10 @@
 | Session R09 (Wave 8) | Deterministic Strategy Backtest Lab (`src/backtest/`), Synchronized `Equity` Sub-Pane & Quantitative Tearsheet (`d06ae78`) | **PASS** | `VERIFIED` (`122/122` tests, `6.318 ms` `100K` BT, `1.355 ms` `95K` fit) |
 | Session R10 — Research Gate | 11 live JS/TS REA operations on Archive journal/dashboard/decision/batch & LWC primitive/range-hit-test/formatter → `RISK_PLANNER_JOURNAL_AND_PORTFOLIO_SPEC.md` | **PASS** | `VERIFIED` (`13` JS/TS + `4` binary 64-hex Evidence IDs) |
 | Session R10 — Wave 9 Engine | Pure `f64`/`i64` WASM-safe `src/journal/` (`HOSE/HNX/UPCOM/VN30F` microstructure, friction-aware sizer, `TradeJournalStore`, RFC-4180 CSV), `RiskRewardBox`, & `src/backtest/walk_forward.rs` (continuous `SimulationCarryState` `WFO` + bar-close `Portfolio`) | **PASS** | `VERIFIED` (`136/136` tests + `wasm32` Clippy) |
-| Session R10 — Workstation & Audit | On-chart dual-zone `RiskRewardBox`, Right `Journal` Dock + `Strategy Lab -> WFO` sub-tab, `--r10` benchmark (`101.12 µs` `1K` plans, `5.958 ms` `6,667`-bar WFO, `0.276–0.369 ms` full UI), `19/19` Critic fixes, `sumi-auditor` sign-off & clean commit | **PASS** | `VERIFIED` |
+| Session R10 — Workstation & Audit | On-chart dual-zone `RiskRewardBox`, Right `Journal` Dock + `Strategy Lab -> WFO` sub-tab, `--r10` benchmark (`101.12 µs` `1K` plans, `5.958 ms` `6,667`-bar WFO, `0.276–0.369 ms` full UI), `19/19` Critic fixes, `sumi-auditor` sign-off & clean commit (`b06fd69`) | **PASS** | `VERIFIED` |
+| Session R11 — Research Gate | `11` live JS/TS REA operations on Archive order-flow/RS & LWC histogram/pane-primitive files → `VOLUME_PROFILE_VWAP_AND_REL_STRENGTH_SPEC.md` | **PASS** | `VERIFIED` (`15` JS/TS + `4` binary 64-hex Evidence IDs) |
+| Session R11 — Wave 10 Engine | Pure `f64`/`i64` WASM-safe `src/indicators/{volume_profile,vwap,relative_strength}.rs` (`VRVP`/`FRVP` + `POC`/`70% VA`, Session & Anchored `VWAP` Welford $\pm 1\sigma/\pm 2\sigma$, `DEF-001` causal `RS vs VNINDEX`) & `FRVP` / `AnchoredVwap` drawings (`src/drawings/`) | **PASS** | `VERIFIED` (`152/152` tests + `wasm32` Clippy) |
+| Session R11 — Workstation & Audit | `VRVP`/`FRVP`/`VWAP`/`AVWAP`/Compare `VNINDEX` + `RS` sub-pane UI, `--r11` benchmark (`14.21 µs` `VRVP(500)`, `725.58 µs` `50k` VWAP, `651.71 µs` `50k` RS, `0.256–3.171 ms` full UI), `8/8` Critic fixes (`B1`–`B3`, `M1`–`M5`), `sumi-auditor` audit & clean commit | **PASS** | `VERIFIED` |
 
 ---
 
@@ -57,13 +60,13 @@
 ```bash
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
 
-# Format, native + WASM strict Clippy lints, and all 136 automated tests:
+# Format, native + WASM strict Clippy lints, and all 152 automated tests:
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo clippy --target wasm32-unknown-unknown --lib -- -D warnings
 cargo test
 
-# Reproducible R03, R04, R05, R06, R07, R08, R09 & R10 release benchmarks:
+# Reproducible R03, R04, R05, R06, R07, R08, R09, R10 & R11 release benchmarks:
 cargo run --release --example viewport_bench
 cargo run --release --example viewport_bench -- --r04
 cargo run --release --example viewport_bench -- --r05
@@ -72,9 +75,10 @@ cargo run --release --example viewport_bench -- --r07
 cargo run --release --example viewport_bench -- --r08
 cargo run --release --example viewport_bench -- --r09
 cargo run --release --example viewport_bench -- --r10
+cargo run --release --example viewport_bench -- --r11
 
 # Offscreen Apple M1 Metal GPU Retina screenshot + telemetry capture (zero windows, zero focus steal):
-SUMI_CAPTURE_BATCH=r10 cargo run --release
+SUMI_CAPTURE_BATCH=r11 cargo run --release
 
 # Launch interactive native macOS Metal trading workstation:
 cargo run --release
@@ -82,25 +86,21 @@ cargo run --release
 
 ---
 
-## 5. Shipped Code & Benchmark Highlights (`Milestone R10`)
+## 5. Shipped Code & Benchmark Highlights (`Milestone R11`)
 
-- **Vietnam & Global Microstructure Risk Planner (`src/journal/market_rules.rs`, `src/journal/planner.rs`):**
-  - Exchange-accurate `HOSE` (`±7%`, `10/50/100 VND` 3-tier tick ladder + tier-crossing `step_one_tick_below`/`above`, board lot `100`, `T+2` `UTC+7` settlement, `0.10%` sell tax), `HNX` (`±10%`), `UPCOM` (`±15%`), `Vn30Futures` (`±7%`, `x100,000 VND` / `x100 kVND` point multiplier, `17%` VSD initial margin, `T+0`), `VnIndexBenchmark` (no statutory band), `UsEquities` (`T+1` `UTC-5`), and `CryptoSpotPerp` (`1e-8` micro-ticks).
-  - Friction-aware position sizing across entry/exit `commission_bps`, `slippage_bps`, and `tax_sell_bps` (`planned_risk_amount <= max_risk_amount`), `max_position_pct` concentration cap, `0`-lot Order Ticket guard, and exact `breakeven_price`, `net_r_multiple`, and statutory ceiling/floor warnings.
-- **Interactive On-Chart `RiskRewardBox` & Structured Trade Journal (`src/drawings/`, `src/journal/ledger.rs`, `src/app.rs`):**
-  - 6th `DrawingGeometry::RiskRewardBox` with 4 non-drifting handles (`RrEntryLeft`, `RrEntryRight`, `RrTarget`, `RrStop`), `Long <-> Short` target crossover reflection, `Log`/`Linear`-invariant body drag, batched emerald/crimson zone meshes + `R:R` badge, and bidirectional Planner/Ticket sync.
-  - Causal `DEF-001` `TradeJournalStore` with Paper Trading rewind pruning, Strategy Backtest trade import, `SetupTag` / `MistakeTag` / `ConvictionRating` / 6-item `ChecklistState`, Van Tharp `SQN`, `Discipline Score %`, `Cost of Mistakes`, formula-injection-hardened single-line RFC-4180 CSV export, and deterministic Markdown report export.
-- **Rolling Walk-Forward (`WFO`) & Multi-Asset Portfolio Engine (`src/backtest/walk_forward.rs`, `src/chart.rs`):**
-  - `K`-fold Rolling/Anchored `IS -> OOS` validation with continuous `SimulationCarryState` across `OOS` boundaries (`VN T+2` holding lockup preserved), Pardo `Walk-Forward Efficiency %`, `WalkForwardVerdict`, and bar-close `Multi-Asset Portfolio` simulation (`EqualWeight` + zero-dilution-free `CausalInverseVolatility`) plotted directly in `OscillatorPaneId::Equity`.
-- **Measured Release Performance (`Apple M1`, `2560×1600` Retina, `136/136` automated tests passing):**
-  - `1,000` `HOSE` Risk Planner evaluations: **`101.12 µs`** median (`0.101 ms`, `~101 ns`/eval).
-  - `500`-entry `DEF-001` Journal analytics + RFC-4180 CSV export: **`601.12 µs`** median (`0.601 ms`).
-  - `4`-fold Rolling WFO (`FPT 1D`): **`108.38 µs`**; `4`-fold Anchored WFO (`6,667` `15m` bars, `116` OOS trades): **`5.958 ms`** (`PASS < 15.0 ms`).
-  - `8`-symbol `VN30` Equal-Weight Portfolio: **`106.00 µs`**; `13`-feed Universe `CausalInverseVolatility(20)` (`10,487` steps): **`2.855 ms`**.
-  - Full `SumiWorkstationApp` UI (`Risk + R:R Box + Journal`: **`0.276 ms`**; `5-Pane Stitched WFO OOS`: **`0.369 ms`**; `5-Pane VN30 Portfolio`: **`0.349 ms`** — all **PASS `< 4.0 ms` `DECISION-RENDERER-002` budget**).
+- **Order-Flow Volume Profile (`src/indicators/volume_profile.rs` & `FRVP` Tool):**
+  - Interval-overlap price histogram (`VRVP` visible range & draggable `FRVP` fixed range) with `OHLCV_PROXY` buy/sell split, zero-volume TPO fallback, scale-invariant positive micro-price floor (`> 0.0`) & Value Area dust guard (`1e-18`), CME dual-row `70%` Value Area (`VAH`/`VAL`) expansion around `POC`, and `HVN`/`LVN` detection.
+- **Exchange-Session `VWAP` & Interactive `Anchored VWAP` (`src/indicators/vwap.rs`, `src/drawings/`):**
+  - Venue-aware session resets (`UTC+7` ICT / `UTC-5` EST / `UTC` on intraday `1m..4h`; UTC civil `(year, month)` / `year` boundaries on `1D` MTD / `1W` YTD), rescaled overflow-safe `WelfordVwapAcc` ($\pm 1\sigma, \pm 2\sigma$ bands safe at `1e160` and `1e-160`), and 1-click draggable `DrawingGeometry::AnchoredVwap` with conflation-safe per-session/gap `egui::Mesh` rendering (`src/chart.rs`).
+- **`DEF-001` Causal `Relative Strength vs VNINDEX` & Live Rebased Compare (`src/indicators/relative_strength.rs`, `src/chart.rs`, `src/app.rs`):**
+  - Strict bar-close causal benchmark alignment (`b_close_ts <= sym_query_ts` capped by `replay_causal_close_timestamp`), tail-coverage-scored benchmark lookup (`src/data/presets.rs`), periodic `64`-bar `RS SMA` drift-prevention recompute, `RS` oscillator sub-pane (`OscillatorPaneId::RelativeStrength`), and `O(1)` live-scaled Rebased Benchmark Overlay across `Normal`, `Log`, `%`, and `Idx100` scales.
+- **Measured Release Performance (`Apple M1`, `2560×1600` Retina, `152/152` automated tests passing):**
+  - `VRVP(500 bars, 64 rows)`: **`14.21 µs`** median (`0.014 ms`); `VRVP(50k bars, 64 rows)`: **`803.08 µs`** median (`0.803 ms`).
+  - `Session VWAP(50k 1m UTC+7)`: **`725.58 µs`** (`0.726 ms`); `Anchored VWAP(50k)`: **`371.25 µs`** (`0.371 ms`); `Causal RS(50k vs VNINDEX)`: **`651.71 µs`** (`0.652 ms`).
+  - Full `SumiWorkstationApp` UI (`FPT` full stack: **`0.256 ms`**, `p99 = 0.396 ms`; `VN30F1M` `50k` `1x`: **`0.266 ms`**, `p99 = 0.411 ms`; `VN30F1M` `50k` interactive pan+zoom: **`0.586 ms`**, `p99 = 0.768 ms`; `VN30F1M` `50k` `16x` conflated full-fit: **`3.171 ms`**, `p99 = 3.831 ms` — all **PASS `< 4.0 ms` `DECISION-RENDERER-002` budget**, `"overall_pass": true`).
 
 ---
 
-## 6. Next Proposed Milestone (`Wave 10 / Session R11 — Awaiting Product Owner Decision`)
+## 6. Next Proposed Milestone (`Wave 11 / Session R12 — Awaiting Product Owner Decision`)
 
-With Waves 1–9 (`src/viewport/`, `src/indicators/`, `src/drawings/`, `MultiPaneLayout`, `src/data/`, `src/replay/`, `src/trading/`, `src/scanner/`, `src/alerts/`, `Cmd+K` Command Palette, `src/backtest/` Strategy Lab + `WFO` + `Portfolio`, and `src/journal/` Vietnam Risk Planner + `RiskRewardBox` + Trade Journal) shipped and independently audited, [`docs/NEXT_SESSION_BRIEF.md`](NEXT_SESSION_BRIEF.md) outlines **Milestone R11 — Wave 10: Volume Profile (`VRVP` / `FRVP` `POC` / `VAH` / `VAL`), Session & Anchored `VWAP` (`AVWAP`) Standard-Deviation Bands, and Relative Strength (`vs VNINDEX`) Multi-Series Comparison Overlay** for Product Owner authorization.
+With Waves 1–10 shipped and independently audited, [`docs/NEXT_SESSION_BRIEF.md`](NEXT_SESSION_BRIEF.md) proposes **Milestone R12 — Wave 11: Synchronized Multi-Chart Grid Layout (`1x1` / `1x2` / `2x1` / `2x2` Linked Crosshair/Time/Symbol Views), Ichimoku Cloud + `Cumulative Volume Delta (CVD)`, & Persistent Workspace Layout Templates** for Product Owner authorization.

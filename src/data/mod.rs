@@ -43,7 +43,7 @@ pub use json_loader::{MAX_JSON_DEPTH, load_ohlcv_json};
 pub use presets::{
     DataSourcePreset, VN30_BASKET_SYMBOLS, WatchlistFeedEntry, build_btcusdt_15m_json_document,
     generate_intraday_vn30f_1m_report, generate_vn30_basket_report,
-    load_bundled_watchlist_universe, load_preset_dataset,
+    load_bundled_watchlist_universe, load_preset_dataset, resolve_benchmark_series_for_window,
 };
 pub use synthetic::generate_synthetic_ohlcv;
 pub use timeframe::{

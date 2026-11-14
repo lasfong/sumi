@@ -453,3 +453,547 @@ fn critic_r04_regression_sub_bucket_gap_breaks_conflated_segments() {
         );
     }
 }
+
+#[test]
+fn r11_volume_profile_conserves_exact_total_buy_sell_volume_and_identifies_poc_vah_val() {
+    let mut candles = generate_synthetic_ohlcv(80);
+    // Inject an unmistakable high-volume cluster around price 125.0 so POC sits right inside it.
+    let mid_bar = Candle {
+        timestamp: candles[40].timestamp,
+        date_label: candles[40].date_label.clone(),
+        open: 124.0,
+        high: 126.0,
+        low: 124.0,
+        close: 125.5,
+        volume: 5_000_000.0,
+    };
+    candles[40] = mid_bar;
+
+    let res = compute_volume_profile(
+        &candles,
+        VolumeProfileConfig {
+            row_count: 48,
+            value_area_pct: 0.70,
+        },
+    )
+    .expect("valid volume profile");
+
+    let expected_total_vol: f64 = candles.iter().map(|c| c.volume).sum();
+    let sum_bin_tot: f64 = res.bins.iter().map(|b| b.total_volume).sum();
+    let sum_bin_buy: f64 = res.bins.iter().map(|b| b.buy_volume).sum();
+    let sum_bin_sell: f64 = res.bins.iter().map(|b| b.sell_volume).sum();
+
+    assert!(
+        (res.total_volume - expected_total_vol).abs() < 1e-6,
+        "total volume conservation violated: {} vs {expected_total_vol}",
+        res.total_volume
+    );
+    assert!(
+        (sum_bin_tot - expected_total_vol).abs() < 1e-6,
+        "bin total sum violated: {sum_bin_tot} vs {expected_total_vol}"
+    );
+    assert!(
+        (sum_bin_buy + sum_bin_sell - expected_total_vol).abs() < 1e-6,
+        "buy+sell sum violated: {} vs {expected_total_vol}",
+        sum_bin_buy + sum_bin_sell
+    );
+    assert!((sum_bin_buy - res.total_buy_volume).abs() < 1e-6);
+    assert!((sum_bin_sell - res.total_sell_volume).abs() < 1e-6);
+
+    assert!(res.val_price <= res.poc_price && res.poc_price <= res.vah_price);
+    let va_vol: f64 = res
+        .bins
+        .iter()
+        .filter(|b| b.in_value_area)
+        .map(|b| b.total_volume)
+        .sum();
+    assert!(
+        va_vol >= 0.70 * res.total_volume - 1e-6,
+        "Value Area must cover >=70% of volume ({va_vol} / {})",
+        res.total_volume
+    );
+
+    // Zero-volume & flat-candle TPO fallback edge case must remain finite and valid.
+    let flat_zero = vec![
+        Candle {
+            timestamp: 1_700_000_000,
+            date_label: "2026-01-01".to_owned(),
+            open: 100.0,
+            high: 100.0,
+            low: 100.0,
+            close: 100.0,
+            volume: 0.0,
+        };
+        5
+    ];
+    let tpo = compute_volume_profile(&flat_zero, VolumeProfileConfig::default())
+        .expect("flat zero-volume TPO fallback");
+    assert!(tpo.poc_price.is_finite() && tpo.val_price <= tpo.vah_price);
+}
+
+#[test]
+fn r11_session_vwap_resets_at_vietnam_utc7_day_boundary_and_monthly_on_d1() {
+    // 2026-09-01 00:00:00 UTC:
+    // At 16:45 UTC on 2026-09-01, UTC+7 is 23:45 (day 1 in VN).
+    // At 17:15 UTC on 2026-09-01, UTC+7 is 00:15 on 2026-09-02 (new day in VN, SAME day in UTC!).
+    let base_day_utc = 1_788_220_800_i64; // 2026-09-01 00:00:00 UTC
+    let ts_2345_vn = base_day_utc + 16 * 3600 + 45 * 60;
+    let ts_2359_vn = base_day_utc + 16 * 3600 + 59 * 60;
+    let ts_0015_vn = base_day_utc + 17 * 3600 + 15 * 60;
+
+    let bars = vec![
+        Candle {
+            timestamp: ts_2345_vn,
+            date_label: "2026-09-01 23:45".to_owned(),
+            open: 100.0,
+            high: 102.0,
+            low: 98.0,
+            close: 100.0,
+            volume: 10_000.0,
+        },
+        Candle {
+            timestamp: ts_2359_vn,
+            date_label: "2026-09-01 23:59".to_owned(),
+            open: 110.0,
+            high: 112.0,
+            low: 108.0,
+            close: 110.0,
+            volume: 10_000.0,
+        },
+        Candle {
+            timestamp: ts_0015_vn,
+            date_label: "2026-09-02 00:15".to_owned(),
+            open: 200.0,
+            high: 201.0,
+            low: 199.0,
+            close: 200.0,
+            volume: 5_000.0,
+        },
+    ];
+
+    let vn_out = compute_session_vwap(&bars, Timeframe::M15, 25_200, 1.0, 2.0);
+    assert_eq!(vn_out.session_starts, vec![0, 2]);
+    // Bar 2 starts a fresh UTC+7 session: zero variance => upper_1 == lower_1 == vwap == 200.0!
+    assert!((vn_out.vwap[2].unwrap() - 200.0).abs() < 1e-9);
+    assert!((vn_out.upper_1[2].unwrap() - 200.0).abs() < 1e-9);
+    assert!((vn_out.lower_1[2].unwrap() - 200.0).abs() < 1e-9);
+
+    let utc_out = compute_session_vwap(&bars, Timeframe::M15, 0, 1.0, 2.0);
+    assert_eq!(
+        utc_out.session_starts,
+        vec![0],
+        "UTC+0 stays in same UTC day while UTC+7 resets!"
+    );
+
+    // D1 bars across Jan 30 -> Jan 31 -> Feb 01 reset on calendar month boundary.
+    let jan30 = 1_769_731_200_i64; // 2026-01-30 00:00:00 UTC
+    let d1_bars = vec![
+        Candle {
+            timestamp: jan30,
+            date_label: "2026-01-30".to_owned(),
+            open: 50.0,
+            high: 52.0,
+            low: 48.0,
+            close: 50.0,
+            volume: 1_000.0,
+        },
+        Candle {
+            timestamp: jan30 + 86_400,
+            date_label: "2026-01-31".to_owned(),
+            open: 54.0,
+            high: 55.0,
+            low: 53.0,
+            close: 54.0,
+            volume: 1_000.0,
+        },
+        Candle {
+            timestamp: jan30 + 2 * 86_400,
+            date_label: "2026-02-01".to_owned(),
+            open: 80.0,
+            high: 81.0,
+            low: 79.0,
+            close: 80.0,
+            volume: 1_000.0,
+        },
+    ];
+    let d1_out = compute_session_vwap(&d1_bars, Timeframe::D1, 25_200, 1.0, 2.0);
+    assert_eq!(d1_out.session_starts, vec![0, 2]);
+    assert!((d1_out.vwap[2].unwrap() - 80.0).abs() < 1e-9);
+}
+
+#[test]
+fn r11_anchored_vwap_masks_pre_anchor_bars_and_accumulates_welford_bands() {
+    let bars = make_close_candles(&[100.0, 102.0, 105.0, 110.0, 106.0, 115.0]);
+    let out = compute_anchored_vwap(&bars, 2, 1.0, 2.0);
+    assert_eq!(out.session_starts, vec![2]);
+    assert_eq!(out.vwap[0], None);
+    assert_eq!(out.vwap[1], None);
+    assert!((out.vwap[2].unwrap() - 105.0).abs() < 1e-9);
+    assert!((out.upper_1[2].unwrap() - 105.0).abs() < 1e-9);
+    assert!((out.lower_2[2].unwrap() - 105.0).abs() < 1e-9);
+
+    for i in 3..bars.len() {
+        let v = out.vwap[i].unwrap();
+        let u1 = out.upper_1[i].unwrap();
+        let l1 = out.lower_1[i].unwrap();
+        let u2 = out.upper_2[i].unwrap();
+        let l2 = out.lower_2[i].unwrap();
+        assert!(l2 <= l1 && l1 <= v && v <= u1 && u1 <= u2);
+        assert!(u1 > v && l1 < v);
+    }
+}
+
+#[test]
+fn r11_relative_strength_enforces_def001_bar_close_causality_and_holiday_carry_forward() {
+    let day_0 = 1_788_220_800_i64; // 2026-09-01 00:00:00 UTC
+    // D1 benchmark closes: day 0 = 1000, day 1 = 1500 (huge spike), day 2 omitted (holiday!), day 3 = 1200.
+    let bench = vec![
+        Candle {
+            timestamp: day_0,
+            date_label: "2026-09-01".to_owned(),
+            open: 1000.0,
+            high: 1010.0,
+            low: 990.0,
+            close: 1000.0,
+            volume: 1000.0,
+        },
+        Candle {
+            timestamp: day_0 + 86_400,
+            date_label: "2026-09-02".to_owned(),
+            open: 1000.0,
+            high: 1510.0,
+            low: 990.0,
+            close: 1500.0,
+            volume: 1000.0,
+        },
+        Candle {
+            timestamp: day_0 + 3 * 86_400,
+            date_label: "2026-09-04".to_owned(),
+            open: 1200.0,
+            high: 1210.0,
+            low: 1190.0,
+            close: 1200.0,
+            volume: 1000.0,
+        },
+    ];
+
+    // Intraday H1 bars:
+    // bar 0: day 1 03:15 UTC (10:15 VN) -> day 1 D1 has NOT closed yet -> must align to day 0 close (1000)!
+    // bar 1: day 2 10:00 UTC (holiday on benchmark) -> must carry forward day 1 D1 close (1500)!
+    // bar 2: day 3 23:00 UTC -> after day 3 close minus 1s -> aligns to day 3 close (1200) unless clipped by replay!
+    let sym = vec![
+        Candle {
+            timestamp: day_0 + 86_400 + 3 * 3600,
+            date_label: "2026-09-02 03:00".to_owned(),
+            open: 50.0,
+            high: 51.0,
+            low: 49.0,
+            close: 50.0,
+            volume: 500.0,
+        },
+        Candle {
+            timestamp: day_0 + 2 * 86_400 + 10 * 3600,
+            date_label: "2026-09-03 10:00".to_owned(),
+            open: 75.0,
+            high: 76.0,
+            low: 74.0,
+            close: 75.0,
+            volume: 500.0,
+        },
+        Candle {
+            timestamp: day_0 + 3 * 86_400 + 23 * 3600,
+            date_label: "2026-09-04 23:00".to_owned(),
+            open: 60.0,
+            high: 61.0,
+            low: 59.0,
+            close: 60.0,
+            volume: 500.0,
+        },
+    ];
+
+    let full = compute_relative_strength(&sym, Timeframe::H1, &bench, Timeframe::D1, 2, None);
+    assert_eq!(full.aligned_benchmark_close[0], Some(1000.0));
+    assert_eq!(full.aligned_benchmark_close[1], Some(1500.0));
+    assert_eq!(full.aligned_benchmark_close[2], Some(1200.0));
+    // All 3 bars have exact ratio (50/1000) == (75/1500) == (60/1200) -> RS == 100.0 throughout!
+    for v in &full.rs_line {
+        assert!((v.unwrap() - 100.0).abs() < 1e-9);
+    }
+    assert!((full.rs_sma[1].unwrap() - 100.0).abs() < 1e-9);
+
+    // With causal replay cutoff before day 3 D1 completes, bar 2 cannot see benchmark day 3 (1200.0).
+    let replay_cut = day_0 + 3 * 86_400 + 12 * 3600;
+    let replayed = compute_relative_strength(
+        &sym,
+        Timeframe::H1,
+        &bench,
+        Timeframe::D1,
+        2,
+        Some(replay_cut),
+    );
+    assert_ne!(replayed.aligned_benchmark_close[2], Some(1200.0));
+    assert_eq!(replayed.aligned_benchmark_close[2], Some(1500.0));
+}
+
+#[test]
+fn critic_r11_regression_session_bucket_d1_w1_negative_utc_offset() {
+    // B2: `D1`/`W1` session resets must use calendar UTC date regardless of negative `tz_offset`
+    // (previously `2024-02-01T00:00Z + (-5h)` shifted back into `2024-01-31` and delayed the monthly reset!).
+    let base_ts = 1_704_067_200_i64; // 2024-01-01T00:00:00Z (leap year Jan 1)
+    let d1_candles: Vec<Candle> = [0_i64, 30, 31, 59, 60] // Jan 1, Jan 31, Feb 1, Feb 29, Mar 1
+        .into_iter()
+        .enumerate()
+        .map(|(i, day)| Candle {
+            timestamp: base_ts + day * 86_400,
+            date_label: format!("d{i}"),
+            open: 100.0 + i as f64,
+            high: 102.0 + i as f64,
+            low: 99.0 + i as f64,
+            close: 101.0 + i as f64,
+            volume: 50_000.0,
+        })
+        .collect();
+
+    let vwap_utc_neg5 = compute_session_vwap(&d1_candles, Timeframe::D1, -18_000, 1.0, 2.0);
+    let vwap_utc_pos7 = compute_session_vwap(&d1_candles, Timeframe::D1, 25_200, 1.0, 2.0);
+    assert_eq!(vwap_utc_neg5.session_starts, vec![0, 2, 4]);
+    assert_eq!(vwap_utc_pos7.session_starts, vec![0, 2, 4]);
+
+    // `W1` resets yearly (YTD VWAP): check 2023-12-25 (`base_ts - 7*86400`) -> 2024-01-01 (`base_ts`).
+    let w1_candles = vec![
+        Candle {
+            timestamp: base_ts - 7 * 86_400,
+            date_label: "2023-12-25".to_owned(),
+            open: 100.0,
+            high: 102.0,
+            low: 99.0,
+            close: 101.0,
+            volume: 50_000.0,
+        },
+        Candle {
+            timestamp: base_ts, // 2024-01-01T00:00Z -> must reset at idx 1 even at tz = -5h!
+            date_label: "2024-01-01".to_owned(),
+            open: 103.0,
+            high: 104.0,
+            low: 102.0,
+            close: 103.5,
+            volume: 60_000.0,
+        },
+    ];
+    let w1_utc_neg5 = compute_session_vwap(&w1_candles, Timeframe::W1, -18_000, 1.0, 2.0);
+    let w1_utc_pos7 = compute_session_vwap(&w1_candles, Timeframe::W1, 25_200, 1.0, 2.0);
+    assert_eq!(w1_utc_neg5.session_starts, vec![0, 1]);
+    assert_eq!(w1_utc_pos7.session_starts, vec![0, 1]);
+
+    // Meanwhile intraday `M15` STILL honors negative UTC offset local midnight (`05:00Z` in `UTC-5`).
+    let m15_base = base_ts + 4 * 3_600 + 45 * 60; // 04:45Z (= 23:45 UTC-5 Jan 1)
+    let m15_candles = vec![
+        Candle {
+            timestamp: m15_base,
+            date_label: "04:45Z".to_owned(),
+            open: 10.0,
+            high: 11.0,
+            low: 9.0,
+            close: 10.0,
+            volume: 100.0,
+        },
+        Candle {
+            timestamp: m15_base + 900, // 05:00Z (= 00:00 UTC-5 Jan 2 -> session reset!)
+            date_label: "05:00Z".to_owned(),
+            open: 12.0,
+            high: 13.0,
+            low: 11.0,
+            close: 12.0,
+            volume: 100.0,
+        },
+    ];
+    let m15_neg5 = compute_session_vwap(&m15_candles, Timeframe::M15, -18_000, 1.0, 2.0);
+    assert_eq!(m15_neg5.session_starts, vec![0, 1]);
+}
+
+#[test]
+fn critic_r11_regression_vwap_extreme_magnitude_no_inf_or_nan_collapse() {
+    // B3: Extreme high (`1e160`) and sub-normal/tiny (`1e-160`) price/volume regimes must never
+    // overflow `(w * p)` or `delta^2` into Inf/NaN bands in Session VWAP or Anchored VWAP.
+    for &(price_scale, vol_scale) in &[(1.0e160_f64, 1.0e160_f64), (1.0e-160_f64, 1.0e-160_f64)] {
+        let candles: Vec<Candle> = (0..12)
+            .map(|i| {
+                let mult = 1.0 + ((i % 4) as f64) * 0.05;
+                Candle {
+                    timestamp: 1_700_000_000 + (i as i64) * 3_600,
+                    date_label: format!("b{i}"),
+                    open: price_scale * mult,
+                    high: price_scale * (mult + 0.02),
+                    low: price_scale * (mult - 0.02),
+                    close: price_scale * mult,
+                    volume: vol_scale * (1.0 + (i as f64) * 0.5),
+                }
+            })
+            .collect();
+
+        for out in [
+            compute_session_vwap(&candles, Timeframe::D1, 25_200, 1.0, 2.0),
+            compute_anchored_vwap(&candles, 0, 1.0, 2.0),
+        ] {
+            for i in 0..candles.len() {
+                let v = out.vwap[i].expect("finite vwap");
+                let u1 = out.upper_1[i].expect("finite upper_1");
+                let l1 = out.lower_1[i].expect("finite lower_1");
+                let u2 = out.upper_2[i].expect("finite upper_2");
+                let l2 = out.lower_2[i].expect("finite lower_2");
+                assert!(
+                    v.is_finite()
+                        && u1.is_finite()
+                        && l1.is_finite()
+                        && u2.is_finite()
+                        && l2.is_finite()
+                );
+                assert!(l2 <= l1 + 1e-12 * price_scale.abs());
+                assert!(l1 <= v + 1e-12 * price_scale.abs());
+                assert!(v <= u1 + 1e-12 * price_scale.abs());
+                assert!(u1 <= u2 + 1e-12 * price_scale.abs());
+            }
+        }
+    }
+}
+
+#[test]
+fn critic_r11_regression_vp_micro_price_and_dust_volume_va() {
+    // B3: Micro-prices (`~1e-9`) must keep positive bin bounds (`price_low > 0`), and dust volumes
+    // (`1e-18`) must expand Value Area properly instead of collapsing onto POC via absolute `f64::EPSILON`.
+    let micro: Vec<Candle> = (0..16)
+        .map(|i| {
+            let base = 1.0e-9 + (i as f64) * 5.0e-11;
+            Candle {
+                timestamp: 1_700_000_000 + (i as i64) * 86_400,
+                date_label: format!("m{i}"),
+                open: base,
+                high: base + 1.0e-11,
+                low: (base - 5.0e-12).max(1.0e-12),
+                close: base + 4.0e-12,
+                volume: 10_000.0,
+            }
+        })
+        .collect();
+    let micro_res = compute_volume_profile(
+        &micro,
+        VolumeProfileConfig {
+            row_count: 16,
+            value_area_pct: 0.70,
+        },
+    )
+    .expect("micro price volume profile");
+    assert!(
+        micro_res
+            .bins
+            .iter()
+            .all(|b| b.price_low > 0.0 && b.price_high > b.price_low)
+    );
+    assert!(
+        micro_res.poc_price > 0.0
+            && micro_res.val_price > 0.0
+            && micro_res.vah_price >= micro_res.val_price
+    );
+
+    let dust: Vec<Candle> = (0..10)
+        .map(|i| {
+            let p = 100.0 + (i as f64) * 2.0;
+            Candle {
+                timestamp: 1_700_000_000 + (i as i64) * 86_400,
+                date_label: format!("u{i}"),
+                open: p,
+                high: p + 0.5,
+                low: p - 0.5,
+                close: p,
+                volume: 1.0e-18,
+            }
+        })
+        .collect();
+    let dust_res = compute_volume_profile(
+        &dust,
+        VolumeProfileConfig {
+            row_count: 10,
+            value_area_pct: 0.70,
+        },
+    )
+    .expect("dust volume profile");
+    assert!(
+        dust_res.vah_price > dust_res.val_price + 4.0,
+        "dust VA collapsed: VAL={} VAH={}",
+        dust_res.val_price,
+        dust_res.vah_price
+    );
+}
+
+#[test]
+fn critic_r11_regression_rs_sma_spike_drift_and_benchmark_coverage() {
+    // M5 (a): Extreme spike in RS series must not leave permanent floating subtraction drift in `rs_sma`.
+    let n = 260_usize;
+    let bench: Vec<Candle> = (0..n)
+        .map(|i| Candle {
+            timestamp: 1_700_000_000 + (i as i64) * 86_400,
+            date_label: format!("b{i}"),
+            open: 1000.0,
+            high: 1005.0,
+            low: 995.0,
+            close: 1000.0,
+            volume: 1_000_000.0,
+        })
+        .collect();
+    let mut sym = bench.clone();
+    sym[10].close = 1.0e14; // extreme spike early in series
+    let rs_out = compute_relative_strength(&sym, Timeframe::D1, &bench, Timeframe::D1, 10, None);
+    let tail_sma = rs_out.rs_sma[n - 1].expect("tail rs sma");
+    assert!(
+        (tail_sma - 100.0).abs() < 1.0e-6,
+        "rolling RS SMA suffered catastrophic spike subtraction drift: {tail_sma}"
+    );
+
+    // M5 (b): Watchlist benchmark resolver must reject high-row-density stale archives that stop early
+    // before `ref_last_ts` and select the candidate covering the full reference window.
+    use crate::data::{DataSourcePreset, WatchlistFeedEntry, resolve_benchmark_series_for_window};
+    let t0 = 1_700_000_000_i64;
+    let t_last = t0 + 120 * 86_400;
+    let stale_dense: Vec<Candle> = (0..500)
+        .map(|i| Candle {
+            timestamp: t0 + (i as i64) * 3_600, // ends ~20 days in, 100 days before t_last!
+            date_label: format!("s{i}"),
+            open: 1200.0,
+            high: 1205.0,
+            low: 1195.0,
+            close: 1200.0,
+            volume: 1000.0,
+        })
+        .collect();
+    let full_cov: Vec<Candle> = (0..=120)
+        .map(|d| Candle {
+            timestamp: t0 + d * 86_400,
+            date_label: format!("f{d}"),
+            open: 1300.0,
+            high: 1305.0,
+            low: 1295.0,
+            close: 1300.0,
+            volume: 1000.0,
+        })
+        .collect();
+    let universe = vec![
+        WatchlistFeedEntry {
+            instrument_id: "vnindex_stale".to_owned(),
+            preset: DataSourcePreset::SyntheticVnindex,
+            symbol: "VNINDEX".to_owned(),
+            base_timeframe: Timeframe::H1,
+            candles: stale_dense,
+        },
+        WatchlistFeedEntry {
+            instrument_id: "vnindex_full".to_owned(),
+            preset: DataSourcePreset::SyntheticVnindex,
+            symbol: "VNINDEX".to_owned(),
+            base_timeframe: Timeframe::D1,
+            candles: full_cov,
+        },
+    ];
+    let (_, tf, resolved) = resolve_benchmark_series_for_window("VNINDEX", t0, t_last, &universe)
+        .expect("resolve benchmark");
+    assert_eq!(tf, Timeframe::D1);
+    assert!(resolved.last().unwrap().timestamp >= t_last - 86_400);
+}

@@ -65,6 +65,7 @@ impl DrawingPaneTarget {
             Self::Oscillator(OscillatorPaneId::Macd) => "macd",
             Self::Oscillator(OscillatorPaneId::Atr) => "atr",
             Self::Oscillator(OscillatorPaneId::Equity) => "equity",
+            Self::Oscillator(OscillatorPaneId::RelativeStrength) => "rs",
         }
     }
 
@@ -77,6 +78,7 @@ impl DrawingPaneTarget {
             Self::Oscillator(OscillatorPaneId::Macd) => "MACD",
             Self::Oscillator(OscillatorPaneId::Atr) => "ATR",
             Self::Oscillator(OscillatorPaneId::Equity) => "EQUITY",
+            Self::Oscillator(OscillatorPaneId::RelativeStrength) => "RS",
         }
     }
 }
@@ -92,6 +94,8 @@ pub enum DrawingTool {
     Rectangle,
     FibonacciRetracement,
     RiskRewardBox,
+    FixedRangeVolumeProfile,
+    AnchoredVwap,
 }
 
 impl DrawingTool {
@@ -106,6 +110,8 @@ impl DrawingTool {
             Self::Rectangle => "Rect",
             Self::FibonacciRetracement => "Fib",
             Self::RiskRewardBox => "Pos R:R",
+            Self::FixedRangeVolumeProfile => "FRVP",
+            Self::AnchoredVwap => "AVWAP",
         }
     }
 
@@ -114,12 +120,13 @@ impl DrawingTool {
     pub const fn required_anchors(self) -> usize {
         match self {
             Self::Select => 0,
-            Self::HorizontalLine => 1,
+            Self::HorizontalLine | Self::AnchoredVwap => 1,
             Self::TrendLine
             | Self::Ray
             | Self::Rectangle
             | Self::FibonacciRetracement
-            | Self::RiskRewardBox => 2,
+            | Self::RiskRewardBox
+            | Self::FixedRangeVolumeProfile => 2,
         }
     }
 }
@@ -349,6 +356,18 @@ impl DrawingStyle {
                 dash: LineDashStyle::Solid,
                 fill_opacity: 0.16,
             },
+            DrawingTool::FixedRangeVolumeProfile => Self {
+                color: DrawingColorPreset::ElectricBlue,
+                line_width: 1.5,
+                dash: LineDashStyle::Dashed,
+                fill_opacity: 0.16,
+            },
+            DrawingTool::AnchoredVwap => Self {
+                color: DrawingColorPreset::AmberGold,
+                line_width: 2.0,
+                dash: LineDashStyle::Solid,
+                fill_opacity: 0.14,
+            },
             DrawingTool::Select => Self {
                 color: DrawingColorPreset::Cyan,
                 line_width: 1.75,
@@ -370,6 +389,14 @@ impl DrawingStyle {
             self.fill_opacity = self.fill_opacity.clamp(0.0, 0.65);
         }
     }
+}
+
+const fn default_frvp_row_count() -> u16 {
+    24
+}
+
+const fn default_avwap_show_bands() -> bool {
+    true
 }
 
 /// Strongly typed geometric payload and logical anchors of a [`Drawing`].
@@ -403,6 +430,21 @@ pub enum DrawingGeometry {
         start: DrawingAnchor,
         end: DrawingAnchor,
         stop_price: f64,
+    },
+    /// Fixed Range Volume Profile (`Milestone R11`):
+    /// Horizontal bar-span volume histogram with `POC`, `VAH`, `VAL` across `[start.bar_index, end.bar_index]`.
+    FixedRangeVolumeProfile {
+        start: DrawingAnchor,
+        end: DrawingAnchor,
+        #[serde(default = "default_frvp_row_count")]
+        row_count: u16,
+    },
+    /// Anchored VWAP (`Milestone R11`):
+    /// Cumulative volume-weighted average price + optional Welford $\pm 1\sigma/\pm 2\sigma$ bands from `anchor.bar_index`.
+    AnchoredVwap {
+        anchor: DrawingAnchor,
+        #[serde(default = "default_avwap_show_bands")]
+        show_bands: bool,
     },
 }
 
@@ -475,13 +517,15 @@ impl DrawingGeometry {
             Self::Rectangle { .. } => DrawingTool::Rectangle,
             Self::FibonacciRetracement { .. } => DrawingTool::FibonacciRetracement,
             Self::RiskRewardBox { .. } => DrawingTool::RiskRewardBox,
+            Self::FixedRangeVolumeProfile { .. } => DrawingTool::FixedRangeVolumeProfile,
+            Self::AnchoredVwap { .. } => DrawingTool::AnchoredVwap,
         }
     }
 
     #[must_use]
     pub fn anchors(&self) -> [DrawingAnchor; 2] {
         match *self {
-            Self::HorizontalLine { anchor } => [anchor, anchor],
+            Self::HorizontalLine { anchor } | Self::AnchoredVwap { anchor, .. } => [anchor, anchor],
             Self::TrendLine { start, end }
             | Self::Ray {
                 origin: start,
@@ -492,7 +536,8 @@ impl DrawingGeometry {
                 corner_b: end,
             }
             | Self::FibonacciRetracement { start, end, .. }
-            | Self::RiskRewardBox { start, end, .. } => [start, end],
+            | Self::RiskRewardBox { start, end, .. }
+            | Self::FixedRangeVolumeProfile { start, end, .. } => [start, end],
         }
     }
 
@@ -500,12 +545,13 @@ impl DrawingGeometry {
     #[must_use]
     pub const fn anchor_count(&self) -> usize {
         match self {
-            Self::HorizontalLine { .. } => 1,
+            Self::HorizontalLine { .. } | Self::AnchoredVwap { .. } => 1,
             Self::TrendLine { .. }
             | Self::Ray { .. }
             | Self::Rectangle { .. }
             | Self::FibonacciRetracement { .. }
-            | Self::RiskRewardBox { .. } => 2,
+            | Self::RiskRewardBox { .. }
+            | Self::FixedRangeVolumeProfile { .. } => 2,
         }
     }
 
@@ -513,12 +559,28 @@ impl DrawingGeometry {
     pub fn is_valid(&self) -> bool {
         match *self {
             Self::HorizontalLine { anchor } => anchor.is_valid(),
+            Self::AnchoredVwap { anchor, .. } => anchor.is_valid() && anchor.bar_index >= -0.5,
             Self::TrendLine { start, end }
             | Self::Rectangle {
                 corner_a: start,
                 corner_b: end,
             }
             | Self::FibonacciRetracement { start, end, .. } => start.is_valid() && end.is_valid(),
+            Self::FixedRangeVolumeProfile {
+                start,
+                end,
+                row_count,
+            } => {
+                let has_bar_span = (end.bar_index - start.bar_index).abs() >= 0.5;
+                let has_ts_span = start
+                    .timestamp
+                    .zip(end.timestamp)
+                    .is_some_and(|(t0, t1)| (t1 - t0).abs() > 1e-6);
+                start.is_valid()
+                    && end.is_valid()
+                    && (has_bar_span || has_ts_span)
+                    && (8..=200).contains(&row_count)
+            }
             Self::Ray { origin, through } => {
                 origin.is_valid() && through.is_valid() && has_non_zero_direction(origin, through)
             }
@@ -547,6 +609,14 @@ impl DrawingGeometry {
                     false
                 }
             }
+            Self::AnchoredVwap { anchor: a, .. } => {
+                if index == 0 && anchor.bar_index >= -0.5 {
+                    *a = anchor;
+                    true
+                } else {
+                    false
+                }
+            }
             Self::TrendLine { start, end }
             | Self::Rectangle {
                 corner_a: start,
@@ -558,6 +628,17 @@ impl DrawingGeometry {
                     true
                 }
                 1 => {
+                    *end = anchor;
+                    true
+                }
+                _ => false,
+            },
+            Self::FixedRangeVolumeProfile { start, end, .. } => match index {
+                0 if (end.bar_index - anchor.bar_index).abs() >= 0.5 => {
+                    *start = anchor;
+                    true
+                }
+                1 if (anchor.bar_index - start.bar_index).abs() >= 0.5 => {
                     *end = anchor;
                     true
                 }
@@ -665,7 +746,9 @@ impl Drawing {
             (ts as f64).is_finite() && (ts as f64).abs() <= MAX_ABS_ANCHOR_TIMESTAMP
         });
         let pane_ok = match self.geometry {
-            DrawingGeometry::RiskRewardBox { .. } => self.pane == DrawingPaneTarget::Main,
+            DrawingGeometry::RiskRewardBox { .. }
+            | DrawingGeometry::FixedRangeVolumeProfile { .. }
+            | DrawingGeometry::AnchoredVwap { .. } => self.pane == DrawingPaneTarget::Main,
             _ => true,
         };
         self.id > 0
@@ -708,7 +791,8 @@ impl Drawing {
             }
         };
         match self.geometry {
-            DrawingGeometry::HorizontalLine { anchor } => anchor_ok(anchor),
+            DrawingGeometry::HorizontalLine { anchor }
+            | DrawingGeometry::AnchoredVwap { anchor, .. } => anchor_ok(anchor),
             DrawingGeometry::TrendLine { start, end }
             | DrawingGeometry::Ray {
                 origin: start,
@@ -719,7 +803,8 @@ impl Drawing {
                 corner_b: end,
             }
             | DrawingGeometry::FibonacciRetracement { start, end, .. }
-            | DrawingGeometry::RiskRewardBox { start, end, .. } => {
+            | DrawingGeometry::RiskRewardBox { start, end, .. }
+            | DrawingGeometry::FixedRangeVolumeProfile { start, end, .. } => {
                 anchor_ok(start) && anchor_ok(end)
             }
         }

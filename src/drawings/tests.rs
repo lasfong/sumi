@@ -1200,3 +1200,429 @@ fn critic_r10_regression_rr_box_entry_handle_crossover_and_target_flip_symmetry(
         "M-07: flipped Short R:R box must keep stop > entry > target"
     );
 }
+
+#[test]
+fn r11_frvp_and_avwap_creation_hit_test_log_linear_drag_timeframe_remap_and_causal_masking() {
+    use crate::data::{Timeframe, aggregate_ohlcv, generate_intraday_vn30f_1m_report};
+
+    let candles_15m = aggregate_ohlcv(
+        &generate_intraday_vn30f_1m_report(6_000).candles,
+        Timeframe::M1,
+        Timeframe::M15,
+    )
+    .expect("15m candles");
+    let candles_h1 =
+        aggregate_ohlcv(&candles_15m, Timeframe::M15, Timeframe::H1).expect("H1 candles");
+
+    let (ts_lin, ps_lin) = setup_pane_scales(
+        candles_15m.len(),
+        900.0,
+        450.0,
+        1_220.0,
+        1_380.0,
+        PriceScaleMode::Normal,
+        false,
+    );
+    let (ts_log, ps_log) = setup_pane_scales(
+        candles_15m.len(),
+        900.0,
+        450.0,
+        1_220.0,
+        1_380.0,
+        PriceScaleMode::Logarithmic,
+        false,
+    );
+    // Fit window cleanly over latest 100 bars so bar indices project onscreen.
+    let mut ts_vis = ts_lin;
+    ts_vis.set_bar_spacing(8.0);
+    ts_vis.set_right_offset(5.0);
+    let mut ts_log_vis = ts_log;
+    ts_log_vis.set_bar_spacing(8.0);
+    ts_log_vis.set_right_offset(5.0);
+    let proj_lin = PaneDrawingProjection::new(&ts_vis, &ps_lin, 900.0, 450.0, 1_280.0);
+    let proj_log = PaneDrawingProjection::new(&ts_log_vis, &ps_log, 900.0, 450.0, 1_280.0);
+
+    let n = candles_15m.len();
+    let i0 = n - 45;
+    let i1 = n - 20;
+    let a_idx = n - 30;
+    let mid_p = candles_15m[i0].close;
+
+    let mut store = DrawingStore::new();
+    // 1. Two-click creation for FixedRangeVolumeProfile + single-click creation for AnchoredVwap.
+    store.set_tool(DrawingTool::FixedRangeVolumeProfile);
+    let p_a = proj_lin
+        .anchor_to_local(DrawingAnchor::new(i0 as f64, mid_p - 6.0))
+        .unwrap();
+    let p_b = proj_lin
+        .anchor_to_local(DrawingAnchor::new(i1 as f64, mid_p + 6.0))
+        .unwrap();
+    assert_eq!(
+        store.pointer_down(DrawingPaneTarget::Main, p_a, false, &proj_lin, &candles_15m),
+        PointerCaptureOutcome::CapturedByDrawing
+    );
+    assert!(!store.pointer_up(
+        DrawingPaneTarget::Main,
+        Some(p_a),
+        false,
+        &proj_lin,
+        &candles_15m
+    ));
+    store.pointer_move(DrawingPaneTarget::Main, p_b, false, &proj_lin, &candles_15m);
+    assert_eq!(
+        store.pointer_down(DrawingPaneTarget::Main, p_b, false, &proj_lin, &candles_15m),
+        PointerCaptureOutcome::CapturedByDrawing
+    );
+    assert!(store.pointer_up(
+        DrawingPaneTarget::Main,
+        Some(p_b),
+        false,
+        &proj_lin,
+        &candles_15m
+    ));
+    assert_eq!(store.drawings.len(), 1);
+    let frvp_id = store.drawings[0].id;
+    assert!(matches!(
+        store.drawings[0].geometry,
+        DrawingGeometry::FixedRangeVolumeProfile { row_count: 24, .. }
+    ));
+
+    store.set_tool(DrawingTool::AnchoredVwap);
+    let av_pt = proj_lin
+        .anchor_to_local(DrawingAnchor::new(a_idx as f64, candles_15m[a_idx].low))
+        .unwrap();
+    assert_eq!(
+        store.pointer_down(
+            DrawingPaneTarget::Main,
+            av_pt,
+            false,
+            &proj_lin,
+            &candles_15m
+        ),
+        PointerCaptureOutcome::CapturedByDrawing
+    );
+    assert!(store.pointer_up(
+        DrawingPaneTarget::Main,
+        Some(av_pt),
+        false,
+        &proj_lin,
+        &candles_15m
+    ));
+    assert_eq!(store.drawings.len(), 2);
+    let avwap_id = store.drawings[1].id;
+    assert!(matches!(
+        store.drawings[1].geometry,
+        DrawingGeometry::AnchoredVwap {
+            show_bands: true,
+            ..
+        }
+    ));
+
+    // 2. Hit-testing on both Normal & Logarithmic projections + handle drag on Log scale!
+    let frvp_hit = hit_test_pane_drawings(
+        &store.drawings,
+        DrawingPaneTarget::Main,
+        &proj_lin,
+        p_b,
+        Some(frvp_id),
+    );
+    assert!(frvp_hit.is_some());
+    let av_hit = hit_test_pane_drawings(
+        &store.drawings,
+        DrawingPaneTarget::Main,
+        &proj_log,
+        proj_log
+            .anchor_to_local(store.drawings[1].geometry.anchors()[0])
+            .unwrap(),
+        Some(avwap_id),
+    );
+    assert!(av_hit.is_some());
+
+    let av_log_pos = proj_log
+        .anchor_to_local(store.drawings[1].geometry.anchors()[0])
+        .unwrap();
+    assert_eq!(
+        store.pointer_down(
+            DrawingPaneTarget::Main,
+            av_log_pos,
+            false,
+            &proj_log,
+            &candles_15m
+        ),
+        PointerCaptureOutcome::CapturedByDrawing
+    );
+    let new_av_idx = (a_idx + 4) as f64;
+    let new_av_pos = proj_log
+        .anchor_to_local(DrawingAnchor::new(new_av_idx, candles_15m[a_idx + 4].low))
+        .unwrap();
+    store.pointer_move(
+        DrawingPaneTarget::Main,
+        new_av_pos,
+        false,
+        &proj_log,
+        &candles_15m,
+    );
+    assert!(store.pointer_up(
+        DrawingPaneTarget::Main,
+        Some(new_av_pos),
+        false,
+        &proj_log,
+        &candles_15m
+    ));
+    let moved_av_bar = store.drawings[1].geometry.anchors()[0].bar_index;
+    assert!((moved_av_bar - new_av_idx).abs() < 1e-6);
+
+    // 3. Timeframe remap (`M15 -> H1 -> M15`) preserves exact chronological bucket placement.
+    store.remap_timeframe(&candles_15m, Timeframe::M15, &candles_h1, Timeframe::H1);
+    let h1_bar = store.drawings[1].geometry.anchors()[0].bar_index;
+    assert!(h1_bar < moved_av_bar);
+    store.remap_timeframe(&candles_h1, Timeframe::H1, &candles_15m, Timeframe::M15);
+
+    // 4. `DEF-001` causal replay masking hides future `AVWAP` (and FRVP extending past cutoff) when cutoff rewinds.
+    let cutoff_mid = candles_15m[n - 15].timestamp;
+    let future_ts = candles_15m[n - 10].timestamp;
+    store.drawings[1].created_at_timestamp = Some(future_ts);
+    store.set_replay_cutoff_timestamp(Some(cutoff_mid), candles_15m.len());
+    assert!(store.drawings[0].is_causally_visible(Some(cutoff_mid), candles_15m.len()));
+    assert!(!store.drawings[1].is_causally_visible(Some(cutoff_mid), candles_15m.len()));
+    let cutoff_before_frvp_end = candles_15m[n - 25].timestamp;
+    assert!(
+        !store.drawings[0].is_causally_visible(Some(cutoff_before_frvp_end), candles_15m.len())
+    );
+
+    // 5. `sanitize_deserialized` clamps corrupted row counts and removes duplicate IDs cleanly.
+    store.set_replay_cutoff_timestamp(None, usize::MAX);
+    if let DrawingGeometry::FixedRangeVolumeProfile { row_count, .. } =
+        &mut store.drawings[0].geometry
+    {
+        *row_count = 9_999;
+    }
+    store.sanitize_deserialized();
+    if let DrawingGeometry::FixedRangeVolumeProfile { row_count, .. } = store.drawings[0].geometry {
+        assert_eq!(row_count, 200);
+    }
+}
+
+#[test]
+fn critic_r11_regression_frvp_timeframe_remap_preserves_validity_and_vertical_handles() {
+    // M4: Remapping a multi-bar 15m FRVP whose timestamps collapse into one H1 bucket must remain valid
+    // when distinct timestamps were preserved, and offscreen-Y FRVP must keep horizontally clamped handles.
+    let start_ts = 1_704_067_200_i64;
+    let candles_15m: Vec<Candle> = (0..32)
+        .map(|i| Candle {
+            timestamp: start_ts + (i as i64) * 900,
+            date_label: format!("m15_{i}"),
+            open: 100.0 + (i as f64) * 0.2,
+            high: 101.0 + (i as f64) * 0.2,
+            low: 99.0 + (i as f64) * 0.2,
+            close: 100.5 + (i as f64) * 0.2,
+            volume: 10_000.0,
+        })
+        .collect();
+    let candles_h1: Vec<Candle> = (0..8)
+        .map(|h| Candle {
+            timestamp: start_ts + (h as i64) * 3_600,
+            date_label: format!("h1_{h}"),
+            open: 100.0 + (h as f64),
+            high: 102.0 + (h as f64),
+            low: 99.0 + (h as f64),
+            close: 101.0 + (h as f64),
+            volume: 40_000.0,
+        })
+        .collect();
+
+    let mut store = DrawingStore::default();
+    let frvp_geom = DrawingGeometry::FixedRangeVolumeProfile {
+        start: DrawingAnchor::with_timestamp(4.0, 100.8, candles_15m[4].timestamp as f64),
+        end: DrawingAnchor::with_timestamp(6.0, 101.2, candles_15m[6].timestamp as f64),
+        row_count: 24,
+    };
+    assert!(frvp_geom.is_valid());
+    let frvp_id = store
+        .add_drawing(DrawingPaneTarget::Main, frvp_geom, None)
+        .expect("add FRVP");
+    store.remap_timeframe(
+        &candles_15m,
+        crate::data::Timeframe::M15,
+        &candles_h1,
+        crate::data::Timeframe::H1,
+    );
+    let remapped = store
+        .drawings
+        .iter()
+        .find(|d| d.id == frvp_id)
+        .expect("FRVP survives 15m -> H1 remap");
+    assert!(remapped.geometry.is_valid());
+
+    // Vertical offscreen check: scale is `[200.0, 260.0]` while FRVP anchors live near `101.0`.
+    store.remap_timeframe(
+        &candles_h1,
+        crate::data::Timeframe::H1,
+        &candles_15m,
+        crate::data::Timeframe::M15,
+    );
+    let (ts, ps) = setup_pane_scales(
+        candles_15m.len(),
+        800.0,
+        400.0,
+        200.0,
+        260.0,
+        PriceScaleMode::Normal,
+        false,
+    );
+    let proj = PaneDrawingProjection::new(&ts, &ps, 800.0, 400.0, 200.0).with_candles(&candles_15m);
+    let projected = proj
+        .project_drawing(
+            store
+                .drawings
+                .iter()
+                .find(|d| d.id == frvp_id)
+                .expect("remapped back"),
+        )
+        .expect("project offscreen-Y FRVP");
+    assert_eq!(projected.handles.len(), 2);
+    for h in &projected.handles {
+        assert!((0.0..=400.0).contains(&h.pos.y));
+    }
+}
+
+#[test]
+fn critic_r11_regression_avwap_tail_hit_test_and_left_drag_clamp() {
+    // M4: Selecting/hitting AVWAP along its visible tail when the anchor is offscreen left must work,
+    // and dragging the anchor past bar `-50` must clamp `anchor.bar_index >= 0.0`.
+    let candles: Vec<Candle> = (0..80)
+        .map(|i| Candle {
+            timestamp: 1_704_067_200 + (i as i64) * 3_600,
+            date_label: format!("b{i}"),
+            open: 100.0 + (i as f64) * 0.5,
+            high: 102.0 + (i as f64) * 0.5,
+            low: 98.0 + (i as f64) * 0.5,
+            close: 101.0 + (i as f64) * 0.5,
+            volume: 25_000.0,
+        })
+        .collect();
+
+    let mut store = DrawingStore::default();
+    let av_id = store
+        .add_drawing(
+            DrawingPaneTarget::Main,
+            DrawingGeometry::AnchoredVwap {
+                anchor: DrawingAnchor::with_timestamp(
+                    5.0,
+                    candles[5].low,
+                    candles[5].timestamp as f64,
+                ),
+                show_bands: true,
+            },
+            None,
+        )
+        .expect("add AVWAP");
+
+    // Pan viewport to `[30..79]` so anchor bar 5 is far offscreen to the left!
+    let mut ts = TimeScale::with_data(candles.len(), 800.0, HorzScaleOptions::default());
+    ts.set_bar_spacing(16.0);
+    ts.set_right_offset(0.0);
+    let mut ps = PriceScale::new("right", PriceScaleOptions::default());
+    ps.set_height(400.0);
+    ps.set_auto_scale(false);
+    ps.set_raw_price_range(95.0, 150.0, 100.0);
+
+    let proj = PaneDrawingProjection::new(&ts, &ps, 800.0, 400.0, 100.0).with_candles(&candles);
+    let projected = proj
+        .project_drawing(
+            store
+                .drawings
+                .iter()
+                .find(|d| d.id == av_id)
+                .expect("avwap"),
+        )
+        .expect("project avwap");
+    let tail_pt = match &projected.shape {
+        ProjectedDrawingShape::AnchoredVwap { tail_segments, .. } => {
+            assert!(
+                !tail_segments.is_empty(),
+                "visible AVWAP tail must produce hit segments"
+            );
+            let s0 = tail_segments[0];
+            LocalPoint::new(0.5 * (s0.start.x + s0.end.x), 0.5 * (s0.start.y + s0.end.y))
+        }
+        other => panic!("expected AnchoredVwap, got {other:?}"),
+    };
+    let hit = hit_test_pane_drawings_causal(
+        &store.drawings,
+        DrawingPaneTarget::Main,
+        &proj,
+        tail_pt,
+        None,
+        None,
+        candles.len(),
+    );
+    assert_eq!(hit.map(|h| h.drawing_id), Some(av_id));
+
+    // Move viewport to include bar 0 and drag anchor handle way left past `-50`.
+    let (mut ts_full, ps_full) = setup_pane_scales(
+        candles.len(),
+        800.0,
+        400.0,
+        90.0,
+        150.0,
+        PriceScaleMode::Normal,
+        false,
+    );
+    ts_full.set_bar_spacing(8.0);
+    ts_full.set_right_offset(5.0);
+    let proj_drag =
+        PaneDrawingProjection::new(&ts_full, &ps_full, 800.0, 400.0, 100.0).with_candles(&candles);
+    let start_pos = proj_drag
+        .anchor_to_local(
+            store
+                .drawings
+                .iter()
+                .find(|d| d.id == av_id)
+                .unwrap()
+                .geometry
+                .anchors()[0],
+        )
+        .expect("start pos");
+    assert_eq!(
+        store.pointer_down(
+            DrawingPaneTarget::Main,
+            start_pos,
+            false,
+            &proj_drag,
+            &candles
+        ),
+        PointerCaptureOutcome::CapturedByDrawing
+    );
+    let far_left_x = proj_drag
+        .time_scale
+        .float_index_to_local_x(-40.0)
+        .unwrap_or(-600.0);
+    let far_left = LocalPoint::new(far_left_x, start_pos.y);
+    store.pointer_move(
+        DrawingPaneTarget::Main,
+        far_left,
+        false,
+        &proj_drag,
+        &candles,
+    );
+    assert!(store.pointer_up(
+        DrawingPaneTarget::Main,
+        Some(far_left),
+        false,
+        &proj_drag,
+        &candles
+    ));
+    let clamped_idx = store
+        .drawings
+        .iter()
+        .find(|d| d.id == av_id)
+        .unwrap()
+        .geometry
+        .anchors()[0]
+        .bar_index;
+    assert!(
+        clamped_idx >= 0.0,
+        "AVWAP left drag must clamp bar_index >= 0.0, got {clamped_idx}"
+    );
+}

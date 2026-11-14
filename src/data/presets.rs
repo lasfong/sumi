@@ -507,3 +507,99 @@ fn build_embedded_spy_csv() -> String {
 fn round2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
+
+/// Resolves an overlapping benchmark series for Relative Strength (`RS`) and Main-Pane Rebased Comparison.
+///
+/// Prefers an exact match from `universe` whenever it contains at least `2` candles overlapping
+/// `[ref_first_ts - 35 days, ref_last_ts + 1 day]`. For macro benchmarks (`VNINDEX`, `HNX-INDEX`, `SPY`)
+/// compared against instruments whose preset dates fall outside the historical archive sample (such as
+/// `VN30` basket `2025-11..2026-07` or `VN30F1M` `2026-09`), generates a deterministic daily benchmark
+/// series covering the exact target window so causal bar-close alignment operates cleanly.
+#[must_use]
+pub fn resolve_benchmark_series_for_window(
+    benchmark_symbol: &str,
+    ref_first_ts: i64,
+    ref_last_ts: i64,
+    universe: &[WatchlistFeedEntry],
+) -> Option<(String, Timeframe, Vec<Candle>)> {
+    let target = benchmark_symbol.trim();
+    if target.is_empty() || ref_last_ts < ref_first_ts {
+        return None;
+    }
+
+    let win_lo = ref_first_ts.saturating_sub(35 * 86_400);
+    let win_hi = ref_last_ts.saturating_add(86_400);
+    let recent_floor_ts = ref_last_ts.saturating_sub(14 * 86_400);
+
+    if let Some(entry) = universe
+        .iter()
+        .filter(|e| e.symbol.eq_ignore_ascii_case(target))
+        .filter_map(|e| {
+            let reaches_recent_tail = e
+                .candles
+                .last()
+                .is_some_and(|c| c.timestamp >= recent_floor_ts);
+            if !reaches_recent_tail {
+                return None;
+            }
+            let overlap_count = e
+                .candles
+                .iter()
+                .filter(|c| c.timestamp >= win_lo && c.timestamp <= win_hi)
+                .count();
+            (overlap_count >= 2).then_some((overlap_count, e))
+        })
+        .max_by_key(|(overlap_count, _)| *overlap_count)
+        .map(|(_, e)| e)
+    {
+        return Some((
+            entry.symbol.clone(),
+            entry.base_timeframe,
+            entry.candles.clone(),
+        ));
+    }
+
+    let upper = target.to_ascii_uppercase();
+    let (canonical, base_price, wave_amp, drift_per_bar) = match upper.as_str() {
+        "VNINDEX" | "VN-INDEX" => ("VNINDEX", 1_265.0, 5.8, 0.42),
+        "HNX-INDEX" | "HNXINDEX" => ("HNX-INDEX", 232.0, 1.6, 0.08),
+        "SPY" => ("SPY", 588.0, 2.9, 0.22),
+        _ => return None,
+    };
+
+    let start_day = (ref_first_ts.saturating_sub(45 * 86_400)).div_euclid(86_400);
+    let end_day = (ref_last_ts.saturating_add(7 * 86_400)).div_euclid(86_400);
+    let mut candles = Vec::new();
+    let mut prev_close = base_price;
+
+    for day in start_day..=end_day {
+        if weekday_from_days(day) >= 5 {
+            continue;
+        }
+        let idx = candles.len() as f64;
+        let ts = day * 86_400;
+        let open = round2((prev_close + (idx * 0.29).cos() * (wave_amp * 0.18)).max(10.0));
+        let delta = drift_per_bar
+            + (idx * 0.17).sin() * (wave_amp * 0.72)
+            + (idx * 0.43).cos() * (wave_amp * 0.35);
+        let close = round2((open + delta).max(10.0));
+        let hi_wick = (wave_amp * 0.55) + (idx * 0.61).sin().abs() * (wave_amp * 0.45);
+        let lo_wick = (wave_amp * 0.50) + (idx * 0.53).cos().abs() * (wave_amp * 0.42);
+        let high = round2(open.max(close) + hi_wick);
+        let low = round2((open.min(close) - lo_wick).max(5.0));
+        let volume = ((580_000_000.0_f64) * (0.85 + (idx * 0.23).sin().abs() * 0.35)).round();
+
+        candles.push(Candle {
+            timestamp: ts,
+            date_label: Timeframe::D1.format_candle_label(ts),
+            open,
+            high,
+            low,
+            close,
+            volume,
+        });
+        prev_close = close;
+    }
+
+    (candles.len() >= 2).then_some((canonical.to_owned(), Timeframe::D1, candles))
+}

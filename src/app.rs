@@ -28,13 +28,16 @@ use crate::data::{
     DataSourcePreset, Timeframe, WatchlistFeedEntry, format_utc_date, format_utc_datetime_hm,
     generate_synthetic_ohlcv, load_bundled_watchlist_universe, load_ohlcv_bytes, load_ohlcv_csv,
     load_ohlcv_json, load_preset_dataset, remap_timestamp_to_bar_index, resolve_anchor_timestamp,
+    resolve_benchmark_series_for_window,
 };
 use crate::drawings::{
     DrawingAnchor, DrawingColorPreset, DrawingGeometry, DrawingPaneTarget, DrawingStore,
     DrawingStyle, DrawingTool, FibDirection, LineDashStyle, MagnetMode,
 };
 use crate::indicators::OscillatorPaneId;
-use crate::indicators::{IndicatorCache, IndicatorConfig, SeriesBlockIndex};
+use crate::indicators::{
+    IndicatorCache, IndicatorConfig, SeriesBlockIndex, compute_rebased_comparison_series,
+};
 use crate::journal::{
     ChecklistState, DailyPriceBand, ExchangeVenue, JournalEntrySource, JournalEntryStatus,
     MistakeTag, SetupTag, TradeJournalStore, TradePlanComputed, TradePlanInput, VnPriceUnit,
@@ -240,6 +243,8 @@ pub enum PaletteAction {
     },
     SetTimeframe(Timeframe),
     ToggleIndicator(&'static str),
+    ToggleCompareOverlay,
+    CycleCompareBenchmark,
     SelectDrawingTool(DrawingTool),
     ToggleMagnet,
     ToggleScannerDock,
@@ -335,6 +340,10 @@ pub struct SumiWorkstationApp {
     pub dataset_bar_count: usize,
     pub viewport: ChartViewportState,
     pub indicators: IndicatorConfig,
+    #[serde(default)]
+    pub compare_benchmark: Option<String>,
+    #[serde(default)]
+    pub show_compare_overlay: bool,
     pub drawings: DrawingStore,
     #[serde(default)]
     drawings_by_instrument: BTreeMap<String, DrawingStore>,
@@ -458,6 +467,18 @@ pub struct SumiWorkstationApp {
     #[serde(skip)]
     dataset_generation: u64,
     #[serde(skip)]
+    resolved_benchmark_cache: Option<(String, i64, i64, u64, Timeframe, Vec<Candle>)>,
+    #[serde(skip)]
+    benchmark_gen_counter: u64,
+    #[serde(skip)]
+    compare_cache_key: Option<(u64, Timeframe, String, Option<i64>)>,
+    #[serde(skip)]
+    compare_series_cached: Vec<Option<f64>>,
+    #[serde(skip)]
+    compare_series_idx: SeriesBlockIndex,
+    #[serde(skip)]
+    active_benchmark_label: String,
+    #[serde(skip)]
     pub last_report: Option<ChartRenderReport>,
     #[serde(skip)]
     pub frame_count: u64,
@@ -489,6 +510,8 @@ impl Default for SumiWorkstationApp {
             dataset_bar_count,
             viewport,
             indicators,
+            compare_benchmark: None,
+            show_compare_overlay: false,
             drawings: DrawingStore::new(),
             drawings_by_instrument: BTreeMap::new(),
             replay: ReplayController::new(),
@@ -571,6 +594,12 @@ impl Default for SumiWorkstationApp {
             viewport_focus_lock: None,
             indicator_cache,
             dataset_generation: 1,
+            resolved_benchmark_cache: None,
+            benchmark_gen_counter: 0,
+            compare_cache_key: None,
+            compare_series_cached: Vec::new(),
+            compare_series_idx: SeriesBlockIndex::default(),
+            active_benchmark_label: "VNINDEX".to_owned(),
             last_report: None,
             frame_count: 0,
             screenshot_requested: false,
@@ -673,6 +702,19 @@ impl SumiWorkstationApp {
         );
         sanitize_persisted_trade_plan_input(&mut self.risk_plan_input);
         self.viewport_focus_lock = None;
+        if let Some(ref mut bench) = self.compare_benchmark {
+            truncate_utf8_bytes(bench, 24);
+            let trimmed = bench.trim().to_ascii_uppercase();
+            if trimmed.is_empty() {
+                self.compare_benchmark = None;
+            } else {
+                *bench = trimmed;
+            }
+        }
+        self.resolved_benchmark_cache = None;
+        self.compare_cache_key = None;
+        self.compare_series_cached.clear();
+        self.compare_series_idx.clear();
         self.in_memory_custom_doc = None;
         self.in_memory_custom_doc_hash = 0;
         self.custom_peer_feeds.clear();
@@ -842,8 +884,7 @@ impl SumiWorkstationApp {
             self.viewport.reset_to_default();
         }
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
-        self.indicator_cache
-            .sync(&self.candles, self.dataset_generation, &self.indicators);
+        self.sync_indicators_and_benchmarks();
         self.reseed_risk_planner_for_active_instrument(reset_to_clean_fallback);
         self.sync_alerts_causal();
     }
@@ -1161,14 +1202,14 @@ impl SumiWorkstationApp {
         self.viewport.rsi_price_scale.reset_auto_scale();
         self.viewport.macd_price_scale.reset_auto_scale();
         self.viewport.atr_price_scale.reset_auto_scale();
+        self.viewport.rs_price_scale.reset_auto_scale();
         self.viewport.equity_price_scale.reset_auto_scale();
         self.focused_backtest_trade_id = None;
 
         self.active_timeframe = target_tf;
         self.timeframe = target_tf.label().to_owned();
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
-        self.indicator_cache
-            .sync(&self.candles, self.dataset_generation, &self.indicators);
+        self.sync_indicators_and_benchmarks();
         self.sync_alerts_causal();
 
         Ok(())
@@ -1390,15 +1431,17 @@ impl SumiWorkstationApp {
             .filter(|_| self.replay.is_active());
 
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
+        self.resolved_benchmark_cache = None;
+        self.compare_cache_key = None;
         self.focused_backtest_trade_id = None;
         self.synced_rr_drawing_signature = None;
+        self.viewport.rs_price_scale.reset_auto_scale();
         self.viewport.equity_price_scale.reset_auto_scale();
         self.viewport.time_scale.set_total_bars(self.candles.len());
         if reset_viewport {
             self.viewport.reset_to_default();
         }
-        self.indicator_cache
-            .sync(&self.candles, self.dataset_generation, &self.indicators);
+        self.sync_indicators_and_benchmarks();
         if outgoing_key != incoming_key {
             self.risk_venue_override = None;
             self.reseed_risk_planner_for_active_instrument(true);
@@ -1825,12 +1868,12 @@ impl SumiWorkstationApp {
         self.viewport.rsi_price_scale.reset_auto_scale();
         self.viewport.macd_price_scale.reset_auto_scale();
         self.viewport.atr_price_scale.reset_auto_scale();
+        self.viewport.rs_price_scale.reset_auto_scale();
         self.viewport.equity_price_scale.reset_auto_scale();
         self.focused_backtest_trade_id = None;
 
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
-        self.indicator_cache
-            .sync(&self.candles, self.dataset_generation, &self.indicators);
+        self.sync_indicators_and_benchmarks();
         self.sync_alerts_causal();
         self.invalidate_or_sync_backtest_after_mutation();
         true
@@ -1930,11 +1973,11 @@ impl SumiWorkstationApp {
         self.viewport.rsi_price_scale.reset_auto_scale();
         self.viewport.macd_price_scale.reset_auto_scale();
         self.viewport.atr_price_scale.reset_auto_scale();
+        self.viewport.rs_price_scale.reset_auto_scale();
         self.viewport.equity_price_scale.reset_auto_scale();
 
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
-        self.indicator_cache
-            .sync(&self.candles, self.dataset_generation, &self.indicators);
+        self.sync_indicators_and_benchmarks();
         self.sync_alerts_causal();
         self.invalidate_or_sync_backtest_after_mutation();
     }
@@ -2029,11 +2072,11 @@ impl SumiWorkstationApp {
         self.viewport.rsi_price_scale.reset_auto_scale();
         self.viewport.macd_price_scale.reset_auto_scale();
         self.viewport.atr_price_scale.reset_auto_scale();
+        self.viewport.rs_price_scale.reset_auto_scale();
         self.viewport.equity_price_scale.reset_auto_scale();
 
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
-        self.indicator_cache
-            .sync(&self.candles, self.dataset_generation, &self.indicators);
+        self.sync_indicators_and_benchmarks();
         self.sync_alerts_causal();
         self.invalidate_or_sync_backtest_after_mutation();
     }
@@ -3025,6 +3068,244 @@ impl SumiWorkstationApp {
             return false;
         };
         self.start_replay_at_base_index(cut_base_idx)
+    }
+
+    // =========================================================================
+    // Milestone R11 — Volume Profile (VRVP/FRVP), Session/Anchored VWAP & Causal RS
+    // =========================================================================
+
+    /// Resolves the active comparison/RS benchmark symbol (defaults to `VNINDEX` for Vietnam symbols,
+    /// `FPT` when viewing `VNINDEX`, `SPY` for US/Crypto).
+    #[must_use]
+    pub fn effective_benchmark_symbol(&self) -> &str {
+        if let Some(ref b) = self.compare_benchmark {
+            let trimmed = b.trim();
+            if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case(&self.symbol) {
+                return trimmed;
+            }
+        }
+        let upper = self.symbol.trim().to_ascii_uppercase();
+        if self.active_exchange_venue().utc_offset_seconds() == 7 * 3_600 {
+            if upper == "VNINDEX" { "FPT" } else { "VNINDEX" }
+        } else if upper == "SPY" {
+            "VNINDEX"
+        } else {
+            "SPY"
+        }
+    }
+
+    /// Updates the comparison/RS benchmark override and refreshes benchmark caches cleanly.
+    pub fn set_compare_benchmark(&mut self, symbol: Option<String>) {
+        self.compare_benchmark = symbol
+            .map(|s| s.trim().to_ascii_uppercase())
+            .filter(|s| !s.is_empty());
+        self.resolved_benchmark_cache = None;
+        self.compare_cache_key = None;
+        self.sync_indicators_and_benchmarks();
+    }
+
+    /// Cycles the active benchmark across bundled Vietnamese & global reference indices (`VNINDEX`,
+    /// `HNX-INDEX`, `FPT`, `VCB`, `HPG`, `SPY`, `BTCUSDT`), skipping the currently displayed symbol.
+    pub fn cycle_compare_benchmark(&mut self) {
+        const BENCHMARKS: [&str; 7] = [
+            "VNINDEX",
+            "HNX-INDEX",
+            "FPT",
+            "VCB",
+            "HPG",
+            "SPY",
+            "BTCUSDT",
+        ];
+        let current = self.effective_benchmark_symbol().to_ascii_uppercase();
+        let start_idx = BENCHMARKS.iter().position(|b| *b == current).unwrap_or(0);
+        for offset in 1..=BENCHMARKS.len() {
+            let cand = BENCHMARKS[(start_idx + offset) % BENCHMARKS.len()];
+            if !cand.eq_ignore_ascii_case(&self.symbol) {
+                self.set_compare_benchmark(Some(cand.to_owned()));
+                return;
+            }
+        }
+    }
+
+    /// Synchronizes session-aware indicators (`Session VWAP` UTC+7 / US / UTC) and, when `RS` or
+    /// `Compare` is active, lazily resolves the benchmark feed and recomputes causal `RS` + rebased curve.
+    pub fn sync_indicators_and_benchmarks(&mut self) {
+        let tz_offset = self.active_exchange_venue().utc_offset_seconds();
+        self.indicator_cache.sync_with_session_context(
+            &self.candles,
+            self.dataset_generation,
+            &self.indicators,
+            self.active_timeframe,
+            tz_offset,
+        );
+
+        let need_bench = self.indicators.show_rs || self.show_compare_overlay;
+        if !need_bench || self.candles.is_empty() {
+            self.indicator_cache.clear_relative_strength();
+            self.compare_cache_key = None;
+            if !self.compare_series_cached.is_empty() {
+                self.compare_series_cached.clear();
+                self.compare_series_idx.clear();
+            }
+            return;
+        }
+
+        let target_bench = self.effective_benchmark_symbol().to_ascii_uppercase();
+        let ref_first_ts = self
+            .base_candles
+            .first()
+            .or_else(|| self.candles.first())
+            .map_or(0, |c| c.timestamp);
+        let ref_last_ts = self
+            .base_candles
+            .last()
+            .or_else(|| self.candles.last())
+            .map_or(0, |c| c.timestamp);
+
+        let cache_hit =
+            self.resolved_benchmark_cache
+                .as_ref()
+                .is_some_and(|(sym_k, f_ts, l_ts, _, _, _)| {
+                    sym_k == &target_bench && *f_ts == ref_first_ts && *l_ts == ref_last_ts
+                });
+        if !cache_hit {
+            self.ensure_watchlist_universe_loaded();
+            let resolved = if !self.custom_peer_feeds.is_empty() {
+                let mut combined = Vec::with_capacity(
+                    self.custom_peer_feeds.len() + self.watchlist_universe.len(),
+                );
+                combined.extend(self.custom_peer_feeds.iter().cloned());
+                combined.extend(self.watchlist_universe.iter().cloned());
+                resolve_benchmark_series_for_window(
+                    &target_bench,
+                    ref_first_ts,
+                    ref_last_ts,
+                    &combined,
+                )
+            } else {
+                resolve_benchmark_series_for_window(
+                    &target_bench,
+                    ref_first_ts,
+                    ref_last_ts,
+                    &self.watchlist_universe,
+                )
+            };
+            if let Some((resolved_sym, bench_tf, bench_candles)) = resolved {
+                self.benchmark_gen_counter = self.benchmark_gen_counter.wrapping_add(1).max(1);
+                self.active_benchmark_label = resolved_sym;
+                self.resolved_benchmark_cache = Some((
+                    target_bench.clone(),
+                    ref_first_ts,
+                    ref_last_ts,
+                    self.benchmark_gen_counter,
+                    bench_tf,
+                    bench_candles,
+                ));
+            } else {
+                self.resolved_benchmark_cache = None;
+                self.active_benchmark_label = target_bench;
+            }
+        }
+
+        let causal_close_ts = self.replay_causal_close_timestamp();
+        if let Some((_, _, _, bench_gen, bench_tf, ref bench_candles)) =
+            self.resolved_benchmark_cache
+        {
+            self.indicator_cache.sync_relative_strength(
+                &self.candles,
+                self.dataset_generation,
+                self.active_timeframe,
+                &self.active_benchmark_label,
+                bench_gen,
+                bench_candles,
+                bench_tf,
+                self.indicators.rs_sma_period,
+                causal_close_ts,
+            );
+        } else {
+            self.indicator_cache.clear_relative_strength();
+        }
+
+        if self.show_compare_overlay {
+            let total = self.candles.len();
+            let cmp_key = (
+                self.dataset_generation,
+                self.active_timeframe,
+                self.active_benchmark_label.clone(),
+                causal_close_ts,
+            );
+            if self.compare_cache_key.as_ref() != Some(&cmp_key) {
+                self.compare_series_cached = compute_rebased_comparison_series(
+                    &self.candles,
+                    &self.indicator_cache.rs.aligned_benchmark_close,
+                    0..total,
+                );
+                self.compare_series_idx = SeriesBlockIndex::build(&self.compare_series_cached);
+                self.compare_cache_key = Some(cmp_key);
+            }
+        } else {
+            self.compare_cache_key = None;
+            if !self.compare_series_cached.is_empty() {
+                self.compare_series_cached.clear();
+                self.compare_series_idx.clear();
+            }
+        }
+    }
+
+    /// Programmatically inserts a Fixed Range Volume Profile (`FRVP`) drawing across `[start_bar..=end_bar]`.
+    pub fn add_frvp_drawing(
+        &mut self,
+        start_bar: usize,
+        end_bar: usize,
+        row_count: u16,
+    ) -> Option<crate::drawings::DrawingId> {
+        if self.candles.is_empty() {
+            return None;
+        }
+        let max_idx = self.candles.len() - 1;
+        let i0 = start_bar.min(max_idx);
+        let i1 = end_bar.min(max_idx).max(i0);
+        let slice = &self.candles[i0..=i1];
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for c in slice {
+            lo = lo.min(c.low);
+            hi = hi.max(c.high);
+        }
+        if !lo.is_finite() || !hi.is_finite() {
+            lo = self.candles[i0].low;
+            hi = self.candles[i0].high;
+        }
+        let geom = DrawingGeometry::FixedRangeVolumeProfile {
+            start: DrawingAnchor::with_timestamp(i0 as f64, lo, self.candles[i0].timestamp as f64),
+            end: DrawingAnchor::with_timestamp(i1 as f64, hi, self.candles[i1].timestamp as f64),
+            row_count: row_count.clamp(8, 200),
+        };
+        self.drawings
+            .add_drawing(DrawingPaneTarget::Main, geom, None)
+    }
+
+    /// Programmatically inserts an Anchored VWAP (`AVWAP`) drawing pinned at `anchor_bar`.
+    pub fn add_anchored_vwap_drawing(
+        &mut self,
+        anchor_bar: usize,
+        show_bands: bool,
+    ) -> Option<crate::drawings::DrawingId> {
+        if self.candles.is_empty() {
+            return None;
+        }
+        let idx = anchor_bar.min(self.candles.len() - 1);
+        let price = self.candles[idx].low;
+        let geom = DrawingGeometry::AnchoredVwap {
+            anchor: DrawingAnchor::with_timestamp(
+                idx as f64,
+                price,
+                self.candles[idx].timestamp as f64,
+            ),
+            show_bands,
+        };
+        self.drawings
+            .add_drawing(DrawingPaneTarget::Main, geom, None)
     }
 
     // =========================================================================
@@ -4076,7 +4357,7 @@ impl SumiWorkstationApp {
             }
         }
 
-        // 4. Technical Indicators (`SMA`, `EMA`, `BB`, `RSI`, `MACD`, `ATR`)
+        // 4. Technical Indicators (`SMA`, `EMA`, `BB`, `VWAP`, `VRVP`, `RSI`, `MACD`, `ATR`, `RS`)
         for (key, name, on) in [
             ("SMA", "SMA(20) Overlay", self.indicators.show_sma),
             ("EMA", "EMA(50) Overlay", self.indicators.show_ema),
@@ -4085,6 +4366,12 @@ impl SumiWorkstationApp {
                 "Bollinger Bands(20, 2.0)",
                 self.indicators.show_bbands,
             ),
+            ("VWAP", "Session VWAP ±1σ/±2σ", self.indicators.show_vwap),
+            (
+                "VRVP",
+                "Visible Range Volume Profile (POC/VAH/VAL)",
+                self.indicators.show_vrvp,
+            ),
             ("RSI", "RSI(14) Sub-Pane", self.indicators.show_rsi),
             (
                 "MACD",
@@ -4092,6 +4379,11 @@ impl SumiWorkstationApp {
                 self.indicators.show_macd,
             ),
             ("ATR", "ATR(14) Sub-Pane", self.indicators.show_atr),
+            (
+                "RS",
+                "Relative Strength vs Benchmark Sub-Pane",
+                self.indicators.show_rs,
+            ),
         ] {
             push_scored(
                 PaletteCategory::Indicator,
@@ -4101,6 +4393,26 @@ impl SumiWorkstationApp {
                 PaletteAction::ToggleIndicator(key),
             );
         }
+        let bench_label = self.effective_benchmark_symbol().to_owned();
+        push_scored(
+            PaletteCategory::Indicator,
+            format!("Toggle Compare Overlay (vs {bench_label})"),
+            if self.show_compare_overlay {
+                "Currently ON · Rebased benchmark comparison"
+            } else {
+                "Currently OFF · Plot rebased benchmark curve"
+            }
+            .to_owned(),
+            format!("compare overlay benchmark vnindex spy rs {bench_label}"),
+            PaletteAction::ToggleCompareOverlay,
+        );
+        push_scored(
+            PaletteCategory::Indicator,
+            format!("Cycle Compare/RS Benchmark (active: {bench_label})"),
+            "Switch between VNINDEX, HNX-INDEX, FPT, VCB, HPG, SPY, BTCUSDT".to_owned(),
+            "cycle switch benchmark compare rs vnindex spy".to_owned(),
+            PaletteAction::CycleCompareBenchmark,
+        );
 
         // 5. Drawing Tools & Magnet
         for tool in [
@@ -4111,6 +4423,8 @@ impl SumiWorkstationApp {
             DrawingTool::Rectangle,
             DrawingTool::FibonacciRetracement,
             DrawingTool::RiskRewardBox,
+            DrawingTool::FixedRangeVolumeProfile,
+            DrawingTool::AnchoredVwap,
         ] {
             push_scored(
                 PaletteCategory::Drawing,
@@ -4408,30 +4722,49 @@ impl SumiWorkstationApp {
             PaletteAction::SetTimeframe(tf) => {
                 let _ = self.set_timeframe(tf);
             }
-            PaletteAction::ToggleIndicator(key) => match key {
-                "SMA" => self.indicators.show_sma = !self.indicators.show_sma,
-                "EMA" => self.indicators.show_ema = !self.indicators.show_ema,
-                "BB" => self.indicators.show_bbands = !self.indicators.show_bbands,
-                "RSI" => {
-                    self.indicators.show_rsi = !self.indicators.show_rsi;
-                    if self.indicators.show_rsi {
-                        self.viewport.rsi_price_scale.reset_auto_scale();
+            PaletteAction::ToggleIndicator(key) => {
+                match key {
+                    "SMA" => self.indicators.show_sma = !self.indicators.show_sma,
+                    "EMA" => self.indicators.show_ema = !self.indicators.show_ema,
+                    "BB" => self.indicators.show_bbands = !self.indicators.show_bbands,
+                    "VWAP" => self.indicators.show_vwap = !self.indicators.show_vwap,
+                    "VRVP" => self.indicators.show_vrvp = !self.indicators.show_vrvp,
+                    "RSI" => {
+                        self.indicators.show_rsi = !self.indicators.show_rsi;
+                        if self.indicators.show_rsi {
+                            self.viewport.rsi_price_scale.reset_auto_scale();
+                        }
                     }
-                }
-                "MACD" => {
-                    self.indicators.show_macd = !self.indicators.show_macd;
-                    if self.indicators.show_macd {
-                        self.viewport.macd_price_scale.reset_auto_scale();
+                    "MACD" => {
+                        self.indicators.show_macd = !self.indicators.show_macd;
+                        if self.indicators.show_macd {
+                            self.viewport.macd_price_scale.reset_auto_scale();
+                        }
                     }
-                }
-                "ATR" => {
-                    self.indicators.show_atr = !self.indicators.show_atr;
-                    if self.indicators.show_atr {
-                        self.viewport.atr_price_scale.reset_auto_scale();
+                    "ATR" => {
+                        self.indicators.show_atr = !self.indicators.show_atr;
+                        if self.indicators.show_atr {
+                            self.viewport.atr_price_scale.reset_auto_scale();
+                        }
                     }
+                    "RS" => {
+                        self.indicators.show_rs = !self.indicators.show_rs;
+                        if self.indicators.show_rs {
+                            self.viewport.rs_price_scale.reset_auto_scale();
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
-            },
+                self.sync_indicators_and_benchmarks();
+            }
+            PaletteAction::ToggleCompareOverlay => {
+                self.show_compare_overlay = !self.show_compare_overlay;
+                self.viewport.main_price_scale.reset_auto_scale();
+                self.sync_indicators_and_benchmarks();
+            }
+            PaletteAction::CycleCompareBenchmark => {
+                self.cycle_compare_benchmark();
+            }
             PaletteAction::SelectDrawingTool(tool) => {
                 if tool != DrawingTool::Select {
                     self.cancel_replay_cut_selection();
@@ -4684,6 +5017,27 @@ fn compute_drawings_alert_digest(store: &DrawingStore) -> u64 {
             DrawingGeometry::Rectangle { .. }
             | DrawingGeometry::FibonacciRetracement { .. }
             | DrawingGeometry::RiskRewardBox { .. } => {}
+            DrawingGeometry::FixedRangeVolumeProfile {
+                start,
+                end,
+                row_count,
+            } => {
+                mix(&mut h, 7);
+                mix(&mut h, start.bar_index.to_bits());
+                mix(&mut h, start.value.to_bits());
+                mix(&mut h, start.timestamp.map_or(u64::MAX, f64::to_bits));
+                mix(&mut h, end.bar_index.to_bits());
+                mix(&mut h, end.value.to_bits());
+                mix(&mut h, end.timestamp.map_or(u64::MAX, f64::to_bits));
+                mix(&mut h, u64::from(row_count));
+            }
+            DrawingGeometry::AnchoredVwap { anchor, show_bands } => {
+                mix(&mut h, 8);
+                mix(&mut h, anchor.bar_index.to_bits());
+                mix(&mut h, anchor.value.to_bits());
+                mix(&mut h, anchor.timestamp.map_or(u64::MAX, f64::to_bits));
+                mix(&mut h, u64::from(show_bands));
+            }
         }
     }
     h
@@ -5459,6 +5813,18 @@ impl SumiWorkstationApp {
                         "BB",
                         palette::IND_BB_BORDER,
                     );
+                    let _ = indicator_toggle_pill(
+                        ui,
+                        &mut self.indicators.show_vwap,
+                        "VWAP",
+                        palette::IND_VWAP_LINE,
+                    );
+                    let _ = indicator_toggle_pill(
+                        ui,
+                        &mut self.indicators.show_vrvp,
+                        "VRVP",
+                        palette::VRVP_POC_GOLD,
+                    );
                     if indicator_toggle_pill(
                         ui,
                         &mut self.indicators.show_rsi,
@@ -5488,12 +5854,37 @@ impl SumiWorkstationApp {
                     }
                     if indicator_toggle_pill(
                         ui,
+                        &mut self.indicators.show_rs,
+                        "RS",
+                        palette::IND_RS_LINE,
+                    ) && self.indicators.show_rs
+                    {
+                        self.viewport.rs_price_scale.reset_auto_scale();
+                    }
+                    if indicator_toggle_pill(
+                        ui,
                         &mut self.show_equity_pane,
                         "EQ",
                         palette::EQUITY_ABOVE_LINE,
                     ) && self.show_equity_pane
                     {
                         self.viewport.equity_price_scale.reset_auto_scale();
+                    }
+                    let cmp_lbl = format!("Cmp:{}", self.effective_benchmark_symbol());
+                    if indicator_toggle_pill(
+                        ui,
+                        &mut self.show_compare_overlay,
+                        &cmp_lbl,
+                        palette::COMPARE_BENCH_LINE,
+                    ) {
+                        self.viewport.main_price_scale.reset_auto_scale();
+                    }
+                    if ui
+                        .small_button("v")
+                        .on_hover_text("Cycle RS / Compare Benchmark")
+                        .clicked()
+                    {
+                        self.cycle_compare_benchmark();
                     }
 
                     ui.separator();
@@ -5563,6 +5954,8 @@ impl SumiWorkstationApp {
                         DrawingTool::Rectangle,
                         DrawingTool::FibonacciRetracement,
                         DrawingTool::RiskRewardBox,
+                        DrawingTool::FixedRangeVolumeProfile,
+                        DrawingTool::AnchoredVwap,
                     ] {
                         let is_active = self.drawings.active_tool == tool;
                         if ui.selectable_label(is_active, tool.short_label()).clicked() {
@@ -5679,6 +6072,27 @@ impl SumiWorkstationApp {
                                 self.open_journal_tab();
                             }
                         }
+                        if let DrawingGeometry::FixedRangeVolumeProfile { row_count, .. } =
+                            sel.geometry
+                            && ui
+                                .add_enabled(!sel.locked, Button::new(format!("Rows: {row_count}")))
+                                .clicked()
+                        {
+                            let _ = self.drawings.cycle_selected_frvp_rows();
+                        }
+                        if let DrawingGeometry::AnchoredVwap { show_bands, .. } = sel.geometry {
+                            let bands_lbl = if show_bands {
+                                "Bands: ON"
+                            } else {
+                                "Bands: OFF"
+                            };
+                            if ui
+                                .add_enabled(!sel.locked, Button::new(bands_lbl))
+                                .clicked()
+                            {
+                                let _ = self.drawings.toggle_selected_avwap_bands();
+                            }
+                        }
                         let lock_label = if sel.locked { "Unlock" } else { "Lock" };
                         if ui.button(lock_label).clicked() {
                             let _ = self.drawings.toggle_selected_lock();
@@ -5712,9 +6126,8 @@ impl SumiWorkstationApp {
                 }
             });
 
-        // Synchronize dirty-tracked indicator & strategy backtest caches (0.000 ms on pan/zoom/hover frames!)
-        self.indicator_cache
-            .sync(&self.candles, self.dataset_generation, &self.indicators);
+        // Synchronize dirty-tracked indicator, session VWAP, causal RS & backtest caches
+        self.sync_indicators_and_benchmarks();
         self.sync_backtest_causal();
 
         // 2. Bottom Telemetry Status Bar
@@ -5782,7 +6195,7 @@ impl SumiWorkstationApp {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(format!(
-                                    "R10  |  {} ({}->{})  |  RPL: {replay_tag}  |  ALT: {armed_alerts}A/{trig_events}T  |  EQ: ${:.0} ({:+.0}){bt_tag}  |  {}P/{}D  |  BARS: {}/{} ({first_date}..{last_date}) {}x  |  {scale_mode}({auto_tag})  |  {:.0}×{:.0}",
+                                    "R11  |  {} ({}->{})  |  RPL: {replay_tag}  |  ALT: {armed_alerts}A/{trig_events}T  |  EQ: ${:.0} ({:+.0}){bt_tag}  |  {}P/{}D  |  BARS: {}/{} ({first_date}..{last_date}) {}x  |  {scale_mode}({auto_tag})  |  {:.0}×{:.0}",
                                     self.data_source.short_label(),
                                     self.base_timeframe,
                                     self.active_timeframe,
@@ -5806,7 +6219,7 @@ impl SumiWorkstationApp {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(format!(
-                                    "R10  |  RPL: {replay_tag}  |  ALT: {armed_alerts} armed{bt_tag}  |  BARS: {} ({first_date}..{last_date})",
+                                    "R11  |  RPL: {replay_tag}  |  ALT: {armed_alerts} armed{bt_tag}  |  BARS: {} ({first_date}..{last_date})",
                                     self.candles.len()
                                 ))
                                 .monospace()
@@ -5971,6 +6384,13 @@ impl SumiWorkstationApp {
                             }),
                     }
                 };
+                let compare_overlay = (self.show_compare_overlay
+                    && !self.compare_series_cached.is_empty())
+                .then_some((
+                    self.active_benchmark_label.as_str(),
+                    self.compare_series_cached.as_slice(),
+                    &self.compare_series_idx,
+                ));
                 let overlay = ChartReplayTradingOverlay {
                     replay_active: self.replay.is_active(),
                     selecting_cut_bar: self.replay.selecting_cut_bar,
@@ -5986,6 +6406,9 @@ impl SumiWorkstationApp {
                     focused_backtest_trade_id: self.focused_backtest_trade_id,
                     replay_cutoff_timestamp,
                     frontier_base_timestamp,
+                    compare_overlay,
+                    rs_benchmark_label: (!self.active_benchmark_label.is_empty())
+                        .then_some(self.active_benchmark_label.as_str()),
                     modal_open: self.command_palette.open,
                 };
                 self.last_report = render_workstation_chart_full(
@@ -11087,14 +11510,14 @@ impl SumiWorkstationApp {
     }
 
     /// Executes all 3 Retina (`2.0x`) Metal/`wgpu` verification scenarios for `"r04"`, `"r05"`, `"r06"`,
-    /// `"r07"`, `"r08"`, `"r09"`, or `"r10"` offscreen in one headless GPU session (zero windows, zero Dock icons, zero occlusion stalls).
+    /// `"r07"`, `"r08"`, `"r09"`, `"r10"`, or `"r11"` offscreen in one headless GPU session (zero windows, zero Dock icons, zero occlusion stalls).
     pub fn run_offscreen_wgpu_capture_batch(batch_name: &str) -> Result<(), String> {
         if !matches!(
             batch_name,
-            "r04" | "r05" | "r06" | "r07" | "r08" | "r09" | "r10"
+            "r04" | "r05" | "r06" | "r07" | "r08" | "r09" | "r10" | "r11"
         ) {
             return Err(format!(
-                "unknown SUMI_CAPTURE_BATCH '{batch_name}' (expected 'r04', 'r05', 'r06', 'r07', 'r08', 'r09', or 'r10')"
+                "unknown SUMI_CAPTURE_BATCH '{batch_name}' (expected 'r04', 'r05', 'r06', 'r07', 'r08', 'r09', 'r10', or 'r11')"
             ));
         }
         std::fs::create_dir_all("docs/evidence")
@@ -11112,6 +11535,7 @@ impl SumiWorkstationApp {
                 "r08" => app.apply_r08_batch_step_state(step),
                 "r09" => app.apply_r09_batch_step_state(step),
                 "r10" => app.apply_r10_batch_step_state(step),
+                "r11" => app.apply_r11_batch_step_state(step),
                 _ => unreachable!(),
             };
             let image = harness.capture_app_frame(&mut app, logical_w, logical_h, 6)?;
@@ -12534,6 +12958,188 @@ impl SumiWorkstationApp {
         }
     }
 
+    fn apply_r11_batch_step_state(
+        &mut self,
+        step: usize,
+    ) -> (u32, u32, &'static str, &'static str) {
+        self.close_command_palette();
+        self.show_import_bar = false;
+        self.alerts.clear_all();
+        self.drawings = DrawingStore::new();
+        self.trading = TradingSession::default();
+        self.risk_venue_override = None;
+        self.show_scanner_dock = false;
+        self.show_trading_panel = false;
+        self.show_alerts_panel = false;
+        self.show_strategy_panel = false;
+        self.show_journal_panel = false;
+        self.show_equity_pane = false;
+        self.show_backtest_trades = false;
+        self.show_compare_overlay = false;
+        self.compare_benchmark = None;
+
+        match step {
+            0 => {
+                // Scenario 0: `1280x800` (`2560x1600` Retina), `FPT` (`VN30` `1D` `HOSE`),
+                // Order-Flow `VRVP` + Swing `FRVP` + Monthly `VWAP (±1σ, ±2σ)` + Rebased Compare `VNINDEX` + `RS vs VNINDEX` sub-pane.
+                self.exit_replay();
+                self.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+                let _ = self.set_timeframe(Timeframe::D1);
+                self.indicators = IndicatorConfig {
+                    show_sma: true,
+                    show_ema: true,
+                    show_bbands: false,
+                    show_vwap: true,
+                    show_vrvp: true,
+                    vrvp_rows: 48,
+                    show_rsi: false,
+                    show_macd: false,
+                    show_atr: false,
+                    show_rs: true,
+                    rs_sma_period: 20,
+                    sma_period: 20,
+                    ema_period: 50,
+                    ..IndicatorConfig::default()
+                };
+                self.show_compare_overlay = true;
+                self.set_compare_benchmark(Some("VNINDEX".to_owned()));
+                self.set_scale_mode(PriceScaleMode::Normal);
+                self.viewport.reset_pane_stretches();
+                self.viewport.rs_stretch = 0.85;
+                self.viewport.time_scale.set_width(1190.0);
+                self.viewport.time_scale.set_bar_spacing(9.0);
+                self.viewport.time_scale.set_right_offset(18.0);
+                self.show_replay_bar = false;
+
+                let n = self.candles.len();
+                if n >= 20 {
+                    let i0 = (n * 42) / 100;
+                    let i1 = ((n * 62) / 100).max(i0 + 8).min(n - 1);
+                    let _ = self.add_frvp_drawing(i0, i1, 32);
+                    let _ = self.add_anchored_vwap_drawing((n * 45) / 100, false);
+                }
+                self.sync_indicators_and_benchmarks();
+
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r11_vrvp_frvp_vwap_and_rs_vnindex_fpt_1280x800.png",
+                    "docs/evidence/r11_vrvp_frvp_vwap_and_rs_vnindex_fpt_1280x800.json",
+                )
+            }
+            1 => {
+                // Scenario 1: `1280x800` (`2560x1600` Retina), `VN30F1M` (`15m` Intraday `UTC+7`),
+                // Intraday `Session VWAP` resetting cleanly across `UTC+7` day boundaries + `Anchored VWAP (±1σ)` + `VRVP` + `FRVP` + `RS vs VNINDEX`.
+                self.exit_replay();
+                self.select_watchlist_instrument(DataSourcePreset::IntradayVn30F1m, "VN30F1M");
+                let _ = self.set_timeframe(Timeframe::M15);
+                self.indicators = IndicatorConfig {
+                    show_sma: false,
+                    show_ema: true,
+                    show_bbands: false,
+                    show_vwap: true,
+                    show_vrvp: true,
+                    vrvp_rows: 64,
+                    show_rsi: false,
+                    show_macd: false,
+                    show_atr: false,
+                    show_rs: true,
+                    rs_sma_period: 20,
+                    ema_period: 34,
+                    ..IndicatorConfig::default()
+                };
+                self.set_scale_mode(PriceScaleMode::Normal);
+                self.viewport.reset_pane_stretches();
+                self.viewport.rs_stretch = 0.85;
+                self.viewport.time_scale.set_width(1190.0);
+                self.viewport.time_scale.set_bar_spacing(8.5);
+                self.viewport.time_scale.set_right_offset(16.0);
+                self.show_replay_bar = false;
+
+                let n = self.candles.len();
+                if n >= 24 {
+                    let avwap_bar = (n * 72) / 100;
+                    let frvp_start = (n * 76) / 100;
+                    let frvp_end = ((n * 92) / 100).max(frvp_start + 6).min(n - 1);
+                    let _ = self.add_anchored_vwap_drawing(avwap_bar, true);
+                    let _ = self.add_frvp_drawing(frvp_start, frvp_end, 36);
+                }
+                self.sync_indicators_and_benchmarks();
+
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r11_intraday_session_vwap_avwap_vn30f_1280x800.png",
+                    "docs/evidence/r11_intraday_session_vwap_avwap_vn30f_1280x800.json",
+                )
+            }
+            _ => {
+                // Scenario 2: `960x640` (`1920x1280` Retina), `FPT` (`1D`) in Causal Bar Replay (`DEF-001`),
+                // Future `AVWAP` masked cleanly behind replay frontier while causal `VRVP`, `FRVP`, `Session VWAP`, `Compare` and `RS vs VNINDEX` remain active.
+                self.exit_replay();
+                self.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+                let _ = self.set_timeframe(Timeframe::D1);
+                self.indicators = IndicatorConfig {
+                    show_sma: true,
+                    show_ema: false,
+                    show_bbands: false,
+                    show_vwap: true,
+                    show_vrvp: true,
+                    vrvp_rows: 48,
+                    show_rsi: false,
+                    show_macd: false,
+                    show_atr: false,
+                    show_rs: true,
+                    rs_sma_period: 20,
+                    sma_period: 20,
+                    ..IndicatorConfig::default()
+                };
+                self.show_compare_overlay = true;
+                self.set_compare_benchmark(Some("VNINDEX".to_owned()));
+                self.set_scale_mode(PriceScaleMode::Normal);
+                self.viewport.reset_pane_stretches();
+                self.viewport.rs_stretch = 0.85;
+
+                let n_base = self.base_candles.len();
+                let replay_cut = ((n_base * 68) / 100).max(20).min(n_base.saturating_sub(8));
+                let future_idx = ((n_base * 88) / 100)
+                    .max(replay_cut + 5)
+                    .min(n_base.saturating_sub(1));
+
+                // Create a future AVWAP at `future_idx`, then rewind to `replay_cut` so `DEF-001` masks it.
+                let _ = self.start_replay_at_base_index(future_idx);
+                let _ = self.add_anchored_vwap_drawing(self.candles.len().saturating_sub(2), true);
+                if let Some(tr) = self
+                    .replay
+                    .jump_to_base_index(&self.base_candles, replay_cut)
+                {
+                    self.apply_replay_transition(tr);
+                }
+
+                let n = self.candles.len();
+                if n >= 16 {
+                    let i0 = (n * 45) / 100;
+                    let i1 = ((n * 72) / 100).max(i0 + 6).min(n - 1);
+                    let _ = self.add_frvp_drawing(i0, i1, 28);
+                    let _ = self.add_anchored_vwap_drawing((n * 48) / 100, true);
+                }
+
+                self.viewport.time_scale.set_width(880.0);
+                self.viewport.time_scale.set_bar_spacing(8.5);
+                self.viewport.time_scale.set_right_offset(14.0);
+                self.show_replay_bar = true;
+                self.sync_indicators_and_benchmarks();
+
+                (
+                    960,
+                    640,
+                    "docs/evidence/r11_causal_replay_avwap_frvp_rs_960x640.png",
+                    "docs/evidence/r11_causal_replay_avwap_frvp_rs_960x640.json",
+                )
+            }
+        }
+    }
+
     fn persist_capture_artifacts(
         &self,
         screenshot_path: &str,
@@ -12611,8 +13217,15 @@ impl SumiWorkstationApp {
                 .portfolio_report
                 .as_ref()
                 .map_or(0.0, |p| p.diversification_dd_reduction_pct);
+            let vrvp_poc_json = rep
+                .vrvp_poc_price
+                .map_or_else(|| "null".to_owned(), |v| format!("{v:.4}"));
+            let compare_bench_json = self.compare_benchmark.as_deref().map_or_else(
+                || "null".to_owned(),
+                |b| format!("\"{}\"", b.replace('"', "\\\"")),
+            );
             let json = format!(
-                "{{\n  \"symbol\": \"{}\",\n  \"timeframe\": \"{}\",\n  \"base_timeframe\": \"{}\",\n  \"data_source\": \"{}\",\n  \"available_symbols\": [{}],\n  \"base_candles\": {},\n  \"total_candles\": {},\n  \"culled_candles\": {},\n  \"rendered_candles\": {},\n  \"conflation_factor\": {},\n  \"bar_spacing\": {:.6},\n  \"right_offset\": {:.6},\n  \"scale_mode\": \"{}\",\n  \"auto_scale\": {},\n  \"pane_count\": {},\n  \"active_overlay_count\": {},\n  \"drawing_count\": {},\n  \"active_drawing_tool\": \"{}\",\n  \"selected_drawing_id\": {},\n  \"magnet_mode\": \"{}\",\n  \"replay_active\": {},\n  \"replay_status\": \"{}\",\n  \"replay_base_cursor\": {},\n  \"replay_step_unit\": \"{}\",\n  \"show_trading_panel\": {},\n  \"show_scanner_dock\": {},\n  \"show_alerts_panel\": {},\n  \"show_strategy_panel\": {},\n  \"show_journal_panel\": {},\n  \"show_equity_pane\": {},\n  \"equity_pane_source\": \"{}\",\n  \"equity_pane_active\": {},\n  \"active_venue\": \"{}\",\n  \"journal_total_entries\": {},\n  \"journal_visible_entries\": {},\n  \"journal_discipline_pct\": {:.2},\n  \"wfo_verdict\": {},\n  \"wfo_wfe_pct\": {},\n  \"portfolio_return_pct\": {:.4},\n  \"portfolio_dd_reduction_pct\": {:.4},\n  \"show_backtest_trades\": {},\n  \"rendered_backtest_trades\": {},\n  \"backtest_preset\": {},\n  \"backtest_trade_count\": {},\n  \"backtest_return_pct\": {:.4},\n  \"backtest_max_dd_pct\": {:.4},\n  \"backtest_sharpe\": {},\n  \"backtest_robustness\": {},\n  \"command_palette_open\": {},\n  \"alert_rule_count\": {},\n  \"alert_trigger_count\": {},\n  \"active_alert_lines\": {},\n  \"rendered_alert_markers\": {},\n  \"scanner_signal_revealed\": {},\n  \"active_price_lines\": {},\n  \"rendered_fill_markers\": {},\n  \"equity\": {:.2},\n  \"net_pnl\": {:.2},\n  \"fill_count\": {},\n  \"closed_trade_count\": {},\n  \"pending_order_count\": {},\n  \"open_position_side\": {},\n  \"stretches\": [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}],\n  \"base_value\": {:.4},\n  \"screenshot_px\": [{}, {}],\n  \"outer_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"plot_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"price_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"time_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"raw_price_min\": {:.2},\n  \"raw_price_max\": {:.2}\n}}\n",
+                "{{\n  \"symbol\": \"{}\",\n  \"timeframe\": \"{}\",\n  \"base_timeframe\": \"{}\",\n  \"data_source\": \"{}\",\n  \"available_symbols\": [{}],\n  \"base_candles\": {},\n  \"total_candles\": {},\n  \"culled_candles\": {},\n  \"rendered_candles\": {},\n  \"conflation_factor\": {},\n  \"bar_spacing\": {:.6},\n  \"right_offset\": {:.6},\n  \"scale_mode\": \"{}\",\n  \"auto_scale\": {},\n  \"pane_count\": {},\n  \"active_overlay_count\": {},\n  \"drawing_count\": {},\n  \"active_drawing_tool\": \"{}\",\n  \"selected_drawing_id\": {},\n  \"magnet_mode\": \"{}\",\n  \"replay_active\": {},\n  \"replay_status\": \"{}\",\n  \"replay_base_cursor\": {},\n  \"replay_step_unit\": \"{}\",\n  \"show_trading_panel\": {},\n  \"show_scanner_dock\": {},\n  \"show_alerts_panel\": {},\n  \"show_strategy_panel\": {},\n  \"show_journal_panel\": {},\n  \"show_equity_pane\": {},\n  \"equity_pane_source\": \"{}\",\n  \"equity_pane_active\": {},\n  \"show_vwap\": {},\n  \"show_vrvp\": {},\n  \"show_rs\": {},\n  \"show_compare_overlay\": {},\n  \"compare_benchmark\": {},\n  \"vrvp_poc_price\": {},\n  \"active_frvp_count\": {},\n  \"rs_stretch\": {:.3},\n  \"active_venue\": \"{}\",\n  \"journal_total_entries\": {},\n  \"journal_visible_entries\": {},\n  \"journal_discipline_pct\": {:.2},\n  \"wfo_verdict\": {},\n  \"wfo_wfe_pct\": {},\n  \"portfolio_return_pct\": {:.4},\n  \"portfolio_dd_reduction_pct\": {:.4},\n  \"show_backtest_trades\": {},\n  \"rendered_backtest_trades\": {},\n  \"backtest_preset\": {},\n  \"backtest_trade_count\": {},\n  \"backtest_return_pct\": {:.4},\n  \"backtest_max_dd_pct\": {:.4},\n  \"backtest_sharpe\": {},\n  \"backtest_robustness\": {},\n  \"command_palette_open\": {},\n  \"alert_rule_count\": {},\n  \"alert_trigger_count\": {},\n  \"active_alert_lines\": {},\n  \"rendered_alert_markers\": {},\n  \"scanner_signal_revealed\": {},\n  \"active_price_lines\": {},\n  \"rendered_fill_markers\": {},\n  \"equity\": {:.2},\n  \"net_pnl\": {:.2},\n  \"fill_count\": {},\n  \"closed_trade_count\": {},\n  \"pending_order_count\": {},\n  \"open_position_side\": {},\n  \"stretches\": [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}],\n  \"base_value\": {:.4},\n  \"screenshot_px\": [{}, {}],\n  \"outer_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"plot_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"price_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"time_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"raw_price_min\": {:.2},\n  \"raw_price_max\": {:.2}\n}}\n",
                 self.symbol,
                 self.timeframe,
                 self.base_timeframe,
@@ -12645,6 +13258,14 @@ impl SumiWorkstationApp {
                 self.show_equity_pane,
                 self.equity_pane_source.short_label(),
                 rep.equity_pane_active,
+                self.indicators.show_vwap,
+                self.indicators.show_vrvp,
+                self.indicators.show_rs,
+                self.show_compare_overlay,
+                compare_bench_json,
+                vrvp_poc_json,
+                rep.active_frvp_count,
+                self.viewport.rs_stretch,
                 self.active_exchange_venue().short_label(),
                 self.journal.entries.len(),
                 j_stats.visible_entry_count,
@@ -14392,5 +15013,184 @@ mod tests {
             "M-08: switching instruments must reset risk_venue_override"
         );
         assert_eq!(app.active_exchange_venue(), ExchangeVenue::Vn30Futures);
+    }
+
+    #[test]
+    fn r11_workstation_vrvp_frvp_vwap_avwap_and_rs_vnindex_e2e() {
+        let mut app = SumiWorkstationApp::default();
+        app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+        app.set_timeframe(Timeframe::D1).expect("D1 timeframe");
+
+        app.indicators.show_vwap = true;
+        app.indicators.show_vrvp = true;
+        app.indicators.vrvp_rows = 48;
+        app.indicators.show_rs = true;
+        app.indicators.show_rsi = false;
+        app.indicators.show_macd = false;
+        app.indicators.show_atr = false;
+        app.execute_palette_action(PaletteAction::ToggleCompareOverlay);
+        assert!(app.show_compare_overlay);
+        assert!(!app.compare_series_cached.is_empty());
+
+        let n = app.candles.len();
+        assert!(n >= 40);
+        let frvp_id = app
+            .add_frvp_drawing((n * 40) / 100, (n * 65) / 100, 32)
+            .expect("FRVP drawing added");
+        let _avwap_id = app
+            .add_anchored_vwap_drawing((n * 45) / 100, true)
+            .expect("AVWAP drawing added");
+        assert!(
+            app.drawings.drawings.iter().any(|d| d.id == frvp_id),
+            "FRVP must be stored in DrawingStore"
+        );
+
+        app.viewport.time_scale.set_width(1190.0);
+        app.viewport.time_scale.set_bar_spacing(8.5);
+        app.viewport.time_scale.set_right_offset(14.0);
+        app.sync_indicators_and_benchmarks();
+
+        let ctx = egui::Context::default();
+        SumiWorkstationApp::configure_dark_workstation_visuals(&ctx);
+        let screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            Vec2::new(1280.0, 800.0),
+        ));
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out.textures_delta.clear();
+
+        let rep = app.last_report.expect("R11 chart render report");
+        assert!(
+            rep.vrvp_poc_price.is_some(),
+            "VRVP POC must be computed and rendered"
+        );
+        assert!(
+            rep.active_frvp_count >= 1,
+            "Active FRVP count must reflect drawn FRVP"
+        );
+        assert!(
+            rep.pane_count >= 2,
+            "Relative Strength sub-pane must produce >= 2 panes"
+        );
+        assert_eq!(app.indicator_cache.vwap.vwap.len(), app.candles.len());
+        assert_eq!(app.indicator_cache.rs.rs_line.len(), app.candles.len());
+
+        // Cycle compare benchmark -> switches from VNINDEX -> next benchmark in cycle cleanly.
+        let prev_bench = app.active_benchmark_label.clone();
+        app.execute_palette_action(PaletteAction::CycleCompareBenchmark);
+        assert_ne!(app.active_benchmark_label, prev_bench);
+
+        // DEF-001 Causal Bar Replay: future AVWAP created at future_idx must be masked on rewind,
+        // and RS / Compare / VWAP vectors must truncate cleanly to the replay candle count.
+        let n_base = app.base_candles.len();
+        let replay_cut = (n_base * 65) / 100;
+        let future_idx = (n_base * 88) / 100;
+        assert!(app.start_replay_at_base_index(future_idx));
+        let future_avwap_id = app
+            .add_anchored_vwap_drawing(app.candles.len().saturating_sub(2), true)
+            .expect("future AVWAP");
+        if let Some(tr) = app.replay.jump_to_base_index(&app.base_candles, replay_cut) {
+            app.apply_replay_transition(tr);
+        }
+        app.sync_indicators_and_benchmarks();
+
+        let vis_cutoff = app.drawings.replay_cutoff_timestamp();
+        let vis_len = app.candles.len();
+        let future_d = app
+            .drawings
+            .drawings
+            .iter()
+            .find(|d| d.id == future_avwap_id)
+            .expect("future AVWAP exists in store");
+        assert!(
+            !future_d.is_causally_visible(vis_cutoff, vis_len),
+            "DEF-001: future AVWAP created after replay cutoff must be causally hidden"
+        );
+        assert_eq!(app.indicator_cache.rs.rs_line.len(), vis_len);
+        assert_eq!(app.indicator_cache.vwap.vwap.len(), vis_len);
+        assert_eq!(app.compare_series_cached.len(), vis_len);
+
+        let mut replay_out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        replay_out.textures_delta.clear();
+        let replay_rep = app.last_report.expect("replay report");
+        assert_eq!(app.viewport.time_scale.total_bars(), vis_len);
+        assert!(replay_rep.culled_bar_count <= vis_len);
+
+        // Switch to intraday VN30F1M 15m and verify UTC+7 daily Session VWAP resets.
+        app.exit_replay();
+        app.select_watchlist_instrument(DataSourcePreset::IntradayVn30F1m, "VN30F1M");
+        app.set_timeframe(Timeframe::M15).expect("15m timeframe");
+        app.sync_indicators_and_benchmarks();
+        assert!(
+            app.indicator_cache.vwap.session_starts.len() > 1,
+            "Intraday 15m VN30F1M must split across multiple UTC+7 trading sessions"
+        );
+    }
+
+    #[test]
+    fn critic_r11_regression_benchmark_cache_invalidation_and_compare_pan_o1() {
+        // M3 (a): Horizontal panning across compare overlay must NEVER invalidate or rebuild `compare_series_cached`
+        // (live left-edge rebasing runs O(1) in renderer via `compute_compare_viewport_scale`).
+        let mut app = SumiWorkstationApp::default();
+        app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+        app.show_compare_overlay = true;
+        app.set_compare_benchmark(Some("VNINDEX".to_owned()));
+        app.viewport.time_scale.set_width(1000.0);
+        app.viewport.time_scale.set_bar_spacing(10.0);
+        app.sync_indicators_and_benchmarks();
+
+        let key_initial = app.compare_cache_key.clone().expect("compare key built");
+        let ptr_initial = app.compare_series_cached.as_ptr();
+        let len_initial = app.compare_series_cached.len();
+        assert!(len_initial > 20);
+
+        for offset in [-40.0_f64, -80.0, 15.0] {
+            app.viewport.time_scale.scroll_by_bars(offset);
+            app.sync_indicators_and_benchmarks();
+            assert_eq!(app.compare_cache_key.as_ref(), Some(&key_initial));
+            assert_eq!(app.compare_series_cached.as_ptr(), ptr_initial);
+        }
+
+        // M3 (b): Loading a new report via CSV must clear and rebuild `resolved_benchmark_cache` and
+        // `compare_cache_key` for the new symbol/window (never reusing stale FPT benchmark state).
+        let prev_bench_meta = app
+            .resolved_benchmark_cache
+            .as_ref()
+            .map(|c| (c.0.clone(), c.1, c.2, c.3));
+        let mut csv = String::from("time,open,high,low,close,volume\n");
+        let t_start = 1_735_689_600_i64; // 2025-01-01
+        for i in 0..40 {
+            let p = 50.0 + (i as f64) * 0.4;
+            let _ = std::fmt::Write::write_fmt(
+                &mut csv,
+                format_args!(
+                    "{},{p:.2},{:.2},{:.2},{p:.2},12000\n",
+                    t_start + (i as i64) * 86_400,
+                    p + 0.8,
+                    p - 0.6
+                ),
+            );
+        }
+        app.load_from_csv_str(&csv, &DataLoadOptions::default())
+            .expect("load custom benchmark-compatible csv");
+        let after_bench_meta = app
+            .resolved_benchmark_cache
+            .as_ref()
+            .map(|c| (c.0.clone(), c.1, c.2, c.3));
+        assert_ne!(after_bench_meta, prev_bench_meta);
+        assert_ne!(app.compare_cache_key.as_ref(), Some(&key_initial));
+        assert_eq!(app.compare_series_cached.len(), app.candles.len());
     }
 }

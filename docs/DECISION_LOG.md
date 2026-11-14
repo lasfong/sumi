@@ -1,7 +1,7 @@
 # SUMI TRADING WORKSTATION — DECISION LOG
 
 - **Session Identity (Created):** `SESSION-01-20261110T160909+0700`
-- **Updated By:** `SESSION-R10-20261114T122730+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Updated By:** `SESSION-R11-20261114T231200+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 
 ## Decisions Recorded in Session 01
 
@@ -197,3 +197,16 @@
   1. Implement `src/journal/` (`mod.rs`, `market_rules.rs`, `planner.rs`, `ledger.rs`, `tests.rs`) in pure `f64`/`i64` (`wasm32-unknown-unknown`-verified, zero new crates in `Cargo.toml`). Model `HOSE`, `HNX`, `UPCOM`, `Vn30Futures` (`x100,000 VND`/`x100 kVND` point multiplier + `17%` VSD initial margin), `VnIndexBenchmark` (no statutory band), `UsEquities`, and `CryptoSpotPerp` with exchange-local civil timezones (`UTC+7` ICT / `UTC-5` EST), tier-crossing `HOSE` tick stepping, all-in friction sizing (`101.12 µs` per `1,000` evaluations), `0`-lot Ticket guards, `DEF-001` causal `TradeJournalStore` with Paper Trading rewind pruning, Van Tharp `SQN` / `Discipline %` / `Cost of Mistakes`, and formula-injection-hardened single-line RFC-4180 CSV + Markdown export (`601.12 µs` for `500` entries).
   2. Add `DrawingGeometry::RiskRewardBox { start, end, stop_price }` to `src/drawings/` and `src/chart.rs` with 4 snapshot-evaluated non-drifting handles (`RrEntryLeft`, `RrEntryRight`, `RrTarget`, `RrStop`), `Long <-> Short` target crossover reflection, `Log`/`Linear`-invariant body drag, batched emerald/crimson zone meshes, and bidirectional Planner / Order Ticket synchronization.
   3. Implement `src/backtest/walk_forward.rs` with continuous `SimulationCarryState` across `OOS[k] -> OOS[k+1]` boundaries (preserving open trades, `VN T+2` `min_holding_bars`, cash, and peak equity; `5.958 ms` across `6,667` `15m` bars / `116` OOS trades) and bar-close-stamped `run_portfolio_backtest` (`EqualWeight` & zero-dilution-free annualized `CausalInverseVolatility`; `106.00 µs` `VN30`, `2.855 ms` `13`-feed universe), rendering directly inside `OscillatorPaneId::Equity` in **`0.276–0.369 ms`** full workstation CPU frame time (`< 4.0 ms` `DECISION-RENDERER-002`).
+
+---
+
+## Decisions Recorded in Session R11
+
+### DEC-R11-001 — Pure `f64`/`i64` WASM-Safe Order-Flow Volume Profile (`VRVP`/`FRVP`), Exchange-Session & Anchored `VWAP` ($\pm 1\sigma, \pm 2\sigma$) & `DEF-001` Causal `Relative Strength vs VNINDEX` + Live Rebased Compare Overlay
+- **Date:** `2026-11-15`
+- **Session:** `SESSION-R11-20261114T231200+0700`
+- **Context:** Milestone R11 (`Wave 10`) delivers Volume Profile, VWAP/AVWAP bands, and causal Relative Strength & Rebased Comparison after live REA MCP analysis (`ev_3a6157b7...`, `ev_c78c7f15...`, `ev_4ba60dd6...`, `ev_65d9ad93...`, `ev_ae62bcb4...`, `ev_6f87d84a...`, `ev_bcea32b4...`, `ev_8eff53c9...`, `ev_a620817a...`, `ev_621eb9d1...`, `ev_bc43e378...`, `ev_8058963b...`) confirmed legacy Sumi lacked `VRVP`/`FRVP`, Session/Anchored `VWAP`, and client-side `DEF-001` causal Relative Strength / Rebased Benchmark overlays.
+- **Decision:**
+  1. Implement `src/indicators/volume_profile.rs`, `src/indicators/vwap.rs`, and `src/indicators/relative_strength.rs` in pure `f64`/`i64` (`wasm32-unknown-unknown`-verified, `0` new crate dependencies). Enforce exact `OHLCV_PROXY` buy/sell volume conservation, TPO fallback, scale-invariant micro-price floor & `1e-18` Value Area dust threshold, CME dual-row `70%` Value Area (`VAH`/`VAL`) + `POC`, rescaled overflow-safe `WelfordVwapAcc` (`1e160`/`1e-160`), venue intraday offsets vs UTC civil `1D`/`1W` boundaries (`B2`/`B3`), periodic `64`-bar `RS SMA` recomputation (`M5`), and tail-coverage-scored benchmark lookup (`src/data/presets.rs`).
+  2. Add `DrawingGeometry::FixedRangeVolumeProfile` (`DrawingTool::FixedRangeVolumeProfile`, `2`-anchor fixed-range Volume Profile with clamped offscreen handles) and `DrawingGeometry::AnchoredVwap` (interactive $\pm 1\sigma, \pm 2\sigma$ tail projection with `tail_segments` hit-testing and left-drag `bar_index >= 0.0` clamping, `M4`) inside `src/drawings/`.
+  3. Add conflation-safe per-session/gap `egui::Mesh` VWAP & AVWAP batching (`B1`/`M2`), asymmetric `65`-sample/`<= 2,048` exact-hash `R11RenderMemo` (`M1`), `O(1)` live-scaled Rebased Compare Overlay over `SeriesBlockIndex::first_valid_index` (`M3`), and synchronized `OscillatorPaneId::RelativeStrength` (`src/chart.rs`, `src/app.rs`), holding full workstation frames within `0.256–3.171 ms` (`< 4.0 ms` `DECISION-RENDERER-002`).

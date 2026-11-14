@@ -150,7 +150,8 @@ pub fn extract_ticket_from_drawing(drawing: &Drawing) -> Option<DrawingTicketSyn
         return None;
     }
     match drawing.geometry {
-        DrawingGeometry::HorizontalLine { anchor } => {
+        DrawingGeometry::HorizontalLine { anchor }
+        | DrawingGeometry::AnchoredVwap { anchor, .. } => {
             (anchor.value.is_finite() && anchor.value > 0.0 && anchor.value <= MAX_ORDER_PRICE)
                 .then_some(DrawingTicketSync {
                     side: OrderSide::Buy,
@@ -224,6 +225,11 @@ pub fn extract_ticket_from_drawing(drawing: &Drawing) -> Option<DrawingTicketSyn
         | DrawingGeometry::Ray {
             origin: corner_a,
             through: corner_b,
+        }
+        | DrawingGeometry::FixedRangeVolumeProfile {
+            start: corner_a,
+            end: corner_b,
+            ..
         } => {
             let low = corner_a.value.min(corner_b.value);
             let high = corner_a.value.max(corner_b.value);

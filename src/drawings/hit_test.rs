@@ -236,6 +236,77 @@ pub fn hit_test_projected_drawing(
             }
             None
         }
+        ProjectedDrawingShape::FixedRangeProfile {
+            clipped_box,
+            left_border,
+            right_border,
+            ..
+        } => {
+            let mut min_dist = f64::INFINITY;
+            for seg in [*left_border, *right_border].into_iter().flatten() {
+                min_dist = min_dist.min(distance_to_segment(cursor, seg));
+            }
+            if min_dist <= STROKE_HIT_TOLERANCE_PX {
+                return Some(HitMatch {
+                    drawing_id: projected.id,
+                    locked: projected.locked,
+                    target: HitTarget::Body,
+                    priority: HitPriority::Stroke,
+                    distance: min_dist,
+                    z_order,
+                });
+            }
+            if is_selected
+                && !projected.locked
+                && let Some(rect) = clipped_box
+                && rect.contains(cursor)
+            {
+                return Some(HitMatch {
+                    drawing_id: projected.id,
+                    locked: projected.locked,
+                    target: HitTarget::Body,
+                    priority: HitPriority::SelectedBody,
+                    distance: 0.0,
+                    z_order,
+                });
+            }
+            None
+        }
+        ProjectedDrawingShape::AnchoredVwap {
+            anchor_local,
+            anchor_marker,
+            tail_segments,
+            ..
+        } => {
+            let mut min_dist = cursor.distance(*anchor_local);
+            if let Some(seg) = anchor_marker {
+                min_dist = min_dist.min(distance_to_segment(cursor, *seg));
+            }
+            for seg in tail_segments {
+                min_dist = min_dist.min(distance_to_segment(cursor, *seg));
+            }
+            if min_dist <= STROKE_HIT_TOLERANCE_PX + 2.0 {
+                return Some(HitMatch {
+                    drawing_id: projected.id,
+                    locked: projected.locked,
+                    target: HitTarget::Body,
+                    priority: HitPriority::Stroke,
+                    distance: min_dist,
+                    z_order,
+                });
+            }
+            if is_selected && !projected.locked && min_dist <= 16.0 {
+                return Some(HitMatch {
+                    drawing_id: projected.id,
+                    locked: projected.locked,
+                    target: HitTarget::Body,
+                    priority: HitPriority::SelectedBody,
+                    distance: min_dist,
+                    z_order,
+                });
+            }
+            None
+        }
     }
 }
 

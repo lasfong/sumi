@@ -1,7 +1,7 @@
 # RESEARCH TO RUST ROADMAP — SESSION R01
 
 - **Session Identity:** `SESSION-R01-20261110T202837+0700`
-- **Updated By:** `SESSION-R10-20261114T122730+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Updated By:** `SESSION-R11-20261114T231200+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 - **Principle:** No Rust implementation begins without prior REA or reference-source research evidence.
 
 ---
@@ -294,13 +294,48 @@ cargo test app::tests::critic_r10_regression_zero_lot_ticket_guard_reseed_venue_
 
 ---
 
-## Wave 10 — Volume Profile (`VRVP` / `FRVP` `POC` / `VAH` / `VAL`), Session & Anchored `VWAP` (`AVWAP`) Bands & Relative Strength (`vs VNINDEX`) Overlay (`PROPOSED — MILESTONE R11`)
+## Wave 10 — Order-Flow Volume Profile (`VRVP` / `FRVP` `POC` / `VAH` / `VAL`), Session & Anchored `VWAP` (`AVWAP`) Bands & Causal Relative Strength (`RS vs VNINDEX`) Overlay (`COMPLETE — SESSION R11`)
+
+### Completed Research & Audit Gates (`VERIFIED`)
+- Executed `13` live REA MCP operations (`19` exact 64-hex Evidence IDs: `15` JS/TS across `ARCHIVE/frontend` + `LWC v5.2.0` histogram/pane-primitive files and `4` binary on final R11 release Mach-O `e9dcb085a076ad12d46981a88dbde0459536675deee843c65641fc2c7f0ff6bc`).
+- Authored [`VOLUME_PROFILE_VWAP_AND_REL_STRENGTH_SPEC.md`](VOLUME_PROFILE_VWAP_AND_REL_STRENGTH_SPEC.md) with zero contact with TradingView Desktop (`DEC-006`) and `0` new crate dependencies in `Cargo.toml`.
+
+### Shipped Rust Deliverables (`IMPLEMENTATION_PASS`)
+| Component | Research Source | Rust Target | Status |
+|---|---|---|---|
+| Pure `f64`/`i64` WASM-safe Order-Flow Volume Profile (`VRVP` & draggable `FRVP` drawing with `OHLCV_PROXY` conservation, TPO fallback, `POC`, CME `70%` `VAH`/`VAL`, `HVN`/`LVN`) | `LWC v5.2.0` `histogram-renderer.ts` + `pane-primitive-wrapper.ts` | `src/indicators/volume_profile.rs`, `src/drawings/`, `src/chart.rs` | ✅ SHIPPED |
+| Exchange-Session `VWAP` (`UTC+7`/`UTC-5`/`UTC` intraday + UTC civil `1D`/`1W` boundaries) & Interactive `Anchored VWAP` (`AVWAP`) rescaled Welford $\pm 1\sigma, \pm 2\sigma$ bands | `VOLUME_PROFILE_VWAP_AND_REL_STRENGTH_SPEC.md` | `src/indicators/vwap.rs`, `src/drawings/`, `src/chart.rs` | ✅ SHIPPED |
+| `DEF-001` Causal Close-Aligned `Relative Strength vs VNINDEX` (`OscillatorPaneId::RelativeStrength` + `64`-bar periodic SMA recompute) & `O(1)` Rebased Benchmark Compare Overlay | `ARCHIVE/frontend` `indicator_engine.py` + `LWC v5.2.0` `price-scale.ts` | `src/indicators/relative_strength.rs`, `src/data/presets.rs`, `src/chart.rs`, `src/app.rs` | ✅ SHIPPED |
+
+### Verified Acceptance Tests (`cargo test` — 152/152 PASS)
+```bash
+cargo test indicators::tests::r11_volume_profile_conserves_exact_total_buy_sell_volume_and_identifies_poc_vah_val
+cargo test indicators::tests::r11_session_vwap_resets_at_vietnam_utc7_day_boundary_and_monthly_on_d1
+cargo test indicators::tests::r11_anchored_vwap_masks_pre_anchor_bars_and_accumulates_welford_bands
+cargo test indicators::tests::r11_relative_strength_enforces_def001_bar_close_causality_and_holiday_carry_forward
+cargo test indicators::tests::critic_r11_regression_session_bucket_d1_w1_negative_utc_offset
+cargo test indicators::tests::critic_r11_regression_vwap_extreme_magnitude_no_inf_or_nan_collapse
+cargo test indicators::tests::critic_r11_regression_vp_micro_price_and_dust_volume_va
+cargo test indicators::tests::critic_r11_regression_rs_sma_spike_drift_and_benchmark_coverage
+cargo test drawings::tests::r11_frvp_and_avwap_creation_hit_test_log_linear_drag_timeframe_remap_and_causal_masking
+cargo test drawings::tests::critic_r11_regression_frvp_timeframe_remap_preserves_validity_and_vertical_handles
+cargo test drawings::tests::critic_r11_regression_avwap_tail_hit_test_and_left_drag_clamp
+cargo test chart::tests::r11_render_memo_invalidates_on_mid_array_last_bar_and_generation_changes
+cargo test chart::tests::critic_r11_regression_vwap_zoomed_out_session_breaks
+cargo test chart::tests::critic_r11_regression_r11_memo_no_xor_cancel_and_avwap_pan_invariance
+cargo test app::tests::r11_workstation_vrvp_frvp_vwap_avwap_and_rs_vnindex_e2e
+cargo test app::tests::critic_r11_regression_benchmark_cache_invalidation_and_compare_pan_o1
+```
+
+---
+
+## Wave 11 — Synchronized Multi-Chart Grid Layout (`1x1`/`1x2`/`2x1`/`2x2`), Ichimoku Cloud + `Cumulative Volume Delta (CVD)`, & Workspace Templates (`PROPOSED — MILESTONE R12`)
 
 ### Proposed Deliverables (Awaiting Product Owner Authorization)
 | Component | Research Source | Rust Target | Status |
 |---|---|---|---|
-| Pure `f64`/`i64` WASM-safe Order-Flow Volume Profile (`Visible Range VRVP` & `Fixed Range FRVP` drawing tool with `POC`, `70%` Value Area `VAH`/`VAL`, Up/Down delta bins) & Session / Anchored `VWAP` (`AVWAP` $\pm 1\sigma, \pm 2\sigma$ bands) | `LWC v5.2.0` `ipane-primitive-api.ts` / `histogram-series.ts` + `TA-Lib` volume primitives | `src/indicators/volume_profile.rs`, `src/indicators/vwap.rs`, `src/drawings/` | Proposed (`Milestone R11`) |
-| Multi-Series Relative Strength (`RS vs VNINDEX` / Peer Benchmark Ratio & Indexed `%` Comparison Overlay) with strict `DEF-001` causal bar-close alignment across Bar Replay | `LWC v5.2.0` `price-scale.ts` (`IndexedTo100` / `Percentage`) + `ARCHIVE` benchmark data | `src/indicators/`, `src/chart.rs`, `src/app.rs` | Proposed (`Milestone R11`) |
+| Pure `f64`/`i64` WASM-safe Synchronized Multi-Chart Grid (`1x1`, `1x2`, `2x1`, `2x2` linked crosshair, time range, symbol/timeframe slots) & Serializable Workspace Templates (`RON`/`JSON`) | `ARCHIVE/frontend/src/components/chart/MultiChartLayout.tsx` + `LWC v5.2.0` `time-scale.ts` | `src/viewport/`, `src/chart.rs`, `src/app.rs` | Proposed (`Milestone R12`) |
+| `Ichimoku Cloud` (`Tenkan`/`Kijun`/`Senkou A-B`/`Chikou` `DEF-001` causal projection) & `Cumulative Volume Delta (CVD)` Oscillator/Pane | `ARCHIVE/frontend/src/components/chart/plugins/IchimokuCloudPlugin.ts` + `src/indicators/volume_profile.rs` | `src/indicators/`, `src/chart.rs`, `src/app.rs` | Proposed (`Milestone R12`) |
 
 ---
 
