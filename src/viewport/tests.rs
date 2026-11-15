@@ -2,8 +2,8 @@ use crate::model::Candle;
 
 use super::{
     CandlestickBarMetrics, HorzScaleOptions, KineticAnimation, KineticScrollConfig, LogFormula,
-    PaneViewport, PlotRect, PriceScale, PriceScaleMode, PriceScaleOptions, TimeScale,
-    from_indexed_to_100, from_log, from_percent, iter_conflated_candles, lwc_clamp,
+    PaneViewport, PlotRect, PriceAxisFormatMode, PriceScale, PriceScaleMode, PriceScaleOptions,
+    TimeScale, from_indexed_to_100, from_log, from_percent, iter_conflated_candles, lwc_clamp,
     optimal_candlestick_width_px, to_indexed_to_100, to_log, to_percent,
 };
 
@@ -127,6 +127,7 @@ fn lwc_fixture_price_scale_linear_and_logarithmic_symmetry() {
         scale_margin_bottom: 0.10,
         min_move: 0.01,
         pin_zero_bottom: false,
+        format_mode: PriceAxisFormatMode::Standard,
     };
     let mut ps = PriceScale::new("right", opts);
     ps.set_height(600.0);
@@ -272,6 +273,7 @@ fn property_price_scale_round_trip_all_modes_and_inversions() {
                 scale_margin_bottom: bottom,
                 min_move: scale_mag * 0.001,
                 pin_zero_bottom: false,
+                format_mode: PriceAxisFormatMode::Standard,
             },
         );
         ps.set_height(height);
@@ -881,7 +883,7 @@ fn r12_workspace_template_ron_json_roundtrip_and_validation() {
     };
 
     let builtins = builtin_workspace_templates();
-    assert_eq!(builtins.len(), 4);
+    assert_eq!(builtins.len(), 5);
     for tpl in &builtins {
         let json = tpl.to_json_pretty();
         let ron = tpl.to_ron_pretty();
@@ -1032,4 +1034,70 @@ fn critic_r12_regression_template_rejects_duplicate_and_unknown_fields() {
         WorkspaceTemplate::from_ron_str(typo_key),
         Err(WorkspaceTemplateError::InvalidField { .. })
     ));
+}
+
+#[test]
+fn r13_compact_volume_axis_formatting_and_template_backwards_compat() {
+    use super::price_scale::{
+        PriceAxisFormatMode, PriceScale, PriceScaleOptions, format_compact_volume_axis,
+    };
+    use super::workspace_template::{WorkspaceTemplate, builtin_workspace_templates};
+    use crate::indicators::VwapAnchorMode;
+
+    // 1. Compact K/M/B/T right-axis formatting & boundary rollover
+    assert_eq!(format_compact_volume_axis(0.0, None), "0");
+    assert_eq!(format_compact_volume_axis(-0.0, None), "0");
+    assert_eq!(format_compact_volume_axis(999.0, None), "999");
+    assert_eq!(format_compact_volume_axis(-450.25, None), "-450");
+    assert_eq!(format_compact_volume_axis(-4.25, None), "-4.25");
+    assert_eq!(format_compact_volume_axis(1_000.0, None), "1K");
+    assert_eq!(format_compact_volume_axis(-1_250.0, None), "-1.25K");
+    assert_eq!(format_compact_volume_axis(999_990.0, None), "1M");
+    assert_eq!(format_compact_volume_axis(-1_250_000.0, None), "-1.25M");
+    assert_eq!(format_compact_volume_axis(2_400_000_000.0, None), "2.4B");
+    assert_eq!(
+        format_compact_volume_axis(-1_500_000_000_000.0, None),
+        "-1.5T"
+    );
+    assert_eq!(format_compact_volume_axis(f64::NAN, None), "—");
+    assert_eq!(format_compact_volume_axis(f64::INFINITY, None), "—");
+
+    let cvd_opts = PriceScaleOptions::sumi_cvd_oscillator();
+    assert_eq!(cvd_opts.format_mode, PriceAxisFormatMode::CompactVolume);
+    let mut ps = PriceScale::new("cvd", cvd_opts);
+    ps.set_raw_price_range(-2_500_000.0, 2_500_000.0, 1.0);
+    assert_eq!(ps.format_price(1_500_000.0, 1.0), "1.5M");
+    assert_eq!(ps.format_price(-12_345_678.0, 1.0), "-12.35M");
+
+    // 2. 5 built-in templates + RON/JSON roundtrip for new R13 IndicatorConfig fields
+    let builtins = builtin_workspace_templates();
+    assert_eq!(builtins.len(), 5);
+    let prof_tpl = &builtins[4];
+    assert!(prof_tpl.slots[0].indicators.show_market_profile);
+    assert_eq!(
+        prof_tpl.slots[0].indicators.vwap_anchor_mode,
+        VwapAnchorMode::AutoSession
+    );
+    assert!(prof_tpl.slots[1].indicators.show_market_profile);
+    assert_eq!(
+        prof_tpl.slots[1].indicators.vwap_anchor_mode,
+        VwapAnchorMode::Weekly
+    );
+
+    let json = prof_tpl.to_json_pretty();
+    let ron = prof_tpl.to_ron_pretty();
+    assert_eq!(WorkspaceTemplate::from_json_str(&json).unwrap(), *prof_tpl);
+    assert_eq!(WorkspaceTemplate::from_ron_str(&ron).unwrap(), *prof_tpl);
+
+    // 3. v1 backwards compatibility: templates omitting R13 fields still decode cleanly to defaults
+    let legacy_json = "{ \"schema_version\": 1, \"name\": \"Legacy\", \"layout\": \"Single1x1\", \"slots\": [{\"symbol\": \"FPT\", \"indicators\": {\"show_vwap\": true}}] }";
+    let decoded = WorkspaceTemplate::from_json_str(legacy_json).expect("legacy R12 template");
+    assert_eq!(
+        decoded.slots[0].indicators.vwap_anchor_mode,
+        VwapAnchorMode::AutoSession
+    );
+    assert!(!decoded.slots[0].indicators.show_market_profile);
+    assert_eq!(decoded.slots[0].indicators.mp_num_bins, 24);
+    assert_eq!(decoded.slots[0].indicators.mp_ib_bars, 4);
+    assert!(decoded.slots[0].indicators.mp_extend_naked_poc);
 }

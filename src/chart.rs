@@ -121,6 +121,14 @@ pub mod palette {
     pub const IND_CVD_LINE: Color32 = Color32::from_rgb(38, 198, 218); // #26C6DA
     pub const IND_CVD_SMA: Color32 = Color32::from_rgb(255, 202, 40); // #FFCA28
     pub const LINKED_CROSSHAIR_LINE: Color32 = Color32::from_rgba_premultiplied(94, 101, 112, 155);
+    pub const MP_VA_FILL: Color32 = Color32::from_rgba_premultiplied(10, 22, 36, 44);
+    pub const MP_TPO_VA: Color32 = Color32::from_rgba_premultiplied(24, 62, 92, 96);
+    pub const MP_TPO_OUT: Color32 = Color32::from_rgba_premultiplied(38, 44, 56, 64);
+    pub const MP_SINGLE_PRINT: Color32 = Color32::from_rgba_premultiplied(72, 40, 12, 78);
+    pub const MP_POC_LINE: Color32 = Color32::from_rgb(255, 202, 40);
+    pub const MP_NAKED_POC_LINE: Color32 = Color32::from_rgba_premultiplied(175, 114, 26, 180);
+    pub const MP_IB_BRACKET: Color32 = Color32::from_rgba_premultiplied(28, 144, 160, 190);
+    pub const MP_VA_BORDER: Color32 = Color32::from_rgba_premultiplied(60, 108, 148, 145);
 }
 
 /// Layout regions computed dynamically from the available chart area on every frame (single-pane view).
@@ -405,7 +413,7 @@ fn default_rs_price_scale() -> PriceScale {
 }
 
 fn default_cvd_price_scale() -> PriceScale {
-    PriceScale::new("cvd-right", PriceScaleOptions::sumi_oscillator())
+    PriceScale::new("cvd-right", PriceScaleOptions::sumi_cvd_oscillator())
 }
 
 const fn default_main_stretch() -> f32 {
@@ -536,6 +544,7 @@ struct AvwapMemoEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PriceScaleMemoKey {
     mode: crate::viewport::PriceScaleMode,
+    format_mode: crate::viewport::PriceAxisFormatMode,
     inverted: bool,
     height_bits: u64,
     top_margin_bits: u64,
@@ -550,6 +559,7 @@ impl PriceScaleMemoKey {
         let log_f = ps.log_formula();
         Self {
             mode: ps.mode(),
+            format_mode: ps.format_mode(),
             inverted: ps.is_inverted(),
             height_bits: ps.height().to_bits(),
             top_margin_bits: ps.top_margin_px().to_bits(),
@@ -617,6 +627,7 @@ struct PlotDataLayerKey {
     vol_ps: PriceScaleMemoKey,
     indicators: IndicatorConfig,
     vwap_stamp: (usize, (usize, u64, u64)),
+    mp_stamp: Option<(usize, usize, u64)>,
     cvd_stamp: (usize, (usize, u64, u64)),
     rs_stamp: (usize, u64, u64),
     compare_stamp: Option<(String, (usize, u64, u64), u64)>,
@@ -895,6 +906,8 @@ impl ChartViewportState {
             .set_mode(crate::viewport::PriceScaleMode::Normal);
         self.cvd_price_scale
             .set_mode(crate::viewport::PriceScaleMode::Normal);
+        self.cvd_price_scale
+            .set_format_mode(crate::viewport::PriceAxisFormatMode::CompactVolume);
         self.equity_price_scale
             .set_mode(crate::viewport::PriceScaleMode::Normal);
         self.main_stretch = sanitize_stretch(self.main_stretch, default_main_stretch());
@@ -1147,6 +1160,7 @@ pub struct ChartRenderReport {
     pub active_frvp_count: usize,
     pub hovered_bar_timestamp: Option<i64>,
     pub ichimoku_active: bool,
+    pub market_profile_active: bool,
     pub cvd_pane_active: bool,
 }
 
@@ -1860,6 +1874,8 @@ fn render_workstation_chart_inner(
 
     let ov_step = overlay_conflation_step(conflation_factor, viewport.time_scale.bar_spacing());
     let ichimoku_active = indicators.show_ichimoku && !indicator_cache.ichimoku.senkou_a.is_empty();
+    let market_profile_active =
+        indicators.show_market_profile && !indicator_cache.market_profile.profiles.is_empty();
     let effective_bar_spacing = viewport.time_scale.bar_spacing() * (conflation_factor as f64);
     let bar_metrics = CandlestickBarMetrics::compute(effective_bar_spacing, ppp);
 
@@ -1902,6 +1918,12 @@ fn render_workstation_chart_inner(
                 indicator_cache.vwap.session_starts.len(),
                 series_edge_stamp(&indicator_cache.vwap.vwap),
             ),
+            mp_stamp: indicators.show_market_profile.then(|| {
+                let ps = &indicator_cache.market_profile.profiles;
+                let last_end = ps.last().map_or(0, |s| s.naked_poc_end_index);
+                let poc_bits = ps.last().map_or(0, |s| s.poc_price.to_bits());
+                (ps.len(), last_end, poc_bits)
+            }),
             cvd_stamp: (
                 indicator_cache.cvd.session_starts.len(),
                 series_edge_stamp(&indicator_cache.cvd.cvd),
@@ -1943,6 +1965,18 @@ fn render_workstation_chart_inner(
             };
             let pre_static_overlays = active_overlay_count;
 
+            if market_profile_active {
+                active_overlay_count += 1;
+                paint_session_market_profiles(
+                    &main_plot_painter,
+                    multi_layout.main_plot_rect,
+                    &viewport.time_scale,
+                    indicators,
+                    indicator_cache,
+                    culling_range.clone(),
+                    &main_vp,
+                );
+            }
             if ichimoku_active {
                 paint_ichimoku_kumo_fill(
                     &main_plot_painter,
@@ -2078,7 +2112,7 @@ fn render_workstation_chart_inner(
         )
         .with_candles(candles);
         paint_pane_drawings(
-            &painter,
+            &painter.with_clip_rect(multi_layout.main_price_axis_rect),
             &main_plot_painter,
             multi_layout.main_plot_rect,
             multi_layout.main_price_axis_rect,
@@ -2242,9 +2276,9 @@ fn render_workstation_chart_inner(
             &osc_vp,
             osc_bv,
             config.show_grid,
-            42.0,
-            2,
-            5,
+            24.0,
+            3,
+            6,
         );
 
         if config.show_grid {
@@ -2384,7 +2418,7 @@ fn render_workstation_chart_inner(
             )
             .with_candles(candles);
             paint_pane_drawings(
-                &painter,
+                &painter.with_clip_rect(osc.price_axis_rect),
                 &osc_painter,
                 osc.plot_rect,
                 osc.price_axis_rect,
@@ -2808,6 +2842,7 @@ fn render_workstation_chart_inner(
             .filter(|&bi| bi >= 0 && (bi as usize) < candles.len())
             .map(|bi| candles[bi as usize].timestamp),
         ichimoku_active,
+        market_profile_active,
         cvd_pane_active: active_osc_ids.contains(&OscillatorPaneId::Cvd),
     })
 }
@@ -3129,6 +3164,7 @@ pub fn render_shared_pane_candlestick_chart(
             .then(|| candles.get(inspected_data_index).map(|c| c.timestamp))
             .flatten(),
         ichimoku_active: false,
+        market_profile_active: false,
         cvd_pane_active: false,
     })
 }
@@ -3178,6 +3214,7 @@ fn paint_horizontal_price_grid_and_ticks(
     let target_ticks =
         ((plot_rect.height() / px_per_tick).floor() as usize).clamp(min_ticks, max_ticks);
     let ticks = price_scale.nice_ticks(target_ticks, base_value);
+    let axis_painter = painter.with_clip_rect(price_axis_rect);
     for tick in &ticks {
         let y = vp.local_y_to_screen_y(tick.local_y) as f32;
         if y < plot_rect.top() || y > plot_rect.bottom() {
@@ -3192,15 +3229,15 @@ fn paint_horizontal_price_grid_and_ticks(
                 Stroke::new(1.0, palette::GRID_LINE),
             );
         }
-        painter.line_segment(
+        axis_painter.line_segment(
             [
                 Pos2::new(price_axis_rect.left(), y),
                 Pos2::new(price_axis_rect.left() + 5.0, y),
             ],
             Stroke::new(1.0, palette::BORDER_SUBTLE),
         );
-        let label_y = y.clamp(price_axis_rect.top() + 8.0, price_axis_rect.bottom() - 8.0);
-        painter.text(
+        let label_y = y.clamp(price_axis_rect.top() + 9.0, price_axis_rect.bottom() - 9.0);
+        axis_painter.text(
             Pos2::new(price_axis_rect.left() + 8.0, label_y),
             Align2::LEFT_CENTER,
             &tick.label,
@@ -4030,6 +4067,155 @@ fn premultiplied_tint(color: Color32, alpha: u8) -> Color32 {
     )
 }
 
+/// Pan-invariant sub-pixel session interval merger: coalesces consecutive sub-pixel sessions
+/// within the same global `env_step`-aligned horizontal bin without dropping extrema and without
+/// bridging vertically disjoint session resets.
+struct WorldBinIntervalAccumulator {
+    env_step: usize,
+    half_w: f32,
+    cur_bin: Option<(usize, f32)>,
+    intervals: Vec<(f32, f32)>,
+}
+
+impl WorldBinIntervalAccumulator {
+    fn new(bar_spacing: f64, base_step: usize, stroke_w: f32) -> Self {
+        let min_px_bars = (1.0 / bar_spacing.max(1.0e-6)).floor().max(1.0) as usize;
+        let env_step = base_step.max(min_px_bars).max(1);
+        let half_w = ((env_step as f64 * bar_spacing * 0.5) as f32)
+            .max(stroke_w * 0.5)
+            .max(0.55);
+        Self {
+            env_step,
+            half_w,
+            cur_bin: None,
+            intervals: Vec::with_capacity(4),
+        }
+    }
+
+    #[inline]
+    fn bin_for_and_cx(&self, bin_anchor_idx: usize, vp: &PaneViewport<'_>) -> Option<(usize, f32)> {
+        let bin = bin_anchor_idx / self.env_step;
+        let start_idx = bin.saturating_mul(self.env_step);
+        let end_idx = start_idx.saturating_add(self.env_step).saturating_sub(1);
+        let center_idx = (start_idx as f64 + end_idx as f64) * 0.5;
+        vp.float_index_to_screen_x(center_idx)
+            .map(|sx| (bin, sx as f32))
+    }
+
+    fn push_raw(
+        &mut self,
+        bin: usize,
+        bin_cx: f32,
+        y_a: f32,
+        y_b: f32,
+        mesh_opt: &mut Option<Mesh>,
+        color: Color32,
+    ) {
+        if self.cur_bin.is_some_and(|(b, _)| b != bin) {
+            self.flush(mesh_opt, color);
+        }
+        if self.cur_bin.is_none() {
+            self.cur_bin = Some((bin, bin_cx));
+        }
+        let lo = y_a.min(y_b);
+        let hi = y_a.max(y_b);
+        for (e_lo, e_hi) in &mut self.intervals {
+            if lo <= *e_hi + 1.0 && hi >= *e_lo - 1.0 {
+                *e_lo = (*e_lo).min(lo);
+                *e_hi = (*e_hi).max(hi);
+                return;
+            }
+        }
+        self.intervals.push((lo, hi));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push_series_bounds(
+        &mut self,
+        bin_anchor_idx: usize,
+        vis_range: std::ops::Range<usize>,
+        series: &[Option<f64>],
+        block_idx: Option<&SeriesBlockIndex>,
+        vp: &PaneViewport<'_>,
+        y_pad: f32,
+        mesh_opt: &mut Option<Mesh>,
+        color: Color32,
+    ) {
+        let bounds = match block_idx {
+            Some(ix) => ix.range_bounds(series, vis_range.clone()),
+            None => crate::indicators::visible_series_bounds(&[series], vis_range),
+        };
+        if let Some((min_v, max_v)) = bounds
+            && min_v.is_finite()
+            && max_v.is_finite()
+            && let (Some((bin, cx)), Some(sy_min), Some(sy_max)) = (
+                self.bin_for_and_cx(bin_anchor_idx, vp),
+                vp.price_to_screen_y(min_v),
+                vp.price_to_screen_y(max_v),
+            )
+        {
+            let top_y = (sy_min as f32).min(sy_max as f32) - y_pad;
+            let bot_y = (sy_min as f32).max(sy_max as f32) + y_pad;
+            self.push_raw(bin, cx, top_y, bot_y, mesh_opt, color);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push_band_bounds(
+        &mut self,
+        bin_anchor_idx: usize,
+        vis_range: std::ops::Range<usize>,
+        upper: &[Option<f64>],
+        upper_idx: Option<&SeriesBlockIndex>,
+        lower: &[Option<f64>],
+        lower_idx: Option<&SeriesBlockIndex>,
+        vp: &PaneViewport<'_>,
+        mesh_opt: &mut Option<Mesh>,
+        fill_color: Color32,
+    ) {
+        let u_bounds = match upper_idx {
+            Some(ix) => ix.range_bounds(upper, vis_range.clone()),
+            None => crate::indicators::visible_series_bounds(&[upper], vis_range.clone()),
+        };
+        let l_bounds = match lower_idx {
+            Some(ix) => ix.range_bounds(lower, vis_range.clone()),
+            None => crate::indicators::visible_series_bounds(&[lower], vis_range),
+        };
+        if let (Some((u_min, u_max)), Some((l_min, l_max))) = (u_bounds, l_bounds)
+            && u_max.is_finite()
+            && l_min.is_finite()
+            && let (Some((bin, cx)), Some(sy_hi), Some(sy_lo)) = (
+                self.bin_for_and_cx(bin_anchor_idx, vp),
+                vp.price_to_screen_y(u_max.max(l_max)),
+                vp.price_to_screen_y(l_min.min(u_min)),
+            )
+        {
+            self.push_raw(bin, cx, sy_hi as f32, sy_lo as f32, mesh_opt, fill_color);
+        }
+    }
+
+    fn flush(&mut self, mesh_opt: &mut Option<Mesh>, color: Color32) {
+        if let Some((_, cx)) = self.cur_bin.take() {
+            if self.intervals.is_empty() {
+                return;
+            }
+            let mesh =
+                mesh_opt.get_or_insert_with(|| Mesh::with_texture(egui::TextureId::default()));
+            for (lo, hi) in self.intervals.drain(..) {
+                mesh.add_colored_rect(
+                    Rect::from_min_max(
+                        Pos2::new(cx - self.half_w, lo),
+                        Pos2::new(cx + self.half_w, hi),
+                    ),
+                    color,
+                );
+            }
+        } else {
+            self.intervals.clear();
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_vwap_output(
     painter: &egui::Painter,
@@ -4094,9 +4280,15 @@ fn paint_vwap_output(
 
     // Always segment strictly per session boundary across EVERY conflation zoom level (`1x`, `4x`, `16x`, ...),
     // accumulating ribbons and dense strokes into shared meshes while never bridging across resets.
+    let bar_spacing = vp.time_scale.bar_spacing();
     let mut render_session_slice =
-        |hard_range: std::ops::Range<usize>, vis_range: std::ops::Range<usize>| {
-            if show_band_2 {
+        |hard_range: std::ops::Range<usize>,
+         vis_range: std::ops::Range<usize>,
+         skip_subpixel_bands: bool,
+         main_line_mesh: &mut Option<Mesh>,
+         band1_mesh: &mut Option<Mesh>,
+         band2_mesh: &mut Option<Mesh>| {
+            if show_band_2 && !skip_subpixel_bands {
                 if let Some(mesh) = band2_mesh.as_mut() {
                     append_band_ribbon_into_mesh(
                         mesh,
@@ -4143,7 +4335,7 @@ fn paint_vwap_output(
                     );
                 }
             }
-            if show_band_1 {
+            if show_band_1 && !skip_subpixel_bands {
                 if let Some(mesh) = band1_mesh.as_mut() {
                     append_band_ribbon_into_mesh(
                         mesh,
@@ -4192,7 +4384,7 @@ fn paint_vwap_output(
             }
             append_conflated_line_segment(
                 painter,
-                &mut main_line_mesh,
+                main_line_mesh,
                 &mut pts_scratch,
                 &vwap.vwap,
                 idx_v,
@@ -4207,17 +4399,110 @@ fn paint_vwap_output(
         };
 
     if starts.is_empty() {
-        render_session_slice(0..total, start..end);
+        render_session_slice(
+            0..total,
+            start..end,
+            false,
+            &mut main_line_mesh,
+            &mut band1_mesh,
+            &mut band2_mesh,
+        );
     } else {
+        let mut main_acc = WorldBinIntervalAccumulator::new(bar_spacing, step, main_stroke.width);
+        let mut b1_acc =
+            show_band_1.then(|| WorldBinIntervalAccumulator::new(bar_spacing, step, 1.0));
+        let mut b2_acc =
+            show_band_2.then(|| WorldBinIntervalAccumulator::new(bar_spacing, step, 1.0));
+        let flush_accs = |main_acc: &mut WorldBinIntervalAccumulator,
+                          b1_acc: &mut Option<WorldBinIntervalAccumulator>,
+                          b2_acc: &mut Option<WorldBinIntervalAccumulator>,
+                          main_mesh: &mut Option<Mesh>,
+                          b1_mesh: &mut Option<Mesh>,
+                          b2_mesh: &mut Option<Mesh>| {
+            main_acc.flush(main_mesh, main_stroke.color);
+            if let Some(acc) = b1_acc.as_mut() {
+                acc.flush(b1_mesh, band1_fill);
+            }
+            if let Some(acc) = b2_acc.as_mut() {
+                acc.flush(b2_mesh, band2_fill);
+            }
+        };
+
         for si in first_pos..last_pos {
             let hard_start = starts[si].min(total);
             let hard_end = starts.get(si + 1).copied().unwrap_or(total).min(total);
             let vis_start = hard_start.max(start);
             let vis_end = hard_end.min(end);
-            if vis_start < vis_end {
-                render_session_slice(hard_start..hard_end, vis_start..vis_end);
+            if vis_start >= vis_end {
+                continue;
+            }
+            let hard_px = ((hard_end - hard_start) as f64) * bar_spacing;
+            let is_subpixel_session = hard_px < 1.25
+                || ((vis_end - vis_start) <= step && (hard_end - hard_start) <= step);
+            if is_subpixel_session {
+                main_acc.push_series_bounds(
+                    hard_start,
+                    vis_start..vis_end,
+                    &vwap.vwap,
+                    idx_v,
+                    vp,
+                    0.75,
+                    &mut main_line_mesh,
+                    main_stroke.color,
+                );
+                if let Some(acc) = b1_acc.as_mut() {
+                    acc.push_band_bounds(
+                        hard_start,
+                        vis_start..vis_end,
+                        &vwap.upper_1,
+                        idx_u1,
+                        &vwap.lower_1,
+                        idx_l1,
+                        vp,
+                        &mut band1_mesh,
+                        band1_fill,
+                    );
+                }
+                if let Some(acc) = b2_acc.as_mut() {
+                    acc.push_band_bounds(
+                        hard_start,
+                        vis_start..vis_end,
+                        &vwap.upper_2,
+                        idx_u2,
+                        &vwap.lower_2,
+                        idx_l2,
+                        vp,
+                        &mut band2_mesh,
+                        band2_fill,
+                    );
+                }
+            } else {
+                flush_accs(
+                    &mut main_acc,
+                    &mut b1_acc,
+                    &mut b2_acc,
+                    &mut main_line_mesh,
+                    &mut band1_mesh,
+                    &mut band2_mesh,
+                );
+                render_session_slice(
+                    hard_start..hard_end,
+                    vis_start..vis_end,
+                    false,
+                    &mut main_line_mesh,
+                    &mut band1_mesh,
+                    &mut band2_mesh,
+                );
             }
         }
+        flush_accs(
+            &mut main_acc,
+            &mut b1_acc,
+            &mut b2_acc,
+            &mut main_line_mesh,
+            &mut band1_mesh,
+            &mut band2_mesh,
+        );
     }
 
     if let Some(mesh) = band2_mesh
@@ -4336,6 +4621,183 @@ fn paint_anchored_vwap_tail(
         && !mesh.is_empty()
     {
         painter.add(Shape::mesh(mesh));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_session_market_profiles(
+    painter: &egui::Painter,
+    plot_rect: Rect,
+    time_scale: &TimeScale,
+    indicators: &IndicatorConfig,
+    cache: &IndicatorCache,
+    culling_range: std::ops::Range<usize>,
+    vp: &PaneViewport<'_>,
+) {
+    let profiles = &cache.market_profile.profiles;
+    let historical_naked = &cache.market_profile.historical_naked_pocs;
+    if profiles.is_empty() && historical_naked.is_empty() {
+        return;
+    }
+
+    let mut mesh = Mesh::with_texture(egui::TextureId::default());
+    mesh.vertices.reserve(profiles.len() * 64);
+    mesh.indices.reserve(profiles.len() * 96);
+
+    let mut poc_segments: Vec<[Pos2; 2]> = Vec::with_capacity(profiles.len());
+    let mut va_segments: Vec<[Pos2; 2]> = Vec::with_capacity(profiles.len() * 2);
+    let mut ib_segments: Vec<[Pos2; 2]> = Vec::with_capacity(profiles.len());
+    let mut naked_segments: Vec<[Pos2; 2]> =
+        Vec::with_capacity(profiles.len() + historical_naked.len());
+
+    let half_bar_w = (time_scale.bar_spacing() * 0.42).max(1.5) as f32;
+    let y_min_clamp = plot_rect.top() - 4.0;
+    let y_max_clamp = plot_rect.bottom() + 4.0;
+
+    for hnp in historical_naked {
+        if !indicators.mp_extend_naked_poc
+            || hnp.naked_poc_end_index < culling_range.start
+            || hnp.session_end_index >= culling_range.end
+            || hnp.session_end_index >= hnp.naked_poc_end_index
+        {
+            continue;
+        }
+        if let (Some(xr0), Some(xr1), Some(y_poc)) = (
+            vp.index_to_screen_x(hnp.session_end_index as i64),
+            vp.index_to_screen_x(hnp.naked_poc_end_index as i64),
+            vp.price_to_screen_y(hnp.poc_price),
+        ) {
+            let yp = (y_poc as f32).clamp(y_min_clamp, y_max_clamp);
+            let x_start = (xr0 as f32) + half_bar_w;
+            let x_end = (xr1 as f32) + half_bar_w;
+            if x_end > x_start {
+                naked_segments.push([Pos2::new(x_start, yp), Pos2::new(x_end, yp)]);
+            }
+        }
+    }
+
+    for s in profiles {
+        if s.naked_poc_end_index < culling_range.start || s.start_index >= culling_range.end {
+            continue;
+        }
+        let body_visible = s.end_index >= culling_range.start && s.start_index < culling_range.end;
+        if body_visible
+            && let (Some(x0_raw), Some(x1_raw)) = (
+                vp.index_to_screen_x(s.start_index as i64),
+                vp.index_to_screen_x(s.end_index as i64),
+            )
+        {
+            let x0 = (x0_raw as f32) - half_bar_w;
+            let x1 = ((x1_raw as f32) + half_bar_w).max(x0 + 2.0);
+            let session_w = x1 - x0;
+
+            if session_w >= 3.0
+                && let (Some(yv_hi), Some(yv_lo)) = (
+                    vp.price_to_screen_y(s.vah_price),
+                    vp.price_to_screen_y(s.val_price),
+                )
+            {
+                let va_top = (yv_hi.min(yv_lo) as f32).clamp(y_min_clamp, y_max_clamp);
+                let va_bot = (yv_hi.max(yv_lo) as f32).clamp(y_min_clamp, y_max_clamp);
+                if va_bot > va_top + 0.5 && session_w >= 4.0 {
+                    mesh.add_colored_rect(
+                        Rect::from_min_max(Pos2::new(x0, va_top), Pos2::new(x1, va_bot)),
+                        palette::MP_VA_FILL,
+                    );
+                }
+                va_segments.push([Pos2::new(x0, va_top), Pos2::new(x1, va_top)]);
+                va_segments.push([Pos2::new(x0, va_bot), Pos2::new(x1, va_bot)]);
+            }
+
+            if session_w >= 14.0 && s.max_row_tpo > 0 && s.bin_height > 0.0 {
+                let max_tpo_w = (session_w * 0.55).max(2.0);
+                for row in &s.rows {
+                    if row.tpo_count == 0 {
+                        continue;
+                    }
+                    let (Some(yr_lo), Some(yr_hi)) = (
+                        vp.price_to_screen_y(row.price_low),
+                        vp.price_to_screen_y(row.price_high),
+                    ) else {
+                        continue;
+                    };
+                    let top = (yr_lo.min(yr_hi) as f32).clamp(y_min_clamp, y_max_clamp);
+                    let bot = (yr_lo.max(yr_hi) as f32).clamp(y_min_clamp, y_max_clamp);
+                    let h = (bot - top).max(1.2);
+                    let gap = if h >= 3.0 { 0.4_f32 } else { 0.0 };
+                    let y0 = top + gap * 0.5;
+                    let y1 = (top + h - gap * 0.5).max(y0 + 0.8);
+                    let bar_w = ((row.tpo_count as f32 / s.max_row_tpo as f32) * max_tpo_w)
+                        .clamp(1.5, max_tpo_w);
+                    let col = if row.is_single_print {
+                        palette::MP_SINGLE_PRINT
+                    } else if row.in_value_area {
+                        palette::MP_TPO_VA
+                    } else {
+                        palette::MP_TPO_OUT
+                    };
+                    mesh.add_colored_rect(
+                        Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x0 + bar_w, y1)),
+                        col,
+                    );
+                }
+            }
+
+            if session_w >= 3.0
+                && let (Some(y_ib_hi), Some(y_ib_lo)) = (
+                    vp.price_to_screen_y(s.ib_high),
+                    vp.price_to_screen_y(s.ib_low),
+                )
+            {
+                let x_ib = x0 - 2.0;
+                if x_ib >= plot_rect.left() {
+                    let ib_top = (y_ib_hi.min(y_ib_lo) as f32).clamp(y_min_clamp, y_max_clamp);
+                    let ib_bot = (y_ib_hi.max(y_ib_lo) as f32).clamp(y_min_clamp, y_max_clamp);
+                    ib_segments.push([Pos2::new(x_ib, ib_top), Pos2::new(x_ib, ib_bot)]);
+                }
+            }
+
+            if let Some(y_poc) = vp.price_to_screen_y(s.poc_price) {
+                let yp = (y_poc as f32).clamp(y_min_clamp, y_max_clamp);
+                poc_segments.push([Pos2::new(x0, yp), Pos2::new(x1, yp)]);
+            }
+        }
+
+        if indicators.mp_extend_naked_poc
+            && s.end_index < s.naked_poc_end_index
+            && let (Some(xr0), Some(xr1), Some(y_poc)) = (
+                vp.index_to_screen_x(s.end_index as i64),
+                vp.index_to_screen_x(s.naked_poc_end_index as i64),
+                vp.price_to_screen_y(s.poc_price),
+            )
+        {
+            let yp = (y_poc as f32).clamp(y_min_clamp, y_max_clamp);
+            let x_start = (xr0 as f32) + half_bar_w;
+            let x_end = (xr1 as f32) + half_bar_w;
+            if x_end > x_start {
+                naked_segments.push([Pos2::new(x_start, yp), Pos2::new(x_end, yp)]);
+            }
+        }
+    }
+
+    if !mesh.is_empty() {
+        painter.add(Shape::mesh(mesh));
+    }
+    let va_stroke = Stroke::new(1.0, palette::MP_VA_BORDER);
+    for seg in va_segments {
+        painter.line_segment(seg, va_stroke);
+    }
+    let ib_stroke = Stroke::new(2.0, palette::MP_IB_BRACKET);
+    for seg in ib_segments {
+        painter.line_segment(seg, ib_stroke);
+    }
+    let poc_stroke = Stroke::new(1.5, palette::MP_POC_LINE);
+    for seg in poc_segments {
+        painter.line_segment(seg, poc_stroke);
+    }
+    let naked_stroke = Stroke::new(1.15, palette::MP_NAKED_POC_LINE);
+    for seg in naked_segments {
+        painter.add(Shape::dashed_line(&seg, naked_stroke, 5.0, 4.0));
     }
 }
 
@@ -4539,6 +5001,19 @@ fn ichimoku_visible_index_range(
     start..end
 }
 
+/// Computes `0.5 * (a + b)` without overflowing `f64::MAX` on large finite operands
+/// while keeping small/subnormal magnitudes monotonic and exact.
+#[inline]
+pub(crate) fn safe_midpoint_f64(a: f64, b: f64) -> f64 {
+    if !a.is_finite() || !b.is_finite() {
+        return 0.5 * (a + b);
+    }
+    if a.abs() > (f64::MAX * 0.25) || b.abs() > (f64::MAX * 0.25) {
+        return (a * 0.5) + (b * 0.5);
+    }
+    0.5 * (a + b)
+}
+
 /// Emits non-crossing Kumo fill triangles into `mesh` for a single step `(x0..x1)` between
 /// `Senkou A` (`ya`) and `Senkou B` (`yb`), splitting linearly at exact Kumo Twist crossovers
 /// so Bullish (`A >= B`) and Bearish (`A < B`) clouds never emit bowtie quads.
@@ -4627,7 +5102,7 @@ pub(crate) fn emit_ichimoku_kumo_segment_triangles(
             col_for(bull1),
         );
     } else {
-        let col = col_for((a0 + a1) >= (b0 + b1));
+        let col = col_for(safe_midpoint_f64(a0, a1) >= safe_midpoint_f64(b0, b1));
         let p_a0 = clamp_pos(x0, ya0);
         let p_b0 = clamp_pos(x0, yb0);
         let p_a1 = clamp_pos(x1, ya1);
@@ -4715,7 +5190,7 @@ fn paint_ichimoku_kumo_fill(
                 if has_lead_gap {
                     prev = None;
                 }
-                let center = 0.5 * (ea.center_logical_index + eb.center_logical_index);
+                let center = safe_midpoint_f64(ea.center_logical_index, eb.center_logical_index);
                 if has_int_gap {
                     let entry_a = ea.entry_val;
                     let entry_b = eb.entry_val;
@@ -4748,8 +5223,8 @@ fn paint_ichimoku_kumo_fill(
                         prev = Some((sx as f32, sya as f32, syb as f32, exit_a, exit_b));
                     }
                 } else {
-                    let a = 0.5 * (ea.entry_val + ea.exit_val);
-                    let b = 0.5 * (eb.entry_val + eb.exit_val);
+                    let a = safe_midpoint_f64(ea.entry_val, ea.exit_val);
+                    let b = safe_midpoint_f64(eb.entry_val, eb.exit_val);
                     if a.is_finite()
                         && b.is_finite()
                         && let (Some(sx), Some(sya), Some(syb)) = (
@@ -4909,12 +5384,12 @@ fn paint_cvd_pane(
         let vis_start = culling_range.start.min(cvd_out.delta.len());
         let vis_end = culling_range.end.min(cvd_out.delta.len());
 
-        let mut push_delta_bar = |center_idx: f64, delta_val: f64| {
+        let mut push_delta_bar = |center_idx: f64, delta_val: f64, bar_hw: f32| {
             let Some(sx) = vp.float_index_to_screen_x(center_idx) else {
                 return;
             };
             let cx = sx as f32;
-            if cx + half_w < plot_rect.left() || cx - half_w > plot_rect.right() {
+            if cx + bar_hw < plot_rect.left() || cx - bar_hw > plot_rect.right() {
                 return;
             }
             let Some(val_sy) = vp.price_to_screen_y(delta_val) else {
@@ -4935,7 +5410,7 @@ fn paint_cvd_pane(
                 palette::BEARISH.gamma_multiply(0.45)
             };
             hist_mesh.add_colored_rect(
-                Rect::from_min_max(Pos2::new(cx - half_w, top_y), Pos2::new(cx + half_w, bot_y)),
+                Rect::from_min_max(Pos2::new(cx - bar_hw, top_y), Pos2::new(cx + bar_hw, bot_y)),
                 col,
             );
         };
@@ -4943,23 +5418,33 @@ fn paint_cvd_pane(
         if step <= 1 {
             for idx in vis_start..vis_end {
                 if let Some(d) = cvd_out.delta[idx].filter(|v| v.is_finite()) {
-                    push_delta_bar(idx as f64, d);
+                    push_delta_bar(idx as f64, d, half_w);
                 }
             }
         } else {
-            let mut b_start = (vis_start / step) * step;
+            let bar_spacing = vp.time_scale.bar_spacing().max(1.0e-6);
+            let min_px_bars = (1.0 / bar_spacing).floor().max(1.0) as usize;
+            let hist_step = step.max(min_px_bars);
+            let conflated_hw = ((hist_step as f64 * bar_spacing * 0.46) as f32)
+                .max(half_w)
+                .max(0.55);
+            let mut b_start = (vis_start / hist_step) * hist_step;
             while b_start < vis_end {
-                let b_end = (b_start + step).min(vis_end);
+                let b_end = (b_start + hist_step).min(vis_end);
                 if b_start < b_end
-                    && let Some((sum, _count)) =
-                        cache
-                            .cvd_delta_idx
-                            .bucket_sum_and_count(&cvd_out.delta, b_start, b_end)
+                    && let Some((min_d, max_d)) = cache
+                        .cvd_delta_idx
+                        .range_bounds(&cvd_out.delta, b_start..b_end)
                 {
                     let center = (b_start + b_end - 1) as f64 * 0.5;
-                    push_delta_bar(center, sum);
+                    if max_d > 0.0 {
+                        push_delta_bar(center, max_d, conflated_hw);
+                    }
+                    if min_d < 0.0 {
+                        push_delta_bar(center, min_d, conflated_hw);
+                    }
                 }
-                b_start = b_start.saturating_add(step);
+                b_start = b_start.saturating_add(hist_step);
             }
         }
 
@@ -4983,7 +5468,9 @@ fn paint_cvd_pane(
         last_pos.saturating_sub(first_pos).max(1)
     };
     let step = conflation_factor.max(1);
-    let use_dense_mesh = step >= 8 || visible_sessions > 32;
+    let bar_spacing = vp.time_scale.bar_spacing();
+    let line_step = overlay_conflation_step(step, bar_spacing);
+    let use_dense_mesh = line_step >= 8 || visible_sessions > 32;
     let mut sma_mesh = use_dense_mesh.then(|| Mesh::with_texture(egui::TextureId::default()));
     let mut cvd_mesh = use_dense_mesh.then(|| Mesh::with_texture(egui::TextureId::default()));
     let mut pts_scratch = Vec::with_capacity(256);
@@ -4998,7 +5485,7 @@ fn paint_cvd_pane(
             0,
             0..total_bars,
             culling_range.clone(),
-            step,
+            line_step,
             vp,
             Stroke::new(1.25, palette::IND_CVD_SMA),
             1.0,
@@ -5012,12 +5499,14 @@ fn paint_cvd_pane(
             0,
             0..total_bars,
             culling_range,
-            step,
+            line_step,
             vp,
             Stroke::new(1.6, palette::IND_CVD_LINE),
             1.0,
         );
     } else {
+        let mut sma_acc = WorldBinIntervalAccumulator::new(bar_spacing, line_step, 1.25);
+        let mut cvd_acc = WorldBinIntervalAccumulator::new(bar_spacing, line_step, 1.6);
         for seg_idx in first_pos..starts.len() {
             let seg_start = starts[seg_idx];
             if seg_start >= culling_range.end {
@@ -5031,36 +5520,71 @@ fn paint_cvd_pane(
             if seg_start >= seg_end {
                 continue;
             }
-            let hard_range = seg_start..seg_end;
-            append_conflated_line_segment(
-                painter,
-                &mut sma_mesh,
-                &mut pts_scratch,
-                &cvd_out.cvd_sma,
-                Some(&cache.cvd_sma_idx),
-                0,
-                hard_range.clone(),
-                culling_range.clone(),
-                step,
-                vp,
-                Stroke::new(1.25, palette::IND_CVD_SMA),
-                1.0,
-            );
-            append_conflated_line_segment(
-                painter,
-                &mut cvd_mesh,
-                &mut pts_scratch,
-                &cvd_out.cvd,
-                Some(&cache.cvd_line_idx),
-                0,
-                hard_range,
-                culling_range.clone(),
-                step,
-                vp,
-                Stroke::new(1.6, palette::IND_CVD_LINE),
-                1.0,
-            );
+            let vis_start = seg_start.max(culling_range.start);
+            let vis_end = seg_end.min(culling_range.end);
+            if vis_start >= vis_end {
+                continue;
+            }
+            let seg_px = ((seg_end - seg_start) as f64) * bar_spacing;
+            let is_subpixel_seg = seg_px < 1.25
+                || ((vis_end - vis_start) <= line_step && (seg_end - seg_start) <= line_step);
+            if is_subpixel_seg {
+                sma_acc.push_series_bounds(
+                    seg_start,
+                    vis_start..vis_end,
+                    &cvd_out.cvd_sma,
+                    Some(&cache.cvd_sma_idx),
+                    vp,
+                    0.6,
+                    &mut sma_mesh,
+                    palette::IND_CVD_SMA,
+                );
+                cvd_acc.push_series_bounds(
+                    seg_start,
+                    vis_start..vis_end,
+                    &cvd_out.cvd,
+                    Some(&cache.cvd_line_idx),
+                    vp,
+                    0.75,
+                    &mut cvd_mesh,
+                    palette::IND_CVD_LINE,
+                );
+            } else {
+                sma_acc.flush(&mut sma_mesh, palette::IND_CVD_SMA);
+                cvd_acc.flush(&mut cvd_mesh, palette::IND_CVD_LINE);
+                let hard_range = seg_start..seg_end;
+                append_conflated_line_segment(
+                    painter,
+                    &mut sma_mesh,
+                    &mut pts_scratch,
+                    &cvd_out.cvd_sma,
+                    Some(&cache.cvd_sma_idx),
+                    0,
+                    hard_range.clone(),
+                    culling_range.clone(),
+                    line_step,
+                    vp,
+                    Stroke::new(1.25, palette::IND_CVD_SMA),
+                    1.0,
+                );
+                append_conflated_line_segment(
+                    painter,
+                    &mut cvd_mesh,
+                    &mut pts_scratch,
+                    &cvd_out.cvd,
+                    Some(&cache.cvd_line_idx),
+                    0,
+                    hard_range,
+                    culling_range.clone(),
+                    line_step,
+                    vp,
+                    Stroke::new(1.6, palette::IND_CVD_LINE),
+                    1.0,
+                );
+            }
         }
+        sma_acc.flush(&mut sma_mesh, palette::IND_CVD_SMA);
+        cvd_acc.flush(&mut cvd_mesh, palette::IND_CVD_LINE);
     }
     if let Some(m) = sma_mesh
         && !m.is_empty()
@@ -5772,7 +6296,7 @@ fn paint_equity_baseline_pane(
                     push_sample(x, y_out, env.exit_val, &mut prev_pt);
                 } else if env.is_single || (y_out - y_in).abs() < 0.65 {
                     let mid_y = 0.5 * (y_in + y_out);
-                    let mid_v = 0.5 * (env.entry_val + env.exit_val);
+                    let mid_v = safe_midpoint_f64(env.entry_val, env.exit_val);
                     push_sample(x, mid_y, mid_v, &mut prev_pt);
                 } else {
                     push_sample(x, y_in, env.entry_val, &mut prev_pt);
@@ -6102,8 +6626,9 @@ fn paint_latest_close_line_and_pill(
                 Pos2::new(price_axis_rect.left() + 2.0, pill_y - 10.0),
                 Pos2::new(price_axis_rect.right() - 4.0, pill_y + 10.0),
             );
-            painter.rect_filled(pill_rect, 3.0, last_color);
-            painter.text(
+            let axis_painter = painter.with_clip_rect(price_axis_rect);
+            axis_painter.rect_filled(pill_rect, 3.0, last_color);
+            axis_painter.text(
                 Pos2::new(price_axis_rect.left() + 7.0, pill_y),
                 Align2::LEFT_CENTER,
                 main_price_scale.format_price(last_candle.close, base_value),
@@ -6125,8 +6650,9 @@ fn paint_axis_cursor_pill(
         Pos2::new(axis_rect.left() + 2.0, pill_y - 9.5),
         Pos2::new(axis_rect.right() - 4.0, pill_y + 9.5),
     );
-    painter.rect_filled(cursor_pill, 3.0, palette::ACCENT_BLUE);
-    painter.text(
+    let axis_painter = painter.with_clip_rect(axis_rect);
+    axis_painter.rect_filled(cursor_pill, 3.0, palette::ACCENT_BLUE);
+    axis_painter.text(
         Pos2::new(axis_rect.left() + 7.0, pill_y),
         Align2::LEFT_CENTER,
         formatted_label,
@@ -6175,8 +6701,9 @@ fn paint_time_axis_cursor_pill(
         Pos2::new(pill_cx - pill_half_w, time_axis_rect.top() + 3.0),
         Pos2::new(pill_cx + pill_half_w, time_axis_rect.bottom() - 3.0),
     );
-    painter.rect_filled(time_pill, 3.0, palette::ACCENT_BLUE);
-    painter.text(
+    let time_axis_painter = painter.with_clip_rect(time_axis_rect);
+    time_axis_painter.rect_filled(time_pill, 3.0, palette::ACCENT_BLUE);
+    time_axis_painter.text(
         time_pill.center(),
         Align2::CENTER_CENTER,
         time_label,
@@ -6270,8 +6797,22 @@ fn paint_main_ohlcv_hud(
     } else {
         palette::BEARISH
     };
-    let hud_galley =
-        painter.layout_no_wrap(hud_text, FontId::monospace(hud_font_size), value_color);
+    let mut hud_job = LayoutJob::single_section(
+        hud_text,
+        TextFormat {
+            font_id: FontId::monospace(hud_font_size),
+            color: value_color,
+            ..Default::default()
+        },
+    );
+    let inner_max_w = (plot_rect.width() - 44.0).max(80.0);
+    hud_job.wrap = egui::text::TextWrapping {
+        max_width: inner_max_w,
+        max_rows: 1,
+        break_anywhere: false,
+        overflow_character: Some('…'),
+    };
+    let hud_galley = painter.layout_job(hud_job);
     let desired_hud_w = (hud_galley.size().x + 22.0).max(160.0);
     let hud_rect = Rect::from_min_size(
         Pos2::new(plot_rect.left() + 12.0, plot_rect.top() + 8.0),
@@ -6400,15 +6941,16 @@ fn paint_main_overlay_hud(
                 |v| price_scale.format_price(v, base_value),
             )
         };
+        let anchor_lbl = indicators.vwap_anchor_mode.short_label();
         let label = if plot_rect.width() >= 960.0 && indicators.vwap_band_1 > 0.0 {
             format!(
-                "VWAP {} (±1σ {}/{})",
+                "VWAP({anchor_lbl}) {} (±1σ {}/{})",
                 fmt_opt(&cache.vwap.vwap),
                 fmt_opt(&cache.vwap.lower_1),
                 fmt_opt(&cache.vwap.upper_1),
             )
         } else {
-            format!("VWAP {}", fmt_opt(&cache.vwap.vwap))
+            format!("VWAP({anchor_lbl}) {}", fmt_opt(&cache.vwap.vwap))
         };
         job.append(
             &label,
@@ -6438,6 +6980,35 @@ fn paint_main_overlay_hud(
             TextFormat {
                 font_id: font.clone(),
                 color: palette::VRVP_POC_GOLD,
+                ..Default::default()
+            },
+        );
+    }
+    if indicators.show_market_profile
+        && let Some(mp) = cache
+            .market_profile
+            .profiles
+            .iter()
+            .find(|s| s.start_index <= idx && idx <= s.end_index)
+            .or_else(|| cache.market_profile.profiles.last())
+    {
+        append_sep(&mut job, &mut has_item);
+        let poc_str = price_scale.format_price(mp.poc_price, base_value);
+        let label = if plot_rect.width() >= 960.0 {
+            format!(
+                "TPO POC {poc_str} (VA {}–{})",
+                price_scale.format_price(mp.val_price, base_value),
+                price_scale.format_price(mp.vah_price, base_value),
+            )
+        } else {
+            format!("TPO POC {poc_str}")
+        };
+        job.append(
+            &label,
+            0.0,
+            TextFormat {
+                font_id: font.clone(),
+                color: palette::MP_POC_LINE,
                 ..Default::default()
             },
         );
@@ -6887,7 +7458,12 @@ fn paint_layout_job_hud(
     height: f32,
     mut job: LayoutJob,
 ) {
-    job.wrap.max_width = f32::INFINITY;
+    job.wrap = egui::text::TextWrapping {
+        max_width: (max_width - 18.0).max(40.0),
+        max_rows: 1,
+        break_anywhere: false,
+        overflow_character: Some('…'),
+    };
     let galley = painter.layout_job(job);
     let desired_w = (galley.size().x + 18.0).clamp(90.0, max_width);
     let hud_rect = Rect::from_min_size(pos, Vec2::new(desired_w, height));
@@ -11860,6 +12436,248 @@ mod tests {
         assert_ne!(
             sig3, sig4,
             "switching to Log scale + panning must invalidate retained mesh coordinates"
+        );
+    }
+
+    #[test]
+    fn r13_safe_midpoint_compact_cvd_axis_and_market_profile_mesh_render() {
+        // 1. Overflow/subnormal/NaN safety for `safe_midpoint_f64`
+        assert_eq!(
+            safe_midpoint_f64(f64::MAX, f64::MAX),
+            f64::MAX,
+            "large equal finite operands must never overflow to +inf"
+        );
+        assert_eq!(safe_midpoint_f64(-f64::MAX, -f64::MAX), -f64::MAX);
+        assert!(safe_midpoint_f64(f64::MAX, f64::MAX * 0.5).is_finite());
+        assert_eq!(safe_midpoint_f64(1.0e-310, 3.0e-310), 2.0e-310);
+        assert!(safe_midpoint_f64(f64::NAN, 10.0).is_nan());
+
+        // 2. Headless workstation render with Session Market Profile + Weekly VWAP + Compact CVD
+        let candles = generate_synthetic_ohlcv(960);
+        let ind_cfg = IndicatorConfig {
+            show_sma: false,
+            show_ema: false,
+            show_bbands: false,
+            show_vwap: true,
+            vwap_anchor_mode: crate::indicators::VwapAnchorMode::Weekly,
+            show_market_profile: true,
+            mp_num_bins: 20,
+            mp_ib_bars: 4,
+            mp_extend_naked_poc: true,
+            show_cvd: true,
+            cvd_reset_mode: CvdResetMode::Cumulative,
+            ..IndicatorConfig::default()
+        };
+        let mut cache = IndicatorCache::new();
+        cache.sync(&candles, Timeframe::M15.seconds() as u64, &ind_cfg);
+
+        let mut vp = ChartViewportState::new();
+        vp.time_scale.set_width(720.0);
+        vp.time_scale.set_total_bars(candles.len());
+        vp.fit_all();
+        assert_eq!(
+            vp.cvd_price_scale.format_mode(),
+            crate::viewport::PriceAxisFormatMode::CompactVolume
+        );
+
+        let mut drawings = DrawingStore::new();
+        let ctx = egui::Context::default();
+        let mut rep = None;
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(820.0, 600.0))),
+                time: Some(0.016),
+                ..Default::default()
+            },
+            |ui| {
+                rep = render_workstation_chart_full(
+                    ui,
+                    &candles,
+                    &mut vp,
+                    ChartDisplayConfig {
+                        symbol: "VN30F1M",
+                        timeframe: "15m",
+                        show_grid: true,
+                        show_crosshair: false,
+                        show_volume: true,
+                    },
+                    &ind_cfg,
+                    &cache,
+                    &mut drawings,
+                    ChartReplayTradingOverlay::default(),
+                );
+            },
+        );
+        out.textures_delta.clear();
+        let report = rep.expect("chart render report");
+        assert!(report.market_profile_active);
+        assert!(report.active_overlay_count >= 1);
+        assert!(report.cvd_pane_active);
+        // Confirm Market Profile batches into Mesh shapes rather than hundreds of per-bar Rect calls
+        let mesh_count = out
+            .shapes
+            .iter()
+            .filter(|cs| matches!(cs.shape, Shape::Mesh(_)))
+            .count();
+        assert!(mesh_count >= 1, "expected batched TPO/chart Mesh shapes");
+    }
+
+    #[test]
+    fn critic_r13_regression_subpixel_vwap_cvd_pan_invariance_and_spike_preservation() {
+        // 1. Construct a 10,000-bar series with 2,000 5-bar sessions (sub-pixel at fit_all).
+        //    Session #500 has an extreme spike (`100 -> 260`), immediately next to baseline `100`.
+        //    Panning fractionally MUST NEVER drop the spike or flip its rendered geometry.
+        let n = 10_000_usize;
+        let mut vwap = VwapBandsOutput {
+            vwap: vec![Some(100.0); n],
+            upper_1: vec![Some(102.0); n],
+            lower_1: vec![Some(98.0); n],
+            upper_2: vec![Some(104.0); n],
+            lower_2: vec![Some(96.0); n],
+            session_starts: (0..n).step_by(5).collect(),
+        };
+        for i in 2500..2505 {
+            vwap.vwap[i] = Some(260.0);
+        }
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 320.0));
+        let render_subpixel_vwap = |right_offset: f64| -> (f32, usize) {
+            let mut ts =
+                TimeScale::with_data(n, f64::from(screen.width()), HorzScaleOptions::default());
+            ts.set_bar_spacing(0.055);
+            ts.set_right_offset(right_offset);
+            let mut ps = PriceScale::new("right", crate::viewport::PriceScaleOptions::default());
+            ps.set_height(f64::from(screen.height()));
+            ps.set_auto_scale(false);
+            ps.set_raw_price_range(80.0, 280.0, 100.0);
+            let vp = PaneViewport::new(&ts, &ps, PlotRect::from_egui(screen), 100.0);
+            let mut min_y = f32::INFINITY;
+            let mut vert_count = 0_usize;
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| {
+                    paint_vwap_output(
+                        ui.painter(),
+                        &vwap,
+                        None,
+                        0..n,
+                        32,
+                        &vp,
+                        true,
+                        false,
+                        palette::IND_VWAP_LINE,
+                    );
+                },
+            );
+            out.textures_delta.clear();
+            for cs in &out.shapes {
+                if let Shape::Mesh(m) = &cs.shape {
+                    vert_count += m.vertices.len();
+                    for v in &m.vertices {
+                        min_y = min_y.min(v.pos.y);
+                    }
+                }
+            }
+            (min_y, vert_count)
+        };
+        let (min_y_a, verts_a) = render_subpixel_vwap(0.0);
+        let (min_y_b, verts_b) = render_subpixel_vwap(3.2);
+        let spike_y = {
+            let mut ps = PriceScale::new("right", crate::viewport::PriceScaleOptions::default());
+            ps.set_height(f64::from(screen.height()));
+            ps.set_auto_scale(false);
+            ps.set_raw_price_range(80.0, 280.0, 100.0);
+            let mut ts =
+                TimeScale::with_data(n, f64::from(screen.width()), HorzScaleOptions::default());
+            ts.set_bar_spacing(0.055);
+            PaneViewport::new(&ts, &ps, PlotRect::from_egui(screen), 100.0)
+                .price_to_screen_y(260.0)
+                .unwrap() as f32
+        };
+        assert!(
+            min_y_a <= spike_y + 2.0 && min_y_b <= spike_y + 2.0,
+            "subpixel session spike must never be dropped ({min_y_a} / {min_y_b} vs {spike_y})"
+        );
+        assert_eq!(
+            verts_a, verts_b,
+            "pan-invariant bucket geometry under fractional pan"
+        );
+
+        // 2. Verify signed delta positive+negative cancellation guard in `paint_cvd_pane`
+        let mut candles = generate_synthetic_ohlcv(256);
+        for (i, c) in candles.iter_mut().enumerate() {
+            c.low = 100.0;
+            c.high = 105.0;
+            c.volume = 500_000.0;
+            if i % 2 == 0 {
+                c.open = 100.0;
+                c.close = 105.0;
+            } else {
+                c.open = 105.0;
+                c.close = 100.0;
+            }
+        }
+        let cfg = IndicatorConfig {
+            show_cvd: true,
+            cvd_reset_mode: CvdResetMode::Cumulative,
+            ..IndicatorConfig::default()
+        };
+        let mut cache = IndicatorCache::new();
+        cache.sync(&candles, 3_600, &cfg);
+        let mut ts = TimeScale::with_data(
+            candles.len(),
+            f64::from(screen.width()),
+            HorzScaleOptions::default(),
+        );
+        ts.set_bar_spacing(0.8);
+        ts.set_right_offset(0.0);
+        let mut ps = PriceScale::new(
+            "cvd-right",
+            crate::viewport::PriceScaleOptions::sumi_cvd_oscillator(),
+        );
+        ps.set_height(f64::from(screen.height()));
+        ps.set_auto_scale(false);
+        ps.set_raw_price_range(-700_000.0, 700_000.0, 1.0);
+        let vp = PaneViewport::new(&ts, &ps, PlotRect::from_egui(screen), 1.0);
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ui| {
+                paint_cvd_pane(
+                    ui.painter(),
+                    screen,
+                    &cache,
+                    0..candles.len(),
+                    8,
+                    &vp,
+                    CandlestickBarMetrics::compute(0.8, 1.0),
+                );
+            },
+        );
+        out.textures_delta.clear();
+        let mut has_above_zero = false;
+        let mut has_below_zero = false;
+        let zero_y = vp.price_to_screen_y(0.0).unwrap() as f32;
+        for cs in &out.shapes {
+            if let Shape::Mesh(m) = &cs.shape {
+                for v in &m.vertices {
+                    if v.pos.y < zero_y - 10.0 {
+                        has_above_zero = true;
+                    }
+                    if v.pos.y > zero_y + 10.0 {
+                        has_below_zero = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            has_above_zero && has_below_zero,
+            "conflated opposing delta bars must preserve both positive and negative extremes"
         );
     }
 }

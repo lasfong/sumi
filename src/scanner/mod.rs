@@ -6,6 +6,7 @@
 //! [`ScanSignalKind`] triggers), historical signal scans gated by `DEF-001` `cutoff_timestamp`, and
 //! type-enforced [`ScannerSignalContext`] (`BlindPractice` vs `SignalReview` signal reveal lock).
 
+pub mod breadth;
 pub mod engine;
 #[cfg(test)]
 mod tests;
@@ -14,6 +15,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::data::Timeframe;
 
+pub use breadth::{
+    BreadthFeedInput, MarketBreadthSnapshot, RrgQuadrant, SymbolBreadthRotation,
+    compute_market_breadth_and_rrg,
+};
 pub use engine::{
     DEFAULT_BLIND_PRACTICE_LOOKBACK_BARS, compute_causal_rvol, evaluate_symbol_scan,
     evaluate_symbol_scan_and_signals, filter_and_sort_watchlist, filter_historical_signals,

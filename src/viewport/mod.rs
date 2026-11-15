@@ -32,9 +32,9 @@ pub use multi_chart::{
 };
 pub use pane_viewport::{PaneViewport, PlotRect};
 pub use price_scale::{
-    LogFormula, PriceRange, PriceScale, PriceScaleMode, PriceScaleOptions, PriceTickMark,
-    format_price_adaptive, from_indexed_to_100, from_log, from_percent, to_indexed_to_100, to_log,
-    to_percent,
+    LogFormula, PriceAxisFormatMode, PriceRange, PriceScale, PriceScaleMode, PriceScaleOptions,
+    PriceTickMark, format_compact_volume_axis, format_price_adaptive, from_indexed_to_100,
+    from_log, from_percent, to_indexed_to_100, to_log, to_percent,
 };
 pub use time_scale::{
     HorzScaleOptions, LogicalRange, StrictBarRange, TimeScale, TransitionSnapshot,

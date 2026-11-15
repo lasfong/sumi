@@ -1,7 +1,7 @@
 # RESEARCH TO RUST ROADMAP — SESSION R01
 
 - **Session Identity:** `SESSION-R01-20261110T202837+0700`
-- **Updated By:** `SESSION-R12-20261115T103000+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Updated By:** `SESSION-R13-20261115T163000+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 - **Principle:** No Rust implementation begins without prior REA or reference-source research evidence.
 
 ---
@@ -339,13 +339,24 @@ cargo test app::tests::critic_r11_regression_benchmark_cache_invalidation_and_co
 
 ---
 
-## Wave 12 — Quantitative Order-Book Heatmap / Market Internals Breadth & Native-Style Layout Docking / Hotkey Profiles (`PROPOSED — MILESTONE R13`)
+## Wave 12 — Session TPO / Market Profile, Multi-Interval `VWAP` Anchors, Causal VN30 Breadth & 4-Quadrant `RRG` Heatmap, Compact `K`/`M`/`B`/`T` `CVD` Axis & R12 Carry-Over Polish (`COMPLETE — SESSION R13`)
+
+### Shipped Deliverables & Verification (`cargo test market_profile`, `cargo test vwap`, `cargo test r13_`, `cargo test critic_r13_`, `--r13`, `SUMI_CAPTURE_BATCH=r13`)
+| Component | Research Source | Rust Target | Status |
+|---|---|---|---|
+| Pure `f64`/`i64` WASM-safe Session TPO / Market Profile (`POC`, CME 70% `VAH`/`VAL`, `IB`, `Single Prints`, `Naked POC` + `HistoricalNakedPoc`, `ProfileSessionPeriod`), Multi-Interval `VwapAnchorMode` (`AutoSession`/`Daily`/`Weekly`/`Monthly`/`Yearly`, negative-UTC `D1`/`W1` guard), 5th built-in `WorkspaceTemplate` (`"VN30 Session Profile & Flow"`), & per-slot `TPO`/`VWAP`/`Sync Ind` toolbar + `Cmd+K` sync | `ARCHIVE/frontend` `TechnicalFlowBBViewer.tsx` + `LWC v5.2.0` + [`docs/research/MARKET_PROFILE_BREADTH_AND_AXIS_SPEC.md`](MARKET_PROFILE_BREADTH_AND_AXIS_SPEC.md) | `src/indicators/market_profile.rs`, `src/indicators/vwap.rs`, `src/indicators/mod.rs`, `src/viewport/workspace_template.rs`, `src/chart.rs`, `src/app.rs` | Shipped & Critic-Hardened (`Milestone R13`, `331.54 µs` `50k` raw `15m` TPO, `785.75 µs` `50k` Weekly VWAP) |
+| Causal VN30 & Universe Market Breadth (`AT05`/`AT09` Aggregate-Before-Ratio Money Flow, `AT17` participation ratios, `DEF-001` `replay_causal_close_timestamp` `0`-lag gate, `causal_peer_open_cutoff`, `is_active_tail_incomplete()`) + JdK 4-quadrant `RRG` + 340px `Watch`/`Sig`/`Breadth` Dock (obstacle-seeded multi-ring `RRG` labels + symmetric `allocate_exact_size` Heatmap tiles) | `ARCHIVE/backend/app/domain/bb/market_aggregator.py` + `ARCHIVE/frontend` `ScannerPage.tsx`/`AnalyticsPage.tsx`/`DashboardPage.tsx` + [`MARKET_PROFILE_BREADTH_AND_AXIS_SPEC.md`](MARKET_PROFILE_BREADTH_AND_AXIS_SPEC.md) | `src/scanner/breadth.rs`, `src/scanner/mod.rs`, `src/scanner/tests.rs`, `src/app.rs` | Shipped & Critic-Hardened (`Milestone R13`, `858.79 µs` Breadth/RRG, `CRITIC_PASS`) |
+| Compact `K`/`M`/`B`/`T` `CVD` Right Axis (`PriceAxisFormatMode::CompactVolume`), Clipped Axis Pills, `WorldBinIntervalAccumulator` Pan-Invariant Sub-Pixel Envelopes, Dual-Sided Conflated `CVD` Histogram, `cvd_price_scale.reset_auto_scale()` across Primary Transitions, & `safe_midpoint_f64` | `ARCHIVE/frontend/src/utils/formatters.ts` + `LWC v5.2.0` `volume-formatter.ts`/`price-axis-view*` + [`MARKET_PROFILE_BREADTH_AND_AXIS_SPEC.md`](MARKET_PROFILE_BREADTH_AND_AXIS_SPEC.md) | `src/viewport/price_scale.rs`, `src/chart.rs`, `src/app.rs`, `src/main.rs` | Shipped & Critic-Hardened (`181/181` tests + `wasm32` Clippy, `--r13` `0.2588–2.4689 ms` mean / `p99 <= 2.8089 ms < 4.0 ms`) |
+
+---
+
+## Wave 13 — Synthetic Depth-of-Market / Footprint Execution Ladder, Custom Hotkey Profiles & Non-Blocking R13 Axis Polish (`PROPOSED — MILESTONE R14`)
 
 ### Proposed Deliverables (Awaiting Product Owner Authorization)
 | Component | Research Source | Rust Target | Status |
 |---|---|---|---|
-| Pure `f64`/`i64` WASM-safe Quantitative Liquidity / Depth Profile Overlay (`Session TPO / Market Profile` + Multi-Interval `VWAP` Anchor Presets & Per-Slot Chart State Sync) | `ARCHIVE/frontend` + `LWC v5.2.0` primitives | `src/indicators/`, `src/drawings/`, `src/chart.rs` | Proposed (`Milestone R13`) |
-| Market Breadth / VN30 Rotation Heatmap & Workspace Profile Polish (including `cvd_price_scale.reset_auto_scale()` across primary transitions and overflow-safe `egui::Mesh` line midpoint helper) | `ARCHIVE/frontend` + `src/scanner/`, `src/app.rs` | `src/scanner/`, `src/viewport/`, `src/chart.rs`, `src/app.rs` | Proposed (`Milestone R13`) |
+| Pure `f64`/`i64` WASM-safe Depth-of-Market / Price-Ladder Staging Widget integrated with `TradingSession` + `Journal` Friction Sizer | `ARCHIVE/frontend` order ticket & `LWC v5.2.0` price-axis primitives | `src/trading/`, `src/journal/`, `src/app.rs` | Proposed (`Milestone R14`) |
+| Customizable Hotkey Profiles + Dock Panel Presets (`WorkspaceTemplate` extension) & Non-Blocking R13 Axis Tick Top-Margin/Scale-Transition Polish | `src/viewport/price_scale.rs`, `src/viewport/workspace_template.rs`, `src/app.rs` | `src/viewport/`, `src/chart.rs`, `src/app.rs` | Proposed (`Milestone R14`) |
 
 ---
 

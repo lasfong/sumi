@@ -358,3 +358,147 @@ fn critic_r08_regression_single_pass_scan_incomplete_tail_and_reveal_timestamp()
     ctx.sanitize_deserialized();
     assert_eq!(ctx.reveal_at_timestamp, bucket_close_ts);
 }
+
+#[test]
+fn r13_breadth_aggregate_before_ratio_at05_at09_at17_and_def001_causality() {
+    use super::{BreadthFeedInput, RrgQuadrant, compute_market_breadth_and_rrg};
+
+    // 1. AT05/AT09 Aggregate-Before-Ratio proof:
+    //    Symbol A ("VCB", VN30): huge bullish bar trading 99B value (`buy_frac = 1.0`, `buy_val = 99B`)
+    //    Symbol B ("FPT", VN30): tiny bearish bar trading 1B value (`buy_frac = 0.0`, `buy_val = 0B`)
+    //    Cross-sectional naive average = 50%, TRUE value-weighted aggregate = 99%!
+    let bench: Vec<Candle> = (0..40)
+        .map(|i| {
+            make_bar(
+                i,
+                1200.0,
+                1205.0,
+                1195.0,
+                1200.0 + (i as f64) * 0.5,
+                1_000.0,
+            )
+        })
+        .collect();
+    let mut vcb: Vec<Candle> = (0..39)
+        .map(|i| make_bar(i, 90.0, 91.0, 89.0, 90.0 + (i as f64) * 0.2, 1_000.0))
+        .collect();
+    // Bar 39: close = 100.0, low = 99.0, high = 100.0, open = 99.0 -> intrabar_buy_fraction = 1.0
+    vcb.push(make_bar(39, 99.0, 100.0, 99.0, 100.0, 990_000_000.0));
+
+    let mut fpt: Vec<Candle> = (0..39)
+        .map(|i| make_bar(i, 120.0, 121.0, 119.0, 120.0 - (i as f64) * 0.1, 1_000.0))
+        .collect();
+    // Bar 39: close = 100.0, low = 100.0, high = 101.0, open = 101.0 -> intrabar_buy_fraction = 0.0
+    fpt.push(make_bar(39, 101.0, 101.0, 100.0, 100.0, 10_000_000.0));
+
+    let feeds = [
+        BreadthFeedInput {
+            instrument_id: "HOSE:VCB:1D",
+            symbol: "VCB",
+            preset_label: "VN30",
+            timeframe: Timeframe::D1,
+            candles: &vcb,
+            exclude_incomplete_tail: false,
+        },
+        BreadthFeedInput {
+            instrument_id: "HOSE:FPT:1D",
+            symbol: "FPT",
+            preset_label: "VN30",
+            timeframe: Timeframe::D1,
+            candles: &fpt,
+            exclude_incomplete_tail: false,
+        },
+    ];
+    let snap = compute_market_breadth_and_rrg(&feeds, &bench, Timeframe::D1, "VNINDEX", None);
+    assert_eq!(snap.participating_count, 2);
+    assert_eq!(snap.vn30_participating_count, 2);
+    assert_eq!(snap.advancers, 1);
+    assert_eq!(snap.decliners, 1);
+    // 99B / 100B = 99.0% (not 50.0% naive arithmetic mean!)
+    assert!(
+        (snap.money_flow_buy_pct - 99.0).abs() < 0.01,
+        "AT05/AT09 violated: got {}",
+        snap.money_flow_buy_pct
+    );
+    assert!((snap.vn30_money_flow_buy_pct - 99.0).abs() < 0.01);
+
+    // 2. Quadrant classification check
+    assert_eq!(RrgQuadrant::classify(102.0, 101.5), RrgQuadrant::Leading);
+    assert_eq!(RrgQuadrant::classify(102.0, 99.0), RrgQuadrant::Weakening);
+    assert_eq!(RrgQuadrant::classify(98.0, 98.0), RrgQuadrant::Lagging);
+    assert_eq!(RrgQuadrant::classify(98.0, 102.0), RrgQuadrant::Improving);
+
+    // 3. DEF-001 Strict Causal Replay Prefix Invariance:
+    //    Corrupting bars after cutoff `T` MUST leave the Breadth + RRG snapshot at `T` bit-exact!
+    let universe = load_bundled_watchlist_universe();
+    let bench_u: Vec<Candle> = universe
+        .iter()
+        .find(|e| e.symbol == "VNINDEX")
+        .expect("VNINDEX")
+        .candles
+        .clone();
+    let cut_bar_open_ts = bench_u[120].timestamp;
+    let cut_close_ts = cut_bar_open_ts + 86_399;
+    let feeds_orig: Vec<BreadthFeedInput<'_>> = universe
+        .iter()
+        .map(|e| BreadthFeedInput {
+            instrument_id: &e.instrument_id,
+            symbol: &e.symbol,
+            preset_label: e.preset.short_label(),
+            timeframe: e.base_timeframe,
+            candles: &e.candles,
+            exclude_incomplete_tail: false,
+        })
+        .collect();
+    let snap_orig = compute_market_breadth_and_rrg(
+        &feeds_orig,
+        &bench_u,
+        Timeframe::D1,
+        "VNINDEX",
+        Some(cut_close_ts),
+    );
+    assert_eq!(snap_orig.evaluated_timestamp, Some(cut_bar_open_ts));
+    let snap_before_close = compute_market_breadth_and_rrg(
+        &feeds_orig,
+        &bench_u,
+        Timeframe::D1,
+        "VNINDEX",
+        Some(cut_close_ts - 1),
+    );
+    assert_eq!(
+        snap_before_close.evaluated_timestamp,
+        Some(bench_u[119].timestamp),
+        "D1 bar closing 1s after cutoff must be withheld causally (DEF-001)"
+    );
+    drop(feeds_orig);
+    let mut poisoned = universe;
+    for e in &mut poisoned {
+        for c in &mut e.candles {
+            if c.timestamp > cut_bar_open_ts {
+                c.close *= 9.0;
+                c.high *= 9.0;
+                c.low *= 0.1;
+                c.volume *= 99.0;
+            }
+        }
+    }
+    let feeds_poison: Vec<BreadthFeedInput<'_>> = poisoned
+        .iter()
+        .map(|e| BreadthFeedInput {
+            instrument_id: &e.instrument_id,
+            symbol: &e.symbol,
+            preset_label: e.preset.short_label(),
+            timeframe: e.base_timeframe,
+            candles: &e.candles,
+            exclude_incomplete_tail: false,
+        })
+        .collect();
+    let snap_poison = compute_market_breadth_and_rrg(
+        &feeds_poison,
+        &bench_u,
+        Timeframe::D1,
+        "VNINDEX",
+        Some(cut_close_ts),
+    );
+    assert_eq!(snap_orig, snap_poison);
+}

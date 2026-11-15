@@ -7,6 +7,7 @@
 pub mod bands;
 pub mod cvd;
 pub mod ichimoku;
+pub mod market_profile;
 pub mod moving_averages;
 pub mod oscillators;
 pub mod relative_strength;
@@ -34,6 +35,11 @@ pub use ichimoku::{
     IchimokuConfig, IchimokuIndicator, IchimokuOutput, MAX_ICHIMOKU_DISPLACEMENT, compute_ichimoku,
     donchian_midpoint_series,
 };
+pub use market_profile::{
+    DEFAULT_MAX_PROFILE_SESSIONS, MAX_MARKET_PROFILE_ROWS, MIN_MARKET_PROFILE_ROWS,
+    MarketProfileConfig, MarketProfileOutput, ProfileSessionPeriod, SessionMarketProfile,
+    TpoPriceRow, compute_session_market_profiles,
+};
 pub use moving_averages::{
     EmaIndicator, SmaIndicator, compute_ema, compute_ema_optional_slice, compute_ema_slices,
     compute_sma, compute_sma_slices,
@@ -51,7 +57,10 @@ pub use volume_profile::{
     MAX_VOLUME_PROFILE_ROWS, MIN_VOLUME_PROFILE_ROWS, VolumeProfileBin, VolumeProfileConfig,
     VolumeProfileResult, compute_volume_profile, intrabar_buy_fraction,
 };
-pub use vwap::{VwapBandsOutput, compute_anchored_vwap, compute_session_vwap, session_bucket_key};
+pub use vwap::{
+    VwapAnchorMode, VwapBandsOutput, compute_anchored_vwap, compute_session_vwap,
+    compute_session_vwap_with_anchor, session_bucket_key, vwap_bucket_key,
+};
 
 /// Target pane placement for an indicator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,11 +164,17 @@ pub struct IndicatorConfig {
     pub bb_period: usize,
     pub bb_std_mult: f64,
     pub show_vwap: bool,
+    pub vwap_anchor_mode: VwapAnchorMode,
     pub vwap_band_1: f64,
     pub vwap_band_2: f64,
     pub show_vrvp: bool,
     pub vrvp_rows: usize,
     pub vrvp_value_area_pct: f64,
+    pub show_market_profile: bool,
+    pub mp_session_period: ProfileSessionPeriod,
+    pub mp_num_bins: usize,
+    pub mp_ib_bars: usize,
+    pub mp_extend_naked_poc: bool,
     pub show_ichimoku: bool,
     pub ichimoku_tenkan: usize,
     pub ichimoku_kijun: usize,
@@ -194,11 +209,17 @@ impl Default for IndicatorConfig {
             bb_period: 20,
             bb_std_mult: 2.0,
             show_vwap: false,
+            vwap_anchor_mode: VwapAnchorMode::AutoSession,
             vwap_band_1: 1.0,
             vwap_band_2: 2.0,
             show_vrvp: false,
             vrvp_rows: 40,
             vrvp_value_area_pct: 0.70,
+            show_market_profile: false,
+            mp_session_period: ProfileSessionPeriod::Auto,
+            mp_num_bins: 24,
+            mp_ib_bars: 4,
+            mp_extend_naked_poc: true,
             show_ichimoku: false,
             ichimoku_tenkan: 9,
             ichimoku_kijun: 26,
@@ -254,6 +275,10 @@ impl IndicatorConfig {
         } else {
             self.vrvp_value_area_pct = self.vrvp_value_area_pct.clamp(0.10, 0.95);
         }
+        self.mp_num_bins = self
+            .mp_num_bins
+            .clamp(MIN_MARKET_PROFILE_ROWS, MAX_MARKET_PROFILE_ROWS);
+        self.mp_ib_bars = self.mp_ib_bars.clamp(1, 60);
         self.ichimoku_tenkan = self.ichimoku_tenkan.clamp(1, 500);
         self.ichimoku_kijun = self.ichimoku_kijun.clamp(1, 500);
         self.ichimoku_senkou_b = self.ichimoku_senkou_b.clamp(1, 500);
@@ -299,6 +324,7 @@ impl IndicatorConfig {
             || self.show_bbands
             || self.show_vwap
             || self.show_vrvp
+            || self.show_market_profile
             || self.show_ichimoku
     }
 }
@@ -731,7 +757,9 @@ pub struct IndicatorCache {
     pub vwap_l1_idx: SeriesBlockIndex,
     pub vwap_u2_idx: SeriesBlockIndex,
     pub vwap_l2_idx: SeriesBlockIndex,
-    vwap_context: Option<(Timeframe, i64)>,
+    vwap_context: Option<(Timeframe, i64, VwapAnchorMode)>,
+    pub market_profile: MarketProfileOutput,
+    mp_computed_cfg: Option<(Timeframe, MarketProfileConfig)>,
     pub rsi: Vec<Option<f64>>,
     pub rsi_idx: SeriesBlockIndex,
     pub macd: MacdOutput,
@@ -791,7 +819,9 @@ impl IndicatorCache {
     /// Uses daily UTC session defaults for `VWAP`; prefer [`Self::sync_with_session_context`] when
     /// venue timezone and active chart timeframe are known.
     pub fn sync(&mut self, candles: &[Candle], dataset_generation: u64, config: &IndicatorConfig) {
-        let (tf, utc_off) = self.vwap_context.unwrap_or((Timeframe::D1, 0));
+        let (tf, utc_off, _) =
+            self.vwap_context
+                .unwrap_or((Timeframe::D1, 0, VwapAnchorMode::AutoSession));
         self.sync_with_session_context(candles, dataset_generation, config, tf, utc_off);
     }
 
@@ -848,6 +878,8 @@ impl IndicatorCache {
             self.ichimoku_senkou_b_idx.clear();
             self.ichimoku_chikou_idx.clear();
             self.ichimoku_computed_cfg = None;
+            self.market_profile = MarketProfileOutput::default();
+            self.mp_computed_cfg = None;
             self.cvd = CvdOutput::default();
             self.cvd_delta_idx.clear();
             self.cvd_line_idx.clear();
@@ -877,11 +909,23 @@ impl IndicatorCache {
                 }));
         let need_vwap = clean_cfg.show_vwap
             && (self.vwap.vwap.len() != candles.len()
-                || self.vwap_context != Some((timeframe, utc_offset_seconds))
+                || self.vwap_context
+                    != Some((timeframe, utc_offset_seconds, clean_cfg.vwap_anchor_mode))
                 || prev_cfg.is_none_or(|p| {
                     (p.vwap_band_1 - clean_cfg.vwap_band_1).abs() > 1e-12
                         || (p.vwap_band_2 - clean_cfg.vwap_band_2).abs() > 1e-12
                 }));
+        let target_mp_cfg = MarketProfileConfig {
+            session_period: clean_cfg.mp_session_period,
+            utc_offset_seconds,
+            num_bins: clean_cfg.mp_num_bins,
+            value_area_pct: 0.70,
+            ib_bars: clean_cfg.mp_ib_bars,
+            max_sessions: DEFAULT_MAX_PROFILE_SESSIONS,
+            extend_naked_poc: clean_cfg.mp_extend_naked_poc,
+        };
+        let need_mp = clean_cfg.show_market_profile
+            && self.mp_computed_cfg != Some((timeframe, target_mp_cfg));
         let need_rsi = clean_cfg.show_rsi
             && (self.rsi.len() != candles.len()
                 || prev_cfg.is_none_or(|p| p.rsi_period != clean_cfg.rsi_period));
@@ -949,10 +993,11 @@ impl IndicatorCache {
             }
         }
         if need_vwap {
-            self.vwap = compute_session_vwap(
+            self.vwap = compute_session_vwap_with_anchor(
                 candles,
                 timeframe,
                 utc_offset_seconds,
+                clean_cfg.vwap_anchor_mode,
                 clean_cfg.vwap_band_1,
                 clean_cfg.vwap_band_2,
             );
@@ -961,7 +1006,12 @@ impl IndicatorCache {
             self.vwap_l1_idx = SeriesBlockIndex::build(&self.vwap.lower_1);
             self.vwap_u2_idx = SeriesBlockIndex::build(&self.vwap.upper_2);
             self.vwap_l2_idx = SeriesBlockIndex::build(&self.vwap.lower_2);
-            self.vwap_context = Some((timeframe, utc_offset_seconds));
+            self.vwap_context = Some((timeframe, utc_offset_seconds, clean_cfg.vwap_anchor_mode));
+        }
+        if need_mp {
+            self.market_profile =
+                compute_session_market_profiles(candles, timeframe, target_mp_cfg);
+            self.mp_computed_cfg = Some((timeframe, target_mp_cfg));
         }
         if need_atr {
             self.atr = compute_atr(candles, clean_cfg.atr_period);

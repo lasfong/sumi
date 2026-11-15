@@ -1,0 +1,26 @@
+{
+  "milestone": "R13",
+  "overall_pass": true,
+  "environment": {
+    "cpu": "Apple M1",
+    "os": "macos",
+    "arch": "aarch64",
+    "ram_bytes": 17179869184,
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "profile": "release",
+    "viewport_logical_px": [1280, 800],
+    "pixels_per_point": 2.0
+  },
+  "r13_domain_throughput": [
+    { "case_id": "r13_session_tpo_market_profile_50k_15m_equivalent", "description": "Session TPO / Market Profile (POC, 70% VAH/VAL, IB, Naked POC) on 50,000 15m bars", "input_units": 50000, "output_items": 24, "median_us": 331.542, "median_ms": 0.3315, "p95_us": 345.167, "max_us": 398.750 },
+    { "case_id": "r13_multi_anchor_vwap_weekly_50k_cold_compute", "description": "Weekly-anchored Welford VWAP (+-1/+-2 sigma bands) cold compute on 50,000 1m bars", "input_units": 50000, "output_items": 50000, "median_us": 785.750, "median_ms": 0.7857, "p95_us": 909.000, "max_us": 916.042 },
+    { "case_id": "r13_vn30_universe_breadth_rrg_cold_compute", "description": "Causal VN30/Universe Breadth + AT05/09 Money Flow + 4-Quadrant RRG trajectories", "input_units": 13, "output_items": 12, "median_us": 858.792, "median_ms": 0.8588, "p95_us": 988.292, "max_us": 1299.208 },
+    { "case_id": "r13_compact_volume_axis_tick_format_10k", "description": "10,000 CompactVolume (K/M/B/T) right-axis formatter calls", "input_units": 10000, "output_items": 51207, "median_us": 2079.334, "median_ms": 2.0793, "p95_us": 2216.500, "max_us": 2247.917 }
+  ],
+  "workstation_r13_workloads": [
+    { "dataset_bars": 3334, "workload_id": "r13_single_1x1_vn30f1m_15m_tpo_vwap_compact_cvd", "scale_mode": "Linear", "bar_spacing": 8.00000, "conflation_factor": 1, "culled_bars": 131, "rendered_candles": 130, "paint_shapes": 325, "clipped_primitives": 43, "total_vertices": 18088, "total_indices": 60126, "ui_median_ms": 0.1670, "tessellate_median_ms": 0.0862, "total_cpu_mean_ms": 0.2588, "total_cpu_median_ms": 0.2534, "total_cpu_p95_ms": 0.3092, "total_cpu_p99_ms": 0.3820 },
+    { "dataset_bars": 540, "workload_id": "r13_split_1x2_session_profile_flow_template", "scale_mode": "Linear", "bar_spacing": 8.00000, "conflation_factor": 1, "culled_bars": 106, "rendered_candles": 104, "paint_shapes": 503, "clipped_primitives": 76, "total_vertices": 21188, "total_indices": 70332, "ui_median_ms": 0.1929, "tessellate_median_ms": 0.1289, "total_cpu_mean_ms": 0.3164, "total_cpu_median_ms": 0.3219, "total_cpu_p95_ms": 0.3419, "total_cpu_p99_ms": 0.4168 },
+    { "dataset_bars": 200000, "workload_id": "r13_quad_2x2_vn30_breadth_rrg_dock_open", "scale_mode": "Linear", "bar_spacing": 7.50000, "conflation_factor": 1, "culled_bars": 108, "rendered_candles": 104, "paint_shapes": 767, "clipped_primitives": 143, "total_vertices": 30708, "total_indices": 98778, "ui_median_ms": 0.3031, "tessellate_median_ms": 0.1616, "total_cpu_mean_ms": 0.4658, "total_cpu_median_ms": 0.4655, "total_cpu_p95_ms": 0.5992, "total_cpu_p99_ms": 0.6809 },
+    { "dataset_bars": 100000, "workload_id": "r13_100k_conflated_pan_zoom_tpo_vwap_compact_cvd", "scale_mode": "Linear", "bar_spacing": 0.01166, "conflation_factor": 32, "culled_bars": 97093, "rendered_candles": 3033, "paint_shapes": 388, "clipped_primitives": 43, "total_vertices": 57352, "total_indices": 117408, "ui_median_ms": 2.2832, "tessellate_median_ms": 0.1446, "total_cpu_mean_ms": 2.4689, "total_cpu_median_ms": 2.4312, "total_cpu_p95_ms": 2.7618, "total_cpu_p99_ms": 2.8089 }
+  ]
+}

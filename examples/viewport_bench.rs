@@ -31,8 +31,10 @@ use sumi_workstation::drawings::{
 };
 use sumi_workstation::indicators::{
     BlockExtrema, CvdConfig, CvdResetMode, IchimokuConfig, IndicatorCache, IndicatorConfig,
-    OscillatorPaneId, SeriesBlockIndex, VolumeProfileConfig, compute_anchored_vwap, compute_cvd,
-    compute_ichimoku, compute_relative_strength, compute_session_vwap, compute_volume_profile,
+    MarketProfileConfig, OscillatorPaneId, SeriesBlockIndex, VolumeProfileConfig, VwapAnchorMode,
+    compute_anchored_vwap, compute_cvd, compute_ichimoku, compute_relative_strength,
+    compute_session_market_profiles, compute_session_vwap, compute_session_vwap_with_anchor,
+    compute_volume_profile,
 };
 use sumi_workstation::journal::{
     ChecklistState, ExchangeVenue, MistakeTag, SetupTag, TradeJournalStore, TradePlanInput,
@@ -41,12 +43,14 @@ use sumi_workstation::journal::{
 use sumi_workstation::model::Candle;
 use sumi_workstation::replay::{ReplayController, ReplayStepUnit};
 use sumi_workstation::scanner::{
-    ScannerFilter, WatchlistSortColumn, evaluate_symbol_scan_and_signals, filter_and_sort_watchlist,
+    BreadthFeedInput, ScannerFilter, WatchlistSortColumn, compute_market_breadth_and_rrg,
+    evaluate_symbol_scan_and_signals, filter_and_sort_watchlist,
 };
 use sumi_workstation::trading::{OrderKind, OrderRequest, OrderSide, TradingSession};
 use sumi_workstation::viewport::{
     HorzScaleOptions, KineticAnimation, MultiChartLayoutKind, PaneViewport, PlotRect, PriceScale,
     PriceScaleMode, PriceScaleOptions, TimeScale, WorkspaceTemplate, builtin_workspace_templates,
+    format_compact_volume_axis,
 };
 
 #[derive(Debug, Clone)]
@@ -157,6 +161,10 @@ fn main() {
     }
     if std::env::args().any(|a| a == "--r12") {
         run_r12_multichart_ichimoku_cvd_benchmark(&cpu_brand, mem_bytes, &rustc_ver, profile);
+        return;
+    }
+    if std::env::args().any(|a| a == "--r13") {
+        run_r13_market_profile_breadth_benchmark(&cpu_brand, mem_bytes, &rustc_ver, profile);
         return;
     }
 
@@ -7661,6 +7669,770 @@ fn format_r12_markdown_report(
     let _ = writeln!(
         s,
         "| Bars (Grid Total) | Workload | Scale | Conflation | Culled | Drawn | Vertices | Indices | Mean (`ms`) | Median (`ms`) | P99 (`ms`) | `< 4.0ms` Gate |"
+    );
+    let _ = writeln!(
+        s,
+        "| ---: | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |"
+    );
+    for (r, p99_ms) in render.iter().zip(p99_ms_list.iter()) {
+        let mean_ms = r.total_cpu_frame_stats.mean_us / 1_000.0;
+        let med_ms = r.total_cpu_frame_stats.median_us / 1_000.0;
+        let gate = if mean_ms < 4.0 && *p99_ms < 4.0 {
+            "PASS (<4ms)"
+        } else {
+            "EXCEEDS"
+        };
+        let _ = writeln!(
+            s,
+            "| `{}` | `{}` ({}) | `{}` | `{}x` | `{}` | `{}` | `{}` | `{}` | **`{:.3}`** | **`{:.3}`** | `{:.3}` | `{gate}` |",
+            r.dataset_bars,
+            r.workload_id,
+            r.description,
+            r.scale_mode,
+            r.conflation_factor,
+            r.culled_bars,
+            r.rendered_candles,
+            r.total_vertices,
+            r.total_indices,
+            mean_ms,
+            med_ms,
+            p99_ms,
+        );
+    }
+    s
+}
+
+fn run_r13_market_profile_breadth_benchmark(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+) {
+    println!(
+        "=== Sumi R13 Session TPO Market Profile, Multi-Interval VWAP, VN30 Breadth/RRG & Compact CVD Axis Benchmark ==="
+    );
+    println!(
+        "CPU: {cpu} | RAM: {:.1} GiB | {rustc_ver} | profile={profile}",
+        (mem_bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+    );
+
+    let candles_50k_1m = generate_intraday_vn30f_1m_report(50_000).candles;
+    let mut candles_50k_15m: Vec<Candle> = Vec::with_capacity(50_000);
+    let mut day: i64 = 15_341; // 2012-01-02 (Monday)
+    while candles_50k_15m.len() < 50_000 {
+        let weekday = (day + 4).rem_euclid(7);
+        if weekday == 0 || weekday == 6 {
+            day += 1;
+            continue;
+        }
+        for slot_in_day in 0_i64..18 {
+            if candles_50k_15m.len() >= 50_000 {
+                break;
+            }
+            let src = &candles_50k_1m[candles_50k_15m.len()];
+            // VN trading hours in UTC+7: 09:00..11:15 (02:00..04:15 UTC) & 13:00..14:45 (06:00..07:45 UTC).
+            let sec_of_day = if slot_in_day < 10 {
+                2 * 3_600 + slot_in_day * 900
+            } else {
+                6 * 3_600 + (slot_in_day - 10) * 900
+            };
+            candles_50k_15m.push(Candle {
+                timestamp: day * 86_400 + sec_of_day,
+                date_label: src.date_label.clone(),
+                open: src.open,
+                high: src.high,
+                low: src.low,
+                close: src.close,
+                volume: src.volume,
+            });
+        }
+        day += 1;
+    }
+    assert_eq!(candles_50k_15m.len(), 50_000);
+    let mut domain_cases = Vec::new();
+
+    // 1. Session TPO / Market Profile cold compute on 50,000 raw 15m bars (~2,778 sessions)
+    let mp_cfg = MarketProfileConfig::default();
+    let mut tpo_samples = Vec::with_capacity(48);
+    let mut tpo_sessions = 0_usize;
+    for step in 0..56 {
+        let t0 = Instant::now();
+        let out = compute_session_market_profiles(
+            std::hint::black_box(&candles_50k_15m),
+            Timeframe::M15,
+            mp_cfg,
+        );
+        let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        tpo_sessions = out.profiles.len();
+        if step >= 8 {
+            tpo_samples.push(us);
+        }
+    }
+    domain_cases.push(R09DomainBenchCase {
+        case_id: "r13_session_tpo_market_profile_50k_15m_equivalent",
+        description: "Session TPO / Market Profile (POC, 70% VAH/VAL, IB, Naked POC) on 50,000 15m bars",
+        input_units: candles_50k_15m.len(),
+        output_items: tpo_sessions,
+        stats: TimingStats::from_samples(tpo_samples),
+    });
+
+    // 2. Multi-Interval Weekly VWAP cold compute on 50,000 1m bars
+    let mut vwap_samples = Vec::with_capacity(48);
+    let mut vwap_len = 0_usize;
+    for step in 0..56 {
+        let t0 = Instant::now();
+        let out = compute_session_vwap_with_anchor(
+            std::hint::black_box(&candles_50k_1m),
+            Timeframe::M1,
+            25_200,
+            VwapAnchorMode::Weekly,
+            1.0,
+            2.0,
+        );
+        let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        vwap_len = out.vwap.len();
+        if step >= 8 {
+            vwap_samples.push(us);
+        }
+    }
+    domain_cases.push(R09DomainBenchCase {
+        case_id: "r13_multi_anchor_vwap_weekly_50k_cold_compute",
+        description: "Weekly-anchored Welford VWAP (+-1/+-2 sigma bands) cold compute on 50,000 1m bars",
+        input_units: candles_50k_1m.len(),
+        output_items: vwap_len,
+        stats: TimingStats::from_samples(vwap_samples),
+    });
+
+    // 3. Causal VN30 + Universe Breadth & 4-Quadrant RRG cold compute across all bundled feeds
+    let universe = load_bundled_watchlist_universe();
+    let mut min_ts = i64::MAX;
+    let mut max_ts = i64::MIN;
+    for e in &universe {
+        if let (Some(f), Some(l)) = (e.candles.first(), e.candles.last()) {
+            min_ts = min_ts.min(f.timestamp);
+            max_ts = max_ts.max(l.timestamp);
+        }
+    }
+    let (bench_sym, bench_tf, bench_candles) =
+        resolve_benchmark_series_for_window("VNINDEX", min_ts, max_ts, &universe)
+            .expect("VNINDEX benchmark window");
+    let feeds: Vec<BreadthFeedInput<'_>> = universe
+        .iter()
+        .map(|e| BreadthFeedInput {
+            instrument_id: &e.instrument_id,
+            symbol: &e.symbol,
+            preset_label: e.preset.short_label(),
+            timeframe: e.base_timeframe,
+            candles: &e.candles,
+            exclude_incomplete_tail: false,
+        })
+        .collect();
+    let mut breadth_samples = Vec::with_capacity(48);
+    let mut breadth_items = 0_usize;
+    for step in 0..56 {
+        let t0 = Instant::now();
+        let snap = compute_market_breadth_and_rrg(
+            std::hint::black_box(&feeds),
+            std::hint::black_box(&bench_candles),
+            bench_tf,
+            &bench_sym,
+            None,
+        );
+        let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        breadth_items = snap.rotations.len();
+        if step >= 8 {
+            breadth_samples.push(us);
+        }
+    }
+    domain_cases.push(R09DomainBenchCase {
+        case_id: "r13_vn30_universe_breadth_rrg_cold_compute",
+        description: "Causal VN30/Universe Breadth + AT05/09 Money Flow + 4-Quadrant RRG trajectories",
+        input_units: feeds.len(),
+        output_items: breadth_items,
+        stats: TimingStats::from_samples(breadth_samples),
+    });
+
+    // 4. Compact K/M/B/T Volume Axis Formatting throughput (`10,000` evaluations per iteration)
+    let probe_vals: Vec<f64> = (0..10_000)
+        .map(|i| {
+            let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+            let scale = match i % 5 {
+                0 => 1.0,
+                1 => 1_000.0,
+                2 => 1_000_000.0,
+                3 => 1_000_000_000.0,
+                _ => 1_000_000_000_000.0,
+            };
+            sign * (((i * 17 + 13) % 995) as f64) * 1.25 * scale
+        })
+        .collect();
+    let mut fmt_samples = Vec::with_capacity(80);
+    let mut fmt_bytes = 0_usize;
+    for step in 0..96 {
+        let t0 = Instant::now();
+        let mut bytes = 0_usize;
+        for &v in std::hint::black_box(&probe_vals) {
+            let lbl = format_compact_volume_axis(v, Some(50_000.0));
+            bytes += lbl.len();
+        }
+        let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        fmt_bytes = bytes;
+        if step >= 16 {
+            fmt_samples.push(us);
+        }
+    }
+    domain_cases.push(R09DomainBenchCase {
+        case_id: "r13_compact_volume_axis_tick_format_10k",
+        description: "10,000 CompactVolume (K/M/B/T) right-axis formatter calls",
+        input_units: probe_vals.len(),
+        output_items: fmt_bytes,
+        stats: TimingStats::from_samples(fmt_samples),
+    });
+
+    println!("\n--- R13 Market Profile, VWAP Anchor, Breadth/RRG & Compact CVD Kernels ---");
+    for d in &domain_cases {
+        println!(
+            "  {:<46} | in={:>6} out={:>6} | med={:>8.2} µs ({:.3} ms) p95={:>8.2} µs",
+            d.case_id,
+            d.input_units,
+            d.output_items,
+            d.stats.median_us,
+            d.stats.median_us / 1_000.0,
+            d.stats.p95_us
+        );
+    }
+
+    // Phase 2: Full Workstation 1280x800 (`2560x1600` Retina `2.0x`) UI + GPU Tessellation Frame Budgets
+    let (r_tpo_1x1, r_tpo_1x1_p99) = bench_r13_full_workstation_ui(
+        &candles_50k_1m,
+        0,
+        "r13_single_1x1_vn30f1m_15m_tpo_vwap_compact_cvd",
+        "1x1 VN30F1M 15m Session TPO + Naked POC + Weekly VWAP + Compact K/M/B CVD",
+        10,
+        60,
+    );
+    let (r_tpl5_1x2, r_tpl5_1x2_p99) = bench_r13_full_workstation_ui(
+        &candles_50k_1m,
+        1,
+        "r13_split_1x2_session_profile_flow_template",
+        "1x2 Built-in Template #5 (VN30F1M 15m | FPT 1D) TPO + Weekly VWAP + Compact CVD",
+        10,
+        60,
+    );
+    let (r_quad_breadth, r_quad_breadth_p99) = bench_r13_full_workstation_ui(
+        &candles_50k_1m,
+        2,
+        "r13_quad_2x2_vn30_breadth_rrg_dock_open",
+        "2x2 Quad Desk + Open 340px Breadth/RRG Quadrant Dock + TPO + Compact CVD",
+        10,
+        60,
+    );
+    let (r_pan_100k, r_pan_100k_p99) = bench_r13_full_workstation_ui(
+        &candles_50k_1m,
+        3,
+        "r13_100k_conflated_pan_zoom_tpo_vwap_compact_cvd",
+        "1x1 100k Conflated Pan/Zoom + Session TPO + Weekly VWAP + Compact CVD",
+        10,
+        60,
+    );
+
+    let render_cases = vec![r_tpo_1x1, r_tpl5_1x2, r_quad_breadth, r_pan_100k];
+    let p99_ms_list = [
+        r_tpo_1x1_p99,
+        r_tpl5_1x2_p99,
+        r_quad_breadth_p99,
+        r_pan_100k_p99,
+    ];
+
+    println!("\n--- Workstation R13 Full-Frame Budget (< 4.0 ms target) ---");
+    for (r, p99_ms) in render_cases.iter().zip(p99_ms_list.iter()) {
+        let mean_ms = r.total_cpu_frame_stats.mean_us / 1_000.0;
+        let med_ms = r.total_cpu_frame_stats.median_us / 1_000.0;
+        println!(
+            "  {:<46} | bars={:>6} conf={}x drawn={:>5} verts={:>6} | mean={:.3} ms med={:.3} ms p99={:.3} ms",
+            r.workload_id,
+            r.dataset_bars,
+            r.conflation_factor,
+            r.rendered_candles,
+            r.total_vertices,
+            mean_ms,
+            med_ms,
+            p99_ms
+        );
+        assert!(
+            mean_ms < 4.0 && *p99_ms < 4.0,
+            "R13 frame budget exceeded on {}: mean={mean_ms:.3} ms, p99={p99_ms:.3} ms (must be < 4.0 ms)",
+            r.workload_id
+        );
+    }
+
+    let _ = std::fs::create_dir_all("docs/evidence");
+    let json_doc = format_r13_json_report(
+        cpu,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        &domain_cases,
+        &render_cases,
+        &p99_ms_list,
+    );
+    let md_doc = format_r13_markdown_report(
+        cpu,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        &domain_cases,
+        &render_cases,
+        &p99_ms_list,
+    );
+    std::fs::write(
+        "docs/evidence/r13_market_profile_breadth_benchmark.json",
+        json_doc,
+    )
+    .expect("write r13 benchmark json");
+    std::fs::write(
+        "docs/evidence/r13_market_profile_breadth_benchmark.md",
+        md_doc,
+    )
+    .expect("write r13 benchmark md");
+    println!(
+        "\nSaved R13 benchmark artifacts to docs/evidence/r13_market_profile_breadth_benchmark.{{json,md}}"
+    );
+}
+
+fn bench_r13_full_workstation_ui(
+    candles_50k_1m: &[Candle],
+    mode: u8,
+    workload_id: &'static str,
+    description: &'static str,
+    warmup: usize,
+    iters: usize,
+) -> (RenderCaseResult, f64) {
+    let ctx = egui::Context::default();
+    SumiWorkstationApp::configure_dark_workstation_visuals(&ctx);
+    let screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+    ctx.set_pixels_per_point(2.0);
+
+    let mut app = SumiWorkstationApp::default();
+    let builtins = builtin_workspace_templates();
+
+    match mode {
+        0 => {
+            let csv_50k = build_r06_csv_document(candles_50k_1m);
+            app.load_from_csv_str(&csv_50k, &DataLoadOptions::default())
+                .expect("load 50k 1m csv");
+            app.set_timeframe(Timeframe::M15).expect("set 15m");
+            app.grid_layout = MultiChartLayoutKind::Single1x1;
+            app.indicators = IndicatorConfig {
+                show_vwap: true,
+                vwap_anchor_mode: VwapAnchorMode::Weekly,
+                show_market_profile: true,
+                mp_num_bins: 24,
+                mp_ib_bars: 4,
+                mp_extend_naked_poc: true,
+                show_cvd: true,
+                cvd_reset_mode: CvdResetMode::Cumulative,
+                show_rsi: false,
+                show_macd: false,
+                show_atr: false,
+                ..IndicatorConfig::default()
+            };
+            app.sync_indicators_and_benchmarks();
+            app.viewport.time_scale.set_width(1190.0);
+            app.viewport.time_scale.set_bar_spacing(8.0);
+            app.viewport.time_scale.set_right_offset(18.0);
+        }
+        1 => {
+            app.apply_workspace_template(&builtins[4]);
+            app.viewport.time_scale.set_width(590.0);
+            app.viewport.time_scale.set_bar_spacing(8.0);
+            app.viewport.time_scale.set_right_offset(18.0);
+            app.secondary_slots[0].viewport.time_scale.set_width(590.0);
+            app.secondary_slots[0]
+                .viewport
+                .time_scale
+                .set_bar_spacing(7.5);
+            app.secondary_slots[0]
+                .viewport
+                .time_scale
+                .set_right_offset(18.0);
+        }
+        2 => {
+            app.set_dataset_size(50_000);
+            app.grid_layout = MultiChartLayoutKind::Quad2x2;
+            app.grid_sync.sync_crosshair = true;
+            app.grid_sync.sync_time_range = true;
+            app.grid_sync.sync_symbol = false;
+            app.grid_sync.sync_timeframe = false;
+            app.indicators = IndicatorConfig {
+                show_ichimoku: true,
+                show_vwap: true,
+                vwap_anchor_mode: VwapAnchorMode::Weekly,
+                show_market_profile: true,
+                mp_num_bins: 24,
+                mp_ib_bars: 4,
+                mp_extend_naked_poc: true,
+                show_cvd: true,
+                cvd_reset_mode: CvdResetMode::Session,
+                show_rsi: false,
+                show_macd: false,
+                show_atr: false,
+                ..IndicatorConfig::default()
+            };
+            for slot in &mut app.secondary_slots {
+                slot.data_source = DataSourcePreset::SyntheticVnindex;
+                slot.symbol = "VNINDEX".to_owned();
+                slot.base_timeframe = Timeframe::D1;
+                slot.active_timeframe = Timeframe::D1;
+                slot.indicators = app.indicators.clone();
+                slot.viewport.time_scale.set_width(440.0);
+                slot.viewport.time_scale.set_bar_spacing(7.5);
+                slot.viewport.time_scale.set_right_offset(24.0);
+            }
+            app.show_scanner_dock = true;
+            app.scanner_tab = ScannerDockTab::Breadth;
+            app.viewport.time_scale.set_width(440.0);
+            app.viewport.time_scale.set_bar_spacing(7.5);
+            app.viewport.time_scale.set_right_offset(24.0);
+            app.sync_indicators_and_benchmarks();
+            app.sync_secondary_slots();
+            app.sync_scanner_caches();
+            let _ = app.market_breadth_snapshot().participating_count;
+            assert_eq!(app.candles.len(), 50_000);
+            assert!(
+                app.secondary_slots
+                    .iter()
+                    .all(|s| s.candles.len() == 50_000),
+                "all 4 Quad2x2 slots must hold 50,000 bars (200k total)"
+            );
+        }
+        _ => {
+            app.set_dataset_size(100_000);
+            app.grid_layout = MultiChartLayoutKind::Single1x1;
+            app.indicators = IndicatorConfig {
+                show_vwap: true,
+                vwap_anchor_mode: VwapAnchorMode::Weekly,
+                show_market_profile: true,
+                mp_num_bins: 24,
+                mp_ib_bars: 4,
+                mp_extend_naked_poc: true,
+                show_cvd: true,
+                cvd_reset_mode: CvdResetMode::Cumulative,
+                show_rsi: false,
+                show_macd: false,
+                show_atr: false,
+                ..IndicatorConfig::default()
+            };
+            app.sync_indicators_and_benchmarks();
+            app.viewport.time_scale.set_width(1190.0);
+            app.fit_content();
+        }
+    }
+
+    for _ in 0..2 {
+        let mut init_out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        init_out.textures_delta.clear();
+    }
+    if mode == 3 {
+        app.viewport.fit_all();
+    }
+
+    let mut ui_samples = Vec::with_capacity(iters);
+    let mut tess_samples = Vec::with_capacity(iters);
+    let mut total_samples = Vec::with_capacity(iters);
+    let mut paint_shapes = 0_usize;
+    let mut clipped_primitives = 0_usize;
+    let mut total_vertices = 0_usize;
+    let mut total_indices = 0_usize;
+
+    for step in 0..(warmup + iters) {
+        let hover_x = 240.0 + ((step % 18) as f32) * 16.0;
+        let hover_y = 220.0;
+        let mut events = vec![egui::Event::PointerMoved(Pos2::new(hover_x, hover_y))];
+        if mode == 3 {
+            let phase = (step / 6) % 2;
+            let pan_dx = if step % 3 == 2 {
+                0.0
+            } else if phase == 0 {
+                -20.0
+            } else {
+                20.0
+            };
+            let zoom_dy = if step % 3 == 2 {
+                if phase == 0 { -12.0 } else { 12.0 }
+            } else {
+                0.0
+            };
+            events.push(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(pan_dx, zoom_dy),
+                modifiers: egui::Modifiers::NONE,
+                phase: egui::TouchPhase::Move,
+            });
+        }
+        let raw_input = egui::RawInput {
+            screen_rect,
+            time: Some(step as f64 * 0.016),
+            events,
+            ..Default::default()
+        };
+
+        let t_frame = Instant::now();
+        let t_ui = Instant::now();
+        let mut full_out = ctx.run_ui(raw_input, |ui| {
+            app.render_workstation_ui(ui);
+        });
+        let ui_us = t_ui.elapsed().as_secs_f64() * 1_000_000.0;
+
+        paint_shapes = full_out.shapes.len();
+        let t_tess = Instant::now();
+        let primitives = ctx.tessellate(full_out.shapes, full_out.pixels_per_point);
+        let tess_us = t_tess.elapsed().as_secs_f64() * 1_000_000.0;
+        let total_us = t_frame.elapsed().as_secs_f64() * 1_000_000.0;
+        full_out.textures_delta.clear();
+
+        if step + 1 == warmup + iters {
+            clipped_primitives = primitives.len();
+            total_vertices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.vertices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+            total_indices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.indices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+        }
+
+        if step >= warmup {
+            ui_samples.push(ui_us);
+            tess_samples.push(tess_us);
+            total_samples.push(total_us);
+        }
+    }
+
+    let mut sorted_tot = total_samples.clone();
+    sorted_tot.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let p99_idx =
+        ((sorted_tot.len() as f64 * 0.99).floor() as usize).min(sorted_tot.len().saturating_sub(1));
+    let p99_ms = sorted_tot.get(p99_idx).copied().unwrap_or(0.0) / 1_000.0;
+
+    let rep = app.last_report.expect("full app r13 report");
+    assert!(
+        rep.rendered_candle_count > 0 && rep.market_profile_active && rep.cvd_pane_active,
+        "slot 0 failed R13 render check in mode={mode}: {rep:?}"
+    );
+    if mode == 1 {
+        let sr = app.secondary_slots[0].last_report.expect("slot 1 report");
+        assert!(sr.rendered_candle_count > 0 && sr.market_profile_active && sr.cvd_pane_active);
+    }
+    if mode == 2 {
+        assert_eq!(app.scanner_tab, ScannerDockTab::Breadth);
+        assert!(app.market_breadth_snapshot().participating_count >= 10);
+        for (i, slot) in app.secondary_slots.iter().enumerate() {
+            let sr = slot
+                .last_report
+                .unwrap_or_else(|| panic!("slot {} missing report in R13 mode=2", i + 1));
+            assert!(sr.rendered_candle_count > 0 && sr.market_profile_active && sr.cvd_pane_active);
+        }
+    }
+    if mode == 3 {
+        assert_eq!(app.candles.len(), 100_000);
+        assert!(rep.conflation_factor >= 8);
+    }
+
+    let sec_limit = match mode {
+        1 => 1,
+        2 => 3,
+        _ => 0,
+    };
+    let mut total_rendered_candles = rep.rendered_candle_count;
+    let mut total_culled_bars = rep.culled_bar_count;
+    let mut reported_bars = app.candles.len();
+    for slot in &app.secondary_slots[..sec_limit] {
+        if let Some(sr) = slot.last_report {
+            total_rendered_candles += sr.rendered_candle_count;
+            total_culled_bars += sr.culled_bar_count;
+        }
+        reported_bars += slot.candles.len();
+    }
+
+    (
+        RenderCaseResult {
+            dataset_bars: reported_bars,
+            workload_id,
+            description,
+            scale_mode: app.viewport.main_price_scale.mode().label(),
+            conflation_enabled: true,
+            bar_spacing: rep.bar_spacing,
+            conflation_factor: rep.conflation_factor,
+            culled_bars: total_culled_bars,
+            rendered_candles: total_rendered_candles,
+            paint_shapes,
+            clipped_primitives,
+            total_vertices,
+            total_indices,
+            ui_build_stats: TimingStats::from_samples(ui_samples),
+            tessellate_stats: TimingStats::from_samples(tess_samples),
+            total_cpu_frame_stats: TimingStats::from_samples(total_samples),
+        },
+        p99_ms,
+    )
+}
+
+fn format_r13_json_report(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+    domain: &[R09DomainBenchCase],
+    render: &[RenderCaseResult],
+    p99_ms_list: &[f64],
+) -> String {
+    let mut s = String::with_capacity(8192);
+    let _ = writeln!(s, "{{");
+    let overall_pass = render
+        .iter()
+        .zip(p99_ms_list.iter())
+        .all(|(r, p99)| (r.total_cpu_frame_stats.mean_us / 1_000.0) < 4.0 && *p99 < 4.0);
+    let _ = writeln!(s, "  \"milestone\": \"R13\",");
+    let _ = writeln!(s, "  \"overall_pass\": {overall_pass},");
+    let _ = writeln!(s, "  \"environment\": {{");
+    let _ = writeln!(s, "    \"cpu\": \"{}\",", cpu.replace('"', "\\\""));
+    let _ = writeln!(s, "    \"os\": \"{}\",", std::env::consts::OS);
+    let _ = writeln!(s, "    \"arch\": \"{}\",", std::env::consts::ARCH);
+    let _ = writeln!(s, "    \"ram_bytes\": {mem_bytes},");
+    let _ = writeln!(s, "    \"rustc\": \"{}\",", rustc_ver.replace('"', "\\\""));
+    let _ = writeln!(s, "    \"profile\": \"{profile}\",");
+    let _ = writeln!(s, "    \"viewport_logical_px\": [1280, 800],");
+    let _ = writeln!(s, "    \"pixels_per_point\": 2.0");
+    let _ = writeln!(s, "  }},");
+    let _ = writeln!(s, "  \"r13_domain_throughput\": [");
+    for (idx, d) in domain.iter().enumerate() {
+        let comma = if idx + 1 == domain.len() { "" } else { "," };
+        let _ = writeln!(
+            s,
+            "    {{ \"case_id\": \"{}\", \"description\": \"{}\", \"input_units\": {}, \"output_items\": {}, \"median_us\": {:.3}, \"median_ms\": {:.4}, \"p95_us\": {:.3}, \"max_us\": {:.3} }}{comma}",
+            d.case_id,
+            d.description.replace('"', "\\\""),
+            d.input_units,
+            d.output_items,
+            d.stats.median_us,
+            d.stats.median_us / 1_000.0,
+            d.stats.p95_us,
+            d.stats.max_us,
+        );
+    }
+    let _ = writeln!(s, "  ],");
+    let _ = writeln!(s, "  \"workstation_r13_workloads\": [");
+    for (idx, (r, p99_ms)) in render.iter().zip(p99_ms_list.iter()).enumerate() {
+        let comma = if idx + 1 == render.len() { "" } else { "," };
+        let _ = writeln!(
+            s,
+            "    {{ \"dataset_bars\": {}, \"workload_id\": \"{}\", \"scale_mode\": \"{}\", \"bar_spacing\": {:.5}, \"conflation_factor\": {}, \"culled_bars\": {}, \"rendered_candles\": {}, \"paint_shapes\": {}, \"clipped_primitives\": {}, \"total_vertices\": {}, \"total_indices\": {}, \"ui_median_ms\": {:.4}, \"tessellate_median_ms\": {:.4}, \"total_cpu_mean_ms\": {:.4}, \"total_cpu_median_ms\": {:.4}, \"total_cpu_p95_ms\": {:.4}, \"total_cpu_p99_ms\": {:.4} }}{comma}",
+            r.dataset_bars,
+            r.workload_id,
+            r.scale_mode,
+            r.bar_spacing,
+            r.conflation_factor,
+            r.culled_bars,
+            r.rendered_candles,
+            r.paint_shapes,
+            r.clipped_primitives,
+            r.total_vertices,
+            r.total_indices,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.mean_us / 1_000.0,
+            r.total_cpu_frame_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.p95_us / 1_000.0,
+            p99_ms,
+        );
+    }
+    let _ = writeln!(s, "  ]");
+    let _ = writeln!(s, "}}");
+    s
+}
+
+fn format_r13_markdown_report(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+    domain: &[R09DomainBenchCase],
+    render: &[RenderCaseResult],
+    p99_ms_list: &[f64],
+) -> String {
+    let mut s = String::with_capacity(8192);
+    let _ = writeln!(
+        s,
+        "# Milestone R13 — Session Market Profile, Multi-Interval VWAP, VN30 Breadth/RRG & Compact CVD Axis Benchmark Evidence\n"
+    );
+    let _ = writeln!(
+        s,
+        "- **Command:** `cargo run --release --example viewport_bench -- --r13`"
+    );
+    let _ = writeln!(
+        s,
+        "- **Hardware:** `{cpu}` (`{}-{}`), `{:.1} GiB` RAM",
+        std::env::consts::ARCH,
+        std::env::consts::OS,
+        (mem_bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+    );
+    let _ = writeln!(
+        s,
+        "- **Toolchain & Profile:** `{rustc_ver}` (`--{profile}`)"
+    );
+    let _ = writeln!(
+        s,
+        "- **Active Stack:** Session TPO / Market Profile (`POC`, 70% `VAH`/`VAL`, `IB`, `Single Prints`, causal `Naked POC`), Multi-Interval `VWAP` (`Session`/`Daily`/`Weekly`/`Monthly`/`Yearly`), Causal VN30 & Universe Market Breadth + `RRG` (`AT05`/`AT09`/`AT17`/`DEF-001`), & Compact `K`/`M`/`B`/`T` `CVD` Right Axis\n"
+    );
+
+    let _ = writeln!(
+        s,
+        "## 1. Market Profile, VWAP Anchor, Breadth/RRG & Compact CVD Kernel Throughput\n"
+    );
+    let _ = writeln!(
+        s,
+        "| Case ID | Description | Input Units | Output Items | Median (`µs`) | Median (`ms`) | P95 (`µs`) | Max (`µs`) |"
+    );
+    let _ = writeln!(
+        s,
+        "| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: |"
+    );
+    for d in domain {
+        let _ = writeln!(
+            s,
+            "| `{}` | {} | `{}` | `{}` | **`{:.2} µs`** | **`{:.3} ms`** | `{:.2} µs` | `{:.2} µs` |",
+            d.case_id,
+            d.description,
+            d.input_units,
+            d.output_items,
+            d.stats.median_us,
+            d.stats.median_us / 1_000.0,
+            d.stats.p95_us,
+            d.stats.max_us,
+        );
+    }
+
+    let _ = writeln!(
+        s,
+        "\n## 2. End-to-End Workstation R13 Frame Budget (`DECISION-RENDERER-002` Gate: `< 4.0 ms`)\n"
+    );
+    let _ = writeln!(
+        s,
+        "| Bars (Total) | Workload | Scale | Conflation | Culled | Drawn | Vertices | Indices | Mean (`ms`) | Median (`ms`) | P99 (`ms`) | `< 4.0ms` Gate |"
     );
     let _ = writeln!(
         s,

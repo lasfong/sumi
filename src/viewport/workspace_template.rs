@@ -11,7 +11,7 @@ use std::fmt::{self, Write as _};
 use serde::{Deserialize, Serialize};
 
 use crate::data::{DataSourcePreset, Timeframe};
-use crate::indicators::{CvdResetMode, IndicatorConfig};
+use crate::indicators::{CvdResetMode, IndicatorConfig, ProfileSessionPeriod, VwapAnchorMode};
 
 use super::multi_chart::{MAX_MULTI_CHART_SLOTS, MultiChartLayoutKind, MultiChartSyncConfig};
 use super::price_scale::PriceScaleMode;
@@ -329,7 +329,8 @@ fn default_four_slots() -> Vec<WorkspaceSlotTemplate> {
     ]
 }
 
-/// Returns the `4` built-in institutional workspace layout templates (`1x1`, `1x2`, `2x1`, `2x2`).
+/// Returns the `5` built-in institutional workspace layout templates (`1x1`, `1x2`, `2x1`, `2x2`,
+/// plus R13 `"VN30 Session Profile & Flow"`).
 #[must_use]
 pub fn builtin_workspace_templates() -> Vec<WorkspaceTemplate> {
     let ichimoku_daily = IndicatorConfig {
@@ -468,10 +469,71 @@ pub fn builtin_workspace_templates() -> Vec<WorkspaceTemplate> {
         slots: default_four_slots(),
     };
 
-    for t in [&mut t1, &mut t2, &mut t3, &mut t4] {
+    let mut t5 = WorkspaceTemplate {
+        schema_version: WORKSPACE_TEMPLATE_SCHEMA_VERSION,
+        name: "VN30 Session Profile & Flow".to_owned(),
+        description: "1x2 VN30F1M 15m TPO + Daily FPT Weekly VWAP & Naked POC with Compact CVD"
+            .to_owned(),
+        layout: MultiChartLayoutKind::SplitVertical1x2,
+        sync: MultiChartSyncConfig {
+            sync_crosshair: true,
+            sync_time_range: true,
+            sync_symbol: false,
+            sync_timeframe: false,
+        },
+        active_slot: 0,
+        slots: default_four_slots(),
+    };
+    t5.slots[0] = WorkspaceSlotTemplate {
+        slot_index: 0,
+        data_source: DataSourcePreset::IntradayVn30F1m,
+        symbol: "VN30F1M".to_owned(),
+        timeframe: Timeframe::M15,
+        indicators: IndicatorConfig {
+            show_sma: false,
+            show_ema: true,
+            ema_period: 34,
+            show_vwap: true,
+            vwap_anchor_mode: VwapAnchorMode::AutoSession,
+            show_market_profile: true,
+            mp_num_bins: 24,
+            mp_ib_bars: 4,
+            mp_extend_naked_poc: true,
+            show_rsi: false,
+            show_cvd: true,
+            cvd_reset_mode: CvdResetMode::Session,
+            cvd_sma_period: 9,
+            ..IndicatorConfig::default()
+        },
+        ..WorkspaceSlotTemplate::default()
+    };
+    t5.slots[1] = WorkspaceSlotTemplate {
+        slot_index: 1,
+        data_source: DataSourcePreset::Vn30Basket,
+        symbol: "FPT".to_owned(),
+        timeframe: Timeframe::D1,
+        indicators: IndicatorConfig {
+            show_sma: true,
+            show_ema: true,
+            show_vwap: true,
+            vwap_anchor_mode: VwapAnchorMode::Weekly,
+            show_market_profile: true,
+            mp_num_bins: 24,
+            mp_ib_bars: 2,
+            mp_extend_naked_poc: true,
+            show_rsi: false,
+            show_cvd: true,
+            cvd_reset_mode: CvdResetMode::Cumulative,
+            cvd_sma_period: 9,
+            ..IndicatorConfig::default()
+        },
+        ..WorkspaceSlotTemplate::default()
+    };
+
+    for t in [&mut t1, &mut t2, &mut t3, &mut t4, &mut t5] {
         t.sanitize();
     }
-    vec![t1, t2, t3, t4]
+    vec![t1, t2, t3, t4, t5]
 }
 
 fn truncate_utf8(s: &mut String, max_bytes: usize) {
@@ -587,6 +649,11 @@ fn encode_json_indicators(out: &mut String, ind: &IndicatorConfig) {
     let _ = writeln!(out, "        \"show_vwap\": {},", ind.show_vwap);
     let _ = writeln!(
         out,
+        "        \"vwap_anchor_mode\": \"{:?}\",",
+        ind.vwap_anchor_mode
+    );
+    let _ = writeln!(
+        out,
         "        \"vwap_band_1\": {},",
         fmt_f64(ind.vwap_band_1)
     );
@@ -601,6 +668,23 @@ fn encode_json_indicators(out: &mut String, ind: &IndicatorConfig) {
         out,
         "        \"vrvp_value_area_pct\": {},",
         fmt_f64(ind.vrvp_value_area_pct)
+    );
+    let _ = writeln!(
+        out,
+        "        \"show_market_profile\": {},",
+        ind.show_market_profile
+    );
+    let _ = writeln!(
+        out,
+        "        \"mp_session_period\": \"{:?}\",",
+        ind.mp_session_period
+    );
+    let _ = writeln!(out, "        \"mp_num_bins\": {},", ind.mp_num_bins);
+    let _ = writeln!(out, "        \"mp_ib_bars\": {},", ind.mp_ib_bars);
+    let _ = writeln!(
+        out,
+        "        \"mp_extend_naked_poc\": {},",
+        ind.mp_extend_naked_poc
     );
     let _ = writeln!(out, "        \"show_ichimoku\": {},", ind.show_ichimoku);
     let _ = writeln!(out, "        \"ichimoku_tenkan\": {},", ind.ichimoku_tenkan);
@@ -722,6 +806,11 @@ fn encode_ron_indicators(out: &mut String, ind: &IndicatorConfig) {
     let _ = writeln!(out, "                show_vwap: {},", ind.show_vwap);
     let _ = writeln!(
         out,
+        "                vwap_anchor_mode: {:?},",
+        ind.vwap_anchor_mode
+    );
+    let _ = writeln!(
+        out,
         "                vwap_band_1: {},",
         fmt_f64(ind.vwap_band_1)
     );
@@ -736,6 +825,23 @@ fn encode_ron_indicators(out: &mut String, ind: &IndicatorConfig) {
         out,
         "                vrvp_value_area_pct: {},",
         fmt_f64(ind.vrvp_value_area_pct)
+    );
+    let _ = writeln!(
+        out,
+        "                show_market_profile: {},",
+        ind.show_market_profile
+    );
+    let _ = writeln!(
+        out,
+        "                mp_session_period: {:?},",
+        ind.mp_session_period
+    );
+    let _ = writeln!(out, "                mp_num_bins: {},", ind.mp_num_bins);
+    let _ = writeln!(out, "                mp_ib_bars: {},", ind.mp_ib_bars);
+    let _ = writeln!(
+        out,
+        "                mp_extend_naked_poc: {},",
+        ind.mp_extend_naked_poc
     );
     let _ = writeln!(out, "                show_ichimoku: {},", ind.show_ichimoku);
     let _ = writeln!(
@@ -1677,11 +1783,17 @@ fn decode_indicators(val: &DocValue) -> Result<IndicatorConfig, WorkspaceTemplat
             "bb_period",
             "bb_std_mult",
             "show_vwap",
+            "vwap_anchor_mode",
             "vwap_band_1",
             "vwap_band_2",
             "show_vrvp",
             "vrvp_rows",
             "vrvp_value_area_pct",
+            "show_market_profile",
+            "mp_session_period",
+            "mp_num_bins",
+            "mp_ib_bars",
+            "mp_extend_naked_poc",
             "show_ichimoku",
             "ichimoku_tenkan",
             "ichimoku_kijun",
@@ -1728,6 +1840,14 @@ fn decode_indicators(val: &DocValue) -> Result<IndicatorConfig, WorkspaceTemplat
     if let Some(v) = find_field(f, "show_vwap") {
         c.show_vwap = expect_bool(v, "indicators.show_vwap")?;
     }
+    if let Some(v) = find_field(f, "vwap_anchor_mode") {
+        let raw = expect_label(v, "indicators.vwap_anchor_mode")?;
+        c.vwap_anchor_mode =
+            parse_vwap_anchor_mode(&raw).ok_or_else(|| WorkspaceTemplateError::InvalidField {
+                field: "indicators.vwap_anchor_mode".to_owned(),
+                reason: format!("unknown VwapAnchorMode '{raw}'"),
+            })?;
+    }
     if let Some(v) = find_field(f, "vwap_band_1") {
         c.vwap_band_1 = expect_f64(v, "indicators.vwap_band_1")?;
     }
@@ -1742,6 +1862,27 @@ fn decode_indicators(val: &DocValue) -> Result<IndicatorConfig, WorkspaceTemplat
     }
     if let Some(v) = find_field(f, "vrvp_value_area_pct") {
         c.vrvp_value_area_pct = expect_f64(v, "indicators.vrvp_value_area_pct")?;
+    }
+    if let Some(v) = find_field(f, "show_market_profile") {
+        c.show_market_profile = expect_bool(v, "indicators.show_market_profile")?;
+    }
+    if let Some(v) = find_field(f, "mp_session_period") {
+        let raw = expect_label(v, "indicators.mp_session_period")?;
+        c.mp_session_period = parse_profile_session_period(&raw).ok_or_else(|| {
+            WorkspaceTemplateError::InvalidField {
+                field: "indicators.mp_session_period".to_owned(),
+                reason: format!("unknown ProfileSessionPeriod '{raw}'"),
+            }
+        })?;
+    }
+    if let Some(v) = find_field(f, "mp_num_bins") {
+        c.mp_num_bins = expect_usize(v, "indicators.mp_num_bins")?;
+    }
+    if let Some(v) = find_field(f, "mp_ib_bars") {
+        c.mp_ib_bars = expect_usize(v, "indicators.mp_ib_bars")?;
+    }
+    if let Some(v) = find_field(f, "mp_extend_naked_poc") {
+        c.mp_extend_naked_poc = expect_bool(v, "indicators.mp_extend_naked_poc")?;
     }
     if let Some(v) = find_field(f, "show_ichimoku") {
         c.show_ichimoku = expect_bool(v, "indicators.show_ichimoku")?;
@@ -1881,6 +2022,26 @@ fn parse_cvd_reset_mode(raw: &str) -> Option<CvdResetMode> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "session" => Some(CvdResetMode::Session),
         "cumulative" | "cumul" => Some(CvdResetMode::Cumulative),
+        _ => None,
+    }
+}
+
+fn parse_profile_session_period(raw: &str) -> Option<ProfileSessionPeriod> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "auto" => Some(ProfileSessionPeriod::Auto),
+        "daily" | "day" | "1d" => Some(ProfileSessionPeriod::Daily),
+        "weekly" | "week" | "1w" => Some(ProfileSessionPeriod::Weekly),
+        _ => None,
+    }
+}
+
+fn parse_vwap_anchor_mode(raw: &str) -> Option<VwapAnchorMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "autosession" | "session" | "auto" => Some(VwapAnchorMode::AutoSession),
+        "daily" | "day" | "1d" => Some(VwapAnchorMode::Daily),
+        "weekly" | "week" | "1w" => Some(VwapAnchorMode::Weekly),
+        "monthly" | "month" | "1mo" => Some(VwapAnchorMode::Monthly),
+        "yearly" | "year" | "1y" => Some(VwapAnchorMode::Yearly),
         _ => None,
     }
 }

@@ -192,6 +192,16 @@ pub fn from_indexed_to_100(indexed: f64, base_value: f64) -> f64 {
     from_percent(indexed - 100.0, base_value)
 }
 
+/// Right-axis value formatting policy for a `PriceScale`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PriceAxisFormatMode {
+    /// Standard adaptive price/oscillator decimal formatting.
+    #[default]
+    Standard,
+    /// Compact K/M/B/T suffix formatting for high-magnitude cumulative volume / delta axes.
+    CompactVolume,
+}
+
 /// Configuration for a single `PriceScale` instance on a pane (`left`, `right`, or `overlay`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PriceScaleOptions {
@@ -206,6 +216,9 @@ pub struct PriceScaleOptions {
     pub min_move: f64,
     /// Pins raw minimum to `0.0` during autoscale (used by Volume histogram overlays).
     pub pin_zero_bottom: bool,
+    /// Value formatting mode for tick labels and crosshair pills on this scale.
+    #[serde(default)]
+    pub format_mode: PriceAxisFormatMode,
 }
 
 impl Default for PriceScaleOptions {
@@ -226,6 +239,7 @@ impl PriceScaleOptions {
             scale_margin_bottom: 0.10,
             min_move: 0.01,
             pin_zero_bottom: false,
+            format_mode: PriceAxisFormatMode::Standard,
         }
     }
 
@@ -240,6 +254,7 @@ impl PriceScaleOptions {
             scale_margin_bottom: 0.20,
             min_move: 0.01,
             pin_zero_bottom: false,
+            format_mode: PriceAxisFormatMode::Standard,
         }
     }
 
@@ -254,6 +269,7 @@ impl PriceScaleOptions {
             scale_margin_bottom: 0.00,
             min_move: 1.0,
             pin_zero_bottom: true,
+            format_mode: PriceAxisFormatMode::Standard,
         }
     }
 
@@ -268,6 +284,22 @@ impl PriceScaleOptions {
             scale_margin_bottom: 0.08,
             min_move: 0.01,
             pin_zero_bottom: false,
+            format_mode: PriceAxisFormatMode::Standard,
+        }
+    }
+
+    /// Cumulative Volume Delta (`CVD`) sub-pane scale defaults with compact `K`/`M`/`B`/`T` axis labels.
+    #[must_use]
+    pub fn sumi_cvd_oscillator() -> Self {
+        Self {
+            mode: PriceScaleMode::Normal,
+            auto_scale: true,
+            invert_scale: false,
+            scale_margin_top: 0.08,
+            scale_margin_bottom: 0.08,
+            min_move: 1.0,
+            pin_zero_bottom: false,
+            format_mode: PriceAxisFormatMode::CompactVolume,
         }
     }
 }
@@ -384,6 +416,17 @@ impl PriceScale {
     #[must_use]
     pub fn mode(&self) -> PriceScaleMode {
         self.options.mode
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn format_mode(&self) -> PriceAxisFormatMode {
+        self.options.format_mode
+    }
+
+    #[inline]
+    pub fn set_format_mode(&mut self, format_mode: PriceAxisFormatMode) {
+        self.options.format_mode = format_mode;
     }
 
     #[inline]
@@ -943,7 +986,7 @@ impl PriceScale {
         }
     }
 
-    /// Formats a raw price according to the active `PriceScaleMode` (for crosshair pills).
+    /// Formats a raw price according to the active `PriceScaleMode` and `PriceAxisFormatMode` (for crosshair pills & badges).
     #[must_use]
     pub fn format_price(&self, raw_price: f64, base_value: f64) -> String {
         match self.options.mode {
@@ -952,7 +995,12 @@ impl PriceScale {
                 format!("{:.2}", to_indexed_to_100(raw_price, base_value))
             }
             PriceScaleMode::Normal | PriceScaleMode::Logarithmic => {
-                format_price_adaptive(raw_price)
+                match self.options.format_mode {
+                    PriceAxisFormatMode::Standard => format_price_adaptive(raw_price),
+                    PriceAxisFormatMode::CompactVolume => {
+                        format_compact_volume_axis(raw_price, None)
+                    }
+                }
             }
         }
     }
@@ -1015,18 +1063,27 @@ impl PriceScale {
                     (v, Some(step))
                 };
                 let mut last_accepted_y: Option<f64> = None;
+                let edge_pad = (self.height * 0.1).min(9.0);
+                let min_gap = if self.height < 130.0 { 16.0 } else { 22.0 };
                 for raw in candidates {
                     if let Some(ly) = self.price_to_local_y(raw, base_value)
-                        && (4.0..=(self.height - 6.0)).contains(&ly)
+                        && (edge_pad..=(self.height - edge_pad)).contains(&ly)
                     {
-                        if last_accepted_y.is_some_and(|prev_y| (prev_y - ly).abs() < 22.0) {
+                        if last_accepted_y.is_some_and(|prev_y| (prev_y - ly).abs() < min_gap) {
                             continue;
                         }
                         last_accepted_y = Some(ly);
-                        let label = if let Some(step) = step_hint {
-                            format_price_with_step(raw, step)
-                        } else {
-                            format_price_adaptive(raw)
+                        let label = match self.options.format_mode {
+                            PriceAxisFormatMode::CompactVolume => {
+                                format_compact_volume_axis(raw, step_hint)
+                            }
+                            PriceAxisFormatMode::Standard => {
+                                if let Some(step) = step_hint {
+                                    format_price_with_step(raw, step)
+                                } else {
+                                    format_price_adaptive(raw)
+                                }
+                            }
                         };
                         marks.push(PriceTickMark {
                             local_y: ly,
@@ -1187,5 +1244,95 @@ pub fn format_price_adaptive(price: f64) -> String {
         format!("{price:.4}")
     } else {
         format!("{price:.6}")
+    }
+}
+
+/// Formats signed large quantities (`K`, `M`, `B`, `T`) with rollover promotion so
+/// `CVD` right-axis ticks, cursor pills, and drawing badges remain concise inside narrow gutters.
+#[must_use]
+pub fn format_compact_volume_axis(value: f64, step_hint: Option<f64>) -> String {
+    if !value.is_finite() {
+        return "—".to_owned();
+    }
+    let abs = value.abs();
+    if abs < 1.0e-9 {
+        return "0".to_owned();
+    }
+    let sign = if value < 0.0 { "-" } else { "" };
+    const TIERS: [(f64, &str); 5] = [
+        (1.0e12, "T"),
+        (1.0e9, "B"),
+        (1.0e6, "M"),
+        (1.0e3, "K"),
+        (1.0, ""),
+    ];
+    let mut tier_idx = if abs >= 999_950_000_000.0 {
+        0
+    } else if abs >= 999_950_000.0 {
+        1
+    } else if abs >= 999_950.0 {
+        2
+    } else if abs >= 999.95 {
+        3
+    } else {
+        4
+    };
+    let valid_step = step_hint.filter(|s| s.is_finite() && *s > 0.0);
+
+    loop {
+        let (divisor, suffix) = TIERS[tier_idx];
+        let mag = abs / divisor;
+        let dec = if suffix.is_empty() {
+            if let Some(step) = valid_step {
+                if step < 1.0 {
+                    decimals_for_step(step, 0, 2)
+                } else if mag >= 10.0 {
+                    0
+                } else {
+                    1
+                }
+            } else if mag >= 10.0 || (mag - mag.round()).abs() < 1.0e-6 {
+                0
+            } else {
+                2
+            }
+        } else if let Some(step) = valid_step {
+            let scaled_step = step / divisor;
+            if scaled_step >= 0.999_9 {
+                0
+            } else if mag >= 100.0
+                || ((scaled_step * 10.0 - (scaled_step * 10.0).round()).abs() < 1.0e-4
+                    && scaled_step >= 0.099_9)
+            {
+                1
+            } else {
+                2
+            }
+        } else if mag >= 100.0 {
+            1
+        } else {
+            2
+        };
+
+        let scale_pow = 10_f64.powi(dec as i32);
+        let rounded = (mag * scale_pow).round() / scale_pow;
+        if rounded >= 1000.0 && tier_idx > 0 {
+            tier_idx -= 1;
+            continue;
+        }
+        if rounded == 0.0 {
+            return "0".to_owned();
+        }
+
+        let mut body = format!("{rounded:.dec$}");
+        if dec > 0 && body.contains('.') {
+            while body.ends_with('0') {
+                body.pop();
+            }
+            if body.ends_with('.') {
+                body.pop();
+            }
+        }
+        return format!("{sign}{body}{suffix}");
     }
 }

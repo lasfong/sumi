@@ -49,10 +49,11 @@ use crate::replay::{
     ReplayController, ReplaySpeed, ReplayStatus, ReplayStepUnit, ReplayTransition,
 };
 use crate::scanner::{
-    DEFAULT_BLIND_PRACTICE_LOOKBACK_BARS, HistoricalSignalHit, MarketRegime, ScanSignalKind,
-    ScannerFilter, ScannerReplayIntent, ScannerSignalContext, SignalDirection, SymbolScanRow,
-    WatchlistSortColumn, evaluate_symbol_scan_and_signals, filter_and_sort_watchlist,
-    filter_historical_signals,
+    BreadthFeedInput, DEFAULT_BLIND_PRACTICE_LOOKBACK_BARS, HistoricalSignalHit,
+    MarketBreadthSnapshot, MarketRegime, RrgQuadrant, ScanSignalKind, ScannerFilter,
+    ScannerReplayIntent, ScannerSignalContext, SignalDirection, SymbolBreadthRotation,
+    SymbolScanRow, WatchlistSortColumn, compute_market_breadth_and_rrg,
+    evaluate_symbol_scan_and_signals, filter_and_sort_watchlist, filter_historical_signals,
 };
 use crate::trading::{
     OrderKind, OrderRequest, OrderSide, PositionSide, TradingSession, extract_ticket_from_drawing,
@@ -61,6 +62,7 @@ use crate::viewport::{
     MultiChartLayoutKind, MultiChartSyncConfig, PlotRect, PriceScaleMode, WorkspacePaneStretches,
     WorkspaceSlotTemplate, WorkspaceTemplate, apply_synced_time_window,
     builtin_workspace_templates, causal_closed_prefix_len, extract_visible_time_window,
+    format_compact_volume_axis,
 };
 
 /// Order-type tab selection in the workstation Paper Trading ticket.
@@ -86,12 +88,13 @@ impl TicketOrderKind {
     }
 }
 
-/// Active sub-view inside the left Multi-Symbol Watchlist & Technical Scanner dock (`Milestone R08`).
+/// Active sub-view inside the left Multi-Symbol Watchlist & Technical Scanner dock (`Milestones R08–R13`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ScannerDockTab {
     #[default]
     Watchlist,
     Signals,
+    Breadth,
 }
 
 /// Active sub-view inside the unified right-side Paper Trading, Alerts, Strategy Lab & Journal dock (`Milestones R08–R10`).
@@ -283,6 +286,9 @@ pub enum PaletteAction {
     ToggleGridSyncCrosshair,
     ToggleGridSyncTimeRange,
     ToggleCvdResetMode,
+    CycleVwapAnchorMode,
+    SyncActiveIndicatorsToAllSlots,
+    OpenMarketBreadthTab,
     OpenTemplatesModal,
     ApplyBuiltinTemplate(usize),
 }
@@ -611,6 +617,8 @@ pub struct SumiWorkstationApp {
     #[serde(skip)]
     raw_historical_hits_cache: Vec<HistoricalSignalHit>,
     #[serde(skip)]
+    breadth_snapshot_cache: MarketBreadthSnapshot,
+    #[serde(skip)]
     scanner_synced_key: Option<(u64, String, Option<i64>, usize, bool)>,
     #[serde(skip)]
     alerts_synced_key: Option<(u64, u64, Option<i64>, u64)>,
@@ -777,6 +785,7 @@ impl Default for SumiWorkstationApp {
             custom_peer_feeds: Vec::new(),
             raw_watchlist_rows_cache: Vec::new(),
             raw_historical_hits_cache: Vec::new(),
+            breadth_snapshot_cache: MarketBreadthSnapshot::default(),
             scanner_synced_key: None,
             alerts_synced_key: None,
             backtest_result: None,
@@ -1108,6 +1117,8 @@ impl SumiWorkstationApp {
         self.viewport.time_scale.set_total_bars(self.candles.len());
         if reset_to_clean_fallback {
             self.viewport.reset_to_default();
+        } else if self.data_source == DataSourcePreset::CustomFile {
+            self.viewport.cvd_price_scale.reset_auto_scale();
         }
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
         self.sync_indicators_and_benchmarks();
@@ -1430,6 +1441,7 @@ impl SumiWorkstationApp {
         self.viewport.macd_price_scale.reset_auto_scale();
         self.viewport.atr_price_scale.reset_auto_scale();
         self.viewport.rs_price_scale.reset_auto_scale();
+        self.viewport.cvd_price_scale.reset_auto_scale();
         self.viewport.equity_price_scale.reset_auto_scale();
         self.focused_backtest_trade_id = None;
 
@@ -1664,6 +1676,7 @@ impl SumiWorkstationApp {
         self.focused_backtest_trade_id = None;
         self.synced_rr_drawing_signature = None;
         self.viewport.rs_price_scale.reset_auto_scale();
+        self.viewport.cvd_price_scale.reset_auto_scale();
         self.viewport.equity_price_scale.reset_auto_scale();
         self.viewport.time_scale.set_total_bars(self.candles.len());
         if reset_viewport {
@@ -2160,6 +2173,7 @@ impl SumiWorkstationApp {
         self.viewport.macd_price_scale.reset_auto_scale();
         self.viewport.atr_price_scale.reset_auto_scale();
         self.viewport.rs_price_scale.reset_auto_scale();
+        self.viewport.cvd_price_scale.reset_auto_scale();
         self.viewport.equity_price_scale.reset_auto_scale();
         self.focused_backtest_trade_id = None;
 
@@ -2266,6 +2280,7 @@ impl SumiWorkstationApp {
         self.viewport.macd_price_scale.reset_auto_scale();
         self.viewport.atr_price_scale.reset_auto_scale();
         self.viewport.rs_price_scale.reset_auto_scale();
+        self.viewport.cvd_price_scale.reset_auto_scale();
         self.viewport.equity_price_scale.reset_auto_scale();
 
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
@@ -2366,6 +2381,7 @@ impl SumiWorkstationApp {
         self.viewport.macd_price_scale.reset_auto_scale();
         self.viewport.atr_price_scale.reset_auto_scale();
         self.viewport.rs_price_scale.reset_auto_scale();
+        self.viewport.cvd_price_scale.reset_auto_scale();
         self.viewport.equity_price_scale.reset_auto_scale();
 
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
@@ -2675,23 +2691,11 @@ impl SumiWorkstationApp {
         self.ensure_watchlist_universe_loaded();
         let active_key = self.current_instrument_key();
         let replay_cutoff = self.replay.cutoff_timestamp(&self.base_candles);
+        let replay_close_cutoff = self.replay_causal_close_timestamp();
         let lookback = self.signal_lookback_bars.clamp(5, 500);
-        let incomplete_active_tail = self.replay.is_active()
-            && self.active_timeframe > self.base_timeframe
-            && !self.base_candles.is_empty()
-            && {
-                let idx = self
-                    .replay
-                    .base_cursor_index
-                    .min(self.base_candles.len() - 1);
-                idx + 1 < self.base_candles.len()
-                    && self
-                        .active_timeframe
-                        .bucket_start_timestamp(self.base_candles[idx].timestamp)
-                        == self
-                            .active_timeframe
-                            .bucket_start_timestamp(self.base_candles[idx + 1].timestamp)
-            };
+        // Causal DEF-001 check: derive incomplete higher-timeframe tail purely from closed prefix timestamps
+        // without inspecting any future `base_candles[idx + 1]` element.
+        let incomplete_active_tail = self.is_active_tail_incomplete();
         let cache_key = (
             self.dataset_generation,
             active_key.clone(),
@@ -2702,10 +2706,21 @@ impl SumiWorkstationApp {
         if self.scanner_synced_key.as_ref() == Some(&cache_key) {
             return;
         }
+        let causal_peer_open_cutoff = |peer_tf: Timeframe| -> Option<i64> {
+            match (replay_cutoff, replay_close_cutoff) {
+                (Some(rc), Some(fc)) => {
+                    let span = peer_tf.seconds().max(1).saturating_sub(1);
+                    Some(rc.min(fc.saturating_sub(span)))
+                }
+                (rc, _) => rc,
+            }
+        };
 
         let mut rows =
             Vec::with_capacity(self.watchlist_universe.len() + self.custom_peer_feeds.len() + 1);
         let mut hits = Vec::new();
+        let mut breadth_feeds: Vec<BreadthFeedInput<'_>> =
+            Vec::with_capacity(self.watchlist_universe.len() + self.custom_peer_feeds.len() + 1);
 
         let active_in_universe = self
             .watchlist_universe
@@ -2733,6 +2748,14 @@ impl SumiWorkstationApp {
                 rows.push(row);
             }
             hits.extend(entry_hits);
+            breadth_feeds.push(BreadthFeedInput {
+                instrument_id: &active_key,
+                symbol: &self.symbol,
+                preset_label: self.data_source.short_label(),
+                timeframe: self.active_timeframe,
+                candles: &self.candles,
+                exclude_incomplete_tail: incomplete_active_tail,
+            });
         }
 
         if self.data_source == DataSourcePreset::CustomFile && !self.custom_peer_feeds.is_empty() {
@@ -2752,14 +2775,23 @@ impl SumiWorkstationApp {
                         rows.push(row);
                     }
                     hits.extend(entry_hits);
+                    breadth_feeds.push(BreadthFeedInput {
+                        instrument_id: &entry.instrument_id,
+                        symbol: &entry.symbol,
+                        preset_label: entry.preset.short_label(),
+                        timeframe: self.active_timeframe,
+                        candles: &self.candles,
+                        exclude_incomplete_tail: incomplete_active_tail,
+                    });
                 } else {
+                    let peer_cutoff = causal_peer_open_cutoff(entry.base_timeframe);
                     let (row_opt, entry_hits) = evaluate_symbol_scan_and_signals(
                         &entry.instrument_id,
                         &entry.symbol,
                         entry.preset.short_label(),
                         entry.base_timeframe,
                         &entry.candles,
-                        replay_cutoff,
+                        peer_cutoff,
                         lookback,
                         false,
                     );
@@ -2767,6 +2799,14 @@ impl SumiWorkstationApp {
                         rows.push(row);
                     }
                     hits.extend(entry_hits);
+                    breadth_feeds.push(BreadthFeedInput {
+                        instrument_id: &entry.instrument_id,
+                        symbol: &entry.symbol,
+                        preset_label: entry.preset.short_label(),
+                        timeframe: entry.base_timeframe,
+                        candles: &entry.candles,
+                        exclude_incomplete_tail: false,
+                    });
                 }
             }
         }
@@ -2787,17 +2827,26 @@ impl SumiWorkstationApp {
                     rows.push(row);
                 }
                 hits.extend(entry_hits);
+                breadth_feeds.push(BreadthFeedInput {
+                    instrument_id: &entry.instrument_id,
+                    symbol: &entry.symbol,
+                    preset_label: entry.preset.short_label(),
+                    timeframe: self.active_timeframe,
+                    candles: &self.candles,
+                    exclude_incomplete_tail: incomplete_active_tail,
+                });
             } else {
-                // Strict cross-sectional `DEF-001` causal gate: pass `replay_cutoff` directly so
-                // future-only peer feeds (`first.timestamp > cut`) are withheld (`0` future leak!)
-                // while overlapping & historical peer feeds slice cleanly to `<= cut`.
+                // Strict cross-sectional `DEF-001` causal gate: only admit peer bars whose closing
+                // timestamp `<= replay_close_cutoff` so neither future bars nor unclosed same-day
+                // daily peer bars leak during intraday Replay.
+                let peer_cutoff = causal_peer_open_cutoff(entry.base_timeframe);
                 let (row_opt, entry_hits) = evaluate_symbol_scan_and_signals(
                     &entry.instrument_id,
                     &entry.symbol,
                     entry.preset.short_label(),
                     entry.base_timeframe,
                     &entry.candles,
-                    replay_cutoff,
+                    peer_cutoff,
                     lookback,
                     false,
                 );
@@ -2805,12 +2854,49 @@ impl SumiWorkstationApp {
                     rows.push(row);
                 }
                 hits.extend(entry_hits);
+                breadth_feeds.push(BreadthFeedInput {
+                    instrument_id: &entry.instrument_id,
+                    symbol: &entry.symbol,
+                    preset_label: entry.preset.short_label(),
+                    timeframe: entry.base_timeframe,
+                    candles: &entry.candles,
+                    exclude_incomplete_tail: false,
+                });
             }
         }
+
+        let mut min_ts = i64::MAX;
+        let mut max_ts = i64::MIN;
+        for f in &breadth_feeds {
+            if let (Some(first), Some(last)) = (f.candles.first(), f.candles.last()) {
+                min_ts = min_ts.min(first.timestamp);
+                max_ts = max_ts.max(last.timestamp);
+            }
+        }
+        let (bench_sym, bench_tf, bench_candles) = if min_ts <= max_ts {
+            resolve_benchmark_series_for_window("VNINDEX", min_ts, max_ts, &self.watchlist_universe)
+                .unwrap_or_else(|| ("VNINDEX".to_owned(), Timeframe::D1, Vec::new()))
+        } else {
+            ("VNINDEX".to_owned(), Timeframe::D1, Vec::new())
+        };
+        self.breadth_snapshot_cache = compute_market_breadth_and_rrg(
+            &breadth_feeds,
+            &bench_candles,
+            bench_tf,
+            &bench_sym,
+            replay_close_cutoff,
+        );
 
         self.raw_watchlist_rows_cache = rows;
         self.raw_historical_hits_cache = hits;
         self.scanner_synced_key = Some(cache_key);
+    }
+
+    /// Returns the causal VN30 / Universe Market Breadth & 4-Quadrant `RRG` Snapshot (`Milestone R13`).
+    #[must_use]
+    pub fn market_breadth_snapshot(&mut self) -> &MarketBreadthSnapshot {
+        self.sync_scanner_caches();
+        &self.breadth_snapshot_cache
     }
 
     /// Returns filtered & deterministically sorted Watchlist rows (`None`/`NaN` metrics always last).
@@ -3328,6 +3414,7 @@ impl SumiWorkstationApp {
         if self.viewport.main_price_scale.is_auto_scale() {
             self.viewport.main_price_scale.reset_auto_scale();
         }
+        self.viewport.cvd_price_scale.reset_auto_scale();
         self.viewport.equity_price_scale.reset_auto_scale();
         true
     }
@@ -3653,6 +3740,52 @@ impl SumiWorkstationApp {
             slot.viewport.cvd_price_scale.reset_auto_scale();
             self.sync_secondary_slots();
         }
+    }
+
+    /// Cycles the active `VWAP` anchor reset boundary (`Session` -> `Daily` -> `Weekly` -> `Monthly` -> `Yearly`)
+    /// on the focused chart slot (`active_chart_slot`), enabling `VWAP` if currently hidden.
+    pub fn cycle_vwap_anchor_mode_for_active_slot(&mut self) {
+        let slot_idx = self
+            .active_chart_slot
+            .min(self.grid_layout.slot_count().saturating_sub(1));
+        if slot_idx == 0 {
+            self.indicators.show_vwap = true;
+            self.indicators.vwap_anchor_mode = self.indicators.vwap_anchor_mode.cycle_next();
+            self.viewport.main_price_scale.reset_auto_scale();
+            self.sync_indicators_and_benchmarks();
+        } else {
+            let slot = &mut self.secondary_slots[slot_idx - 1];
+            slot.indicators.show_vwap = true;
+            slot.indicators.vwap_anchor_mode = slot.indicators.vwap_anchor_mode.cycle_next();
+            slot.viewport.main_price_scale.reset_auto_scale();
+            self.sync_secondary_slots();
+        }
+    }
+
+    /// Clones the active slot's indicator configuration cleanly into every grid slot (`0..4`)
+    /// and resets oscillator auto-scales + recomputes caches immediately.
+    pub fn sync_active_slot_indicators_to_all_slots(&mut self) {
+        let target_cfg = self.active_slot_indicators().clone();
+        self.indicators = target_cfg.clone();
+        self.viewport.main_price_scale.reset_auto_scale();
+        self.viewport.rsi_price_scale.reset_auto_scale();
+        self.viewport.macd_price_scale.reset_auto_scale();
+        self.viewport.atr_price_scale.reset_auto_scale();
+        self.viewport.rs_price_scale.reset_auto_scale();
+        self.viewport.cvd_price_scale.reset_auto_scale();
+
+        for slot in &mut self.secondary_slots {
+            slot.indicators = target_cfg.clone();
+            slot.viewport.main_price_scale.reset_auto_scale();
+            slot.viewport.rsi_price_scale.reset_auto_scale();
+            slot.viewport.macd_price_scale.reset_auto_scale();
+            slot.viewport.atr_price_scale.reset_auto_scale();
+            slot.viewport.rs_price_scale.reset_auto_scale();
+            slot.viewport.cvd_price_scale.reset_auto_scale();
+            slot.rs_cmp_synced_key = None;
+        }
+        self.sync_indicators_and_benchmarks();
+        self.sync_secondary_slots();
     }
 
     #[inline]
@@ -5398,42 +5531,40 @@ impl SumiWorkstationApp {
             }
         }
 
-        // 4. Technical Indicators (`SMA`, `EMA`, `BB`, `VWAP`, `VRVP`, `RSI`, `MACD`, `ATR`, `RS`)
+        // 4. Technical Indicators (`SMA`, `EMA`, `BB`, `VWAP`, `VRVP`, `TPO`, `RSI`, `MACD`, `ATR`, `RS`, `ICHIMOKU`, `CVD`)
+        let slot_ind = self.active_slot_indicators().clone();
         for (key, name, on) in [
-            ("SMA", "SMA(20) Overlay", self.indicators.show_sma),
-            ("EMA", "EMA(50) Overlay", self.indicators.show_ema),
-            (
-                "BB",
-                "Bollinger Bands(20, 2.0)",
-                self.indicators.show_bbands,
-            ),
-            ("VWAP", "Session VWAP ±1σ/±2σ", self.indicators.show_vwap),
+            ("SMA", "SMA(20) Overlay", slot_ind.show_sma),
+            ("EMA", "EMA(50) Overlay", slot_ind.show_ema),
+            ("BB", "Bollinger Bands(20, 2.0)", slot_ind.show_bbands),
+            ("VWAP", "Session VWAP ±1σ/±2σ", slot_ind.show_vwap),
             (
                 "VRVP",
                 "Visible Range Volume Profile (POC/VAH/VAL)",
-                self.indicators.show_vrvp,
+                slot_ind.show_vrvp,
             ),
-            ("RSI", "RSI(14) Sub-Pane", self.indicators.show_rsi),
             (
-                "MACD",
-                "MACD(12, 26, 9) Sub-Pane",
-                self.indicators.show_macd,
+                "TPO",
+                "Session Market Profile (TPO POC/VA/IB/Naked POC)",
+                slot_ind.show_market_profile,
             ),
-            ("ATR", "ATR(14) Sub-Pane", self.indicators.show_atr),
+            ("RSI", "RSI(14) Sub-Pane", slot_ind.show_rsi),
+            ("MACD", "MACD(12, 26, 9) Sub-Pane", slot_ind.show_macd),
+            ("ATR", "ATR(14) Sub-Pane", slot_ind.show_atr),
             (
                 "RS",
                 "Relative Strength vs Benchmark Sub-Pane",
-                self.active_slot_indicators().show_rs,
+                slot_ind.show_rs,
             ),
             (
                 "ICHIMOKU",
                 "Ichimoku Cloud (9, 26, 52, 26) Overlay",
-                self.active_slot_indicators().show_ichimoku,
+                slot_ind.show_ichimoku,
             ),
             (
                 "CVD",
                 "Cumulative Volume Delta (CVD + SMA 9) Sub-Pane",
-                self.active_slot_indicators().show_cvd,
+                slot_ind.show_cvd,
             ),
         ] {
             push_scored(
@@ -5442,6 +5573,25 @@ impl SumiWorkstationApp {
                 if on { "Currently ON" } else { "Currently OFF" }.to_owned(),
                 format!("indicator overlay oscillator {key} {name}"),
                 PaletteAction::ToggleIndicator(key),
+            );
+        }
+        push_scored(
+            PaletteCategory::Indicator,
+            format!(
+                "Cycle VWAP Anchor Mode (Current: {})",
+                slot_ind.vwap_anchor_mode.short_label()
+            ),
+            "Cycle Session / Daily / Weekly / Monthly / Yearly VWAP reset".to_owned(),
+            "vwap anchor session daily weekly monthly yearly cycle".to_owned(),
+            PaletteAction::CycleVwapAnchorMode,
+        );
+        if self.grid_layout.slot_count() > 1 {
+            push_scored(
+                PaletteCategory::Workspace,
+                "Sync Active Slot Indicators to All Grid Slots".to_owned(),
+                "Propagate focused chart overlays & oscillator panes across grid".to_owned(),
+                "sync indicators grid all slots copy".to_owned(),
+                PaletteAction::SyncActiveIndicatorsToAllSlots,
             );
         }
         let cvd_mode_lbl = match self.active_slot_indicators().cvd_reset_mode {
@@ -5515,6 +5665,13 @@ impl SumiWorkstationApp {
             },
             "watchlist scanner signals screener dock left".to_owned(),
             PaletteAction::ToggleScannerDock,
+        );
+        push_scored(
+            PaletteCategory::Workspace,
+            "Open VN30 Market Breadth & 4-Quadrant RRG Dock".to_owned(),
+            "Causal Advance/Decline, Aggregate Money Flow & RRG rotation canvas".to_owned(),
+            "breadth rrg rotation vn30 money flow heatmap leading lagging".to_owned(),
+            PaletteAction::OpenMarketBreadthTab,
         );
         let pal_cutoff = self.replay.cutoff_timestamp(&self.base_candles);
         let pal_vis_rules = self
@@ -5863,6 +6020,15 @@ impl SumiWorkstationApp {
                         let ind = self.active_slot_indicators_mut();
                         ind.show_vrvp = !ind.show_vrvp;
                     }
+                    "TPO" => {
+                        let ind = self.active_slot_indicators_mut();
+                        ind.show_market_profile = !ind.show_market_profile;
+                        if ind.show_market_profile {
+                            self.active_slot_viewport_mut()
+                                .main_price_scale
+                                .reset_auto_scale();
+                        }
+                    }
                     "RSI" => {
                         let ind = self.active_slot_indicators_mut();
                         ind.show_rsi = !ind.show_rsi;
@@ -6056,6 +6222,16 @@ impl SumiWorkstationApp {
             }
             PaletteAction::ToggleCvdResetMode => {
                 self.toggle_cvd_reset_mode_for_active_slot();
+            }
+            PaletteAction::CycleVwapAnchorMode => {
+                self.cycle_vwap_anchor_mode_for_active_slot();
+            }
+            PaletteAction::SyncActiveIndicatorsToAllSlots => {
+                self.sync_active_slot_indicators_to_all_slots();
+            }
+            PaletteAction::OpenMarketBreadthTab => {
+                self.show_scanner_dock = true;
+                self.scanner_tab = ScannerDockTab::Breadth;
             }
             PaletteAction::OpenTemplatesModal => {
                 self.show_templates_modal = true;
@@ -7214,6 +7390,15 @@ impl SumiWorkstationApp {
                                 self.active_chart_slot = s_idx;
                             }
                         }
+                        if ui
+                            .small_button("Sync Ind")
+                            .on_hover_text(
+                                "Copy active chart slot's indicators & oscillators to all grid slots",
+                            )
+                            .clicked()
+                        {
+                            self.sync_active_slot_indicators_to_all_slots();
+                        }
                     }
 
                     let mut tpl_open = self.show_templates_modal;
@@ -7317,12 +7502,35 @@ impl SumiWorkstationApp {
                         "VWAP",
                         palette::IND_VWAP_LINE,
                     );
+                    if self.active_slot_indicators().show_vwap {
+                        let vwap_lbl = self.active_slot_indicators().vwap_anchor_mode.short_label();
+                        if ui
+                            .small_button(vwap_lbl)
+                            .on_hover_text(
+                                "Cycle VWAP Anchor (Session -> Daily -> Weekly -> Monthly -> Yearly)",
+                            )
+                            .clicked()
+                        {
+                            self.cycle_vwap_anchor_mode_for_active_slot();
+                        }
+                    }
                     let _ = indicator_toggle_pill(
                         ui,
                         &mut self.active_slot_indicators_mut().show_vrvp,
                         "VRVP",
                         palette::VRVP_POC_GOLD,
                     );
+                    if indicator_toggle_pill(
+                        ui,
+                        &mut self.active_slot_indicators_mut().show_market_profile,
+                        "TPO",
+                        palette::MP_POC_LINE,
+                    ) && self.active_slot_indicators().show_market_profile
+                    {
+                        self.active_slot_viewport_mut()
+                            .main_price_scale
+                            .reset_auto_scale();
+                    }
                     if indicator_toggle_pill(
                         ui,
                         &mut self.active_slot_indicators_mut().show_ichimoku,
@@ -7769,7 +7977,7 @@ impl SumiWorkstationApp {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(format!(
-                                    "R12 [{grid_badge}]  |  {} ({}->{})  |  RPL: {replay_tag}  |  ALT: {armed_alerts}A/{trig_events}T  |  EQ: ${:.0} ({:+.0}){bt_tag}  |  {}P/{}D  |  BARS: {}/{} ({first_date}..{last_date}) {}x  |  {scale_mode}({auto_tag})  |  {:.0}×{:.0}",
+                                    "R13 [{grid_badge}]  |  {} ({}->{})  |  RPL: {replay_tag}  |  ALT: {armed_alerts}A/{trig_events}T  |  EQ: ${:.0} ({:+.0}){bt_tag}  |  {}P/{}D  |  BARS: {}/{} ({first_date}..{last_date}) {}x  |  {scale_mode}({auto_tag})  |  {:.0}×{:.0}",
                                     self.data_source.short_label(),
                                     self.base_timeframe,
                                     self.active_timeframe,
@@ -7793,7 +8001,7 @@ impl SumiWorkstationApp {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(format!(
-                                    "R12 [{grid_badge}]  |  RPL: {replay_tag}  |  ALT: {armed_alerts} armed{bt_tag}  |  BARS: {} ({first_date}..{last_date})",
+                                    "R13 [{grid_badge}]  |  RPL: {replay_tag}  |  ALT: {armed_alerts} armed{bt_tag}  |  BARS: {} ({first_date}..{last_date})",
                                     self.candles.len()
                                 ))
                                 .monospace()
@@ -7813,10 +8021,15 @@ impl SumiWorkstationApp {
                 .inner_margin(Margin::symmetric(8, 8))
                 .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE));
 
+            let dock_default_w = if self.scanner_tab == ScannerDockTab::Breadth {
+                340.0
+            } else {
+                276.0
+            };
             egui::Panel::left("scanner_watchlist_dock")
                 .resizable(true)
-                .default_size(276.0)
-                .size_range(236.0..=360.0)
+                .default_size(dock_default_w)
+                .size_range(236.0..=400.0)
                 .frame(left_frame)
                 .show(ui, |ui| {
                     if any_modal_open {
@@ -8852,13 +9065,15 @@ impl SumiWorkstationApp {
 
         ui.horizontal(|ui| {
             let sp_x = ui.spacing().item_spacing.x;
-            let half_w = ((ui.available_width() - sp_x - 2.0) * 0.5).max(68.0);
+            let third_w = ((ui.available_width() - 2.0 * sp_x - 2.0) / 3.0).max(58.0);
+            let breadth_count = self.breadth_snapshot_cache.rotations.len();
             for (tab, lbl) in [
+                (ScannerDockTab::Watchlist, format!("Watch ({})", rows.len())),
+                (ScannerDockTab::Signals, format!("Sig ({})", hits.len())),
                 (
-                    ScannerDockTab::Watchlist,
-                    format!("Watchlist ({})", rows.len()),
+                    ScannerDockTab::Breadth,
+                    format!("Breadth ({breadth_count})"),
                 ),
-                (ScannerDockTab::Signals, format!("Signals ({})", hits.len())),
             ] {
                 let selected = self.scanner_tab == tab;
                 let fill = if selected {
@@ -8871,7 +9086,7 @@ impl SumiWorkstationApp {
                 } else {
                     Stroke::new(1.0, palette::BORDER_SUBTLE)
                 };
-                let btn = Button::new(RichText::new(lbl).monospace().strong().size(10.5).color(
+                let btn = Button::new(RichText::new(lbl).monospace().strong().size(10.0).color(
                     if selected {
                         Color32::WHITE
                     } else {
@@ -8880,132 +9095,134 @@ impl SumiWorkstationApp {
                 ))
                 .fill(fill)
                 .stroke(stroke)
-                .min_size(Vec2::new(half_w, 22.0));
+                .min_size(Vec2::new(third_w, 22.0));
                 if ui.add(btn).clicked() {
                     self.scanner_tab = tab;
                 }
             }
         });
 
-        // 2. Shared Search & Filter Card
-        Frame::new()
-            .fill(Color32::from_rgb(19, 24, 35))
-            .corner_radius(CornerRadius::same(4))
-            .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
-            .inner_margin(Margin::symmetric(6, 5))
-            .show(ui, |ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
-                ui.horizontal(|ui| {
-                    let has_filter = !self.scanner_filter.search_query.is_empty()
-                        || self.scanner_filter.signal_filter.is_some()
-                        || self.scanner_filter.regime_filter.is_some()
-                        || self.scanner_filter.direction_filter.is_some()
-                        || self.scanner_filter.only_active_signals;
-                    let edit_w =
-                        (ui.available_width() - if has_filter { 38.0 } else { 4.0 }).max(90.0);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.scanner_filter.search_query)
-                            .desired_width(edit_w)
-                            .hint_text("Search symbol / regime / sig")
-                            .font(egui::FontId::monospace(10.5)),
-                    );
-                    truncate_utf8_bytes(&mut self.scanner_filter.search_query, 64);
-                    if has_filter
-                        && ui
-                            .button(RichText::new("Clr").monospace().size(9.5))
-                            .clicked()
-                    {
-                        self.scanner_filter = ScannerFilter::default();
-                    }
-                });
-
-                ui.horizontal_wrapped(|ui| {
-                    if self.scanner_tab == ScannerDockTab::Watchlist {
-                        let _ = indicator_toggle_pill(
-                            ui,
-                            &mut self.scanner_filter.only_active_signals,
-                            "Sig Only",
-                            palette::ALERT_ARMED_AMBER,
+        // 2. Shared Search & Filter Card (Watchlist & Signals only)
+        if self.scanner_tab != ScannerDockTab::Breadth {
+            Frame::new()
+                .fill(Color32::from_rgb(19, 24, 35))
+                .corner_radius(CornerRadius::same(4))
+                .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                .inner_margin(Margin::symmetric(6, 5))
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+                    ui.horizontal(|ui| {
+                        let has_filter = !self.scanner_filter.search_query.is_empty()
+                            || self.scanner_filter.signal_filter.is_some()
+                            || self.scanner_filter.regime_filter.is_some()
+                            || self.scanner_filter.direction_filter.is_some()
+                            || self.scanner_filter.only_active_signals;
+                        let edit_w =
+                            (ui.available_width() - if has_filter { 38.0 } else { 4.0 }).max(90.0);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.scanner_filter.search_query)
+                                .desired_width(edit_w)
+                                .hint_text("Search symbol / regime / sig")
+                                .font(egui::FontId::monospace(10.5)),
                         );
-                    }
-                    for (dir_opt, lbl) in [
-                        (None, "All"),
-                        (Some(SignalDirection::Bullish), "Bull"),
-                        (Some(SignalDirection::Bearish), "Bear"),
-                    ] {
-                        if ui
-                            .selectable_label(
-                                self.scanner_filter.direction_filter == dir_opt,
-                                RichText::new(lbl).monospace().size(10.0),
-                            )
-                            .clicked()
+                        truncate_utf8_bytes(&mut self.scanner_filter.search_query, 64);
+                        if has_filter
+                            && ui
+                                .button(RichText::new("Clr").monospace().size(9.5))
+                                .clicked()
                         {
-                            self.scanner_filter.direction_filter = dir_opt;
+                            self.scanner_filter = ScannerFilter::default();
                         }
-                    }
+                    });
 
-                    if self.scanner_tab == ScannerDockTab::Signals {
-                        ui.separator();
-                        for lb in [30_usize, 80, 180] {
+                    ui.horizontal_wrapped(|ui| {
+                        if self.scanner_tab == ScannerDockTab::Watchlist {
+                            let _ = indicator_toggle_pill(
+                                ui,
+                                &mut self.scanner_filter.only_active_signals,
+                                "Sig Only",
+                                palette::ALERT_ARMED_AMBER,
+                            );
+                        }
+                        for (dir_opt, lbl) in [
+                            (None, "All"),
+                            (Some(SignalDirection::Bullish), "Bull"),
+                            (Some(SignalDirection::Bearish), "Bear"),
+                        ] {
                             if ui
                                 .selectable_label(
-                                    self.signal_lookback_bars == lb,
-                                    RichText::new(format!("{lb}B")).monospace().size(10.0),
+                                    self.scanner_filter.direction_filter == dir_opt,
+                                    RichText::new(lbl).monospace().size(10.0),
                                 )
                                 .clicked()
                             {
-                                self.signal_lookback_bars = lb;
+                                self.scanner_filter.direction_filter = dir_opt;
                             }
                         }
-                    }
-                });
 
-                ui.horizontal(|ui| {
-                    let reg_lbl = self
-                        .scanner_filter
-                        .regime_filter
-                        .map_or("Regime: All", MarketRegime::short_label);
-                    egui::ComboBox::from_id_salt("scanner_regime_combo")
-                        .width(102.0)
-                        .selected_text(RichText::new(reg_lbl).monospace().size(10.0))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut self.scanner_filter.regime_filter,
-                                None,
-                                "All Regimes",
-                            );
-                            for reg in MarketRegime::ALL_FILTERABLE {
+                        if self.scanner_tab == ScannerDockTab::Signals {
+                            ui.separator();
+                            for lb in [30_usize, 80, 180] {
+                                if ui
+                                    .selectable_label(
+                                        self.signal_lookback_bars == lb,
+                                        RichText::new(format!("{lb}B")).monospace().size(10.0),
+                                    )
+                                    .clicked()
+                                {
+                                    self.signal_lookback_bars = lb;
+                                }
+                            }
+                        }
+                    });
+
+                    ui.horizontal(|ui| {
+                        let reg_lbl = self
+                            .scanner_filter
+                            .regime_filter
+                            .map_or("Regime: All", MarketRegime::short_label);
+                        egui::ComboBox::from_id_salt("scanner_regime_combo")
+                            .width(102.0)
+                            .selected_text(RichText::new(reg_lbl).monospace().size(10.0))
+                            .show_ui(ui, |ui| {
                                 ui.selectable_value(
                                     &mut self.scanner_filter.regime_filter,
-                                    Some(reg),
-                                    format!("{} ({})", reg.full_label(), reg.short_label()),
+                                    None,
+                                    "All Regimes",
                                 );
-                            }
-                        });
+                                for reg in MarketRegime::ALL_FILTERABLE {
+                                    ui.selectable_value(
+                                        &mut self.scanner_filter.regime_filter,
+                                        Some(reg),
+                                        format!("{} ({})", reg.full_label(), reg.short_label()),
+                                    );
+                                }
+                            });
 
-                    let sig_lbl = self
-                        .scanner_filter
-                        .signal_filter
-                        .map_or("Sig: All", ScanSignalKind::short_label);
-                    egui::ComboBox::from_id_salt("scanner_sig_combo")
-                        .width(102.0)
-                        .selected_text(RichText::new(sig_lbl).monospace().size(10.0))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut self.scanner_filter.signal_filter,
-                                None,
-                                "All Signals",
-                            );
-                            for sig in ScanSignalKind::ALL {
+                        let sig_lbl = self
+                            .scanner_filter
+                            .signal_filter
+                            .map_or("Sig: All", ScanSignalKind::short_label);
+                        egui::ComboBox::from_id_salt("scanner_sig_combo")
+                            .width(102.0)
+                            .selected_text(RichText::new(sig_lbl).monospace().size(10.0))
+                            .show_ui(ui, |ui| {
                                 ui.selectable_value(
                                     &mut self.scanner_filter.signal_filter,
-                                    Some(sig),
-                                    format!("{} — {}", sig.short_label(), sig.full_label()),
+                                    None,
+                                    "All Signals",
                                 );
-                            }
-                        });
+                                for sig in ScanSignalKind::ALL {
+                                    ui.selectable_value(
+                                        &mut self.scanner_filter.signal_filter,
+                                        Some(sig),
+                                        format!("{} — {}", sig.short_label(), sig.full_label()),
+                                    );
+                                }
+                            });
+                    });
                 });
-            });
+        }
 
         // 3. Sub-Tab Body
         match self.scanner_tab {
@@ -9339,6 +9556,497 @@ impl SumiWorkstationApp {
                     let _ = self.start_scanner_signal_replay(hit, intent);
                 }
             }
+            ScannerDockTab::Breadth => {
+                self.render_market_breadth_tab(ui);
+            }
+        }
+    }
+
+    fn resolve_instrument_preset_symbol(
+        &self,
+        instrument_id: &str,
+        symbol: &str,
+    ) -> Option<(DataSourcePreset, String)> {
+        if let Some(entry) = self
+            .watchlist_universe
+            .iter()
+            .find(|e| e.instrument_id == instrument_id)
+        {
+            Some((entry.preset, entry.symbol.clone()))
+        } else if let Some(entry) = self
+            .custom_peer_feeds
+            .iter()
+            .find(|e| e.instrument_id == instrument_id)
+        {
+            Some((DataSourcePreset::CustomFile, entry.symbol.clone()))
+        } else if instrument_id.starts_with("Preset:Synth:") {
+            Some((DataSourcePreset::SyntheticVnindex, symbol.to_owned()))
+        } else {
+            None
+        }
+    }
+
+    fn render_market_breadth_tab(&mut self, ui: &mut egui::Ui) {
+        let snap = self.breadth_snapshot_cache.clone();
+        let mut clicked_target: Option<(DataSourcePreset, String)> = None;
+
+        let quadrant_color = |q: RrgQuadrant| -> Color32 {
+            match q {
+                RrgQuadrant::Leading => palette::BULLISH,
+                RrgQuadrant::Weakening => palette::ALERT_ARMED_AMBER,
+                RrgQuadrant::Lagging => palette::BEARISH,
+                RrgQuadrant::Improving => palette::ACCENT_BLUE,
+            }
+        };
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(5.0, 6.0);
+
+                // A. Breadth Summary Card (`AT05`/`AT09` Aggregate Money Flow + `AT17` VN30 vs Universe)
+                Frame::new()
+                    .fill(Color32::from_rgb(19, 24, 35))
+                    .corner_radius(CornerRadius::same(4))
+                    .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                    .inner_margin(Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        let ts_str = snap
+                            .evaluated_timestamp
+                            .map_or_else(|| "—".to_owned(), format_utc_date);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "BREADTH · {} ({})",
+                                    snap.benchmark_symbol, snap.participating_count
+                                ))
+                                .monospace()
+                                .strong()
+                                .size(10.2)
+                                .color(palette::TEXT_PRIMARY),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        RichText::new(ts_str)
+                                            .monospace()
+                                            .size(9.5)
+                                            .color(palette::TEXT_MUTED),
+                                    );
+                                },
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "A/D {}/{} ({:.2}x)",
+                                    snap.advancers, snap.decliners, snap.adv_dec_ratio
+                                ))
+                                .monospace()
+                                .size(10.0)
+                                .color(
+                                    if snap.advancers >= snap.decliners {
+                                        palette::BULLISH
+                                    } else {
+                                        palette::BEARISH
+                                    },
+                                ),
+                            );
+                            ui.label(
+                                RichText::new(format!(
+                                    ">SMA20 {:.0}%  >EMA50 {:.0}%",
+                                    snap.pct_above_sma20, snap.pct_above_ema50
+                                ))
+                                .monospace()
+                                .size(9.8)
+                                .color(palette::TEXT_MUTED),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "VN30({}) Flow {:.1}% Buy",
+                                    snap.vn30_participating_count, snap.vn30_money_flow_buy_pct
+                                ))
+                                .monospace()
+                                .size(9.8)
+                                .color(
+                                    if snap.vn30_money_flow_buy_pct >= 50.0 {
+                                        palette::BULLISH
+                                    } else {
+                                        palette::BEARISH
+                                    },
+                                ),
+                            );
+                            ui.label(
+                                RichText::new(format!(
+                                    "Univ {:.1}% · Val {}",
+                                    snap.money_flow_buy_pct,
+                                    format_compact_volume_axis(snap.total_traded_value, None)
+                                ))
+                                .monospace()
+                                .size(9.5)
+                                .color(palette::TEXT_MUTED),
+                            );
+                        });
+                        ui.label(
+                            RichText::new(format!(
+                                "Lead {} · Weak {} · Lag {} · Impr {}",
+                                snap.quadrant_counts[0],
+                                snap.quadrant_counts[1],
+                                snap.quadrant_counts[2],
+                                snap.quadrant_counts[3],
+                            ))
+                            .monospace()
+                            .size(9.5)
+                            .color(palette::TEXT_MUTED),
+                        );
+                    });
+
+                // B. Interactive 2D 4-Quadrant RRG Canvas
+                let canvas_w = ui.available_width().max(180.0);
+                let (canvas_rect, resp) =
+                    ui.allocate_exact_size(Vec2::new(canvas_w, 184.0), egui::Sense::click());
+                let painter = ui.painter_at(canvas_rect);
+                painter.rect_filled(canvas_rect, 4.0, Color32::from_rgb(15, 19, 28));
+                painter.rect_stroke(
+                    canvas_rect,
+                    4.0,
+                    Stroke::new(1.0, palette::BORDER_SUBTLE),
+                    egui::StrokeKind::Inside,
+                );
+
+                let mut max_dev_x = 2.0_f64;
+                let mut max_dev_y = 2.0_f64;
+                for rot in &snap.rotations {
+                    for &(rx, my) in &rot.trail {
+                        max_dev_x = max_dev_x.max((rx - 100.0).abs() * 1.18);
+                        max_dev_y = max_dev_y.max((my - 100.0).abs() * 1.18);
+                    }
+                }
+                let pad_rect = canvas_rect.shrink(12.0);
+                let map_pt = |rx: f64, my: f64| -> egui::Pos2 {
+                    let nx = ((rx - 100.0) / max_dev_x).clamp(-1.0, 1.0) as f32;
+                    let ny = ((my - 100.0) / max_dev_y).clamp(-1.0, 1.0) as f32;
+                    let px = pad_rect.center().x + nx * (pad_rect.width() * 0.5);
+                    let py = pad_rect.center().y - ny * (pad_rect.height() * 0.5);
+                    egui::Pos2::new(px, py)
+                };
+
+                let mid_p = canvas_rect.center();
+                let top_l = egui::Rect::from_min_max(canvas_rect.min, mid_p);
+                let top_r = egui::Rect::from_min_max(
+                    egui::Pos2::new(mid_p.x, canvas_rect.top()),
+                    egui::Pos2::new(canvas_rect.right(), mid_p.y),
+                );
+                let bot_l = egui::Rect::from_min_max(
+                    egui::Pos2::new(canvas_rect.left(), mid_p.y),
+                    egui::Pos2::new(mid_p.x, canvas_rect.bottom()),
+                );
+                let bot_r = egui::Rect::from_min_max(mid_p, canvas_rect.max);
+
+                painter.rect_filled(top_l, 0.0, palette::ACCENT_BLUE.gamma_multiply(0.06));
+                painter.rect_filled(top_r, 0.0, palette::BULLISH.gamma_multiply(0.08));
+                painter.rect_filled(bot_l, 0.0, palette::BEARISH.gamma_multiply(0.08));
+                painter.rect_filled(bot_r, 0.0, palette::ALERT_ARMED_AMBER.gamma_multiply(0.07));
+
+                let cross_stroke = Stroke::new(1.0, palette::BORDER_SUBTLE);
+                painter.line_segment(
+                    [
+                        egui::Pos2::new(canvas_rect.left(), mid_p.y),
+                        egui::Pos2::new(canvas_rect.right(), mid_p.y),
+                    ],
+                    cross_stroke,
+                );
+                painter.line_segment(
+                    [
+                        egui::Pos2::new(mid_p.x, canvas_rect.top()),
+                        egui::Pos2::new(mid_p.x, canvas_rect.bottom()),
+                    ],
+                    cross_stroke,
+                );
+
+                let q_font = egui::FontId::monospace(8.5);
+                painter.text(
+                    canvas_rect.left_top() + Vec2::new(4.0, 3.0),
+                    egui::Align2::LEFT_TOP,
+                    "IMPROVING",
+                    q_font.clone(),
+                    palette::ACCENT_BLUE.gamma_multiply(0.75),
+                );
+                painter.text(
+                    canvas_rect.right_top() + Vec2::new(-4.0, 3.0),
+                    egui::Align2::RIGHT_TOP,
+                    "LEADING",
+                    q_font.clone(),
+                    palette::BULLISH.gamma_multiply(0.85),
+                );
+                painter.text(
+                    canvas_rect.left_bottom() + Vec2::new(4.0, -3.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    "LAGGING",
+                    q_font.clone(),
+                    palette::BEARISH.gamma_multiply(0.80),
+                );
+                painter.text(
+                    canvas_rect.right_bottom() + Vec2::new(-4.0, -3.0),
+                    egui::Align2::RIGHT_BOTTOM,
+                    "WEAKENING",
+                    q_font,
+                    palette::ALERT_ARMED_AMBER.gamma_multiply(0.85),
+                );
+
+                let click_pos = resp
+                    .clicked()
+                    .then(|| resp.interact_pointer_pos())
+                    .flatten();
+                let hover_pos = resp.hover_pos();
+                let mut hovered_rot: Option<&SymbolBreadthRotation> = None;
+                let inner_bounds = canvas_rect.shrink2(Vec2::new(4.0, 3.0));
+
+                let mut placed_obstacles: Vec<egui::Rect> =
+                    Vec::with_capacity(snap.rotations.len() * 2 + 8);
+                // Seed quadrant corner headers & origin intersection as protected obstacle rects.
+                placed_obstacles.push(egui::Rect::from_min_size(
+                    canvas_rect.left_top() + Vec2::new(2.0, 2.0),
+                    Vec2::new(62.0, 13.0),
+                ));
+                placed_obstacles.push(egui::Rect::from_min_size(
+                    egui::Pos2::new(canvas_rect.right() - 56.0, canvas_rect.top() + 2.0),
+                    Vec2::new(54.0, 13.0),
+                ));
+                placed_obstacles.push(egui::Rect::from_min_size(
+                    egui::Pos2::new(canvas_rect.left() + 2.0, canvas_rect.bottom() - 15.0),
+                    Vec2::new(54.0, 13.0),
+                ));
+                placed_obstacles.push(egui::Rect::from_min_size(
+                    egui::Pos2::new(canvas_rect.right() - 66.0, canvas_rect.bottom() - 15.0),
+                    Vec2::new(64.0, 13.0),
+                ));
+                placed_obstacles.push(egui::Rect::from_center_size(mid_p, Vec2::splat(8.0)));
+
+                // Pass 1: Draw all rotation trails & head markers, registering dot bounding boxes.
+                let mut draw_items: Vec<(&SymbolBreadthRotation, egui::Pos2, Color32, bool)> =
+                    Vec::with_capacity(snap.rotations.len());
+                for rot in &snap.rotations {
+                    let col = quadrant_color(rot.quadrant);
+                    if rot.trail.len() >= 2 {
+                        let pts: Vec<egui::Pos2> =
+                            rot.trail.iter().map(|&(rx, my)| map_pt(rx, my)).collect();
+                        painter.add(egui::Shape::line(
+                            pts,
+                            Stroke::new(1.1, col.gamma_multiply(0.55)),
+                        ));
+                    }
+                    let head = map_pt(rot.rs_ratio, rot.rs_momentum);
+                    let is_active_sym = rot.symbol.eq_ignore_ascii_case(&self.symbol);
+                    painter.circle_filled(head, if is_active_sym { 4.2 } else { 3.2 }, col);
+                    if is_active_sym {
+                        painter.circle_stroke(head, 6.2, Stroke::new(1.2, Color32::WHITE));
+                    }
+                    placed_obstacles.push(egui::Rect::from_center_size(
+                        head,
+                        Vec2::splat(if is_active_sym { 14.0 } else { 10.0 }),
+                    ));
+                    draw_items.push((rot, head, col, is_active_sym));
+
+                    if let Some(hp) = hover_pos
+                        && hp.distance(head) <= 12.0
+                    {
+                        hovered_rot = Some(rot);
+                    }
+                    if let Some(cp) = click_pos
+                        && cp.distance(head) <= 14.0
+                        && clicked_target.is_none()
+                    {
+                        clicked_target =
+                            self.resolve_instrument_preset_symbol(&rot.instrument_id, &rot.symbol);
+                    }
+                }
+
+                // Pass 2: Place active symbol label first, then peers in multi-ring candidate search.
+                draw_items.sort_by_key(|item| if item.3 { 0_u8 } else { 1_u8 });
+                let lbl_font = egui::FontId::monospace(8.6);
+                let pad = Vec2::new(2.5, 2.0);
+                for (rot, head, col, is_active_sym) in draw_items {
+                    let text_col = if is_active_sym {
+                        Color32::WHITE
+                    } else {
+                        palette::TEXT_PRIMARY
+                    };
+                    let galley =
+                        painter.layout_no_wrap(rot.symbol.clone(), lbl_font.clone(), text_col);
+                    let sz = galley.size();
+                    let candidates = [
+                        Vec2::new(7.0, -sz.y * 0.5),
+                        Vec2::new(-7.0 - sz.x, -sz.y * 0.5),
+                        Vec2::new(-sz.x * 0.5, -8.0 - sz.y),
+                        Vec2::new(-sz.x * 0.5, 8.0),
+                        Vec2::new(7.0, -sz.y - 6.0),
+                        Vec2::new(7.0, 6.0),
+                        Vec2::new(-7.0 - sz.x, -sz.y - 6.0),
+                        Vec2::new(-7.0 - sz.x, 6.0),
+                        Vec2::new(16.0, -sz.y - 12.0),
+                        Vec2::new(16.0, 12.0),
+                        Vec2::new(-16.0 - sz.x, -sz.y - 12.0),
+                        Vec2::new(-16.0 - sz.x, 12.0),
+                        Vec2::new(-sz.x * 0.5, -20.0 - sz.y),
+                        Vec2::new(-sz.x * 0.5, 20.0),
+                        Vec2::new(26.0, -sz.y * 0.5 - 16.0),
+                        Vec2::new(-26.0 - sz.x, -sz.y * 0.5 + 16.0),
+                        Vec2::new(26.0, -sz.y * 0.5 + 16.0),
+                        Vec2::new(-26.0 - sz.x, -sz.y * 0.5 - 16.0),
+                    ];
+                    let mut best_pos = head + candidates[0];
+                    let mut best_rect = egui::Rect::from_min_size(best_pos, sz);
+                    let mut best_cost = f32::INFINITY;
+                    for &offset in &candidates {
+                        let mut tl = head + offset;
+                        tl.x = tl.x.clamp(
+                            inner_bounds.left(),
+                            (inner_bounds.right() - sz.x).max(inner_bounds.left()),
+                        );
+                        tl.y = tl.y.clamp(
+                            inner_bounds.top(),
+                            (inner_bounds.bottom() - sz.y).max(inner_bounds.top()),
+                        );
+                        let cand_rect = egui::Rect::from_min_size(tl, sz).expand2(pad);
+                        let mut overlap_area = 0.0_f32;
+                        for prev in &placed_obstacles {
+                            let inter = cand_rect.intersect(*prev);
+                            if inter.is_positive() {
+                                overlap_area += inter.width() * inter.height();
+                            }
+                        }
+                        let straddles_x =
+                            cand_rect.left() < mid_p.x + 1.0 && cand_rect.right() > mid_p.x - 1.0;
+                        let straddles_y =
+                            cand_rect.top() < mid_p.y + 1.0 && cand_rect.bottom() > mid_p.y - 1.0;
+                        let axis_pen = if straddles_x { 12.0 } else { 0.0 }
+                            + if straddles_y { 12.0 } else { 0.0 };
+                        let dist = cand_rect.center().distance(head);
+                        let cost = overlap_area * 1000.0 + axis_pen + dist * 0.12;
+                        if cost < best_cost {
+                            best_cost = cost;
+                            best_pos = tl;
+                            best_rect = cand_rect;
+                        }
+                    }
+                    placed_obstacles.push(best_rect);
+                    let nearest_pt = egui::Pos2::new(
+                        head.x.clamp(best_rect.left(), best_rect.right()),
+                        head.y.clamp(best_rect.top(), best_rect.bottom()),
+                    );
+                    if head.distance(nearest_pt) > 10.0 {
+                        painter.line_segment(
+                            [head, nearest_pt],
+                            Stroke::new(0.7, col.gamma_multiply(0.55)),
+                        );
+                    }
+                    painter.galley(best_pos, galley, text_col);
+                }
+                if let Some(rot) = hovered_rot {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    resp.on_hover_text(format!(
+                        "{} [{}]\nRS-Ratio {:.2} · RS-Mom {:.2}\n1-bar {:+.2}% · Flow {:.1}% Buy",
+                        rot.symbol,
+                        rot.quadrant.full_label(),
+                        rot.rs_ratio,
+                        rot.rs_momentum,
+                        rot.return_1bar_pct,
+                        rot.buy_flow_ratio_pct,
+                    ));
+                }
+
+                // C. Clickable VN30 / Universe Liquidity Heatmap Grid (2 fixed symmetric columns)
+                ui.label(
+                    RichText::new("LIQUIDITY HEATMAP (CLICK TO LOAD)")
+                        .monospace()
+                        .strong()
+                        .size(9.5)
+                        .color(palette::TEXT_MUTED),
+                );
+                let sp_x = 5.0_f32;
+                let tile_w = ((ui.available_width() - sp_x - 2.0) * 0.5).max(80.0);
+                let sym_font = egui::FontId::monospace(9.8);
+                let sub_font = egui::FontId::monospace(8.3);
+                for pair in snap.rotations.chunks(2) {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = sp_x;
+                        for rot in pair {
+                            let is_active = rot.symbol.eq_ignore_ascii_case(&self.symbol);
+                            let ret_c = if rot.return_1bar_pct >= 0.0 {
+                                palette::BULLISH
+                            } else {
+                                palette::BEARISH
+                            };
+                            let intensity =
+                                (rot.return_1bar_pct.abs() as f32 / 4.0).clamp(0.08, 0.34);
+                            let bg = if is_active {
+                                ret_c.gamma_multiply(intensity + 0.12)
+                            } else {
+                                ret_c.gamma_multiply(intensity)
+                            };
+                            let border = if is_active {
+                                Color32::WHITE
+                            } else {
+                                ret_c.gamma_multiply(0.55)
+                            };
+                            let (tile_rect, click) = ui
+                                .allocate_exact_size(Vec2::new(tile_w, 44.0), egui::Sense::click());
+                            let tp = ui.painter().with_clip_rect(tile_rect);
+                            tp.rect_filled(tile_rect, 4.0, bg);
+                            tp.rect_stroke(
+                                tile_rect,
+                                4.0,
+                                Stroke::new(if is_active { 1.4 } else { 1.0 }, border),
+                                egui::StrokeKind::Inside,
+                            );
+                            let inner_r = tile_rect.shrink2(Vec2::new(6.0, 4.0));
+                            let inner_p = ui.painter().with_clip_rect(inner_r);
+                            inner_p.text(
+                                inner_r.left_top(),
+                                egui::Align2::LEFT_TOP,
+                                &rot.symbol,
+                                sym_font.clone(),
+                                Color32::WHITE,
+                            );
+                            inner_p.text(
+                                inner_r.right_top(),
+                                egui::Align2::RIGHT_TOP,
+                                format!("{:+.2}%", rot.return_1bar_pct),
+                                sym_font.clone(),
+                                ret_c,
+                            );
+                            inner_p.text(
+                                inner_r.left_bottom(),
+                                egui::Align2::LEFT_BOTTOM,
+                                format!(
+                                    "{} · {} · {:.0}%B",
+                                    rot.quadrant.short_label(),
+                                    format_compact_volume_axis(rot.traded_value, None),
+                                    rot.buy_flow_ratio_pct,
+                                ),
+                                sub_font.clone(),
+                                palette::TEXT_MUTED,
+                            );
+                            if click.hovered() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
+                            if click.clicked() {
+                                clicked_target = self.resolve_instrument_preset_symbol(
+                                    &rot.instrument_id,
+                                    &rot.symbol,
+                                );
+                            }
+                        }
+                    });
+                }
+            });
+
+        if let Some((preset, sym)) = clicked_target {
+            self.select_watchlist_instrument(preset, &sym);
         }
     }
 
@@ -13422,15 +14130,15 @@ impl SumiWorkstationApp {
         Ok(())
     }
 
-    /// Executes all 3 Retina (`2.0x`) Metal/`wgpu` verification scenarios for `"r04"`, `"r05"`, `"r06"`,
-    /// `"r07"`, `"r08"`, `"r09"`, `"r10"`, `"r11"`, or `"r12"` offscreen in one headless GPU session (zero windows, zero Dock icons, zero occlusion stalls).
+    /// Executes all 3 Retina (`2.0x`) Metal/`wgpu` verification scenarios for `"r04"`..=`"r13"`
+    /// offscreen in one headless GPU session (zero windows, zero Dock icons, zero occlusion stalls).
     pub fn run_offscreen_wgpu_capture_batch(batch_name: &str) -> Result<(), String> {
         if !matches!(
             batch_name,
-            "r04" | "r05" | "r06" | "r07" | "r08" | "r09" | "r10" | "r11" | "r12"
+            "r04" | "r05" | "r06" | "r07" | "r08" | "r09" | "r10" | "r11" | "r12" | "r13"
         ) {
             return Err(format!(
-                "unknown SUMI_CAPTURE_BATCH '{batch_name}' (expected 'r04', 'r05', 'r06', 'r07', 'r08', 'r09', 'r10', 'r11', or 'r12')"
+                "unknown SUMI_CAPTURE_BATCH '{batch_name}' (expected 'r04'..'r13')"
             ));
         }
         std::fs::create_dir_all("docs/evidence")
@@ -13450,6 +14158,7 @@ impl SumiWorkstationApp {
                 "r10" => app.apply_r10_batch_step_state(step),
                 "r11" => app.apply_r11_batch_step_state(step),
                 "r12" => app.apply_r12_batch_step_state(step),
+                "r13" => app.apply_r13_batch_step_state(step),
                 _ => unreachable!(),
             };
             let image = harness.capture_app_frame(&mut app, logical_w, logical_h, 6)?;
@@ -15202,6 +15911,185 @@ impl SumiWorkstationApp {
         }
     }
 
+    fn apply_r13_batch_step_state(
+        &mut self,
+        step: usize,
+    ) -> (u32, u32, &'static str, &'static str) {
+        use crate::indicators::VwapAnchorMode;
+
+        self.exit_replay();
+        self.show_replay_bar = false;
+        self.show_scanner_dock = false;
+        self.show_trading_panel = false;
+        self.show_alerts_panel = false;
+        self.show_strategy_panel = false;
+        self.show_journal_panel = false;
+        self.show_equity_pane = false;
+        self.show_backtest_trades = false;
+        self.command_palette.open = false;
+        self.show_templates_modal = false;
+        self.saved_workspace_templates.clear();
+
+        let builtins = builtin_workspace_templates();
+        match step {
+            0 => {
+                // Scenario 0 (`1280x800` @ `2.0x`): Built-in Template #5 ("VN30 Session Profile & Flow",
+                // `1x2` `VN30F1M 15m` | `FPT 1D`) showcasing Session TPO/POC/VAH/VAL/IB/Naked POC,
+                // Weekly VWAP, and Compact `K`/`M` CVD right-axis formatting.
+                self.apply_workspace_template(&builtins[4]);
+                self.grid_sync.sync_time_range = false;
+                self.pending_grid_time_sync = None;
+                self.indicators.show_market_profile = true;
+                self.indicators.show_vwap = true;
+                self.indicators.show_cvd = true;
+                self.indicators.cvd_reset_mode = CvdResetMode::Session;
+                self.viewport.reset_pane_stretches();
+                self.viewport.cvd_stretch = 0.85;
+                self.viewport.time_scale.set_width(540.0);
+                self.viewport.time_scale.set_bar_spacing(8.0);
+                self.viewport.time_scale.set_right_offset(18.0);
+
+                self.secondary_slots[0].indicators.show_market_profile = true;
+                self.secondary_slots[0].indicators.show_vwap = true;
+                self.secondary_slots[0].indicators.vwap_anchor_mode = VwapAnchorMode::Weekly;
+                self.secondary_slots[0].indicators.show_cvd = true;
+                self.secondary_slots[0].indicators.cvd_reset_mode = CvdResetMode::Cumulative;
+                self.secondary_slots[0].viewport.reset_pane_stretches();
+                self.secondary_slots[0].viewport.cvd_stretch = 0.85;
+                self.secondary_slots[0].viewport.time_scale.set_width(540.0);
+                self.secondary_slots[0]
+                    .viewport
+                    .time_scale
+                    .set_bar_spacing(7.5);
+                self.secondary_slots[0]
+                    .viewport
+                    .time_scale
+                    .set_right_offset(18.0);
+
+                self.active_chart_slot = 0;
+                self.sync_indicators_and_benchmarks();
+                self.sync_secondary_slots();
+                self.pinned_crosshair_timestamp = self
+                    .candles
+                    .get(self.candles.len().saturating_sub(14))
+                    .map(|c| c.timestamp);
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r13_step1_vn30f1m_tpo_compact_cvd.png",
+                    "docs/evidence/r13_step1_vn30f1m_tpo_compact_cvd.json",
+                )
+            }
+            1 => {
+                // Scenario 1 (`1280x800` @ `2.0x`): `2x2` Quad Desk + Left Dock `Breadth` tab open (`340px`)
+                // showing 4-Quadrant `RRG` (`VN30` + Universe vs `VNINDEX`) and Value-Weighted Heatmap.
+                self.apply_workspace_template(&builtins[3]);
+                self.grid_sync.sync_time_range = false;
+                self.pending_grid_time_sync = None;
+                self.indicators.show_market_profile = true;
+                self.indicators.show_vwap = true;
+                self.indicators.vwap_anchor_mode = VwapAnchorMode::Weekly;
+                self.indicators.show_cvd = true;
+                self.indicators.cvd_reset_mode = CvdResetMode::Cumulative;
+                self.viewport.reset_pane_stretches();
+                self.viewport.cvd_stretch = 0.78;
+                self.viewport.time_scale.set_width(420.0);
+                self.viewport.time_scale.set_bar_spacing(7.5);
+                self.viewport.time_scale.set_right_offset(18.0);
+
+                self.secondary_slots[2].indicators.show_market_profile = true;
+                self.secondary_slots[2].indicators.show_vwap = true;
+                for slot in &mut self.secondary_slots {
+                    slot.indicators.show_cvd = true;
+                    slot.viewport.reset_pane_stretches();
+                    slot.viewport.cvd_stretch = 0.78;
+                    slot.viewport.time_scale.set_width(420.0);
+                    slot.viewport.time_scale.set_bar_spacing(7.5);
+                    slot.viewport.time_scale.set_right_offset(18.0);
+                }
+
+                self.show_scanner_dock = true;
+                self.scanner_tab = ScannerDockTab::Breadth;
+                self.active_chart_slot = 0;
+                self.sync_indicators_and_benchmarks();
+                self.sync_secondary_slots();
+                self.sync_scanner_caches();
+                let _ = self.market_breadth_snapshot().participating_count;
+                self.pinned_crosshair_timestamp = self
+                    .candles
+                    .get(self.candles.len().saturating_sub(14))
+                    .map(|c| c.timestamp);
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r13_step2_vn30_breadth_rrg_quad.png",
+                    "docs/evidence/r13_step2_vn30_breadth_rrg_quad.json",
+                )
+            }
+            _ => {
+                // Scenario 2 (`1280x800` @ `2.0x`): Causal Bar Replay mid-series (`68%`) with `1x2`
+                // (`FPT 1D` | `VCB 1D`) + `Breadth` dock proving `DEF-001` truncation of `Naked POC`,
+                // `RRG` trailing trajectories, and Compact CVD axis.
+                self.apply_workspace_template(&builtins[0]);
+                self.grid_layout = MultiChartLayoutKind::SplitVertical1x2;
+                self.active_chart_slot = 0;
+                self.secondary_slots[0].data_source = DataSourcePreset::Vn30Basket;
+                self.secondary_slots[0].symbol = "VCB".to_owned();
+                self.secondary_slots[0].active_timeframe = Timeframe::D1;
+                self.grid_sync.sync_symbol = false;
+                self.grid_sync.sync_time_range = true;
+
+                self.indicators.show_market_profile = true;
+                self.indicators.show_vwap = true;
+                self.indicators.vwap_anchor_mode = VwapAnchorMode::Weekly;
+                self.indicators.show_cvd = true;
+                self.indicators.cvd_reset_mode = CvdResetMode::Cumulative;
+                self.viewport.reset_pane_stretches();
+                self.viewport.cvd_stretch = 0.78;
+
+                self.secondary_slots[0].indicators = self.indicators.clone();
+                self.secondary_slots[0].viewport.reset_pane_stretches();
+                self.secondary_slots[0].viewport.cvd_stretch = 0.78;
+
+                let n_base = self.base_candles.len();
+                let replay_cut = ((n_base * 68) / 100).max(30).min(n_base.saturating_sub(8));
+                let _ = self.start_replay_at_base_index(replay_cut);
+                self.show_replay_bar = true;
+                self.show_scanner_dock = true;
+                self.scanner_tab = ScannerDockTab::Breadth;
+
+                self.viewport.time_scale.set_width(360.0);
+                self.viewport.time_scale.set_bar_spacing(6.2);
+                self.viewport.time_scale.set_right_offset(14.0);
+                self.secondary_slots[0].viewport.time_scale.set_width(360.0);
+                self.secondary_slots[0]
+                    .viewport
+                    .time_scale
+                    .set_bar_spacing(6.2);
+                self.secondary_slots[0]
+                    .viewport
+                    .time_scale
+                    .set_right_offset(14.0);
+
+                self.sync_indicators_and_benchmarks();
+                self.sync_secondary_slots();
+                self.sync_scanner_caches();
+                let _ = self.market_breadth_snapshot().participating_count;
+                self.pinned_crosshair_timestamp = self
+                    .candles
+                    .get(self.candles.len().saturating_sub(8))
+                    .map(|c| c.timestamp);
+                self.pending_grid_time_sync = Some(0);
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r13_step3_replay_causal_tpo_breadth.png",
+                    "docs/evidence/r13_step3_replay_causal_tpo_breadth.json",
+                )
+            }
+        }
+    }
+
     fn persist_capture_artifacts(
         &self,
         screenshot_path: &str,
@@ -15289,8 +16177,17 @@ impl SumiWorkstationApp {
             let pinned_xhair_json = self
                 .pinned_crosshair_timestamp
                 .map_or_else(|| "null".to_owned(), |ts| ts.to_string());
+            let scanner_tab_lbl = match self.scanner_tab {
+                ScannerDockTab::Watchlist => "Watchlist",
+                ScannerDockTab::Signals => "Signals",
+                ScannerDockTab::Breadth => "Breadth",
+            };
+            let cvd_axis_mode_lbl = match self.viewport.cvd_price_scale.format_mode() {
+                crate::viewport::PriceAxisFormatMode::Standard => "Standard",
+                crate::viewport::PriceAxisFormatMode::CompactVolume => "CompactVolume",
+            };
             let json = format!(
-                "{{\n  \"symbol\": \"{}\",\n  \"timeframe\": \"{}\",\n  \"base_timeframe\": \"{}\",\n  \"data_source\": \"{}\",\n  \"available_symbols\": [{}],\n  \"base_candles\": {},\n  \"total_candles\": {},\n  \"culled_candles\": {},\n  \"rendered_candles\": {},\n  \"conflation_factor\": {},\n  \"bar_spacing\": {:.6},\n  \"right_offset\": {:.6},\n  \"scale_mode\": \"{}\",\n  \"auto_scale\": {},\n  \"pane_count\": {},\n  \"active_overlay_count\": {},\n  \"drawing_count\": {},\n  \"active_drawing_tool\": \"{}\",\n  \"selected_drawing_id\": {},\n  \"magnet_mode\": \"{}\",\n  \"replay_active\": {},\n  \"replay_status\": \"{}\",\n  \"replay_base_cursor\": {},\n  \"replay_step_unit\": \"{}\",\n  \"show_trading_panel\": {},\n  \"show_scanner_dock\": {},\n  \"show_alerts_panel\": {},\n  \"show_strategy_panel\": {},\n  \"show_journal_panel\": {},\n  \"show_equity_pane\": {},\n  \"equity_pane_source\": \"{}\",\n  \"equity_pane_active\": {},\n  \"show_vwap\": {},\n  \"show_vrvp\": {},\n  \"show_rs\": {},\n  \"show_compare_overlay\": {},\n  \"compare_benchmark\": {},\n  \"vrvp_poc_price\": {},\n  \"active_frvp_count\": {},\n  \"rs_stretch\": {:.3},\n  \"grid_layout\": \"{}\",\n  \"grid_slot_count\": {},\n  \"active_chart_slot\": {},\n  \"sync_crosshair\": {},\n  \"sync_time_range\": {},\n  \"show_ichimoku\": {},\n  \"ichimoku_active\": {},\n  \"show_cvd\": {},\n  \"cvd_reset_mode\": \"{}\",\n  \"cvd_pane_active\": {},\n  \"cvd_stretch\": {:.3},\n  \"saved_template_count\": {},\n  \"pinned_crosshair_timestamp\": {},\n  \"active_venue\": \"{}\",\n  \"journal_total_entries\": {},\n  \"journal_visible_entries\": {},\n  \"journal_discipline_pct\": {:.2},\n  \"wfo_verdict\": {},\n  \"wfo_wfe_pct\": {},\n  \"portfolio_return_pct\": {:.4},\n  \"portfolio_dd_reduction_pct\": {:.4},\n  \"show_backtest_trades\": {},\n  \"rendered_backtest_trades\": {},\n  \"backtest_preset\": {},\n  \"backtest_trade_count\": {},\n  \"backtest_return_pct\": {:.4},\n  \"backtest_max_dd_pct\": {:.4},\n  \"backtest_sharpe\": {},\n  \"backtest_robustness\": {},\n  \"command_palette_open\": {},\n  \"alert_rule_count\": {},\n  \"alert_trigger_count\": {},\n  \"active_alert_lines\": {},\n  \"rendered_alert_markers\": {},\n  \"scanner_signal_revealed\": {},\n  \"active_price_lines\": {},\n  \"rendered_fill_markers\": {},\n  \"equity\": {:.2},\n  \"net_pnl\": {:.2},\n  \"fill_count\": {},\n  \"closed_trade_count\": {},\n  \"pending_order_count\": {},\n  \"open_position_side\": {},\n  \"stretches\": [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}],\n  \"base_value\": {:.4},\n  \"screenshot_px\": [{}, {}],\n  \"outer_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"plot_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"price_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"time_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"raw_price_min\": {:.2},\n  \"raw_price_max\": {:.2}\n}}\n",
+                "{{\n  \"symbol\": \"{}\",\n  \"timeframe\": \"{}\",\n  \"base_timeframe\": \"{}\",\n  \"data_source\": \"{}\",\n  \"available_symbols\": [{}],\n  \"base_candles\": {},\n  \"total_candles\": {},\n  \"culled_candles\": {},\n  \"rendered_candles\": {},\n  \"conflation_factor\": {},\n  \"bar_spacing\": {:.6},\n  \"right_offset\": {:.6},\n  \"scale_mode\": \"{}\",\n  \"auto_scale\": {},\n  \"pane_count\": {},\n  \"active_overlay_count\": {},\n  \"drawing_count\": {},\n  \"active_drawing_tool\": \"{}\",\n  \"selected_drawing_id\": {},\n  \"magnet_mode\": \"{}\",\n  \"replay_active\": {},\n  \"replay_status\": \"{}\",\n  \"replay_base_cursor\": {},\n  \"replay_step_unit\": \"{}\",\n  \"show_trading_panel\": {},\n  \"show_scanner_dock\": {},\n  \"show_alerts_panel\": {},\n  \"show_strategy_panel\": {},\n  \"show_journal_panel\": {},\n  \"show_equity_pane\": {},\n  \"equity_pane_source\": \"{}\",\n  \"equity_pane_active\": {},\n  \"show_vwap\": {},\n  \"show_vrvp\": {},\n  \"show_rs\": {},\n  \"show_compare_overlay\": {},\n  \"compare_benchmark\": {},\n  \"vrvp_poc_price\": {},\n  \"active_frvp_count\": {},\n  \"rs_stretch\": {:.3},\n  \"grid_layout\": \"{}\",\n  \"grid_slot_count\": {},\n  \"active_chart_slot\": {},\n  \"sync_crosshair\": {},\n  \"sync_time_range\": {},\n  \"show_ichimoku\": {},\n  \"ichimoku_active\": {},\n  \"show_cvd\": {},\n  \"cvd_reset_mode\": \"{}\",\n  \"cvd_pane_active\": {},\n  \"cvd_stretch\": {:.3},\n  \"saved_template_count\": {},\n  \"vwap_anchor_mode\": \"{}\",\n  \"show_market_profile\": {},\n  \"market_profile_active\": {},\n  \"scanner_tab\": \"{}\",\n  \"breadth_participating_count\": {},\n  \"vn30_participating_count\": {},\n  \"money_flow_buy_pct\": {:.2},\n  \"cvd_axis_format_mode\": \"{}\",\n  \"pinned_crosshair_timestamp\": {},\n  \"active_venue\": \"{}\",\n  \"journal_total_entries\": {},\n  \"journal_visible_entries\": {},\n  \"journal_discipline_pct\": {:.2},\n  \"wfo_verdict\": {},\n  \"wfo_wfe_pct\": {},\n  \"portfolio_return_pct\": {:.4},\n  \"portfolio_dd_reduction_pct\": {:.4},\n  \"show_backtest_trades\": {},\n  \"rendered_backtest_trades\": {},\n  \"backtest_preset\": {},\n  \"backtest_trade_count\": {},\n  \"backtest_return_pct\": {:.4},\n  \"backtest_max_dd_pct\": {:.4},\n  \"backtest_sharpe\": {},\n  \"backtest_robustness\": {},\n  \"command_palette_open\": {},\n  \"alert_rule_count\": {},\n  \"alert_trigger_count\": {},\n  \"active_alert_lines\": {},\n  \"rendered_alert_markers\": {},\n  \"scanner_signal_revealed\": {},\n  \"active_price_lines\": {},\n  \"rendered_fill_markers\": {},\n  \"equity\": {:.2},\n  \"net_pnl\": {:.2},\n  \"fill_count\": {},\n  \"closed_trade_count\": {},\n  \"pending_order_count\": {},\n  \"open_position_side\": {},\n  \"stretches\": [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}],\n  \"base_value\": {:.4},\n  \"screenshot_px\": [{}, {}],\n  \"outer_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"plot_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"price_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"time_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"raw_price_min\": {:.2},\n  \"raw_price_max\": {:.2}\n}}\n",
                 self.symbol,
                 self.timeframe,
                 self.base_timeframe,
@@ -15343,6 +16240,14 @@ impl SumiWorkstationApp {
                 rep.cvd_pane_active,
                 self.viewport.cvd_stretch,
                 self.saved_workspace_templates.len(),
+                self.indicators.vwap_anchor_mode.short_label(),
+                self.indicators.show_market_profile,
+                rep.market_profile_active,
+                scanner_tab_lbl,
+                self.breadth_snapshot_cache.participating_count,
+                self.breadth_snapshot_cache.vn30_participating_count,
+                self.breadth_snapshot_cache.money_flow_buy_pct,
+                cvd_axis_mode_lbl,
                 pinned_xhair_json,
                 self.active_exchange_venue().short_label(),
                 self.journal.entries.len(),
@@ -17613,5 +18518,80 @@ mod tests {
             );
             assert!(sr.rendered_candle_count > 0);
         }
+    }
+
+    #[test]
+    fn r13_primary_cvd_reset_per_slot_palette_sync_and_market_breadth_e2e() {
+        use crate::indicators::VwapAnchorMode;
+        use crate::viewport::PriceAxisFormatMode;
+
+        let mut app = SumiWorkstationApp::default();
+        assert_eq!(
+            app.viewport.cvd_price_scale.format_mode(),
+            PriceAxisFormatMode::CompactVolume
+        );
+
+        // 1. Primary-slot transition (`select_data_source` / `set_timeframe`) must reset
+        //    `cvd_price_scale` auto_scale after manual range locking and keep CompactVolume mode.
+        app.viewport
+            .cvd_price_scale
+            .set_raw_price_range(-500.0, 500.0, 1.0);
+        app.viewport.cvd_price_scale.set_auto_scale(false);
+        assert!(!app.viewport.cvd_price_scale.is_auto_scale());
+        app.select_data_source(DataSourcePreset::IntradayVn30F1m);
+        assert!(app.viewport.cvd_price_scale.is_auto_scale());
+        assert_eq!(
+            app.viewport.cvd_price_scale.format_mode(),
+            PriceAxisFormatMode::CompactVolume
+        );
+
+        app.viewport
+            .cvd_price_scale
+            .set_raw_price_range(-250.0, 250.0, 1.0);
+        app.viewport.cvd_price_scale.set_auto_scale(false);
+        assert!(!app.viewport.cvd_price_scale.is_auto_scale());
+        app.set_timeframe(Timeframe::M15)
+            .expect("switch VN30F1M to 15m");
+        assert!(app.viewport.cvd_price_scale.is_auto_scale());
+
+        // 2. Per-slot CommandPalette indicator toggles + CycleVwapAnchorMode + SyncActiveIndicatorsToAllSlots
+        app.set_grid_layout(MultiChartLayoutKind::SplitVertical1x2);
+        app.active_chart_slot = 1;
+        let orig_primary_mp = app.indicators.show_market_profile;
+        let orig_slot1_anchor = app.secondary_slots[0].indicators.vwap_anchor_mode;
+        assert_eq!(orig_slot1_anchor, VwapAnchorMode::AutoSession);
+
+        app.execute_palette_action(PaletteAction::ToggleIndicator("TPO"));
+        app.execute_palette_action(PaletteAction::CycleVwapAnchorMode);
+        assert!(app.secondary_slots[0].indicators.show_market_profile);
+        assert_ne!(
+            app.secondary_slots[0].indicators.vwap_anchor_mode,
+            VwapAnchorMode::AutoSession
+        );
+        assert_eq!(app.indicators.show_market_profile, orig_primary_mp);
+
+        app.execute_palette_action(PaletteAction::SyncActiveIndicatorsToAllSlots);
+        assert_eq!(app.indicators, app.secondary_slots[0].indicators);
+
+        // 3. Built-in Template #5 + Market Breadth dock tab + VN30/Universe RRG snapshot
+        app.execute_palette_action(PaletteAction::ApplyBuiltinTemplate(4));
+        assert!(app.indicators.show_market_profile);
+        assert_eq!(app.indicators.vwap_anchor_mode, VwapAnchorMode::AutoSession);
+        assert!(app.secondary_slots[0].indicators.show_market_profile);
+        assert_eq!(
+            app.secondary_slots[0].indicators.vwap_anchor_mode,
+            VwapAnchorMode::Weekly
+        );
+
+        app.execute_palette_action(PaletteAction::OpenMarketBreadthTab);
+        assert!(app.show_scanner_dock);
+        assert_eq!(app.scanner_tab, ScannerDockTab::Breadth);
+        let snap = app.market_breadth_snapshot().clone();
+        assert!(
+            snap.participating_count >= 10,
+            "expected >=10 participating universe feeds, got {}",
+            snap.participating_count
+        );
+        assert_eq!(snap.vn30_participating_count, 8);
     }
 }

@@ -1,7 +1,7 @@
 # SUMI TRADING WORKSTATION — DECISION LOG
 
 - **Session Identity (Created):** `SESSION-01-20261110T160909+0700`
-- **Updated By:** `SESSION-R12-20261115T103000+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Updated By:** `SESSION-R13-20261115T163000+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 
 ## Decisions Recorded in Session 01
 
@@ -223,4 +223,18 @@
   1. Add pure `f64`/`i64` WASM-safe `MultiChartLayoutKind` (`MultiChartLayoutKind::{Single1x1, SplitVertical1x2, SplitHorizontal2x1, Quad2x2}`, `MultiChartSyncConfig` for `Sync X`/`Sync T`/`Sync S`/`Sync TF`, `SyncedTimeWindow`, `resolve_linked_crosshair_bar`) and `WorkspaceTemplate` (`WORKSPACE_TEMPLATE_SCHEMA_VERSION = 1`, strict linear-scan RFC 8259 JSON & RON codecs rejecting duplicate/unknown keys and negative/out-of-range dimensions) under `src/viewport/` paired with `SecondaryChartSlot` in `src/app.rs`.
   2. Enforce `DEF-001` causal Bar Replay across multi-timeframe secondary slots via `causal_closed_prefix_len` (`time + span <= replay_cutoff_ts`) while preserving `custom_file` provenance (`CRITIC-R12-13`), zero false crosshair pinning over future whitespace (`CRITIC-R12-04`), and UTC `Sync T` alignment (`CRITIC-R12-06`).
   3. Add `src/indicators/ichimoku.rs` (`Tenkan 9`, `Kijun 26`, `Senkou Span A/B` projected `+26`, strict `None` tail on `Chikou` `-26`) with triangle-split Kumo crossover (`emit_ichimoku_kumo_segment_triangles`), overflow-safe midpoint `(0.5 * lo + 0.5 * hi)`, and `src/indicators/cvd.rs` (`OHLCV_PROXY` `Cumulative` / timezone-aware `Session` reset + `9`-SMA + `OscillatorPaneId::Cvd` + `cvd_price_scale` + `CandleBlockIndex` `16`-bar acceleration and `PlotDataLayerMemo` inside `R11RenderMemo`), holding `Quad 2x2` `200,000`-bar `32x` conflated frames with Kumo + Session VWAP + Session CVD at `1.3035 ms` mean / `1.6077 ms` `p99` (`< 4.0 ms`).
+
+---
+
+## Decisions Recorded in Session R13
+
+### DEC-R13-001 — Session TPO / Market Profile, Multi-Interval `VWAP`, Causal VN30 Breadth / `RRG` (`AT05`/`AT09`/`AT17`/`DEF-001`), Compact `K`/`M`/`B`/`T` `CVD` Right Axis, & Pan-Invariant `WorldBinIntervalAccumulator`
+- **Date:** `2026-11-15`
+- **Status:** Accepted & Shipped (`Milestone R13 / Wave 12`, verified via `181/181` Cargo unit tests, native + `wasm32` `clippy -D warnings`, `--r13` release benchmark `0.2588–2.4689 ms` / `p99 <= 2.8089 ms < 4.0 ms`, `SUMI_CAPTURE_BATCH=r13`, `sumi-critic` `CRITIC_PASS`, and post-build `rea` audit `REA-R13-11`..`12`).
+- **Context:** Milestone R12 left two non-blocking Minor items (`cvd_price_scale.reset_auto_scale()` across primary transitions and an overflow-safe midpoint helper) alongside raw uncompacted `CVD` right-axis numbers overflowing the `86 px` gutter at `10M+`/`1B+` scales. Institutional flow analysis also required session TPO / Market Profile (`POC`, 70% `VAH`/`VAL`, `IB`, `Single Prints`, `Naked POC`), multi-interval `VWAP` anchors, and causal whole-universe Market Breadth + `RRG` rotation (`AT05`/`AT09`/`AT17`/`DEF-001`).
+- **Decision:**
+  1. Add `PriceAxisFormatMode::CompactVolume` (`format_compact_volume_axis`) with post-rounding tier promotion (`K`/`M`/`B`/`T`, signed `-`, `<= 8` chars) on `PriceScaleOptions::sumi_cvd_oscillator()` across grid ticks, cursor pills, linked crosshairs, and CVD drawing badges, alongside clipped axis pills and R12 Minor carry-overs (`cvd_price_scale.reset_auto_scale()` across all primary-slot transitions + `CustomFile` restore, and `safe_midpoint_f64` in `src/chart.rs`).
+  2. Implement pure `f64`/`i64` WASM-safe `src/indicators/market_profile.rs` (`compute_session_market_profiles`, `HistoricalNakedPoc` tracking across `up to 96` prior sessions, `ProfileSessionPeriod` on `IndicatorConfig` & `5` built-in `WorkspaceTemplate` presets, valid-only `ib_bars` counting, batched `egui::Mesh` rendering with `session_w >= 3.0` and off-left `IB` culling), extend `src/indicators/vwap.rs` with `VwapAnchorMode` (`AutoSession`/`Daily`/`Weekly`/`Monthly`/`Yearly`, `"1mo"` monthly alias, zeroed negative-UTC `effective_off` on `D1`/`W1`), and add `WorldBinIntervalAccumulator` + dual-sided `SeriesBlockIndex::range_bounds` conflated `CVD` delta histograms in `src/chart.rs` for pan-invariant sub-pixel envelopes without spike dropping or disjoint session bridging.
+  3. Implement pure `f64`/`i64` WASM-safe `src/scanner/breadth.rs` (`AT09` Aggregate-Before-Ratio value-weighted Money Flow, `AT05` zero-value `50.0` fallback (`money_flow_buy_pct: f64`, `vn30_money_flow_buy_pct: f64`), `AT17` VN30/Universe participation ratios, JdK `RS-Ratio`/`RS-Momentum` 4-quadrant `RRG` trajectories gated strictly by `replay_causal_close_timestamp` (`0` bar lag on `1D`) + `causal_peer_open_cutoff` + `is_active_tail_incomplete()`), and render inside the 340px `Watch`/`Sig`/`Breadth` dock with obstacle-seeded multi-ring `RRG` labels and symmetric `allocate_exact_size` Liquidity Heatmap tiles.
+
 

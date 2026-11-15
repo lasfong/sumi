@@ -1,0 +1,54 @@
+{
+  "milestone": "R13",
+  "wave": "Wave 12",
+  "dec_006_compliance": "Inspected ONLY local Sumi release binary (/Users/mizuhara/workspace/sumi/target/release/sumi-workstation). TradingView Desktop was never touched or inspected.",
+  "artifact": {
+    "path": "/Users/mizuhara/workspace/sumi/target/release/sumi-workstation",
+    "sha256": "df67a0779a0fdc22d547fd36ce5735e9937f85ebb41f7a5f16a2f7e25af4a400",
+    "bytes": 20067456,
+    "format": "mach-o",
+    "architecture": "arm64",
+    "word_size": 64,
+    "endian": "little",
+    "macho_uuid": "BE0F5E47-430A-3EB4-A1DE-59FDA4E6A63A"
+  },
+  "rea_inspections": [
+    {
+      "tool": "inspect_rust_binary",
+      "detail": "summary",
+      "evidence_id": "ev_243309eb199a5fa3b28ec05232b4db83c1530763a081dcf97c7cd037dc138ebd",
+      "parent_evidence_id": "ev_69523e01a4ffe7d0849b28f759a0627f8a2eeee06a50b64475af40d4b7d55c92",
+      "view_digest": "073ca92533fd2d89f6477729b8b78b3972a59fe8a68c218157f70e1d8f5032f0",
+      "summary": {
+        "bytes": 20067456,
+        "format": "macho",
+        "architecture": "arm64",
+        "bits": 64,
+        "byte_order": "little",
+        "auditable_metadata_available": false,
+        "rustc_commit_hashes_count": 1
+      }
+    },
+    {
+      "tool": "inspect_macho",
+      "detail": "summary",
+      "evidence_id": "ev_258606db63cf604fad16195af30e470adaa11906a5348802d1c87da4e7bc097f",
+      "parent_evidence_id": "ev_5d1d8081732178ee43aed076e0c69d216d780770f2993cf255011e5155d7531c",
+      "view_digest": "8c4ea26a37725b389f860f2bb5e6c63d916bba53b584bbb487624416e1b04f36",
+      "summary": {
+        "file_type": "2",
+        "flags": ["0x00a00085"],
+        "uuid": "BE0F5E47-430A-3EB4-A1DE-59FDA4E6A63A",
+        "entrypoints": 1,
+        "architectures": 1,
+        "build_metadata": 1,
+        "load_commands": 30,
+        "dependencies": 14,
+        "imports_returned": 324,
+        "exports_returned": 5211,
+        "segments": 5,
+        "examined": 5587
+      }
+    }
+  ]
+}

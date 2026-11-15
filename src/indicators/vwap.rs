@@ -7,8 +7,90 @@
 //! - Daily (`1D`): resets at local calendar month boundary (`MTD VWAP`).
 //! - Weekly (`1W`): resets at local calendar year boundary (`YTD VWAP`).
 
-use crate::data::{Timeframe, civil_from_days};
+use crate::data::{Timeframe, civil_from_days, weekday_from_days};
 use crate::model::Candle;
+
+/// Anchor reset regime for `VWAP` bands.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
+pub enum VwapAnchorMode {
+    /// Automatic trading-session / timeframe boundary (`session_bucket_key`).
+    #[default]
+    AutoSession,
+    /// Calendar day boundary in the venue's timezone (`YYYY-MM-DD`).
+    Daily,
+    /// ISO Monday `00:00` weekly boundary in the venue's timezone.
+    Weekly,
+    /// Calendar month boundary (`YYYY-MM`).
+    Monthly,
+    /// Calendar year boundary (`YYYY`).
+    Yearly,
+}
+
+impl VwapAnchorMode {
+    #[inline]
+    #[must_use]
+    pub const fn short_label(self) -> &'static str {
+        match self {
+            Self::AutoSession => "Session",
+            Self::Daily => "Daily",
+            Self::Weekly => "Weekly",
+            Self::Monthly => "Monthly",
+            Self::Yearly => "Yearly",
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn cycle_next(self) -> Self {
+        match self {
+            Self::AutoSession => Self::Daily,
+            Self::Daily => Self::Weekly,
+            Self::Weekly => Self::Monthly,
+            Self::Monthly => Self::Yearly,
+            Self::Yearly => Self::AutoSession,
+        }
+    }
+}
+
+/// Computes the deterministic reset bucket for `(timestamp, timeframe, utc_offset_seconds, anchor_mode)`.
+#[inline]
+#[must_use]
+pub fn vwap_bucket_key(
+    timestamp: i64,
+    timeframe: Timeframe,
+    utc_offset_seconds: i64,
+    anchor_mode: VwapAnchorMode,
+) -> i64 {
+    // Daily and Weekly feeds normalize candle timestamps to `00:00:00 UTC`; applying negative
+    // exchange UTC offsets (`EST = -18_000`) to `00:00 UTC` would shift civil dates backward by
+    // one calendar day across Monday, month-start, and Jan-1 boundaries.
+    let effective_off = match timeframe {
+        Timeframe::D1 | Timeframe::W1 => 0,
+        Timeframe::M1 | Timeframe::M5 | Timeframe::M15 | Timeframe::H1 | Timeframe::H4 => {
+            utc_offset_seconds.clamp(-50_400, 50_400)
+        }
+    };
+    match anchor_mode {
+        VwapAnchorMode::AutoSession => session_bucket_key(timestamp, timeframe, effective_off),
+        VwapAnchorMode::Daily => timestamp.saturating_add(effective_off).div_euclid(86_400),
+        VwapAnchorMode::Weekly => {
+            let days = timestamp.saturating_add(effective_off).div_euclid(86_400);
+            days - i64::from(weekday_from_days(days))
+        }
+        VwapAnchorMode::Monthly => {
+            let days = timestamp.saturating_add(effective_off).div_euclid(86_400);
+            let (year, month, _) = civil_from_days(days);
+            i64::from(year).saturating_mul(16) + i64::from(month)
+        }
+        VwapAnchorMode::Yearly => {
+            let days = timestamp.saturating_add(effective_off).div_euclid(86_400);
+            let (year, _, _) = civil_from_days(days);
+            i64::from(year)
+        }
+    }
+}
 
 /// Computed `VWAP` center line, volume-weighted standard-deviation bands, and session reset indices.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -201,12 +283,14 @@ impl WelfordVwapAcc {
     }
 }
 
-/// Computes Exchange-Session `VWAP` with Welford volume-weighted $\pm \text{mult}_1\sigma, \pm \text{mult}_2\sigma$ bands.
+/// Computes `VWAP` with Welford volume-weighted $\pm \text{mult}_1\sigma, \pm \text{mult}_2\sigma$ bands
+/// resetting along [`VwapAnchorMode`] boundaries.
 #[must_use]
-pub fn compute_session_vwap(
+pub fn compute_session_vwap_with_anchor(
     candles: &[Candle],
     timeframe: Timeframe,
     utc_offset_seconds: i64,
+    anchor_mode: VwapAnchorMode,
     mult_1: f64,
     mult_2: f64,
 ) -> VwapBandsOutput {
@@ -233,7 +317,7 @@ pub fn compute_session_vwap(
     let mut acc = WelfordVwapAcc::new();
 
     for (i, c) in candles.iter().enumerate() {
-        let bucket = session_bucket_key(c.timestamp, timeframe, utc_offset_seconds);
+        let bucket = vwap_bucket_key(c.timestamp, timeframe, utc_offset_seconds, anchor_mode);
         if current_bucket != Some(bucket) {
             current_bucket = Some(bucket);
             acc = WelfordVwapAcc::new();
@@ -245,6 +329,25 @@ pub fn compute_session_vwap(
     }
 
     out
+}
+
+/// Computes Exchange-Session `VWAP` with Welford volume-weighted $\pm \text{mult}_1\sigma, \pm \text{mult}_2\sigma$ bands.
+#[must_use]
+pub fn compute_session_vwap(
+    candles: &[Candle],
+    timeframe: Timeframe,
+    utc_offset_seconds: i64,
+    mult_1: f64,
+    mult_2: f64,
+) -> VwapBandsOutput {
+    compute_session_vwap_with_anchor(
+        candles,
+        timeframe,
+        utc_offset_seconds,
+        VwapAnchorMode::AutoSession,
+        mult_1,
+        mult_2,
+    )
 }
 
 /// Computes an `Anchored VWAP (AVWAP)` starting at `anchor_index` forward to `candles.len() - 1`

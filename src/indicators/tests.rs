@@ -1368,3 +1368,342 @@ fn candle_block_index_and_bucket_sum_match_raw_scans_bit_for_bit() {
         assert!((gs - raw_sum).abs() <= raw_sum.abs().max(1.0) * 1e-9);
     }
 }
+
+#[test]
+fn r13_vwap_anchor_buckets_and_session_market_profile_invariants() {
+    use crate::data::Timeframe;
+
+    // 1. Multi-interval VWAP anchor bucket reset boundaries (Daily / Weekly / Monthly / Yearly)
+    // 2026-01-02 (Fri) vs 2026-01-05 (Mon) UTC+0: same Month & Year, different Daily & ISO Week!
+    let fri_ts = 1_767_348_000; // 2026-01-02 10:00:00Z
+    let mon_ts = 1_767_607_200; // 2026-01-05 10:00:00Z
+    let feb_ts = 1_770_026_400; // 2026-02-02 10:00:00Z
+    assert_ne!(
+        vwap_bucket_key(fri_ts, Timeframe::H1, 0, VwapAnchorMode::Daily),
+        vwap_bucket_key(mon_ts, Timeframe::H1, 0, VwapAnchorMode::Daily)
+    );
+    assert_ne!(
+        vwap_bucket_key(fri_ts, Timeframe::H1, 0, VwapAnchorMode::Weekly),
+        vwap_bucket_key(mon_ts, Timeframe::H1, 0, VwapAnchorMode::Weekly)
+    );
+    assert_eq!(
+        vwap_bucket_key(fri_ts, Timeframe::H1, 0, VwapAnchorMode::Monthly),
+        vwap_bucket_key(mon_ts, Timeframe::H1, 0, VwapAnchorMode::Monthly)
+    );
+    assert_ne!(
+        vwap_bucket_key(mon_ts, Timeframe::H1, 0, VwapAnchorMode::Monthly),
+        vwap_bucket_key(feb_ts, Timeframe::H1, 0, VwapAnchorMode::Monthly)
+    );
+    assert_eq!(
+        vwap_bucket_key(mon_ts, Timeframe::H1, 0, VwapAnchorMode::Yearly),
+        vwap_bucket_key(feb_ts, Timeframe::H1, 0, VwapAnchorMode::Yearly)
+    );
+
+    let hourly: Vec<Candle> = (0..120)
+        .map(|i| Candle {
+            timestamp: fri_ts + (i as i64) * 3_600,
+            date_label: format!("bar-{i}"),
+            open: 100.0 + (i as f64) * 0.25,
+            high: 101.0 + (i as f64) * 0.25,
+            low: 99.0 + (i as f64) * 0.25,
+            close: 100.5 + (i as f64) * 0.25,
+            volume: 50_000.0,
+        })
+        .collect();
+    let v_daily = compute_session_vwap_with_anchor(
+        &hourly,
+        Timeframe::H1,
+        0,
+        VwapAnchorMode::Daily,
+        1.0,
+        2.0,
+    );
+    let v_yearly = compute_session_vwap_with_anchor(
+        &hourly,
+        Timeframe::H1,
+        0,
+        VwapAnchorMode::Yearly,
+        1.0,
+        2.0,
+    );
+    assert_eq!(v_daily.vwap.len(), hourly.len());
+    assert_ne!(v_daily.vwap.last(), v_yearly.vwap.last());
+
+    // 2. Session TPO / Market Profile invariants: POC max TPOs, 70% Value Area bounds, IBH >= IBL,
+    //    Single Prints interior, flat-candle guard, and DEF-001 causal Naked POC mitigation.
+    // Build 3 daily sessions on 15m timeframe: Day 0, Day 1 (away from Day 0 POC -> Naked!), Day 2 (mitigates Day 0 POC!)
+    let mut tpo_bars = Vec::new();
+    let day0 = 1_767_574_800_i64; // 2026-01-05 01:00Z
+    // Day 0 (8 bars, clustered around 100..110 with heavy dwell around 105)
+    let d0_ranges = [
+        (100.0, 103.0),
+        (103.0, 107.0),
+        (104.0, 106.0),
+        (104.0, 106.5),
+        (104.5, 106.0),
+        (103.5, 107.0),
+        (107.0, 110.0),
+        (104.0, 106.0),
+    ];
+    for (i, &(l, h)) in d0_ranges.iter().enumerate() {
+        tpo_bars.push(Candle {
+            timestamp: day0 + (i as i64) * 900,
+            date_label: format!("d0-{i}"),
+            open: l + 0.2,
+            high: h,
+            low: l,
+            close: h - 0.2,
+            volume: 10_000.0,
+        });
+    }
+    // Day 1 (6 bars staying strictly >= 120.0, so Day 0 POC ~ 105 stays NAKED at end of Day 1!)
+    for i in 0..6 {
+        tpo_bars.push(Candle {
+            timestamp: day0 + 86_400 + (i as i64) * 900,
+            date_label: format!("d1-{i}"),
+            open: 120.0,
+            high: 124.0,
+            low: 120.0,
+            close: 122.0,
+            volume: 8_000.0,
+        });
+    }
+    let mp_prefix = compute_session_market_profiles(
+        &tpo_bars,
+        Timeframe::M15,
+        MarketProfileConfig {
+            session_period: ProfileSessionPeriod::Daily,
+            utc_offset_seconds: 0,
+            num_bins: 16,
+            value_area_pct: 0.70,
+            ib_bars: 3,
+            max_sessions: 12,
+            extend_naked_poc: true,
+        },
+    );
+    assert_eq!(mp_prefix.profiles.len(), 2);
+    let p0 = &mp_prefix.profiles[0];
+    assert!(p0.val_price <= p0.poc_price && p0.poc_price <= p0.vah_price);
+    assert!(p0.ib_high >= p0.ib_low);
+    assert_eq!(
+        p0.rows[p0.poc_index].tpo_count,
+        p0.rows.iter().map(|r| r.tpo_count).max().unwrap()
+    );
+    assert!(p0.naked_poc_mitigated_index.is_none());
+    assert_eq!(p0.naked_poc_end_index, tpo_bars.len() - 1);
+
+    // Day 2 breaks back down through Day 0 POC (~105), causally mitigating ONLY AFTER prefix!
+    let mut with_day2 = tpo_bars.clone();
+    with_day2.push(Candle {
+        timestamp: day0 + 2 * 86_400,
+        date_label: "d2-0".to_owned(),
+        open: 112.0,
+        high: 112.0,
+        low: 100.0,
+        close: 104.0,
+        volume: 25_000.0,
+    });
+    let mp_full = compute_session_market_profiles(
+        &with_day2,
+        Timeframe::M15,
+        MarketProfileConfig {
+            session_period: ProfileSessionPeriod::Daily,
+            utc_offset_seconds: 0,
+            num_bins: 16,
+            value_area_pct: 0.70,
+            ib_bars: 3,
+            max_sessions: 12,
+            extend_naked_poc: true,
+        },
+    );
+    assert_eq!(
+        mp_full.profiles[0].naked_poc_mitigated_index,
+        Some(tpo_bars.len())
+    );
+    assert_eq!(mp_full.profiles[0].naked_poc_end_index, tpo_bars.len());
+    // Flat zero-range session must never produce NaN/div-by-zero
+    let flat = vec![
+        Candle {
+            timestamp: day0,
+            date_label: "flat".to_owned(),
+            open: 50.0,
+            high: 50.0,
+            low: 50.0,
+            close: 50.0,
+            volume: 100.0,
+        };
+        5
+    ];
+    let mp_flat =
+        compute_session_market_profiles(&flat, Timeframe::M15, MarketProfileConfig::default());
+    assert_eq!(mp_flat.profiles.len(), 1);
+    assert!(mp_flat.profiles[0].poc_price.is_finite());
+}
+
+#[test]
+fn critic_r13_regression_negative_utc_vwap_tpo_valid_ib_and_older_naked_poc() {
+    // 1. Negative UTC offset (EST -18_000) MUST NOT shift 00:00 UTC Daily/Weekly bars backward
+    //    across leap-year Feb-29/Mar-01, Mondays, month-starts, or Jan-01!
+    let start_day_utc = 1_709_164_800_i64; // 2024-02-29 00:00:00 UTC (leap day)
+    let anchors = [
+        VwapAnchorMode::AutoSession,
+        VwapAnchorMode::Daily,
+        VwapAnchorMode::Weekly,
+        VwapAnchorMode::Monthly,
+        VwapAnchorMode::Yearly,
+    ];
+    for day_off in 0..400_i64 {
+        let ts = start_day_utc + day_off * 86_400;
+        for tf in [Timeframe::D1, Timeframe::W1] {
+            for anchor in anchors {
+                let k_utc = vwap_bucket_key(ts, tf, 0, anchor);
+                let k_est = vwap_bucket_key(ts, tf, -18_000, anchor);
+                let k_ict = vwap_bucket_key(ts, tf, 25_200, anchor);
+                assert_eq!(
+                    k_est, k_utc,
+                    "D1/W1 EST negative offset shifted bucket on day_off={day_off} {tf:?} {anchor:?}"
+                );
+                assert_eq!(
+                    k_ict, k_utc,
+                    "D1/W1 ICT positive offset shifted bucket on day_off={day_off} {tf:?} {anchor:?}"
+                );
+            }
+        }
+    }
+
+    // Check explicit transitions on EST D1: 2024-02-29 != 2024-03-01 (Monthly),
+    // 2024-03-01 (Fri) != 2024-03-04 (Mon) (Weekly), 2024-12-31 != 2025-01-01 (Yearly)
+    let feb29 = start_day_utc;
+    let mar01 = feb29 + 86_400;
+    let mar04 = feb29 + 4 * 86_400;
+    assert_ne!(
+        vwap_bucket_key(feb29, Timeframe::D1, -18_000, VwapAnchorMode::Monthly),
+        vwap_bucket_key(mar01, Timeframe::D1, -18_000, VwapAnchorMode::Monthly)
+    );
+    assert_eq!(
+        vwap_bucket_key(mar01, Timeframe::D1, -18_000, VwapAnchorMode::Weekly),
+        vwap_bucket_key(feb29, Timeframe::D1, -18_000, VwapAnchorMode::Weekly)
+    );
+    assert_ne!(
+        vwap_bucket_key(mar01, Timeframe::D1, -18_000, VwapAnchorMode::Weekly),
+        vwap_bucket_key(mar04, Timeframe::D1, -18_000, VwapAnchorMode::Weekly)
+    );
+
+    // 2. Leading invalid (NaN) candles must NOT consume IB bar slots in TPO Profile.
+    let s0 = 1_767_574_800_i64;
+    let ib_candles = vec![
+        Candle {
+            timestamp: s0,
+            date_label: "nan0".to_owned(),
+            open: f64::NAN,
+            high: f64::NAN,
+            low: f64::NAN,
+            close: f64::NAN,
+            volume: 0.0,
+        },
+        Candle {
+            timestamp: s0 + 900,
+            date_label: "nan1".to_owned(),
+            open: 100.0,
+            high: f64::INFINITY,
+            low: 99.0,
+            close: 100.0,
+            volume: 0.0,
+        },
+        Candle {
+            timestamp: s0 + 1800,
+            date_label: "v0".to_owned(),
+            open: 101.0,
+            high: 104.0,
+            low: 100.0,
+            close: 103.0,
+            volume: 1000.0,
+        },
+        Candle {
+            timestamp: s0 + 2700,
+            date_label: "v1".to_owned(),
+            open: 103.0,
+            high: 106.0,
+            low: 102.0,
+            close: 105.0,
+            volume: 1000.0,
+        },
+        Candle {
+            timestamp: s0 + 3600,
+            date_label: "v2_post_ib".to_owned(),
+            open: 105.0,
+            high: 112.0,
+            low: 104.0,
+            close: 111.0,
+            volume: 1000.0,
+        },
+    ];
+    let mp_ib = compute_session_market_profiles(
+        &ib_candles,
+        Timeframe::M15,
+        MarketProfileConfig {
+            session_period: ProfileSessionPeriod::Daily,
+            utc_offset_seconds: 0,
+            num_bins: 12,
+            value_area_pct: 0.70,
+            ib_bars: 2,
+            max_sessions: 8,
+            extend_naked_poc: true,
+        },
+    );
+    assert_eq!(mp_ib.profiles.len(), 1);
+    assert!(
+        (mp_ib.profiles[0].ib_low - 100.0).abs() < 1e-9
+            && (mp_ib.profiles[0].ib_high - 106.0).abs() < 1e-9,
+        "leading invalid bars must not eat ib_bars slots (got IBL={} IBH={})",
+        mp_ib.profiles[0].ib_low,
+        mp_ib.profiles[0].ib_high
+    );
+    assert!((mp_ib.profiles[0].range_high - 112.0).abs() < 1e-9);
+
+    // 3. Unmitigated Naked POC older than `max_sessions` is preserved in `historical_naked_pocs`
+    //    and causally stops when touched by a later session bar.
+    let mut multi_days = Vec::new();
+    for d in 0..4_i64 {
+        let base_px = if d == 0 {
+            100.0
+        } else {
+            150.0 + (d as f64) * 5.0
+        };
+        for b in 0..4_i64 {
+            multi_days.push(Candle {
+                timestamp: s0 + d * 86_400 + b * 900,
+                date_label: format!("d{d}-b{b}"),
+                open: base_px,
+                high: base_px + 3.0,
+                low: base_px - 3.0,
+                close: base_px + 1.0,
+                volume: 5000.0,
+            });
+        }
+    }
+    let mp_old = compute_session_market_profiles(
+        &multi_days,
+        Timeframe::M15,
+        MarketProfileConfig {
+            session_period: ProfileSessionPeriod::Daily,
+            utc_offset_seconds: 0,
+            num_bins: 12,
+            value_area_pct: 0.70,
+            ib_bars: 2,
+            max_sessions: 2,
+            extend_naked_poc: true,
+        },
+    );
+    assert_eq!(mp_old.profiles.len(), 2);
+    assert_eq!(mp_old.historical_naked_pocs.len(), 2);
+    assert!(
+        mp_old.historical_naked_pocs[0]
+            .naked_poc_mitigated_index
+            .is_none()
+    );
+    assert_eq!(
+        mp_old.historical_naked_pocs[0].naked_poc_end_index,
+        multi_days.len() - 1
+    );
+}
