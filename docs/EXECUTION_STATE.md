@@ -1,9 +1,9 @@
 # SUMI TRADING WORKSTATION — EXECUTION STATE
 
-- **Session Identity:** `SESSION-R11-20261114T231200+0700` (`SUMI PROGRAM ORCHESTRATOR`)
-- **Previous Session:** `SESSION-R10-20261114T122730+0700` (`IMPLEMENTATION_PASS` — Committed cleanly at `b06fd69`)
-- **Timestamp (Updated):** `2026-11-15T01:07:30+07:00`
-- **Program Status:** `IMPLEMENTATION_PASS` (`Milestone R11 / Wave 10 Order-Flow Volume Profile VRVP/FRVP, Exchange-Session & Anchored VWAP Bands, Causal RS vs VNINDEX & Rebased Benchmark Comparison Shipped, Critic-Hardened & Independently Audited`)
+- **Session Identity:** `SESSION-R12-20261115T103000+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Previous Session:** `SESSION-R11-20261114T231200+0700` (`IMPLEMENTATION_PASS` — Committed cleanly at `c1ec5bd`)
+- **Timestamp (Updated):** `2026-11-15T13:25:00+07:00`
+- **Program Status:** `IMPLEMENTATION_PASS` (`Milestone R12 / Wave 11 Synchronized Multi-Chart Grid Layout (1x1/1x2/2x1/2x2), Ichimoku Cloud + Cumulative Volume Delta (CVD), & schema_version = 1 Workspace Layout Templates Shipped, Critic-Hardened & Audited`)
 
 ---
 
@@ -11,7 +11,7 @@
 
 - **Working Directory:** `/Users/mizuhara/workspace/sumi`
 - **Git Branch:** `master`
-- **Batch Commit Policy (`DEC-R04-001`):** Authorized by Product Owner on `2026-11-11` — each verified milestone/batch plan is committed cleanly on `master` (`98ec576` for R03, `50a7845` for R04, `b04d2dc` for R05, `0c83290` for R06, `0e76e72` for R07, `62105d6` for R08, `d06ae78` for R09, `b06fd69` for R10; Milestone R11 committed cleanly at the close of Session R11).
+- **Batch Commit Policy (`DEC-R04-001`):** Authorized by Product Owner on `2026-11-11` — each verified milestone/batch plan is committed cleanly on `master` (`98ec576` for R03, `50a7845` for R04, `b04d2dc` for R05, `0c83290` for R06, `0e76e72` for R07, `62105d6` for R08, `d06ae78` for R09, `b06fd69` for R10, `c1ec5bd` for R11; Milestone R12 prepared for clean atomic commit at the close of Session R12).
 - **Git Tags:** `v2.0.0-rc1`, `v2.0.0-rc2` (untouched)
 - **Legacy Project Archive:** Untouched read-only reference at `/Users/mizuhara/workspace/sumi/ARCHIVE`
 - **Authorized Open-Source References (`research_repos/`, gitignored):**
@@ -27,8 +27,8 @@
 - **Crate Dependencies (`Cargo.toml` / `Cargo.lock`):** `0` new dependencies added (`git diff Cargo.toml Cargo.lock` empty).
 - **Antigravity Orchestration (`VERIFIED`):**
   - Durable charter: [`docs/operations/SUMI_ORCHESTRATION_CHARTER.md`](operations/SUMI_ORCHESTRATION_CHARTER.md)
-  - Specialized subagents invoked in R11: `sumi-critic` (`8/8` adversarial findings `B1`–`B3`, `M1`–`M5` remediated with `9` dedicated `critic_r11_regression_*` tests) and `sumi-auditor` (independent read-only audit).
-- **REA MCP (`rea-agents@6.8.0`):** `VERIFIED` — `13` live REA MCP operations (`19` exact 64-hex Evidence IDs: `15` JS/TS + `4` binary) executed in R11 across `ARCHIVE/frontend` (`TechnicalFlowBBViewer.tsx`, `indicatorDomain.ts`, etc.), `LWC v5.2.0` (`histogram-*`, `pane-primitive-wrapper.ts`), and the final R11 release Mach-O binary (`e9dcb085a076ad12d46981a88dbde0459536675deee843c65641fc2c7f0ff6bc`), cumulative `120` live REA operations across R01–R11. Zero contact with TradingView Desktop (`DEC-006`).
+  - Specialized subagents invoked in R12: `sumi-researcher` (verified JS/TS research gate across `ARCHIVE/frontend` & `LWC v5.2.0`), `sumi-critic` (`14/14` adversarial findings `CRITIC-R12-01`..`14` remediated with dedicated regression tests -> Round 2 `VERDICT: CRITIC_PASS`), and `sumi-auditor` (independent read-only audit).
+- **REA MCP (`rea-agents@6.8.0`):** `VERIFIED` — `10` live REA MCP operations (`22` exact 64-hex Evidence IDs: `18` JS/TS + `4` binary) executed in R12 across `ARCHIVE/frontend` (`MultiChartLayout.tsx`, `IchimokuCloudPlugin.ts`, etc.), `LWC v5.2.0` (`time-scale.ts`, etc.), and the final R12 release Mach-O binary (`3574cd4e8b4ca90ca55f640cb5084c1efd6a5b253aad2b145ee077fe9f1d2c2c`), cumulative `130` live REA operations across R01–R12. Zero contact with TradingView Desktop (`DEC-006`).
 
 ---
 
@@ -51,7 +51,10 @@
 | Session R10 — Workstation & Audit | On-chart dual-zone `RiskRewardBox`, Right `Journal` Dock + `Strategy Lab -> WFO` sub-tab, `--r10` benchmark (`101.12 µs` `1K` plans, `5.958 ms` `6,667`-bar WFO, `0.276–0.369 ms` full UI), `19/19` Critic fixes, `sumi-auditor` sign-off & clean commit (`b06fd69`) | **PASS** | `VERIFIED` |
 | Session R11 — Research Gate | `11` live JS/TS REA operations on Archive order-flow/RS & LWC histogram/pane-primitive files → `VOLUME_PROFILE_VWAP_AND_REL_STRENGTH_SPEC.md` | **PASS** | `VERIFIED` (`15` JS/TS + `4` binary 64-hex Evidence IDs) |
 | Session R11 — Wave 10 Engine | Pure `f64`/`i64` WASM-safe `src/indicators/{volume_profile,vwap,relative_strength}.rs` (`VRVP`/`FRVP` + `POC`/`70% VA`, Session & Anchored `VWAP` Welford $\pm 1\sigma/\pm 2\sigma$, `DEF-001` causal `RS vs VNINDEX`) & `FRVP` / `AnchoredVwap` drawings (`src/drawings/`) | **PASS** | `VERIFIED` (`152/152` tests + `wasm32` Clippy) |
-| Session R11 — Workstation & Audit | `VRVP`/`FRVP`/`VWAP`/`AVWAP`/Compare `VNINDEX` + `RS` sub-pane UI, `--r11` benchmark (`14.21 µs` `VRVP(500)`, `725.58 µs` `50k` VWAP, `651.71 µs` `50k` RS, `0.256–3.171 ms` full UI), `8/8` Critic fixes (`B1`–`B3`, `M1`–`M5`), `sumi-auditor` audit & clean commit | **PASS** | `VERIFIED` |
+| Session R11 — Workstation & Audit | `VRVP`/`FRVP`/`VWAP`/`AVWAP`/Compare `VNINDEX` + `RS` sub-pane UI, `--r11` benchmark (`14.21 µs` `VRVP(500)`, `725.58 µs` `50k` VWAP, `651.71 µs` `50k` RS, `0.256–3.171 ms` full UI), `8/8` Critic fixes (`B1`–`B3`, `M1`–`M5`), `sumi-auditor` audit & clean commit (`c1ec5bd`) | **PASS** | `VERIFIED` |
+| Session R12 — Research Gate | `8` live JS/TS REA operations (`18` JS/TS + `4` binary 64-hex Evidence IDs across `ARCHIVE/frontend` `MultiChartLayout.tsx`/`IchimokuCloudPlugin.ts` & `LWC v5.2.0` `time-scale.ts`/plugins + release Mach-O) → `MULTI_CHART_ICHIMOKU_CVD_SPEC.md` | **PASS** | `VERIFIED` |
+| Session R12 — Wave 11 Engine | Pure `f64`/`i64` WASM-safe `src/viewport/{multi_chart,workspace_template}.rs` (`1x1`/`1x2`/`2x1`/`2x2` grid sync, `schema_version = 1` strict `RON`/`JSON` codecs) & `src/indicators/{ichimoku,cvd}.rs` (`9/26/52/+26` Kumo + strict `None` tail `Chikou`, `OHLCV_PROXY` `Cumulative`/`Session` CVD + `9`-SMA, `CandleBlockIndex`) | **PASS** | `VERIFIED` (`174/174` tests + `wasm32` Clippy) |
+| Session R12 — Workstation & Audit | Synced Multi-Chart UI (`Sync X`/`Sync T`/`Sync S`/`Sync TF`), `DEF-001` causal MTF cutoffs, triangle-split Kumo `egui::Mesh`, `OscillatorPaneId::Cvd`, `PlotDataLayerMemo`, `--r12` (`3.288 ms` `50k` Ichimoku, `409.42 µs` `50k` CVD, `102.96 µs` template roundtrip, `0.2320–1.3035 ms` UI / `p99 <= 1.6077 ms`), `14/14` Critic fixes (`CRITIC_PASS`), independent `sumi-auditor` verification & atomic `master` commit | **PASS** | `VERIFIED` |
 
 ---
 
@@ -60,13 +63,13 @@
 ```bash
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
 
-# Format, native + WASM strict Clippy lints, and all 152 automated tests:
+# Format, native + WASM strict Clippy lints, and all 174 automated tests:
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo clippy --target wasm32-unknown-unknown --lib -- -D warnings
 cargo test
 
-# Reproducible R03, R04, R05, R06, R07, R08, R09, R10 & R11 release benchmarks:
+# Reproducible R03, R04, R05, R06, R07, R08, R09, R10, R11 & R12 release benchmarks:
 cargo run --release --example viewport_bench
 cargo run --release --example viewport_bench -- --r04
 cargo run --release --example viewport_bench -- --r05
@@ -76,9 +79,10 @@ cargo run --release --example viewport_bench -- --r08
 cargo run --release --example viewport_bench -- --r09
 cargo run --release --example viewport_bench -- --r10
 cargo run --release --example viewport_bench -- --r11
+cargo run --release --example viewport_bench -- --r12
 
 # Offscreen Apple M1 Metal GPU Retina screenshot + telemetry capture (zero windows, zero focus steal):
-SUMI_CAPTURE_BATCH=r11 cargo run --release
+SUMI_CAPTURE_BATCH=r12 cargo run --release
 
 # Launch interactive native macOS Metal trading workstation:
 cargo run --release
@@ -86,21 +90,21 @@ cargo run --release
 
 ---
 
-## 5. Shipped Code & Benchmark Highlights (`Milestone R11`)
+## 5. Shipped Code & Benchmark Highlights (`Milestone R12`)
 
-- **Order-Flow Volume Profile (`src/indicators/volume_profile.rs` & `FRVP` Tool):**
-  - Interval-overlap price histogram (`VRVP` visible range & draggable `FRVP` fixed range) with `OHLCV_PROXY` buy/sell split, zero-volume TPO fallback, scale-invariant positive micro-price floor (`> 0.0`) & Value Area dust guard (`1e-18`), CME dual-row `70%` Value Area (`VAH`/`VAL`) expansion around `POC`, and `HVN`/`LVN` detection.
-- **Exchange-Session `VWAP` & Interactive `Anchored VWAP` (`src/indicators/vwap.rs`, `src/drawings/`):**
-  - Venue-aware session resets (`UTC+7` ICT / `UTC-5` EST / `UTC` on intraday `1m..4h`; UTC civil `(year, month)` / `year` boundaries on `1D` MTD / `1W` YTD), rescaled overflow-safe `WelfordVwapAcc` ($\pm 1\sigma, \pm 2\sigma$ bands safe at `1e160` and `1e-160`), and 1-click draggable `DrawingGeometry::AnchoredVwap` with conflation-safe per-session/gap `egui::Mesh` rendering (`src/chart.rs`).
-- **`DEF-001` Causal `Relative Strength vs VNINDEX` & Live Rebased Compare (`src/indicators/relative_strength.rs`, `src/chart.rs`, `src/app.rs`):**
-  - Strict bar-close causal benchmark alignment (`b_close_ts <= sym_query_ts` capped by `replay_causal_close_timestamp`), tail-coverage-scored benchmark lookup (`src/data/presets.rs`), periodic `64`-bar `RS SMA` drift-prevention recompute, `RS` oscillator sub-pane (`OscillatorPaneId::RelativeStrength`), and `O(1)` live-scaled Rebased Benchmark Overlay across `Normal`, `Log`, `%`, and `Idx100` scales.
-- **Measured Release Performance (`Apple M1`, `2560×1600` Retina, `152/152` automated tests passing):**
-  - `VRVP(500 bars, 64 rows)`: **`14.21 µs`** median (`0.014 ms`); `VRVP(50k bars, 64 rows)`: **`803.08 µs`** median (`0.803 ms`).
-  - `Session VWAP(50k 1m UTC+7)`: **`725.58 µs`** (`0.726 ms`); `Anchored VWAP(50k)`: **`371.25 µs`** (`0.371 ms`); `Causal RS(50k vs VNINDEX)`: **`651.71 µs`** (`0.652 ms`).
-  - Full `SumiWorkstationApp` UI (`FPT` full stack: **`0.256 ms`**, `p99 = 0.396 ms`; `VN30F1M` `50k` `1x`: **`0.266 ms`**, `p99 = 0.411 ms`; `VN30F1M` `50k` interactive pan+zoom: **`0.586 ms`**, `p99 = 0.768 ms`; `VN30F1M` `50k` `16x` conflated full-fit: **`3.171 ms`**, `p99 = 3.831 ms` — all **PASS `< 4.0 ms` `DECISION-RENDERER-002` budget**, `"overall_pass": true`).
+- **Synchronized Multi-Chart Grid & Causal Replay Cutoffs (`src/viewport/multi_chart.rs`, `src/app.rs`):**
+  - `MultiChartLayoutKind` (`Single1x1`, `SplitVertical1x2`, `SplitHorizontal2x1`, `Quad2x2`) driving primary + [`SecondaryChartSlot`](../src/app.rs) panes with orthogonal `MultiChartSyncConfig` (`Sync X` linked crosshair via `resolve_linked_crosshair_bar`, `Sync T` UTC visible time range via `SyncedTimeWindow`, `Sync S` symbol, `Sync TF` timeframe), independent per-slot vertical `PriceScale`s, whitespace non-pinning (`CRITIC-R12-04`), and `DEF-001` causal Bar Replay truncation (`causal_closed_prefix_len`, preserving `custom_file` provenance per `CRITIC-R12-13`).
+- **`Ichimoku Cloud` & `Cumulative Volume Delta (CVD)` (`src/indicators/ichimoku.rs`, `src/indicators/cvd.rs`, `src/indicators/mod.rs`, `src/chart.rs`):**
+  - Pure `f64`/`i64` `compute_ichimoku` (`Tenkan 9`, `Kijun 26`, `Senkou Span A/B` `+26`, strict `None` tail on `Chikou -26`, overflow-safe `0.5 * lo + 0.5 * hi`) + `emit_ichimoku_kumo_segment_triangles` triangle-split Kumo `egui::Mesh` rendering without NaN bridging (`CRITIC-R12-09`..`11`).
+  - `compute_cvd` (`OHLCV_PROXY` `Cumulative` / TZ-aware `Session` + `9`-SMA), `OscillatorPaneId::Cvd` + `cvd_price_scale`, `CandleBlockIndex` `16`-bar acceleration + hybrid `SeriesBlockIndex` scanning, and conflated `Arc<Mesh>` `PlotDataLayerMemo` inside `R11RenderMemo`.
+- **Versioned Workspace Layout Templates (`src/viewport/workspace_template.rs`, `src/app.rs`):**
+  - `WorkspaceTemplate` (`schema_version = 1`) with deterministic linear-scan RFC 8259 JSON & RON codecs rejecting duplicate/unknown keys and invalid dimensions (`102.958 µs` median roundtrip), interactive Workspace Templates modal, `Cmd+K` presets, and `builtin_workspace_templates()`.
+- **Measured Release Performance (`Apple M1`, `2560×1600` Retina, `174/174` automated tests passing):**
+  - `Ichimoku(50k cold)`: **`3.2878 ms`** median (`3287.833 µs`, `p95 = 3461.291 µs`); `CVD Session(50k cold)`: **`409.417 µs`** median (`0.4094 ms`); `WorkspaceTemplate RON/JSON`: **`102.958 µs`** median (`0.1030 ms`).
+  - Full `SumiWorkstationApp` UI: `1x1` (`50k`, `1x`): **`0.2320 ms`** (`p99 = 0.3387 ms`); `Quad 2x2` synced (`200k`, `1x`): **`0.3715 ms`** (`p99 = 0.4756 ms`); `Quad 2x2` UTC `Sync T` pan (`200k`, `1x`): **`0.3752 ms`** (`p99 = 0.6085 ms`); `MTF 1x2` conflated (`50,360`, `32x`): **`0.3892 ms`** (`p99 = 0.5271 ms`); `Quad 2x2` conflated Kumo + Session VWAP + Session CVD (`200k`, `32x`, `6,248` drawn, `162,876` verts): **`1.3035 ms`** mean (`1.2780 ms` med, `p95 = 1.5327 ms`, **`p99 = 1.6077 ms`** — all **PASS `< 4.0 ms` `DECISION-RENDERER-002` budget**, `"overall_pass": true`).
 
 ---
 
-## 6. Next Proposed Milestone (`Wave 11 / Session R12 — Awaiting Product Owner Decision`)
+## 6. Next Proposed Milestone (`Wave 12 / Session R13 — Awaiting Product Owner Decision`)
 
-With Waves 1–10 shipped and independently audited, [`docs/NEXT_SESSION_BRIEF.md`](NEXT_SESSION_BRIEF.md) proposes **Milestone R12 — Wave 11: Synchronized Multi-Chart Grid Layout (`1x1` / `1x2` / `2x1` / `2x2` Linked Crosshair/Time/Symbol Views), Ichimoku Cloud + `Cumulative Volume Delta (CVD)`, & Persistent Workspace Layout Templates** for Product Owner authorization.
+With Waves 1–11 shipped and independently audited, [`docs/NEXT_SESSION_BRIEF.md`](NEXT_SESSION_BRIEF.md) proposes **Milestone R13 — Wave 12: Liquidity Session TPO / Market Profile, VN30 Rotation Breadth Heatmap, & Minor Non-Blocking Critic Polish** for Product Owner authorization.

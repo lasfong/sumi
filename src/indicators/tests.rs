@@ -997,3 +997,374 @@ fn critic_r11_regression_rs_sma_spike_drift_and_benchmark_coverage() {
     assert_eq!(tf, Timeframe::D1);
     assert!(resolved.last().unwrap().timestamp >= t_last - 86_400);
 }
+
+#[test]
+fn r12_ichimoku_math_displacement_and_def001_causality() {
+    use super::ichimoku::{IchimokuConfig, compute_ichimoku, donchian_midpoint_series};
+
+    let empty = compute_ichimoku(&[], IchimokuConfig::default());
+    assert!(empty.tenkan.is_empty() && empty.senkou_a.is_empty());
+
+    let short = compute_ichimoku(
+        &make_close_candles(&[10.0, 12.0, 11.0]),
+        IchimokuConfig::default(),
+    );
+    assert!(short.tenkan.iter().all(Option::is_none));
+    assert_eq!(short.senkou_a.len(), 3 + 26);
+    assert!(short.chikou.iter().all(Option::is_none));
+
+    let candles: Vec<Candle> = (0..110)
+        .map(|i| {
+            let base = 100.0 + (i as f64) * 1.2 + ((i % 7) as f64) * 0.5;
+            Candle {
+                timestamp: 1_700_000_000 + (i as i64) * 86_400,
+                date_label: format!("d{i}"),
+                open: base,
+                high: base + 4.0,
+                low: base - 3.0,
+                close: base + 1.5,
+                volume: 150_000.0,
+            }
+        })
+        .collect();
+
+    let cfg = IchimokuConfig::default();
+    let full = compute_ichimoku(&candles, cfg);
+    assert_eq!(full.tenkan.len(), candles.len());
+    assert_eq!(full.kijun.len(), candles.len());
+    assert_eq!(full.chikou.len(), candles.len());
+    assert_eq!(full.senkou_a.len(), candles.len() + 26);
+    assert_eq!(full.senkou_b.len(), candles.len() + 26);
+
+    // Exact warmup indices: Tenkan at 8, Kijun at 25, Senkou A at 25 + 26 = 51, Senkou B at 51 + 26 = 77
+    assert!(full.tenkan[7].is_none() && full.tenkan[8].is_some());
+    assert!(full.kijun[24].is_none() && full.kijun[25].is_some());
+    assert!(full.senkou_a[50].is_none() && full.senkou_a[51].is_some());
+    assert!(full.senkou_b[76].is_none() && full.senkou_b[77].is_some());
+
+    let manual_tenkan = donchian_midpoint_series(&candles, 9);
+    assert_eq!(full.tenkan, manual_tenkan);
+    assert!(
+        (full.senkou_a[25 + 26].unwrap()
+            - 0.5 * (full.tenkan[25].unwrap() + full.kijun[25].unwrap()))
+        .abs()
+            < 1e-10
+    );
+    assert_eq!(
+        full.senkou_b[51 + 26],
+        donchian_midpoint_series(&candles, 52)[51]
+    );
+
+    // Forward projection [N .. N + 26) must carry non-None values from tail bars!
+    assert!(full.senkou_a[candles.len()].is_some());
+    assert!(full.senkou_a[candles.len() + 25].is_some());
+    assert!(full.senkou_b[candles.len() + 25].is_some());
+
+    // DEF-001 causal Chikou: strictly masked `None` for all indices `>= N - 26`!
+    let chikou_limit = candles.len() - 26;
+    for i in 0..chikou_limit {
+        assert!((full.chikou[i].unwrap() - candles[i + 26].close).abs() < 1e-12);
+    }
+    assert!(full.chikou[chikou_limit..].iter().all(Option::is_none));
+
+    // DEF-001 Prefix invariance: past Tenkan/Kijun/SenkouA/SenkouB never shift when future bars append.
+    let prefix_k = 80_usize;
+    let prefix = compute_ichimoku(&candles[..prefix_k], cfg);
+    for i in 0..prefix_k {
+        assert_eq!(prefix.tenkan[i], full.tenkan[i]);
+        assert_eq!(prefix.kijun[i], full.kijun[i]);
+    }
+    for i in 0..(prefix_k + 26) {
+        assert_eq!(prefix.senkou_a[i], full.senkou_a[i]);
+        assert_eq!(prefix.senkou_b[i], full.senkou_b[i]);
+    }
+}
+
+#[test]
+fn r12_cvd_conservation_session_reset_and_sma_isolation() {
+    use super::cvd::{CvdConfig, CvdResetMode, compute_bar_volume_delta, compute_cvd};
+    use crate::data::Timeframe;
+
+    assert_eq!(compute_cvd(&[], CvdConfig::default()).delta.len(), 0);
+
+    let flat_candle = Candle {
+        timestamp: 1_750_000_000,
+        date_label: "flat".to_owned(),
+        open: 100.0,
+        high: 100.0,
+        low: 100.0,
+        close: 100.0,
+        volume: 50_000.0,
+    };
+    assert_eq!(compute_bar_volume_delta(&flat_candle), Some(0.0));
+
+    let bull_full = Candle {
+        timestamp: 1_750_000_000,
+        date_label: "bull".to_owned(),
+        open: 100.0,
+        high: 110.0,
+        low: 100.0,
+        close: 110.0,
+        volume: 25_000.0,
+    };
+    assert!((compute_bar_volume_delta(&bull_full).unwrap() - 25_000.0).abs() < 1e-9);
+
+    let zero_vol = Candle {
+        volume: 0.0,
+        ..bull_full.clone()
+    };
+    assert_eq!(compute_bar_volume_delta(&zero_vol), Some(0.0));
+
+    // Construct 2 intraday UTC+7 trading sessions (`15m` bars across 2 days):
+    // Session 0 (`2026-09-01 09:00 UTC+7`): bullish bars
+    // Session 1 (`2026-09-02 09:00 UTC+7`): bearish bar first
+    let utc7 = 7 * 3_600;
+    let day0_0200_utc = 1_788_228_000_i64; // 02:00 UTC = 09:00 UTC+7
+    let mut series = Vec::new();
+    for b in 0..6_i64 {
+        series.push(Candle {
+            timestamp: day0_0200_utc + b * 900,
+            date_label: format!("s0_{b}"),
+            open: 1200.0,
+            high: 1210.0,
+            low: 1200.0,
+            close: 1210.0,
+            volume: 1_000.0,
+        });
+    }
+    let day1_0200_utc = day0_0200_utc + 86_400;
+    for b in 0..6_i64 {
+        series.push(Candle {
+            timestamp: day1_0200_utc + b * 900,
+            date_label: format!("s1_{b}"),
+            open: 1210.0,
+            high: 1210.0,
+            low: 1200.0,
+            close: 1200.0,
+            volume: 400.0,
+        });
+    }
+
+    let ses_cfg = CvdConfig {
+        reset_mode: CvdResetMode::Session,
+        timeframe: Timeframe::M15,
+        utc_offset_seconds: utc7,
+        sma_period: 3,
+    };
+    let ses = compute_cvd(&series, ses_cfg);
+    assert_eq!(ses.session_starts, vec![0, 6]);
+    assert!((ses.cvd[5].unwrap() - 6_000.0).abs() < 1e-9);
+    // Session 1 MUST reset cumulative sum back to `-400.0` (not `6000 - 400`) and isolate SMA!
+    assert!((ses.cvd[6].unwrap() - (-400.0)).abs() < 1e-9);
+    assert!(ses.cvd_sma[5].is_some());
+    assert!(ses.cvd_sma[6].is_none() && ses.cvd_sma[7].is_none() && ses.cvd_sma[8].is_some());
+    assert!((ses.cvd_sma[8].unwrap() - ((-400.0 - 800.0 - 1_200.0) / 3.0)).abs() < 1e-9);
+
+    let cum_cfg = CvdConfig {
+        reset_mode: CvdResetMode::Cumulative,
+        ..ses_cfg
+    };
+    let cum = compute_cvd(&series, cum_cfg);
+    assert_eq!(cum.session_starts, vec![0]);
+    assert!((cum.cvd[6].unwrap() - 5_600.0).abs() < 1e-9);
+
+    // DEF-001 Prefix invariance:
+    let prefix = compute_cvd(&series[..8], ses_cfg);
+    assert_eq!(&ses.cvd[..8], &prefix.cvd[..]);
+    assert_eq!(&ses.cvd_sma[..8], &prefix.cvd_sma[..]);
+}
+
+#[test]
+fn critic_r12_regression_extreme_finite_midpoint_and_cvd_sma() {
+    let extreme_ichi: Vec<Candle> = (0..12)
+        .map(|i| Candle {
+            timestamp: 1_750_000_000 + (i as i64) * 60,
+            date_label: format!("e{i}"),
+            open: 0.0,
+            high: 1.0e308,
+            low: -1.0e308,
+            close: 0.0,
+            volume: 100.0,
+        })
+        .collect();
+    let cfg = IchimokuConfig {
+        tenkan_period: 3,
+        kijun_period: 1,
+        senkou_b_period: 5,
+        displacement: 2,
+        show_chikou: true,
+    };
+    let ichi = compute_ichimoku(&extreme_ichi, cfg);
+    assert!(ichi.kijun.iter().all(|v| v.is_some_and(f64::is_finite)));
+    assert!(
+        ichi.tenkan[2..]
+            .iter()
+            .all(|v| v.is_some_and(f64::is_finite))
+    );
+    assert!(
+        ichi.senkou_b[6..]
+            .iter()
+            .all(|v| v.is_some_and(f64::is_finite))
+    );
+
+    // High-magnitude volume & finite range > f64::MAX / 2 must keep buy fraction & CVD SMA finite
+    let mut cvd_bars = vec![Candle {
+        timestamp: 1_750_000_000,
+        date_label: "c0".to_owned(),
+        open: 1.0e308,
+        high: 1.6e308,
+        low: 1.0e308,
+        close: 1.3e308,
+        volume: 1.0e308,
+    }];
+    // Bar 0 has midpoint close -> delta = 0; create 10 up bars pushing running_cvd to 1.0e308
+    cvd_bars[0] = Candle {
+        timestamp: 1_750_000_000,
+        date_label: "c0".to_owned(),
+        open: 100.0,
+        high: 105.0,
+        low: 100.0,
+        close: 105.0,
+        volume: 1.0e308,
+    };
+    for i in 1..12 {
+        cvd_bars.push(Candle {
+            timestamp: 1_750_000_000 + (i as i64) * 60,
+            date_label: format!("c{i}"),
+            open: 1.0e308,
+            high: 1.6e308,
+            low: 1.0e308,
+            close: 1.3e308,
+            volume: 1.0e307,
+        });
+    }
+    let frac = super::volume_profile::intrabar_buy_fraction(&cvd_bars[1]);
+    assert!(
+        (frac - 0.5).abs() < 1e-12,
+        "high-magnitude close must not overflow 2*close: {frac}"
+    );
+    let cvd_out = compute_cvd(
+        &cvd_bars,
+        CvdConfig {
+            reset_mode: CvdResetMode::Cumulative,
+            timeframe: Timeframe::M1,
+            utc_offset_seconds: 0,
+            sma_period: 9,
+        },
+    );
+    for (idx, val) in cvd_out.cvd_sma.iter().enumerate().skip(8) {
+        assert!(
+            val.is_some_and(f64::is_finite),
+            "cvd_sma[{idx}] overflowed instead of scaled mean"
+        );
+    }
+}
+
+#[test]
+fn candle_block_index_and_bucket_sum_match_raw_scans_bit_for_bit() {
+    use crate::data::generate_synthetic_ohlcv;
+
+    let candles = generate_synthetic_ohlcv(1_029);
+    let mut cache = IndicatorCache::new();
+    let cfg = IndicatorConfig {
+        show_cvd: true,
+        cvd_reset_mode: CvdResetMode::Cumulative,
+        ..IndicatorConfig::default()
+    };
+    cache.sync(&candles, 1, &cfg);
+    assert_eq!(cache.candle_idx.source_len(), candles.len());
+
+    for step in [16_usize, 32, 64] {
+        for range in [0..candles.len(), 7..991, 512..candles.len()] {
+            let mut from_blocks = Vec::new();
+            cache.candle_idx.for_each_conflated_bucket(
+                &candles,
+                range.clone(),
+                step,
+                |cx, o, h, l, c, v, bull| {
+                    from_blocks.push((cx, o, h, l, c, v, bull));
+                },
+            );
+            let mut from_raw = Vec::new();
+            let mut r_min = f64::INFINITY;
+            let mut r_max = f64::NEG_INFINITY;
+            let mut m_vol = 0.0_f64;
+            for bar in crate::viewport::iter_conflated_candles(&candles, range.clone(), step) {
+                from_raw.push((
+                    bar.center_logical_index,
+                    bar.open,
+                    bar.high,
+                    bar.low,
+                    bar.close,
+                    bar.volume,
+                    bar.is_bullish(),
+                ));
+                r_min = r_min.min(bar.low);
+                r_max = r_max.max(bar.high);
+                m_vol = m_vol.max(bar.volume);
+            }
+            assert_eq!(from_blocks.len(), from_raw.len());
+            for (b, r) in from_blocks.iter().zip(from_raw.iter()) {
+                assert_eq!(b.0, r.0);
+                assert_eq!(b.1, r.1);
+                assert_eq!(b.2, r.2);
+                assert_eq!(b.3, r.3);
+                assert_eq!(b.4, r.4);
+                assert!((b.5 - r.5).abs() <= r.5.abs() * 1e-12 + 1e-9);
+                assert_eq!(b.6, r.6);
+            }
+            let (b_min, b_max, b_vol) = cache.candle_idx.autoscale_bounds(&candles, range, step);
+            assert_eq!(b_min, r_min);
+            assert_eq!(b_max, r_max);
+            assert!((b_vol - m_vol).abs() <= m_vol.abs() * 1e-12 + 1e-9);
+        }
+    }
+
+    let mut b_s = 0_usize;
+    while b_s < candles.len() {
+        let b_e = (b_s + 32).min(candles.len());
+        let got = cache
+            .cvd_delta_idx
+            .bucket_sum_and_count(&cache.cvd.delta, b_s, b_e);
+        let mut raw_sum = 0.0_f64;
+        let mut raw_cnt = 0_usize;
+        for v in cache.cvd.delta[b_s..b_e].iter().flatten() {
+            if v.is_finite() {
+                raw_sum += *v;
+                raw_cnt += 1;
+            }
+        }
+        let (gs, gc) = got.expect("aligned delta sum");
+        assert_eq!(gc, raw_cnt);
+        assert!((gs - raw_sum).abs() <= raw_sum.abs() * 1e-12 + 1e-9);
+        b_s += 32;
+    }
+
+    let mut sparse_series: Vec<Option<f64>> = (0..640)
+        .map(|i| Some(100.0 + ((i * 13) % 29) as f64 - ((i % 7) as f64) * 1.5))
+        .collect();
+    for slot in &mut sparse_series[250..262] {
+        *slot = None;
+    }
+    let sparse_idx = SeriesBlockIndex::build(&sparse_series);
+    for (s, e) in [(7, 71), (19, 255), (255, 340), (511, 600), (240, 270)] {
+        assert_eq!(
+            bucket_line_envelope_indexed(&sparse_series, Some(&sparse_idx), s, e),
+            bucket_line_envelope_indexed(&sparse_series, None, s, e),
+            "unaligned hybrid envelope mismatch on [{s}..{e})"
+        );
+        let mut raw_sum = 0.0_f64;
+        let mut raw_cnt = 0_usize;
+        for v in sparse_series[s..e].iter().flatten() {
+            if v.is_finite() {
+                raw_sum += *v;
+                raw_cnt += 1;
+            }
+        }
+        let (gs, gc) = sparse_idx
+            .bucket_sum_and_count(&sparse_series, s, e)
+            .expect("unaligned bucket sum");
+        assert_eq!(gc, raw_cnt);
+        assert!((gs - raw_sum).abs() <= raw_sum.abs().max(1.0) * 1e-9);
+    }
+}

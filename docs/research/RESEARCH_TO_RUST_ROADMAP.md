@@ -1,7 +1,7 @@
 # RESEARCH TO RUST ROADMAP — SESSION R01
 
 - **Session Identity:** `SESSION-R01-20261110T202837+0700`
-- **Updated By:** `SESSION-R11-20261114T231200+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Updated By:** `SESSION-R12-20261115T103000+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 - **Principle:** No Rust implementation begins without prior REA or reference-source research evidence.
 
 ---
@@ -329,13 +329,23 @@ cargo test app::tests::critic_r11_regression_benchmark_cache_invalidation_and_co
 
 ---
 
-## Wave 11 — Synchronized Multi-Chart Grid Layout (`1x1`/`1x2`/`2x1`/`2x2`), Ichimoku Cloud + `Cumulative Volume Delta (CVD)`, & Workspace Templates (`PROPOSED — MILESTONE R12`)
+## Wave 11 — Synchronized Multi-Chart Grid Layout (`1x1`/`1x2`/`2x1`/`2x2`), Ichimoku Cloud + `Cumulative Volume Delta (CVD)`, & Workspace Templates (`COMPLETE — SESSION R12`)
+
+### Shipped Deliverables & Verification (`cargo test indicators::tests::r12_`, `cargo test viewport::tests::r12_`, `cargo test chart::tests::r12_`, `cargo test app::tests::r12_`, `cargo test critic_r12_`, `--r12`, `SUMI_CAPTURE_BATCH=r12`)
+| Component | Research Source | Rust Target | Status |
+|---|---|---|---|
+| Pure `f64`/`i64` WASM-safe Synchronized Multi-Chart Grid (`MultiChartLayoutKind` `1x1`/`1x2`/`2x1`/`2x2`, `MultiChartSyncConfig` `Sync X`/`Sync T`/`Sync S`/`Sync TF`, `SyncedTimeWindow`, `resolve_linked_crosshair_bar`, `causal_closed_prefix_len`, `SecondaryChartSlot`) & Serializable `WorkspaceTemplate` (`WORKSPACE_TEMPLATE_SCHEMA_VERSION = 1`, strict RFC-8259 JSON & RON codecs, presets + modal) | `ARCHIVE/frontend/src/components/chart/MultiChartLayout.tsx` + `LWC v5.2.0` (`time-scale.ts`) + [`docs/research/MULTI_CHART_ICHIMOKU_CVD_SPEC.md`](MULTI_CHART_ICHIMOKU_CVD_SPEC.md) | `src/viewport/multi_chart.rs`, `src/viewport/workspace_template.rs`, `src/viewport/tests.rs`, `src/chart.rs`, `src/app.rs` | Shipped & Critic-Hardened (`Milestone R12`, `CRITIC-R12-01..14` verified) |
+| `Ichimoku Cloud` (`Tenkan 9`/`Kijun 26`/`Senkou A-B +26`/strict `None` tail `Chikou -26`, overflow-safe midpoint, triangle-split Kumo `egui::Mesh`), `Cumulative Volume Delta (CVD)` (`OHLCV_PROXY` `Cumulative` / TZ-aware `Session` + `9`-SMA, `OscillatorPaneId::Cvd`), `CandleBlockIndex` (`16`-bar acceleration) & `PlotDataLayerMemo` (`Quad 2x2` `200k` conflated `1.3035 ms` / `p99 1.6077 ms < 4.0 ms`) | `ARCHIVE/frontend/src/components/chart/plugins/IchimokuCloudPlugin.ts` + `src/indicators/volume_profile.rs` + [`docs/research/MULTI_CHART_ICHIMOKU_CVD_SPEC.md`](MULTI_CHART_ICHIMOKU_CVD_SPEC.md) | `src/indicators/ichimoku.rs`, `src/indicators/cvd.rs`, `src/indicators/mod.rs`, `src/indicators/tests.rs`, `src/chart.rs`, `src/app.rs` | Shipped & Critic-Hardened (`Milestone R12`, `174/174` tests + `wasm32` Clippy) |
+
+---
+
+## Wave 12 — Quantitative Order-Book Heatmap / Market Internals Breadth & Native-Style Layout Docking / Hotkey Profiles (`PROPOSED — MILESTONE R13`)
 
 ### Proposed Deliverables (Awaiting Product Owner Authorization)
 | Component | Research Source | Rust Target | Status |
 |---|---|---|---|
-| Pure `f64`/`i64` WASM-safe Synchronized Multi-Chart Grid (`1x1`, `1x2`, `2x1`, `2x2` linked crosshair, time range, symbol/timeframe slots) & Serializable Workspace Templates (`RON`/`JSON`) | `ARCHIVE/frontend/src/components/chart/MultiChartLayout.tsx` + `LWC v5.2.0` `time-scale.ts` | `src/viewport/`, `src/chart.rs`, `src/app.rs` | Proposed (`Milestone R12`) |
-| `Ichimoku Cloud` (`Tenkan`/`Kijun`/`Senkou A-B`/`Chikou` `DEF-001` causal projection) & `Cumulative Volume Delta (CVD)` Oscillator/Pane | `ARCHIVE/frontend/src/components/chart/plugins/IchimokuCloudPlugin.ts` + `src/indicators/volume_profile.rs` | `src/indicators/`, `src/chart.rs`, `src/app.rs` | Proposed (`Milestone R12`) |
+| Pure `f64`/`i64` WASM-safe Quantitative Liquidity / Depth Profile Overlay (`Session TPO / Market Profile` + Multi-Interval `VWAP` Anchor Presets & Per-Slot Chart State Sync) | `ARCHIVE/frontend` + `LWC v5.2.0` primitives | `src/indicators/`, `src/drawings/`, `src/chart.rs` | Proposed (`Milestone R13`) |
+| Market Breadth / VN30 Rotation Heatmap & Workspace Profile Polish (including `cvd_price_scale.reset_auto_scale()` across primary transitions and overflow-safe `egui::Mesh` line midpoint helper) | `ARCHIVE/frontend` + `src/scanner/`, `src/app.rs` | `src/scanner/`, `src/viewport/`, `src/chart.rs`, `src/app.rs` | Proposed (`Milestone R13`) |
 
 ---
 

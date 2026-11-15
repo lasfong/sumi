@@ -1,0 +1,40 @@
+{
+  "session_id": "SESSION-R12-20261115T103000+0700",
+  "milestone": "R12",
+  "artifact": {
+    "path": "/Users/mizuhara/workspace/sumi/target/release/sumi-workstation",
+    "sha256": "3574cd4e8b4ca90ca55f640cb5084c1efd6a5b253aad2b145ee077fe9f1d2c2c",
+    "bytes": 19919424,
+    "format": "mach-o",
+    "architecture": "arm64",
+    "word_size": 64,
+    "endian": "little",
+    "uuid": "EBD70D06-773D-3FD2-BF46-33C234E34718"
+  },
+  "inspect_rust_binary": {
+    "parent_evidence_id": "ev_7133162989cc4f15a8a4bae0a7cf1ef84d97d0ea5a345f815e4f4a930d1805f5",
+    "summary_evidence_id": "ev_90e2c3af926556d8bd4cae3885296aa1d3f115e234efd0548164058d1f4195a5",
+    "auditable_metadata_available": false,
+    "inferred_rustc_commit_hashes_count": 1
+  },
+  "inspect_macho": {
+    "parent_evidence_id": "ev_5ebbef36848f5b2d33c670c96ea4a20134b032fb5f05875333070d33c3051087",
+    "summary_evidence_id": "ev_13a4ab160b0e1bca8be841edfc978f24d943a9b2207f4dbde8b1238f8d00143b",
+    "examined_items": 5566,
+    "collections": {
+      "entrypoints": 1,
+      "architectures": 1,
+      "build_metadata": 1,
+      "load_commands": 30,
+      "dependencies": 14,
+      "imports": 324,
+      "exports": 5190,
+      "segments": 5
+    }
+  },
+  "compliance": {
+    "dec_006_tradingview_desktop_untouched": true,
+    "cargo_toml_new_dependencies": 0,
+    "session_cleanly_closed": true
+  }
+}

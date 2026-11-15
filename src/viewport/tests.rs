@@ -783,3 +783,253 @@ fn critic_regression_sanitize_deserialized_recovers_corrupted_state() {
     ps.sanitize_deserialized();
     assert!(ps.is_auto_scale());
 }
+
+#[test]
+fn r12_multichart_grid_geometry_causal_prefix_and_linked_crosshair() {
+    use super::multi_chart::{
+        MultiChartLayoutKind, apply_synced_time_window, causal_closed_prefix_len,
+        extract_visible_time_window, resolve_linked_crosshair_bar,
+    };
+
+    let outer = PlotRect::new(10.0, 20.0, 1_000.0, 600.0);
+    for layout in MultiChartLayoutKind::ALL {
+        let cells = layout.compute_grid_cell_rects(outer, 6.0);
+        assert_eq!(cells.len(), layout.slot_count());
+        for c in &cells {
+            assert!(c.left >= outer.left - 1e-9 && c.right() <= outer.right() + 1e-9);
+            assert!(c.top >= outer.top - 1e-9 && c.bottom() <= outer.bottom() + 1e-9);
+            assert!(c.width > 100.0 && c.height > 100.0);
+        }
+        // Pairwise non-overlapping
+        for i in 0..cells.len() {
+            for j in (i + 1)..cells.len() {
+                let x_overlap =
+                    cells[i].left < cells[j].right() && cells[j].left < cells[i].right();
+                let y_overlap =
+                    cells[i].top < cells[j].bottom() && cells[j].top < cells[i].bottom();
+                assert!(
+                    !(x_overlap && y_overlap),
+                    "{layout:?} overlapping cells {i} vs {j}"
+                );
+            }
+        }
+    }
+
+    // Causal DEF-001 closed prefix: 1h bars vs replay frontier mid-hour
+    let t0 = 1_750_000_000_i64;
+    let h1_bars: Vec<Candle> = (0..10)
+        .map(|i| Candle {
+            timestamp: t0 + (i as i64) * 3_600,
+            date_label: format!("h{i}"),
+            open: 100.0,
+            high: 101.0,
+            low: 99.0,
+            close: 100.0,
+            volume: 1000.0,
+        })
+        .collect();
+    // Cutoff during bar #5 open+30m (`t0 + 5*3600 + 1800`) -> bar #5 closes at `t0 + 5*3600 + 3599`
+    // -> STRICTLY closed prefix must stop at 5 bars (`0..=4`), NEVER revealing incomplete bar #5!
+    let mid_bar5_close = t0 + 5 * 3_600 + 1_800;
+    assert_eq!(
+        causal_closed_prefix_len(&h1_bars, 3_600, Some(mid_bar5_close)),
+        5
+    );
+    assert_eq!(causal_closed_prefix_len(&h1_bars, 3_600, None), 10);
+
+    // Linked crosshair exact MTF containment (`t0 + 2*3600 + 900` inside bar 2) & causal clamp
+    assert_eq!(
+        resolve_linked_crosshair_bar(&h1_bars, 3_600, t0 + 2 * 3_600 + 900, None),
+        Some(2)
+    );
+    assert_eq!(
+        resolve_linked_crosshair_bar(
+            &h1_bars,
+            3_600,
+            t0 + 9 * 3_600,
+            Some(t0 + 4 * 3_600 + 3_599)
+        ),
+        Some(4)
+    );
+
+    // Synced time window preserves independent PriceScale untouched!
+    let src_candles = make_candles(200, 100.0, 1.0);
+    let mut dst_candles = Vec::new();
+    for w in src_candles.chunks(4) {
+        dst_candles.push(w[0].clone());
+    }
+    let mut ts_src =
+        TimeScale::with_data(src_candles.len(), 600.0, HorzScaleOptions::sumi_default());
+    ts_src.set_bar_spacing(10.0);
+    ts_src.set_right_offset(-15.0);
+    let mut ts_dst =
+        TimeScale::with_data(dst_candles.len(), 600.0, HorzScaleOptions::sumi_default());
+    let win = extract_visible_time_window(&src_candles, 86_400, &ts_src).expect("window");
+    assert!(apply_synced_time_window(
+        &dst_candles,
+        86_400 * 4,
+        &mut ts_dst,
+        &win
+    ));
+    assert!(ts_dst.right_offset().is_finite() && ts_dst.bar_spacing() > 0.0);
+}
+
+#[test]
+fn r12_workspace_template_ron_json_roundtrip_and_validation() {
+    use super::workspace_template::{
+        WorkspaceTemplate, WorkspaceTemplateError, builtin_workspace_templates,
+    };
+
+    let builtins = builtin_workspace_templates();
+    assert_eq!(builtins.len(), 4);
+    for tpl in &builtins {
+        let json = tpl.to_json_pretty();
+        let ron = tpl.to_ron_pretty();
+        let dec_json = WorkspaceTemplate::from_json_str(&json).expect("json parse");
+        let dec_ron = WorkspaceTemplate::from_ron_str(&ron).expect("ron parse");
+        let dec_auto_j = WorkspaceTemplate::from_auto_str(&json).expect("auto json");
+        let dec_auto_r = WorkspaceTemplate::from_auto_str(&ron).expect("auto ron");
+        assert_eq!(&dec_json, tpl);
+        assert_eq!(&dec_ron, tpl);
+        assert_eq!(&dec_auto_j, tpl);
+        assert_eq!(&dec_auto_r, tpl);
+    }
+
+    let bad_ver =
+        "{ \"schema_version\": 99, \"name\": \"x\", \"layout\": \"Quad2x2\", \"slots\": [] }";
+    assert!(matches!(
+        WorkspaceTemplate::from_json_str(bad_ver),
+        Err(WorkspaceTemplateError::UnsupportedSchemaVersion(99))
+    ));
+    let bad_nan = "(schema_version: 1, name: \"x\", layout: \"Single1x1\", slots: [(symbol: \"FPT\", pane_stretches: (main: NaN))])";
+    assert!(matches!(
+        WorkspaceTemplate::from_ron_str(bad_nan),
+        Err(WorkspaceTemplateError::NonFiniteNumber(_))
+    ));
+}
+
+#[test]
+fn critic_r12_regression_parser_linear_string_and_rfc8259_escapes() {
+    use super::workspace_template::{WorkspaceTemplate, builtin_workspace_templates};
+
+    let mut tpl = builtin_workspace_templates().into_iter().next().unwrap();
+    // 1. Short RFC 8259 \b & \f escape round-trip (stays under MAX_TEMPLATE_DESC_BYTES)
+    tpl.description = "short\u{0008}\u{000C}line".to_owned();
+    let json = tpl.to_json_pretty();
+    assert!(json.contains("\\b\\fline"));
+    let decoded = WorkspaceTemplate::from_json_str(&json).expect("decode escaped \\b\\f JSON");
+    assert!(decoded.description.ends_with("\u{0008}\u{000C}line"));
+
+    // 2. Direct 100 KB string scan verifying linear O(N) scanning and zero quadratic UTF-8 DoS
+    let big_desc = "x".repeat(100_000);
+    let big_json = format!(
+        "{{ \"schema_version\": 1, \"name\": \"ok\", \"description\": \"{big_desc}\", \"layout\": \"Single1x1\", \"slots\": [{{ \"symbol\": \"FPT\" }}] }}"
+    );
+    let big_decoded =
+        WorkspaceTemplate::from_json_str(&big_json).expect("linear O(N) 100KB string scan");
+    assert_eq!(big_decoded.name, "ok");
+
+    // Reject raw unescaped control chars in JSON string
+    let raw_ctrl_json = "{ \"schema_version\": 1, \"name\": \"bad\nline\", \"layout\": \"Single1x1\", \"slots\": [{ \"symbol\": \"FPT\" }] }";
+    assert!(WorkspaceTemplate::from_json_str(raw_ctrl_json).is_err());
+
+    // Reject whitespace or comments inside RON \u{...}
+    let bad_ron_uni = "(schema_version: 1, name: \"\\u{41 }\", layout: \"Single1x1\", slots: [(symbol: \"FPT\")])";
+    assert!(WorkspaceTemplate::from_ron_str(bad_ron_uni).is_err());
+    let ok_ron_uni =
+        "(schema_version: 1, name: \"\\u{41}\", layout: \"Single1x1\", slots: [(symbol: \"FPT\")])";
+    assert_eq!(
+        WorkspaceTemplate::from_ron_str(ok_ron_uni)
+            .expect("valid RON \\u{41}")
+            .name,
+        "A"
+    );
+}
+
+#[test]
+fn critic_r12_regression_auto_detect_comments_and_nested_blocks() {
+    use super::workspace_template::{WorkspaceTemplate, builtin_workspace_templates};
+
+    let base = builtin_workspace_templates().into_iter().next().unwrap();
+    let json = base.to_json_pretty();
+    let ron = base.to_ron_pretty();
+
+    let nested_ron = format!("/* a /* b */ c */ {ron}");
+    assert_eq!(
+        WorkspaceTemplate::from_auto_str(&nested_ron).expect("nested block RON"),
+        base
+    );
+
+    let nested_json = format!("/* a /* b */ c */ {json}");
+    assert_eq!(
+        WorkspaceTemplate::from_auto_str(&nested_json).expect("nested block JSON"),
+        base
+    );
+
+    let line_comment_json = format!("// note\n{json}");
+    assert_eq!(
+        WorkspaceTemplate::from_auto_str(&line_comment_json).expect("line comment JSON"),
+        base
+    );
+
+    // Strict RFC-8259 from_json_str still rejects comments directly
+    assert!(WorkspaceTemplate::from_json_str(&line_comment_json).is_err());
+}
+
+#[test]
+fn critic_r12_regression_template_strict_validation() {
+    use super::workspace_template::{WorkspaceTemplate, WorkspaceTemplateError};
+
+    let ovf_f32 = "(schema_version: 1, name: \"x\", layout: \"Single1x1\", slots: [(symbol: \"FPT\", pane_stretches: (main: 1e39))])";
+    assert!(matches!(
+        WorkspaceTemplate::from_ron_str(ovf_f32),
+        Err(WorkspaceTemplateError::NonFiniteNumber(_))
+    ));
+
+    let bare_inf = "(schema_version: 1, name: \"x\", layout: \"Single1x1\", slots: [(symbol: \"FPT\", pane_stretches: (main: INF))])";
+    assert!(matches!(
+        WorkspaceTemplate::from_ron_str(bare_inf),
+        Err(WorkspaceTemplateError::NonFiniteNumber(_))
+    ));
+
+    let frac_period = "(schema_version: 1, name: \"x\", layout: \"Single1x1\", slots: [(symbol: \"FPT\", indicators: (ichimoku_tenkan: 9.4))])";
+    assert!(matches!(
+        WorkspaceTemplate::from_ron_str(frac_period),
+        Err(WorkspaceTemplateError::InvalidField { .. })
+    ));
+
+    let frac_ver = "{ \"schema_version\": 1.0000005, \"name\": \"x\", \"layout\": \"Single1x1\", \"slots\": [{}] }";
+    assert!(matches!(
+        WorkspaceTemplate::from_json_str(frac_ver),
+        Err(WorkspaceTemplateError::InvalidField { .. })
+    ));
+
+    let missing_ver = "{ \"name\": \"x\", \"layout\": \"Single1x1\", \"slots\": [{}] }";
+    assert!(matches!(
+        WorkspaceTemplate::from_json_str(missing_ver),
+        Err(WorkspaceTemplateError::InvalidField { .. })
+    ));
+
+    let under_slots = "{ \"schema_version\": 1, \"name\": \"x\", \"layout\": \"Quad2x2\", \"slots\": [{\"symbol\": \"FPT\"}] }";
+    assert!(matches!(
+        WorkspaceTemplate::from_json_str(under_slots),
+        Err(WorkspaceTemplateError::InvalidField { .. })
+    ));
+}
+
+#[test]
+fn critic_r12_regression_template_rejects_duplicate_and_unknown_fields() {
+    use super::workspace_template::{WorkspaceTemplate, WorkspaceTemplateError};
+
+    let dup_key = "{ \"schema_version\": 1, \"schema_version\": 1, \"name\": \"x\", \"layout\": \"Single1x1\", \"slots\": [{\"symbol\": \"FPT\"}] }";
+    assert!(matches!(
+        WorkspaceTemplate::from_json_str(dup_key),
+        Err(WorkspaceTemplateError::InvalidField { .. })
+    ));
+
+    let typo_key = "(schema_version: 1, name: \"x\", layout: \"Single1x1\", slots: [(symbol: \"FPT\", indicators: (tenkan_peroid: 12))])";
+    assert!(matches!(
+        WorkspaceTemplate::from_ron_str(typo_key),
+        Err(WorkspaceTemplateError::InvalidField { .. })
+    ));
+}

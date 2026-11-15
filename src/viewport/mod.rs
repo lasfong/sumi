@@ -11,9 +11,11 @@
 
 pub mod candle_metrics;
 pub mod kinetic;
+pub mod multi_chart;
 pub mod pane_viewport;
 pub mod price_scale;
 pub mod time_scale;
+pub mod workspace_template;
 
 #[cfg(test)]
 mod tests;
@@ -23,6 +25,11 @@ pub use candle_metrics::{
     iter_conflated_candles, optimal_bar_width_px, optimal_candlestick_width_px,
 };
 pub use kinetic::{KineticAnimation, KineticScrollConfig};
+pub use multi_chart::{
+    MAX_MULTI_CHART_SLOTS, MultiChartLayoutKind, MultiChartSyncConfig, SyncedTimeWindow,
+    apply_synced_time_window, causal_closed_prefix_len, extract_visible_time_window,
+    resolve_linked_crosshair_bar,
+};
 pub use pane_viewport::{PaneViewport, PlotRect};
 pub use price_scale::{
     LogFormula, PriceRange, PriceScale, PriceScaleMode, PriceScaleOptions, PriceTickMark,
@@ -31,6 +38,10 @@ pub use price_scale::{
 };
 pub use time_scale::{
     HorzScaleOptions, LogicalRange, StrictBarRange, TimeScale, TransitionSnapshot,
+};
+pub use workspace_template::{
+    WORKSPACE_TEMPLATE_SCHEMA_VERSION, WorkspacePaneStretches, WorkspaceSlotTemplate,
+    WorkspaceTemplate, WorkspaceTemplateError, builtin_workspace_templates,
 };
 
 /// Panic-free clamp matching Lightweight Charts `src/helpers/mathex.ts` (`Math.min(Math.max(v, min), max)`).

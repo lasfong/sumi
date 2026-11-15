@@ -1,0 +1,26 @@
+{
+  "milestone": "R12",
+  "overall_pass": true,
+  "environment": {
+    "cpu": "Apple M1",
+    "os": "macos",
+    "arch": "aarch64",
+    "ram_bytes": 17179869184,
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "profile": "release",
+    "viewport_logical_px": [1280, 800],
+    "pixels_per_point": 2.0
+  },
+  "r12_domain_throughput": [
+    { "case_id": "r12_ichimoku_50k_cold_compute", "description": "Ichimoku Kinko Hyo (9,26,52,+26) cold O(N) compute on 50,000 1m bars", "input_units": 50000, "output_items": 50026, "median_us": 3287.833, "median_ms": 3.2878, "p95_us": 3461.291, "max_us": 3547.583 },
+    { "case_id": "r12_cvd_session_50k_cold_compute", "description": "Session CVD (OHLCV_PROXY UTC+7 daily reset + 9-SMA) cold compute on 50,000 1m bars", "input_units": 50000, "output_items": 197, "median_us": 409.417, "median_ms": 0.4094, "p95_us": 439.500, "max_us": 501.625 },
+    { "case_id": "r12_workspace_template_ron_json_roundtrip", "description": "WorkspaceTemplate v1 RON+JSON encode & validated decode (4-slot desk)", "input_units": 4, "output_items": 13214, "median_us": 102.958, "median_ms": 0.1030, "p95_us": 119.708, "max_us": 185.042 }
+  ],
+  "workstation_r12_workloads": [
+    { "dataset_bars": 50000, "workload_id": "r12_single_1x1_ichimoku_cvd_50k_frame", "scale_mode": "Linear", "bar_spacing": 7.50000, "conflation_factor": 1, "culled_bars": 131, "rendered_candles": 129, "paint_shapes": 270, "clipped_primitives": 18, "total_vertices": 16458, "total_indices": 54330, "ui_median_ms": 0.1533, "tessellate_median_ms": 0.0732, "total_cpu_mean_ms": 0.2320, "total_cpu_median_ms": 0.2267, "total_cpu_p95_ms": 0.2625, "total_cpu_p99_ms": 0.3387 },
+    { "dataset_bars": 200000, "workload_id": "r12_quad_2x2_synced_ichimoku_cvd_50k_frame", "scale_mode": "Linear", "bar_spacing": 7.50000, "conflation_factor": 1, "culled_bars": 180, "rendered_candles": 176, "paint_shapes": 519, "clipped_primitives": 52, "total_vertices": 30012, "total_indices": 99942, "ui_median_ms": 0.2049, "tessellate_median_ms": 0.1473, "total_cpu_mean_ms": 0.3715, "total_cpu_median_ms": 0.3518, "total_cpu_p95_ms": 0.3991, "total_cpu_p99_ms": 0.4756 },
+    { "dataset_bars": 200000, "workload_id": "r12_quad_2x2_pan_time_sync_50k_frame", "scale_mode": "Linear", "bar_spacing": 7.39949, "conflation_factor": 1, "culled_bars": 157, "rendered_candles": 150, "paint_shapes": 511, "clipped_primitives": 52, "total_vertices": 27894, "total_indices": 92640, "ui_median_ms": 0.2148, "tessellate_median_ms": 0.1416, "total_cpu_mean_ms": 0.3752, "total_cpu_median_ms": 0.3588, "total_cpu_p95_ms": 0.4590, "total_cpu_p99_ms": 0.6085 },
+    { "dataset_bars": 50360, "workload_id": "r12_mtf_1x2_conflated_ichimoku_cvd_50k_frame", "scale_mode": "Linear", "bar_spacing": 0.01080, "conflation_factor": 32, "culled_bars": 50360, "rendered_candles": 1584, "paint_shapes": 331, "clipped_primitives": 30, "total_vertices": 47952, "total_indices": 112980, "ui_median_ms": 0.2667, "tessellate_median_ms": 0.1168, "total_cpu_mean_ms": 0.3892, "total_cpu_median_ms": 0.3833, "total_cpu_p95_ms": 0.4437, "total_cpu_p99_ms": 0.5271 },
+    { "dataset_bars": 200000, "workload_id": "r12_quad_2x2_conflated_ichimoku_vwap_session_cvd_50k_frame", "scale_mode": "Linear", "bar_spacing": 0.01080, "conflation_factor": 32, "culled_bars": 200000, "rendered_candles": 6248, "paint_shapes": 459, "clipped_primitives": 61, "total_vertices": 162876, "total_indices": 354984, "ui_median_ms": 0.8632, "tessellate_median_ms": 0.4147, "total_cpu_mean_ms": 1.3035, "total_cpu_median_ms": 1.2780, "total_cpu_p95_ms": 1.5327, "total_cpu_p99_ms": 1.6077 }
+  ]
+}

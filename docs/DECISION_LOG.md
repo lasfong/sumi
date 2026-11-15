@@ -1,7 +1,7 @@
 # SUMI TRADING WORKSTATION — DECISION LOG
 
 - **Session Identity (Created):** `SESSION-01-20261110T160909+0700`
-- **Updated By:** `SESSION-R11-20261114T231200+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Updated By:** `SESSION-R12-20261115T103000+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 
 ## Decisions Recorded in Session 01
 
@@ -210,3 +210,17 @@
   1. Implement `src/indicators/volume_profile.rs`, `src/indicators/vwap.rs`, and `src/indicators/relative_strength.rs` in pure `f64`/`i64` (`wasm32-unknown-unknown`-verified, `0` new crate dependencies). Enforce exact `OHLCV_PROXY` buy/sell volume conservation, TPO fallback, scale-invariant micro-price floor & `1e-18` Value Area dust threshold, CME dual-row `70%` Value Area (`VAH`/`VAL`) + `POC`, rescaled overflow-safe `WelfordVwapAcc` (`1e160`/`1e-160`), venue intraday offsets vs UTC civil `1D`/`1W` boundaries (`B2`/`B3`), periodic `64`-bar `RS SMA` recomputation (`M5`), and tail-coverage-scored benchmark lookup (`src/data/presets.rs`).
   2. Add `DrawingGeometry::FixedRangeVolumeProfile` (`DrawingTool::FixedRangeVolumeProfile`, `2`-anchor fixed-range Volume Profile with clamped offscreen handles) and `DrawingGeometry::AnchoredVwap` (interactive $\pm 1\sigma, \pm 2\sigma$ tail projection with `tail_segments` hit-testing and left-drag `bar_index >= 0.0` clamping, `M4`) inside `src/drawings/`.
   3. Add conflation-safe per-session/gap `egui::Mesh` VWAP & AVWAP batching (`B1`/`M2`), asymmetric `65`-sample/`<= 2,048` exact-hash `R11RenderMemo` (`M1`), `O(1)` live-scaled Rebased Compare Overlay over `SeriesBlockIndex::first_valid_index` (`M3`), and synchronized `OscillatorPaneId::RelativeStrength` (`src/chart.rs`, `src/app.rs`), holding full workstation frames within `0.256–3.171 ms` (`< 4.0 ms` `DECISION-RENDERER-002`).
+
+---
+
+## Decisions Recorded in Session R12
+
+### DEC-R12-001 — Synchronized Multi-Chart Grid (`1x1`/`1x2`/`2x1`/`2x2`), `Ichimoku Cloud` + `Cumulative Volume Delta (CVD)` (`DEF-001`), and `schema_version = 1` `WorkspaceTemplate` (`RON`/`JSON`)
+- **Date:** 2026-11-15
+- **Status:** Accepted & Shipped (`Milestone R12 / Wave 11`, verified via `174/174` Cargo unit tests, native + `wasm32` `clippy -D warnings`, `--r12` release benchmark `0.2320–1.3035 ms` / `p99 <= 1.6077 ms < 4.0 ms`, `SUMI_CAPTURE_BATCH=r12`, `sumi-critic` `CRITIC_PASS`, and post-build `rea` audit `REA-R12-09`..`10`).
+- **Context:** Milestone R11 established order-flow overlays (`VRVP`/`FRVP`, session/anchored VWAP, causal RS) on a single chart workspace. Institutional multi-timeframe and multi-asset execution requires synchronized side-by-side chart panes (`1x1`/`1x2`/`2x1`/`2x2`), equilibrium/momentum cloud overlays (`Ichimoku Cloud`), directional delta pressure tracking (`CVD`), and deterministic serializable workspace presets (`RON`/`JSON`) without native-only crates or look-ahead leakage (`DEF-001`).
+- **Decision:**
+  1. Add pure `f64`/`i64` WASM-safe `MultiChartLayoutKind` (`MultiChartLayoutKind::{Single1x1, SplitVertical1x2, SplitHorizontal2x1, Quad2x2}`, `MultiChartSyncConfig` for `Sync X`/`Sync T`/`Sync S`/`Sync TF`, `SyncedTimeWindow`, `resolve_linked_crosshair_bar`) and `WorkspaceTemplate` (`WORKSPACE_TEMPLATE_SCHEMA_VERSION = 1`, strict linear-scan RFC 8259 JSON & RON codecs rejecting duplicate/unknown keys and negative/out-of-range dimensions) under `src/viewport/` paired with `SecondaryChartSlot` in `src/app.rs`.
+  2. Enforce `DEF-001` causal Bar Replay across multi-timeframe secondary slots via `causal_closed_prefix_len` (`time + span <= replay_cutoff_ts`) while preserving `custom_file` provenance (`CRITIC-R12-13`), zero false crosshair pinning over future whitespace (`CRITIC-R12-04`), and UTC `Sync T` alignment (`CRITIC-R12-06`).
+  3. Add `src/indicators/ichimoku.rs` (`Tenkan 9`, `Kijun 26`, `Senkou Span A/B` projected `+26`, strict `None` tail on `Chikou` `-26`) with triangle-split Kumo crossover (`emit_ichimoku_kumo_segment_triangles`), overflow-safe midpoint `(0.5 * lo + 0.5 * hi)`, and `src/indicators/cvd.rs` (`OHLCV_PROXY` `Cumulative` / timezone-aware `Session` reset + `9`-SMA + `OscillatorPaneId::Cvd` + `cvd_price_scale` + `CandleBlockIndex` `16`-bar acceleration and `PlotDataLayerMemo` inside `R11RenderMemo`), holding `Quad 2x2` `200,000`-bar `32x` conflated frames with Kumo + Session VWAP + Session CVD at `1.3035 ms` mean / `1.6077 ms` `p99` (`< 4.0 ms`).
+

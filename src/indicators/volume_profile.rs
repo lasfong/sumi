@@ -90,7 +90,8 @@ pub struct VolumeProfileResult {
 pub fn intrabar_buy_fraction(candle: &Candle) -> f64 {
     let range = candle.high - candle.low;
     if range.is_finite() && range > 1.0e-12 {
-        let pressure = ((2.0 * candle.close - candle.high - candle.low) / range).clamp(-1.0, 1.0);
+        let pressure =
+            (((candle.close - candle.low) + (candle.close - candle.high)) / range).clamp(-1.0, 1.0);
         0.5 * (1.0 + pressure)
     } else if candle.close > candle.open {
         1.0

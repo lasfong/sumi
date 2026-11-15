@@ -66,6 +66,7 @@ impl DrawingPaneTarget {
             Self::Oscillator(OscillatorPaneId::Atr) => "atr",
             Self::Oscillator(OscillatorPaneId::Equity) => "equity",
             Self::Oscillator(OscillatorPaneId::RelativeStrength) => "rs",
+            Self::Oscillator(OscillatorPaneId::Cvd) => "cvd",
         }
     }
 
@@ -79,6 +80,7 @@ impl DrawingPaneTarget {
             Self::Oscillator(OscillatorPaneId::Atr) => "ATR",
             Self::Oscillator(OscillatorPaneId::Equity) => "EQUITY",
             Self::Oscillator(OscillatorPaneId::RelativeStrength) => "RS",
+            Self::Oscillator(OscillatorPaneId::Cvd) => "CVD",
         }
     }
 }

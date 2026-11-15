@@ -20,7 +20,7 @@ use sumi_workstation::chart::{
     render_workstation_chart_with_drawings,
 };
 use sumi_workstation::data::{
-    DataLoadOptions, Timeframe, aggregate_ohlcv, build_btcusdt_15m_json_document,
+    DataLoadOptions, DataSourcePreset, Timeframe, aggregate_ohlcv, build_btcusdt_15m_json_document,
     generate_intraday_vn30f_1m_report, generate_synthetic_ohlcv, load_bundled_watchlist_universe,
     load_ohlcv_csv, load_ohlcv_json, resolve_benchmark_series_for_window,
 };
@@ -30,9 +30,9 @@ use sumi_workstation::drawings::{
     snap_to_visible_ohlc,
 };
 use sumi_workstation::indicators::{
-    BlockExtrema, IndicatorCache, IndicatorConfig, OscillatorPaneId, SeriesBlockIndex,
-    VolumeProfileConfig, compute_anchored_vwap, compute_relative_strength, compute_session_vwap,
-    compute_volume_profile,
+    BlockExtrema, CvdConfig, CvdResetMode, IchimokuConfig, IndicatorCache, IndicatorConfig,
+    OscillatorPaneId, SeriesBlockIndex, VolumeProfileConfig, compute_anchored_vwap, compute_cvd,
+    compute_ichimoku, compute_relative_strength, compute_session_vwap, compute_volume_profile,
 };
 use sumi_workstation::journal::{
     ChecklistState, ExchangeVenue, MistakeTag, SetupTag, TradeJournalStore, TradePlanInput,
@@ -45,8 +45,8 @@ use sumi_workstation::scanner::{
 };
 use sumi_workstation::trading::{OrderKind, OrderRequest, OrderSide, TradingSession};
 use sumi_workstation::viewport::{
-    HorzScaleOptions, KineticAnimation, PaneViewport, PlotRect, PriceScale, PriceScaleMode,
-    PriceScaleOptions, TimeScale,
+    HorzScaleOptions, KineticAnimation, MultiChartLayoutKind, PaneViewport, PlotRect, PriceScale,
+    PriceScaleMode, PriceScaleOptions, TimeScale, WorkspaceTemplate, builtin_workspace_templates,
 };
 
 #[derive(Debug, Clone)]
@@ -153,6 +153,10 @@ fn main() {
     }
     if std::env::args().any(|a| a == "--r11") {
         run_r11_volume_profile_vwap_rs_benchmark(&cpu_brand, mem_bytes, &rustc_ver, profile);
+        return;
+    }
+    if std::env::args().any(|a| a == "--r12") {
+        run_r12_multichart_ichimoku_cvd_benchmark(&cpu_brand, mem_bytes, &rustc_ver, profile);
         return;
     }
 
@@ -1574,6 +1578,7 @@ fn run_r05_drawing_engine_benchmark(
                     }
                     DrawingPaneTarget::Oscillator(
                         OscillatorPaneId::Atr
+                        | OscillatorPaneId::Cvd
                         | OscillatorPaneId::RelativeStrength
                         | OscillatorPaneId::Equity,
                     ) => atr_proj.project_drawing(d),
@@ -6933,6 +6938,729 @@ fn format_r11_markdown_report(
     let _ = writeln!(
         s,
         "| Bars | Workload | Scale | Conflation | Culled | Drawn | Vertices | Indices | Mean (`ms`) | Median (`ms`) | P99 (`ms`) | `< 4.0ms` Gate |"
+    );
+    let _ = writeln!(
+        s,
+        "| ---: | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |"
+    );
+    for (r, p99_ms) in render.iter().zip(p99_ms_list.iter()) {
+        let mean_ms = r.total_cpu_frame_stats.mean_us / 1_000.0;
+        let med_ms = r.total_cpu_frame_stats.median_us / 1_000.0;
+        let gate = if mean_ms < 4.0 && *p99_ms < 4.0 {
+            "PASS (<4ms)"
+        } else {
+            "EXCEEDS"
+        };
+        let _ = writeln!(
+            s,
+            "| `{}` | `{}` ({}) | `{}` | `{}x` | `{}` | `{}` | `{}` | `{}` | **`{:.3}`** | **`{:.3}`** | `{:.3}` | `{gate}` |",
+            r.dataset_bars,
+            r.workload_id,
+            r.description,
+            r.scale_mode,
+            r.conflation_factor,
+            r.culled_bars,
+            r.rendered_candles,
+            r.total_vertices,
+            r.total_indices,
+            mean_ms,
+            med_ms,
+            p99_ms,
+        );
+    }
+    s
+}
+
+fn run_r12_multichart_ichimoku_cvd_benchmark(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+) {
+    println!(
+        "=== Sumi R12 Synchronized Multi-Chart Grid, Ichimoku Cloud, CVD & Workspace Templates Benchmark ==="
+    );
+    println!(
+        "CPU: {cpu} | RAM: {:.1} GiB | {rustc_ver} | profile={profile}",
+        (mem_bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+    );
+
+    let candles_50k_1m = generate_intraday_vn30f_1m_report(50_000).candles;
+    let mut domain_cases = Vec::new();
+
+    // 1. 50,000-bar Ichimoku Cloud cold compute (O(N) monotonic deques + +26 forward Kumo)
+    let ichimoku_cfg = IchimokuConfig::default();
+    let mut ichi_samples = Vec::with_capacity(48);
+    let mut ichi_senkou_len = 0_usize;
+    for step in 0..56 {
+        let t0 = Instant::now();
+        let out = compute_ichimoku(std::hint::black_box(&candles_50k_1m), ichimoku_cfg);
+        let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        ichi_senkou_len = out.senkou_a.len();
+        if step >= 8 {
+            ichi_samples.push(us);
+        }
+    }
+    domain_cases.push(R09DomainBenchCase {
+        case_id: "r12_ichimoku_50k_cold_compute",
+        description: "Ichimoku Kinko Hyo (9,26,52,+26) cold O(N) compute on 50,000 1m bars",
+        input_units: candles_50k_1m.len(),
+        output_items: ichi_senkou_len,
+        stats: TimingStats::from_samples(ichi_samples),
+    });
+
+    // 2. 50,000-bar Cumulative Volume Delta (`Session` reset UTC+7 + 9-SMA)
+    let cvd_cfg = CvdConfig {
+        reset_mode: CvdResetMode::Session,
+        timeframe: Timeframe::M1,
+        utc_offset_seconds: 25_200,
+        sma_period: 9,
+    };
+    let mut cvd_samples = Vec::with_capacity(48);
+    let mut cvd_sessions = 0_usize;
+    for step in 0..56 {
+        let t0 = Instant::now();
+        let out = compute_cvd(std::hint::black_box(&candles_50k_1m), cvd_cfg);
+        let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        cvd_sessions = out.session_starts.len();
+        if step >= 8 {
+            cvd_samples.push(us);
+        }
+    }
+    domain_cases.push(R09DomainBenchCase {
+        case_id: "r12_cvd_session_50k_cold_compute",
+        description: "Session CVD (OHLCV_PROXY UTC+7 daily reset + 9-SMA) cold compute on 50,000 1m bars",
+        input_units: candles_50k_1m.len(),
+        output_items: cvd_sessions,
+        stats: TimingStats::from_samples(cvd_samples),
+    });
+
+    // 3. Workspace Layout Template v1 RON + JSON round-trip (4-slot institutional desk preset)
+    let builtins = builtin_workspace_templates();
+    let tpl = &builtins[3];
+    let mut tpl_samples = Vec::with_capacity(120);
+    let mut tpl_bytes = 0_usize;
+    for step in 0..144 {
+        let t0 = Instant::now();
+        let ron_doc = std::hint::black_box(tpl).to_ron_pretty();
+        let parsed_ron = WorkspaceTemplate::from_ron_str(&ron_doc).expect("parse template RON");
+        let json_doc = std::hint::black_box(&parsed_ron).to_json_pretty();
+        let parsed_json = WorkspaceTemplate::from_json_str(&json_doc).expect("parse template JSON");
+        let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        std::hint::black_box(&parsed_json);
+        tpl_bytes = ron_doc.len() + json_doc.len();
+        if step >= 24 {
+            tpl_samples.push(us);
+        }
+    }
+    domain_cases.push(R09DomainBenchCase {
+        case_id: "r12_workspace_template_ron_json_roundtrip",
+        description: "WorkspaceTemplate v1 RON+JSON encode & validated decode (4-slot desk)",
+        input_units: 4,
+        output_items: tpl_bytes,
+        stats: TimingStats::from_samples(tpl_samples),
+    });
+
+    println!("\n--- R12 Ichimoku, CVD & Workspace Template Kernels ---");
+    for d in &domain_cases {
+        println!(
+            "  {:<42} | in={:>7} out={:>6} | med={:>8.2} µs ({:.3} ms) p95={:>8.2} µs",
+            d.case_id,
+            d.input_units,
+            d.output_items,
+            d.stats.median_us,
+            d.stats.median_us / 1_000.0,
+            d.stats.p95_us
+        );
+    }
+
+    // Phase 2: Full Workstation 1280x800 (`2560x1600` Retina `2.0x`) UI + GPU Tessellation Frame Budgets
+    let (r_single, r_single_p99) = bench_r12_full_workstation_ui(
+        &candles_50k_1m,
+        0,
+        "r12_single_1x1_ichimoku_cvd_50k_frame",
+        "1x1 Single Focus 50k Bars + Ichimoku (+26 Kumo) + Session CVD",
+        10,
+        60,
+    );
+    let (r_quad, r_quad_p99) = bench_r12_full_workstation_ui(
+        &candles_50k_1m,
+        1,
+        "r12_quad_2x2_synced_ichimoku_cvd_50k_frame",
+        "2x2 Quad Synced 50k x 4 Slots (200k Total Bars) + Sync X/T + Ichimoku + CVD",
+        10,
+        60,
+    );
+    let (r_quad_pan, r_quad_pan_p99) = bench_r12_full_workstation_ui(
+        &candles_50k_1m,
+        2,
+        "r12_quad_2x2_pan_time_sync_50k_frame",
+        "2x2 Quad 50k x 4 Slots Interactive Pan/Zoom + Live Sync T + Linked Crosshair + Ichimoku + CVD",
+        10,
+        60,
+    );
+    let (r_mtf_confl, r_mtf_confl_p99) = bench_r12_full_workstation_ui(
+        &candles_50k_1m,
+        3,
+        "r12_mtf_1x2_conflated_ichimoku_cvd_50k_frame",
+        "1x2 Split MTF Conflated 50k 1m + 15m + Ichimoku Kumo + Session CVD",
+        10,
+        60,
+    );
+    let (r_quad_confl, r_quad_confl_p99) = bench_r12_full_workstation_ui(
+        &candles_50k_1m,
+        4,
+        "r12_quad_2x2_conflated_ichimoku_vwap_session_cvd_50k_frame",
+        "2x2 Quad Conflated (step>=8) 50k 1m x 4 (200k Bars) + Ichimoku + VWAP + Session CVD",
+        10,
+        60,
+    );
+
+    let render_cases = vec![r_single, r_quad, r_quad_pan, r_mtf_confl, r_quad_confl];
+    let p99_ms_list = [
+        r_single_p99,
+        r_quad_p99,
+        r_quad_pan_p99,
+        r_mtf_confl_p99,
+        r_quad_confl_p99,
+    ];
+
+    println!("\n--- Workstation R12 Full-Frame Budget (< 4.0 ms target) ---");
+    for (r, p99_ms) in render_cases.iter().zip(p99_ms_list.iter()) {
+        let mean_ms = r.total_cpu_frame_stats.mean_us / 1_000.0;
+        let med_ms = r.total_cpu_frame_stats.median_us / 1_000.0;
+        println!(
+            "  {:<44} | bars={:>6} conf={}x drawn={:>5} verts={:>6} | mean={:.3} ms med={:.3} ms p99={:.3} ms",
+            r.workload_id,
+            r.dataset_bars,
+            r.conflation_factor,
+            r.rendered_candles,
+            r.total_vertices,
+            mean_ms,
+            med_ms,
+            p99_ms
+        );
+        assert!(
+            mean_ms < 4.0 && *p99_ms < 4.0,
+            "R12 frame budget exceeded on {}: mean={mean_ms:.3} ms, p99={p99_ms:.3} ms (must be < 4.0 ms)",
+            r.workload_id
+        );
+    }
+
+    let _ = std::fs::create_dir_all("docs/evidence");
+    let json_doc = format_r12_json_report(
+        cpu,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        &domain_cases,
+        &render_cases,
+        &p99_ms_list,
+    );
+    let md_doc = format_r12_markdown_report(
+        cpu,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        &domain_cases,
+        &render_cases,
+        &p99_ms_list,
+    );
+    std::fs::write(
+        "docs/evidence/r12_multichart_ichimoku_cvd_benchmark.json",
+        json_doc,
+    )
+    .expect("write r12 benchmark json");
+    std::fs::write(
+        "docs/evidence/r12_multichart_ichimoku_cvd_benchmark.md",
+        md_doc,
+    )
+    .expect("write r12 benchmark md");
+    println!(
+        "\nSaved R12 benchmark artifacts to docs/evidence/r12_multichart_ichimoku_cvd_benchmark.{{json,md}}"
+    );
+}
+
+fn bench_r12_full_workstation_ui(
+    candles_50k_1m: &[Candle],
+    mode: u8,
+    workload_id: &'static str,
+    description: &'static str,
+    warmup: usize,
+    iters: usize,
+) -> (RenderCaseResult, f64) {
+    let ctx = egui::Context::default();
+    SumiWorkstationApp::configure_dark_workstation_visuals(&ctx);
+    let screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+    ctx.set_pixels_per_point(2.0);
+
+    let mut app = SumiWorkstationApp::default();
+    match mode {
+        0 => {
+            app.set_dataset_size(50_000);
+            app.grid_layout = MultiChartLayoutKind::Single1x1;
+            app.indicators = IndicatorConfig {
+                show_ichimoku: true,
+                show_cvd: true,
+                cvd_reset_mode: CvdResetMode::Session,
+                show_rsi: false,
+                show_macd: false,
+                show_atr: false,
+                ..IndicatorConfig::default()
+            };
+            app.sync_indicators_and_benchmarks();
+            app.viewport.time_scale.set_width(1190.0);
+            app.viewport.time_scale.set_bar_spacing(7.5);
+            app.viewport.time_scale.set_right_offset(28.0);
+        }
+        1 | 2 => {
+            app.set_dataset_size(50_000);
+            app.grid_layout = MultiChartLayoutKind::Quad2x2;
+            app.grid_sync.sync_crosshair = true;
+            app.grid_sync.sync_time_range = true;
+            app.grid_sync.sync_symbol = false;
+            app.grid_sync.sync_timeframe = false;
+            app.indicators = IndicatorConfig {
+                show_ichimoku: true,
+                show_vwap: true,
+                show_cvd: true,
+                cvd_reset_mode: CvdResetMode::Session,
+                show_rsi: false,
+                show_macd: false,
+                show_atr: false,
+                ..IndicatorConfig::default()
+            };
+            for slot in &mut app.secondary_slots {
+                slot.data_source = DataSourcePreset::SyntheticVnindex;
+                slot.symbol = "VNINDEX".to_owned();
+                slot.base_timeframe = Timeframe::D1;
+                slot.active_timeframe = Timeframe::D1;
+                slot.indicators = IndicatorConfig {
+                    show_ichimoku: true,
+                    show_vwap: true,
+                    show_cvd: true,
+                    cvd_reset_mode: CvdResetMode::Session,
+                    show_rsi: false,
+                    show_macd: false,
+                    show_atr: false,
+                    ..IndicatorConfig::default()
+                };
+                slot.viewport.time_scale.set_width(590.0);
+                slot.viewport.time_scale.set_bar_spacing(7.5);
+                slot.viewport.time_scale.set_right_offset(28.0);
+            }
+            app.viewport.time_scale.set_width(590.0);
+            app.viewport.time_scale.set_bar_spacing(7.5);
+            app.viewport.time_scale.set_right_offset(28.0);
+            app.sync_indicators_and_benchmarks();
+            app.sync_secondary_slots();
+            assert_eq!(app.candles.len(), 50_000);
+            assert!(
+                app.secondary_slots
+                    .iter()
+                    .all(|s| s.candles.len() == 50_000),
+                "all 3 secondary Quad2x2 slots must hold 50,000 bars (200k total)"
+            );
+        }
+        3 => {
+            let csv_50k = build_r06_csv_document(candles_50k_1m);
+            app.load_from_csv_str(&csv_50k, &DataLoadOptions::default())
+                .expect("load 50k csv");
+            app.grid_layout = MultiChartLayoutKind::SplitVertical1x2;
+            app.grid_sync.sync_crosshair = true;
+            app.grid_sync.sync_time_range = true;
+            app.grid_sync.sync_symbol = false;
+            app.grid_sync.sync_timeframe = false;
+            app.indicators = IndicatorConfig {
+                show_ichimoku: true,
+                show_vwap: true,
+                show_cvd: true,
+                cvd_reset_mode: CvdResetMode::Session,
+                show_rsi: false,
+                show_macd: false,
+                show_atr: false,
+                ..IndicatorConfig::default()
+            };
+            app.secondary_slots[0].data_source = DataSourcePreset::IntradayVn30F1m;
+            app.secondary_slots[0].symbol = "VN30F1M".to_owned();
+            app.secondary_slots[0].base_timeframe = Timeframe::M1;
+            app.secondary_slots[0].active_timeframe = Timeframe::M15;
+            app.secondary_slots[0].indicators = IndicatorConfig {
+                show_ichimoku: true,
+                show_vwap: true,
+                show_cvd: true,
+                cvd_reset_mode: CvdResetMode::Session,
+                show_rsi: false,
+                show_macd: false,
+                show_atr: false,
+                ..IndicatorConfig::default()
+            };
+            app.sync_indicators_and_benchmarks();
+            app.sync_secondary_slots();
+            app.viewport.time_scale.set_width(590.0);
+            app.viewport.fit_all();
+            app.secondary_slots[0].viewport.time_scale.set_width(590.0);
+            app.propagate_time_window_from_slot(0);
+        }
+        _ => {
+            let csv_50k = build_r06_csv_document(candles_50k_1m);
+            app.load_from_csv_str(&csv_50k, &DataLoadOptions::default())
+                .expect("load 50k 1m csv");
+            app.set_timeframe(Timeframe::M1).expect("set 1m timeframe");
+            app.grid_layout = MultiChartLayoutKind::Quad2x2;
+            app.grid_sync.sync_crosshair = true;
+            app.grid_sync.sync_time_range = true;
+            app.grid_sync.sync_symbol = true;
+            app.grid_sync.sync_timeframe = true;
+            app.indicators = IndicatorConfig {
+                show_ichimoku: true,
+                show_vwap: true,
+                show_cvd: true,
+                cvd_reset_mode: CvdResetMode::Session,
+                show_rsi: false,
+                show_macd: false,
+                show_atr: false,
+                ..IndicatorConfig::default()
+            };
+            for slot in &mut app.secondary_slots {
+                slot.base_timeframe = Timeframe::M1;
+                slot.active_timeframe = Timeframe::M1;
+                slot.indicators = app.indicators.clone();
+                slot.viewport.time_scale.set_width(590.0);
+            }
+            app.sync_symbol_from_primary_across_slots();
+            app.sync_timeframe_from_primary_across_slots();
+            app.sync_indicators_and_benchmarks();
+            app.sync_secondary_slots();
+            assert_eq!(app.candles.len(), 50_000);
+            assert!(
+                app.secondary_slots
+                    .iter()
+                    .all(|s| s.candles.len() == 50_000),
+                "all 4 conflated Quad2x2 slots must hold 50,000 1m bars (200k total)"
+            );
+            app.viewport.time_scale.set_width(590.0);
+            app.viewport.fit_all();
+            app.propagate_time_window_from_slot(0);
+        }
+    }
+
+    for _ in 0..2 {
+        let mut init_out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        init_out.textures_delta.clear();
+    }
+    if matches!(mode, 3 | 4) {
+        app.viewport.fit_all();
+        app.propagate_time_window_from_slot(0);
+    }
+
+    let mut ui_samples = Vec::with_capacity(iters);
+    let mut tess_samples = Vec::with_capacity(iters);
+    let mut total_samples = Vec::with_capacity(iters);
+    let mut paint_shapes = 0_usize;
+    let mut clipped_primitives = 0_usize;
+    let mut total_vertices = 0_usize;
+    let mut total_indices = 0_usize;
+
+    for step in 0..(warmup + iters) {
+        let hover_x = 220.0 + ((step % 18) as f32) * 16.0;
+        let hover_y = 220.0;
+        let mut events = vec![egui::Event::PointerMoved(Pos2::new(hover_x, hover_y))];
+        if mode == 2 {
+            let phase = (step / 6) % 2;
+            let pan_dx = if step % 3 == 2 {
+                0.0
+            } else if phase == 0 {
+                -24.0
+            } else {
+                24.0
+            };
+            let zoom_dy = if step % 3 == 2 {
+                if phase == 0 { -16.0 } else { 16.0 }
+            } else {
+                0.0
+            };
+            events.push(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(pan_dx, zoom_dy),
+                modifiers: egui::Modifiers::NONE,
+                phase: egui::TouchPhase::Move,
+            });
+        }
+        let raw_input = egui::RawInput {
+            screen_rect,
+            time: Some(step as f64 * 0.016),
+            events,
+            ..Default::default()
+        };
+
+        let t_frame = Instant::now();
+        let t_ui = Instant::now();
+        let mut full_out = ctx.run_ui(raw_input, |ui| {
+            app.render_workstation_ui(ui);
+        });
+        let ui_us = t_ui.elapsed().as_secs_f64() * 1_000_000.0;
+
+        paint_shapes = full_out.shapes.len();
+        let t_tess = Instant::now();
+        let primitives = ctx.tessellate(full_out.shapes, full_out.pixels_per_point);
+        let tess_us = t_tess.elapsed().as_secs_f64() * 1_000_000.0;
+        let total_us = t_frame.elapsed().as_secs_f64() * 1_000_000.0;
+        full_out.textures_delta.clear();
+
+        if step + 1 == warmup + iters {
+            clipped_primitives = primitives.len();
+            total_vertices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.vertices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+            total_indices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.indices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+        }
+
+        if step >= warmup {
+            ui_samples.push(ui_us);
+            tess_samples.push(tess_us);
+            total_samples.push(total_us);
+        }
+    }
+
+    let mut sorted_tot = total_samples.clone();
+    sorted_tot.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let p99_idx =
+        ((sorted_tot.len() as f64 * 0.99).floor() as usize).min(sorted_tot.len().saturating_sub(1));
+    let p99_ms = sorted_tot.get(p99_idx).copied().unwrap_or(0.0) / 1_000.0;
+
+    let rep = app.last_report.expect("full app r12 report");
+    assert!(
+        rep.rendered_candle_count > 0 && rep.ichimoku_active && rep.cvd_pane_active,
+        "slot 0 failed R12 render check in mode={mode}: {rep:?}"
+    );
+    let sec_limit = match mode {
+        1 | 2 | 4 => 3,
+        3 => 1,
+        _ => 0,
+    };
+    let mut total_rendered_candles = rep.rendered_candle_count;
+    let mut total_culled_bars = rep.culled_bar_count;
+    for (i, slot) in app.secondary_slots[..sec_limit].iter().enumerate() {
+        let sr = slot
+            .last_report
+            .unwrap_or_else(|| panic!("secondary slot {} missing report in mode={mode}", i + 1));
+        assert!(
+            sr.rendered_candle_count > 0 && sr.ichimoku_active && sr.cvd_pane_active,
+            "secondary slot {} failed R12 render check in mode={mode}: {sr:?}",
+            i + 1
+        );
+        if matches!(mode, 3 | 4) && !(mode == 3 && slot.active_timeframe > slot.base_timeframe) {
+            assert!(
+                sr.conflation_factor >= 8,
+                "expected conflated mode={mode} on slot {} (got conflation_factor={})",
+                i + 1,
+                sr.conflation_factor
+            );
+        }
+        total_rendered_candles += sr.rendered_candle_count;
+        total_culled_bars += sr.culled_bar_count;
+    }
+    if matches!(mode, 3 | 4) {
+        assert!(
+            rep.conflation_factor >= 8,
+            "expected conflated MTF mode={mode} (got conflation_factor={})",
+            rep.conflation_factor
+        );
+    }
+    let reported_bars = if matches!(mode, 1 | 2 | 4) {
+        app.candles.len()
+            + app
+                .secondary_slots
+                .iter()
+                .map(|s| s.candles.len())
+                .sum::<usize>()
+    } else if mode == 3 {
+        app.candles.len() + app.secondary_slots[0].candles.len()
+    } else {
+        app.candles.len()
+    };
+    (
+        RenderCaseResult {
+            dataset_bars: reported_bars,
+            workload_id,
+            description,
+            scale_mode: app.viewport.main_price_scale.mode().label(),
+            conflation_enabled: true,
+            bar_spacing: rep.bar_spacing,
+            conflation_factor: rep.conflation_factor,
+            culled_bars: total_culled_bars,
+            rendered_candles: total_rendered_candles,
+            paint_shapes,
+            clipped_primitives,
+            total_vertices,
+            total_indices,
+            ui_build_stats: TimingStats::from_samples(ui_samples),
+            tessellate_stats: TimingStats::from_samples(tess_samples),
+            total_cpu_frame_stats: TimingStats::from_samples(total_samples),
+        },
+        p99_ms,
+    )
+}
+
+fn format_r12_json_report(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+    domain: &[R09DomainBenchCase],
+    render: &[RenderCaseResult],
+    p99_ms_list: &[f64],
+) -> String {
+    let mut s = String::with_capacity(8192);
+    let _ = writeln!(s, "{{");
+    let overall_pass = render
+        .iter()
+        .zip(p99_ms_list.iter())
+        .all(|(r, p99)| (r.total_cpu_frame_stats.mean_us / 1_000.0) < 4.0 && *p99 < 4.0);
+    let _ = writeln!(s, "  \"milestone\": \"R12\",");
+    let _ = writeln!(s, "  \"overall_pass\": {overall_pass},");
+    let _ = writeln!(s, "  \"environment\": {{");
+    let _ = writeln!(s, "    \"cpu\": \"{}\",", cpu.replace('"', "\\\""));
+    let _ = writeln!(s, "    \"os\": \"{}\",", std::env::consts::OS);
+    let _ = writeln!(s, "    \"arch\": \"{}\",", std::env::consts::ARCH);
+    let _ = writeln!(s, "    \"ram_bytes\": {mem_bytes},");
+    let _ = writeln!(s, "    \"rustc\": \"{}\",", rustc_ver.replace('"', "\\\""));
+    let _ = writeln!(s, "    \"profile\": \"{profile}\",");
+    let _ = writeln!(s, "    \"viewport_logical_px\": [1280, 800],");
+    let _ = writeln!(s, "    \"pixels_per_point\": 2.0");
+    let _ = writeln!(s, "  }},");
+    let _ = writeln!(s, "  \"r12_domain_throughput\": [");
+    for (idx, d) in domain.iter().enumerate() {
+        let comma = if idx + 1 == domain.len() { "" } else { "," };
+        let _ = writeln!(
+            s,
+            "    {{ \"case_id\": \"{}\", \"description\": \"{}\", \"input_units\": {}, \"output_items\": {}, \"median_us\": {:.3}, \"median_ms\": {:.4}, \"p95_us\": {:.3}, \"max_us\": {:.3} }}{comma}",
+            d.case_id,
+            d.description.replace('"', "\\\""),
+            d.input_units,
+            d.output_items,
+            d.stats.median_us,
+            d.stats.median_us / 1_000.0,
+            d.stats.p95_us,
+            d.stats.max_us,
+        );
+    }
+    let _ = writeln!(s, "  ],");
+    let _ = writeln!(s, "  \"workstation_r12_workloads\": [");
+    for (idx, (r, p99_ms)) in render.iter().zip(p99_ms_list.iter()).enumerate() {
+        let comma = if idx + 1 == render.len() { "" } else { "," };
+        let _ = writeln!(
+            s,
+            "    {{ \"dataset_bars\": {}, \"workload_id\": \"{}\", \"scale_mode\": \"{}\", \"bar_spacing\": {:.5}, \"conflation_factor\": {}, \"culled_bars\": {}, \"rendered_candles\": {}, \"paint_shapes\": {}, \"clipped_primitives\": {}, \"total_vertices\": {}, \"total_indices\": {}, \"ui_median_ms\": {:.4}, \"tessellate_median_ms\": {:.4}, \"total_cpu_mean_ms\": {:.4}, \"total_cpu_median_ms\": {:.4}, \"total_cpu_p95_ms\": {:.4}, \"total_cpu_p99_ms\": {:.4} }}{comma}",
+            r.dataset_bars,
+            r.workload_id,
+            r.scale_mode,
+            r.bar_spacing,
+            r.conflation_factor,
+            r.culled_bars,
+            r.rendered_candles,
+            r.paint_shapes,
+            r.clipped_primitives,
+            r.total_vertices,
+            r.total_indices,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.mean_us / 1_000.0,
+            r.total_cpu_frame_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.p95_us / 1_000.0,
+            p99_ms,
+        );
+    }
+    let _ = writeln!(s, "  ]");
+    let _ = writeln!(s, "}}");
+    s
+}
+
+fn format_r12_markdown_report(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+    domain: &[R09DomainBenchCase],
+    render: &[RenderCaseResult],
+    p99_ms_list: &[f64],
+) -> String {
+    let mut s = String::with_capacity(8192);
+    let _ = writeln!(
+        s,
+        "# Milestone R12 — Synchronized Multi-Chart Grid, Ichimoku Cloud, Cumulative Volume Delta (`CVD`) & Workspace Templates Benchmark Evidence\n"
+    );
+    let _ = writeln!(
+        s,
+        "- **Command:** `cargo run --release --example viewport_bench -- --r12`"
+    );
+    let _ = writeln!(
+        s,
+        "- **Hardware:** `{cpu}` (`{}-{}`), `{:.1} GiB` RAM",
+        std::env::consts::ARCH,
+        std::env::consts::OS,
+        (mem_bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+    );
+    let _ = writeln!(
+        s,
+        "- **Toolchain & Profile:** `{rustc_ver}` (`--{profile}`)"
+    );
+    let _ = writeln!(
+        s,
+        "- **Active Stack:** Multi-Chart Grid (`1x1`/`1x2`/`2x1`/`2x2` + `Sync X`/`Sync T`), Ichimoku Cloud (`(9,26,52,+26)` Kumo Twist triangle-split `egui::Mesh` + causal `DEF-001` `Chikou`), `CVD` (`OHLCV_PROXY` `Session` UTC+7 / `Cumulative` + `9`-SMA), & Versioned `WorkspaceTemplate` (`RON`/`JSON` v1)\n"
+    );
+
+    let _ = writeln!(
+        s,
+        "## 1. Ichimoku Cloud, CVD & Workspace Template Kernel Throughput\n"
+    );
+    let _ = writeln!(
+        s,
+        "| Case ID | Description | Input Units | Output Items | Median (`µs`) | Median (`ms`) | P95 (`µs`) | Max (`µs`) |"
+    );
+    let _ = writeln!(
+        s,
+        "| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: |"
+    );
+    for d in domain {
+        let _ = writeln!(
+            s,
+            "| `{}` | {} | `{}` | `{}` | **`{:.2} µs`** | **`{:.3} ms`** | `{:.2} µs` | `{:.2} µs` |",
+            d.case_id,
+            d.description,
+            d.input_units,
+            d.output_items,
+            d.stats.median_us,
+            d.stats.median_us / 1_000.0,
+            d.stats.p95_us,
+            d.stats.max_us,
+        );
+    }
+
+    let _ = writeln!(
+        s,
+        "\n## 2. End-to-End Workstation Multi-Chart Frame Budget (`DECISION-RENDERER-002` Gate: `< 4.0 ms`)\n"
+    );
+    let _ = writeln!(
+        s,
+        "| Bars (Grid Total) | Workload | Scale | Conflation | Culled | Drawn | Vertices | Indices | Mean (`ms`) | Median (`ms`) | P99 (`ms`) | `< 4.0ms` Gate |"
     );
     let _ = writeln!(
         s,

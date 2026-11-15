@@ -5,6 +5,8 @@
 //! Contains zero UI or OS-specific dependencies.
 
 pub mod bands;
+pub mod cvd;
+pub mod ichimoku;
 pub mod moving_averages;
 pub mod oscillators;
 pub mod relative_strength;
@@ -20,9 +22,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::data::Timeframe;
 use crate::model::Candle;
+use crate::viewport::iter_conflated_candles;
 
 pub use bands::{
     BollingerBandsIndicator, BollingerOutput, compute_bollinger_bands, compute_bollinger_slices,
+};
+pub use cvd::{
+    CVD_REFERENCE_LEVELS, CvdConfig, CvdOutput, CvdResetMode, compute_bar_volume_delta, compute_cvd,
+};
+pub use ichimoku::{
+    IchimokuConfig, IchimokuIndicator, IchimokuOutput, MAX_ICHIMOKU_DISPLACEMENT, compute_ichimoku,
+    donchian_midpoint_series,
 };
 pub use moving_averages::{
     EmaIndicator, SmaIndicator, compute_ema, compute_ema_optional_slice, compute_ema_slices,
@@ -103,6 +113,7 @@ pub enum OscillatorPaneId {
     Atr,
     Equity,
     RelativeStrength,
+    Cvd,
 }
 
 impl OscillatorPaneId {
@@ -114,6 +125,7 @@ impl OscillatorPaneId {
             Self::Atr => "osc-atr",
             Self::Equity => "osc-equity",
             Self::RelativeStrength => "osc-rs",
+            Self::Cvd => "osc-cvd",
         }
     }
 
@@ -125,6 +137,7 @@ impl OscillatorPaneId {
             Self::Atr => "ATR",
             Self::Equity => "EQUITY",
             Self::RelativeStrength => "RS",
+            Self::Cvd => "CVD",
         }
     }
 }
@@ -147,6 +160,12 @@ pub struct IndicatorConfig {
     pub show_vrvp: bool,
     pub vrvp_rows: usize,
     pub vrvp_value_area_pct: f64,
+    pub show_ichimoku: bool,
+    pub ichimoku_tenkan: usize,
+    pub ichimoku_kijun: usize,
+    pub ichimoku_senkou_b: usize,
+    pub ichimoku_displacement: usize,
+    pub show_ichimoku_chikou: bool,
 
     // Stacked oscillator sub-panes
     pub show_rsi: bool,
@@ -159,6 +178,9 @@ pub struct IndicatorConfig {
     pub atr_period: usize,
     pub show_rs: bool,
     pub rs_sma_period: usize,
+    pub show_cvd: bool,
+    pub cvd_reset_mode: CvdResetMode,
+    pub cvd_sma_period: usize,
 }
 
 impl Default for IndicatorConfig {
@@ -177,6 +199,12 @@ impl Default for IndicatorConfig {
             show_vrvp: false,
             vrvp_rows: 40,
             vrvp_value_area_pct: 0.70,
+            show_ichimoku: false,
+            ichimoku_tenkan: 9,
+            ichimoku_kijun: 26,
+            ichimoku_senkou_b: 52,
+            ichimoku_displacement: 26,
+            show_ichimoku_chikou: true,
             show_rsi: true,
             rsi_period: 14,
             show_macd: false,
@@ -187,6 +215,9 @@ impl Default for IndicatorConfig {
             atr_period: 14,
             show_rs: false,
             rs_sma_period: 20,
+            show_cvd: false,
+            cvd_reset_mode: CvdResetMode::Session,
+            cvd_sma_period: 9,
         }
     }
 }
@@ -223,6 +254,10 @@ impl IndicatorConfig {
         } else {
             self.vrvp_value_area_pct = self.vrvp_value_area_pct.clamp(0.10, 0.95);
         }
+        self.ichimoku_tenkan = self.ichimoku_tenkan.clamp(1, 500);
+        self.ichimoku_kijun = self.ichimoku_kijun.clamp(1, 500);
+        self.ichimoku_senkou_b = self.ichimoku_senkou_b.clamp(1, 500);
+        self.ichimoku_displacement = self.ichimoku_displacement.min(MAX_ICHIMOKU_DISPLACEMENT);
         self.rsi_period = self.rsi_period.clamp(2, 5_000);
         self.macd_fast = self.macd_fast.clamp(2, 5_000);
         self.macd_slow = self.macd_slow.clamp(2, 5_000);
@@ -232,12 +267,13 @@ impl IndicatorConfig {
         self.macd_signal = self.macd_signal.clamp(1, 5_000);
         self.atr_period = self.atr_period.clamp(1, 5_000);
         self.rs_sma_period = self.rs_sma_period.clamp(1, 5_000);
+        self.cvd_sma_period = self.cvd_sma_period.clamp(1, 500);
     }
 
     /// Returns the ordered list of active oscillator sub-panes below the main price pane.
     #[must_use]
     pub fn active_oscillator_panes(&self) -> Vec<OscillatorPaneId> {
-        let mut panes = Vec::with_capacity(4);
+        let mut panes = Vec::with_capacity(5);
         if self.show_rsi {
             panes.push(OscillatorPaneId::Rsi);
         }
@@ -247,6 +283,9 @@ impl IndicatorConfig {
         if self.show_atr {
             panes.push(OscillatorPaneId::Atr);
         }
+        if self.show_cvd {
+            panes.push(OscillatorPaneId::Cvd);
+        }
         if self.show_rs {
             panes.push(OscillatorPaneId::RelativeStrength);
         }
@@ -255,7 +294,12 @@ impl IndicatorConfig {
 
     #[must_use]
     pub const fn any_overlay_enabled(&self) -> bool {
-        self.show_sma || self.show_ema || self.show_bbands || self.show_vwap || self.show_vrvp
+        self.show_sma
+            || self.show_ema
+            || self.show_bbands
+            || self.show_vwap
+            || self.show_vrvp
+            || self.show_ichimoku
     }
 }
 
@@ -273,6 +317,7 @@ pub struct BlockExtrema {
     pub max_idx: usize,
     pub max_val: f64,
     pub dom_val: f64,
+    pub valid_sum: f64,
     pub valid_count: u8,
 }
 
@@ -295,11 +340,13 @@ impl SeriesBlockIndex {
             let mut min_pair: Option<(usize, f64)> = None;
             let mut max_pair: Option<(usize, f64)> = None;
             let mut dom_val: Option<f64> = None;
+            let mut valid_sum = 0.0_f64;
             let mut valid_count = 0_u8;
 
             for (offset, item) in chunk.iter().enumerate() {
                 if let Some(v) = item.filter(|v| v.is_finite()) {
                     let abs_i = base + offset;
+                    valid_sum += v;
                     valid_count += 1;
                     if first_pair.is_none() {
                         first_pair = Some((abs_i, v));
@@ -335,6 +382,7 @@ impl SeriesBlockIndex {
                     max_idx,
                     max_val,
                     dom_val: dom,
+                    valid_sum,
                     valid_count,
                 }));
             } else {
@@ -429,6 +477,236 @@ impl SeriesBlockIndex {
         }
         None
     }
+
+    /// Returns exact `(sum, valid_count)` of finite values in `series[bucket_start..bucket_end]`
+    /// using hybrid head + `16`-bar blocks + tail acceleration whenever `step >= 16`, with exact slice fallback.
+    #[must_use]
+    pub fn bucket_sum_and_count(
+        &self,
+        series: &[Option<f64>],
+        bucket_start: usize,
+        bucket_end: usize,
+    ) -> Option<(f64, usize)> {
+        let start = bucket_start.min(series.len());
+        let end = bucket_end.min(series.len());
+        if start >= end {
+            return None;
+        }
+        let step = end - start;
+        if step >= Self::BLOCK_SIZE && self.is_synced_with(series) {
+            let first_aligned = start.div_ceil(Self::BLOCK_SIZE) * Self::BLOCK_SIZE;
+            let last_aligned = (end / Self::BLOCK_SIZE) * Self::BLOCK_SIZE;
+            if first_aligned <= last_aligned {
+                let mut sum = 0.0_f64;
+                let mut count = 0_usize;
+                for slice in [&series[start..first_aligned], &series[last_aligned..end]] {
+                    for item in slice {
+                        if let Some(v) = item.filter(|v| v.is_finite()) {
+                            sum += v;
+                            count += 1;
+                        }
+                    }
+                }
+                let b_start = first_aligned / Self::BLOCK_SIZE;
+                let b_end = last_aligned / Self::BLOCK_SIZE;
+                for blk in self.blocks[b_start..b_end].iter().flatten() {
+                    sum += blk.valid_sum;
+                    count += usize::from(blk.valid_count);
+                }
+                if count == 0 {
+                    return None;
+                }
+                if sum.is_finite() {
+                    return Some((sum, count));
+                }
+            }
+        }
+
+        let mut sum = 0.0_f64;
+        let mut count = 0_usize;
+        for item in &series[start..end] {
+            if let Some(v) = item.filter(|v| v.is_finite()) {
+                sum += v;
+                count += 1;
+            }
+        }
+        (count > 0).then_some((sum, count))
+    }
+}
+
+/// Compact `Copy` 16-bar OHLCV summary block eliminating per-frame `String`-padded `Candle` scans
+/// during `16x`..`512x` conflated autoscale and chart painting.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CandleBlock {
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume_sum: f64,
+    pub first_idx: u32,
+    pub last_idx: u32,
+}
+
+/// Hierarchical 16-bar OHLCV block index for zero-allocation conflated autoscale and rendering.
+#[derive(Debug, Clone, Default)]
+pub struct CandleBlockIndex {
+    blocks: Vec<CandleBlock>,
+    source_len: usize,
+}
+
+impl CandleBlockIndex {
+    pub const BLOCK_SIZE: usize = 16;
+
+    /// Builds a compact `16`-bar OHLCV summary index for `candles`.
+    #[must_use]
+    pub fn build(candles: &[Candle]) -> Self {
+        let mut blocks = Vec::with_capacity(candles.len().div_ceil(Self::BLOCK_SIZE));
+        for (blk_i, chunk) in candles.chunks(Self::BLOCK_SIZE).enumerate() {
+            let base = blk_i * Self::BLOCK_SIZE;
+            let first = &chunk[0];
+            let last = &chunk[chunk.len() - 1];
+            let mut high = first.high;
+            let mut low = first.low;
+            let mut volume_sum = 0.0_f64;
+            for c in chunk {
+                high = high.max(c.high);
+                low = low.min(c.low);
+                volume_sum += c.volume;
+            }
+            blocks.push(CandleBlock {
+                open: first.open,
+                high,
+                low,
+                close: last.close,
+                volume_sum,
+                first_idx: base as u32,
+                last_idx: (base + chunk.len() - 1) as u32,
+            });
+        }
+        Self {
+            blocks,
+            source_len: candles.len(),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.blocks.clear();
+        self.source_len = 0;
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn source_len(&self) -> usize {
+        self.source_len
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn is_synced_with(&self, candles: &[Candle]) -> bool {
+        self.source_len == candles.len()
+            && self.blocks.len() == candles.len().div_ceil(Self::BLOCK_SIZE)
+    }
+
+    /// Iterates conflated OHLCV buckets matching `iter_conflated_candles` alignment in $O(N / 16)$
+    /// whenever `conflation_factor >= 16` is a multiple of `16` and the block index is synced.
+    pub fn for_each_conflated_bucket<F>(
+        &self,
+        candles: &[Candle],
+        slice_range: Range<usize>,
+        conflation_factor: usize,
+        mut on_bar: F,
+    ) where
+        F: FnMut(f64, f64, f64, f64, f64, f64, bool),
+    {
+        let step = conflation_factor.max(1);
+        let clamped_end = slice_range.end.min(candles.len());
+        let raw_start = slice_range.start.min(clamped_end);
+        if raw_start >= clamped_end {
+            return;
+        }
+        if step >= Self::BLOCK_SIZE
+            && step.is_multiple_of(Self::BLOCK_SIZE)
+            && self.is_synced_with(candles)
+        {
+            let aligned_start = (raw_start / step) * step;
+            let aligned_end = clamped_end
+                .div_ceil(step)
+                .saturating_mul(step)
+                .min(candles.len());
+            let blocks_per_step = step / Self::BLOCK_SIZE;
+            let mut b_idx = aligned_start / Self::BLOCK_SIZE;
+            let total_blocks = self.blocks.len();
+            let b_limit = aligned_end.div_ceil(Self::BLOCK_SIZE).min(total_blocks);
+
+            while b_idx < b_limit {
+                let b_chunk_end = (b_idx + blocks_per_step).min(b_limit);
+                let first_blk = &self.blocks[b_idx];
+                let last_blk = &self.blocks[b_chunk_end - 1];
+                let mut high = first_blk.high;
+                let mut low = first_blk.low;
+                let mut volume = 0.0_f64;
+                for blk in &self.blocks[b_idx..b_chunk_end] {
+                    high = high.max(blk.high);
+                    low = low.min(blk.low);
+                    volume += blk.volume_sum;
+                }
+                let start_i = first_blk.first_idx as usize;
+                let end_i = last_blk.last_idx as usize;
+                let center = if start_i == end_i {
+                    start_i as f64
+                } else {
+                    (start_i + end_i) as f64 * 0.5
+                };
+                let open = first_blk.open;
+                let close = last_blk.close;
+                on_bar(center, open, high, low, close, volume, close >= open);
+                b_idx = b_chunk_end;
+            }
+            return;
+        }
+
+        for bar in iter_conflated_candles(candles, raw_start..clamped_end, step) {
+            on_bar(
+                bar.center_logical_index,
+                bar.open,
+                bar.high,
+                bar.low,
+                bar.close,
+                bar.volume,
+                bar.is_bullish(),
+            );
+        }
+    }
+
+    /// Computes `(raw_min, raw_max, max_vol)` across `strict_range` matching `iter_conflated_candles`.
+    #[must_use]
+    pub fn autoscale_bounds(
+        &self,
+        candles: &[Candle],
+        strict_range: Range<usize>,
+        conflation_factor: usize,
+    ) -> (f64, f64, f64) {
+        let mut raw_min = f64::INFINITY;
+        let mut raw_max = f64::NEG_INFINITY;
+        let mut max_vol = 0.0_f64;
+        self.for_each_conflated_bucket(
+            candles,
+            strict_range,
+            conflation_factor,
+            |_, _, high, low, _, volume, _| {
+                if low.is_finite() {
+                    raw_min = raw_min.min(low);
+                }
+                if high.is_finite() {
+                    raw_max = raw_max.max(high);
+                }
+                if volume.is_finite() {
+                    max_vol = max_vol.max(volume);
+                }
+            },
+        );
+        (raw_min, raw_max, max_vol)
+    }
 }
 
 /// Dirty-tracked cache of computed indicator series (plus 16-bar block indices) so panning,
@@ -438,6 +716,7 @@ pub struct IndicatorCache {
     dataset_generation: u64,
     dataset_len: usize,
     applied_config: Option<IndicatorConfig>,
+    pub candle_idx: CandleBlockIndex,
     pub sma: Vec<Option<f64>>,
     pub sma_idx: SeriesBlockIndex,
     pub ema: Vec<Option<f64>>,
@@ -461,6 +740,18 @@ pub struct IndicatorCache {
     pub macd_hist_idx: SeriesBlockIndex,
     pub atr: Vec<Option<f64>>,
     pub atr_idx: SeriesBlockIndex,
+    pub ichimoku: IchimokuOutput,
+    pub ichimoku_tenkan_idx: SeriesBlockIndex,
+    pub ichimoku_kijun_idx: SeriesBlockIndex,
+    pub ichimoku_senkou_a_idx: SeriesBlockIndex,
+    pub ichimoku_senkou_b_idx: SeriesBlockIndex,
+    pub ichimoku_chikou_idx: SeriesBlockIndex,
+    ichimoku_computed_cfg: Option<IchimokuConfig>,
+    pub cvd: CvdOutput,
+    pub cvd_delta_idx: SeriesBlockIndex,
+    pub cvd_line_idx: SeriesBlockIndex,
+    pub cvd_sma_idx: SeriesBlockIndex,
+    cvd_computed_cfg: Option<CvdConfig>,
     pub rs: RelativeStrengthOutput,
     pub rs_line_idx: SeriesBlockIndex,
     pub rs_sma_idx: SeriesBlockIndex,
@@ -520,6 +811,12 @@ impl IndicatorCache {
         let dataset_changed =
             self.dataset_generation != dataset_generation || self.dataset_len != candles.len();
 
+        if candles.is_empty() {
+            self.candle_idx.clear();
+        } else if dataset_changed || self.candle_idx.source_len() != candles.len() {
+            self.candle_idx = CandleBlockIndex::build(candles);
+        }
+
         let prev_cfg = if dataset_changed {
             self.sma.clear();
             self.sma_idx.clear();
@@ -544,6 +841,18 @@ impl IndicatorCache {
             self.macd_hist_idx.clear();
             self.atr.clear();
             self.atr_idx.clear();
+            self.ichimoku = IchimokuOutput::default();
+            self.ichimoku_tenkan_idx.clear();
+            self.ichimoku_kijun_idx.clear();
+            self.ichimoku_senkou_a_idx.clear();
+            self.ichimoku_senkou_b_idx.clear();
+            self.ichimoku_chikou_idx.clear();
+            self.ichimoku_computed_cfg = None;
+            self.cvd = CvdOutput::default();
+            self.cvd_delta_idx.clear();
+            self.cvd_line_idx.clear();
+            self.cvd_sma_idx.clear();
+            self.cvd_computed_cfg = None;
             self.rs = RelativeStrengthOutput::default();
             self.rs_line_idx.clear();
             self.rs_sma_idx.clear();
@@ -583,6 +892,25 @@ impl IndicatorCache {
                         || p.macd_slow != clean_cfg.macd_slow
                         || p.macd_signal != clean_cfg.macd_signal
                 }));
+        let target_ichi_cfg = IchimokuConfig {
+            tenkan_period: clean_cfg.ichimoku_tenkan,
+            kijun_period: clean_cfg.ichimoku_kijun,
+            senkou_b_period: clean_cfg.ichimoku_senkou_b,
+            displacement: clean_cfg.ichimoku_displacement,
+            show_chikou: clean_cfg.show_ichimoku_chikou,
+        };
+        let need_ichimoku = clean_cfg.show_ichimoku
+            && (self.ichimoku.tenkan.len() != candles.len()
+                || self.ichimoku_computed_cfg != Some(target_ichi_cfg));
+        let target_cvd_cfg = CvdConfig {
+            reset_mode: clean_cfg.cvd_reset_mode,
+            timeframe,
+            utc_offset_seconds,
+            sma_period: clean_cfg.cvd_sma_period,
+        };
+        let need_cvd = clean_cfg.show_cvd
+            && (self.cvd.cvd.len() != candles.len()
+                || self.cvd_computed_cfg != Some(target_cvd_cfg));
         let need_atr = clean_cfg.show_atr
             && (self.atr.len() != candles.len()
                 || prev_cfg.is_none_or(|p| p.atr_period != clean_cfg.atr_period));
@@ -638,6 +966,22 @@ impl IndicatorCache {
         if need_atr {
             self.atr = compute_atr(candles, clean_cfg.atr_period);
             self.atr_idx = SeriesBlockIndex::build(&self.atr);
+        }
+        if need_ichimoku {
+            self.ichimoku = compute_ichimoku(candles, target_ichi_cfg);
+            self.ichimoku_tenkan_idx = SeriesBlockIndex::build(&self.ichimoku.tenkan);
+            self.ichimoku_kijun_idx = SeriesBlockIndex::build(&self.ichimoku.kijun);
+            self.ichimoku_senkou_a_idx = SeriesBlockIndex::build(&self.ichimoku.senkou_a);
+            self.ichimoku_senkou_b_idx = SeriesBlockIndex::build(&self.ichimoku.senkou_b);
+            self.ichimoku_chikou_idx = SeriesBlockIndex::build(&self.ichimoku.chikou);
+            self.ichimoku_computed_cfg = Some(target_ichi_cfg);
+        }
+        if need_cvd {
+            self.cvd = compute_cvd(candles, target_cvd_cfg);
+            self.cvd_delta_idx = SeriesBlockIndex::build(&self.cvd.delta);
+            self.cvd_line_idx = SeriesBlockIndex::build(&self.cvd.cvd);
+            self.cvd_sma_idx = SeriesBlockIndex::build(&self.cvd.cvd_sma);
+            self.cvd_computed_cfg = Some(target_cvd_cfg);
         }
 
         self.dataset_generation = dataset_generation;
@@ -765,54 +1109,74 @@ pub fn bucket_line_envelope_indexed(
         ((bucket_start + (bucket_end - 1)) as f64) * 0.5
     };
 
-    let mut first_pair: Option<(usize, f64)> = None;
-    let mut last_pair: Option<(usize, f64)> = None;
-    let mut min_pair: Option<(usize, f64)> = None;
-    let mut max_pair: Option<(usize, f64)> = None;
-    let mut valid_count = 0_usize;
+    #[derive(Default)]
+    struct BucketEnvelopeAcc {
+        first_pair: Option<(usize, f64)>,
+        last_pair: Option<(usize, f64)>,
+        min_pair: Option<(usize, f64)>,
+        max_pair: Option<(usize, f64)>,
+        valid_count: usize,
+    }
 
-    let use_blocks = step >= SeriesBlockIndex::BLOCK_SIZE
-        && bucket_start.is_multiple_of(SeriesBlockIndex::BLOCK_SIZE)
-        && (bucket_end == series.len() || bucket_end.is_multiple_of(SeriesBlockIndex::BLOCK_SIZE))
-        && block_index.is_some_and(|bi| bi.is_synced_with(series));
-
-    if use_blocks && let Some(bi) = block_index {
-        let b_start = bucket_start / SeriesBlockIndex::BLOCK_SIZE;
-        let b_end = bucket_end.div_ceil(SeriesBlockIndex::BLOCK_SIZE);
-        for blk in bi.blocks[b_start..b_end].iter().flatten() {
-            valid_count += usize::from(blk.valid_count);
-            if first_pair.is_none() {
-                first_pair = Some((blk.first_idx, blk.first_val));
-            }
-            last_pair = Some((blk.last_idx, blk.last_val));
-            if min_pair.is_none_or(|(_, mv)| blk.min_val < mv) {
-                min_pair = Some((blk.min_idx, blk.min_val));
-            }
-            if max_pair.is_none_or(|(_, mv)| blk.max_val > mv) {
-                max_pair = Some((blk.max_idx, blk.max_val));
-            }
-        }
-    } else {
-        for (offset, item) in series[bucket_start..bucket_end].iter().enumerate() {
-            if let Some(v) = item.filter(|v| v.is_finite()) {
-                let abs_i = bucket_start + offset;
-                valid_count += 1;
-                if first_pair.is_none() {
-                    first_pair = Some((abs_i, v));
-                }
-                last_pair = Some((abs_i, v));
-                if min_pair.is_none_or(|(_, mv)| v < mv) {
-                    min_pair = Some((abs_i, v));
-                }
-                if max_pair.is_none_or(|(_, mv)| v > mv) {
-                    max_pair = Some((abs_i, v));
+    impl BucketEnvelopeAcc {
+        #[inline]
+        fn scan_subslice(&mut self, series: &[Option<f64>], sub_start: usize, sub_end: usize) {
+            for (offset, item) in series[sub_start..sub_end].iter().enumerate() {
+                if let Some(v) = item.filter(|v| v.is_finite()) {
+                    let abs_i = sub_start + offset;
+                    self.valid_count += 1;
+                    if self.first_pair.is_none() {
+                        self.first_pair = Some((abs_i, v));
+                    }
+                    self.last_pair = Some((abs_i, v));
+                    if self.min_pair.is_none_or(|(_, mv)| v < mv) {
+                        self.min_pair = Some((abs_i, v));
+                    }
+                    if self.max_pair.is_none_or(|(_, mv)| v > mv) {
+                        self.max_pair = Some((abs_i, v));
+                    }
                 }
             }
         }
     }
 
-    let ((first_idx, first_val), (last_idx, last_val), (min_idx, min_val), (max_idx, max_val)) =
-        (first_pair?, last_pair?, min_pair?, max_pair?);
+    let mut acc = BucketEnvelopeAcc::default();
+    let first_aligned =
+        bucket_start.div_ceil(SeriesBlockIndex::BLOCK_SIZE) * SeriesBlockIndex::BLOCK_SIZE;
+    let last_aligned = (bucket_end / SeriesBlockIndex::BLOCK_SIZE) * SeriesBlockIndex::BLOCK_SIZE;
+    let use_hybrid_blocks = step >= SeriesBlockIndex::BLOCK_SIZE
+        && first_aligned <= last_aligned
+        && block_index.is_some_and(|bi| bi.is_synced_with(series));
+
+    if use_hybrid_blocks && let Some(bi) = block_index {
+        acc.scan_subslice(series, bucket_start, first_aligned);
+        let b_start = first_aligned / SeriesBlockIndex::BLOCK_SIZE;
+        let b_end = last_aligned / SeriesBlockIndex::BLOCK_SIZE;
+        for blk in bi.blocks[b_start..b_end].iter().flatten() {
+            acc.valid_count += usize::from(blk.valid_count);
+            if acc.first_pair.is_none() {
+                acc.first_pair = Some((blk.first_idx, blk.first_val));
+            }
+            acc.last_pair = Some((blk.last_idx, blk.last_val));
+            if acc.min_pair.is_none_or(|(_, mv)| blk.min_val < mv) {
+                acc.min_pair = Some((blk.min_idx, blk.min_val));
+            }
+            if acc.max_pair.is_none_or(|(_, mv)| blk.max_val > mv) {
+                acc.max_pair = Some((blk.max_idx, blk.max_val));
+            }
+        }
+        acc.scan_subslice(series, last_aligned, bucket_end);
+    } else {
+        acc.scan_subslice(series, bucket_start, bucket_end);
+    }
+
+    let ((first_idx, first_val), (last_idx, last_val), (min_idx, min_val), (max_idx, max_val)) = (
+        acc.first_pair?,
+        acc.last_pair?,
+        acc.min_pair?,
+        acc.max_pair?,
+    );
+    let valid_count = acc.valid_count;
 
     let has_leading_gap = first_idx > bucket_start;
     let has_trailing_gap = last_idx + 1 < bucket_end;

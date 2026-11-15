@@ -36,7 +36,8 @@ use crate::drawings::{
 };
 use crate::indicators::OscillatorPaneId;
 use crate::indicators::{
-    IndicatorCache, IndicatorConfig, SeriesBlockIndex, compute_rebased_comparison_series,
+    CvdResetMode, IndicatorCache, IndicatorConfig, SeriesBlockIndex,
+    compute_rebased_comparison_series,
 };
 use crate::journal::{
     ChecklistState, DailyPriceBand, ExchangeVenue, JournalEntrySource, JournalEntryStatus,
@@ -56,7 +57,11 @@ use crate::scanner::{
 use crate::trading::{
     OrderKind, OrderRequest, OrderSide, PositionSide, TradingSession, extract_ticket_from_drawing,
 };
-use crate::viewport::PriceScaleMode;
+use crate::viewport::{
+    MultiChartLayoutKind, MultiChartSyncConfig, PlotRect, PriceScaleMode, WorkspacePaneStretches,
+    WorkspaceSlotTemplate, WorkspaceTemplate, apply_synced_time_window,
+    builtin_workspace_templates, causal_closed_prefix_len, extract_visible_time_window,
+};
 
 /// Order-type tab selection in the workstation Paper Trading ticket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -274,6 +279,12 @@ pub enum PaletteAction {
     SetScaleMode(PriceScaleMode),
     FitContent,
     ResetView,
+    SetGridLayout(MultiChartLayoutKind),
+    ToggleGridSyncCrosshair,
+    ToggleGridSyncTimeRange,
+    ToggleCvdResetMode,
+    OpenTemplatesModal,
+    ApplyBuiltinTemplate(usize),
 }
 
 /// Ranked candidate row inside the `Cmd+K` Command Palette (`Milestone R08`).
@@ -322,6 +333,165 @@ struct MappedPortfolioCurveCache {
     equity_values: Vec<Option<f64>>,
     equity_idx: SeriesBlockIndex,
     underwater_values: Vec<Option<f64>>,
+}
+
+type SecondaryRsCompareKey = (u64, Timeframe, String, Option<i64>, bool, bool, usize);
+
+/// Independent chart slot state for `1x2`, `2x1`, and `2x2` secondary multi-chart panes (`Milestone R12`).
+///
+/// Holds each secondary slot's own symbol/timeframe, `PriceScale`s, indicators, and `IndicatorCache`
+/// while strictly obeying the primary slot's `DEF-001` Replay causal frontier.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SecondaryChartSlot {
+    pub symbol: String,
+    pub data_source: DataSourcePreset,
+    pub base_timeframe: Timeframe,
+    pub active_timeframe: Timeframe,
+    pub show_volume: bool,
+    pub indicators: IndicatorConfig,
+    pub compare_benchmark: Option<String>,
+    pub show_compare_overlay: bool,
+    pub viewport: ChartViewportState,
+
+    #[serde(skip)]
+    pub base_candles: Vec<Candle>,
+    #[serde(skip)]
+    loaded_source_key: Option<(DataSourcePreset, String, usize, u64)>,
+    #[serde(skip)]
+    pub candles: Vec<Candle>,
+    #[serde(skip)]
+    pub drawings: DrawingStore,
+    #[serde(skip)]
+    pub indicator_cache: IndicatorCache,
+    #[serde(skip)]
+    compare_series_cached: Vec<Option<f64>>,
+    #[serde(skip)]
+    compare_series_idx: SeriesBlockIndex,
+    #[serde(skip)]
+    active_benchmark_label: String,
+    #[serde(skip)]
+    materialized_key: Option<(u64, Timeframe, usize, Option<i64>)>,
+    #[serde(skip)]
+    rs_cmp_synced_key: Option<SecondaryRsCompareKey>,
+    #[serde(skip)]
+    dataset_generation: u64,
+    #[serde(skip)]
+    pub last_report: Option<ChartRenderReport>,
+}
+
+impl Default for SecondaryChartSlot {
+    fn default() -> Self {
+        Self::default_for_slot(1)
+    }
+}
+
+impl SecondaryChartSlot {
+    /// Builds deterministic institutional default configuration for secondary slot `slot_index` (`1..=3`).
+    #[must_use]
+    pub fn default_for_slot(slot_index: usize) -> Self {
+        let (data_source, symbol, base_tf, active_tf, cvd_mode, show_vwap) = match slot_index {
+            1 => (
+                DataSourcePreset::CafeFIndexCsv,
+                "VNINDEX".to_owned(),
+                Timeframe::D1,
+                Timeframe::D1,
+                CvdResetMode::Cumulative,
+                false,
+            ),
+            2 => (
+                DataSourcePreset::Vn30Basket,
+                "VCB".to_owned(),
+                Timeframe::D1,
+                Timeframe::D1,
+                CvdResetMode::Cumulative,
+                false,
+            ),
+            _ => (
+                DataSourcePreset::IntradayVn30F1m,
+                "VN30F1M".to_owned(),
+                Timeframe::M1,
+                Timeframe::M15,
+                CvdResetMode::Session,
+                true,
+            ),
+        };
+        Self {
+            symbol,
+            data_source,
+            base_timeframe: base_tf,
+            active_timeframe: active_tf,
+            show_volume: true,
+            indicators: IndicatorConfig {
+                show_sma: !show_vwap,
+                show_ema: show_vwap,
+                show_vwap,
+                show_ichimoku: true,
+                show_rsi: false,
+                show_cvd: true,
+                cvd_reset_mode: cvd_mode,
+                ..IndicatorConfig::default()
+            },
+            compare_benchmark: None,
+            show_compare_overlay: false,
+            viewport: ChartViewportState::new(),
+            base_candles: Vec::new(),
+            loaded_source_key: None,
+            candles: Vec::new(),
+            drawings: DrawingStore::new(),
+            indicator_cache: IndicatorCache::new(),
+            compare_series_cached: Vec::new(),
+            compare_series_idx: SeriesBlockIndex::default(),
+            active_benchmark_label: String::new(),
+            materialized_key: None,
+            rs_cmp_synced_key: None,
+            dataset_generation: 1,
+            last_report: None,
+        }
+    }
+
+    pub fn sanitize_deserialized(&mut self) {
+        self.viewport.sanitize_deserialized();
+        self.indicators.sanitize_deserialized();
+        self.drawings.sanitize_deserialized();
+        if self.data_source == DataSourcePreset::CustomFile {
+            self.data_source = DataSourcePreset::Vn30Basket;
+            if self.symbol.trim().is_empty() {
+                self.symbol = "FPT".to_owned();
+            }
+        }
+        truncate_utf8_bytes(&mut self.symbol, 24);
+        let sym = self.symbol.trim().to_ascii_uppercase();
+        self.symbol = if sym.is_empty() {
+            "VNINDEX".to_owned()
+        } else {
+            sym
+        };
+        if !self.base_timeframe.can_aggregate_to(self.active_timeframe) {
+            self.active_timeframe = self.base_timeframe;
+        }
+        if let Some(ref mut bench) = self.compare_benchmark {
+            truncate_utf8_bytes(bench, 24);
+            let b = bench.trim().to_ascii_uppercase();
+            if b.is_empty() {
+                self.compare_benchmark = None;
+            } else {
+                *bench = b;
+            }
+        }
+        self.loaded_source_key = None;
+        self.materialized_key = None;
+        self.rs_cmp_synced_key = None;
+        self.last_report = None;
+    }
+}
+
+fn default_secondary_slots() -> [SecondaryChartSlot; 3] {
+    [
+        SecondaryChartSlot::default_for_slot(1),
+        SecondaryChartSlot::default_for_slot(2),
+        SecondaryChartSlot::default_for_slot(3),
+    ]
 }
 
 /// Primary application state for the Sumi Rust Trading Workstation (`Milestone R09`).
@@ -395,6 +565,16 @@ pub struct SumiWorkstationApp {
     pub alert_frequency: AlertFrequency,
     pub alert_value_input: String,
     pub alert_message_input: String,
+    #[serde(default)]
+    pub grid_layout: MultiChartLayoutKind,
+    #[serde(default)]
+    pub grid_sync: MultiChartSyncConfig,
+    #[serde(default)]
+    pub active_chart_slot: usize,
+    #[serde(default = "default_secondary_slots")]
+    pub secondary_slots: [SecondaryChartSlot; 3],
+    #[serde(default)]
+    pub saved_workspace_templates: Vec<WorkspaceTemplate>,
 
     #[serde(skip)]
     pub base_candles: Vec<Candle>,
@@ -484,6 +664,22 @@ pub struct SumiWorkstationApp {
     pub frame_count: u64,
     #[serde(skip)]
     pub screenshot_requested: bool,
+    #[serde(skip)]
+    pub show_templates_modal: bool,
+    #[serde(skip)]
+    pub template_name_input: String,
+    #[serde(skip)]
+    pub template_doc_buffer: String,
+    #[serde(skip)]
+    pub template_export_ron: bool,
+    #[serde(skip)]
+    pub last_template_status: Option<(bool, String)>,
+    #[serde(skip)]
+    pub linked_crosshair_timestamp: Option<i64>,
+    #[serde(skip)]
+    pub pinned_crosshair_timestamp: Option<i64>,
+    #[serde(skip)]
+    pending_grid_time_sync: Option<usize>,
 }
 
 impl Default for SumiWorkstationApp {
@@ -559,6 +755,11 @@ impl Default for SumiWorkstationApp {
             alert_frequency: AlertFrequency::Once,
             alert_value_input: String::new(),
             alert_message_input: String::new(),
+            grid_layout: MultiChartLayoutKind::Single1x1,
+            grid_sync: MultiChartSyncConfig::default(),
+            active_chart_slot: 0,
+            secondary_slots: default_secondary_slots(),
+            saved_workspace_templates: Vec::new(),
             base_candles,
             candles,
             available_symbols: vec!["VNINDEX".to_owned()],
@@ -603,6 +804,14 @@ impl Default for SumiWorkstationApp {
             last_report: None,
             frame_count: 0,
             screenshot_requested: false,
+            show_templates_modal: false,
+            template_name_input: "My Custom Desk".to_owned(),
+            template_doc_buffer: String::new(),
+            template_export_ron: true,
+            last_template_status: None,
+            linked_crosshair_timestamp: None,
+            pinned_crosshair_timestamp: None,
+            pending_grid_time_sync: None,
         }
     }
 }
@@ -718,6 +927,23 @@ impl SumiWorkstationApp {
         self.in_memory_custom_doc = None;
         self.in_memory_custom_doc_hash = 0;
         self.custom_peer_feeds.clear();
+        self.active_chart_slot = self
+            .active_chart_slot
+            .min(self.grid_layout.slot_count().saturating_sub(1));
+        for slot in &mut self.secondary_slots {
+            slot.sanitize_deserialized();
+        }
+        while self.saved_workspace_templates.len() > 32 {
+            self.saved_workspace_templates.pop();
+        }
+        for tpl in &mut self.saved_workspace_templates {
+            tpl.sanitize();
+        }
+        self.show_templates_modal = false;
+        self.last_template_status = None;
+        self.linked_crosshair_timestamp = None;
+        self.pinned_crosshair_timestamp = None;
+        self.pending_grid_time_sync = None;
         self.last_trade_status = None;
         self.last_alert_status = None;
         self.last_journal_status = None;
@@ -887,6 +1113,7 @@ impl SumiWorkstationApp {
         self.sync_indicators_and_benchmarks();
         self.reseed_risk_planner_for_active_instrument(reset_to_clean_fallback);
         self.sync_alerts_causal();
+        self.sync_secondary_slots();
     }
 
     pub fn configure_dark_workstation_visuals(ctx: &egui::Context) {
@@ -1211,6 +1438,7 @@ impl SumiWorkstationApp {
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
         self.sync_indicators_and_benchmarks();
         self.sync_alerts_causal();
+        self.sync_timeframe_from_primary_across_slots();
 
         Ok(())
     }
@@ -1449,6 +1677,8 @@ impl SumiWorkstationApp {
             self.reseed_risk_planner_for_active_instrument(false);
         }
         self.sync_alerts_causal();
+        self.sync_symbol_from_primary_across_slots();
+        self.sync_secondary_slots();
     }
 
     /// Switches vertical price transformation mode (`Normal`, `Logarithmic`, `Percentage`, `IndexedTo100`).
@@ -1457,6 +1687,27 @@ impl SumiWorkstationApp {
         self.viewport
             .main_price_scale
             .set_mode_with_base(mode, base_value);
+    }
+
+    /// Switches vertical price scale mode for whichever chart grid slot is currently focused (`0..4`).
+    pub fn set_scale_mode_for_active_slot(&mut self, mode: PriceScaleMode) {
+        let slot_idx = self
+            .active_chart_slot
+            .min(self.grid_layout.slot_count().saturating_sub(1));
+        if slot_idx == 0 {
+            self.set_scale_mode(mode);
+        } else {
+            let sec = &mut self.secondary_slots[slot_idx - 1];
+            let base_value = sec
+                .candles
+                .get(sec.viewport.time_scale.strict_visible_data_range())
+                .and_then(|s| s.first())
+                .or_else(|| sec.candles.first())
+                .map(|c| c.close);
+            sec.viewport
+                .main_price_scale
+                .set_mode_with_base(mode, base_value);
+        }
     }
 
     /// Returns the slice of candles currently inside `TimeScale::strict_visible_data_range()`.
@@ -1475,33 +1726,73 @@ impl SumiWorkstationApp {
     }
 
     pub fn zoom_in(&mut self) {
-        self.viewport_focus_lock = None;
-        if self.viewport.time_scale.width() <= 0.0 {
-            self.viewport.time_scale.set_width(1000.0);
+        let slot_idx = self
+            .active_chart_slot
+            .min(self.grid_layout.slot_count().saturating_sub(1));
+        if slot_idx == 0 {
+            self.viewport_focus_lock = None;
         }
-        self.viewport.zoom_around_center(2.5);
+        let vp = self.active_slot_viewport_mut();
+        if vp.time_scale.width() <= 0.0 {
+            vp.time_scale.set_width(1000.0);
+        }
+        vp.zoom_around_center(2.5);
+        if self.grid_layout.slot_count() > 1 && self.grid_sync.sync_time_range {
+            self.propagate_time_window_from_slot(slot_idx);
+            self.pending_grid_time_sync = Some(slot_idx);
+        }
     }
 
     pub fn zoom_out(&mut self) {
-        self.viewport_focus_lock = None;
-        if self.viewport.time_scale.width() <= 0.0 {
-            self.viewport.time_scale.set_width(1000.0);
+        let slot_idx = self
+            .active_chart_slot
+            .min(self.grid_layout.slot_count().saturating_sub(1));
+        if slot_idx == 0 {
+            self.viewport_focus_lock = None;
         }
-        self.viewport.zoom_around_center(-2.5);
+        let vp = self.active_slot_viewport_mut();
+        if vp.time_scale.width() <= 0.0 {
+            vp.time_scale.set_width(1000.0);
+        }
+        vp.zoom_around_center(-2.5);
+        if self.grid_layout.slot_count() > 1 && self.grid_sync.sync_time_range {
+            self.propagate_time_window_from_slot(slot_idx);
+            self.pending_grid_time_sync = Some(slot_idx);
+        }
     }
 
     pub fn fit_content(&mut self) {
-        self.viewport_focus_lock = None;
-        if self.viewport.time_scale.width() <= 0.0 {
-            self.viewport.time_scale.set_width(1000.0);
+        let slot_idx = self
+            .active_chart_slot
+            .min(self.grid_layout.slot_count().saturating_sub(1));
+        if slot_idx == 0 {
+            self.viewport_focus_lock = None;
         }
-        self.viewport.fit_all();
+        let vp = self.active_slot_viewport_mut();
+        if vp.time_scale.width() <= 0.0 {
+            vp.time_scale.set_width(1000.0);
+        }
+        vp.fit_all();
+        if self.grid_layout.slot_count() > 1 && self.grid_sync.sync_time_range {
+            self.propagate_time_window_from_slot(slot_idx);
+            self.pending_grid_time_sync = Some(slot_idx);
+        }
     }
 
     pub fn reset_view(&mut self) {
-        self.viewport_focus_lock = None;
-        self.viewport.reset_to_default();
-        self.viewport.reset_pane_stretches();
+        let slot_idx = self
+            .active_chart_slot
+            .min(self.grid_layout.slot_count().saturating_sub(1));
+        if slot_idx == 0 {
+            self.viewport_focus_lock = None;
+        }
+        let vp = self.active_slot_viewport_mut();
+        vp.reset_to_default();
+        vp.reset_pane_stretches();
+        if self.grid_layout.slot_count() > 1 && self.grid_sync.sync_time_range {
+            self.propagate_time_window_from_slot(slot_idx);
+            self.pending_grid_time_sync = Some(slot_idx);
+        }
     }
 
     /// Populates a deterministic, data-anchored set of multi-pane annotations (`HorizontalLine`,
@@ -1876,6 +2167,7 @@ impl SumiWorkstationApp {
         self.sync_indicators_and_benchmarks();
         self.sync_alerts_causal();
         self.invalidate_or_sync_backtest_after_mutation();
+        self.sync_secondary_slots();
         true
     }
 
@@ -1980,6 +2272,7 @@ impl SumiWorkstationApp {
         self.sync_indicators_and_benchmarks();
         self.sync_alerts_causal();
         self.invalidate_or_sync_backtest_after_mutation();
+        self.sync_secondary_slots();
     }
 
     /// Steps causal Bar Replay forward by `steps` units (`ActiveBar` or `BaseBar`).
@@ -2079,6 +2372,7 @@ impl SumiWorkstationApp {
         self.sync_indicators_and_benchmarks();
         self.sync_alerts_causal();
         self.invalidate_or_sync_backtest_after_mutation();
+        self.sync_secondary_slots();
     }
 
     /// Parses the workstation Order Ticket fields and submits `side` (`Buy` or `Sell`) at the
@@ -3127,6 +3421,76 @@ impl SumiWorkstationApp {
         }
     }
 
+    /// Toggles the rebased comparison overlay on the focused grid slot (`active_chart_slot`).
+    pub fn toggle_compare_overlay_for_active_slot(&mut self) {
+        let slot_idx = self
+            .active_chart_slot
+            .min(self.grid_layout.slot_count().saturating_sub(1));
+        if slot_idx == 0 {
+            self.show_compare_overlay = !self.show_compare_overlay;
+            self.viewport.main_price_scale.reset_auto_scale();
+            self.sync_indicators_and_benchmarks();
+        } else {
+            let slot = &mut self.secondary_slots[slot_idx - 1];
+            slot.show_compare_overlay = !slot.show_compare_overlay;
+            slot.viewport.main_price_scale.reset_auto_scale();
+            slot.rs_cmp_synced_key = None;
+            self.sync_secondary_slots();
+        }
+    }
+
+    /// Cycles the comparison / RS benchmark on the focused grid slot (`active_chart_slot`).
+    pub fn cycle_compare_benchmark_for_active_slot(&mut self) {
+        const BENCHMARKS: [&str; 7] = [
+            "VNINDEX",
+            "HNX-INDEX",
+            "FPT",
+            "VCB",
+            "HPG",
+            "SPY",
+            "BTCUSDT",
+        ];
+        let slot_idx = self
+            .active_chart_slot
+            .min(self.grid_layout.slot_count().saturating_sub(1));
+        if slot_idx == 0 {
+            self.cycle_compare_benchmark();
+            return;
+        }
+        let slot = &mut self.secondary_slots[slot_idx - 1];
+        let current = slot
+            .compare_benchmark
+            .as_deref()
+            .unwrap_or("VNINDEX")
+            .to_ascii_uppercase();
+        let start_idx = BENCHMARKS.iter().position(|b| *b == current).unwrap_or(0);
+        for offset in 1..=BENCHMARKS.len() {
+            let cand = BENCHMARKS[(start_idx + offset) % BENCHMARKS.len()];
+            if !cand.eq_ignore_ascii_case(&slot.symbol) {
+                slot.compare_benchmark = Some(cand.to_owned());
+                slot.rs_cmp_synced_key = None;
+                self.sync_secondary_slots();
+                return;
+            }
+        }
+    }
+
+    /// Returns the effective comparison benchmark symbol for the focused slot.
+    #[must_use]
+    pub fn active_slot_benchmark_symbol(&self) -> String {
+        let slot_idx = self
+            .active_chart_slot
+            .min(self.grid_layout.slot_count().saturating_sub(1));
+        if slot_idx == 0 {
+            self.effective_benchmark_symbol().to_owned()
+        } else {
+            let slot = &self.secondary_slots[slot_idx - 1];
+            slot.compare_benchmark
+                .clone()
+                .unwrap_or_else(|| "VNINDEX".to_owned())
+        }
+    }
+
     /// Synchronizes session-aware indicators (`Session VWAP` UTC+7 / US / UTC) and, when `RS` or
     /// `Compare` is active, lazily resolves the benchmark feed and recomputes causal `RS` + rebased curve.
     pub fn sync_indicators_and_benchmarks(&mut self) {
@@ -3249,6 +3613,678 @@ impl SumiWorkstationApp {
                 self.compare_series_cached.clear();
                 self.compare_series_idx.clear();
             }
+        }
+    }
+
+    // =========================================================================
+    // Milestone R12 — Synchronized Multi-Chart Grid, Causal Secondary Slots & Templates
+    // =========================================================================
+
+    /// Switches active workstation grid topology (`1x1`, `1x2`, `2x1`, `2x2`), initializes causal
+    /// secondary slots (`DEF-001`), and schedules initial UTC time-range alignment when synced.
+    pub fn set_grid_layout(&mut self, layout: MultiChartLayoutKind) {
+        self.grid_layout = layout;
+        self.active_chart_slot = self
+            .active_chart_slot
+            .min(layout.slot_count().saturating_sub(1));
+        self.sync_secondary_slots();
+        self.pending_grid_time_sync =
+            (layout.slot_count() > 1 && self.grid_sync.sync_time_range).then_some(0);
+    }
+
+    /// Toggles `CVD` reset mode (`Session` <-> `Cumulative`) for the focused chart slot.
+    pub fn toggle_cvd_reset_mode_for_active_slot(&mut self) {
+        let slot_idx = self
+            .active_chart_slot
+            .min(self.grid_layout.slot_count().saturating_sub(1));
+        if slot_idx == 0 {
+            self.indicators.cvd_reset_mode = match self.indicators.cvd_reset_mode {
+                CvdResetMode::Session => CvdResetMode::Cumulative,
+                CvdResetMode::Cumulative => CvdResetMode::Session,
+            };
+            self.viewport.cvd_price_scale.reset_auto_scale();
+            self.sync_indicators_and_benchmarks();
+        } else {
+            let slot = &mut self.secondary_slots[slot_idx - 1];
+            slot.indicators.cvd_reset_mode = match slot.indicators.cvd_reset_mode {
+                CvdResetMode::Session => CvdResetMode::Cumulative,
+                CvdResetMode::Cumulative => CvdResetMode::Session,
+            };
+            slot.viewport.cvd_price_scale.reset_auto_scale();
+            self.sync_secondary_slots();
+        }
+    }
+
+    #[inline]
+    pub fn active_slot_indicators(&self) -> &IndicatorConfig {
+        let slot_idx = self
+            .active_chart_slot
+            .min(self.grid_layout.slot_count().saturating_sub(1));
+        if slot_idx == 0 {
+            &self.indicators
+        } else {
+            &self.secondary_slots[slot_idx - 1].indicators
+        }
+    }
+
+    #[inline]
+    pub fn active_slot_indicators_mut(&mut self) -> &mut IndicatorConfig {
+        let slot_idx = self
+            .active_chart_slot
+            .min(self.grid_layout.slot_count().saturating_sub(1));
+        if slot_idx == 0 {
+            &mut self.indicators
+        } else {
+            &mut self.secondary_slots[slot_idx - 1].indicators
+        }
+    }
+
+    #[inline]
+    pub fn active_slot_viewport_mut(&mut self) -> &mut ChartViewportState {
+        let slot_idx = self
+            .active_chart_slot
+            .min(self.grid_layout.slot_count().saturating_sub(1));
+        if slot_idx == 0 {
+            &mut self.viewport
+        } else {
+            &mut self.secondary_slots[slot_idx - 1].viewport
+        }
+    }
+
+    /// Materializes visible secondary grid slots (`1..grid_layout.slot_count()`) under `DEF-001`
+    /// Replay causal prefix enforcement and dirty-tracked `IndicatorCache` reuse (`0.000 ms` on idle frames).
+    pub fn sync_secondary_slots(&mut self) {
+        let slot_count = self.grid_layout.slot_count();
+        if slot_count <= 1 {
+            return;
+        }
+        let need_any_bench = self.secondary_slots[..(slot_count - 1)]
+            .iter()
+            .any(|s| s.indicators.show_rs || s.show_compare_overlay);
+        if need_any_bench {
+            self.ensure_watchlist_universe_loaded();
+        }
+
+        let causal_close_cap = self.replay_causal_close_timestamp();
+        let replay_open_cut = self.replay.cutoff_timestamp(&self.base_candles);
+        let bar_count = self.dataset_bar_count.max(10);
+        let custom_doc_sig = self.in_memory_custom_doc_hash
+            ^ (self.base_candles.len() as u64)
+            ^ ((self.custom_peer_feeds.len() as u64) << 32);
+        let primary_custom = (self.data_source == DataSourcePreset::CustomFile).then_some((
+            self.symbol.as_str(),
+            self.base_timeframe,
+            self.base_candles.as_slice(),
+            custom_doc_sig,
+        ));
+        let universe = &self.watchlist_universe;
+        let custom_peers = &self.custom_peer_feeds;
+
+        for slot in &mut self.secondary_slots[..(slot_count - 1)] {
+            sync_one_secondary_slot(
+                slot,
+                bar_count,
+                causal_close_cap,
+                replay_open_cut,
+                primary_custom,
+                universe,
+                custom_peers,
+                &mut self.benchmark_gen_counter,
+            );
+        }
+    }
+
+    #[inline]
+    fn slot_time_data(&self, slot_idx: usize) -> (&[Candle], i64, &crate::viewport::TimeScale) {
+        if slot_idx == 0 {
+            (
+                &self.candles,
+                self.active_timeframe.seconds(),
+                &self.viewport.time_scale,
+            )
+        } else {
+            let s = &self.secondary_slots[slot_idx - 1];
+            (
+                &s.candles,
+                s.active_timeframe.seconds(),
+                &s.viewport.time_scale,
+            )
+        }
+    }
+
+    #[inline]
+    fn slot_has_time_gesture_or_kinetic(&self, slot_idx: usize) -> bool {
+        let vp = if slot_idx == 0 {
+            &self.viewport
+        } else if let Some(s) = self.secondary_slots.get(slot_idx - 1) {
+            &s.viewport
+        } else {
+            return false;
+        };
+        vp.kinetic.is_some() || vp.time_scale.is_scrolling() || vp.time_scale.is_scaling()
+    }
+
+    /// Synchronizes visible UTC time range from `source_slot` to all other visible grid slots
+    /// without mutating any slot's independent vertical `PriceScale`.
+    pub fn propagate_time_window_from_slot(&mut self, source_slot: usize) {
+        let slot_count = self.grid_layout.slot_count();
+        if slot_count <= 1 || source_slot >= slot_count {
+            return;
+        }
+        let window = {
+            let (src_candles, src_tf_secs, src_ts) = self.slot_time_data(source_slot);
+            if src_candles.is_empty() || src_ts.is_empty() || src_ts.width() <= 1.0 {
+                return;
+            }
+            let Some(w) = extract_visible_time_window(src_candles, src_tf_secs, src_ts) else {
+                return;
+            };
+            w
+        };
+
+        for dst_idx in 0..slot_count {
+            if dst_idx == source_slot {
+                continue;
+            }
+            let (dst_candles, dst_tf_secs, dst_ts) = if dst_idx == 0 {
+                (
+                    &self.candles[..],
+                    self.active_timeframe.seconds(),
+                    &mut self.viewport.time_scale,
+                )
+            } else {
+                let s = &mut self.secondary_slots[dst_idx - 1];
+                (
+                    &s.candles[..],
+                    s.active_timeframe.seconds(),
+                    &mut s.viewport.time_scale,
+                )
+            };
+            if dst_candles.is_empty() || dst_ts.is_empty() {
+                continue;
+            }
+            let dst_first = dst_candles[0].timestamp;
+            let dst_last = dst_candles[dst_candles.len() - 1]
+                .timestamp
+                .saturating_add(dst_tf_secs);
+            // Skip disjoint calendar datasets (e.g. 2025-11..2026-07 Daily vs 2026-09 15m Futures)
+            // so a non-overlapping window never scrolls another panel out into blank whitespace.
+            if window.end_ts < dst_first || window.start_ts > dst_last {
+                continue;
+            }
+            let prev_bs = dst_ts.bar_spacing();
+            let prev_ro = dst_ts.right_offset();
+            if apply_synced_time_window(dst_candles, dst_tf_secs, dst_ts, &window)
+                && dst_ts.strict_visible_data_range().is_empty()
+            {
+                dst_ts.set_bar_spacing(prev_bs);
+                dst_ts.set_right_offset(prev_ro);
+            }
+        }
+    }
+
+    /// Captures the active multi-chart workspace layout, slot configs, indicators, and stretches
+    /// into a schema-versioned [`WorkspaceTemplate`].
+    #[must_use]
+    pub fn capture_workspace_template(&self, name: &str) -> WorkspaceTemplate {
+        let mut slots = Vec::with_capacity(4);
+        slots.push(WorkspaceSlotTemplate {
+            slot_index: 0,
+            data_source: self.data_source,
+            symbol: self.symbol.clone(),
+            timeframe: self.active_timeframe,
+            scale_mode: self.viewport.main_price_scale.mode(),
+            show_volume: self.show_volume,
+            show_grid: self.show_grid,
+            compare_benchmark: self.compare_benchmark.clone(),
+            show_compare_overlay: self.show_compare_overlay,
+            indicators: self.indicators.clone(),
+            pane_stretches: WorkspacePaneStretches {
+                main: self.viewport.main_stretch,
+                rsi: self.viewport.rsi_stretch,
+                macd: self.viewport.macd_stretch,
+                atr: self.viewport.atr_stretch,
+                rs: self.viewport.rs_stretch,
+                cvd: self.viewport.cvd_stretch,
+                equity: self.viewport.equity_stretch,
+            },
+        });
+        for (i, sec) in self.secondary_slots.iter().enumerate() {
+            slots.push(WorkspaceSlotTemplate {
+                slot_index: i + 1,
+                data_source: sec.data_source,
+                symbol: sec.symbol.clone(),
+                timeframe: sec.active_timeframe,
+                scale_mode: sec.viewport.main_price_scale.mode(),
+                show_volume: sec.show_volume,
+                show_grid: self.show_grid,
+                compare_benchmark: sec.compare_benchmark.clone(),
+                show_compare_overlay: sec.show_compare_overlay,
+                indicators: sec.indicators.clone(),
+                pane_stretches: WorkspacePaneStretches {
+                    main: sec.viewport.main_stretch,
+                    rsi: sec.viewport.rsi_stretch,
+                    macd: sec.viewport.macd_stretch,
+                    atr: sec.viewport.atr_stretch,
+                    rs: sec.viewport.rs_stretch,
+                    cvd: sec.viewport.cvd_stretch,
+                    equity: sec.viewport.equity_stretch,
+                },
+            });
+        }
+        let mut tpl = WorkspaceTemplate {
+            schema_version: crate::viewport::WORKSPACE_TEMPLATE_SCHEMA_VERSION,
+            name: name.to_owned(),
+            description: format!(
+                "{} · {} ({})",
+                self.grid_layout.short_label(),
+                self.symbol,
+                self.timeframe
+            ),
+            layout: self.grid_layout,
+            sync: self.grid_sync,
+            active_slot: self.active_chart_slot,
+            slots,
+        };
+        tpl.sanitize();
+        tpl
+    }
+
+    /// Applies a validated [`WorkspaceTemplate`] across the primary slot and all secondary slots.
+    pub fn apply_workspace_template(&mut self, template: &WorkspaceTemplate) {
+        let mut tpl = template.clone();
+        tpl.sanitize();
+        // Temporarily reset grid layout to `Single1x1` while applying slot 0 so `sync_symbol` /
+        // `sync_timeframe` propagation hooks never overwrite template secondary slots mid-load.
+        self.grid_layout = MultiChartLayoutKind::Single1x1;
+        self.grid_sync = MultiChartSyncConfig::default();
+
+        if let Some(s0) = tpl.slots.first() {
+            if self.replay.is_active() {
+                // In Replay mode, preserve active symbol/timeline unless switching feeds cleanly;
+                // still update timeframe when compatible and apply indicators/scale/stretches.
+                if self.symbol.eq_ignore_ascii_case(&s0.symbol)
+                    && self.base_timeframe.can_aggregate_to(s0.timeframe)
+                {
+                    let _ = self.set_timeframe(s0.timeframe);
+                }
+            } else {
+                self.select_watchlist_instrument(s0.data_source, &s0.symbol);
+                if self.base_timeframe.can_aggregate_to(s0.timeframe) {
+                    let _ = self.set_timeframe(s0.timeframe);
+                }
+            }
+            self.set_scale_mode(s0.scale_mode);
+            self.show_volume = s0.show_volume;
+            self.show_grid = s0.show_grid;
+            self.set_compare_benchmark(s0.compare_benchmark.clone());
+            self.show_compare_overlay = s0.show_compare_overlay;
+            self.indicators = s0.indicators.clone();
+            self.viewport.main_stretch = s0.pane_stretches.main;
+            self.viewport.rsi_stretch = s0.pane_stretches.rsi;
+            self.viewport.macd_stretch = s0.pane_stretches.macd;
+            self.viewport.atr_stretch = s0.pane_stretches.atr;
+            self.viewport.rs_stretch = s0.pane_stretches.rs;
+            self.viewport.cvd_stretch = s0.pane_stretches.cvd;
+            self.viewport.equity_stretch = s0.pane_stretches.equity;
+            self.viewport.main_price_scale.reset_auto_scale();
+            self.viewport.cvd_price_scale.reset_auto_scale();
+        }
+
+        for i in 0..3 {
+            if let Some(st) = tpl.slots.get(i + 1) {
+                let dst = &mut self.secondary_slots[i];
+                dst.data_source = st.data_source;
+                dst.symbol = st.symbol.clone();
+                dst.active_timeframe = st.timeframe;
+                dst.show_volume = st.show_volume;
+                dst.compare_benchmark = st.compare_benchmark.clone();
+                dst.show_compare_overlay = st.show_compare_overlay;
+                dst.indicators = st.indicators.clone();
+                dst.viewport.main_price_scale.set_mode(st.scale_mode);
+                dst.viewport.main_stretch = st.pane_stretches.main;
+                dst.viewport.rsi_stretch = st.pane_stretches.rsi;
+                dst.viewport.macd_stretch = st.pane_stretches.macd;
+                dst.viewport.atr_stretch = st.pane_stretches.atr;
+                dst.viewport.rs_stretch = st.pane_stretches.rs;
+                dst.viewport.cvd_stretch = st.pane_stretches.cvd;
+                dst.viewport.equity_stretch = st.pane_stretches.equity;
+                dst.loaded_source_key = None;
+                dst.materialized_key = None;
+                dst.viewport.main_price_scale.reset_auto_scale();
+                dst.viewport.cvd_price_scale.reset_auto_scale();
+            }
+        }
+
+        self.grid_layout = tpl.layout;
+        self.grid_sync = tpl.sync;
+        self.active_chart_slot = tpl
+            .active_slot
+            .min(self.grid_layout.slot_count().saturating_sub(1));
+        self.sync_indicators_and_benchmarks();
+        self.sync_secondary_slots();
+        self.pending_grid_time_sync =
+            (self.grid_layout.slot_count() > 1 && self.grid_sync.sync_time_range).then_some(0);
+    }
+
+    /// Saves the current workstation layout into `self.saved_workspace_templates` (up to 32 items).
+    pub fn save_current_workspace_template(&mut self, name: &str) {
+        let tpl = self.capture_workspace_template(name);
+        if let Some(existing) = self
+            .saved_workspace_templates
+            .iter_mut()
+            .find(|t| t.name.eq_ignore_ascii_case(&tpl.name))
+        {
+            *existing = tpl.clone();
+        } else {
+            if self.saved_workspace_templates.len() >= 32 {
+                self.saved_workspace_templates.remove(0);
+            }
+            self.saved_workspace_templates.push(tpl.clone());
+        }
+        self.last_template_status = Some((false, format!("Saved template '{}'", tpl.name)));
+    }
+
+    /// Parses a template from `RON` or `JSON` (`from_auto_str`), applies it, and saves it to the library.
+    pub fn import_workspace_template_str(
+        &mut self,
+        raw: &str,
+    ) -> Result<WorkspaceTemplate, String> {
+        match WorkspaceTemplate::from_auto_str(raw) {
+            Ok(tpl) => {
+                self.apply_workspace_template(&tpl);
+                if let Some(existing) = self
+                    .saved_workspace_templates
+                    .iter_mut()
+                    .find(|t| t.name.eq_ignore_ascii_case(&tpl.name))
+                {
+                    *existing = tpl.clone();
+                } else {
+                    if self.saved_workspace_templates.len() >= 32 {
+                        self.saved_workspace_templates.remove(0);
+                    }
+                    self.saved_workspace_templates.push(tpl.clone());
+                }
+                self.last_template_status =
+                    Some((false, format!("Imported & applied '{}'", tpl.name)));
+                Ok(tpl)
+            }
+            Err(err) => {
+                let msg = err.to_string();
+                self.last_template_status = Some((true, msg.clone()));
+                Err(msg)
+            }
+        }
+    }
+
+    /// Propagates primary symbol to visible secondary slots when `grid_sync.sync_symbol` is enabled.
+    pub fn sync_symbol_from_primary_across_slots(&mut self) {
+        if !self.grid_sync.sync_symbol || self.grid_layout.slot_count() <= 1 {
+            return;
+        }
+        let slot_count = self.grid_layout.slot_count();
+        for slot in &mut self.secondary_slots[..(slot_count - 1)] {
+            if slot.data_source != self.data_source
+                || !slot.symbol.eq_ignore_ascii_case(&self.symbol)
+            {
+                slot.data_source = self.data_source;
+                slot.symbol = self.symbol.clone();
+                slot.base_timeframe = self.base_timeframe;
+                if !slot.base_timeframe.can_aggregate_to(slot.active_timeframe) {
+                    slot.active_timeframe = slot.base_timeframe;
+                }
+                slot.loaded_source_key = None;
+                slot.materialized_key = None;
+            }
+        }
+        self.sync_secondary_slots();
+    }
+
+    /// Propagates primary timeframe to visible secondary slots when `grid_sync.sync_timeframe` is enabled.
+    pub fn sync_timeframe_from_primary_across_slots(&mut self) {
+        if !self.grid_sync.sync_timeframe || self.grid_layout.slot_count() <= 1 {
+            return;
+        }
+        let slot_count = self.grid_layout.slot_count();
+        for slot in &mut self.secondary_slots[..(slot_count - 1)] {
+            if slot.base_timeframe.can_aggregate_to(self.active_timeframe)
+                && slot.active_timeframe != self.active_timeframe
+            {
+                slot.active_timeframe = self.active_timeframe;
+                slot.materialized_key = None;
+            }
+        }
+        self.sync_secondary_slots();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_primary_slot_0_chart(
+        &mut self,
+        ui: &mut egui::Ui,
+        external_crosshair_ts: Option<i64>,
+        any_modal_open: bool,
+    ) -> Option<usize> {
+        let pre_ro = self.viewport.time_scale.right_offset();
+        let pre_bs = self.viewport.time_scale.bar_spacing();
+        let pre_draw_digest = compute_drawings_alert_digest(&self.drawings);
+        let replay_status_label = self
+            .replay
+            .is_active()
+            .then(|| self.replay.status.short_label());
+        let replay_cutoff_timestamp = self.replay.cutoff_timestamp(&self.base_candles);
+        let frontier_base_timestamp = self
+            .base_candles
+            .get(self.current_trading_cursor_base_index())
+            .map(|c| c.timestamp);
+        let has_trading_visuals = self.show_trading_panel
+            || self.trading.open_position().is_some()
+            || !self.trading.fills().is_empty()
+            || self.trading.pending_orders().next().is_some();
+        let has_alert_visuals = !self.alerts.rules.is_empty() || !self.alerts.triggers.is_empty();
+        let has_backtest_visuals =
+            self.show_strategy_panel || self.show_equity_pane || self.show_backtest_trades;
+        let wf_title_str = self.walk_forward_report.as_ref().map(|wf| {
+            format!(
+                "WFO {}F {} · {}",
+                wf.wf_config.fold_count,
+                if wf.wf_config.anchored { "ANC" } else { "ROL" },
+                wf.preset.short_label()
+            )
+        });
+        let equity_override = if !self.show_equity_pane && !self.show_backtest_trades {
+            None
+        } else {
+            match self.equity_pane_source {
+                EquityPaneSource::SingleAssetBacktest => None,
+                EquityPaneSource::WalkForwardOos => self
+                    .walk_forward_report
+                    .as_ref()
+                    .zip(wf_title_str.as_deref())
+                    .map(|(wf, title)| EquityCurveOverlay {
+                        title_label: title,
+                        baseline_cash: self.backtest_config.initial_cash,
+                        equity_values: &wf.stitched_equity_values,
+                        equity_idx: &wf.stitched_equity_idx,
+                        underwater_values: &wf.stitched_underwater_values,
+                        bar_count: wf.total_bars,
+                        split_bar_index: wf.first_oos_bar_index,
+                        trades: Some(&wf.stitched_oos_trades),
+                    }),
+                EquityPaneSource::MultiAssetPortfolio => {
+                    self.portfolio_mapped_curve
+                        .as_ref()
+                        .map(|mc| EquityCurveOverlay {
+                            title_label: &mc.title_label,
+                            baseline_cash: mc.baseline_cash,
+                            equity_values: &mc.equity_values,
+                            equity_idx: &mc.equity_idx,
+                            underwater_values: &mc.underwater_values,
+                            bar_count: mc.candle_len,
+                            split_bar_index: None,
+                            trades: Some(&[]),
+                        })
+                }
+            }
+        };
+        let compare_overlay = (self.show_compare_overlay && !self.compare_series_cached.is_empty())
+            .then_some((
+                self.active_benchmark_label.as_str(),
+                self.compare_series_cached.as_slice(),
+                &self.compare_series_idx,
+            ));
+        let primary_causal_cap = self.replay_causal_close_timestamp().map(|cap| {
+            cap.saturating_add(
+                self.active_timeframe
+                    .seconds()
+                    .saturating_sub(self.base_timeframe.seconds()),
+            )
+        });
+        let overlay = ChartReplayTradingOverlay {
+            replay_active: self.replay.is_active(),
+            selecting_cut_bar: self.replay.selecting_cut_bar,
+            replay_status_label,
+            trading_session: has_trading_visuals.then_some(&self.trading),
+            alert_engine: has_alert_visuals.then_some(&self.alerts),
+            backtest_result: has_backtest_visuals
+                .then_some(self.backtest_result.as_ref())
+                .flatten(),
+            equity_override,
+            show_equity_pane: self.show_equity_pane,
+            show_backtest_trades_on_chart: self.show_backtest_trades,
+            focused_backtest_trade_id: self.focused_backtest_trade_id,
+            replay_cutoff_timestamp,
+            causal_close_cap: primary_causal_cap,
+            frontier_base_timestamp,
+            compare_overlay,
+            rs_benchmark_label: (!self.active_benchmark_label.is_empty())
+                .then_some(self.active_benchmark_label.as_str()),
+            external_crosshair_timestamp: external_crosshair_ts,
+            modal_open: any_modal_open,
+        };
+        self.last_report = render_workstation_chart_full(
+            ui,
+            &self.candles,
+            &mut self.viewport,
+            ChartDisplayConfig {
+                symbol: &self.symbol,
+                timeframe: &self.timeframe,
+                show_grid: self.show_grid,
+                show_crosshair: self.show_crosshair,
+                show_volume: self.show_volume,
+            },
+            &self.indicators,
+            &self.indicator_cache,
+            &mut self.drawings,
+            overlay,
+        );
+        self.auto_sync_planner_if_rr_box_changed();
+        let clicked_cut = self.last_report.and_then(|r| r.clicked_cut_bar_index);
+        if compute_drawings_alert_digest(&self.drawings) != pre_draw_digest {
+            self.sync_alerts_causal();
+        }
+        if (self.viewport.time_scale.right_offset() - pre_ro).abs() > 1e-6
+            || (self.viewport.time_scale.bar_spacing() - pre_bs).abs() > 1e-6
+        {
+            self.viewport_focus_lock = None;
+        }
+        clicked_cut
+    }
+
+    fn render_secondary_slot_chart(
+        &mut self,
+        ui: &mut egui::Ui,
+        sec_idx: usize,
+        external_crosshair_ts: Option<i64>,
+        replay_cutoff_timestamp: Option<i64>,
+        frontier_base_timestamp: Option<i64>,
+        any_modal_open: bool,
+    ) {
+        let show_grid = self.show_grid;
+        let show_crosshair = self.show_crosshair;
+        let base_causal_cap = self.replay_causal_close_timestamp();
+        let sec = &mut self.secondary_slots[sec_idx];
+        let sec_causal_cap = base_causal_cap.map(|cap| {
+            cap.saturating_add(
+                sec.active_timeframe
+                    .seconds()
+                    .saturating_sub(sec.base_timeframe.seconds()),
+            )
+        });
+        let tf_label = sec.active_timeframe.label();
+        let compare_overlay = (sec.show_compare_overlay && !sec.compare_series_cached.is_empty())
+            .then_some((
+                sec.active_benchmark_label.as_str(),
+                sec.compare_series_cached.as_slice(),
+                &sec.compare_series_idx,
+            ));
+        let overlay = ChartReplayTradingOverlay {
+            replay_active: replay_cutoff_timestamp.is_some(),
+            selecting_cut_bar: false,
+            replay_status_label: None,
+            trading_session: None,
+            alert_engine: None,
+            backtest_result: None,
+            equity_override: None,
+            show_equity_pane: false,
+            show_backtest_trades_on_chart: false,
+            focused_backtest_trade_id: None,
+            replay_cutoff_timestamp,
+            causal_close_cap: sec_causal_cap,
+            frontier_base_timestamp,
+            compare_overlay,
+            rs_benchmark_label: (!sec.active_benchmark_label.is_empty())
+                .then_some(sec.active_benchmark_label.as_str()),
+            external_crosshair_timestamp: external_crosshair_ts,
+            modal_open: any_modal_open,
+        };
+        sec.last_report = render_workstation_chart_full(
+            ui,
+            &sec.candles,
+            &mut sec.viewport,
+            ChartDisplayConfig {
+                symbol: &sec.symbol,
+                timeframe: tf_label,
+                show_grid,
+                show_crosshair,
+                show_volume: sec.show_volume,
+            },
+            &sec.indicators,
+            &sec.indicator_cache,
+            &mut sec.drawings,
+            overlay,
+        );
+    }
+
+    #[inline]
+    fn slot_plot_span(&self, slot_idx: usize, cell_rect: egui::Rect) -> (f32, f32) {
+        let rep = if slot_idx == 0 {
+            self.last_report
+        } else {
+            self.secondary_slots[slot_idx - 1].last_report
+        };
+        if let Some(r) = rep {
+            (r.layout.plot_rect.left(), r.layout.plot_rect.right())
+        } else {
+            (
+                cell_rect.left(),
+                (cell_rect.right() - 78.0).max(cell_rect.left() + 40.0),
+            )
+        }
+    }
+
+    #[inline]
+    fn slot_bar_metrics(&self, slot_idx: usize) -> (f64, f64) {
+        if slot_idx == 0 {
+            (
+                self.viewport.time_scale.right_offset(),
+                self.viewport.time_scale.bar_spacing(),
+            )
+        } else {
+            let s = &self.secondary_slots[slot_idx - 1];
+            (
+                s.viewport.time_scale.right_offset(),
+                s.viewport.time_scale.bar_spacing(),
+            )
         }
     }
 
@@ -4214,8 +5250,13 @@ impl SumiWorkstationApp {
 
     /// Opens the keyboard-first `Cmd+K` / `Ctrl+K` Command Palette modal and requests input focus.
     pub fn open_command_palette(&mut self) {
+        self.show_templates_modal = false;
         self.drawings.cancel_active_gesture();
         self.viewport.cancel_active_interactions();
+        for slot in &mut self.secondary_slots {
+            slot.drawings.cancel_active_gesture();
+            slot.viewport.cancel_active_interactions();
+        }
         self.ensure_watchlist_universe_loaded();
         self.command_palette.open = true;
         self.command_palette.selected_index = 0;
@@ -4382,7 +5423,17 @@ impl SumiWorkstationApp {
             (
                 "RS",
                 "Relative Strength vs Benchmark Sub-Pane",
-                self.indicators.show_rs,
+                self.active_slot_indicators().show_rs,
+            ),
+            (
+                "ICHIMOKU",
+                "Ichimoku Cloud (9, 26, 52, 26) Overlay",
+                self.active_slot_indicators().show_ichimoku,
+            ),
+            (
+                "CVD",
+                "Cumulative Volume Delta (CVD + SMA 9) Sub-Pane",
+                self.active_slot_indicators().show_cvd,
             ),
         ] {
             push_scored(
@@ -4393,6 +5444,17 @@ impl SumiWorkstationApp {
                 PaletteAction::ToggleIndicator(key),
             );
         }
+        let cvd_mode_lbl = match self.active_slot_indicators().cvd_reset_mode {
+            CvdResetMode::Session => "Session Reset",
+            CvdResetMode::Cumulative => "Cumulative",
+        };
+        push_scored(
+            PaletteCategory::Indicator,
+            format!("Cycle CVD Reset Mode (active: {cvd_mode_lbl})"),
+            "Switch CVD reset between Session (daily UTC+7) and Cumulative".to_owned(),
+            "cvd volume delta reset session cumulative".to_owned(),
+            PaletteAction::ToggleCvdResetMode,
+        );
         let bench_label = self.effective_benchmark_symbol().to_owned();
         push_scored(
             PaletteCategory::Indicator,
@@ -4700,6 +5762,63 @@ impl SumiWorkstationApp {
             "reset default view camera".to_owned(),
             PaletteAction::ResetView,
         );
+        for layout in MultiChartLayoutKind::ALL {
+            push_scored(
+                PaletteCategory::Workspace,
+                format!("Grid Layout: {} ({})", layout.short_label(), layout.title()),
+                "Switch synchronized multi-chart workspace topology".to_owned(),
+                format!(
+                    "grid layout multi chart {} {}",
+                    layout.short_label(),
+                    layout.title()
+                ),
+                PaletteAction::SetGridLayout(layout),
+            );
+        }
+        push_scored(
+            PaletteCategory::Workspace,
+            "Toggle Sync Crosshair Across Grid Charts".to_owned(),
+            if self.grid_sync.sync_crosshair {
+                "Currently ON · Linked UTC hover & close price pills"
+            } else {
+                "Currently OFF"
+            }
+            .to_owned(),
+            "sync crosshair link multi chart grid".to_owned(),
+            PaletteAction::ToggleGridSyncCrosshair,
+        );
+        push_scored(
+            PaletteCategory::Workspace,
+            "Toggle Sync Visible Time Range Across Grid".to_owned(),
+            if self.grid_sync.sync_time_range {
+                "Currently ON · Linked pan/zoom in UTC"
+            } else {
+                "Currently OFF"
+            }
+            .to_owned(),
+            "sync time range scroll zoom multi chart grid".to_owned(),
+            PaletteAction::ToggleGridSyncTimeRange,
+        );
+        push_scored(
+            PaletteCategory::Workspace,
+            "Open Workspace Layout Templates (RON / JSON)".to_owned(),
+            "Manage presets, export/import versioned RON & JSON templates".to_owned(),
+            "workspace template ron json save load preset".to_owned(),
+            PaletteAction::OpenTemplatesModal,
+        );
+        for (tpl_idx, tpl) in builtin_workspace_templates().into_iter().enumerate() {
+            push_scored(
+                PaletteCategory::Workspace,
+                format!("Apply Template: {}", tpl.name),
+                tpl.description,
+                format!(
+                    "template layout preset {} {}",
+                    tpl.layout.short_label(),
+                    tpl.name
+                ),
+                PaletteAction::ApplyBuiltinTemplate(tpl_idx),
+            );
+        }
 
         if !q.is_empty() {
             out.sort_by(|a, b| {
@@ -4724,46 +5843,88 @@ impl SumiWorkstationApp {
             }
             PaletteAction::ToggleIndicator(key) => {
                 match key {
-                    "SMA" => self.indicators.show_sma = !self.indicators.show_sma,
-                    "EMA" => self.indicators.show_ema = !self.indicators.show_ema,
-                    "BB" => self.indicators.show_bbands = !self.indicators.show_bbands,
-                    "VWAP" => self.indicators.show_vwap = !self.indicators.show_vwap,
-                    "VRVP" => self.indicators.show_vrvp = !self.indicators.show_vrvp,
+                    "SMA" => {
+                        let ind = self.active_slot_indicators_mut();
+                        ind.show_sma = !ind.show_sma;
+                    }
+                    "EMA" => {
+                        let ind = self.active_slot_indicators_mut();
+                        ind.show_ema = !ind.show_ema;
+                    }
+                    "BB" => {
+                        let ind = self.active_slot_indicators_mut();
+                        ind.show_bbands = !ind.show_bbands;
+                    }
+                    "VWAP" => {
+                        let ind = self.active_slot_indicators_mut();
+                        ind.show_vwap = !ind.show_vwap;
+                    }
+                    "VRVP" => {
+                        let ind = self.active_slot_indicators_mut();
+                        ind.show_vrvp = !ind.show_vrvp;
+                    }
                     "RSI" => {
-                        self.indicators.show_rsi = !self.indicators.show_rsi;
-                        if self.indicators.show_rsi {
-                            self.viewport.rsi_price_scale.reset_auto_scale();
+                        let ind = self.active_slot_indicators_mut();
+                        ind.show_rsi = !ind.show_rsi;
+                        if ind.show_rsi {
+                            self.active_slot_viewport_mut()
+                                .rsi_price_scale
+                                .reset_auto_scale();
                         }
                     }
                     "MACD" => {
-                        self.indicators.show_macd = !self.indicators.show_macd;
-                        if self.indicators.show_macd {
-                            self.viewport.macd_price_scale.reset_auto_scale();
+                        let ind = self.active_slot_indicators_mut();
+                        ind.show_macd = !ind.show_macd;
+                        if ind.show_macd {
+                            self.active_slot_viewport_mut()
+                                .macd_price_scale
+                                .reset_auto_scale();
                         }
                     }
                     "ATR" => {
-                        self.indicators.show_atr = !self.indicators.show_atr;
-                        if self.indicators.show_atr {
-                            self.viewport.atr_price_scale.reset_auto_scale();
+                        let ind = self.active_slot_indicators_mut();
+                        ind.show_atr = !ind.show_atr;
+                        if ind.show_atr {
+                            self.active_slot_viewport_mut()
+                                .atr_price_scale
+                                .reset_auto_scale();
                         }
                     }
                     "RS" => {
-                        self.indicators.show_rs = !self.indicators.show_rs;
-                        if self.indicators.show_rs {
-                            self.viewport.rs_price_scale.reset_auto_scale();
+                        let ind = self.active_slot_indicators_mut();
+                        ind.show_rs = !ind.show_rs;
+                        if ind.show_rs {
+                            self.active_slot_viewport_mut()
+                                .rs_price_scale
+                                .reset_auto_scale();
+                        }
+                    }
+                    "ICHIMOKU" => {
+                        let ind = self.active_slot_indicators_mut();
+                        ind.show_ichimoku = !ind.show_ichimoku;
+                        self.active_slot_viewport_mut()
+                            .main_price_scale
+                            .reset_auto_scale();
+                    }
+                    "CVD" => {
+                        let ind = self.active_slot_indicators_mut();
+                        ind.show_cvd = !ind.show_cvd;
+                        if ind.show_cvd {
+                            self.active_slot_viewport_mut()
+                                .cvd_price_scale
+                                .reset_auto_scale();
                         }
                     }
                     _ => {}
                 }
                 self.sync_indicators_and_benchmarks();
+                self.sync_secondary_slots();
             }
             PaletteAction::ToggleCompareOverlay => {
-                self.show_compare_overlay = !self.show_compare_overlay;
-                self.viewport.main_price_scale.reset_auto_scale();
-                self.sync_indicators_and_benchmarks();
+                self.toggle_compare_overlay_for_active_slot();
             }
             PaletteAction::CycleCompareBenchmark => {
-                self.cycle_compare_benchmark();
+                self.cycle_compare_benchmark_for_active_slot();
             }
             PaletteAction::SelectDrawingTool(tool) => {
                 if tool != DrawingTool::Select {
@@ -4873,13 +6034,36 @@ impl SumiWorkstationApp {
                 self.show_replay_bar = false;
             }
             PaletteAction::SetScaleMode(mode) => {
-                self.set_scale_mode(mode);
+                self.set_scale_mode_for_active_slot(mode);
             }
             PaletteAction::FitContent => {
                 self.fit_content();
             }
             PaletteAction::ResetView => {
                 self.reset_view();
+            }
+            PaletteAction::SetGridLayout(layout) => {
+                self.set_grid_layout(layout);
+            }
+            PaletteAction::ToggleGridSyncCrosshair => {
+                self.grid_sync.sync_crosshair = !self.grid_sync.sync_crosshair;
+            }
+            PaletteAction::ToggleGridSyncTimeRange => {
+                self.grid_sync.sync_time_range = !self.grid_sync.sync_time_range;
+                if self.grid_sync.sync_time_range && self.grid_layout.slot_count() > 1 {
+                    self.pending_grid_time_sync = Some(self.active_chart_slot);
+                }
+            }
+            PaletteAction::ToggleCvdResetMode => {
+                self.toggle_cvd_reset_mode_for_active_slot();
+            }
+            PaletteAction::OpenTemplatesModal => {
+                self.show_templates_modal = true;
+            }
+            PaletteAction::ApplyBuiltinTemplate(idx) => {
+                if let Some(tpl) = builtin_workspace_templates().get(idx) {
+                    self.apply_workspace_template(tpl);
+                }
             }
         }
     }
@@ -5388,6 +6572,253 @@ fn format_load_summary(source_tag: &str, rep: &DataLoadReport) -> String {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+fn sync_one_secondary_slot(
+    slot: &mut SecondaryChartSlot,
+    bar_count: usize,
+    causal_close_cap: Option<i64>,
+    replay_open_cut: Option<i64>,
+    primary_custom: Option<(&str, Timeframe, &[Candle], u64)>,
+    universe: &[WatchlistFeedEntry],
+    custom_peers: &[WatchlistFeedEntry],
+    benchmark_gen_counter: &mut u64,
+) {
+    let req_sym = slot.symbol.trim().to_ascii_uppercase();
+    let custom_sig = primary_custom.map_or(0_u64, |(_, _, _, sig)| sig);
+    if slot.data_source == DataSourcePreset::CustomFile {
+        let source_key = (
+            DataSourcePreset::CustomFile,
+            req_sym.clone(),
+            bar_count,
+            custom_sig,
+        );
+        if slot.loaded_source_key.as_ref() != Some(&source_key) || slot.base_candles.is_empty() {
+            if let Some(peer) = custom_peers
+                .iter()
+                .find(|p| p.symbol.eq_ignore_ascii_case(&req_sym))
+                .or_else(|| custom_peers.first())
+                .filter(|_| {
+                    custom_peers
+                        .iter()
+                        .any(|p| p.symbol.eq_ignore_ascii_case(&req_sym))
+                        || primary_custom
+                            .is_none_or(|(ps, _, _, _)| !ps.eq_ignore_ascii_case(&req_sym))
+                })
+            {
+                slot.symbol = peer.symbol.clone();
+                slot.base_timeframe = peer.base_timeframe;
+                if !slot.base_timeframe.can_aggregate_to(slot.active_timeframe) {
+                    slot.active_timeframe = slot.base_timeframe;
+                }
+                slot.base_candles = peer.candles.clone();
+                slot.loaded_source_key = Some((
+                    DataSourcePreset::CustomFile,
+                    slot.symbol.to_ascii_uppercase(),
+                    bar_count,
+                    custom_sig,
+                ));
+                slot.materialized_key = None;
+                slot.rs_cmp_synced_key = None;
+                slot.dataset_generation = slot.dataset_generation.wrapping_add(1).max(1);
+            } else if let Some((psym, ptf, pcandles, _)) = primary_custom {
+                slot.symbol = psym.to_owned();
+                slot.base_timeframe = ptf;
+                if !slot.base_timeframe.can_aggregate_to(slot.active_timeframe) {
+                    slot.active_timeframe = slot.base_timeframe;
+                }
+                slot.base_candles = pcandles.to_vec();
+                slot.loaded_source_key = Some((
+                    DataSourcePreset::CustomFile,
+                    slot.symbol.to_ascii_uppercase(),
+                    bar_count,
+                    custom_sig,
+                ));
+                slot.materialized_key = None;
+                slot.rs_cmp_synced_key = None;
+                slot.dataset_generation = slot.dataset_generation.wrapping_add(1).max(1);
+            } else {
+                let rep =
+                    load_preset_dataset(DataSourcePreset::Vn30Basket, bar_count, Some(&req_sym));
+                slot.symbol = rep.symbol;
+                slot.data_source = DataSourcePreset::Vn30Basket;
+                slot.base_timeframe = rep.base_timeframe;
+                if !slot.base_timeframe.can_aggregate_to(slot.active_timeframe) {
+                    slot.active_timeframe = slot.base_timeframe;
+                }
+                slot.base_candles = rep.candles;
+                slot.loaded_source_key = Some((
+                    DataSourcePreset::Vn30Basket,
+                    slot.symbol.to_ascii_uppercase(),
+                    bar_count,
+                    0,
+                ));
+                slot.materialized_key = None;
+                slot.rs_cmp_synced_key = None;
+                slot.dataset_generation = slot.dataset_generation.wrapping_add(1).max(1);
+            }
+        }
+    } else {
+        let ds = slot.data_source;
+        let source_key = (ds, req_sym.clone(), bar_count, 0_u64);
+        if slot.loaded_source_key.as_ref() != Some(&source_key) || slot.base_candles.is_empty() {
+            let rep = load_preset_dataset(ds, bar_count, Some(&req_sym));
+            slot.symbol = rep.symbol;
+            slot.data_source = ds;
+            slot.base_timeframe = rep.base_timeframe;
+            if !slot.base_timeframe.can_aggregate_to(slot.active_timeframe) {
+                slot.active_timeframe = slot.base_timeframe;
+            }
+            slot.base_candles = rep.candles;
+            slot.loaded_source_key = Some((ds, slot.symbol.to_ascii_uppercase(), bar_count, 0));
+            slot.materialized_key = None;
+            slot.rs_cmp_synced_key = None;
+            slot.dataset_generation = slot.dataset_generation.wrapping_add(1).max(1);
+        }
+    }
+    let ds = slot.data_source;
+
+    let prefix_len = causal_closed_prefix_len(
+        &slot.base_candles,
+        slot.base_timeframe.seconds(),
+        causal_close_cap,
+    );
+    let mat_key = (
+        slot.dataset_generation,
+        slot.active_timeframe,
+        prefix_len,
+        replay_open_cut,
+    );
+    if slot.materialized_key.as_ref() != Some(&mat_key) {
+        let old_len = slot.candles.len();
+        let slice = &slot.base_candles[..prefix_len];
+        slot.candles = if slot.active_timeframe == slot.base_timeframe || slice.is_empty() {
+            slice.to_vec()
+        } else {
+            crate::data::aggregate_ohlcv(slice, slot.base_timeframe, slot.active_timeframe)
+                .unwrap_or_else(|_| slice.to_vec())
+        };
+        slot.drawings.refresh_materialized_anchor_timestamps(
+            old_len,
+            &slot.candles,
+            slot.active_timeframe,
+        );
+        slot.drawings
+            .set_replay_cutoff_timestamp(replay_open_cut, slot.candles.len());
+        slot.viewport.time_scale.set_total_bars(slot.candles.len());
+        slot.viewport.main_price_scale.reset_auto_scale();
+        slot.viewport.cvd_price_scale.reset_auto_scale();
+        slot.dataset_generation = slot.dataset_generation.wrapping_add(1).max(1);
+        slot.materialized_key = Some((
+            slot.dataset_generation,
+            slot.active_timeframe,
+            prefix_len,
+            replay_open_cut,
+        ));
+        slot.rs_cmp_synced_key = None;
+    }
+
+    let venue_offset =
+        ExchangeVenue::infer_from_symbol_and_preset(&slot.symbol, ds).utc_offset_seconds();
+    slot.indicator_cache.sync_with_session_context(
+        &slot.candles,
+        slot.dataset_generation,
+        &slot.indicators,
+        slot.active_timeframe,
+        venue_offset,
+    );
+
+    let target_bench = slot
+        .compare_benchmark
+        .as_deref()
+        .unwrap_or_else(|| {
+            if slot.symbol.eq_ignore_ascii_case("BTCUSDT") {
+                "BTCUSDT"
+            } else if slot.symbol.eq_ignore_ascii_case("SPY") {
+                "SPY"
+            } else {
+                "VNINDEX"
+            }
+        })
+        .to_ascii_uppercase();
+    let rs_key = (
+        slot.dataset_generation,
+        slot.active_timeframe,
+        target_bench.clone(),
+        causal_close_cap,
+        slot.indicators.show_rs,
+        slot.show_compare_overlay,
+        slot.indicators.rs_sma_period,
+    );
+    if slot.rs_cmp_synced_key.as_ref() != Some(&rs_key) {
+        if slot.indicators.show_rs || slot.show_compare_overlay {
+            let ref_first_ts = slot
+                .base_candles
+                .first()
+                .or_else(|| slot.candles.first())
+                .map_or(0, |c| c.timestamp);
+            let ref_last_ts = slot
+                .base_candles
+                .last()
+                .or_else(|| slot.candles.last())
+                .map_or(0, |c| c.timestamp);
+            let resolved = if !custom_peers.is_empty() {
+                let mut combined = Vec::with_capacity(custom_peers.len() + universe.len());
+                combined.extend(custom_peers.iter().cloned());
+                combined.extend(universe.iter().cloned());
+                resolve_benchmark_series_for_window(
+                    &target_bench,
+                    ref_first_ts,
+                    ref_last_ts,
+                    &combined,
+                )
+            } else {
+                resolve_benchmark_series_for_window(
+                    &target_bench,
+                    ref_first_ts,
+                    ref_last_ts,
+                    universe,
+                )
+            };
+            if let Some((resolved_sym, bench_tf, bench_candles)) = resolved {
+                *benchmark_gen_counter = benchmark_gen_counter.wrapping_add(1).max(1);
+                slot.active_benchmark_label = resolved_sym;
+                slot.indicator_cache.sync_relative_strength(
+                    &slot.candles,
+                    slot.dataset_generation,
+                    slot.active_timeframe,
+                    &slot.active_benchmark_label,
+                    *benchmark_gen_counter,
+                    &bench_candles,
+                    bench_tf,
+                    slot.indicators.rs_sma_period,
+                    causal_close_cap,
+                );
+            } else {
+                slot.active_benchmark_label = target_bench;
+                slot.indicator_cache.clear_relative_strength();
+            }
+            if slot.show_compare_overlay {
+                slot.compare_series_cached = compute_rebased_comparison_series(
+                    &slot.candles,
+                    &slot.indicator_cache.rs.aligned_benchmark_close,
+                    0..slot.candles.len(),
+                );
+                slot.compare_series_idx = SeriesBlockIndex::build(&slot.compare_series_cached);
+            } else if !slot.compare_series_cached.is_empty() {
+                slot.compare_series_cached.clear();
+                slot.compare_series_idx.clear();
+            }
+        } else {
+            slot.indicator_cache.clear_relative_strength();
+            if !slot.compare_series_cached.is_empty() {
+                slot.compare_series_cached.clear();
+                slot.compare_series_idx.clear();
+            }
+        }
+        slot.rs_cmp_synced_key = Some(rs_key);
+    }
+}
+
 fn indicator_toggle_pill(
     ui: &mut egui::Ui,
     active: &mut bool,
@@ -5445,6 +6876,7 @@ impl SumiWorkstationApp {
             self.toggle_command_palette();
         }
 
+        let any_modal_open = self.command_palette.open || self.show_templates_modal;
         if self.command_palette.open {
             let vp_rect = ui.input(|i| i.viewport_rect());
             let modal_est = command_palette_modal_rect_estimate(vp_rect);
@@ -5461,9 +6893,14 @@ impl SumiWorkstationApp {
                         .retain(|ev| !matches!(ev, egui::Event::MouseWheel { .. }));
                 }
             });
+        } else if self.show_templates_modal {
+            ui.input_mut(|i| {
+                let _ = i.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
+                let _ = i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab);
+            });
         }
 
-        if self.replay.is_playing() && !self.command_palette.open {
+        if self.replay.is_playing() && !any_modal_open {
             let dt = f64::from(ui.input(|i| i.stable_dt).max(0.0));
             if dt > 0.0
                 && let Some(tr) =
@@ -5493,7 +6930,7 @@ impl SumiWorkstationApp {
         egui::Panel::top("workstation_top_toolbar")
             .frame(top_frame)
             .show(ui, |ui| {
-                if self.command_palette.open {
+                if any_modal_open {
                     ui.visuals_mut().disabled_alpha = 1.0;
                     ui.disable();
                 }
@@ -5739,6 +7176,64 @@ impl SumiWorkstationApp {
                         self.open_journal_tab();
                     }
 
+                    ui.separator();
+
+                    let mut requested_layout: Option<MultiChartLayoutKind> = None;
+                    for layout in MultiChartLayoutKind::ALL {
+                        let is_cur = self.grid_layout == layout;
+                        if ui.selectable_label(is_cur, layout.short_label()).clicked() {
+                            requested_layout = Some(layout);
+                        }
+                    }
+                    if let Some(layout) = requested_layout {
+                        self.set_grid_layout(layout);
+                    }
+
+                    if self.grid_layout.slot_count() > 1 {
+                        let _ = indicator_toggle_pill(
+                            ui,
+                            &mut self.grid_sync.sync_crosshair,
+                            "Sync X",
+                            palette::LINKED_CROSSHAIR_LINE,
+                        );
+                        if indicator_toggle_pill(
+                            ui,
+                            &mut self.grid_sync.sync_time_range,
+                            "Sync T",
+                            palette::IND_ICHIMOKU_TENKAN,
+                        ) && self.grid_sync.sync_time_range
+                        {
+                            self.pending_grid_time_sync = Some(self.active_chart_slot);
+                        }
+                        for s_idx in 0..self.grid_layout.slot_count() {
+                            let lbl = format!("S{}", s_idx + 1);
+                            if ui
+                                .selectable_label(self.active_chart_slot == s_idx, lbl)
+                                .clicked()
+                            {
+                                self.active_chart_slot = s_idx;
+                            }
+                        }
+                    }
+
+                    let mut tpl_open = self.show_templates_modal;
+                    if indicator_toggle_pill(ui, &mut tpl_open, "Templates", palette::IND_CVD_LINE)
+                    {
+                        if tpl_open {
+                            self.command_palette.open = false;
+                            if self.template_doc_buffer.trim().is_empty() {
+                                let cur =
+                                    self.capture_workspace_template(&self.template_name_input);
+                                self.template_doc_buffer = if self.template_export_ron {
+                                    cur.to_ron_pretty()
+                                } else {
+                                    cur.to_json_pretty()
+                                };
+                            }
+                        }
+                        self.show_templates_modal = tpl_open;
+                    }
+
                     let mut palette_open = self.command_palette.open;
                     if indicator_toggle_pill(
                         ui,
@@ -5795,71 +7290,117 @@ impl SumiWorkstationApp {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = Vec2::new(5.0, 4.0);
 
+                    let slot_idx = self
+                        .active_chart_slot
+                        .min(self.grid_layout.slot_count().saturating_sub(1));
                     let _ = indicator_toggle_pill(
                         ui,
-                        &mut self.indicators.show_sma,
+                        &mut self.active_slot_indicators_mut().show_sma,
                         "SMA",
                         palette::IND_SMA,
                     );
                     let _ = indicator_toggle_pill(
                         ui,
-                        &mut self.indicators.show_ema,
+                        &mut self.active_slot_indicators_mut().show_ema,
                         "EMA",
                         palette::IND_EMA,
                     );
                     let _ = indicator_toggle_pill(
                         ui,
-                        &mut self.indicators.show_bbands,
+                        &mut self.active_slot_indicators_mut().show_bbands,
                         "BB",
                         palette::IND_BB_BORDER,
                     );
                     let _ = indicator_toggle_pill(
                         ui,
-                        &mut self.indicators.show_vwap,
+                        &mut self.active_slot_indicators_mut().show_vwap,
                         "VWAP",
                         palette::IND_VWAP_LINE,
                     );
                     let _ = indicator_toggle_pill(
                         ui,
-                        &mut self.indicators.show_vrvp,
+                        &mut self.active_slot_indicators_mut().show_vrvp,
                         "VRVP",
                         palette::VRVP_POC_GOLD,
                     );
                     if indicator_toggle_pill(
                         ui,
-                        &mut self.indicators.show_rsi,
+                        &mut self.active_slot_indicators_mut().show_ichimoku,
+                        "ICH",
+                        palette::IND_ICHIMOKU_TENKAN,
+                    ) && self.active_slot_indicators().show_ichimoku
+                    {
+                        self.active_slot_viewport_mut()
+                            .main_price_scale
+                            .reset_auto_scale();
+                    }
+                    if indicator_toggle_pill(
+                        ui,
+                        &mut self.active_slot_indicators_mut().show_rsi,
                         "RSI",
                         palette::IND_RSI,
-                    ) && self.indicators.show_rsi
+                    ) && self.active_slot_indicators().show_rsi
                     {
-                        self.viewport.rsi_price_scale.reset_auto_scale();
+                        self.active_slot_viewport_mut()
+                            .rsi_price_scale
+                            .reset_auto_scale();
                     }
                     if indicator_toggle_pill(
                         ui,
-                        &mut self.indicators.show_macd,
+                        &mut self.active_slot_indicators_mut().show_macd,
                         "MACD",
                         palette::IND_MACD,
-                    ) && self.indicators.show_macd
+                    ) && self.active_slot_indicators().show_macd
                     {
-                        self.viewport.macd_price_scale.reset_auto_scale();
+                        self.active_slot_viewport_mut()
+                            .macd_price_scale
+                            .reset_auto_scale();
                     }
                     if indicator_toggle_pill(
                         ui,
-                        &mut self.indicators.show_atr,
+                        &mut self.active_slot_indicators_mut().show_atr,
                         "ATR",
                         palette::IND_ATR,
-                    ) && self.indicators.show_atr
+                    ) && self.active_slot_indicators().show_atr
                     {
-                        self.viewport.atr_price_scale.reset_auto_scale();
+                        self.active_slot_viewport_mut()
+                            .atr_price_scale
+                            .reset_auto_scale();
                     }
                     if indicator_toggle_pill(
                         ui,
-                        &mut self.indicators.show_rs,
+                        &mut self.active_slot_indicators_mut().show_cvd,
+                        "CVD",
+                        palette::IND_CVD_LINE,
+                    ) && self.active_slot_indicators().show_cvd
+                    {
+                        self.active_slot_viewport_mut()
+                            .cvd_price_scale
+                            .reset_auto_scale();
+                    }
+                    if self.active_slot_indicators().show_cvd {
+                        let cvd_mode_lbl = match self.active_slot_indicators().cvd_reset_mode {
+                            CvdResetMode::Session => "Ses",
+                            CvdResetMode::Cumulative => "Cum",
+                        };
+                        if ui
+                            .small_button(cvd_mode_lbl)
+                            .on_hover_text("Toggle CVD Session / Cumulative Reset")
+                            .clicked()
+                        {
+                            self.toggle_cvd_reset_mode_for_active_slot();
+                        }
+                    }
+                    if indicator_toggle_pill(
+                        ui,
+                        &mut self.active_slot_indicators_mut().show_rs,
                         "RS",
                         palette::IND_RS_LINE,
-                    ) && self.indicators.show_rs
+                    ) && self.active_slot_indicators().show_rs
                     {
-                        self.viewport.rs_price_scale.reset_auto_scale();
+                        self.active_slot_viewport_mut()
+                            .rs_price_scale
+                            .reset_auto_scale();
                     }
                     if indicator_toggle_pill(
                         ui,
@@ -5870,26 +7411,34 @@ impl SumiWorkstationApp {
                     {
                         self.viewport.equity_price_scale.reset_auto_scale();
                     }
-                    let cmp_lbl = format!("Cmp:{}", self.effective_benchmark_symbol());
-                    if indicator_toggle_pill(
-                        ui,
-                        &mut self.show_compare_overlay,
-                        &cmp_lbl,
-                        palette::COMPARE_BENCH_LINE,
-                    ) {
-                        self.viewport.main_price_scale.reset_auto_scale();
+                    let cmp_lbl = format!("Cmp:{}", self.active_slot_benchmark_symbol());
+                    let mut cmp_on = if slot_idx == 0 {
+                        self.show_compare_overlay
+                    } else {
+                        self.secondary_slots[slot_idx - 1].show_compare_overlay
+                    };
+                    if indicator_toggle_pill(ui, &mut cmp_on, &cmp_lbl, palette::COMPARE_BENCH_LINE)
+                    {
+                        self.toggle_compare_overlay_for_active_slot();
                     }
                     if ui
                         .small_button("v")
                         .on_hover_text("Cycle RS / Compare Benchmark")
                         .clicked()
                     {
-                        self.cycle_compare_benchmark();
+                        self.cycle_compare_benchmark_for_active_slot();
                     }
 
                     ui.separator();
 
-                    let active_mode = self.viewport.main_price_scale.mode();
+                    let active_mode = if slot_idx == 0 {
+                        self.viewport.main_price_scale.mode()
+                    } else {
+                        self.secondary_slots[slot_idx - 1]
+                            .viewport
+                            .main_price_scale
+                            .mode()
+                    };
                     for mode in [
                         PriceScaleMode::Normal,
                         PriceScaleMode::Logarithmic,
@@ -5900,16 +7449,34 @@ impl SumiWorkstationApp {
                             .selectable_label(active_mode == mode, mode.label())
                             .clicked()
                         {
-                            self.set_scale_mode(mode);
+                            self.set_scale_mode_for_active_slot(mode);
                         }
                     }
-                    let is_auto = self.viewport.main_price_scale.is_auto_scale();
+                    let is_auto = if slot_idx == 0 {
+                        self.viewport.main_price_scale.is_auto_scale()
+                    } else {
+                        self.secondary_slots[slot_idx - 1]
+                            .viewport
+                            .main_price_scale
+                            .is_auto_scale()
+                    };
                     if ui.selectable_label(is_auto, "Auto").clicked() {
-                        self.viewport.main_price_scale.set_auto_scale(!is_auto);
+                        self.active_slot_viewport_mut()
+                            .main_price_scale
+                            .set_auto_scale(!is_auto);
                     }
-                    let is_inv = self.viewport.main_price_scale.is_inverted();
+                    let is_inv = if slot_idx == 0 {
+                        self.viewport.main_price_scale.is_inverted()
+                    } else {
+                        self.secondary_slots[slot_idx - 1]
+                            .viewport
+                            .main_price_scale
+                            .is_inverted()
+                    };
                     if ui.selectable_label(is_inv, "Inv").clicked() {
-                        self.viewport.main_price_scale.set_inverted(!is_inv);
+                        self.active_slot_viewport_mut()
+                            .main_price_scale
+                            .set_inverted(!is_inv);
                     }
 
                     ui.separator();
@@ -5931,7 +7498,12 @@ impl SumiWorkstationApp {
 
                     ui.checkbox(&mut self.show_grid, "Grid");
                     ui.checkbox(&mut self.show_crosshair, "Crosshair");
-                    ui.checkbox(&mut self.show_volume, "Volume");
+                    let active_vol = if slot_idx == 0 {
+                        &mut self.show_volume
+                    } else {
+                        &mut self.secondary_slots[slot_idx - 1].show_volume
+                    };
+                    ui.checkbox(active_vol, "Volume");
                 });
 
                 ui.add_space(4.0);
@@ -6126,9 +7698,10 @@ impl SumiWorkstationApp {
                 }
             });
 
-        // Synchronize dirty-tracked indicator, session VWAP, causal RS & backtest caches
+        // Synchronize dirty-tracked indicator, session VWAP, causal RS, backtest & secondary grid slots
         self.sync_indicators_and_benchmarks();
         self.sync_backtest_causal();
+        self.sync_secondary_slots();
 
         // 2. Bottom Telemetry Status Bar
         let bottom_frame = Frame::new()
@@ -6139,7 +7712,7 @@ impl SumiWorkstationApp {
         egui::Panel::bottom("workstation_status_bar")
             .frame(bottom_frame)
             .show(ui, |ui| {
-                if self.command_palette.open {
+                if any_modal_open {
                     ui.visuals_mut().disabled_alpha = 1.0;
                     ui.disable();
                 }
@@ -6191,11 +7764,12 @@ impl SumiWorkstationApp {
                     } else {
                         String::new()
                     };
+                    let grid_badge = self.grid_layout.short_label();
                     if let Some(rep) = self.last_report {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(format!(
-                                    "R11  |  {} ({}->{})  |  RPL: {replay_tag}  |  ALT: {armed_alerts}A/{trig_events}T  |  EQ: ${:.0} ({:+.0}){bt_tag}  |  {}P/{}D  |  BARS: {}/{} ({first_date}..{last_date}) {}x  |  {scale_mode}({auto_tag})  |  {:.0}×{:.0}",
+                                    "R12 [{grid_badge}]  |  {} ({}->{})  |  RPL: {replay_tag}  |  ALT: {armed_alerts}A/{trig_events}T  |  EQ: ${:.0} ({:+.0}){bt_tag}  |  {}P/{}D  |  BARS: {}/{} ({first_date}..{last_date}) {}x  |  {scale_mode}({auto_tag})  |  {:.0}×{:.0}",
                                     self.data_source.short_label(),
                                     self.base_timeframe,
                                     self.active_timeframe,
@@ -6219,7 +7793,7 @@ impl SumiWorkstationApp {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(format!(
-                                    "R11  |  RPL: {replay_tag}  |  ALT: {armed_alerts} armed{bt_tag}  |  BARS: {} ({first_date}..{last_date})",
+                                    "R12 [{grid_badge}]  |  RPL: {replay_tag}  |  ALT: {armed_alerts} armed{bt_tag}  |  BARS: {} ({first_date}..{last_date})",
                                     self.candles.len()
                                 ))
                                 .monospace()
@@ -6245,7 +7819,7 @@ impl SumiWorkstationApp {
                 .size_range(236.0..=360.0)
                 .frame(left_frame)
                 .show(ui, |ui| {
-                    if self.command_palette.open {
+                    if any_modal_open {
                         ui.visuals_mut().disabled_alpha = 1.0;
                         ui.disable();
                     }
@@ -6305,7 +7879,7 @@ impl SumiWorkstationApp {
                 .size_range(min_w..=max_w)
                 .frame(right_frame)
                 .show(ui, |ui| {
-                    if self.command_palette.open {
+                    if any_modal_open {
                         ui.visuals_mut().disabled_alpha = 1.0;
                         ui.disable();
                     }
@@ -6322,120 +7896,231 @@ impl SumiWorkstationApp {
         egui::CentralPanel::default()
             .frame(central_frame)
             .show(ui, |ui| {
-                let pre_ro = self.viewport.time_scale.right_offset();
-                let pre_bs = self.viewport.time_scale.bar_spacing();
-                let pre_draw_digest = compute_drawings_alert_digest(&self.drawings);
-                let replay_status_label = self
-                    .replay
-                    .is_active()
-                    .then(|| self.replay.status.short_label());
-                let replay_cutoff_timestamp = self.replay.cutoff_timestamp(&self.base_candles);
-                let frontier_base_timestamp = self
-                    .base_candles
-                    .get(self.current_trading_cursor_base_index())
-                    .map(|c| c.timestamp);
-                let has_trading_visuals = self.show_trading_panel
-                    || self.trading.open_position().is_some()
-                    || !self.trading.fills().is_empty()
-                    || self.trading.pending_orders().next().is_some();
-                let has_alert_visuals =
-                    !self.alerts.rules.is_empty() || !self.alerts.triggers.is_empty();
-                let has_backtest_visuals =
-                    self.show_strategy_panel || self.show_equity_pane || self.show_backtest_trades;
-                let wf_title_str = self.walk_forward_report.as_ref().map(|wf| {
-                    format!(
-                        "WFO {}F {} · {}",
-                        wf.wf_config.fold_count,
-                        if wf.wf_config.anchored { "ANC" } else { "ROL" },
-                        wf.preset.short_label()
-                    )
-                });
-                let equity_override = if !self.show_equity_pane && !self.show_backtest_trades {
-                    None
-                } else {
-                    match self.equity_pane_source {
-                        EquityPaneSource::SingleAssetBacktest => None,
-                        EquityPaneSource::WalkForwardOos => self
-                            .walk_forward_report
-                            .as_ref()
-                            .zip(wf_title_str.as_deref())
-                            .map(|(wf, title)| EquityCurveOverlay {
-                                title_label: title,
-                                baseline_cash: self.backtest_config.initial_cash,
-                                equity_values: &wf.stitched_equity_values,
-                                equity_idx: &wf.stitched_equity_idx,
-                                underwater_values: &wf.stitched_underwater_values,
-                                bar_count: wf.total_bars,
-                                split_bar_index: wf.first_oos_bar_index,
-                                trades: Some(&wf.stitched_oos_trades),
-                            }),
-                        EquityPaneSource::MultiAssetPortfolio => self
-                            .portfolio_mapped_curve
-                            .as_ref()
-                            .map(|mc| EquityCurveOverlay {
-                                title_label: &mc.title_label,
-                                baseline_cash: mc.baseline_cash,
-                                equity_values: &mc.equity_values,
-                                equity_idx: &mc.equity_idx,
-                                underwater_values: &mc.underwater_values,
-                                bar_count: mc.candle_len,
-                                split_bar_index: None,
-                                trades: Some(&[]),
-                            }),
+                if self.grid_layout == MultiChartLayoutKind::Single1x1 {
+                    let hover_pos = (!any_modal_open)
+                        .then(|| ui.input(|i| i.pointer.hover_pos()))
+                        .flatten();
+                    if hover_pos.is_some() {
+                        self.pinned_crosshair_timestamp = None;
                     }
-                };
-                let compare_overlay = (self.show_compare_overlay
-                    && !self.compare_series_cached.is_empty())
-                .then_some((
-                    self.active_benchmark_label.as_str(),
-                    self.compare_series_cached.as_slice(),
-                    &self.compare_series_idx,
-                ));
-                let overlay = ChartReplayTradingOverlay {
-                    replay_active: self.replay.is_active(),
-                    selecting_cut_bar: self.replay.selecting_cut_bar,
-                    replay_status_label,
-                    trading_session: has_trading_visuals.then_some(&self.trading),
-                    alert_engine: has_alert_visuals.then_some(&self.alerts),
-                    backtest_result: has_backtest_visuals
-                        .then_some(self.backtest_result.as_ref())
-                        .flatten(),
-                    equity_override,
-                    show_equity_pane: self.show_equity_pane,
-                    show_backtest_trades_on_chart: self.show_backtest_trades,
-                    focused_backtest_trade_id: self.focused_backtest_trade_id,
-                    replay_cutoff_timestamp,
-                    frontier_base_timestamp,
-                    compare_overlay,
-                    rs_benchmark_label: (!self.active_benchmark_label.is_empty())
-                        .then_some(self.active_benchmark_label.as_str()),
-                    modal_open: self.command_palette.open,
-                };
-                self.last_report = render_workstation_chart_full(
-                    ui,
-                    &self.candles,
-                    &mut self.viewport,
-                    ChartDisplayConfig {
-                        symbol: &self.symbol,
-                        timeframe: &self.timeframe,
-                        show_grid: self.show_grid,
-                        show_crosshair: self.show_crosshair,
-                        show_volume: self.show_volume,
-                    },
-                    &self.indicators,
-                    &self.indicator_cache,
-                    &mut self.drawings,
-                    overlay,
-                );
-                self.auto_sync_planner_if_rr_box_changed();
-                clicked_cut_idx = self.last_report.and_then(|r| r.clicked_cut_bar_index);
-                if compute_drawings_alert_digest(&self.drawings) != pre_draw_digest {
-                    self.sync_alerts_causal();
-                }
-                if (self.viewport.time_scale.right_offset() - pre_ro).abs() > 1e-6
-                    || (self.viewport.time_scale.bar_spacing() - pre_bs).abs() > 1e-6
-                {
-                    self.viewport_focus_lock = None;
+                    let causal_cap = self.replay_causal_close_timestamp();
+                    let ext_ts = if hover_pos.is_none() {
+                        self.pinned_crosshair_timestamp
+                            .filter(|&ts| causal_cap.is_none_or(|cap| ts <= cap))
+                    } else {
+                        None
+                    };
+                    clicked_cut_idx = self.render_primary_slot_0_chart(ui, ext_ts, any_modal_open);
+                    if hover_pos.is_some() {
+                        self.linked_crosshair_timestamp =
+                            self.last_report.and_then(|r| r.hovered_bar_timestamp);
+                    }
+                } else {
+                    let full_rect = ui.available_rect_before_wrap();
+                    let _ = ui.allocate_rect(full_rect, egui::Sense::hover());
+                    let slot_count = self.grid_layout.slot_count().min(4);
+                    let cell_rects: Vec<egui::Rect> = self
+                        .grid_layout
+                        .compute_grid_cell_rects(PlotRect::from_egui(full_rect), 6.0)
+                        .into_iter()
+                        .map(PlotRect::to_egui)
+                        .collect();
+
+                    if let Some(src_slot) = self.pending_grid_time_sync.take()
+                        && src_slot < slot_count
+                    {
+                        for (i, cr) in cell_rects.iter().take(slot_count).enumerate() {
+                            let approx_w = (cr.width() - 80.0).max(120.0) as f64;
+                            if i == 0 {
+                                self.viewport.time_scale.set_width(approx_w);
+                            } else {
+                                self.secondary_slots[i - 1]
+                                    .viewport
+                                    .time_scale
+                                    .set_width(approx_w);
+                            }
+                        }
+                        self.propagate_time_window_from_slot(src_slot);
+                    }
+
+                    let hover_pos = (!any_modal_open)
+                        .then(|| ui.input(|i| i.pointer.hover_pos()))
+                        .flatten();
+                    if hover_pos.is_some() {
+                        self.pinned_crosshair_timestamp = None;
+                    }
+                    let mut hovered_slot: Option<usize> = None;
+                    let mut hovered_ts: Option<i64> = None;
+                    if let Some(pos) = hover_pos {
+                        for (i, cr) in cell_rects.iter().take(slot_count).enumerate() {
+                            if cr.contains(pos) {
+                                hovered_slot = Some(i);
+                                let (plot_l, plot_r) = self.slot_plot_span(i, *cr);
+                                if pos.x >= plot_l && pos.x <= plot_r {
+                                    let (candles, _tf_s, ts) = self.slot_time_data(i);
+                                    if !candles.is_empty()
+                                        && !ts.is_empty()
+                                        && let Some(bi) =
+                                            ts.local_x_to_index(f64::from(pos.x - plot_l))
+                                        && bi >= 0
+                                        && (bi as usize) < candles.len()
+                                    {
+                                        hovered_ts = Some(candles[bi as usize].timestamp);
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    let causal_cap = self.replay_causal_close_timestamp();
+                    if self.grid_sync.sync_crosshair {
+                        if let Some(ts) = hovered_ts {
+                            self.linked_crosshair_timestamp = Some(ts);
+                        } else if hover_pos.is_none() {
+                            self.linked_crosshair_timestamp = self
+                                .pinned_crosshair_timestamp
+                                .filter(|&ts| causal_cap.is_none_or(|cap| ts <= cap));
+                        } else {
+                            self.linked_crosshair_timestamp = None;
+                        }
+                    } else {
+                        self.linked_crosshair_timestamp = None;
+                    }
+
+                    let pointer_interacted = !any_modal_open
+                        && ui.input(|i| {
+                            i.pointer.primary_pressed()
+                                || i.pointer.primary_clicked()
+                                || i.smooth_scroll_delta.length_sq() > 0.0
+                        });
+                    let interact_pos =
+                        ui.input(|i| i.pointer.interact_pos().or_else(|| i.pointer.hover_pos()));
+                    if pointer_interacted && let Some(pos) = interact_pos {
+                        for (i, cr) in cell_rects.iter().take(slot_count).enumerate() {
+                            if cr.contains(pos) {
+                                self.active_chart_slot = i;
+                                break;
+                            }
+                        }
+                    }
+
+                    let pre_metrics = [
+                        self.slot_bar_metrics(0),
+                        self.slot_bar_metrics(1),
+                        self.slot_bar_metrics(2),
+                        self.slot_bar_metrics(3),
+                    ];
+                    let pre_can_drive_sync = [0, 1, 2, 3].map(|i| {
+                        hovered_slot == Some(i) || self.slot_has_time_gesture_or_kinetic(i)
+                    });
+
+                    let replay_cutoff_timestamp = self.replay.cutoff_timestamp(&self.base_candles);
+                    let frontier_base_timestamp = self
+                        .base_candles
+                        .get(self.current_trading_cursor_base_index())
+                        .map(|c| c.timestamp);
+
+                    for (i, cr) in cell_rects.iter().take(slot_count).enumerate() {
+                        let ext_ts = if hovered_slot == Some(i) {
+                            None
+                        } else {
+                            self.linked_crosshair_timestamp
+                        };
+                        let inner_rect = cr.shrink(1.5);
+                        ui.scope_builder(
+                            egui::UiBuilder::new()
+                                .max_rect(inner_rect)
+                                .layout(egui::Layout::top_down(egui::Align::Min))
+                                .id_salt(("sumi_grid_slot", i)),
+                            |cell_ui| {
+                                if i == 0 {
+                                    clicked_cut_idx = self.render_primary_slot_0_chart(
+                                        cell_ui,
+                                        ext_ts,
+                                        any_modal_open,
+                                    );
+                                } else {
+                                    self.render_secondary_slot_chart(
+                                        cell_ui,
+                                        i - 1,
+                                        ext_ts,
+                                        replay_cutoff_timestamp,
+                                        frontier_base_timestamp,
+                                        any_modal_open,
+                                    );
+                                }
+                            },
+                        );
+
+                        let is_active = i == self.active_chart_slot;
+                        let border_stroke = if is_active {
+                            Stroke::new(1.5, palette::IND_ICHIMOKU_TENKAN)
+                        } else {
+                            Stroke::new(1.0, palette::BORDER_SUBTLE)
+                        };
+                        ui.painter().rect_stroke(
+                            *cr,
+                            CornerRadius::same(2),
+                            border_stroke,
+                            egui::StrokeKind::Inside,
+                        );
+
+                        let (_, plot_r) = self.slot_plot_span(i, *cr);
+                        let slot_badge_rect = egui::Rect::from_min_size(
+                            egui::Pos2::new((plot_r - 28.0).max(cr.left() + 4.0), cr.top() + 4.0),
+                            Vec2::new(24.0, 15.0),
+                        );
+                        let badge_fill = if is_active {
+                            palette::IND_ICHIMOKU_TENKAN.gamma_multiply(0.28)
+                        } else {
+                            Color32::from_rgba_unmultiplied(18, 22, 32, 200)
+                        };
+                        ui.painter().rect(
+                            slot_badge_rect,
+                            CornerRadius::same(3),
+                            badge_fill,
+                            Stroke::new(
+                                1.0,
+                                if is_active {
+                                    palette::IND_ICHIMOKU_TENKAN
+                                } else {
+                                    palette::BORDER_SUBTLE
+                                },
+                            ),
+                            egui::StrokeKind::Inside,
+                        );
+                        ui.painter().text(
+                            slot_badge_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            format!("S{}", i + 1),
+                            egui::FontId::monospace(9.5),
+                            if is_active {
+                                Color32::WHITE
+                            } else {
+                                palette::TEXT_MUTED
+                            },
+                        );
+                    }
+
+                    if self.grid_sync.sync_time_range {
+                        let mut changed_slot: Option<usize> = None;
+                        for (i, pre) in pre_metrics.iter().enumerate().take(slot_count) {
+                            let post = self.slot_bar_metrics(i);
+                            let can_drive =
+                                pre_can_drive_sync[i] || self.slot_has_time_gesture_or_kinetic(i);
+                            if can_drive
+                                && ((post.0 - pre.0).abs() > 1e-6 || (post.1 - pre.1).abs() > 1e-6)
+                            {
+                                changed_slot = Some(i);
+                                break;
+                            }
+                        }
+                        if let Some(src) = changed_slot {
+                            self.propagate_time_window_from_slot(src);
+                            ui.ctx().request_repaint();
+                        }
+                    }
                 }
             });
 
@@ -6444,13 +8129,15 @@ impl SumiWorkstationApp {
             ui.ctx().request_repaint();
         }
 
-        // 4b. Floating `Cmd+K` / `Ctrl+K` Command Palette Modal (`Milestone R08`)
+        // 4b. Floating `Cmd+K` / `Ctrl+K` Command Palette & `Workspace Layout Templates` Modals (`R08` & `R12`)
         if self.command_palette.open {
             self.render_command_palette_modal(ui);
+        } else if self.show_templates_modal {
+            self.render_templates_modal(ui);
         }
 
         // 5. Non-modal keyboard transport shortcuts (suppressed whenever modal or text input holds focus)
-        if !self.command_palette.open && !ui.ctx().egui_wants_keyboard_input() {
+        if !any_modal_open && !ui.ctx().egui_wants_keyboard_input() {
             let (esc_pressed, space_pressed, step_fwd, step_back) = ui.input(|i| {
                 let plain = !i.modifiers.command && !i.modifiers.ctrl && !i.modifiers.alt;
                 (
@@ -11122,6 +12809,232 @@ impl SumiWorkstationApp {
             ui.ctx().request_repaint();
         }
     }
+
+    fn render_templates_modal(&mut self, ui: &mut egui::Ui) {
+        let esc = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        if esc {
+            self.show_templates_modal = false;
+            ui.ctx().request_repaint();
+            return;
+        }
+
+        let vp_rect = ui.input(|i| i.viewport_rect());
+        let scrim_resp = egui::Area::new(egui::Id::new("sumi_templates_scrim"))
+            .order(egui::Order::Middle)
+            .fixed_pos(vp_rect.min)
+            .show(ui.ctx(), |ui| {
+                let (rect, resp) =
+                    ui.allocate_exact_size(vp_rect.size(), egui::Sense::click_and_drag());
+                ui.painter()
+                    .rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(6, 9, 15, 182));
+                resp
+            })
+            .inner;
+
+        let modal_w = (vp_rect.width() - 48.0).clamp(360.0, 720.0);
+        let modal_pos = egui::Pos2::new(
+            vp_rect.center().x - modal_w * 0.5,
+            vp_rect.top() + (vp_rect.height() * 0.08).clamp(24.0, 68.0),
+        );
+
+        let mut close_clicked = false;
+        let modal_area = egui::Area::new(egui::Id::new("sumi_templates_modal"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(modal_pos)
+            .show(ui.ctx(), |ui| {
+                Frame::new()
+                    .fill(Color32::from_rgb(17, 22, 33))
+                    .corner_radius(CornerRadius::same(8))
+                    .stroke(Stroke::new(1.5, palette::IND_CVD_LINE))
+                    .inner_margin(Margin::symmetric(14, 12))
+                    .show(ui, |ui| {
+                        ui.set_width(modal_w - 28.0);
+                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("WORKSPACE LAYOUT TEMPLATES (SCHEMA V1)")
+                                    .monospace()
+                                    .strong()
+                                    .size(11.5)
+                                    .color(palette::IND_CVD_LINE),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.button("Close (Esc)").clicked() {
+                                        close_clicked = true;
+                                    }
+                                },
+                            );
+                        });
+
+                        ui.separator();
+
+                        ui.label(
+                            RichText::new("Built-in Presets:")
+                                .monospace()
+                                .strong()
+                                .size(10.5)
+                                .color(palette::TEXT_MUTED),
+                        );
+                        for tpl in builtin_workspace_templates() {
+                            ui.horizontal(|ui| {
+                                if ui.button("Apply").clicked() {
+                                    self.apply_workspace_template(&tpl);
+                                    self.last_template_status =
+                                        Some((false, format!("Applied preset '{}'", tpl.name)));
+                                    close_clicked = true;
+                                }
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} [{}]",
+                                        tpl.name,
+                                        tpl.layout.short_label()
+                                    ))
+                                    .monospace()
+                                    .strong()
+                                    .size(10.5)
+                                    .color(palette::TEXT_PRIMARY),
+                                );
+                                ui.label(
+                                    RichText::new(&tpl.description)
+                                        .monospace()
+                                        .size(9.5)
+                                        .color(palette::TEXT_MUTED),
+                                );
+                            });
+                        }
+
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Name:")
+                                    .monospace()
+                                    .size(10.5)
+                                    .color(palette::TEXT_MUTED),
+                            );
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.template_name_input)
+                                    .desired_width(220.0)
+                                    .font(egui::FontId::monospace(11.0)),
+                            );
+                            truncate_utf8_bytes(&mut self.template_name_input, 48);
+                            if ui.button("Save Current").clicked() {
+                                let name_copy = self.template_name_input.clone();
+                                self.save_current_workspace_template(&name_copy);
+                            }
+                            ui.selectable_label(self.template_export_ron, "RON")
+                                .clicked()
+                                .then(|| self.template_export_ron = true);
+                            ui.selectable_label(!self.template_export_ron, "JSON")
+                                .clicked()
+                                .then(|| self.template_export_ron = false);
+                            if ui.button("Export to Buffer").clicked() {
+                                let tpl =
+                                    self.capture_workspace_template(&self.template_name_input);
+                                self.template_doc_buffer = if self.template_export_ron {
+                                    tpl.to_ron_pretty()
+                                } else {
+                                    tpl.to_json_pretty()
+                                };
+                                self.last_template_status =
+                                    Some((false, "Exported template to editor buffer".to_owned()));
+                            }
+                        });
+
+                        if !self.saved_workspace_templates.is_empty() {
+                            ui.label(
+                                RichText::new("Saved Custom Layouts:")
+                                    .monospace()
+                                    .strong()
+                                    .size(10.5)
+                                    .color(palette::TEXT_MUTED),
+                            );
+                            let mut apply_idx: Option<usize> = None;
+                            let mut remove_idx: Option<usize> = None;
+                            egui::ScrollArea::vertical()
+                                .id_salt("sumi_saved_tpls_scroll")
+                                .max_height(84.0)
+                                .show(ui, |ui| {
+                                    for (i, saved) in
+                                        self.saved_workspace_templates.iter().enumerate()
+                                    {
+                                        ui.horizontal(|ui| {
+                                            if ui.button("Apply").clicked() {
+                                                apply_idx = Some(i);
+                                            }
+                                            if ui.button("Del").clicked() {
+                                                remove_idx = Some(i);
+                                            }
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "{} [{} · {} slots]",
+                                                    saved.name,
+                                                    saved.layout.short_label(),
+                                                    saved.slots.len()
+                                                ))
+                                                .monospace()
+                                                .size(10.2)
+                                                .color(palette::TEXT_PRIMARY),
+                                            );
+                                        });
+                                    }
+                                });
+                            if let Some(i) = apply_idx {
+                                let tpl = self.saved_workspace_templates[i].clone();
+                                self.apply_workspace_template(&tpl);
+                                self.last_template_status =
+                                    Some((false, format!("Applied saved '{}'", tpl.name)));
+                                close_clicked = true;
+                            } else if let Some(i) = remove_idx {
+                                self.saved_workspace_templates.remove(i);
+                            }
+                        }
+
+                        egui::ScrollArea::vertical()
+                            .id_salt("sumi_tpl_doc_scroll")
+                            .max_height(170.0)
+                            .show(ui, |ui| {
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut self.template_doc_buffer)
+                                        .desired_width(ui.available_width())
+                                        .desired_rows(7)
+                                        .font(egui::FontId::monospace(10.0)),
+                                );
+                            });
+                        truncate_utf8_bytes(&mut self.template_doc_buffer, 32_768);
+
+                        ui.horizontal(|ui| {
+                            if ui.button("Import & Apply Buffer (RON/JSON)").clicked() {
+                                let buf = self.template_doc_buffer.clone();
+                                if self.import_workspace_template_str(&buf).is_ok() {
+                                    close_clicked = true;
+                                }
+                            }
+                            if let Some((is_err, ref msg)) = self.last_template_status {
+                                ui.label(RichText::new(msg).monospace().size(10.0).color(
+                                    if is_err {
+                                        palette::BEARISH
+                                    } else {
+                                        palette::BULLISH
+                                    },
+                                ));
+                            }
+                        });
+                    });
+            });
+
+        if close_clicked
+            || (scrim_resp.clicked()
+                && ui
+                    .input(|i| i.pointer.interact_pos())
+                    .is_none_or(|p| !modal_area.response.rect.contains(p)))
+        {
+            self.show_templates_modal = false;
+            ui.ctx().request_repaint();
+        }
+    }
 }
 
 #[inline]
@@ -11510,14 +13423,14 @@ impl SumiWorkstationApp {
     }
 
     /// Executes all 3 Retina (`2.0x`) Metal/`wgpu` verification scenarios for `"r04"`, `"r05"`, `"r06"`,
-    /// `"r07"`, `"r08"`, `"r09"`, `"r10"`, or `"r11"` offscreen in one headless GPU session (zero windows, zero Dock icons, zero occlusion stalls).
+    /// `"r07"`, `"r08"`, `"r09"`, `"r10"`, `"r11"`, or `"r12"` offscreen in one headless GPU session (zero windows, zero Dock icons, zero occlusion stalls).
     pub fn run_offscreen_wgpu_capture_batch(batch_name: &str) -> Result<(), String> {
         if !matches!(
             batch_name,
-            "r04" | "r05" | "r06" | "r07" | "r08" | "r09" | "r10" | "r11"
+            "r04" | "r05" | "r06" | "r07" | "r08" | "r09" | "r10" | "r11" | "r12"
         ) {
             return Err(format!(
-                "unknown SUMI_CAPTURE_BATCH '{batch_name}' (expected 'r04', 'r05', 'r06', 'r07', 'r08', 'r09', 'r10', or 'r11')"
+                "unknown SUMI_CAPTURE_BATCH '{batch_name}' (expected 'r04', 'r05', 'r06', 'r07', 'r08', 'r09', 'r10', 'r11', or 'r12')"
             ));
         }
         std::fs::create_dir_all("docs/evidence")
@@ -11536,6 +13449,7 @@ impl SumiWorkstationApp {
                 "r09" => app.apply_r09_batch_step_state(step),
                 "r10" => app.apply_r10_batch_step_state(step),
                 "r11" => app.apply_r11_batch_step_state(step),
+                "r12" => app.apply_r12_batch_step_state(step),
                 _ => unreachable!(),
             };
             let image = harness.capture_app_frame(&mut app, logical_w, logical_h, 6)?;
@@ -13140,6 +15054,154 @@ impl SumiWorkstationApp {
         }
     }
 
+    fn apply_r12_batch_step_state(
+        &mut self,
+        step: usize,
+    ) -> (u32, u32, &'static str, &'static str) {
+        self.exit_replay();
+        self.show_replay_bar = false;
+        self.show_scanner_dock = false;
+        self.show_trading_panel = false;
+        self.show_alerts_panel = false;
+        self.show_strategy_panel = false;
+        self.show_journal_panel = false;
+        self.show_equity_pane = false;
+        self.show_backtest_trades = false;
+        self.command_palette.open = false;
+        self.show_templates_modal = false;
+        self.saved_workspace_templates.clear();
+
+        let builtins = builtin_workspace_templates();
+        match step {
+            0 => {
+                // Scenario 0: `1280x800` (`2560x1600` Retina), `2x2` Quad Synchronized Multi-Chart Grid
+                // (`FPT 1D`, `VNINDEX 1D`, `VCB 1D`, `VN30F1M 15m`) with `Ichimoku Cloud` (`+26` right
+                // whitespace Kumo projection) and `CVD` sub-panes + linked crosshairs.
+                self.apply_workspace_template(&builtins[3]);
+                self.indicators.show_ichimoku = true;
+                self.indicators.show_cvd = true;
+                self.indicators.show_rsi = false;
+                self.indicators.show_macd = false;
+                self.viewport.reset_pane_stretches();
+                self.viewport.cvd_stretch = 0.78;
+                self.viewport.time_scale.set_width(540.0);
+                self.viewport.time_scale.set_bar_spacing(7.5);
+                self.viewport.time_scale.set_right_offset(28.0);
+                for slot in &mut self.secondary_slots {
+                    slot.indicators.show_ichimoku = true;
+                    slot.indicators.show_cvd = true;
+                    slot.indicators.show_rsi = false;
+                    slot.viewport.reset_pane_stretches();
+                    slot.viewport.cvd_stretch = 0.78;
+                    slot.viewport.time_scale.set_width(540.0);
+                    slot.viewport.time_scale.set_bar_spacing(7.5);
+                    slot.viewport.time_scale.set_right_offset(28.0);
+                }
+                self.active_chart_slot = 0;
+                self.sync_indicators_and_benchmarks();
+                self.sync_secondary_slots();
+                self.pinned_crosshair_timestamp = self
+                    .candles
+                    .get(self.candles.len().saturating_sub(18))
+                    .map(|c| c.timestamp);
+                self.pending_grid_time_sync = Some(0);
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r12_quad_2x2_synced_ichimoku_cvd_1280x800.png",
+                    "docs/evidence/r12_quad_2x2_synced_ichimoku_cvd_1280x800.json",
+                )
+            }
+            1 => {
+                // Scenario 1: `1280x800` (`2560x1600` Retina), `1x2` MTF Derivative Flow (`VN30F1M` `15m` | `1h`)
+                // showcasing Ichimoku Kumo Twist triangles, forward `+26` projection, Session-reset CVD + SMA 9 & VWAP.
+                self.apply_workspace_template(&builtins[1]);
+                self.indicators.show_ichimoku = true;
+                self.indicators.show_cvd = true;
+                self.indicators.cvd_reset_mode = CvdResetMode::Session;
+                self.indicators.show_vwap = true;
+                self.viewport.reset_pane_stretches();
+                self.viewport.cvd_stretch = 0.85;
+                self.viewport.time_scale.set_width(540.0);
+                self.viewport.time_scale.set_bar_spacing(8.0);
+                self.viewport.time_scale.set_right_offset(28.0);
+                for slot in &mut self.secondary_slots[..1] {
+                    slot.indicators.show_ichimoku = true;
+                    slot.indicators.show_cvd = true;
+                    slot.indicators.cvd_reset_mode = CvdResetMode::Session;
+                    slot.indicators.show_vwap = true;
+                    slot.viewport.reset_pane_stretches();
+                    slot.viewport.cvd_stretch = 0.85;
+                    slot.viewport.time_scale.set_width(540.0);
+                    slot.viewport.time_scale.set_bar_spacing(8.0);
+                    slot.viewport.time_scale.set_right_offset(28.0);
+                }
+                self.active_chart_slot = 0;
+                self.sync_indicators_and_benchmarks();
+                self.sync_secondary_slots();
+                self.pinned_crosshair_timestamp = self
+                    .candles
+                    .get(self.candles.len().saturating_sub(15))
+                    .map(|c| c.timestamp);
+                self.pending_grid_time_sync = Some(0);
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r12_mtf_1x2_kumo_twist_session_cvd_1280x800.png",
+                    "docs/evidence/r12_mtf_1x2_kumo_twist_session_cvd_1280x800.json",
+                )
+            }
+            _ => {
+                // Scenario 2: `960x640` (`1920x1280` Retina), `2x1` Top-Down (`FPT` `1D` / `1W`) in
+                // Causal Bar Replay (`DEF-001`): Chikou causal masking, higher-TF strict closed-bar cutoff,
+                // Cumulative CVD, RS vs VNINDEX, and saved Workspace Layout Template.
+                self.apply_workspace_template(&builtins[2]);
+                self.indicators.show_ichimoku = true;
+                self.indicators.show_cvd = true;
+                self.indicators.cvd_reset_mode = CvdResetMode::Cumulative;
+                self.secondary_slots[0].indicators.show_ichimoku = true;
+                self.secondary_slots[0].indicators.show_cvd = true;
+                self.secondary_slots[0].indicators.show_rs = false;
+                self.viewport.reset_pane_stretches();
+                self.viewport.cvd_stretch = 0.72;
+                self.secondary_slots[0].viewport.reset_pane_stretches();
+                self.secondary_slots[0].viewport.cvd_stretch = 0.72;
+
+                let n_base = self.base_candles.len();
+                let replay_cut = ((n_base * 68) / 100).max(30).min(n_base.saturating_sub(6));
+                let _ = self.start_replay_at_base_index(replay_cut);
+                self.show_replay_bar = true;
+                self.save_current_workspace_template("R12 Replay Desk");
+
+                self.viewport.time_scale.set_width(820.0);
+                self.viewport.time_scale.set_bar_spacing(7.5);
+                self.viewport.time_scale.set_right_offset(26.0);
+                self.secondary_slots[0].viewport.time_scale.set_width(820.0);
+                self.secondary_slots[0]
+                    .viewport
+                    .time_scale
+                    .set_bar_spacing(6.5);
+                self.secondary_slots[0]
+                    .viewport
+                    .time_scale
+                    .set_right_offset(26.0);
+                self.sync_indicators_and_benchmarks();
+                self.sync_secondary_slots();
+                self.pinned_crosshair_timestamp = self
+                    .candles
+                    .get(self.candles.len().saturating_sub(8))
+                    .map(|c| c.timestamp);
+                self.pending_grid_time_sync = Some(0);
+                (
+                    960,
+                    640,
+                    "docs/evidence/r12_causal_replay_2x1_templates_960x640.png",
+                    "docs/evidence/r12_causal_replay_2x1_templates_960x640.json",
+                )
+            }
+        }
+    }
+
     fn persist_capture_artifacts(
         &self,
         screenshot_path: &str,
@@ -13224,8 +15286,11 @@ impl SumiWorkstationApp {
                 || "null".to_owned(),
                 |b| format!("\"{}\"", b.replace('"', "\\\"")),
             );
+            let pinned_xhair_json = self
+                .pinned_crosshair_timestamp
+                .map_or_else(|| "null".to_owned(), |ts| ts.to_string());
             let json = format!(
-                "{{\n  \"symbol\": \"{}\",\n  \"timeframe\": \"{}\",\n  \"base_timeframe\": \"{}\",\n  \"data_source\": \"{}\",\n  \"available_symbols\": [{}],\n  \"base_candles\": {},\n  \"total_candles\": {},\n  \"culled_candles\": {},\n  \"rendered_candles\": {},\n  \"conflation_factor\": {},\n  \"bar_spacing\": {:.6},\n  \"right_offset\": {:.6},\n  \"scale_mode\": \"{}\",\n  \"auto_scale\": {},\n  \"pane_count\": {},\n  \"active_overlay_count\": {},\n  \"drawing_count\": {},\n  \"active_drawing_tool\": \"{}\",\n  \"selected_drawing_id\": {},\n  \"magnet_mode\": \"{}\",\n  \"replay_active\": {},\n  \"replay_status\": \"{}\",\n  \"replay_base_cursor\": {},\n  \"replay_step_unit\": \"{}\",\n  \"show_trading_panel\": {},\n  \"show_scanner_dock\": {},\n  \"show_alerts_panel\": {},\n  \"show_strategy_panel\": {},\n  \"show_journal_panel\": {},\n  \"show_equity_pane\": {},\n  \"equity_pane_source\": \"{}\",\n  \"equity_pane_active\": {},\n  \"show_vwap\": {},\n  \"show_vrvp\": {},\n  \"show_rs\": {},\n  \"show_compare_overlay\": {},\n  \"compare_benchmark\": {},\n  \"vrvp_poc_price\": {},\n  \"active_frvp_count\": {},\n  \"rs_stretch\": {:.3},\n  \"active_venue\": \"{}\",\n  \"journal_total_entries\": {},\n  \"journal_visible_entries\": {},\n  \"journal_discipline_pct\": {:.2},\n  \"wfo_verdict\": {},\n  \"wfo_wfe_pct\": {},\n  \"portfolio_return_pct\": {:.4},\n  \"portfolio_dd_reduction_pct\": {:.4},\n  \"show_backtest_trades\": {},\n  \"rendered_backtest_trades\": {},\n  \"backtest_preset\": {},\n  \"backtest_trade_count\": {},\n  \"backtest_return_pct\": {:.4},\n  \"backtest_max_dd_pct\": {:.4},\n  \"backtest_sharpe\": {},\n  \"backtest_robustness\": {},\n  \"command_palette_open\": {},\n  \"alert_rule_count\": {},\n  \"alert_trigger_count\": {},\n  \"active_alert_lines\": {},\n  \"rendered_alert_markers\": {},\n  \"scanner_signal_revealed\": {},\n  \"active_price_lines\": {},\n  \"rendered_fill_markers\": {},\n  \"equity\": {:.2},\n  \"net_pnl\": {:.2},\n  \"fill_count\": {},\n  \"closed_trade_count\": {},\n  \"pending_order_count\": {},\n  \"open_position_side\": {},\n  \"stretches\": [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}],\n  \"base_value\": {:.4},\n  \"screenshot_px\": [{}, {}],\n  \"outer_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"plot_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"price_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"time_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"raw_price_min\": {:.2},\n  \"raw_price_max\": {:.2}\n}}\n",
+                "{{\n  \"symbol\": \"{}\",\n  \"timeframe\": \"{}\",\n  \"base_timeframe\": \"{}\",\n  \"data_source\": \"{}\",\n  \"available_symbols\": [{}],\n  \"base_candles\": {},\n  \"total_candles\": {},\n  \"culled_candles\": {},\n  \"rendered_candles\": {},\n  \"conflation_factor\": {},\n  \"bar_spacing\": {:.6},\n  \"right_offset\": {:.6},\n  \"scale_mode\": \"{}\",\n  \"auto_scale\": {},\n  \"pane_count\": {},\n  \"active_overlay_count\": {},\n  \"drawing_count\": {},\n  \"active_drawing_tool\": \"{}\",\n  \"selected_drawing_id\": {},\n  \"magnet_mode\": \"{}\",\n  \"replay_active\": {},\n  \"replay_status\": \"{}\",\n  \"replay_base_cursor\": {},\n  \"replay_step_unit\": \"{}\",\n  \"show_trading_panel\": {},\n  \"show_scanner_dock\": {},\n  \"show_alerts_panel\": {},\n  \"show_strategy_panel\": {},\n  \"show_journal_panel\": {},\n  \"show_equity_pane\": {},\n  \"equity_pane_source\": \"{}\",\n  \"equity_pane_active\": {},\n  \"show_vwap\": {},\n  \"show_vrvp\": {},\n  \"show_rs\": {},\n  \"show_compare_overlay\": {},\n  \"compare_benchmark\": {},\n  \"vrvp_poc_price\": {},\n  \"active_frvp_count\": {},\n  \"rs_stretch\": {:.3},\n  \"grid_layout\": \"{}\",\n  \"grid_slot_count\": {},\n  \"active_chart_slot\": {},\n  \"sync_crosshair\": {},\n  \"sync_time_range\": {},\n  \"show_ichimoku\": {},\n  \"ichimoku_active\": {},\n  \"show_cvd\": {},\n  \"cvd_reset_mode\": \"{}\",\n  \"cvd_pane_active\": {},\n  \"cvd_stretch\": {:.3},\n  \"saved_template_count\": {},\n  \"pinned_crosshair_timestamp\": {},\n  \"active_venue\": \"{}\",\n  \"journal_total_entries\": {},\n  \"journal_visible_entries\": {},\n  \"journal_discipline_pct\": {:.2},\n  \"wfo_verdict\": {},\n  \"wfo_wfe_pct\": {},\n  \"portfolio_return_pct\": {:.4},\n  \"portfolio_dd_reduction_pct\": {:.4},\n  \"show_backtest_trades\": {},\n  \"rendered_backtest_trades\": {},\n  \"backtest_preset\": {},\n  \"backtest_trade_count\": {},\n  \"backtest_return_pct\": {:.4},\n  \"backtest_max_dd_pct\": {:.4},\n  \"backtest_sharpe\": {},\n  \"backtest_robustness\": {},\n  \"command_palette_open\": {},\n  \"alert_rule_count\": {},\n  \"alert_trigger_count\": {},\n  \"active_alert_lines\": {},\n  \"rendered_alert_markers\": {},\n  \"scanner_signal_revealed\": {},\n  \"active_price_lines\": {},\n  \"rendered_fill_markers\": {},\n  \"equity\": {:.2},\n  \"net_pnl\": {:.2},\n  \"fill_count\": {},\n  \"closed_trade_count\": {},\n  \"pending_order_count\": {},\n  \"open_position_side\": {},\n  \"stretches\": [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}],\n  \"base_value\": {:.4},\n  \"screenshot_px\": [{}, {}],\n  \"outer_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"plot_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"price_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"time_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"raw_price_min\": {:.2},\n  \"raw_price_max\": {:.2}\n}}\n",
                 self.symbol,
                 self.timeframe,
                 self.base_timeframe,
@@ -13266,6 +15331,19 @@ impl SumiWorkstationApp {
                 vrvp_poc_json,
                 rep.active_frvp_count,
                 self.viewport.rs_stretch,
+                self.grid_layout.short_label(),
+                self.grid_layout.slot_count(),
+                self.active_chart_slot,
+                self.grid_sync.sync_crosshair,
+                self.grid_sync.sync_time_range,
+                self.indicators.show_ichimoku,
+                rep.ichimoku_active,
+                self.indicators.show_cvd,
+                self.indicators.cvd_reset_mode.short_label(),
+                rep.cvd_pane_active,
+                self.viewport.cvd_stretch,
+                self.saved_workspace_templates.len(),
+                pinned_xhair_json,
                 self.active_exchange_venue().short_label(),
                 self.journal.entries.len(),
                 j_stats.visible_entry_count,
@@ -15192,5 +17270,348 @@ mod tests {
         assert_ne!(after_bench_meta, prev_bench_meta);
         assert_ne!(app.compare_cache_key.as_ref(), Some(&key_initial));
         assert_eq!(app.compare_series_cached.len(), app.candles.len());
+    }
+
+    #[test]
+    fn r12_quad_2x2_multichart_sync_causal_replay_and_template_roundtrip() {
+        let mut app = SumiWorkstationApp::default();
+        let builtins = builtin_workspace_templates();
+        app.apply_workspace_template(&builtins[3]); // Quad 2x2: FPT, VNINDEX, VCB, VN30F1M 15m
+        assert_eq!(app.grid_layout, MultiChartLayoutKind::Quad2x2);
+        app.indicators.show_ichimoku = true;
+        app.indicators.show_cvd = true;
+        for slot in &mut app.secondary_slots {
+            slot.indicators.show_ichimoku = true;
+            slot.indicators.show_cvd = true;
+        }
+        app.sync_secondary_slots();
+
+        // Render two headless UI frames and confirm all 4 slots render with isolated PriceScales!
+        let ctx = egui::Context::default();
+        let screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(1280.0, 800.0),
+        ));
+        for _ in 0..2 {
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect,
+                    ..Default::default()
+                },
+                |ui| app.render_workstation_ui(ui),
+            );
+            out.textures_delta.clear();
+        }
+        let r0 = app.last_report.expect("slot 0 report");
+        assert!(r0.ichimoku_active && r0.cvd_pane_active);
+        for (idx, sec) in app.secondary_slots.iter().enumerate() {
+            let sr = sec
+                .last_report
+                .unwrap_or_else(|| panic!("secondary slot {} missing report", idx + 1));
+            assert!(sr.ichimoku_active && sr.cvd_pane_active);
+            assert!(sec.candles.len() >= 10);
+        }
+
+        // PriceScale independence across FPT vs VNINDEX vs VN30F1M
+        let fpt_mid = 0.5 * (r0.bounds.raw_min + r0.bounds.raw_max);
+        let vn_rep = app.secondary_slots[0].last_report.unwrap();
+        let vn_mid = 0.5 * (vn_rep.bounds.raw_min + vn_rep.bounds.raw_max);
+        assert!(
+            (fpt_mid - vn_mid).abs() > 100.0,
+            "Slot 0 (FPT={fpt_mid}) and Slot 1 (VNINDEX={vn_mid}) must preserve independent PriceScales"
+        );
+
+        // Template capture -> RON/JSON roundtrip -> import_workspace_template_str
+        app.save_current_workspace_template("R12 Unit Desk");
+        let captured = app.capture_workspace_template("R12 Unit Desk");
+        let ron_doc = captured.to_ron_pretty();
+        let mut restored = SumiWorkstationApp::default();
+        restored
+            .import_workspace_template_str(&ron_doc)
+            .expect("import valid RON template");
+        assert_eq!(restored.grid_layout, MultiChartLayoutKind::Quad2x2);
+        assert_eq!(restored.secondary_slots[2].symbol, "VN30F1M");
+        assert_eq!(restored.saved_workspace_templates.len(), 1);
+
+        // Causal DEF-001 Bar Replay across 2x1 FPT Daily + Weekly: weekly slot must never leak
+        // future daily closes beyond primary cutoff!
+        app.apply_workspace_template(&builtins[2]); // 2x1 FPT 1D + 1W
+        let cut_idx = (app.base_candles.len() * 65) / 100;
+        assert!(app.start_replay_at_base_index(cut_idx));
+        let causal_close_cap = app.replay_causal_close_timestamp().expect("causal cutoff");
+        let weekly_snapshot = app.secondary_slots[0].candles.clone();
+        assert!(!weekly_snapshot.is_empty());
+        assert!(
+            weekly_snapshot
+                .iter()
+                .all(|c| c.timestamp <= causal_close_cap),
+            "DEF-001: weekly bar start exceeded causal close cutoff {causal_close_cap}"
+        );
+        // Corrupt future base bars inside slot 1 after causal_close_cap and verify zero leakage!
+        let base_secs = app.secondary_slots[0].base_timeframe.seconds();
+        let future_start = causal_closed_prefix_len(
+            &app.secondary_slots[0].base_candles,
+            base_secs,
+            Some(causal_close_cap),
+        );
+        assert!(future_start < app.secondary_slots[0].base_candles.len());
+        for future_c in &mut app.secondary_slots[0].base_candles[future_start..] {
+            future_c.high = 999_999.0;
+            future_c.low = 1.0;
+            future_c.close = 500_000.0;
+        }
+        app.secondary_slots[0].materialized_key = None;
+        app.sync_secondary_slots();
+        assert_eq!(app.secondary_slots[0].candles, weekly_snapshot);
+    }
+
+    #[test]
+    fn critic_r12_regression_instrument_switch_syncs_secondary_replay_cutoff() {
+        let mut app = SumiWorkstationApp::default();
+        app.set_dataset_size(120);
+        app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+        app.set_grid_layout(MultiChartLayoutKind::SplitVertical1x2);
+        app.grid_sync.sync_symbol = false;
+        app.secondary_slots[0].data_source = DataSourcePreset::Vn30Basket;
+        app.secondary_slots[0].symbol = "VCB".to_owned();
+        app.secondary_slots[0].loaded_source_key = None;
+        app.sync_secondary_slots();
+        let vcb_full_len = app.secondary_slots[0].candles.len();
+        assert!(vcb_full_len >= 60);
+
+        let cut = (app.base_candles.len() * 60) / 100;
+        assert!(app.start_replay_at_base_index(cut));
+        let fpt_cap = app.replay_causal_close_timestamp().expect("FPT replay cap");
+        let vcb_cut_len = app.secondary_slots[0].candles.len();
+        assert!(vcb_cut_len < vcb_full_len);
+        assert!(
+            app.secondary_slots[0].candles.last().unwrap().timestamp <= fpt_cap,
+            "VCB must be truncated causally on replay start"
+        );
+
+        // Switch primary to live HPG while sync_symbol == false -> secondary VCB must restore full live bars!
+        app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "HPG");
+        assert!(!app.replay.is_active());
+        assert_eq!(
+            app.secondary_slots[0].candles.len(),
+            vcb_full_len,
+            "switching to live instrument with sync_symbol=false must release stale secondary replay cutoff"
+        );
+
+        // Switch primary back to FPT (with parked replay!) -> secondary VCB must immediately re-truncate causally!
+        app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+        assert!(app.replay.is_active());
+        let restored_cap = app
+            .replay_causal_close_timestamp()
+            .expect("restored FPT replay cap");
+        assert_eq!(restored_cap, fpt_cap);
+        assert_eq!(
+            app.secondary_slots[0].candles.len(),
+            vcb_cut_len,
+            "DEF-001: returning to instrument with parked replay must immediately truncate secondary slots"
+        );
+        assert!(app.secondary_slots[0].candles.last().unwrap().timestamp <= restored_cap);
+    }
+
+    #[test]
+    fn critic_r12_regression_whitespace_hover_no_false_pin() {
+        let mut app = SumiWorkstationApp::default();
+        app.apply_workspace_template(&builtin_workspace_templates()[1]); // 1x2 MTF
+        app.indicators.show_ichimoku = true;
+        app.viewport.time_scale.set_bar_spacing(8.0);
+        app.viewport.time_scale.set_right_offset(28.0);
+        app.sync_indicators_and_benchmarks();
+        app.sync_secondary_slots();
+
+        let ctx = egui::Context::default();
+        let screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(1280.0, 800.0),
+        ));
+        let mut out0 = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out0.textures_delta.clear();
+        let plot_rect = app.last_report.expect("slot 0 layout").layout.plot_rect;
+
+        // Move pointer into the +26 future right-whitespace column inside slot 0 plot_rect
+        let ws_pos = egui::Pos2::new(plot_rect.right() - 12.0, plot_rect.center().y);
+        let mut out1 = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                events: vec![egui::Event::PointerMoved(ws_pos)],
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out1.textures_delta.clear();
+        assert!(
+            app.last_report.unwrap().hovered_bar_timestamp.is_none(),
+            "hovering inside +26 right whitespace must yield hovered_bar_timestamp=None"
+        );
+        assert!(
+            app.linked_crosshair_timestamp.is_none(),
+            "hovering inside +26 right whitespace must NOT pin last bar on peer slots"
+        );
+    }
+
+    #[test]
+    fn critic_r12_regression_active_slot_palette_zoom_and_sync_t() {
+        let mut app = SumiWorkstationApp::default();
+        app.set_grid_layout(MultiChartLayoutKind::Quad2x2);
+        app.grid_sync.sync_time_range = true;
+        let [s0, s1, s2] = &mut app.secondary_slots;
+        for vp in [
+            &mut app.viewport,
+            &mut s0.viewport,
+            &mut s1.viewport,
+            &mut s2.viewport,
+        ] {
+            vp.time_scale.set_width(580.0);
+            vp.time_scale.set_bar_spacing(7.5);
+            vp.time_scale.set_right_offset(6.0);
+        }
+        app.secondary_slots[0].data_source = DataSourcePreset::SyntheticVnindex;
+        app.secondary_slots[0].symbol = "VNINDEX".to_owned();
+        app.secondary_slots[0].loaded_source_key = None;
+        app.sync_secondary_slots();
+
+        app.active_chart_slot = 1;
+        let s0_sma_before = app.indicators.show_sma;
+        let s1_sma_before = app.secondary_slots[0].indicators.show_sma;
+        app.execute_palette_action(PaletteAction::ToggleIndicator("SMA"));
+        assert_eq!(app.indicators.show_sma, s0_sma_before);
+        assert_eq!(app.secondary_slots[0].indicators.show_sma, !s1_sma_before);
+
+        app.execute_palette_action(PaletteAction::SetScaleMode(PriceScaleMode::Logarithmic));
+        assert_eq!(app.viewport.main_price_scale.mode(), PriceScaleMode::Normal);
+        assert_eq!(
+            app.secondary_slots[0].viewport.main_price_scale.mode(),
+            PriceScaleMode::Logarithmic
+        );
+
+        let before_bs_s1 = app.secondary_slots[0].viewport.time_scale.bar_spacing();
+        let before_bs_s0 = app.viewport.time_scale.bar_spacing();
+        app.zoom_in();
+        assert!(
+            app.secondary_slots[0].viewport.time_scale.bar_spacing() > before_bs_s1,
+            "zoom_in() must mutate focused slot 1"
+        );
+        assert!(
+            (app.viewport.time_scale.bar_spacing() - before_bs_s0).abs() > 1e-4,
+            "Sync T must propagate zoom_in() from slot 1 to slot 0 immediately"
+        );
+    }
+
+    #[test]
+    fn critic_r12_regression_custom_file_preserved_across_secondary_sync() {
+        let mut csv = String::from("timestamp,open,high,low,close,volume,symbol\n");
+        let base_ts = 1_750_032_000_i64;
+        for sym in ["AAA", "BBB"] {
+            let base_p = if sym == "AAA" { 100.0 } else { 200.0 };
+            for i in 0..60_i64 {
+                let ts = base_ts + i * 86_400;
+                let c = base_p + (i as f64) * 0.5;
+                csv.push_str(&format!(
+                    "{ts},{:.2},{:.2},{:.2},{c:.2},10000,{sym}\n",
+                    c - 0.5,
+                    c + 1.0,
+                    c - 1.0
+                ));
+            }
+        }
+        let mut app = SumiWorkstationApp::default();
+        app.load_from_csv_str(&csv, &DataLoadOptions::default())
+            .expect("load multi-symbol custom CSV");
+        assert_eq!(app.data_source, DataSourcePreset::CustomFile);
+        app.grid_layout = MultiChartLayoutKind::SplitVertical1x2;
+        app.grid_sync.sync_symbol = true;
+        app.sync_symbol_from_primary_across_slots();
+        assert_eq!(
+            app.secondary_slots[0].data_source,
+            DataSourcePreset::CustomFile
+        );
+        assert_eq!(app.secondary_slots[0].symbol, app.symbol);
+        assert_eq!(app.secondary_slots[0].candles, app.candles);
+
+        app.grid_sync.sync_symbol = false;
+        app.secondary_slots[0].symbol = "BBB".to_owned();
+        app.secondary_slots[0].loaded_source_key = None;
+        app.sync_secondary_slots();
+        assert_eq!(
+            app.secondary_slots[0].data_source,
+            DataSourcePreset::CustomFile
+        );
+        assert_eq!(app.secondary_slots[0].symbol, "BBB");
+        assert!((app.secondary_slots[0].candles[0].close - 200.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn critic_r12_regression_quad_bench_exercises_conflated_session_cvd() {
+        let mut app = SumiWorkstationApp {
+            dataset_bar_count: 50_000,
+            ..Default::default()
+        };
+        app.select_data_source(DataSourcePreset::IntradayVn30F1m);
+        app.grid_layout = MultiChartLayoutKind::Quad2x2;
+        app.grid_sync.sync_crosshair = true;
+        app.grid_sync.sync_time_range = true;
+        app.grid_sync.sync_symbol = true;
+        app.grid_sync.sync_timeframe = true;
+        app.indicators = IndicatorConfig {
+            show_ichimoku: true,
+            show_vwap: true,
+            show_cvd: true,
+            cvd_reset_mode: CvdResetMode::Session,
+            show_rsi: false,
+            show_macd: false,
+            show_atr: false,
+            ..IndicatorConfig::default()
+        };
+        for slot in &mut app.secondary_slots {
+            slot.base_timeframe = Timeframe::M1;
+            slot.active_timeframe = Timeframe::M1;
+            slot.indicators = app.indicators.clone();
+        }
+        app.sync_symbol_from_primary_across_slots();
+        app.sync_timeframe_from_primary_across_slots();
+        app.sync_indicators_and_benchmarks();
+        app.sync_secondary_slots();
+        app.viewport.time_scale.set_width(540.0);
+        app.fit_content();
+
+        let ctx = egui::Context::default();
+        let screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(1280.0, 800.0),
+        ));
+        for _ in 0..10 {
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect,
+                    ..Default::default()
+                },
+                |ui| app.render_workstation_ui(ui),
+            );
+            out.textures_delta.clear();
+        }
+        let r0 = app.last_report.expect("slot 0 report");
+        assert!(r0.conflation_factor >= 8 && r0.ichimoku_active && r0.cvd_pane_active);
+        for (i, slot) in app.secondary_slots.iter().enumerate() {
+            let sr = slot
+                .last_report
+                .unwrap_or_else(|| panic!("slot {} missing report", i + 1));
+            assert!(
+                sr.conflation_factor >= 8 && sr.ichimoku_active && sr.cvd_pane_active,
+                "slot {} failed conflated Session CVD check: {:?}",
+                i + 1,
+                sr
+            );
+            assert!(sr.rendered_candle_count > 0);
+        }
     }
 }

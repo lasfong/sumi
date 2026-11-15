@@ -11,23 +11,25 @@ use crate::alerts::{
     drawing_line_value_at_bar,
 };
 use crate::backtest::{BacktestExitReason, BacktestRunResult, BacktestTrade};
+use crate::data::Timeframe;
 use crate::drawings::{
     Drawing, DrawingColorPreset, DrawingGeometry, DrawingId, DrawingInteractionPhase,
     DrawingPaneTarget, DrawingStore, DrawingTool, HandlePart, HitTarget, LineDashStyle, LocalPoint,
     MagnetMode, PaneDrawingProjection, PointerCaptureOutcome, ProjectedDrawingShape,
 };
 use crate::indicators::{
-    BucketLineEnvelope, IndicatorCache, IndicatorConfig, MACD_REFERENCE_LEVELS, OscillatorPaneId,
-    RS_REFERENCE_LEVELS, RSI_REFERENCE_LEVELS, SeriesBlockIndex, VolumeProfileConfig,
-    VolumeProfileResult, VwapBandsOutput, bucket_line_envelope_indexed, compute_anchored_vwap,
-    compute_volume_profile, visit_conflated_histogram_bars_indexed,
+    BucketLineEnvelope, CVD_REFERENCE_LEVELS, CandleBlockIndex, CvdResetMode, IndicatorCache,
+    IndicatorConfig, MACD_REFERENCE_LEVELS, OscillatorPaneId, RS_REFERENCE_LEVELS,
+    RSI_REFERENCE_LEVELS, SeriesBlockIndex, VolumeProfileConfig, VolumeProfileResult,
+    VwapBandsOutput, bucket_line_envelope_indexed, compute_anchored_vwap, compute_volume_profile,
+    visit_conflated_histogram_bars_indexed,
 };
 use crate::model::{Candle, PriceBounds};
 use crate::trading::{ExecutionFill, OrderSide, PositionSide, TradingSession};
 use crate::viewport::{
     CandlestickBarMetrics, HorzScaleOptions, KineticAnimation, KineticScrollConfig, PaneViewport,
     PlotRect, PriceScale, PriceScaleOptions, TimeScale, conflated_candle_at,
-    iter_conflated_candles,
+    iter_conflated_candles, resolve_linked_crosshair_bar,
 };
 
 /// TradingView-inspired dark workstation & indicator palette.
@@ -109,6 +111,16 @@ pub mod palette {
     pub const IND_RS_LINE: Color32 = Color32::from_rgb(38, 198, 218); // #26C6DA Teal-Cyan
     pub const IND_RS_SMA: Color32 = Color32::from_rgb(255, 202, 40); // #FFCA28 Amber
     pub const IND_RS_BASELINE: Color32 = Color32::from_rgb(120, 123, 134);
+    pub const IND_ICHIMOKU_TENKAN: Color32 = Color32::from_rgb(41, 98, 255); // #2962FF
+    pub const IND_ICHIMOKU_KIJUN: Color32 = Color32::from_rgb(183, 28, 28); // #B71C1C
+    pub const IND_ICHIMOKU_SENKOU_A: Color32 = Color32::from_rgb(67, 160, 71); // #43A047
+    pub const IND_ICHIMOKU_SENKOU_B: Color32 = Color32::from_rgb(244, 67, 54); // #F44336
+    pub const IND_ICHIMOKU_CHIKOU: Color32 = Color32::from_rgb(77, 208, 225); // #4DD0E1
+    pub const IND_KUMO_BULL_FILL: Color32 = Color32::from_rgba_premultiplied(12, 29, 13, 46);
+    pub const IND_KUMO_BEAR_FILL: Color32 = Color32::from_rgba_premultiplied(44, 12, 10, 46);
+    pub const IND_CVD_LINE: Color32 = Color32::from_rgb(38, 198, 218); // #26C6DA
+    pub const IND_CVD_SMA: Color32 = Color32::from_rgb(255, 202, 40); // #FFCA28
+    pub const LINKED_CROSSHAIR_LINE: Color32 = Color32::from_rgba_premultiplied(94, 101, 112, 155);
 }
 
 /// Layout regions computed dynamically from the available chart area on every frame (single-pane view).
@@ -392,6 +404,10 @@ fn default_rs_price_scale() -> PriceScale {
     PriceScale::new("rs-right", PriceScaleOptions::sumi_oscillator())
 }
 
+fn default_cvd_price_scale() -> PriceScale {
+    PriceScale::new("cvd-right", PriceScaleOptions::sumi_oscillator())
+}
+
 const fn default_main_stretch() -> f32 {
     4.0
 }
@@ -517,12 +533,139 @@ struct AvwapMemoEntry {
     result: std::sync::Arc<VwapBandsOutput>,
 }
 
-/// Frame-to-frame viewport memoization cache for R11 order-flow computations (`VRVP`, `FRVP`, `AVWAP`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PriceScaleMemoKey {
+    mode: crate::viewport::PriceScaleMode,
+    inverted: bool,
+    height_bits: u64,
+    top_margin_bits: u64,
+    bottom_margin_bits: u64,
+    range_bits: Option<(u64, u64)>,
+    log_logical_bits: u64,
+    log_coord_bits: u64,
+}
+
+impl PriceScaleMemoKey {
+    fn from_price_scale(ps: &PriceScale) -> Self {
+        let log_f = ps.log_formula();
+        Self {
+            mode: ps.mode(),
+            inverted: ps.is_inverted(),
+            height_bits: ps.height().to_bits(),
+            top_margin_bits: ps.top_margin_px().to_bits(),
+            bottom_margin_bits: ps.bottom_margin_px().to_bits(),
+            range_bits: ps.price_range().map(|r| (r.min.to_bits(), r.max.to_bits())),
+            log_logical_bits: log_f.logical_offset.to_bits(),
+            log_coord_bits: log_f.coord_offset.to_bits(),
+        }
+    }
+}
+
+#[inline]
+fn rect_to_bits(r: Rect) -> [u32; 4] {
+    [
+        r.min.x.to_bits(),
+        r.min.y.to_bits(),
+        r.max.x.to_bits(),
+        r.max.y.to_bits(),
+    ]
+}
+
+#[inline]
+fn opt_f64_bits(v: Option<f64>) -> u64 {
+    match v {
+        Some(x) if x.is_finite() => x.to_bits() ^ 0xA5A5_5A5A_1234_5678,
+        Some(x) => x.to_bits(),
+        None => 0xDEAD_BEEF_CAFE_BABE,
+    }
+}
+
+#[inline]
+fn series_edge_stamp(series: &[Option<f64>]) -> (usize, u64, u64) {
+    let len = series.len();
+    if len == 0 {
+        return (0, 0, 0);
+    }
+    let first = opt_f64_bits(series[0]);
+    let mid = opt_f64_bits(series[len / 2]).rotate_left(19);
+    let last = opt_f64_bits(series[len - 1]);
+    let q3 = opt_f64_bits(series[(len * 3) / 4]).rotate_left(11);
+    (len, first ^ mid, last ^ q3)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PlotDataLayerKey {
+    layer_id: egui::LayerId,
+    parent_clip_bits: [u32; 4],
+    opacity_bits: u32,
+    ppp_bits: u64,
+    candles_fp: u64,
+    candles_len: usize,
+    dataset_gen: u64,
+    main_plot_bits: [u32; 4],
+    culling_start: usize,
+    culling_end: usize,
+    conflation_factor: usize,
+    ov_step: usize,
+    time_width_bits: u64,
+    bar_spacing_bits: u64,
+    right_offset_bits: u64,
+    base_index: Option<i64>,
+    base_value_bits: u64,
+    show_volume: bool,
+    main_ps: PriceScaleMemoKey,
+    vol_ps: PriceScaleMemoKey,
+    indicators: IndicatorConfig,
+    vwap_stamp: (usize, (usize, u64, u64)),
+    cvd_stamp: (usize, (usize, u64, u64)),
+    rs_stamp: (usize, u64, u64),
+    compare_stamp: Option<(String, (usize, u64, u64), u64)>,
+    osc_panes: Vec<(OscillatorPaneId, [u32; 4], PriceScaleMemoKey)>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PlotDataLayerMemo {
+    key: PlotDataLayerKey,
+    main_shapes: Vec<egui::epaint::ClippedShape>,
+    osc_shapes: Vec<(OscillatorPaneId, Vec<egui::epaint::ClippedShape>)>,
+    rendered_candle_count: usize,
+    static_overlay_count: usize,
+}
+
+fn painter_next_shape_idx(painter: &egui::Painter) -> usize {
+    painter
+        .ctx()
+        .graphics(|g| g.get(painter.layer_id()).map_or(0, |l| l.next_idx().0))
+}
+
+fn capture_painter_shapes_since(
+    painter: &egui::Painter,
+    start_idx: usize,
+) -> Vec<egui::epaint::ClippedShape> {
+    painter.ctx().graphics(|g| {
+        g.get(painter.layer_id())
+            .map(|l| l.all_entries().skip(start_idx).cloned().collect())
+            .unwrap_or_default()
+    })
+}
+
+fn replay_cached_shapes(painter: &egui::Painter, shapes: &[egui::epaint::ClippedShape]) {
+    painter.ctx().graphics_mut(|g| {
+        let list = g.entry(painter.layer_id());
+        for cs in shapes {
+            list.add(cs.clip_rect, cs.shape.clone());
+        }
+    });
+}
+
+/// Frame-to-frame viewport memoization cache for R11 order-flow computations (`VRVP`, `FRVP`, `AVWAP`)
+/// and conflated static `Arc<Mesh>` chart plot layers.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct R11RenderMemo {
     vrvp: Option<VrvpMemoEntry>,
     frvp: Vec<FrvpMemoEntry>,
     avwap: Vec<AvwapMemoEntry>,
+    plot_data: Option<PlotDataLayerMemo>,
 }
 
 impl R11RenderMemo {
@@ -530,6 +673,7 @@ impl R11RenderMemo {
         self.vrvp = None;
         self.frvp.clear();
         self.avwap.clear();
+        self.plot_data = None;
     }
 
     pub(crate) fn get_or_compute_vrvp(
@@ -663,6 +807,8 @@ pub struct ChartViewportState {
     pub atr_price_scale: PriceScale,
     #[serde(default = "default_rs_price_scale")]
     pub rs_price_scale: PriceScale,
+    #[serde(default = "default_cvd_price_scale")]
+    pub cvd_price_scale: PriceScale,
     #[serde(default = "default_equity_price_scale")]
     pub equity_price_scale: PriceScale,
 
@@ -676,6 +822,8 @@ pub struct ChartViewportState {
     pub atr_stretch: f32,
     #[serde(default = "default_sub_stretch")]
     pub rs_stretch: f32,
+    #[serde(default = "default_sub_stretch")]
+    pub cvd_stretch: f32,
     #[serde(default = "default_equity_stretch")]
     pub equity_stretch: f32,
 
@@ -707,12 +855,14 @@ impl ChartViewportState {
             macd_price_scale: default_macd_price_scale(),
             atr_price_scale: default_atr_price_scale(),
             rs_price_scale: default_rs_price_scale(),
+            cvd_price_scale: default_cvd_price_scale(),
             equity_price_scale: default_equity_price_scale(),
             main_stretch: default_main_stretch(),
             rsi_stretch: default_sub_stretch(),
             macd_stretch: default_sub_stretch(),
             atr_stretch: default_sub_stretch(),
             rs_stretch: default_sub_stretch(),
+            cvd_stretch: default_sub_stretch(),
             equity_stretch: default_equity_stretch(),
             kinetic: None,
             separator_drag: None,
@@ -732,6 +882,7 @@ impl ChartViewportState {
         self.macd_price_scale.sanitize_deserialized();
         self.atr_price_scale.sanitize_deserialized();
         self.rs_price_scale.sanitize_deserialized();
+        self.cvd_price_scale.sanitize_deserialized();
         self.equity_price_scale.sanitize_deserialized();
         // Oscillator / Equity sub-panes always operate in Linear vertical space (`RSI`, `MACD`, `ATR`, `RS`, `Equity`).
         self.rsi_price_scale
@@ -742,6 +893,8 @@ impl ChartViewportState {
             .set_mode(crate::viewport::PriceScaleMode::Normal);
         self.rs_price_scale
             .set_mode(crate::viewport::PriceScaleMode::Normal);
+        self.cvd_price_scale
+            .set_mode(crate::viewport::PriceScaleMode::Normal);
         self.equity_price_scale
             .set_mode(crate::viewport::PriceScaleMode::Normal);
         self.main_stretch = sanitize_stretch(self.main_stretch, default_main_stretch());
@@ -749,6 +902,7 @@ impl ChartViewportState {
         self.macd_stretch = sanitize_stretch(self.macd_stretch, default_sub_stretch());
         self.atr_stretch = sanitize_stretch(self.atr_stretch, default_sub_stretch());
         self.rs_stretch = sanitize_stretch(self.rs_stretch, default_sub_stretch());
+        self.cvd_stretch = sanitize_stretch(self.cvd_stretch, default_sub_stretch());
         self.equity_stretch = sanitize_stretch(self.equity_stretch, default_equity_stretch());
     }
 
@@ -758,6 +912,7 @@ impl ChartViewportState {
             OscillatorPaneId::Rsi => &self.rsi_price_scale,
             OscillatorPaneId::Macd => &self.macd_price_scale,
             OscillatorPaneId::Atr => &self.atr_price_scale,
+            OscillatorPaneId::Cvd => &self.cvd_price_scale,
             OscillatorPaneId::RelativeStrength => &self.rs_price_scale,
             OscillatorPaneId::Equity => &self.equity_price_scale,
         }
@@ -768,6 +923,7 @@ impl ChartViewportState {
             OscillatorPaneId::Rsi => &mut self.rsi_price_scale,
             OscillatorPaneId::Macd => &mut self.macd_price_scale,
             OscillatorPaneId::Atr => &mut self.atr_price_scale,
+            OscillatorPaneId::Cvd => &mut self.cvd_price_scale,
             OscillatorPaneId::RelativeStrength => &mut self.rs_price_scale,
             OscillatorPaneId::Equity => &mut self.equity_price_scale,
         }
@@ -779,6 +935,7 @@ impl ChartViewportState {
             OscillatorPaneId::Rsi => self.rsi_stretch,
             OscillatorPaneId::Macd => self.macd_stretch,
             OscillatorPaneId::Atr => self.atr_stretch,
+            OscillatorPaneId::Cvd => self.cvd_stretch,
             OscillatorPaneId::RelativeStrength => self.rs_stretch,
             OscillatorPaneId::Equity => self.equity_stretch,
         }
@@ -790,6 +947,7 @@ impl ChartViewportState {
             OscillatorPaneId::Rsi => self.rsi_stretch = s,
             OscillatorPaneId::Macd => self.macd_stretch = s,
             OscillatorPaneId::Atr => self.atr_stretch = s,
+            OscillatorPaneId::Cvd => self.cvd_stretch = s,
             OscillatorPaneId::RelativeStrength => self.rs_stretch = s,
             OscillatorPaneId::Equity => self.equity_stretch = s,
         }
@@ -818,6 +976,7 @@ impl ChartViewportState {
         self.macd_stretch = default_sub_stretch();
         self.atr_stretch = default_sub_stretch();
         self.rs_stretch = default_sub_stretch();
+        self.cvd_stretch = default_sub_stretch();
         self.equity_stretch = default_equity_stretch();
     }
 
@@ -862,6 +1021,7 @@ impl ChartViewportState {
         self.macd_price_scale.reset_auto_scale();
         self.atr_price_scale.reset_auto_scale();
         self.rs_price_scale.reset_auto_scale();
+        self.cvd_price_scale.reset_auto_scale();
         self.equity_price_scale.reset_auto_scale();
     }
 
@@ -877,6 +1037,7 @@ impl ChartViewportState {
         self.macd_price_scale.reset_auto_scale();
         self.atr_price_scale.reset_auto_scale();
         self.rs_price_scale.reset_auto_scale();
+        self.cvd_price_scale.reset_auto_scale();
         self.equity_price_scale.reset_auto_scale();
     }
 
@@ -943,9 +1104,11 @@ pub struct ChartReplayTradingOverlay<'a> {
     pub show_backtest_trades_on_chart: bool,
     pub focused_backtest_trade_id: Option<u64>,
     pub replay_cutoff_timestamp: Option<i64>,
+    pub causal_close_cap: Option<i64>,
     pub frontier_base_timestamp: Option<i64>,
     pub compare_overlay: Option<(&'a str, &'a [Option<f64>], &'a SeriesBlockIndex)>,
     pub rs_benchmark_label: Option<&'a str>,
+    pub external_crosshair_timestamp: Option<i64>,
     pub modal_open: bool,
 }
 
@@ -982,6 +1145,9 @@ pub struct ChartRenderReport {
     pub rendered_backtest_trade_count: usize,
     pub vrvp_poc_price: Option<f64>,
     pub active_frvp_count: usize,
+    pub hovered_bar_timestamp: Option<i64>,
+    pub ichimoku_active: bool,
+    pub cvd_pane_active: bool,
 }
 
 /// Renders the native candlestick chart, volume histogram, price/time axes, crosshair, and OHLCV overlay
@@ -1504,6 +1670,7 @@ fn render_workstation_chart_inner(
                     rsi_price_scale,
                     macd_price_scale,
                     atr_price_scale,
+                    cvd_price_scale,
                     rs_price_scale,
                     equity_price_scale,
                     ..
@@ -1512,6 +1679,7 @@ fn render_workstation_chart_inner(
                     OscillatorPaneId::Rsi => rsi_price_scale,
                     OscillatorPaneId::Macd => macd_price_scale,
                     OscillatorPaneId::Atr => atr_price_scale,
+                    OscillatorPaneId::Cvd => cvd_price_scale,
                     OscillatorPaneId::RelativeStrength => rs_price_scale,
                     OscillatorPaneId::Equity => equity_price_scale,
                 };
@@ -1644,7 +1812,7 @@ fn render_workstation_chart_inner(
 
     let main_plot_painter = painter.with_clip_rect(multi_layout.main_plot_rect);
     let mut active_overlay_count = 0_usize;
-    let candles_fp = if indicators.show_vrvp || drawings.is_some() {
+    let candles_fp = if conflation_factor >= 2 || indicators.show_vrvp || drawings.is_some() {
         candles_fast_fingerprint(candles) ^ indicator_cache.dataset_generation().rotate_left(17)
     } else {
         0
@@ -1690,89 +1858,204 @@ fn render_workstation_chart_inner(
         );
     }
 
+    let ov_step = overlay_conflation_step(conflation_factor, viewport.time_scale.bar_spacing());
+    let ichimoku_active = indicators.show_ichimoku && !indicator_cache.ichimoku.senkou_a.is_empty();
     let effective_bar_spacing = viewport.time_scale.bar_spacing() * (conflation_factor as f64);
     let bar_metrics = CandlestickBarMetrics::compute(effective_bar_spacing, ppp);
-    let rendered_candle_count = paint_candlesticks_and_volume(
-        &painter,
-        multi_layout.main_plot_rect,
-        candles,
-        culling_range.clone(),
-        conflation_factor,
-        &main_vp,
-        &vol_vp,
-        bar_metrics,
-        ppp,
-        config.show_volume,
-    );
 
-    // Main-Pane Technical Overlays (`BollingerBands`, `SMA`, `EMA`, `Session VWAP`, `Compare Benchmark`)
-    if indicators.show_bbands {
-        active_overlay_count += 1;
-        paint_bollinger_bands(
-            &main_plot_painter,
-            indicator_cache,
-            culling_range.clone(),
+    let plot_memo_key = (conflation_factor >= 2 && painter.is_visible()).then(|| {
+        let osc_panes = multi_layout
+            .oscillators
+            .iter()
+            .filter(|osc| osc.id != OscillatorPaneId::Equity)
+            .map(|osc| {
+                (
+                    osc.id,
+                    rect_to_bits(osc.plot_rect),
+                    PriceScaleMemoKey::from_price_scale(viewport.oscillator_price_scale(osc.id)),
+                )
+            })
+            .collect();
+        PlotDataLayerKey {
+            layer_id: painter.layer_id(),
+            parent_clip_bits: rect_to_bits(painter.clip_rect()),
+            opacity_bits: painter.opacity().to_bits(),
+            ppp_bits: ppp.to_bits(),
+            candles_fp,
+            candles_len: candles.len(),
+            dataset_gen: indicator_cache.dataset_generation(),
+            main_plot_bits: rect_to_bits(multi_layout.main_plot_rect),
+            culling_start: culling_range.start,
+            culling_end: culling_range.end,
             conflation_factor,
-            &main_vp,
-        );
+            ov_step,
+            time_width_bits: viewport.time_scale.width().to_bits(),
+            bar_spacing_bits: viewport.time_scale.bar_spacing().to_bits(),
+            right_offset_bits: viewport.time_scale.right_offset().to_bits(),
+            base_index: viewport.time_scale.base_index(),
+            base_value_bits: base_value.to_bits(),
+            show_volume: config.show_volume,
+            main_ps: PriceScaleMemoKey::from_price_scale(&viewport.main_price_scale),
+            vol_ps: PriceScaleMemoKey::from_price_scale(&viewport.volume_price_scale),
+            indicators: indicators.clone(),
+            vwap_stamp: (
+                indicator_cache.vwap.session_starts.len(),
+                series_edge_stamp(&indicator_cache.vwap.vwap),
+            ),
+            cvd_stamp: (
+                indicator_cache.cvd.session_starts.len(),
+                series_edge_stamp(&indicator_cache.cvd.cvd),
+            ),
+            rs_stamp: series_edge_stamp(&indicator_cache.rs.rs_line),
+            compare_stamp: replay_trading.compare_overlay.map(|(sym, s, _)| {
+                (
+                    sym.to_owned(),
+                    series_edge_stamp(s),
+                    compare_scale.to_bits(),
+                )
+            }),
+            osc_panes,
+        }
+    });
+    if plot_memo_key.is_none() {
+        viewport.r11_memo.plot_data = None;
     }
-    if indicators.show_sma {
-        active_overlay_count += 1;
-        paint_conflated_line_series(
-            &main_plot_painter,
-            &indicator_cache.sma,
-            Some(&indicator_cache.sma_idx),
-            culling_range.clone(),
-            conflation_factor,
-            &main_vp,
-            Stroke::new(1.6, palette::IND_SMA),
-        );
-    }
-    if indicators.show_ema {
-        active_overlay_count += 1;
-        paint_conflated_line_series(
-            &main_plot_painter,
-            &indicator_cache.ema,
-            Some(&indicator_cache.ema_idx),
-            culling_range.clone(),
-            conflation_factor,
-            &main_vp,
-            Stroke::new(1.6, palette::IND_EMA),
-        );
-    }
-    if indicators.show_vwap {
-        active_overlay_count += 1;
-        paint_vwap_output(
-            &main_plot_painter,
-            &indicator_cache.vwap,
-            Some((
-                &indicator_cache.vwap_idx,
-                &indicator_cache.vwap_u1_idx,
-                &indicator_cache.vwap_l1_idx,
-                &indicator_cache.vwap_u2_idx,
-                &indicator_cache.vwap_l2_idx,
-            )),
-            culling_range.clone(),
-            conflation_factor,
-            &main_vp,
-            indicators.vwap_band_1 > 0.0,
-            indicators.vwap_band_2 > 0.0,
-            palette::IND_VWAP_LINE,
-        );
-    }
-    if let Some((_, cmp_series, cmp_idx)) = replay_trading.compare_overlay {
-        active_overlay_count += 1;
-        paint_conflated_line_series_scaled(
-            &main_plot_painter,
-            cmp_series,
-            Some(cmp_idx),
-            culling_range.clone(),
-            conflation_factor,
-            &main_vp,
-            Stroke::new(1.5, palette::COMPARE_BENCH_LINE),
-            compare_scale,
-        );
-    }
+    let plot_cache_hit = plot_memo_key.as_ref().is_some_and(|k| {
+        viewport
+            .r11_memo
+            .plot_data
+            .as_ref()
+            .is_some_and(|m| &m.key == k)
+    });
+
+    let mut captured_main_shapes = Vec::new();
+    let mut captured_static_overlay_count = 0_usize;
+    let rendered_candle_count =
+        if plot_cache_hit && let Some(memo) = viewport.r11_memo.plot_data.as_ref() {
+            replay_cached_shapes(&painter, &memo.main_shapes);
+            active_overlay_count += memo.static_overlay_count;
+            memo.rendered_candle_count
+        } else {
+            let main_shape_start = if plot_memo_key.is_some() {
+                painter_next_shape_idx(&painter)
+            } else {
+                0
+            };
+            let pre_static_overlays = active_overlay_count;
+
+            if ichimoku_active {
+                paint_ichimoku_kumo_fill(
+                    &main_plot_painter,
+                    multi_layout.main_plot_rect,
+                    &viewport.time_scale,
+                    indicator_cache,
+                    ov_step,
+                    &main_vp,
+                );
+            }
+
+            let count = paint_candlesticks_and_volume(
+                &painter,
+                multi_layout.main_plot_rect,
+                candles,
+                Some(&indicator_cache.candle_idx),
+                culling_range.clone(),
+                conflation_factor,
+                &main_vp,
+                &vol_vp,
+                bar_metrics,
+                ppp,
+                config.show_volume,
+            );
+
+            // Main-Pane Technical Overlays (`Ichimoku Cloud`, `BollingerBands`, `SMA`, `EMA`, `Session VWAP`, `Compare Benchmark`)
+            if ichimoku_active {
+                active_overlay_count += 1;
+                paint_ichimoku_lines(
+                    &main_plot_painter,
+                    &viewport.time_scale,
+                    indicators,
+                    indicator_cache,
+                    culling_range.clone(),
+                    ov_step,
+                    &main_vp,
+                );
+            }
+            if indicators.show_bbands {
+                active_overlay_count += 1;
+                paint_bollinger_bands(
+                    &main_plot_painter,
+                    indicator_cache,
+                    culling_range.clone(),
+                    conflation_factor,
+                    &main_vp,
+                );
+            }
+            if indicators.show_sma {
+                active_overlay_count += 1;
+                paint_conflated_line_series(
+                    &main_plot_painter,
+                    &indicator_cache.sma,
+                    Some(&indicator_cache.sma_idx),
+                    culling_range.clone(),
+                    ov_step,
+                    &main_vp,
+                    Stroke::new(1.6, palette::IND_SMA),
+                );
+            }
+            if indicators.show_ema {
+                active_overlay_count += 1;
+                paint_conflated_line_series(
+                    &main_plot_painter,
+                    &indicator_cache.ema,
+                    Some(&indicator_cache.ema_idx),
+                    culling_range.clone(),
+                    ov_step,
+                    &main_vp,
+                    Stroke::new(1.6, palette::IND_EMA),
+                );
+            }
+            if indicators.show_vwap {
+                active_overlay_count += 1;
+                paint_vwap_output(
+                    &main_plot_painter,
+                    &indicator_cache.vwap,
+                    Some((
+                        &indicator_cache.vwap_idx,
+                        &indicator_cache.vwap_u1_idx,
+                        &indicator_cache.vwap_l1_idx,
+                        &indicator_cache.vwap_u2_idx,
+                        &indicator_cache.vwap_l2_idx,
+                    )),
+                    culling_range.clone(),
+                    ov_step,
+                    &main_vp,
+                    indicators.vwap_band_1 > 0.0,
+                    indicators.vwap_band_2 > 0.0,
+                    palette::IND_VWAP_LINE,
+                );
+            }
+            if let Some((_, cmp_series, cmp_idx)) = replay_trading.compare_overlay {
+                active_overlay_count += 1;
+                paint_conflated_line_series_scaled(
+                    &main_plot_painter,
+                    cmp_series,
+                    Some(cmp_idx),
+                    culling_range.clone(),
+                    ov_step,
+                    &main_vp,
+                    Stroke::new(1.5, palette::COMPARE_BENCH_LINE),
+                    compare_scale,
+                );
+            }
+
+            if plot_memo_key.is_some() {
+                captured_main_shapes = capture_painter_shapes_since(&painter, main_shape_start);
+                captured_static_overlay_count =
+                    active_overlay_count.saturating_sub(pre_static_overlays);
+            }
+            count
+        };
 
     paint_latest_close_line_and_pill(
         &painter,
@@ -1936,13 +2219,18 @@ fn render_workstation_chart_inner(
                 .map(|bt| bt.config.initial_cash.max(1.0))
         })
         .unwrap_or(100_000.0);
+    let mut captured_osc_shapes: Vec<(OscillatorPaneId, Vec<egui::epaint::ClippedShape>)> =
+        Vec::with_capacity(multi_layout.oscillators.len());
     for osc in &multi_layout.oscillators {
         let osc_ps = viewport.oscillator_price_scale(osc.id);
         let osc_plot_f64 = PlotRect::from_egui(osc.plot_rect);
         let osc_bv = match osc.id {
             OscillatorPaneId::Equity => equity_base_val,
             OscillatorPaneId::RelativeStrength => 100.0,
-            OscillatorPaneId::Rsi | OscillatorPaneId::Macd | OscillatorPaneId::Atr => 1.0,
+            OscillatorPaneId::Rsi
+            | OscillatorPaneId::Macd
+            | OscillatorPaneId::Atr
+            | OscillatorPaneId::Cvd => 1.0,
         };
         let osc_vp = PaneViewport::new(&viewport.time_scale, osc_ps, osc_plot_f64, osc_bv);
 
@@ -1972,88 +2260,117 @@ fn render_workstation_chart_inner(
         }
 
         let osc_painter = painter.with_clip_rect(osc.plot_rect);
-        match osc.id {
-            OscillatorPaneId::Rsi => {
-                paint_rsi_pane(
+        if osc.id == OscillatorPaneId::Equity {
+            if let Some(eq_ov) = replay_trading.equity_override {
+                paint_equity_baseline_pane(
+                    &painter,
                     &osc_painter,
                     osc.plot_rect,
-                    &indicator_cache.rsi,
-                    Some(&indicator_cache.rsi_idx),
+                    osc.price_axis_rect,
+                    eq_ov,
+                    candles.len(),
                     culling_range.clone(),
                     conflation_factor,
+                    osc_ps,
                     &osc_vp,
                 );
-            }
-            OscillatorPaneId::Macd => {
-                paint_macd_pane(
+            } else if let Some(bt) = replay_trading.backtest_result {
+                let eq_ov = EquityCurveOverlay {
+                    title_label: bt.config.preset.short_label(),
+                    baseline_cash: bt.config.initial_cash,
+                    equity_values: &bt.equity_values,
+                    equity_idx: &bt.equity_idx,
+                    underwater_values: &bt.underwater_values,
+                    bar_count: bt.bar_count,
+                    split_bar_index: bt.split_bar_index,
+                    trades: None,
+                };
+                paint_equity_baseline_pane(
+                    &painter,
                     &osc_painter,
                     osc.plot_rect,
-                    indicator_cache,
+                    osc.price_axis_rect,
+                    eq_ov,
+                    candles.len(),
                     culling_range.clone(),
                     conflation_factor,
-                    &osc_vp,
-                    bar_metrics,
-                );
-            }
-            OscillatorPaneId::Atr => {
-                paint_conflated_line_series(
-                    &osc_painter,
-                    &indicator_cache.atr,
-                    Some(&indicator_cache.atr_idx),
-                    culling_range.clone(),
-                    conflation_factor,
-                    &osc_vp,
-                    Stroke::new(1.5, palette::IND_ATR),
-                );
-            }
-            OscillatorPaneId::RelativeStrength => {
-                paint_relative_strength_pane(
-                    &osc_painter,
-                    osc.plot_rect,
-                    indicator_cache,
-                    culling_range.clone(),
-                    conflation_factor,
+                    osc_ps,
                     &osc_vp,
                 );
             }
-            OscillatorPaneId::Equity => {
-                if let Some(eq_ov) = replay_trading.equity_override {
-                    paint_equity_baseline_pane(
-                        &painter,
+        } else if plot_cache_hit
+            && let Some(memo) = viewport.r11_memo.plot_data.as_ref()
+            && let Some((_, shapes)) = memo.osc_shapes.iter().find(|(id, _)| *id == osc.id)
+        {
+            replay_cached_shapes(&painter, shapes);
+        } else {
+            let osc_shape_start = if plot_memo_key.is_some() {
+                painter_next_shape_idx(&painter)
+            } else {
+                0
+            };
+            match osc.id {
+                OscillatorPaneId::Rsi => {
+                    paint_rsi_pane(
                         &osc_painter,
                         osc.plot_rect,
-                        osc.price_axis_rect,
-                        eq_ov,
-                        candles.len(),
+                        &indicator_cache.rsi,
+                        Some(&indicator_cache.rsi_idx),
                         culling_range.clone(),
                         conflation_factor,
-                        osc_ps,
-                        &osc_vp,
-                    );
-                } else if let Some(bt) = replay_trading.backtest_result {
-                    let eq_ov = EquityCurveOverlay {
-                        title_label: bt.config.preset.short_label(),
-                        baseline_cash: bt.config.initial_cash,
-                        equity_values: &bt.equity_values,
-                        equity_idx: &bt.equity_idx,
-                        underwater_values: &bt.underwater_values,
-                        bar_count: bt.bar_count,
-                        split_bar_index: bt.split_bar_index,
-                        trades: None,
-                    };
-                    paint_equity_baseline_pane(
-                        &painter,
-                        &osc_painter,
-                        osc.plot_rect,
-                        osc.price_axis_rect,
-                        eq_ov,
-                        candles.len(),
-                        culling_range.clone(),
-                        conflation_factor,
-                        osc_ps,
                         &osc_vp,
                     );
                 }
+                OscillatorPaneId::Macd => {
+                    paint_macd_pane(
+                        &osc_painter,
+                        osc.plot_rect,
+                        indicator_cache,
+                        culling_range.clone(),
+                        conflation_factor,
+                        &osc_vp,
+                        bar_metrics,
+                    );
+                }
+                OscillatorPaneId::Atr => {
+                    paint_conflated_line_series(
+                        &osc_painter,
+                        &indicator_cache.atr,
+                        Some(&indicator_cache.atr_idx),
+                        culling_range.clone(),
+                        conflation_factor,
+                        &osc_vp,
+                        Stroke::new(1.5, palette::IND_ATR),
+                    );
+                }
+                OscillatorPaneId::Cvd => {
+                    paint_cvd_pane(
+                        &osc_painter,
+                        osc.plot_rect,
+                        indicator_cache,
+                        culling_range.clone(),
+                        ov_step,
+                        &osc_vp,
+                        bar_metrics,
+                    );
+                }
+                OscillatorPaneId::RelativeStrength => {
+                    paint_relative_strength_pane(
+                        &osc_painter,
+                        osc.plot_rect,
+                        indicator_cache,
+                        culling_range.clone(),
+                        conflation_factor,
+                        &osc_vp,
+                    );
+                }
+                OscillatorPaneId::Equity => {}
+            }
+            if plot_memo_key.is_some() {
+                captured_osc_shapes.push((
+                    osc.id,
+                    capture_painter_shapes_since(&painter, osc_shape_start),
+                ));
             }
         }
 
@@ -2086,6 +2403,16 @@ fn render_workstation_chart_inner(
         }
     }
 
+    if !plot_cache_hit && let Some(key) = plot_memo_key {
+        viewport.r11_memo.plot_data = Some(PlotDataLayerMemo {
+            key,
+            main_shapes: captured_main_shapes,
+            osc_shapes: captured_osc_shapes,
+            rendered_candle_count,
+            static_overlay_count: captured_static_overlay_count,
+        });
+    }
+
     // 11. Resolve Unified Synchronized Crosshair across Main + Oscillator Sub-Panes
     #[derive(Clone, Copy)]
     enum HoveredPane {
@@ -2116,12 +2443,22 @@ fn render_workstation_chart_inner(
         HoveredPane::Main(p) | HoveredPane::Oscillator(_, _, _, p) => p.x,
     });
     let hovered_slot_index = hover_x.and_then(|hx| main_vp.screen_x_to_index(f64::from(hx)));
+    let tf_secs = timeframe_str_to_seconds(config.timeframe);
+    let linked_bar_idx = if hovered_pane.is_none()
+        && config.show_crosshair
+        && let Some(ext_ts) = replay_trading.external_crosshair_timestamp
+    {
+        resolve_linked_crosshair_bar(candles, tf_secs, ext_ts, replay_trading.causal_close_cap)
+    } else {
+        None
+    };
     let default_inspected_idx = culling_range
         .end
         .checked_sub(1)
         .unwrap_or(candles.len() - 1);
     let inspected_data_index = hover_x
         .and_then(|hx| main_vp.screen_x_to_clamped_data_index(f64::from(hx)))
+        .or(linked_bar_idx)
         .unwrap_or(default_inspected_idx);
 
     let mut pointer_price = None;
@@ -2138,7 +2475,10 @@ fn render_workstation_chart_inner(
                 let osc_bv = match id {
                     OscillatorPaneId::Equity => equity_base_val,
                     OscillatorPaneId::RelativeStrength => 100.0,
-                    OscillatorPaneId::Rsi | OscillatorPaneId::Macd | OscillatorPaneId::Atr => 1.0,
+                    OscillatorPaneId::Rsi
+                    | OscillatorPaneId::Macd
+                    | OscillatorPaneId::Atr
+                    | OscillatorPaneId::Cvd => 1.0,
                 };
                 let osc_vp = PaneViewport::new(
                     &viewport.time_scale,
@@ -2221,9 +2561,10 @@ fn render_workstation_chart_inner(
                     let osc_bv = match id {
                         OscillatorPaneId::Equity => equity_base_val,
                         OscillatorPaneId::RelativeStrength => 100.0,
-                        OscillatorPaneId::Rsi | OscillatorPaneId::Macd | OscillatorPaneId::Atr => {
-                            1.0
-                        }
+                        OscillatorPaneId::Rsi
+                        | OscillatorPaneId::Macd
+                        | OscillatorPaneId::Atr
+                        | OscillatorPaneId::Cvd => 1.0,
                     };
                     paint_axis_cursor_pill(
                         &painter,
@@ -2242,6 +2583,21 @@ fn render_workstation_chart_inner(
             config.timeframe,
             slot_idx,
             cross_x,
+        );
+    } else if config.show_crosshair
+        && let Some(l_idx) = linked_bar_idx
+    {
+        paint_linked_crosshair(
+            &painter,
+            &main_plot_painter,
+            &multi_layout,
+            candles,
+            config.timeframe,
+            &viewport.main_price_scale,
+            &main_vp,
+            base_value,
+            conflation_factor,
+            l_idx,
         );
     }
 
@@ -2448,6 +2804,11 @@ fn render_workstation_chart_inner(
         rendered_backtest_trade_count,
         vrvp_poc_price,
         active_frvp_count,
+        hovered_bar_timestamp: hovered_slot_index
+            .filter(|&bi| bi >= 0 && (bi as usize) < candles.len())
+            .map(|bi| candles[bi as usize].timestamp),
+        ichimoku_active,
+        cvd_pane_active: active_osc_ids.contains(&OscillatorPaneId::Cvd),
     })
 }
 
@@ -2615,6 +2976,7 @@ pub fn render_shared_pane_candlestick_chart(
         &painter,
         layout.plot_rect,
         candles,
+        None,
         culling_range.clone(),
         conflation_factor,
         &main_vp,
@@ -2762,6 +3124,12 @@ pub fn render_shared_pane_candlestick_chart(
         rendered_backtest_trade_count: 0,
         vrvp_poc_price: None,
         active_frvp_count: 0,
+        hovered_bar_timestamp: hover_pos
+            .is_some()
+            .then(|| candles.get(inspected_data_index).map(|c| c.timestamp))
+            .flatten(),
+        ichimoku_active: false,
+        cvd_pane_active: false,
     })
 }
 
@@ -2931,11 +3299,23 @@ fn paint_bottom_time_axis_labels(
     }
 }
 
+#[inline]
+fn overlay_conflation_step(conflation_factor: usize, bar_spacing: f64) -> usize {
+    let mut step = conflation_factor.max(1);
+    if step >= 16 && bar_spacing.is_finite() && bar_spacing > 0.0 {
+        while step < 512 && bar_spacing * (step as f64) < 1.25 {
+            step *= 2;
+        }
+    }
+    step.min(512)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_candlesticks_and_volume(
     painter: &egui::Painter,
     plot_rect: Rect,
     candles: &[Candle],
+    candle_idx: Option<&CandleBlockIndex>,
     culling_range: std::ops::Range<usize>,
     conflation_factor: usize,
     main_vp: &PaneViewport<'_>,
@@ -2953,8 +3333,15 @@ fn paint_candlesticks_and_volume(
     let plot_bottom = plot_rect.bottom();
     let plot_top = plot_rect.top();
 
-    let conflated_iter = iter_conflated_candles(candles, culling_range, conflation_factor);
-    let est_bars = conflated_iter.size_hint().0;
+    let step = conflation_factor.max(1);
+    let clamped_len = culling_range
+        .end
+        .min(candles.len())
+        .saturating_sub(culling_range.start.min(candles.len()));
+    let est_bars = clamped_len.div_ceil(step).saturating_add(2);
+    let half_wick_w = (wick_stroke_w * 0.5).max(0.45);
+    let single_rect_mode = half_body_w <= half_wick_w + 0.08;
+
     let vol_layer_slot = show_volume.then(|| plot_painter.add(Shape::Noop));
     let mut vol_mesh = Mesh::default();
     if show_volume {
@@ -2962,26 +3349,35 @@ fn paint_candlesticks_and_volume(
         vol_mesh.indices.reserve(est_bars * 6);
     }
     let mut candle_mesh = Mesh::default();
-    candle_mesh.vertices.reserve(est_bars * 12);
-    candle_mesh.indices.reserve(est_bars * 18);
-    let half_wick_w = (wick_stroke_w * 0.5).max(0.45);
+    candle_mesh
+        .vertices
+        .reserve(est_bars * if single_rect_mode { 4 } else { 12 });
+    candle_mesh
+        .indices
+        .reserve(est_bars * if single_rect_mode { 6 } else { 18 });
 
-    for bar in conflated_iter {
-        let Some(sx) = main_vp.float_index_to_screen_x(bar.center_logical_index) else {
-            continue;
+    let mut push_bar = |center_logical_index: f64,
+                        open: f64,
+                        high: f64,
+                        low: f64,
+                        close: f64,
+                        volume: f64,
+                        is_bullish: bool| {
+        let Some(sx) = main_vp.float_index_to_screen_x(center_logical_index) else {
+            return;
         };
         let cx = sx as f32;
         if cx + half_body_w < plot_rect.left() || cx - half_body_w > plot_rect.right() {
-            continue;
-        };
+            return;
+        }
 
         if show_volume {
             let vol_top_y = vol_vp
-                .price_to_screen_y(bar.volume)
+                .price_to_screen_y(volume)
                 .map_or(plot_bottom - 1.0, |sy| {
                     (sy as f32).clamp(plot_top, plot_bottom - 1.0)
                 });
-            let fill = if bar.is_bullish() {
+            let fill = if is_bullish {
                 palette::BULLISH_VOL
             } else {
                 palette::BEARISH_VOL
@@ -2996,12 +3392,12 @@ fn paint_candlesticks_and_volume(
         }
 
         let (Some(high_sy), Some(low_sy), Some(open_sy), Some(close_sy)) = (
-            main_vp.price_to_screen_y(bar.high),
-            main_vp.price_to_screen_y(bar.low),
-            main_vp.price_to_screen_y(bar.open),
-            main_vp.price_to_screen_y(bar.close),
+            main_vp.price_to_screen_y(high),
+            main_vp.price_to_screen_y(low),
+            main_vp.price_to_screen_y(open),
+            main_vp.price_to_screen_y(close),
         ) else {
-            continue;
+            return;
         };
 
         rendered_candle_count += 1;
@@ -3011,7 +3407,7 @@ fn paint_candlesticks_and_volume(
         let open_y = open_sy as f32;
         let close_y = close_sy as f32;
 
-        let color = if bar.is_bullish() {
+        let color = if is_bullish {
             palette::BULLISH
         } else {
             palette::BEARISH
@@ -3021,6 +3417,18 @@ fn paint_candlesticks_and_volume(
         let bottom_y = open_y.max(close_y).max(top_y + min_body_h);
         let wick_top_y = high_y.min(low_y);
         let wick_bottom_y = high_y.max(low_y);
+
+        if single_rect_mode {
+            let half_w = half_wick_w.max(half_body_w);
+            candle_mesh.add_colored_rect(
+                Rect::from_min_max(
+                    Pos2::new(cx - half_w, wick_top_y.min(top_y)),
+                    Pos2::new(cx + half_w, wick_bottom_y.max(bottom_y)),
+                ),
+                color,
+            );
+            return;
+        }
 
         if wick_top_y < top_y {
             candle_mesh.add_colored_rect(
@@ -3046,6 +3454,22 @@ fn paint_candlesticks_and_volume(
             Pos2::new(cx + half_body_w, bottom_y),
         );
         candle_mesh.add_colored_rect(body_rect, color);
+    };
+
+    if let Some(idx) = candle_idx {
+        idx.for_each_conflated_bucket(candles, culling_range, conflation_factor, push_bar);
+    } else {
+        for bar in iter_conflated_candles(candles, culling_range, conflation_factor) {
+            push_bar(
+                bar.center_logical_index,
+                bar.open,
+                bar.high,
+                bar.low,
+                bar.close,
+                bar.volume,
+                bar.is_bullish(),
+            );
+        }
     }
 
     if let Some(slot) = vol_layer_slot
@@ -3100,43 +3524,90 @@ fn resolve_bucket_screen_ys_scaled(
     }
 }
 
-/// Appends a pre-baked triangle quad strip along `pts` into `mesh` to avoid per-segment stroke feathering.
-fn append_polyline_quad_strip(mesh: &mut Mesh, pts: &[Pos2], stroke: Stroke) {
-    if pts.len() >= 2 {
-        let half_w = (stroke.width * 0.5).max(0.55);
-        for seg in pts.windows(2) {
-            let p0 = seg[0];
-            let p1 = seg[1];
-            let dx = p1.x - p0.x;
-            let dy = p1.y - p0.y;
-            let len_sq = dx * dx + dy * dy;
-            if len_sq <= 1e-6 {
-                continue;
-            }
-            let inv = len_sq.sqrt().recip() * half_w;
-            let nx = -dy * inv;
-            let ny = dx * inv;
-            let b = mesh.vertices.len() as u32;
-            mesh.colored_vertex(Pos2::new(p0.x + nx, p0.y + ny), stroke.color);
-            mesh.colored_vertex(Pos2::new(p0.x - nx, p0.y - ny), stroke.color);
-            mesh.colored_vertex(Pos2::new(p1.x - nx, p1.y - ny), stroke.color);
-            mesh.colored_vertex(Pos2::new(p1.x + nx, p1.y + ny), stroke.color);
-            mesh.add_triangle(b, b + 1, b + 2);
-            mesh.add_triangle(b, b + 2, b + 3);
+#[inline]
+fn next_distinct_polyline_pt(pts: &[Pos2], after: usize) -> Option<usize> {
+    let anchor = pts[after];
+    let mut j = after + 1;
+    while j < pts.len() {
+        let dx = pts[j].x - anchor.x;
+        let dy = pts[j].y - anchor.y;
+        if dx * dx + dy * dy > 1e-4 {
+            return Some(j);
         }
-    } else if let Some(&single_pt) = pts.first() {
+        j += 1;
+    }
+    None
+}
+
+#[inline]
+fn polyline_unit_normal(p0: Pos2, p1: Pos2) -> Vec2 {
+    let dx = p1.x - p0.x;
+    let dy = p1.y - p0.y;
+    if dx.abs() <= 1e-4 {
+        Vec2::new(if dy > 0.0 { -1.0 } else { 1.0 }, 0.0)
+    } else {
+        let inv = (dx * dx + dy * dy).sqrt().recip();
+        Vec2::new(-dy * inv, dx * inv)
+    }
+}
+
+/// Appends a connected `2 * N`-vertex triangle strip along `pts` into `mesh` to avoid per-segment stroke feathering.
+fn append_polyline_quad_strip(mesh: &mut Mesh, pts: &[Pos2], stroke: Stroke) {
+    if pts.is_empty() {
+        return;
+    }
+    let Some(mut i1) = next_distinct_polyline_pt(pts, 0) else {
         let r = (stroke.width * 0.9).max(1.2);
         mesh.add_colored_rect(
-            Rect::from_center_size(single_pt, Vec2::splat(r * 2.0)),
+            Rect::from_center_size(pts[0], Vec2::splat(r * 2.0)),
             stroke.color,
         );
+        return;
+    };
+
+    let half_w = (stroke.width * 0.5).max(0.55);
+    let mut n_prev = polyline_unit_normal(pts[0], pts[i1]);
+    let mut prev_b = mesh.vertices.len() as u32;
+    mesh.colored_vertex(pts[0] + n_prev * half_w, stroke.color);
+    mesh.colored_vertex(pts[0] - n_prev * half_w, stroke.color);
+
+    while let Some(i2) = next_distinct_polyline_pt(pts, i1) {
+        let n_next = polyline_unit_normal(pts[i1], pts[i2]);
+        let sum = n_prev + n_next;
+        let sum_sq = sum.length_sq();
+        let miter = if sum_sq <= 1e-4 {
+            n_prev * half_w
+        } else {
+            let miter_n = sum * sum_sq.sqrt().recip();
+            let cos_half = miter_n.dot(n_prev);
+            if cos_half > 1e-3 {
+                miter_n * (half_w / cos_half).clamp(half_w, half_w * 1.35)
+            } else {
+                n_prev * half_w
+            }
+        };
+        let b = mesh.vertices.len() as u32;
+        mesh.colored_vertex(pts[i1] + miter, stroke.color);
+        mesh.colored_vertex(pts[i1] - miter, stroke.color);
+        mesh.add_triangle(prev_b, prev_b + 1, b);
+        mesh.add_triangle(prev_b + 1, b + 1, b);
+        prev_b = b;
+        i1 = i2;
+        n_prev = n_next;
     }
+
+    let b = mesh.vertices.len() as u32;
+    mesh.colored_vertex(pts[i1] + n_prev * half_w, stroke.color);
+    mesh.colored_vertex(pts[i1] - n_prev * half_w, stroke.color);
+    mesh.add_triangle(prev_b, prev_b + 1, b);
+    mesh.add_triangle(prev_b + 1, b + 1, b);
 }
 
 #[allow(clippy::too_many_arguments)]
 fn append_conflated_line_segment(
     painter: &egui::Painter,
     dense_mesh: &mut Option<Mesh>,
+    pts_scratch: &mut Vec<Pos2>,
     series: &[Option<f64>],
     block_index: Option<&SeriesBlockIndex>,
     global_offset: usize,
@@ -3157,8 +3628,7 @@ fn append_conflated_line_segment(
         return;
     }
 
-    let mut current_pts: Vec<Pos2> =
-        Vec::with_capacity(((vis_end - vis_start) / step + 4).min(256));
+    pts_scratch.clear();
     let flush_segment =
         |painter: &egui::Painter, dense_mesh: &mut Option<Mesh>, pts: &mut Vec<Pos2>| {
             if let Some(mesh) = dense_mesh.as_mut() {
@@ -3180,12 +3650,12 @@ fn append_conflated_line_segment(
                     vp.price_to_screen_y(v),
                 )
             {
-                current_pts.push(Pos2::new(sx as f32, sy as f32));
+                pts_scratch.push(Pos2::new(sx as f32, sy as f32));
             } else {
-                flush_segment(painter, dense_mesh, &mut current_pts);
+                flush_segment(painter, dense_mesh, pts_scratch);
             }
         }
-        flush_segment(painter, dense_mesh, &mut current_pts);
+        flush_segment(painter, dense_mesh, pts_scratch);
         return;
     }
 
@@ -3211,27 +3681,27 @@ fn append_conflated_line_segment(
         {
             let x = sx as f32;
             if env.has_leading_gap {
-                flush_segment(painter, dense_mesh, &mut current_pts);
+                flush_segment(painter, dense_mesh, pts_scratch);
             }
             if env.has_internal_gap {
-                current_pts.push(Pos2::new(x, y_entry));
-                flush_segment(painter, dense_mesh, &mut current_pts);
-                current_pts.push(Pos2::new(x, y_exit));
+                pts_scratch.push(Pos2::new(x, y_entry));
+                flush_segment(painter, dense_mesh, pts_scratch);
+                pts_scratch.push(Pos2::new(x, y_exit));
             } else if single {
-                current_pts.push(Pos2::new(x, y_entry));
+                pts_scratch.push(Pos2::new(x, y_entry));
             } else {
-                current_pts.push(Pos2::new(x, y_entry));
-                current_pts.push(Pos2::new(x, y_exit));
+                pts_scratch.push(Pos2::new(x, y_entry));
+                pts_scratch.push(Pos2::new(x, y_exit));
             }
             if env.has_trailing_gap {
-                flush_segment(painter, dense_mesh, &mut current_pts);
+                flush_segment(painter, dense_mesh, pts_scratch);
             }
         } else {
-            flush_segment(painter, dense_mesh, &mut current_pts);
+            flush_segment(painter, dense_mesh, pts_scratch);
         }
         g_start = g_start.saturating_add(step);
     }
-    flush_segment(painter, dense_mesh, &mut current_pts);
+    flush_segment(painter, dense_mesh, pts_scratch);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3270,9 +3740,11 @@ fn paint_conflated_line_series_scaled(
     let step = conflation_factor.max(1);
     let total = series.len();
     let mut dense_mesh = (step >= 8).then(|| Mesh::with_texture(egui::TextureId::default()));
+    let mut pts_scratch = Vec::with_capacity(256);
     append_conflated_line_segment(
         painter,
         &mut dense_mesh,
+        &mut pts_scratch,
         series,
         block_index,
         0,
@@ -3423,10 +3895,11 @@ fn append_band_ribbon_into_mesh(
         return;
     }
 
-    let mut prev_exit: Option<(f32, f32, f32)> = None;
+    type RibbonPrevExit = Option<(f32, f32, f32, Option<(u32, u32)>)>;
+    let mut prev_exit: RibbonPrevExit = None;
     #[allow(clippy::too_many_arguments)]
     let push_pair = |mesh: &mut Mesh,
-                     prev_exit: &mut Option<(f32, f32, f32)>,
+                     prev_exit: &mut RibbonPrevExit,
                      x: f32,
                      u_in: f32,
                      u_out: f32,
@@ -3437,23 +3910,37 @@ fn append_band_ribbon_into_mesh(
         if lead_gap {
             *prev_exit = None;
         }
-        if let Some((px, pu_out, pl_out)) = *prev_exit {
-            let tl = pu_out.min(pl_out);
-            let bl = pu_out.max(pl_out);
+        let mut next_shared: Option<(u32, u32)> = None;
+        if let Some((px, pu_out, pl_out, prev_verts)) = *prev_exit {
+            let (l_top_idx, l_bot_idx) = if let Some(pair) = prev_verts {
+                pair
+            } else {
+                let tl = pu_out.min(pl_out);
+                let bl = pu_out.max(pl_out);
+                let base_v = mesh.vertices.len() as u32;
+                mesh.colored_vertex(Pos2::new(px, tl), fill_color);
+                mesh.colored_vertex(Pos2::new(px, bl), fill_color);
+                (base_v, base_v + 1)
+            };
             let tr = u_in.min(l_in);
             let br = u_in.max(l_in);
-            let base_v = mesh.vertices.len() as u32;
-            mesh.colored_vertex(Pos2::new(px, tl), fill_color);
-            mesh.colored_vertex(Pos2::new(px, bl), fill_color);
+            let right_v = mesh.vertices.len() as u32;
             mesh.colored_vertex(Pos2::new(x, tr), fill_color);
             mesh.colored_vertex(Pos2::new(x, br), fill_color);
-            mesh.add_triangle(base_v, base_v + 1, base_v + 2);
-            mesh.add_triangle(base_v + 1, base_v + 3, base_v + 2);
+            mesh.add_triangle(l_top_idx, l_bot_idx, right_v);
+            mesh.add_triangle(l_bot_idx, right_v + 1, right_v);
+            if !trail_gap && (u_in - u_out).abs() < 0.65 && (l_in - l_out).abs() < 0.65 {
+                let tr_out = u_out.min(l_out);
+                let br_out = u_out.max(l_out);
+                if (tr - tr_out).abs() < 0.65 && (br - br_out).abs() < 0.65 {
+                    next_shared = Some((right_v, right_v + 1));
+                }
+            }
         }
         if trail_gap {
             *prev_exit = None;
         } else {
-            *prev_exit = Some((x, u_out, l_out));
+            *prev_exit = Some((x, u_out, l_out, next_shared));
         }
     };
 
@@ -3603,6 +4090,7 @@ fn paint_vwap_output(
     let mut band_border_mesh = ((show_band_2 || show_band_1) && step < 8 && visible_sessions > 128)
         .then(|| Mesh::with_texture(egui::TextureId::default()));
     let mut main_line_mesh = use_line_mesh.then(|| Mesh::with_texture(egui::TextureId::default()));
+    let mut pts_scratch = Vec::with_capacity(256);
 
     // Always segment strictly per session boundary across EVERY conflation zoom level (`1x`, `4x`, `16x`, ...),
     // accumulating ribbons and dense strokes into shared meshes while never bridging across resets.
@@ -3628,6 +4116,7 @@ fn paint_vwap_output(
                     append_conflated_line_segment(
                         painter,
                         &mut band_border_mesh,
+                        &mut pts_scratch,
                         &vwap.upper_2,
                         idx_u2,
                         0,
@@ -3641,6 +4130,7 @@ fn paint_vwap_output(
                     append_conflated_line_segment(
                         painter,
                         &mut band_border_mesh,
+                        &mut pts_scratch,
                         &vwap.lower_2,
                         idx_l2,
                         0,
@@ -3673,6 +4163,7 @@ fn paint_vwap_output(
                     append_conflated_line_segment(
                         painter,
                         &mut band_border_mesh,
+                        &mut pts_scratch,
                         &vwap.upper_1,
                         idx_u1,
                         0,
@@ -3686,6 +4177,7 @@ fn paint_vwap_output(
                     append_conflated_line_segment(
                         painter,
                         &mut band_border_mesh,
+                        &mut pts_scratch,
                         &vwap.lower_1,
                         idx_l1,
                         0,
@@ -3701,6 +4193,7 @@ fn paint_vwap_output(
             append_conflated_line_segment(
                 painter,
                 &mut main_line_mesh,
+                &mut pts_scratch,
                 &vwap.vwap,
                 idx_v,
                 0,
@@ -3772,6 +4265,7 @@ fn paint_anchored_vwap_tail(
     let band_stroke = Stroke::new(1.0, line_color.gamma_multiply(0.55));
     let main_stroke = Stroke::new(1.7, line_color);
 
+    let mut pts_scratch = Vec::with_capacity(256);
     if show_bands {
         let mut band_mesh = Mesh::default();
         append_band_ribbon_into_mesh(
@@ -3795,6 +4289,7 @@ fn paint_anchored_vwap_tail(
             append_conflated_line_segment(
                 painter,
                 &mut border_mesh,
+                &mut pts_scratch,
                 &vwap.upper_1,
                 None,
                 global_offset,
@@ -3808,6 +4303,7 @@ fn paint_anchored_vwap_tail(
             append_conflated_line_segment(
                 painter,
                 &mut border_mesh,
+                &mut pts_scratch,
                 &vwap.lower_1,
                 None,
                 global_offset,
@@ -3825,6 +4321,7 @@ fn paint_anchored_vwap_tail(
     append_conflated_line_segment(
         painter,
         &mut line_mesh,
+        &mut pts_scratch,
         &vwap.vwap,
         None,
         global_offset,
@@ -3999,6 +4496,668 @@ fn paint_volume_profile_bars(
             }
         }
     }
+}
+
+#[inline]
+fn timeframe_str_to_seconds(tf_label: &str) -> i64 {
+    Timeframe::ALL
+        .iter()
+        .find(|t| t.label().eq_ignore_ascii_case(tf_label.trim()))
+        .map_or(86_400, |t| t.seconds())
+}
+
+#[inline]
+fn format_compact_signed(v: f64) -> String {
+    let av = v.abs();
+    if av >= 1_000_000_000.0 {
+        format!("{:+.2}B", v / 1_000_000_000.0)
+    } else if av >= 1_000_000.0 {
+        format!("{:+.2}M", v / 1_000_000.0)
+    } else if av >= 10_000.0 {
+        format!("{:+.1}K", v / 1_000.0)
+    } else {
+        format!("{v:+.0}")
+    }
+}
+
+#[inline]
+fn ichimoku_visible_index_range(
+    time_scale: &TimeScale,
+    series_len: usize,
+    conflation_factor: usize,
+) -> std::ops::Range<usize> {
+    if series_len == 0 {
+        return 0..0;
+    }
+    let pad = (conflation_factor.max(1) as isize) + 1;
+    let Some(lr) = time_scale.visible_logical_range() else {
+        return 0..series_len;
+    };
+    let start = ((lr.left.floor() as isize) - pad).clamp(0, series_len as isize) as usize;
+    let end =
+        ((lr.right.ceil() as isize) + pad + 1).clamp(start as isize, series_len as isize) as usize;
+    start..end
+}
+
+/// Emits non-crossing Kumo fill triangles into `mesh` for a single step `(x0..x1)` between
+/// `Senkou A` (`ya`) and `Senkou B` (`yb`), splitting linearly at exact Kumo Twist crossovers
+/// so Bullish (`A >= B`) and Bearish (`A < B`) clouds never emit bowtie quads.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_ichimoku_kumo_segment_triangles(
+    mesh: &mut Mesh,
+    x0: f32,
+    ya0: f32,
+    yb0: f32,
+    a0: f64,
+    b0: f64,
+    x1: f32,
+    ya1: f32,
+    yb1: f32,
+    a1: f64,
+    b1: f64,
+    y_clamp: (f32, f32),
+) {
+    let Ok(base_idx) = u32::try_from(mesh.vertices.len()) else {
+        return;
+    };
+    if base_idx > u32::MAX - 8 {
+        return;
+    }
+
+    let clamp_pos = |x: f32, y: f32| Pos2::new(x, y.clamp(y_clamp.0, y_clamp.1));
+
+    let bull0 = a0 >= b0;
+    let bull1 = a1 >= b1;
+
+    let push_tri = |mesh: &mut Mesh, p0: Pos2, p1: Pos2, p2: Pos2, col: Color32| {
+        let Ok(idx) = u32::try_from(mesh.vertices.len()) else {
+            return;
+        };
+        if idx > u32::MAX - 3 {
+            return;
+        }
+        mesh.colored_vertex(p0, col);
+        mesh.colored_vertex(p1, col);
+        mesh.colored_vertex(p2, col);
+        mesh.add_triangle(idx, idx + 1, idx + 2);
+    };
+
+    let col_for = |bull: bool| {
+        if bull {
+            palette::IND_KUMO_BULL_FILL
+        } else {
+            palette::IND_KUMO_BEAR_FILL
+        }
+    };
+
+    if bull0 != bull1 {
+        let dy0 = f64::from(ya0) - f64::from(yb0);
+        let dy1 = f64::from(ya1) - f64::from(yb1);
+        let denom_s = dy0 - dy1;
+        let t_f64 = if denom_s.abs() > 1.0e-9
+            && (dy0.signum() != dy1.signum() || dy0 == 0.0 || dy1 == 0.0)
+        {
+            (dy0 / denom_s).clamp(0.0, 1.0)
+        } else {
+            let dp0 = a0 - b0;
+            let dp1 = a1 - b1;
+            let denom_p = dp0 - dp1;
+            if denom_p.abs() > 1.0e-15 {
+                (dp0 / denom_p).clamp(0.0, 1.0)
+            } else {
+                0.5
+            }
+        };
+        let t = t_f64 as f32;
+        let xm = x0 + t * (x1 - x0);
+        let ym = ya0 + t * (ya1 - ya0);
+        let p_mid = clamp_pos(xm, ym);
+        push_tri(
+            mesh,
+            clamp_pos(x0, ya0),
+            clamp_pos(x0, yb0),
+            p_mid,
+            col_for(bull0),
+        );
+        push_tri(
+            mesh,
+            p_mid,
+            clamp_pos(x1, ya1),
+            clamp_pos(x1, yb1),
+            col_for(bull1),
+        );
+    } else {
+        let col = col_for((a0 + a1) >= (b0 + b1));
+        let p_a0 = clamp_pos(x0, ya0);
+        let p_b0 = clamp_pos(x0, yb0);
+        let p_a1 = clamp_pos(x1, ya1);
+        let p_b1 = clamp_pos(x1, yb1);
+        push_tri(mesh, p_a0, p_b0, p_b1, col);
+        push_tri(mesh, p_a0, p_b1, p_a1, col);
+    }
+}
+
+fn paint_ichimoku_kumo_fill(
+    painter: &egui::Painter,
+    plot_rect: Rect,
+    time_scale: &TimeScale,
+    cache: &IndicatorCache,
+    conflation_factor: usize,
+    vp: &PaneViewport<'_>,
+) {
+    let senkou_a = &cache.ichimoku.senkou_a;
+    let senkou_b = &cache.ichimoku.senkou_b;
+    let total = senkou_a.len().min(senkou_b.len());
+    if total == 0 {
+        return;
+    }
+
+    let step = conflation_factor.max(1);
+    let vis_range = ichimoku_visible_index_range(time_scale, total, step);
+    if vis_range.start >= vis_range.end {
+        return;
+    }
+
+    let y_clamp = (plot_rect.top() - 4096.0, plot_rect.bottom() + 4096.0);
+    let mut mesh = Mesh::default();
+    let est_steps = ((vis_range.end - vis_range.start) / step + 2).min(2048);
+    mesh.vertices.reserve(est_steps * 4);
+    mesh.indices.reserve(est_steps * 6);
+
+    let mut prev: Option<(f32, f32, f32, f64, f64)> = None;
+
+    if step == 1 {
+        for idx in vis_range {
+            if let (Some(a), Some(b)) = (senkou_a[idx], senkou_b[idx])
+                && a.is_finite()
+                && b.is_finite()
+                && let (Some(sx), Some(sya), Some(syb)) = (
+                    vp.float_index_to_screen_x(idx as f64),
+                    vp.price_to_screen_y(a),
+                    vp.price_to_screen_y(b),
+                )
+            {
+                let x = sx as f32;
+                let ya = sya as f32;
+                let yb = syb as f32;
+                if let Some((x0, ya0, yb0, a0, b0)) = prev {
+                    emit_ichimoku_kumo_segment_triangles(
+                        &mut mesh, x0, ya0, yb0, a0, b0, x, ya, yb, a, b, y_clamp,
+                    );
+                }
+                prev = Some((x, ya, yb, a, b));
+            } else {
+                prev = None;
+            }
+        }
+    } else {
+        let mut b_start = (vis_range.start / step) * step;
+        let b_limit = vis_range.end.min(total);
+        while b_start < b_limit {
+            let b_end = (b_start + step).min(b_limit);
+            if let (Some(ea), Some(eb)) = (
+                bucket_line_envelope_indexed(
+                    senkou_a,
+                    Some(&cache.ichimoku_senkou_a_idx),
+                    b_start,
+                    b_end,
+                ),
+                bucket_line_envelope_indexed(
+                    senkou_b,
+                    Some(&cache.ichimoku_senkou_b_idx),
+                    b_start,
+                    b_end,
+                ),
+            ) {
+                let has_lead_gap = ea.has_leading_gap || eb.has_leading_gap;
+                let has_int_gap = ea.has_internal_gap || eb.has_internal_gap;
+                let has_trail_gap = ea.has_trailing_gap || eb.has_trailing_gap;
+                if has_lead_gap {
+                    prev = None;
+                }
+                let center = 0.5 * (ea.center_logical_index + eb.center_logical_index);
+                if has_int_gap {
+                    let entry_a = ea.entry_val;
+                    let entry_b = eb.entry_val;
+                    if let Some((x0, ya0, yb0, a0, b0)) = prev
+                        && entry_a.is_finite()
+                        && entry_b.is_finite()
+                        && let (Some(sx), Some(sya), Some(syb)) = (
+                            vp.float_index_to_screen_x(center),
+                            vp.price_to_screen_y(entry_a),
+                            vp.price_to_screen_y(entry_b),
+                        )
+                    {
+                        emit_ichimoku_kumo_segment_triangles(
+                            &mut mesh, x0, ya0, yb0, a0, b0, sx as f32, sya as f32, syb as f32,
+                            entry_a, entry_b, y_clamp,
+                        );
+                    }
+                    prev = None;
+                    let exit_a = ea.exit_val;
+                    let exit_b = eb.exit_val;
+                    if !has_trail_gap
+                        && exit_a.is_finite()
+                        && exit_b.is_finite()
+                        && let (Some(sx), Some(sya), Some(syb)) = (
+                            vp.float_index_to_screen_x(center),
+                            vp.price_to_screen_y(exit_a),
+                            vp.price_to_screen_y(exit_b),
+                        )
+                    {
+                        prev = Some((sx as f32, sya as f32, syb as f32, exit_a, exit_b));
+                    }
+                } else {
+                    let a = 0.5 * (ea.entry_val + ea.exit_val);
+                    let b = 0.5 * (eb.entry_val + eb.exit_val);
+                    if a.is_finite()
+                        && b.is_finite()
+                        && let (Some(sx), Some(sya), Some(syb)) = (
+                            vp.float_index_to_screen_x(center),
+                            vp.price_to_screen_y(a),
+                            vp.price_to_screen_y(b),
+                        )
+                    {
+                        let x = sx as f32;
+                        let ya = sya as f32;
+                        let yb = syb as f32;
+                        if let Some((x0, ya0, yb0, a0, b0)) = prev {
+                            emit_ichimoku_kumo_segment_triangles(
+                                &mut mesh, x0, ya0, yb0, a0, b0, x, ya, yb, a, b, y_clamp,
+                            );
+                        }
+                        prev = (!has_trail_gap).then_some((x, ya, yb, a, b));
+                    } else {
+                        prev = None;
+                    }
+                }
+            } else {
+                prev = None;
+            }
+            b_start = b_start.saturating_add(step);
+        }
+    }
+
+    if !mesh.indices.is_empty() {
+        painter.add(Shape::mesh(mesh));
+    }
+}
+
+fn paint_ichimoku_lines(
+    painter: &egui::Painter,
+    time_scale: &TimeScale,
+    indicators: &IndicatorConfig,
+    cache: &IndicatorCache,
+    culling_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    vp: &PaneViewport<'_>,
+) {
+    let senkou_len = cache
+        .ichimoku
+        .senkou_a
+        .len()
+        .min(cache.ichimoku.senkou_b.len());
+    let senkou_vis = ichimoku_visible_index_range(time_scale, senkou_len, conflation_factor);
+    if senkou_vis.start < senkou_vis.end {
+        let use_mesh = conflation_factor.max(1) >= 8;
+        let mut sa_mesh = use_mesh.then(|| Mesh::with_texture(egui::TextureId::default()));
+        let mut sb_mesh = use_mesh.then(|| Mesh::with_texture(egui::TextureId::default()));
+        let mut pts_scratch = Vec::with_capacity(256);
+        append_conflated_line_segment(
+            painter,
+            &mut sa_mesh,
+            &mut pts_scratch,
+            &cache.ichimoku.senkou_a,
+            Some(&cache.ichimoku_senkou_a_idx),
+            0,
+            0..senkou_len,
+            senkou_vis.clone(),
+            conflation_factor,
+            vp,
+            Stroke::new(1.25, palette::IND_ICHIMOKU_SENKOU_A),
+            1.0,
+        );
+        append_conflated_line_segment(
+            painter,
+            &mut sb_mesh,
+            &mut pts_scratch,
+            &cache.ichimoku.senkou_b,
+            Some(&cache.ichimoku_senkou_b_idx),
+            0,
+            0..senkou_len,
+            senkou_vis,
+            conflation_factor,
+            vp,
+            Stroke::new(1.25, palette::IND_ICHIMOKU_SENKOU_B),
+            1.0,
+        );
+        if let Some(m) = sa_mesh
+            && !m.is_empty()
+        {
+            painter.add(Shape::mesh(m));
+        }
+        if let Some(m) = sb_mesh
+            && !m.is_empty()
+        {
+            painter.add(Shape::mesh(m));
+        }
+    }
+
+    paint_conflated_line_series(
+        painter,
+        &cache.ichimoku.tenkan,
+        Some(&cache.ichimoku_tenkan_idx),
+        culling_range.clone(),
+        conflation_factor,
+        vp,
+        Stroke::new(1.45, palette::IND_ICHIMOKU_TENKAN),
+    );
+    paint_conflated_line_series(
+        painter,
+        &cache.ichimoku.kijun,
+        Some(&cache.ichimoku_kijun_idx),
+        culling_range.clone(),
+        conflation_factor,
+        vp,
+        Stroke::new(1.45, palette::IND_ICHIMOKU_KIJUN),
+    );
+    if indicators.show_ichimoku_chikou {
+        paint_conflated_line_series(
+            painter,
+            &cache.ichimoku.chikou,
+            Some(&cache.ichimoku_chikou_idx),
+            culling_range,
+            conflation_factor,
+            vp,
+            Stroke::new(1.25, palette::IND_ICHIMOKU_CHIKOU),
+        );
+    }
+}
+
+fn paint_cvd_pane(
+    painter: &egui::Painter,
+    plot_rect: Rect,
+    cache: &IndicatorCache,
+    culling_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    vp: &PaneViewport<'_>,
+    bar_metrics: CandlestickBarMetrics,
+) {
+    let cvd_out = &cache.cvd;
+    let zero_level = CVD_REFERENCE_LEVELS[0].value;
+    let zero_y_opt = vp.price_to_screen_y(zero_level).map(|sy| sy as f32);
+
+    if let Some(zy) = zero_y_opt
+        && zy >= plot_rect.top()
+        && zy <= plot_rect.bottom()
+    {
+        painter.line_segment(
+            [
+                Pos2::new(plot_rect.left(), zy),
+                Pos2::new(plot_rect.right(), zy),
+            ],
+            Stroke::new(1.0, palette::BORDER_SUBTLE),
+        );
+    }
+
+    if let Some(zero_y) = zero_y_opt
+        && !cvd_out.delta.is_empty()
+    {
+        let step = conflation_factor.max(1);
+        let half_w = ((bar_metrics.body_width_logical as f32) * 0.45).max(0.5);
+        let mut hist_mesh = Mesh::default();
+        let vis_start = culling_range.start.min(cvd_out.delta.len());
+        let vis_end = culling_range.end.min(cvd_out.delta.len());
+
+        let mut push_delta_bar = |center_idx: f64, delta_val: f64| {
+            let Some(sx) = vp.float_index_to_screen_x(center_idx) else {
+                return;
+            };
+            let cx = sx as f32;
+            if cx + half_w < plot_rect.left() || cx - half_w > plot_rect.right() {
+                return;
+            }
+            let Some(val_sy) = vp.price_to_screen_y(delta_val) else {
+                return;
+            };
+            let Some((top_y, bot_y)) = resolve_macd_histogram_bar_ys(
+                zero_y,
+                val_sy as f32,
+                delta_val,
+                plot_rect.top(),
+                plot_rect.bottom(),
+            ) else {
+                return;
+            };
+            let col = if delta_val >= 0.0 {
+                palette::BULLISH.gamma_multiply(0.45)
+            } else {
+                palette::BEARISH.gamma_multiply(0.45)
+            };
+            hist_mesh.add_colored_rect(
+                Rect::from_min_max(Pos2::new(cx - half_w, top_y), Pos2::new(cx + half_w, bot_y)),
+                col,
+            );
+        };
+
+        if step <= 1 {
+            for idx in vis_start..vis_end {
+                if let Some(d) = cvd_out.delta[idx].filter(|v| v.is_finite()) {
+                    push_delta_bar(idx as f64, d);
+                }
+            }
+        } else {
+            let mut b_start = (vis_start / step) * step;
+            while b_start < vis_end {
+                let b_end = (b_start + step).min(vis_end);
+                if b_start < b_end
+                    && let Some((sum, _count)) =
+                        cache
+                            .cvd_delta_idx
+                            .bucket_sum_and_count(&cvd_out.delta, b_start, b_end)
+                {
+                    let center = (b_start + b_end - 1) as f64 * 0.5;
+                    push_delta_bar(center, sum);
+                }
+                b_start = b_start.saturating_add(step);
+            }
+        }
+
+        if !hist_mesh.indices.is_empty() {
+            painter.add(Shape::mesh(hist_mesh));
+        }
+    }
+
+    let total_bars = cvd_out.cvd.len();
+    if total_bars == 0 {
+        return;
+    }
+    let starts = &cvd_out.session_starts;
+    let first_pos = starts
+        .partition_point(|&s| s <= culling_range.start)
+        .saturating_sub(1);
+    let last_pos = starts.partition_point(|&s| s < culling_range.end);
+    let visible_sessions = if starts.is_empty() {
+        1
+    } else {
+        last_pos.saturating_sub(first_pos).max(1)
+    };
+    let step = conflation_factor.max(1);
+    let use_dense_mesh = step >= 8 || visible_sessions > 32;
+    let mut sma_mesh = use_dense_mesh.then(|| Mesh::with_texture(egui::TextureId::default()));
+    let mut cvd_mesh = use_dense_mesh.then(|| Mesh::with_texture(egui::TextureId::default()));
+    let mut pts_scratch = Vec::with_capacity(256);
+
+    if starts.is_empty() {
+        append_conflated_line_segment(
+            painter,
+            &mut sma_mesh,
+            &mut pts_scratch,
+            &cvd_out.cvd_sma,
+            Some(&cache.cvd_sma_idx),
+            0,
+            0..total_bars,
+            culling_range.clone(),
+            step,
+            vp,
+            Stroke::new(1.25, palette::IND_CVD_SMA),
+            1.0,
+        );
+        append_conflated_line_segment(
+            painter,
+            &mut cvd_mesh,
+            &mut pts_scratch,
+            &cvd_out.cvd,
+            Some(&cache.cvd_line_idx),
+            0,
+            0..total_bars,
+            culling_range,
+            step,
+            vp,
+            Stroke::new(1.6, palette::IND_CVD_LINE),
+            1.0,
+        );
+    } else {
+        for seg_idx in first_pos..starts.len() {
+            let seg_start = starts[seg_idx];
+            if seg_start >= culling_range.end {
+                break;
+            }
+            let seg_end = starts
+                .get(seg_idx + 1)
+                .copied()
+                .unwrap_or(total_bars)
+                .min(total_bars);
+            if seg_start >= seg_end {
+                continue;
+            }
+            let hard_range = seg_start..seg_end;
+            append_conflated_line_segment(
+                painter,
+                &mut sma_mesh,
+                &mut pts_scratch,
+                &cvd_out.cvd_sma,
+                Some(&cache.cvd_sma_idx),
+                0,
+                hard_range.clone(),
+                culling_range.clone(),
+                step,
+                vp,
+                Stroke::new(1.25, palette::IND_CVD_SMA),
+                1.0,
+            );
+            append_conflated_line_segment(
+                painter,
+                &mut cvd_mesh,
+                &mut pts_scratch,
+                &cvd_out.cvd,
+                Some(&cache.cvd_line_idx),
+                0,
+                hard_range,
+                culling_range.clone(),
+                step,
+                vp,
+                Stroke::new(1.6, palette::IND_CVD_LINE),
+                1.0,
+            );
+        }
+    }
+    if let Some(m) = sma_mesh
+        && !m.is_empty()
+    {
+        painter.add(Shape::mesh(m));
+    }
+    if let Some(m) = cvd_mesh
+        && !m.is_empty()
+    {
+        painter.add(Shape::mesh(m));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_linked_crosshair(
+    painter: &egui::Painter,
+    main_plot_painter: &egui::Painter,
+    multi_layout: &MultiPaneLayout,
+    candles: &[Candle],
+    tf_label: &str,
+    main_price_scale: &PriceScale,
+    main_vp: &PaneViewport<'_>,
+    base_value: f64,
+    conflation_factor: usize,
+    bar_idx: usize,
+) {
+    if bar_idx >= candles.len() {
+        return;
+    }
+    let snapped_screen_x = if conflation_factor > 1 {
+        conflated_candle_at(candles, bar_idx, conflation_factor)
+            .and_then(|b| main_vp.float_index_to_screen_x(b.center_logical_index))
+            .or_else(|| main_vp.index_to_screen_x(bar_idx as i64))
+    } else {
+        main_vp.index_to_screen_x(bar_idx as i64)
+    };
+    let Some(sx) = snapped_screen_x else {
+        return;
+    };
+    let cross_x = sx as f32;
+    if cross_x < multi_layout.main_plot_rect.left() || cross_x > multi_layout.main_plot_rect.right()
+    {
+        return;
+    }
+
+    let stroke = Stroke::new(1.0, palette::LINKED_CROSSHAIR_LINE);
+    let p_top = Pos2::new(cross_x, multi_layout.main_plot_rect.top());
+    let p_bot = Pos2::new(cross_x, multi_layout.main_plot_rect.bottom());
+    paint_styled_segment_phased(
+        main_plot_painter,
+        p_top,
+        p_bot,
+        p_top,
+        stroke,
+        LineDashStyle::Dashed,
+    );
+
+    for osc in &multi_layout.oscillators {
+        let osc_painter = painter.with_clip_rect(osc.plot_rect);
+        let ot = Pos2::new(cross_x, osc.plot_rect.top());
+        let ob = Pos2::new(cross_x, osc.plot_rect.bottom());
+        paint_styled_segment_phased(&osc_painter, ot, ob, ot, stroke, LineDashStyle::Dashed);
+    }
+
+    let close_price = candles[bar_idx].close;
+    if close_price.is_finite()
+        && let Some(sy) = main_vp.price_to_screen_y(close_price)
+    {
+        let cy = sy as f32;
+        if cy >= multi_layout.main_plot_rect.top() && cy <= multi_layout.main_plot_rect.bottom() {
+            let hl = Pos2::new(multi_layout.main_plot_rect.left(), cy);
+            let hr = Pos2::new(multi_layout.main_plot_rect.right(), cy);
+            paint_styled_segment_phased(
+                main_plot_painter,
+                hl,
+                hr,
+                hl,
+                stroke,
+                LineDashStyle::Dashed,
+            );
+            paint_axis_cursor_pill(
+                painter,
+                multi_layout.main_price_axis_rect,
+                cy,
+                &main_price_scale.format_price(close_price, base_value),
+            );
+        }
+    }
+
+    paint_time_axis_cursor_pill(
+        painter,
+        multi_layout.time_axis_rect,
+        candles,
+        tf_label,
+        bar_idx as i64,
+        cross_x,
+    );
 }
 
 fn paint_relative_strength_pane(
@@ -5283,6 +6442,43 @@ fn paint_main_overlay_hud(
             },
         );
     }
+    if indicators.show_ichimoku && !cache.ichimoku.tenkan.is_empty() {
+        append_sep(&mut job, &mut has_item);
+        let fmt_p = |s: &[Option<f64>]| {
+            s.get(idx).copied().flatten().map_or_else(
+                || "—".to_owned(),
+                |v| price_scale.format_price(v, base_value),
+            )
+        };
+        let label = if plot_rect.width() >= 960.0 {
+            format!(
+                "ICH({},{},{},{}) T {} K {} A {} B {}",
+                indicators.ichimoku_tenkan,
+                indicators.ichimoku_kijun,
+                indicators.ichimoku_senkou_b,
+                indicators.ichimoku_displacement,
+                fmt_p(&cache.ichimoku.tenkan),
+                fmt_p(&cache.ichimoku.kijun),
+                fmt_p(&cache.ichimoku.senkou_a),
+                fmt_p(&cache.ichimoku.senkou_b),
+            )
+        } else {
+            format!(
+                "ICH T {} K {}",
+                fmt_p(&cache.ichimoku.tenkan),
+                fmt_p(&cache.ichimoku.kijun),
+            )
+        };
+        job.append(
+            &label,
+            0.0,
+            TextFormat {
+                font_id: font.clone(),
+                color: palette::IND_ICHIMOKU_TENKAN,
+                ..Default::default()
+            },
+        );
+    }
     if let Some((bench_sym, cmp_series, cmp_scale)) = compare_info {
         append_sep(&mut job, &mut has_item);
         let val = cmp_series
@@ -5415,6 +6611,52 @@ fn paint_oscillator_hud(
                 TextFormat {
                     font_id: font,
                     color: palette::IND_ATR,
+                    ..Default::default()
+                },
+            );
+        }
+        OscillatorPaneId::Cvd => {
+            let mode_lbl = match indicators.cvd_reset_mode {
+                CvdResetMode::Session => "Ses",
+                CvdResetMode::Cumulative => "Cum",
+            };
+            let cvd_opt = cache.cvd.cvd.get(idx).copied().flatten();
+            let sma_opt = cache.cvd.cvd_sma.get(idx).copied().flatten();
+            let delta_opt = cache.cvd.delta.get(idx).copied().flatten();
+            let fmt_opt = |o: Option<f64>| o.map_or_else(|| "—".to_owned(), format_compact_signed);
+            let delta_color = match delta_opt {
+                Some(v) if v >= 0.0 => palette::BULLISH,
+                Some(_) => palette::BEARISH,
+                None => palette::TEXT_MUTED,
+            };
+            job.append(
+                &format!(
+                    "CVD({mode_lbl}, SMA {})  {}  ",
+                    indicators.cvd_sma_period,
+                    fmt_opt(cvd_opt),
+                ),
+                0.0,
+                TextFormat {
+                    font_id: font.clone(),
+                    color: palette::IND_CVD_LINE,
+                    ..Default::default()
+                },
+            );
+            job.append(
+                &format!("SMA {}  ", fmt_opt(sma_opt)),
+                0.0,
+                TextFormat {
+                    font_id: font.clone(),
+                    color: palette::IND_CVD_SMA,
+                    ..Default::default()
+                },
+            );
+            job.append(
+                &format!("Δ {}", fmt_opt(delta_opt)),
+                0.0,
+                TextFormat {
+                    font_id: font,
+                    color: delta_color,
                     ..Default::default()
                 },
             );
@@ -5880,21 +7122,27 @@ fn refresh_main_pane_autoscale_and_bounds(
         .first()
         .map_or_else(|| candles[0].close, |c| c.close);
 
-    let mut raw_min = f64::INFINITY;
-    let mut raw_max = f64::NEG_INFINITY;
-    let mut max_vol = 0.0_f64;
-
-    for bar in iter_conflated_candles(candles, strict_range.clone(), conflation_factor) {
-        if bar.low.is_finite() {
-            raw_min = raw_min.min(bar.low);
+    let (mut raw_min, mut raw_max, max_vol) = if let Some((_, cache)) = overlays {
+        cache
+            .candle_idx
+            .autoscale_bounds(candles, strict_range.clone(), conflation_factor)
+    } else {
+        let mut r_min = f64::INFINITY;
+        let mut r_max = f64::NEG_INFINITY;
+        let mut m_vol = 0.0_f64;
+        for bar in iter_conflated_candles(candles, strict_range.clone(), conflation_factor) {
+            if bar.low.is_finite() {
+                r_min = r_min.min(bar.low);
+            }
+            if bar.high.is_finite() {
+                r_max = r_max.max(bar.high);
+            }
+            if bar.volume.is_finite() {
+                m_vol = m_vol.max(bar.volume);
+            }
         }
-        if bar.high.is_finite() {
-            raw_max = raw_max.max(bar.high);
-        }
-        if bar.volume.is_finite() {
-            max_vol = max_vol.max(bar.volume);
-        }
-    }
+        (r_min, r_max, m_vol)
+    };
 
     // Include visible main-pane overlays (`SMA`, `EMA`, `BollingerBands`, `Session VWAP`, `Compare`) in `main_price_scale` autoscale!
     if main_price_scale.is_auto_scale() {
@@ -5955,6 +7203,39 @@ fn refresh_main_pane_autoscale_and_bounds(
                         cache
                             .vwap_l2_idx
                             .range_bounds(&cache.vwap.lower_2, strict_range.clone()),
+                    );
+                }
+            }
+            if cfg.show_ichimoku && !cache.ichimoku.tenkan.is_empty() {
+                merge_ov(
+                    cache
+                        .ichimoku_tenkan_idx
+                        .range_bounds(&cache.ichimoku.tenkan, strict_range.clone()),
+                );
+                merge_ov(
+                    cache
+                        .ichimoku_kijun_idx
+                        .range_bounds(&cache.ichimoku.kijun, strict_range.clone()),
+                );
+                if cfg.show_ichimoku_chikou {
+                    merge_ov(
+                        cache
+                            .ichimoku_chikou_idx
+                            .range_bounds(&cache.ichimoku.chikou, strict_range.clone()),
+                    );
+                }
+                let kumo_range =
+                    ichimoku_visible_index_range(time_scale, cache.ichimoku.senkou_a.len(), 1);
+                if kumo_range.start < kumo_range.end {
+                    merge_ov(
+                        cache
+                            .ichimoku_senkou_a_idx
+                            .range_bounds(&cache.ichimoku.senkou_a, kumo_range.clone()),
+                    );
+                    merge_ov(
+                        cache
+                            .ichimoku_senkou_b_idx
+                            .range_bounds(&cache.ichimoku.senkou_b, kumo_range),
                     );
                 }
             }
@@ -6028,6 +7309,34 @@ fn refresh_oscillator_autoscale(
                 .range_bounds(&cache.atr, strict_range)
                 .unwrap_or((0.0, 1.0));
             price_scale.autoscale_raw_bounds(min_v, max_v, 1.0);
+        }
+        OscillatorPaneId::Cvd => {
+            let mut min_v = 0.0_f64;
+            let mut max_v = 0.0_f64;
+            let mut has_data = false;
+            for b in [
+                cache
+                    .cvd_line_idx
+                    .range_bounds(&cache.cvd.cvd, strict_range.clone()),
+                cache
+                    .cvd_sma_idx
+                    .range_bounds(&cache.cvd.cvd_sma, strict_range.clone()),
+                cache
+                    .cvd_delta_idx
+                    .range_bounds(&cache.cvd.delta, strict_range),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                min_v = min_v.min(b.0);
+                max_v = max_v.max(b.1);
+                has_data = true;
+            }
+            if !has_data || (max_v - min_v).abs() < 1e-9 {
+                min_v = -1.0;
+                max_v = 1.0;
+            }
+            price_scale.autoscale_raw_bounds(min_v.min(0.0), max_v.max(0.0), 1.0);
         }
         OscillatorPaneId::RelativeStrength => {
             let line_b = cache
@@ -10020,6 +11329,537 @@ mod tests {
         assert!(
             !single_out.shapes.is_empty(),
             "single-bar AVWAP must render visible point"
+        );
+    }
+
+    #[test]
+    fn r12_kumo_twist_triangle_splitting_and_headless_ichimoku_cvd_render() {
+        let mut mesh = Mesh::default();
+        // Crossing segment: Senkou A rises from 90->110 (`ya0` below -> `ya1` above in screen Y),
+        // Senkou B flat at 100 -> exact twist crossover at `t = 0.5`!
+        emit_ichimoku_kumo_segment_triangles(
+            &mut mesh,
+            100.0,
+            200.0, // ya0 (screen Y, lower price 90)
+            150.0, // yb0 (screen Y, price 100)
+            90.0,  // a0 < b0 (bearish left)
+            100.0,
+            200.0,
+            100.0, // ya1 (screen Y, higher price 110)
+            150.0, // yb1
+            110.0, // a1 > b1 (bullish right)
+            100.0,
+            (0.0, 500.0),
+        );
+        assert_eq!(
+            mesh.indices.len(),
+            6,
+            "twist segment must emit 2 sub-triangles"
+        );
+        assert_eq!(mesh.vertices[0].color, palette::IND_KUMO_BEAR_FILL);
+        assert_eq!(mesh.vertices[3].color, palette::IND_KUMO_BULL_FILL);
+        assert!((mesh.vertices[2].pos.x - 150.0).abs() < 1e-4);
+        assert!((mesh.vertices[2].pos.y - 150.0).abs() < 1e-4);
+
+        // Non-crossing bullish segment emits 2 triangles filling quad cleanly
+        let mut bull_mesh = Mesh::default();
+        emit_ichimoku_kumo_segment_triangles(
+            &mut bull_mesh,
+            100.0,
+            120.0,
+            180.0,
+            110.0,
+            95.0,
+            200.0,
+            115.0,
+            175.0,
+            112.0,
+            97.0,
+            (0.0, 500.0),
+        );
+        assert_eq!(bull_mesh.indices.len(), 6);
+        assert!(
+            bull_mesh
+                .vertices
+                .iter()
+                .all(|v| v.color == palette::IND_KUMO_BULL_FILL)
+        );
+
+        // Full headless chart render with Ichimoku +26 right whitespace & CVD sub-pane
+        let candles = generate_synthetic_ohlcv(140);
+        let cfg = IndicatorConfig {
+            show_ichimoku: true,
+            show_cvd: true,
+            show_rsi: false,
+            show_macd: false,
+            show_atr: false,
+            ..IndicatorConfig::default()
+        };
+        let mut cache = IndicatorCache::new();
+        cache.sync(&candles, 1, &cfg);
+
+        let mut vp = ChartViewportState::new();
+        vp.time_scale.set_width(820.0);
+        vp.time_scale.set_bar_spacing(7.5);
+        vp.time_scale.set_right_offset(28.0);
+        let mut drawings = DrawingStore::new();
+        let ctx = egui::Context::default();
+        let mut rep = None;
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(920.0, 620.0))),
+                ..Default::default()
+            },
+            |ui| {
+                rep = render_workstation_chart_full(
+                    ui,
+                    &candles,
+                    &mut vp,
+                    ChartDisplayConfig {
+                        symbol: "VNINDEX",
+                        timeframe: "1D",
+                        show_grid: true,
+                        show_crosshair: true,
+                        show_volume: true,
+                    },
+                    &cfg,
+                    &cache,
+                    &mut drawings,
+                    ChartReplayTradingOverlay {
+                        external_crosshair_timestamp: Some(candles[candles.len() - 10].timestamp),
+                        ..ChartReplayTradingOverlay::default()
+                    },
+                );
+            },
+        );
+        out.textures_delta.clear();
+        let rep = rep.expect("chart render report");
+        assert!(rep.ichimoku_active);
+        assert!(rep.cvd_pane_active);
+        assert!(rep.pane_count >= 2);
+    }
+
+    #[test]
+    fn critic_r12_regression_linked_crosshair_causal_cutoff() {
+        let t0 = 1_750_032_000_i64;
+        let mut daily = Vec::new();
+        for i in 0..5 {
+            daily.push(Candle {
+                timestamp: t0 + (i as i64) * 86_400,
+                date_label: format!("d{i}"),
+                open: 100.0 + (i as f64),
+                high: if i == 4 { 9_999.0 } else { 102.0 + (i as f64) },
+                low: 99.0 + (i as f64),
+                close: if i == 4 { 9_888.0 } else { 101.0 + (i as f64) },
+                volume: 10_000.0,
+            });
+        }
+        let fc = t0 + 4 * 86_400 + 3_600;
+        let ext_ts = t0 + 4 * 86_400 + 7_200;
+        assert_eq!(
+            resolve_linked_crosshair_bar(&daily, 86_400, ext_ts, Some(fc)),
+            Some(3),
+            "unclosed daily bar #4 must be rejected under DEF-001 cutoff"
+        );
+        assert_eq!(
+            resolve_linked_crosshair_bar(&daily[4..], 86_400, ext_ts, Some(fc)),
+            None,
+            "single unclosed daily bar must resolve to None"
+        );
+
+        let cfg = IndicatorConfig::default();
+        let mut cache = IndicatorCache::new();
+        cache.sync(&daily, 1, &cfg);
+        let mut vp = ChartViewportState::new();
+        let mut drawings = DrawingStore::new();
+        let ctx = egui::Context::default();
+        let mut rep = None;
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 500.0))),
+                ..Default::default()
+            },
+            |ui| {
+                rep = render_workstation_chart_full(
+                    ui,
+                    &daily,
+                    &mut vp,
+                    ChartDisplayConfig {
+                        symbol: "FPT",
+                        timeframe: "1D",
+                        show_grid: true,
+                        show_crosshair: true,
+                        show_volume: false,
+                    },
+                    &cfg,
+                    &cache,
+                    &mut drawings,
+                    ChartReplayTradingOverlay {
+                        replay_active: true,
+                        causal_close_cap: Some(fc),
+                        external_crosshair_timestamp: Some(ext_ts),
+                        ..ChartReplayTradingOverlay::default()
+                    },
+                );
+            },
+        );
+        out.textures_delta.clear();
+        let rep = rep.expect("render report");
+        assert_eq!(
+            rep.inspected_data_index, 3,
+            "ChartRenderer must pass causal_close_cap so unclosed bar #4 is not inspected"
+        );
+    }
+
+    #[test]
+    fn critic_r12_regression_kumo_twist_unclamped_split_and_no_bowtie() {
+        // Offscreen vertical zoom: ya1 = -9000.0 (unclamped) -> exact t = 50 / 9200, not clamped 50 / 200
+        let mut offscreen_mesh = Mesh::default();
+        emit_ichimoku_kumo_segment_triangles(
+            &mut offscreen_mesh,
+            100.0,
+            200.0,
+            150.0,
+            90.0,
+            100.0,
+            200.0,
+            -9000.0,
+            150.0,
+            500.0,
+            100.0,
+            (0.0, 500.0),
+        );
+        assert_eq!(offscreen_mesh.indices.len(), 6);
+        let expected_xm = 100.0 + (50.0_f32 / 9200.0) * 100.0;
+        assert!(
+            (offscreen_mesh.vertices[2].pos.x - expected_xm).abs() < 1e-3,
+            "expected unclamped crossover xm={expected_xm}, got {}",
+            offscreen_mesh.vertices[2].pos.x
+        );
+        assert!(
+            offscreen_mesh
+                .vertices
+                .iter()
+                .all(|v| v.pos.y >= 0.0 && v.pos.y <= 500.0),
+            "emitted vertices must remain clamped inside plot rect"
+        );
+
+        // Shallow sub-pixel crossing where |(ya0-yb0) - (ya1-yb1)| = 5e-7 <= 1e-6: must split, never bowtie!
+        let mut shallow_mesh = Mesh::default();
+        emit_ichimoku_kumo_segment_triangles(
+            &mut shallow_mesh,
+            100.0,
+            150.0000003,
+            150.0,
+            99.9999,
+            100.0,
+            200.0,
+            149.9999998,
+            150.0,
+            100.0001,
+            100.0,
+            (0.0, 500.0),
+        );
+        assert_eq!(shallow_mesh.indices.len(), 6);
+        assert_eq!(
+            shallow_mesh.vertices[0].color,
+            palette::IND_KUMO_BEAR_FILL,
+            "left half must stay bearish"
+        );
+        assert_eq!(
+            shallow_mesh.vertices[3].color,
+            palette::IND_KUMO_BULL_FILL,
+            "right half must split cleanly to bullish"
+        );
+        assert!(
+            (shallow_mesh.vertices[2].pos.x - shallow_mesh.vertices[3].pos.x).abs() < 1e-4,
+            "split vertex must be shared cleanly"
+        );
+    }
+
+    #[test]
+    fn critic_r12_regression_kumo_conflated_respects_nan_gaps() {
+        let mut candles = generate_synthetic_ohlcv(1_200);
+        for c in &mut candles[500..600] {
+            c.high = f64::NAN;
+            c.low = f64::NAN;
+            c.close = f64::NAN;
+        }
+        let cfg = crate::indicators::IchimokuConfig::default();
+        let ichi = crate::indicators::compute_ichimoku(&candles, cfg);
+        let first_gap = (0..candles.len())
+            .find(|&i| i >= 500 && ichi.senkou_a[i].is_none() && ichi.senkou_b[i].is_none())
+            .expect("gap start");
+        let after_gap = (first_gap..ichi.senkou_a.len())
+            .find(|&i| ichi.senkou_a[i].is_some() && ichi.senkou_b[i].is_some())
+            .expect("post-gap resume");
+        assert!(
+            after_gap - first_gap >= 24,
+            "need wide Kumo None gap for conflation test ({first_gap}..{after_gap})"
+        );
+
+        let ind_cfg = IndicatorConfig {
+            show_ichimoku: true,
+            show_rsi: false,
+            show_macd: false,
+            show_atr: false,
+            ..IndicatorConfig::default()
+        };
+        let mut cache = IndicatorCache::new();
+        cache.sync(&candles, 1, &ind_cfg);
+
+        let mut vp = ChartViewportState::new();
+        vp.time_scale.set_width(300.0);
+        vp.time_scale.set_total_bars(candles.len());
+        vp.fit_all();
+        let mut drawings = DrawingStore::new();
+        let ctx = egui::Context::default();
+        let mut rep = None;
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 400.0))),
+                ..Default::default()
+            },
+            |ui| {
+                rep = render_workstation_chart_full(
+                    ui,
+                    &candles,
+                    &mut vp,
+                    ChartDisplayConfig {
+                        symbol: "VNINDEX",
+                        timeframe: "1D",
+                        show_grid: false,
+                        show_crosshair: false,
+                        show_volume: false,
+                    },
+                    &ind_cfg,
+                    &cache,
+                    &mut drawings,
+                    ChartReplayTradingOverlay::default(),
+                );
+            },
+        );
+        out.textures_delta.clear();
+        let rep = rep.expect("conflated gap render report");
+        assert!(
+            rep.conflation_factor >= 2,
+            "expected conflated step >= 2, got {}",
+            rep.conflation_factor
+        );
+
+        let x_void_left = vp
+            .time_scale
+            .index_to_local_x((first_gap + rep.conflation_factor) as i64)
+            .expect("gap left x") as f32
+            + rep.layout.plot_rect.left();
+        let x_void_right = vp
+            .time_scale
+            .index_to_local_x(after_gap.saturating_sub(rep.conflation_factor) as i64)
+            .expect("gap right x") as f32
+            + rep.layout.plot_rect.left();
+        assert!(x_void_right > x_void_left + 1.0);
+
+        fn check_no_bridge(shape: &Shape, void_l: f32, void_r: f32) {
+            match shape {
+                Shape::Mesh(m) => {
+                    let is_kumo = m.vertices.first().is_some_and(|v| {
+                        v.color == palette::IND_KUMO_BULL_FILL
+                            || v.color == palette::IND_KUMO_BEAR_FILL
+                    });
+                    if is_kumo {
+                        for tri in m.indices.as_chunks::<3>().0 {
+                            let xs = [
+                                m.vertices[tri[0] as usize].pos.x,
+                                m.vertices[tri[1] as usize].pos.x,
+                                m.vertices[tri[2] as usize].pos.x,
+                            ];
+                            let min_x = xs.into_iter().fold(f32::INFINITY, f32::min);
+                            let max_x = xs.into_iter().fold(f32::NEG_INFINITY, f32::max);
+                            assert!(
+                                !(min_x < void_l && max_x > void_r),
+                                "Kumo triangle [{min_x}, {max_x}] bridged across NaN void [{void_l}, {void_r}]"
+                            );
+                        }
+                    }
+                }
+                Shape::Vec(children) => {
+                    for ch in children {
+                        check_no_bridge(ch, void_l, void_r);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for s in &out.shapes {
+            check_no_bridge(&s.shape, x_void_left, x_void_right);
+        }
+    }
+
+    #[test]
+    fn critic_r12_regression_cvd_session_dense_mesh_batching() {
+        let rep_data = crate::data::presets::generate_intraday_vn30f_1m_report(50_000);
+        let candles = &rep_data.candles;
+        let cfg = IndicatorConfig {
+            show_cvd: true,
+            cvd_reset_mode: CvdResetMode::Session,
+            show_rsi: false,
+            show_macd: false,
+            show_atr: false,
+            ..IndicatorConfig::default()
+        };
+        let mut cache = IndicatorCache::new();
+        cache.sync_with_session_context(candles, 1, &cfg, Timeframe::M1, 7 * 3600);
+        assert!(
+            cache.cvd.session_starts.len() > 100,
+            "50k 1m bars must span > 100 sessions (got {})",
+            cache.cvd.session_starts.len()
+        );
+
+        let mut vp = ChartViewportState::new();
+        vp.time_scale.set_width(900.0);
+        vp.time_scale.set_total_bars(candles.len());
+        vp.fit_all();
+        let mut drawings = DrawingStore::new();
+        let ctx = egui::Context::default();
+        let mut rep = None;
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 600.0))),
+                ..Default::default()
+            },
+            |ui| {
+                rep = render_workstation_chart_full(
+                    ui,
+                    candles,
+                    &mut vp,
+                    ChartDisplayConfig {
+                        symbol: "VN30F1M",
+                        timeframe: "1m",
+                        show_grid: false,
+                        show_crosshair: false,
+                        show_volume: false,
+                    },
+                    &cfg,
+                    &cache,
+                    &mut drawings,
+                    ChartReplayTradingOverlay::default(),
+                );
+            },
+        );
+        out.textures_delta.clear();
+        let rep = rep.expect("cvd batch report");
+        assert!(rep.conflation_factor >= 8);
+        assert!(rep.cvd_pane_active);
+        assert!(
+            out.shapes.len() < 80,
+            "Session CVD over {} sessions must batch via dense_mesh (got {} shapes)",
+            cache.cvd.session_starts.len(),
+            out.shapes.len()
+        );
+    }
+
+    #[test]
+    fn critic_r12_regression_conflated_plot_memo_invalidates_on_pan_scale_and_indicator_toggle() {
+        let candles = generate_synthetic_ohlcv(5_000);
+        let mut ind_cfg = IndicatorConfig {
+            show_ichimoku: false,
+            show_rsi: false,
+            show_macd: false,
+            show_atr: false,
+            show_cvd: true,
+            cvd_reset_mode: CvdResetMode::Cumulative,
+            ..IndicatorConfig::default()
+        };
+        let mut cache = IndicatorCache::new();
+        cache.sync(&candles, 1, &ind_cfg);
+
+        let mut vp = ChartViewportState::new();
+        vp.time_scale.set_width(500.0);
+        vp.time_scale.set_total_bars(candles.len());
+        vp.fit_all();
+        let mut drawings = DrawingStore::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(620.0, 480.0)));
+
+        let mut render_once = |vp: &mut ChartViewportState,
+                               ind_cfg: &IndicatorConfig,
+                               cache: &IndicatorCache,
+                               step: f64| {
+            let mut rep = None;
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    time: Some(step * 0.016),
+                    ..Default::default()
+                },
+                |ui| {
+                    rep = render_workstation_chart_full(
+                        ui,
+                        &candles,
+                        vp,
+                        ChartDisplayConfig {
+                            symbol: "VNINDEX",
+                            timeframe: "1m",
+                            show_grid: false,
+                            show_crosshair: false,
+                            show_volume: false,
+                        },
+                        ind_cfg,
+                        cache,
+                        &mut drawings,
+                        ChartReplayTradingOverlay::default(),
+                    );
+                },
+            );
+            out.textures_delta.clear();
+            (rep.expect("render report"), out.shapes)
+        };
+
+        fn collect_first_mesh_signature(shapes: &[egui::epaint::ClippedShape]) -> Vec<(u32, u32)> {
+            let mut pts = Vec::new();
+            for cs in shapes {
+                if let Shape::Mesh(m) = &cs.shape {
+                    for v in m.vertices.iter().take(12) {
+                        pts.push((v.pos.x.to_bits(), v.pos.y.to_bits()));
+                    }
+                }
+            }
+            pts
+        }
+
+        let (rep1, shapes1) = render_once(&mut vp, &ind_cfg, &cache, 1.0);
+        assert!(rep1.conflation_factor >= 2);
+        assert!(vp.r11_memo.plot_data.is_some());
+
+        let (rep2, shapes2) = render_once(&mut vp, &ind_cfg, &cache, 2.0);
+        assert_eq!(rep1.rendered_candle_count, rep2.rendered_candle_count);
+        assert_eq!(shapes1.len(), shapes2.len());
+        assert_eq!(
+            collect_first_mesh_signature(&shapes1),
+            collect_first_mesh_signature(&shapes2)
+        );
+
+        ind_cfg.show_ichimoku = true;
+        cache.sync(&candles, 1, &ind_cfg);
+        let (rep3, shapes3) = render_once(&mut vp, &ind_cfg, &cache, 3.0);
+        assert!(rep3.ichimoku_active);
+        assert!(
+            shapes3.len() > shapes2.len(),
+            "enabling Ichimoku must invalidate cached shapes ({} vs {})",
+            shapes3.len(),
+            shapes2.len()
+        );
+        let sig3 = collect_first_mesh_signature(&shapes3);
+
+        vp.main_price_scale
+            .set_mode(crate::viewport::PriceScaleMode::Logarithmic);
+        vp.time_scale.scroll_by_bars(15.0);
+        let (rep4, shapes4) = render_once(&mut vp, &ind_cfg, &cache, 4.0);
+        assert!(rep4.ichimoku_active);
+        let sig4 = collect_first_mesh_signature(&shapes4);
+        assert_ne!(
+            sig3, sig4,
+            "switching to Log scale + panning must invalidate retained mesh coordinates"
         );
     }
 }
