@@ -13,6 +13,10 @@ use serde::{Deserialize, Serialize};
 use crate::data::{DataSourcePreset, Timeframe};
 use crate::indicators::{CvdResetMode, IndicatorConfig, ProfileSessionPeriod, VwapAnchorMode};
 
+use super::hotkeys::{
+    HotkeyAction, HotkeyChord, HotkeyKey, HotkeyModifiers, HotkeyOverride, HotkeyProfile,
+    HotkeyProfileId,
+};
 use super::multi_chart::{MAX_MULTI_CHART_SLOTS, MultiChartLayoutKind, MultiChartSyncConfig};
 use super::price_scale::PriceScaleMode;
 
@@ -134,6 +138,93 @@ impl WorkspaceSlotTemplate {
     }
 }
 
+/// Left Scanner / Breadth dock active tab persisted inside [`WorkspaceDockPreset`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum TemplateScannerTab {
+    #[default]
+    Watchlist,
+    Signals,
+    Breadth,
+}
+
+impl TemplateScannerTab {
+    #[inline]
+    #[must_use]
+    pub const fn as_id(self) -> &'static str {
+        match self {
+            Self::Watchlist => "Watchlist",
+            Self::Signals => "Signals",
+            Self::Breadth => "Breadth",
+        }
+    }
+}
+
+/// Right-hand unified execution / alerts / strategy / journal dock active tab persisted inside [`WorkspaceDockPreset`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum TemplateRightDockTab {
+    #[default]
+    Trading,
+    Alerts,
+    StrategyLab,
+    Journal,
+}
+
+impl TemplateRightDockTab {
+    #[inline]
+    #[must_use]
+    pub const fn as_id(self) -> &'static str {
+        match self {
+            Self::Trading => "Trading",
+            Self::Alerts => "Alerts",
+            Self::StrategyLab => "StrategyLab",
+            Self::Journal => "Journal",
+        }
+    }
+}
+
+/// Active sub-view inside the Paper Trading / Execution dock (`OrderTicket` vs `DomLadder`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum TemplateTradingViewMode {
+    #[default]
+    OrderTicket,
+    DomLadder,
+}
+
+impl TemplateTradingViewMode {
+    #[inline]
+    #[must_use]
+    pub const fn as_id(self) -> &'static str {
+        match self {
+            Self::OrderTicket => "OrderTicket",
+            Self::DomLadder => "DomLadder",
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn short_label(self) -> &'static str {
+        match self {
+            Self::OrderTicket => "Ticket",
+            Self::DomLadder => "DOM Ladder",
+        }
+    }
+}
+
+/// Serializable workstation side-dock & toolbar layout preset persisted per [`WorkspaceTemplate`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkspaceDockPreset {
+    pub show_scanner_dock: bool,
+    pub scanner_tab: TemplateScannerTab,
+    pub show_trading_panel: bool,
+    pub show_alerts_panel: bool,
+    pub show_strategy_panel: bool,
+    pub show_journal_panel: bool,
+    pub right_dock_tab: TemplateRightDockTab,
+    pub trading_view_mode: TemplateTradingViewMode,
+    pub show_replay_bar: bool,
+}
+
 /// Versioned multi-chart workspace template persisted/shared as `RON` or `JSON`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -145,6 +236,11 @@ pub struct WorkspaceTemplate {
     pub sync: MultiChartSyncConfig,
     pub active_slot: usize,
     pub slots: Vec<WorkspaceSlotTemplate>,
+    pub dock_layout: WorkspaceDockPreset,
+    pub hotkey_profile: HotkeyProfileId,
+    #[serde(default)]
+    pub hotkey_base_preset: Option<HotkeyProfileId>,
+    pub hotkey_overrides: Vec<HotkeyOverride>,
 }
 
 impl Default for WorkspaceTemplate {
@@ -157,6 +253,10 @@ impl Default for WorkspaceTemplate {
             sync: MultiChartSyncConfig::default(),
             active_slot: 0,
             slots: default_four_slots(),
+            dock_layout: WorkspaceDockPreset::default(),
+            hotkey_profile: HotkeyProfileId::default(),
+            hotkey_base_preset: None,
+            hotkey_overrides: Vec::new(),
         };
         tpl.sanitize();
         tpl
@@ -187,6 +287,25 @@ impl WorkspaceTemplate {
             normalized.push(slot);
         }
         self.slots = normalized;
+
+        self.hotkey_base_preset = match self.hotkey_base_preset {
+            Some(bp)
+                if self.hotkey_profile == HotkeyProfileId::Custom
+                    && !matches!(
+                        bp,
+                        HotkeyProfileId::StandardCharting | HotkeyProfileId::Custom
+                    ) =>
+            {
+                Some(bp)
+            }
+            _ => None,
+        };
+        let canonical_profile = HotkeyProfile::from_preset_with_base_and_overrides(
+            self.hotkey_profile,
+            self.hotkey_base_preset,
+            &self.hotkey_overrides,
+        );
+        self.hotkey_overrides = canonical_profile.overrides_from_preset();
     }
 
     /// Encodes this template into formatted RFC-8259 `JSON`.
@@ -329,8 +448,8 @@ fn default_four_slots() -> Vec<WorkspaceSlotTemplate> {
     ]
 }
 
-/// Returns the `5` built-in institutional workspace layout templates (`1x1`, `1x2`, `2x1`, `2x2`,
-/// plus R13 `"VN30 Session Profile & Flow"`).
+/// Returns the `6` built-in institutional workspace layout templates (`1x1`, `1x2`, `2x1`, `2x2`,
+/// R13 `"VN30 Session Profile & Flow"`, and R14 `"VN30F DOM Execution & Flow"`).
 #[must_use]
 pub fn builtin_workspace_templates() -> Vec<WorkspaceTemplate> {
     let ichimoku_daily = IndicatorConfig {
@@ -368,6 +487,10 @@ pub fn builtin_workspace_templates() -> Vec<WorkspaceTemplate> {
         sync: MultiChartSyncConfig::default(),
         active_slot: 0,
         slots: default_four_slots(),
+        dock_layout: WorkspaceDockPreset::default(),
+        hotkey_profile: HotkeyProfileId::default(),
+        hotkey_base_preset: None,
+        hotkey_overrides: Vec::new(),
     };
     t1.slots[0].indicators = ichimoku_daily.clone();
 
@@ -385,6 +508,10 @@ pub fn builtin_workspace_templates() -> Vec<WorkspaceTemplate> {
         },
         active_slot: 0,
         slots: default_four_slots(),
+        dock_layout: WorkspaceDockPreset::default(),
+        hotkey_profile: HotkeyProfileId::default(),
+        hotkey_base_preset: None,
+        hotkey_overrides: Vec::new(),
     };
     t2.slots[0] = WorkspaceSlotTemplate {
         slot_index: 0,
@@ -439,6 +566,10 @@ pub fn builtin_workspace_templates() -> Vec<WorkspaceTemplate> {
         },
         active_slot: 0,
         slots: default_four_slots(),
+        dock_layout: WorkspaceDockPreset::default(),
+        hotkey_profile: HotkeyProfileId::default(),
+        hotkey_base_preset: None,
+        hotkey_overrides: Vec::new(),
     };
     t3.slots[0].symbol = "FPT".to_owned();
     t3.slots[0].timeframe = Timeframe::D1;
@@ -467,6 +598,10 @@ pub fn builtin_workspace_templates() -> Vec<WorkspaceTemplate> {
         },
         active_slot: 0,
         slots: default_four_slots(),
+        dock_layout: WorkspaceDockPreset::default(),
+        hotkey_profile: HotkeyProfileId::default(),
+        hotkey_base_preset: None,
+        hotkey_overrides: Vec::new(),
     };
 
     let mut t5 = WorkspaceTemplate {
@@ -483,6 +618,14 @@ pub fn builtin_workspace_templates() -> Vec<WorkspaceTemplate> {
         },
         active_slot: 0,
         slots: default_four_slots(),
+        dock_layout: WorkspaceDockPreset {
+            show_scanner_dock: true,
+            scanner_tab: TemplateScannerTab::Breadth,
+            ..WorkspaceDockPreset::default()
+        },
+        hotkey_profile: HotkeyProfileId::default(),
+        hotkey_base_preset: None,
+        hotkey_overrides: Vec::new(),
     };
     t5.slots[0] = WorkspaceSlotTemplate {
         slot_index: 0,
@@ -530,10 +673,77 @@ pub fn builtin_workspace_templates() -> Vec<WorkspaceTemplate> {
         ..WorkspaceSlotTemplate::default()
     };
 
-    for t in [&mut t1, &mut t2, &mut t3, &mut t4, &mut t5] {
+    let mut t6 = WorkspaceTemplate {
+        schema_version: WORKSPACE_TEMPLATE_SCHEMA_VERSION,
+        name: "VN30F DOM Execution & Flow".to_owned(),
+        description: "1x2 Execution Desk (VN30F1M 15m + FPT 1D) with OHLCV_SYNTH_DOM_PROXY Ladder & InstitutionalDomFast Hotkeys".to_owned(),
+        layout: MultiChartLayoutKind::SplitVertical1x2,
+        sync: MultiChartSyncConfig {
+            sync_crosshair: true,
+            sync_time_range: true,
+            sync_symbol: false,
+            sync_timeframe: false,
+        },
+        active_slot: 0,
+        slots: default_four_slots(),
+        dock_layout: WorkspaceDockPreset {
+            show_trading_panel: true,
+            right_dock_tab: TemplateRightDockTab::Trading,
+            trading_view_mode: TemplateTradingViewMode::DomLadder,
+            show_replay_bar: true,
+            ..WorkspaceDockPreset::default()
+        },
+        hotkey_profile: HotkeyProfileId::InstitutionalDomFast,
+        hotkey_base_preset: None,
+        hotkey_overrides: Vec::new(),
+    };
+    t6.slots[0] = WorkspaceSlotTemplate {
+        slot_index: 0,
+        data_source: DataSourcePreset::IntradayVn30F1m,
+        symbol: "VN30F1M".to_owned(),
+        timeframe: Timeframe::M15,
+        indicators: IndicatorConfig {
+            show_sma: false,
+            show_ema: true,
+            ema_period: 21,
+            show_vwap: true,
+            vwap_anchor_mode: VwapAnchorMode::AutoSession,
+            show_market_profile: true,
+            mp_num_bins: 24,
+            mp_ib_bars: 4,
+            mp_extend_naked_poc: true,
+            show_rsi: false,
+            show_cvd: true,
+            cvd_reset_mode: CvdResetMode::Session,
+            cvd_sma_period: 9,
+            ..IndicatorConfig::default()
+        },
+        ..WorkspaceSlotTemplate::default()
+    };
+    t6.slots[1] = WorkspaceSlotTemplate {
+        slot_index: 1,
+        data_source: DataSourcePreset::Vn30Basket,
+        symbol: "FPT".to_owned(),
+        timeframe: Timeframe::D1,
+        indicators: IndicatorConfig {
+            show_sma: true,
+            show_ema: true,
+            show_vwap: true,
+            vwap_anchor_mode: VwapAnchorMode::Weekly,
+            show_market_profile: false,
+            show_rsi: false,
+            show_cvd: true,
+            cvd_reset_mode: CvdResetMode::Cumulative,
+            cvd_sma_period: 9,
+            ..IndicatorConfig::default()
+        },
+        ..WorkspaceSlotTemplate::default()
+    };
+
+    for t in [&mut t1, &mut t2, &mut t3, &mut t4, &mut t5, &mut t6] {
         t.sanitize();
     }
-    vec![t1, t2, t3, t4, t5]
+    vec![t1, t2, t3, t4, t5, t6]
 }
 
 fn truncate_utf8(s: &mut String, max_bytes: usize) {
@@ -629,8 +839,84 @@ fn encode_json_template(t: &WorkspaceTemplate) -> String {
             out.push_str("    },\n");
         }
     }
-    out.push_str("  ]\n}");
+    out.push_str("  ],\n");
+    encode_json_dock_layout(&mut out, &t.dock_layout);
+    out.push_str(",\n  \"hotkey_profile\": ");
+    escape_str_into(&mut out, t.hotkey_profile.as_id());
+    out.push_str(",\n  \"hotkey_base_preset\": ");
+    match t.hotkey_base_preset {
+        Some(base) => escape_str_into(&mut out, base.as_id()),
+        None => out.push_str("null"),
+    }
+    out.push_str(",\n");
+    encode_json_hotkey_overrides(&mut out, &t.hotkey_overrides);
+    out.push_str("\n}");
     out
+}
+
+fn encode_json_dock_layout(out: &mut String, dl: &WorkspaceDockPreset) {
+    out.push_str("  \"dock_layout\": {\n");
+    let _ = writeln!(out, "    \"show_scanner_dock\": {},", dl.show_scanner_dock);
+    let _ = writeln!(out, "    \"scanner_tab\": \"{}\",", dl.scanner_tab.as_id());
+    let _ = writeln!(
+        out,
+        "    \"show_trading_panel\": {},",
+        dl.show_trading_panel
+    );
+    let _ = writeln!(out, "    \"show_alerts_panel\": {},", dl.show_alerts_panel);
+    let _ = writeln!(
+        out,
+        "    \"show_strategy_panel\": {},",
+        dl.show_strategy_panel
+    );
+    let _ = writeln!(
+        out,
+        "    \"show_journal_panel\": {},",
+        dl.show_journal_panel
+    );
+    let _ = writeln!(
+        out,
+        "    \"right_dock_tab\": \"{}\",",
+        dl.right_dock_tab.as_id()
+    );
+    let _ = writeln!(
+        out,
+        "    \"trading_view_mode\": \"{}\",",
+        dl.trading_view_mode.as_id()
+    );
+    let _ = writeln!(out, "    \"show_replay_bar\": {}", dl.show_replay_bar);
+    out.push_str("  }");
+}
+
+fn encode_json_hotkey_overrides(out: &mut String, overrides: &[HotkeyOverride]) {
+    if overrides.is_empty() {
+        out.push_str("  \"hotkey_overrides\": []");
+        return;
+    }
+    out.push_str("  \"hotkey_overrides\": [\n");
+    for (idx, ov) in overrides.iter().enumerate() {
+        out.push_str("    { \"action\": ");
+        escape_str_into(out, ov.action.as_id());
+        out.push_str(", \"chord\": ");
+        match ov.chord {
+            Some(c) => {
+                let _ = write!(
+                    out,
+                    "{{ \"key\": \"{}\", \"shift\": {}, \"alt\": {} }}",
+                    c.key.as_id(),
+                    c.modifiers.shift,
+                    c.modifiers.alt
+                );
+            }
+            None => out.push_str("null"),
+        }
+        if idx + 1 == overrides.len() {
+            out.push_str(" }\n");
+        } else {
+            out.push_str(" },\n");
+        }
+    }
+    out.push_str("  ]");
 }
 
 fn encode_json_indicators(out: &mut String, ind: &IndicatorConfig) {
@@ -786,8 +1072,79 @@ fn encode_ron_template(t: &WorkspaceTemplate) -> String {
         encode_ron_stretches(&mut out, &s.pane_stretches);
         out.push_str("        ),\n");
     }
-    out.push_str("    ],\n)");
+    out.push_str("    ],\n");
+    encode_ron_dock_layout(&mut out, &t.dock_layout);
+    let _ = writeln!(out, "    hotkey_profile: {},", t.hotkey_profile.as_id());
+    match t.hotkey_base_preset {
+        Some(base) => {
+            let _ = writeln!(out, "    hotkey_base_preset: Some({}),", base.as_id());
+        }
+        None => {
+            let _ = writeln!(out, "    hotkey_base_preset: None,");
+        }
+    }
+    encode_ron_hotkey_overrides(&mut out, &t.hotkey_overrides);
+    out.push(')');
     out
+}
+
+fn encode_ron_dock_layout(out: &mut String, dl: &WorkspaceDockPreset) {
+    out.push_str("    dock_layout: (\n");
+    let _ = writeln!(out, "        show_scanner_dock: {},", dl.show_scanner_dock);
+    let _ = writeln!(out, "        scanner_tab: {},", dl.scanner_tab.as_id());
+    let _ = writeln!(
+        out,
+        "        show_trading_panel: {},",
+        dl.show_trading_panel
+    );
+    let _ = writeln!(out, "        show_alerts_panel: {},", dl.show_alerts_panel);
+    let _ = writeln!(
+        out,
+        "        show_strategy_panel: {},",
+        dl.show_strategy_panel
+    );
+    let _ = writeln!(
+        out,
+        "        show_journal_panel: {},",
+        dl.show_journal_panel
+    );
+    let _ = writeln!(
+        out,
+        "        right_dock_tab: {},",
+        dl.right_dock_tab.as_id()
+    );
+    let _ = writeln!(
+        out,
+        "        trading_view_mode: {},",
+        dl.trading_view_mode.as_id()
+    );
+    let _ = writeln!(out, "        show_replay_bar: {},", dl.show_replay_bar);
+    out.push_str("    ),\n");
+}
+
+fn encode_ron_hotkey_overrides(out: &mut String, overrides: &[HotkeyOverride]) {
+    if overrides.is_empty() {
+        out.push_str("    hotkey_overrides: [],\n");
+        return;
+    }
+    out.push_str("    hotkey_overrides: [\n");
+    for ov in overrides {
+        let _ = write!(out, "        (action: {}, chord: ", ov.action.as_id());
+        match ov.chord {
+            Some(c) => {
+                let _ = write!(
+                    out,
+                    "Some((key: {}, shift: {}, alt: {}))",
+                    c.key.as_id(),
+                    c.modifiers.shift,
+                    c.modifiers.alt
+                );
+            }
+            None => out.push_str("None"),
+        }
+        out.push_str("),\n");
+    }
+    out.push_str("    ],\n");
 }
 
 fn encode_ron_indicators(out: &mut String, ind: &IndicatorConfig) {
@@ -1458,6 +1815,10 @@ impl WorkspaceTemplate {
                 "sync",
                 "active_slot",
                 "slots",
+                "dock_layout",
+                "hotkey_profile",
+                "hotkey_base_preset",
+                "hotkey_overrides",
             ],
         )?;
         let mut tpl = Self::default();
@@ -1542,6 +1903,24 @@ impl WorkspaceTemplate {
             });
         }
         tpl.slots = decoded;
+        if let Some(v) = find_field(fields, "dock_layout") {
+            tpl.dock_layout = decode_dock_layout(v)?;
+        }
+        if let Some(v) = find_field(fields, "hotkey_profile") {
+            tpl.hotkey_profile = decode_hotkey_profile_id(v, "hotkey_profile")?;
+        }
+        if let Some(v) = find_field(fields, "hotkey_base_preset") {
+            tpl.hotkey_base_preset = match v {
+                DocValue::None => None,
+                DocValue::Some(inner) => {
+                    Some(decode_hotkey_profile_id(inner, "hotkey_base_preset")?)
+                }
+                other => Some(decode_hotkey_profile_id(other, "hotkey_base_preset")?),
+            };
+        }
+        if let Some(v) = find_field(fields, "hotkey_overrides") {
+            tpl.hotkey_overrides = decode_hotkey_overrides(v)?;
+        }
         tpl.sanitize();
         Ok(tpl)
     }
@@ -2044,4 +2423,176 @@ fn parse_vwap_anchor_mode(raw: &str) -> Option<VwapAnchorMode> {
         "yearly" | "year" | "1y" => Some(VwapAnchorMode::Yearly),
         _ => None,
     }
+}
+
+fn parse_template_scanner_tab(raw: &str) -> Option<TemplateScannerTab> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "watchlist" | "scanner" => Some(TemplateScannerTab::Watchlist),
+        "signals" => Some(TemplateScannerTab::Signals),
+        "breadth" => Some(TemplateScannerTab::Breadth),
+        _ => None,
+    }
+}
+
+fn parse_template_right_dock_tab(raw: &str) -> Option<TemplateRightDockTab> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "trading" | "dom" => Some(TemplateRightDockTab::Trading),
+        "alerts" => Some(TemplateRightDockTab::Alerts),
+        "strategylab" | "strategy" => Some(TemplateRightDockTab::StrategyLab),
+        "journal" | "risk" => Some(TemplateRightDockTab::Journal),
+        _ => None,
+    }
+}
+
+fn parse_template_trading_view_mode(raw: &str) -> Option<TemplateTradingViewMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "orderticket" | "ticket" => Some(TemplateTradingViewMode::OrderTicket),
+        "domladder" | "dom" | "ladder" => Some(TemplateTradingViewMode::DomLadder),
+        _ => None,
+    }
+}
+
+fn decode_dock_layout(val: &DocValue) -> Result<WorkspaceDockPreset, WorkspaceTemplateError> {
+    let f = expect_struct(val, "dock_layout")?;
+    validate_struct_fields(
+        f,
+        "dock_layout",
+        &[
+            "show_scanner_dock",
+            "scanner_tab",
+            "show_trading_panel",
+            "show_alerts_panel",
+            "show_strategy_panel",
+            "show_journal_panel",
+            "right_dock_tab",
+            "trading_view_mode",
+            "show_replay_bar",
+        ],
+    )?;
+    let mut dl = WorkspaceDockPreset::default();
+    if let Some(v) = find_field(f, "show_scanner_dock") {
+        dl.show_scanner_dock = expect_bool(v, "dock_layout.show_scanner_dock")?;
+    }
+    if let Some(v) = find_field(f, "scanner_tab") {
+        let raw = expect_label(v, "dock_layout.scanner_tab")?;
+        dl.scanner_tab = parse_template_scanner_tab(&raw).ok_or_else(|| {
+            WorkspaceTemplateError::InvalidField {
+                field: "dock_layout.scanner_tab".to_owned(),
+                reason: format!("unknown TemplateScannerTab '{raw}'"),
+            }
+        })?;
+    }
+    if let Some(v) = find_field(f, "show_trading_panel") {
+        dl.show_trading_panel = expect_bool(v, "dock_layout.show_trading_panel")?;
+    }
+    if let Some(v) = find_field(f, "show_alerts_panel") {
+        dl.show_alerts_panel = expect_bool(v, "dock_layout.show_alerts_panel")?;
+    }
+    if let Some(v) = find_field(f, "show_strategy_panel") {
+        dl.show_strategy_panel = expect_bool(v, "dock_layout.show_strategy_panel")?;
+    }
+    if let Some(v) = find_field(f, "show_journal_panel") {
+        dl.show_journal_panel = expect_bool(v, "dock_layout.show_journal_panel")?;
+    }
+    if let Some(v) = find_field(f, "right_dock_tab") {
+        let raw = expect_label(v, "dock_layout.right_dock_tab")?;
+        dl.right_dock_tab = parse_template_right_dock_tab(&raw).ok_or_else(|| {
+            WorkspaceTemplateError::InvalidField {
+                field: "dock_layout.right_dock_tab".to_owned(),
+                reason: format!("unknown TemplateRightDockTab '{raw}'"),
+            }
+        })?;
+    }
+    if let Some(v) = find_field(f, "trading_view_mode") {
+        let raw = expect_label(v, "dock_layout.trading_view_mode")?;
+        dl.trading_view_mode = parse_template_trading_view_mode(&raw).ok_or_else(|| {
+            WorkspaceTemplateError::InvalidField {
+                field: "dock_layout.trading_view_mode".to_owned(),
+                reason: format!("unknown TemplateTradingViewMode '{raw}'"),
+            }
+        })?;
+    }
+    if let Some(v) = find_field(f, "show_replay_bar") {
+        dl.show_replay_bar = expect_bool(v, "dock_layout.show_replay_bar")?;
+    }
+    Ok(dl)
+}
+
+fn decode_hotkey_overrides(val: &DocValue) -> Result<Vec<HotkeyOverride>, WorkspaceTemplateError> {
+    let items = match val {
+        DocValue::Array(items) => items,
+        _ => {
+            return Err(WorkspaceTemplateError::InvalidField {
+                field: "hotkey_overrides".to_owned(),
+                reason: "expected array of hotkey overrides".to_owned(),
+            });
+        }
+    };
+    if items.len() > 64 {
+        return Err(WorkspaceTemplateError::InvalidField {
+            field: "hotkey_overrides".to_owned(),
+            reason: format!("too many hotkey overrides ({}, max 64)", items.len()),
+        });
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for (idx, item) in items.iter().enumerate() {
+        let ctx = format!("hotkey_overrides[{idx}]");
+        let f = expect_struct(item, &ctx)?;
+        validate_struct_fields(f, &ctx, &["action", "chord"])?;
+        let action_val =
+            find_field(f, "action").ok_or_else(|| WorkspaceTemplateError::InvalidField {
+                field: format!("{ctx}.action"),
+                reason: "missing required field 'action'".to_owned(),
+            })?;
+        let raw_action = expect_label(action_val, &format!("{ctx}.action"))?;
+        let action = HotkeyAction::from_id(&raw_action).ok_or_else(|| {
+            WorkspaceTemplateError::InvalidField {
+                field: format!("{ctx}.action"),
+                reason: format!("unknown HotkeyAction '{raw_action}'"),
+            }
+        })?;
+        let chord = match find_field(f, "chord") {
+            None | Some(DocValue::None) => None,
+            Some(DocValue::Some(inner)) => {
+                Some(decode_hotkey_chord(inner, &format!("{ctx}.chord"))?)
+            }
+            Some(v) => Some(decode_hotkey_chord(v, &format!("{ctx}.chord"))?),
+        };
+        out.push(HotkeyOverride { action, chord });
+    }
+    Ok(out)
+}
+
+fn decode_hotkey_chord(val: &DocValue, ctx: &str) -> Result<HotkeyChord, WorkspaceTemplateError> {
+    let f = expect_struct(val, ctx)?;
+    validate_struct_fields(f, ctx, &["key", "shift", "alt"])?;
+    let key_val = find_field(f, "key").ok_or_else(|| WorkspaceTemplateError::InvalidField {
+        field: format!("{ctx}.key"),
+        reason: "missing required field 'key'".to_owned(),
+    })?;
+    let raw_key = expect_label(key_val, &format!("{ctx}.key"))?;
+    let key = HotkeyKey::from_id(&raw_key).ok_or_else(|| WorkspaceTemplateError::InvalidField {
+        field: format!("{ctx}.key"),
+        reason: format!("unknown or reserved HotkeyKey '{raw_key}'"),
+    })?;
+    let shift = match find_field(f, "shift") {
+        Some(v) => expect_bool(v, &format!("{ctx}.shift"))?,
+        None => false,
+    };
+    let alt = match find_field(f, "alt") {
+        Some(v) => expect_bool(v, &format!("{ctx}.alt"))?,
+        None => false,
+    };
+    Ok(HotkeyChord::new(key, HotkeyModifiers { shift, alt }))
+}
+
+fn decode_hotkey_profile_id(
+    val: &DocValue,
+    field: &str,
+) -> Result<HotkeyProfileId, WorkspaceTemplateError> {
+    let raw = expect_label(val, field)?;
+    HotkeyProfileId::from_id(&raw).ok_or_else(|| WorkspaceTemplateError::InvalidField {
+        field: field.to_owned(),
+        reason: format!("unknown HotkeyProfileId '{raw}'"),
+    })
 }

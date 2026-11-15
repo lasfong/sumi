@@ -4,11 +4,18 @@
 //! symmetric `Long` and `Short` net-position accounting with exact fee conservation across scale-ins and
 //! partial closes, and command-log prefix replay for bit-exact state reconstruction on Bar Replay rewind.
 
+pub mod ladder;
 pub mod orders;
 pub mod portfolio;
 #[cfg(test)]
 mod tests;
 
+pub use ladder::{
+    DOM_LADDER_DATA_FIDELITY, DomLadderConfig, DomLadderError, DomLadderRow, DomLadderSnapshot,
+    DomPriceBandState, LadderStageInput, compute_causal_dom_ladder, compute_quick_market_brackets,
+    exact_tick_distance, infer_causal_prior_session_close, size_ladder_qty_from_risk_budget,
+    stage_ladder_order, step_ladder_price_ticks,
+};
 pub use orders::{
     AccountConfig, FillReason, MAX_ORDER_NOTIONAL, MAX_ORDER_PRICE, MAX_ORDER_QUANTITY,
     MAX_PENDING_ORDERS, MAX_RECORDED_COMMANDS, MIN_ORDER_QUANTITY, Order, OrderKind, OrderRequest,

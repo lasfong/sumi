@@ -257,6 +257,21 @@ impl ExchangeVenue {
     pub const fn is_vn_cash_equity(self) -> bool {
         matches!(self, Self::Hose | Self::Hnx | Self::Upcom)
     }
+
+    /// Concise display unit suffix for DOM headers and ticket badges (`"kVND"`, `"VND"`, `"pts"`, `"USD"`, `"USDT"`).
+    #[inline]
+    #[must_use]
+    pub const fn price_unit_label(self, resolved_vn_unit: ResolvedVnPriceUnit) -> &'static str {
+        match self {
+            Self::Hose | Self::Hnx | Self::Upcom => match resolved_vn_unit {
+                ResolvedVnPriceUnit::ThousandVnd => "kVND",
+                ResolvedVnPriceUnit::RawVnd => "VND",
+            },
+            Self::Vn30Futures | Self::VnIndexBenchmark => "pts",
+            Self::UsEquities => "USD",
+            Self::CryptoSpotPerp => "USDT",
+        }
+    }
 }
 
 /// Denomination unit policy for Vietnam cash equity prices (`1,000 VND` CafeF quotes vs raw `VND`).
@@ -303,6 +318,19 @@ impl VnPriceUnit {
                     ResolvedVnPriceUnit::ThousandVnd
                 }
             }
+        }
+    }
+
+    /// Resolves price denomination respecting `venue`: only VN cash equities (`HOSE`/`HNX`/`UPCOM`)
+    /// trigger `1,000.0` `Auto` switch (`kVND` vs full `VND`); futures/indices/US/crypto keep `ThousandVnd`
+    /// so `VN30F1M` (~`1,305 pts`) never flips into `"VND"`.
+    #[inline]
+    #[must_use]
+    pub fn resolve_for_venue(self, venue: ExchangeVenue, anchor_price: f64) -> ResolvedVnPriceUnit {
+        if venue.is_vn_cash_equity() {
+            self.resolve(anchor_price)
+        } else {
+            ResolvedVnPriceUnit::ThousandVnd
         }
     }
 }
@@ -473,6 +501,51 @@ pub fn snap_to_nearest_tick(price: f64, venue: ExchangeVenue, vn_unit: ResolvedV
     clean_quantized(verify_steps * verify_tick)
 }
 
+/// Computes statutory daily floor and ceiling prices using an explicitly resolved `resolved_unit`
+/// (`HOSE ±7%`, `HNX ±10%`, `UPCOM ±15%`, `VN30F ±7%`), snapping `reference_price` to a valid venue
+/// tick first so `reference_price`, `floor_price`, and `ceiling_price` stay tick-consistent.
+#[must_use]
+pub fn compute_daily_price_band_with_resolved_unit(
+    venue: ExchangeVenue,
+    reference_price: f64,
+    resolved_unit: ResolvedVnPriceUnit,
+) -> Option<DailyPriceBand> {
+    let band_pct = venue.daily_band_pct()?;
+    if !reference_price.is_finite() || reference_price <= 0.0 {
+        return None;
+    }
+    let snapped_ref = snap_to_nearest_tick(reference_price, venue, resolved_unit);
+    if !snapped_ref.is_finite() || snapped_ref <= 0.0 {
+        return None;
+    }
+    let tick_at_ref = tick_size_at_price(venue, snapped_ref, resolved_unit);
+    let raw_ceiling = snapped_ref * (1.0 + band_pct);
+    let raw_floor = snapped_ref * (1.0 - band_pct);
+
+    let mut ceiling_price = round_down_to_tick(raw_ceiling, venue, resolved_unit);
+    let mut floor_price = round_up_to_tick(raw_floor, venue, resolved_unit);
+
+    // Low-price guard (matching HSX minimum 1-tick band rule so floor <= ref <= ceiling).
+    if ceiling_price < snapped_ref {
+        ceiling_price = snapped_ref;
+    }
+    if floor_price > snapped_ref {
+        floor_price = round_down_to_tick(snapped_ref, venue, resolved_unit).max(tick_at_ref);
+    }
+    if floor_price > ceiling_price {
+        floor_price = ceiling_price;
+    }
+
+    Some(DailyPriceBand {
+        venue,
+        reference_price: snapped_ref,
+        band_pct,
+        floor_price,
+        ceiling_price,
+        tick_at_ref,
+    })
+}
+
 /// Computes statutory daily floor and ceiling prices from `reference_price` (`HOSE ±7%`, `HNX ±10%`,
 /// `UPCOM ±15%`, `VN30F ±7%`), rounding ceiling **down** to tick and floor **up** to tick per
 /// Vietnam Circular `120/2020/TT-BTC` and HSX/HNX trading regulations.
@@ -482,37 +555,8 @@ pub fn compute_daily_price_band(
     reference_price: f64,
     unit: VnPriceUnit,
 ) -> Option<DailyPriceBand> {
-    let band_pct = venue.daily_band_pct()?;
-    if !reference_price.is_finite() || reference_price <= 0.0 {
-        return None;
-    }
-    let resolved_unit = unit.resolve(reference_price);
-    let tick_at_ref = tick_size_at_price(venue, reference_price, resolved_unit);
-    let raw_ceiling = reference_price * (1.0 + band_pct);
-    let raw_floor = reference_price * (1.0 - band_pct);
-
-    let mut ceiling_price = round_down_to_tick(raw_ceiling, venue, resolved_unit);
-    let mut floor_price = round_up_to_tick(raw_floor, venue, resolved_unit);
-
-    // Low-price guard (matching HSX minimum 1-tick band rule so floor <= ref <= ceiling).
-    if ceiling_price < reference_price {
-        ceiling_price = snap_to_nearest_tick(reference_price, venue, resolved_unit);
-    }
-    if floor_price > reference_price {
-        floor_price = round_down_to_tick(reference_price, venue, resolved_unit).max(tick_at_ref);
-    }
-    if floor_price > ceiling_price {
-        floor_price = ceiling_price;
-    }
-
-    Some(DailyPriceBand {
-        venue,
-        reference_price: clean_quantized(reference_price),
-        band_pct,
-        floor_price,
-        ceiling_price,
-        tick_at_ref,
-    })
+    let resolved_unit = unit.resolve_for_venue(venue, reference_price);
+    compute_daily_price_band_with_resolved_unit(venue, reference_price, resolved_unit)
 }
 
 /// Floors `raw_quantity` down to an integer multiple of `venue.board_lot()`.

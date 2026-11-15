@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use egui::{Button, Color32, CornerRadius, Frame, Margin, RichText, Stroke, Vec2, Visuals};
+use egui::{
+    Button, Color32, CornerRadius, Frame, Margin, Pos2, Rect, RichText, Stroke, Vec2, Visuals,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::alerts::{
@@ -42,7 +44,7 @@ use crate::indicators::{
 use crate::journal::{
     ChecklistState, DailyPriceBand, ExchangeVenue, JournalEntrySource, JournalEntryStatus,
     MistakeTag, SetupTag, TradeJournalStore, TradePlanComputed, TradePlanInput, VnPriceUnit,
-    compute_daily_price_band, compute_trade_plan,
+    compute_daily_price_band, compute_trade_plan, floor_to_board_lot,
 };
 use crate::model::Candle;
 use crate::replay::{
@@ -56,13 +58,18 @@ use crate::scanner::{
     evaluate_symbol_scan_and_signals, filter_and_sort_watchlist, filter_historical_signals,
 };
 use crate::trading::{
-    OrderKind, OrderRequest, OrderSide, PositionSide, TradingSession, extract_ticket_from_drawing,
+    DOM_LADDER_DATA_FIDELITY, DomLadderConfig, DomLadderError, DomLadderSnapshot,
+    DomPriceBandState, LadderStageInput, OrderKind, OrderRequest, OrderSide, PositionSide,
+    TradingSession, compute_causal_dom_ladder, extract_ticket_from_drawing,
+    size_ladder_qty_from_risk_budget, stage_ladder_order, step_ladder_price_ticks,
 };
 use crate::viewport::{
-    MultiChartLayoutKind, MultiChartSyncConfig, PlotRect, PriceScaleMode, WorkspacePaneStretches,
+    HotkeyAction, HotkeyChord, HotkeyKey, HotkeyModifiers, HotkeyProfile, HotkeyProfileId,
+    MultiChartLayoutKind, MultiChartSyncConfig, PlotRect, PriceScaleMode, TemplateRightDockTab,
+    TemplateScannerTab, TemplateTradingViewMode, WorkspaceDockPreset, WorkspacePaneStretches,
     WorkspaceSlotTemplate, WorkspaceTemplate, apply_synced_time_window,
     builtin_workspace_templates, causal_closed_prefix_len, extract_visible_time_window,
-    format_compact_volume_axis,
+    format_compact_volume_axis, is_global_hotkey_eligible,
 };
 
 /// Order-type tab selection in the workstation Paper Trading ticket.
@@ -291,6 +298,10 @@ pub enum PaletteAction {
     OpenMarketBreadthTab,
     OpenTemplatesModal,
     ApplyBuiltinTemplate(usize),
+    OpenDomLadder,
+    CenterDomLadder,
+    OpenHotkeysModal,
+    SetHotkeyProfile(HotkeyProfileId),
 }
 
 /// Ranked candidate row inside the `Cmd+K` Command Palette (`Milestone R08`).
@@ -581,6 +592,14 @@ pub struct SumiWorkstationApp {
     pub secondary_slots: [SecondaryChartSlot; 3],
     #[serde(default)]
     pub saved_workspace_templates: Vec<WorkspaceTemplate>,
+    pub trading_view_mode: TemplateTradingViewMode,
+    pub dom_half_rows: usize,
+    pub dom_lookback_bars: usize,
+    pub dom_use_risk_sizing: bool,
+    pub dom_stop_loss_ticks: u32,
+    pub dom_take_profit_ticks: u32,
+    pub dom_vn_unit: VnPriceUnit,
+    pub hotkey_profile: HotkeyProfile,
 
     #[serde(skip)]
     pub base_candles: Vec<Candle>,
@@ -688,6 +707,14 @@ pub struct SumiWorkstationApp {
     pub pinned_crosshair_timestamp: Option<i64>,
     #[serde(skip)]
     pending_grid_time_sync: Option<usize>,
+    #[serde(skip)]
+    pub dom_center_override: Option<f64>,
+    #[serde(skip)]
+    pub show_hotkeys_modal: bool,
+    #[serde(skip)]
+    pub rebinding_hotkey_action: Option<HotkeyAction>,
+    #[serde(skip)]
+    pub(crate) last_hotkeys_modal_rect: Option<egui::Rect>,
 }
 
 impl Default for SumiWorkstationApp {
@@ -768,6 +795,14 @@ impl Default for SumiWorkstationApp {
             active_chart_slot: 0,
             secondary_slots: default_secondary_slots(),
             saved_workspace_templates: Vec::new(),
+            trading_view_mode: TemplateTradingViewMode::default(),
+            dom_half_rows: 10,
+            dom_lookback_bars: 120,
+            dom_use_risk_sizing: false,
+            dom_stop_loss_ticks: 0,
+            dom_take_profit_ticks: 0,
+            dom_vn_unit: VnPriceUnit::Auto,
+            hotkey_profile: HotkeyProfile::default(),
             base_candles,
             candles,
             available_symbols: vec!["VNINDEX".to_owned()],
@@ -821,6 +856,10 @@ impl Default for SumiWorkstationApp {
             linked_crosshair_timestamp: None,
             pinned_crosshair_timestamp: None,
             pending_grid_time_sync: None,
+            dom_center_override: None,
+            show_hotkeys_modal: false,
+            rebinding_hotkey_action: None,
+            last_hotkeys_modal_rect: None,
         }
     }
 }
@@ -948,7 +987,15 @@ impl SumiWorkstationApp {
         for tpl in &mut self.saved_workspace_templates {
             tpl.sanitize();
         }
+        self.dom_half_rows = self.dom_half_rows.clamp(4, 30);
+        self.dom_lookback_bars = self.dom_lookback_bars.clamp(5, 500);
+        self.dom_stop_loss_ticks = self.dom_stop_loss_ticks.min(500);
+        self.dom_take_profit_ticks = self.dom_take_profit_ticks.min(1_000);
+        self.hotkey_profile.sanitize();
+        self.dom_center_override = None;
         self.show_templates_modal = false;
+        self.show_hotkeys_modal = false;
+        self.rebinding_hotkey_action = None;
         self.last_template_status = None;
         self.linked_crosshair_timestamp = None;
         self.pinned_crosshair_timestamp = None;
@@ -1622,6 +1669,7 @@ impl SumiWorkstationApp {
         let has_existing_trades = !incoming_trading.commands.is_empty();
         self.trading = incoming_trading;
         self.show_replay_bar = self.replay.is_active();
+        self.dom_center_override = None;
         self.last_trade_status = None;
         if !has_existing_trades {
             self.ticket_qty_input = default_ticket_qty_string(
@@ -2616,6 +2664,463 @@ impl SumiWorkstationApp {
             false,
             format!("Reset account (${:.0})", self.trading.config.initial_cash),
         ));
+    }
+
+    // =========================================================================
+    // Milestone R14 — Synthetic DOM Ladder Execution & Custom Hotkey Helpers
+    // =========================================================================
+
+    /// Opens the right dock on `RightDockTab::Trading` switched to [`TemplateTradingViewMode::DomLadder`].
+    pub fn open_dom_ladder(&mut self) {
+        self.show_trading_panel = true;
+        self.right_dock_tab = RightDockTab::Trading;
+        self.trading_view_mode = TemplateTradingViewMode::DomLadder;
+    }
+
+    /// Re-centers the DOM Price Ladder viewport on the active causal mark price.
+    pub fn center_dom_on_mark(&mut self) {
+        self.dom_center_override = None;
+    }
+
+    /// Shifts the DOM Price Ladder center by `delta_ticks` dynamic exchange ticks (`+` higher, `-` lower),
+    /// resolving venue, Vietnam price unit, and causal replay mark price from [`Self::compute_active_dom_ladder`].
+    pub fn shift_dom_center_ticks(&mut self, delta_ticks: i32) {
+        if delta_ticks == 0 {
+            return;
+        }
+        let (venue, unit, mark) = match self.compute_active_dom_ladder() {
+            Ok(snap) => (snap.venue, snap.resolved_unit, snap.mark_price),
+            Err(_) => {
+                let mark = self.current_mark_price();
+                if !mark.is_finite() || mark <= 0.0 {
+                    return;
+                }
+                let venue = self.active_exchange_venue();
+                (venue, self.dom_vn_unit.resolve_for_venue(venue, mark), mark)
+            }
+        };
+        if !mark.is_finite() || mark <= 0.0 {
+            return;
+        }
+        let anchor = self
+            .dom_center_override
+            .filter(|p| p.is_finite() && *p > 0.0)
+            .unwrap_or(mark);
+        if let Some(next) = step_ladder_price_ticks(anchor, delta_ticks, venue, unit) {
+            self.dom_center_override = Some(next);
+        }
+    }
+
+    /// Opens the Keyboard Shortcuts & Hotkey Profiles modal while closing competing modals.
+    pub fn open_hotkeys_modal(&mut self) {
+        self.close_command_palette();
+        self.show_templates_modal = false;
+        self.rebinding_hotkey_action = None;
+        self.show_hotkeys_modal = true;
+    }
+
+    /// Switches to a built-in [`HotkeyProfileId`] preset (no-op for `Custom` unless already active).
+    pub fn set_hotkey_profile(&mut self, id: HotkeyProfileId) {
+        if id != HotkeyProfileId::Custom {
+            self.hotkey_profile = HotkeyProfile::from_preset(id);
+        } else {
+            self.hotkey_profile.id = HotkeyProfileId::Custom;
+        }
+        self.rebinding_hotkey_action = None;
+    }
+
+    /// Computes a causal [`DomLadderSnapshot`] (`OHLCV_SYNTH_DOM_PROXY`, `DEF-001`-compliant) for the
+    /// active workstation symbol, timeframe, and Bar Replay cursor.
+    pub fn compute_active_dom_ladder(&self) -> Result<DomLadderSnapshot, DomLadderError> {
+        let cfg = DomLadderConfig {
+            venue: self.active_exchange_venue(),
+            vn_unit: self.dom_vn_unit,
+            half_rows: self.dom_half_rows.clamp(4, 30),
+            lookback_bars: self.dom_lookback_bars.clamp(5, 500),
+            center_price_override: self.dom_center_override,
+            reference_price_override: None,
+        };
+        let pending: Vec<_> = self.trading.pending_orders().cloned().collect();
+        let cutoff_ts = self.replay_causal_close_timestamp();
+        compute_causal_dom_ladder(
+            &self.candles,
+            &cfg,
+            &pending,
+            self.trading.open_position(),
+            cutoff_ts,
+        )
+    }
+
+    /// Computes the effective board-lot-rounded order quantity for DOM Ladder & quick hotkeys,
+    /// using [`size_ladder_qty_from_risk_budget`] when risk sizing + SL ticks are armed.
+    pub fn effective_dom_order_qty(
+        &self,
+        side: OrderSide,
+        entry_price: f64,
+        snap: &DomLadderSnapshot,
+    ) -> Result<f64, String> {
+        if self.dom_use_risk_sizing && self.dom_stop_loss_ticks > 0 {
+            let equity = self
+                .trading
+                .metrics(snap.mark_price)
+                .equity
+                .max(self.trading.config.initial_cash);
+            let qty = size_ladder_qty_from_risk_budget(
+                equity,
+                self.risk_plan_input.risk_pct,
+                entry_price,
+                self.dom_stop_loss_ticks,
+                side,
+                snap.venue,
+                self.dom_vn_unit,
+                snap.daily_band.map(|b| b.reference_price),
+            )
+            .map_err(|e| e.to_string())?;
+            if !qty.is_finite() || qty < snap.venue.board_lot() - 1.0e-7 || qty <= 0.0 {
+                return Err(format!(
+                    "Risk sizing yielded 0 affordable lots for {} @ {entry_price:.2}",
+                    snap.venue.short_label()
+                ));
+            }
+            return Ok(qty);
+        }
+        let raw = parse_ticket_qty(&self.ticket_qty_input).map_err(|e| e.to_string())?;
+        let snapped = floor_to_board_lot(snap.venue, raw);
+        if !snapped.is_finite() || snapped < snap.venue.board_lot() - 1.0e-7 || snapped <= 0.0 {
+            return Err(format!(
+                "Quantity {raw} snaps below {} minimum board lot {}",
+                snap.venue.short_label(),
+                snap.venue.board_lot()
+            ));
+        }
+        Ok(snapped)
+    }
+
+    /// Stages a tick-snapped, venue-validated `Limit` or `Stop` order from a DOM Ladder row click.
+    pub fn stage_dom_click_order(
+        &mut self,
+        side: OrderSide,
+        clicked_price: f64,
+    ) -> Result<u64, String> {
+        if self.base_candles.is_empty() {
+            let err = "no market candles loaded".to_owned();
+            self.last_trade_status = Some((true, err.clone()));
+            return Err(err);
+        }
+        let snap = self.compute_active_dom_ladder().map_err(|e| {
+            let msg = e.to_string();
+            self.last_trade_status = Some((true, msg.clone()));
+            msg
+        })?;
+        let qty = self
+            .effective_dom_order_qty(side, clicked_price, &snap)
+            .inspect_err(|msg| {
+                self.last_trade_status = Some((true, msg.clone()));
+            })?;
+        let req = stage_ladder_order(&LadderStageInput {
+            side,
+            clicked_price,
+            mark_price: snap.mark_price,
+            quantity: qty,
+            venue: snap.venue,
+            resolved_unit: snap.resolved_unit,
+            daily_band: snap.daily_band,
+            stop_loss_ticks: (self.dom_stop_loss_ticks > 0).then_some(self.dom_stop_loss_ticks),
+            take_profit_ticks: (self.dom_take_profit_ticks > 0)
+                .then_some(self.dom_take_profit_ticks),
+            open_position: self.trading.open_position().cloned(),
+            allow_account_short: self.trading.config.allow_short,
+        })
+        .map_err(|e| {
+            let msg = e.to_string();
+            self.last_trade_status = Some((true, msg.clone()));
+            msg
+        })?;
+        let cursor_idx = self.current_trading_cursor_base_index();
+        match self
+            .trading
+            .submit_order(req, &self.base_candles, cursor_idx)
+        {
+            Ok(id) => {
+                let kind_px = match req.kind {
+                    OrderKind::Limit { limit_price } => {
+                        format!(
+                            "LMT @ {}",
+                            crate::viewport::format_price_fixed_decimals(
+                                limit_price,
+                                snap.price_decimals
+                            )
+                        )
+                    }
+                    OrderKind::Stop { stop_price } => {
+                        format!(
+                            "STP @ {}",
+                            crate::viewport::format_price_fixed_decimals(
+                                stop_price,
+                                snap.price_decimals
+                            )
+                        )
+                    }
+                    OrderKind::Market => "MKT".to_owned(),
+                };
+                self.last_trade_status = Some((
+                    false,
+                    format!(
+                        "DOM #{id} {} {} {kind_px} ({})",
+                        side.short_label(),
+                        format_clean_qty(req.quantity),
+                        snap.venue.short_label()
+                    ),
+                ));
+                Ok(id)
+            }
+            Err(err) => {
+                let msg = err.to_string();
+                self.last_trade_status = Some((true, msg.clone()));
+                Err(msg)
+            }
+        }
+    }
+
+    /// Executes an immediate venue-validated `Market` order (from DOM toolbar buttons or global hotkeys).
+    pub fn submit_quick_market_order(&mut self, side: OrderSide) -> Result<u64, String> {
+        if self.base_candles.is_empty() {
+            let err = "no market candles loaded".to_owned();
+            self.last_trade_status = Some((true, err.clone()));
+            return Err(err);
+        }
+        let snap = self.compute_active_dom_ladder().map_err(|e| {
+            let msg = e.to_string();
+            self.last_trade_status = Some((true, msg.clone()));
+            msg
+        })?;
+        let mark = self.current_mark_price();
+        if !mark.is_finite() || mark <= 0.0 {
+            let msg = "invalid causal mark price for quick market execution".to_owned();
+            self.last_trade_status = Some((true, msg.clone()));
+            return Err(msg);
+        }
+        let qty = self
+            .effective_dom_order_qty(side, mark, &snap)
+            .inspect_err(|msg| {
+                self.last_trade_status = Some((true, msg.clone()));
+            })?;
+
+        let closable_long = self
+            .trading
+            .open_position()
+            .filter(|p| p.side == PositionSide::Long && p.quantity.is_finite() && p.quantity > 0.0)
+            .map_or(0.0, |p| p.quantity);
+        if side == OrderSide::Sell
+            && qty > closable_long + 1.0e-7
+            && (!snap.venue.allows_short() || !self.trading.config.allow_short)
+        {
+            let msg = format!(
+                "short selling not allowed on {} (sell {:.0} exceeds closable long {:.0})",
+                snap.venue.short_label(),
+                qty,
+                closable_long
+            );
+            self.last_trade_status = Some((true, msg.clone()));
+            return Err(msg);
+        }
+
+        let is_pure_reduce = self
+            .trading
+            .open_position()
+            .is_some_and(|pos| side == pos.side.exit_order_side() && qty <= pos.quantity + 1.0e-7);
+        let (stop_loss, take_profit) = if is_pure_reduce {
+            (None, None)
+        } else {
+            crate::trading::compute_quick_market_brackets(
+                mark,
+                side,
+                self.trading.config.slippage_bps,
+                self.dom_stop_loss_ticks,
+                self.dom_take_profit_ticks,
+                snap.venue,
+                snap.resolved_unit,
+            )
+            .map_err(|e| {
+                let msg = e.to_string();
+                self.last_trade_status = Some((true, msg.clone()));
+                msg
+            })?
+        };
+
+        let cursor_idx = self.current_trading_cursor_base_index();
+        match self.trading.submit_order(
+            OrderRequest {
+                side,
+                kind: OrderKind::Market,
+                quantity: qty,
+                stop_loss,
+                take_profit,
+            },
+            &self.base_candles,
+            cursor_idx,
+        ) {
+            Ok(id) => {
+                self.last_trade_status = Some((
+                    false,
+                    format!(
+                        "Filled #{id} {} {} MKT @ {}",
+                        side.short_label(),
+                        format_clean_qty(qty),
+                        crate::viewport::format_price_fixed_decimals(mark, snap.price_decimals)
+                    ),
+                ));
+                Ok(id)
+            }
+            Err(err) => {
+                let msg = err.to_string();
+                self.last_trade_status = Some((true, msg.clone()));
+                Err(msg)
+            }
+        }
+    }
+
+    /// Cancels every pending working order ID in `order_ids` (1-click DOM row cancel).
+    pub fn cancel_dom_row_orders(&mut self, order_ids: &[u64]) -> usize {
+        let mut cancelled = 0_usize;
+        for &id in order_ids {
+            if self.cancel_working_order(id).is_ok() {
+                cancelled += 1;
+            }
+        }
+        if cancelled > 1 {
+            self.last_trade_status = Some((false, format!("Cancelled {cancelled} DOM row orders")));
+        }
+        cancelled
+    }
+
+    /// Cancels all active pending working orders for the active trading session.
+    pub fn cancel_all_working_orders(&mut self) -> usize {
+        let ids: Vec<u64> = self.trading.pending_orders().map(|o| o.id).collect();
+        let count = self.cancel_dom_row_orders(&ids);
+        if ids.is_empty() {
+            self.last_trade_status =
+                Some((false, "No pending working orders to cancel".to_owned()));
+        } else {
+            self.last_trade_status = Some((false, format!("Cancelled {count} working orders")));
+        }
+        count
+    }
+
+    /// Executes a resolved global [`HotkeyAction`] when hotkey dispatch is eligible.
+    pub fn execute_hotkey_action(&mut self, action: HotkeyAction) -> bool {
+        match action {
+            HotkeyAction::ReplayPlayPause => {
+                if self.replay.is_active() {
+                    self.toggle_replay_play_pause()
+                } else {
+                    false
+                }
+            }
+            HotkeyAction::ReplayStepForward => {
+                if self.replay.is_active() {
+                    self.step_replay_forward(1)
+                } else {
+                    false
+                }
+            }
+            HotkeyAction::ReplayStepBack => {
+                if self.replay.is_active() {
+                    self.step_replay_backward(1)
+                } else {
+                    false
+                }
+            }
+            HotkeyAction::ReplayCutTool => {
+                if self.replay.selecting_cut_bar {
+                    self.cancel_replay_cut_selection();
+                } else {
+                    self.enter_replay_cut_selection();
+                }
+                true
+            }
+            HotkeyAction::QuickBuyMarket => {
+                let _ = self.submit_quick_market_order(OrderSide::Buy);
+                true
+            }
+            HotkeyAction::QuickSellMarket => {
+                let _ = self.submit_quick_market_order(OrderSide::Sell);
+                true
+            }
+            HotkeyAction::FlattenPosition => {
+                let _ = self.flatten_open_position();
+                true
+            }
+            HotkeyAction::CancelAllPending => {
+                let _ = self.cancel_all_working_orders();
+                true
+            }
+            HotkeyAction::ToggleTradingDock => {
+                if self.show_trading_panel && self.right_dock_tab == RightDockTab::Trading {
+                    self.show_trading_panel = false;
+                } else {
+                    self.show_trading_panel = true;
+                    self.right_dock_tab = RightDockTab::Trading;
+                }
+                true
+            }
+            HotkeyAction::ToggleDomLadderView => {
+                if self.show_trading_panel && self.right_dock_tab == RightDockTab::Trading {
+                    self.trading_view_mode = match self.trading_view_mode {
+                        TemplateTradingViewMode::OrderTicket => TemplateTradingViewMode::DomLadder,
+                        TemplateTradingViewMode::DomLadder => TemplateTradingViewMode::OrderTicket,
+                    };
+                } else {
+                    self.open_dom_ladder();
+                }
+                true
+            }
+            HotkeyAction::CenterDomOnMark => {
+                self.center_dom_on_mark();
+                self.open_dom_ladder();
+                true
+            }
+            HotkeyAction::ToggleScannerDock => {
+                self.show_scanner_dock = !self.show_scanner_dock;
+                true
+            }
+            HotkeyAction::ToggleJournalDock => {
+                if self.show_journal_panel && self.right_dock_tab == RightDockTab::Journal {
+                    self.show_journal_panel = false;
+                } else {
+                    self.open_journal_tab();
+                }
+                true
+            }
+            HotkeyAction::ToggleAlertsDock => {
+                if self.show_alerts_panel && self.right_dock_tab == RightDockTab::Alerts {
+                    self.show_alerts_panel = false;
+                } else {
+                    self.show_alerts_panel = true;
+                    self.right_dock_tab = RightDockTab::Alerts;
+                }
+                true
+            }
+            HotkeyAction::ToggleStrategyDock => {
+                if self.show_strategy_panel && self.right_dock_tab == RightDockTab::StrategyLab {
+                    self.show_strategy_panel = false;
+                } else {
+                    self.open_strategy_lab();
+                }
+                true
+            }
+            HotkeyAction::CycleGridLayout => {
+                let all = MultiChartLayoutKind::ALL;
+                let idx = all.iter().position(|l| *l == self.grid_layout).unwrap_or(0);
+                let next = all[(idx + 1) % all.len()];
+                self.set_grid_layout(next);
+                true
+            }
+            HotkeyAction::OpenShortcutsModal => {
+                self.open_hotkeys_modal();
+                true
+            }
+        }
     }
 
     // =========================================================================
@@ -4005,6 +4510,26 @@ impl SumiWorkstationApp {
                 },
             });
         }
+        let dock_layout = WorkspaceDockPreset {
+            show_scanner_dock: self.show_scanner_dock,
+            scanner_tab: match self.scanner_tab {
+                ScannerDockTab::Watchlist => TemplateScannerTab::Watchlist,
+                ScannerDockTab::Signals => TemplateScannerTab::Signals,
+                ScannerDockTab::Breadth => TemplateScannerTab::Breadth,
+            },
+            show_trading_panel: self.show_trading_panel,
+            show_alerts_panel: self.show_alerts_panel,
+            show_strategy_panel: self.show_strategy_panel,
+            show_journal_panel: self.show_journal_panel,
+            right_dock_tab: match self.right_dock_tab {
+                RightDockTab::Trading => TemplateRightDockTab::Trading,
+                RightDockTab::Alerts => TemplateRightDockTab::Alerts,
+                RightDockTab::StrategyLab => TemplateRightDockTab::StrategyLab,
+                RightDockTab::Journal => TemplateRightDockTab::Journal,
+            },
+            trading_view_mode: self.trading_view_mode,
+            show_replay_bar: self.show_replay_bar,
+        };
         let mut tpl = WorkspaceTemplate {
             schema_version: crate::viewport::WORKSPACE_TEMPLATE_SCHEMA_VERSION,
             name: name.to_owned(),
@@ -4018,12 +4543,22 @@ impl SumiWorkstationApp {
             sync: self.grid_sync,
             active_slot: self.active_chart_slot,
             slots,
+            dock_layout,
+            hotkey_profile: self.hotkey_profile.id,
+            hotkey_base_preset: (self.hotkey_profile.id == HotkeyProfileId::Custom
+                && !matches!(
+                    self.hotkey_profile.base_preset(),
+                    HotkeyProfileId::StandardCharting | HotkeyProfileId::Custom
+                ))
+            .then_some(self.hotkey_profile.base_preset()),
+            hotkey_overrides: self.hotkey_profile.overrides_from_preset(),
         };
         tpl.sanitize();
         tpl
     }
 
-    /// Applies a validated [`WorkspaceTemplate`] across the primary slot and all secondary slots.
+    /// Applies a validated [`WorkspaceTemplate`] across the primary slot, all secondary slots,
+    /// dock visibility/tabs, DOM view mode, and hotkey profile/overrides.
     pub fn apply_workspace_template(&mut self, template: &WorkspaceTemplate) {
         let mut tpl = template.clone();
         tpl.sanitize();
@@ -4094,6 +4629,37 @@ impl SumiWorkstationApp {
         self.active_chart_slot = tpl
             .active_slot
             .min(self.grid_layout.slot_count().saturating_sub(1));
+
+        self.show_scanner_dock = tpl.dock_layout.show_scanner_dock;
+        self.scanner_tab = match tpl.dock_layout.scanner_tab {
+            TemplateScannerTab::Watchlist => ScannerDockTab::Watchlist,
+            TemplateScannerTab::Signals => ScannerDockTab::Signals,
+            TemplateScannerTab::Breadth => ScannerDockTab::Breadth,
+        };
+        self.show_trading_panel = tpl.dock_layout.show_trading_panel;
+        self.show_alerts_panel = tpl.dock_layout.show_alerts_panel;
+        self.show_strategy_panel = tpl.dock_layout.show_strategy_panel;
+        self.show_journal_panel = tpl.dock_layout.show_journal_panel;
+        self.right_dock_tab = match tpl.dock_layout.right_dock_tab {
+            TemplateRightDockTab::Trading => RightDockTab::Trading,
+            TemplateRightDockTab::Alerts => RightDockTab::Alerts,
+            TemplateRightDockTab::StrategyLab => RightDockTab::StrategyLab,
+            TemplateRightDockTab::Journal => RightDockTab::Journal,
+        };
+        self.trading_view_mode = tpl.dock_layout.trading_view_mode;
+        if tpl.dock_layout.show_replay_bar {
+            self.show_replay_bar = true;
+        } else if !self.replay.is_active() {
+            self.show_replay_bar = false;
+        }
+        self.hotkey_profile = HotkeyProfile::from_preset_with_base_and_overrides(
+            tpl.hotkey_profile,
+            tpl.hotkey_base_preset,
+            &tpl.hotkey_overrides,
+        );
+        self.dom_center_override = None;
+        self.rebinding_hotkey_action = None;
+
         self.sync_indicators_and_benchmarks();
         self.sync_secondary_slots();
         self.pending_grid_time_sync =
@@ -5384,6 +5950,8 @@ impl SumiWorkstationApp {
     /// Opens the keyboard-first `Cmd+K` / `Ctrl+K` Command Palette modal and requests input focus.
     pub fn open_command_palette(&mut self) {
         self.show_templates_modal = false;
+        self.show_hotkeys_modal = false;
+        self.rebinding_hotkey_action = None;
         self.drawings.cancel_active_gesture();
         self.viewport.cancel_active_interactions();
         for slot in &mut self.secondary_slots {
@@ -5714,6 +6282,20 @@ impl SumiWorkstationApp {
             "paper trade ticket order blotter position equity".to_owned(),
             PaletteAction::OpenTradingTab,
         );
+        push_scored(
+            PaletteCategory::Trading,
+            "Open DOM / Execution Price Ladder (R14)".to_owned(),
+            "Synthetic OHLCV_SYNTH_DOM_PROXY ladder, tick band guards, click-to-stage".to_owned(),
+            "dom ladder depth market footprint orderbook click stage hose vn30f".to_owned(),
+            PaletteAction::OpenDomLadder,
+        );
+        push_scored(
+            PaletteCategory::Trading,
+            "Center DOM Ladder on Mark Price".to_owned(),
+            "Recenter synthetic DOM price ladder around active causal close/mark".to_owned(),
+            "center dom ladder mark recenter reset".to_owned(),
+            PaletteAction::CenterDomLadder,
+        );
         let j_vis = self
             .journal
             .visible_entries(self.replay_causal_close_timestamp())
@@ -5963,6 +6545,39 @@ impl SumiWorkstationApp {
             "workspace template ron json save load preset".to_owned(),
             PaletteAction::OpenTemplatesModal,
         );
+        push_scored(
+            PaletteCategory::Workspace,
+            "Open Keyboard Shortcuts & Hotkey Profiles (R14)".to_owned(),
+            "Switch presets, rebind conflict-free hotkeys (Standard / DOM Fast / Replay)"
+                .to_owned(),
+            "hotkey keyboard shortcuts keymap rebind profile preset dom replay".to_owned(),
+            PaletteAction::OpenHotkeysModal,
+        );
+        for (preset_id, label, desc) in [
+            (
+                HotkeyProfileId::StandardCharting,
+                "Switch Hotkey Profile: Standard Charting",
+                "Balanced navigation, replay transport, and order staging keys",
+            ),
+            (
+                HotkeyProfileId::InstitutionalDomFast,
+                "Switch Hotkey Profile: Institutional DOM Fast",
+                "Rapid bid/ask ladder staging, center DOM, flatten & cancel keys",
+            ),
+            (
+                HotkeyProfileId::ReplayPractice,
+                "Switch Hotkey Profile: Replay Practice",
+                "Focused bar replay transport, cut-date, and drill hotkeys",
+            ),
+        ] {
+            push_scored(
+                PaletteCategory::Workspace,
+                label.to_owned(),
+                desc.to_owned(),
+                format!("hotkey profile preset switch {}", preset_id.short_label()),
+                PaletteAction::SetHotkeyProfile(preset_id),
+            );
+        }
         for (tpl_idx, tpl) in builtin_workspace_templates().into_iter().enumerate() {
             push_scored(
                 PaletteCategory::Workspace,
@@ -6233,8 +6848,22 @@ impl SumiWorkstationApp {
                 self.show_scanner_dock = true;
                 self.scanner_tab = ScannerDockTab::Breadth;
             }
+            PaletteAction::OpenDomLadder => {
+                self.open_dom_ladder();
+            }
+            PaletteAction::CenterDomLadder => {
+                self.center_dom_on_mark();
+            }
             PaletteAction::OpenTemplatesModal => {
+                self.show_hotkeys_modal = false;
+                self.rebinding_hotkey_action = None;
                 self.show_templates_modal = true;
+            }
+            PaletteAction::OpenHotkeysModal => {
+                self.open_hotkeys_modal();
+            }
+            PaletteAction::SetHotkeyProfile(preset_id) => {
+                self.set_hotkey_profile(preset_id);
             }
             PaletteAction::ApplyBuiltinTemplate(idx) => {
                 if let Some(tpl) = builtin_workspace_templates().get(idx) {
@@ -7052,7 +7681,8 @@ impl SumiWorkstationApp {
             self.toggle_command_palette();
         }
 
-        let any_modal_open = self.command_palette.open || self.show_templates_modal;
+        let any_modal_open =
+            self.command_palette.open || self.show_templates_modal || self.show_hotkeys_modal;
         if self.command_palette.open {
             let vp_rect = ui.input(|i| i.viewport_rect());
             let modal_est = command_palette_modal_rect_estimate(vp_rect);
@@ -7074,6 +7704,26 @@ impl SumiWorkstationApp {
                 let _ = i.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
                 let _ = i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab);
             });
+        } else if self.show_hotkeys_modal {
+            let vp_rect = ui.input(|i| i.viewport_rect());
+            let modal_rect = self
+                .last_hotkeys_modal_rect
+                .unwrap_or_else(|| Self::hotkeys_modal_rect(vp_rect));
+            ui.input_mut(|i| {
+                let _ = i.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
+                let _ = i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab);
+                if i.pointer
+                    .hover_pos()
+                    .is_none_or(|pos| !modal_rect.contains(pos))
+                {
+                    i.smooth_scroll_delta = Vec2::ZERO;
+                    i.raw
+                        .events
+                        .retain(|ev| !matches!(ev, egui::Event::MouseWheel { .. }));
+                }
+            });
+        } else {
+            self.last_hotkeys_modal_rect = None;
         }
 
         if self.replay.is_playing() && !any_modal_open {
@@ -7295,6 +7945,22 @@ impl SumiWorkstationApp {
                         self.right_dock_tab = RightDockTab::Trading;
                     }
 
+                    let mut dom_open = self.show_trading_panel
+                        && self.right_dock_tab == RightDockTab::Trading
+                        && self.trading_view_mode == TemplateTradingViewMode::DomLadder;
+                    if indicator_toggle_pill(
+                        ui,
+                        &mut dom_open,
+                        "DOM Ladder",
+                        Color32::from_rgb(38, 166, 154),
+                    ) {
+                        if dom_open {
+                            self.open_dom_ladder();
+                        } else {
+                            self.trading_view_mode = TemplateTradingViewMode::OrderTicket;
+                        }
+                    }
+
                     let tb_cutoff = self.replay.cutoff_timestamp(&self.base_candles);
                     let vis_rules = self
                         .alerts
@@ -7406,6 +8072,8 @@ impl SumiWorkstationApp {
                     {
                         if tpl_open {
                             self.command_palette.open = false;
+                            self.show_hotkeys_modal = false;
+                            self.rebinding_hotkey_action = None;
                             if self.template_doc_buffer.trim().is_empty() {
                                 let cur =
                                     self.capture_workspace_template(&self.template_name_input);
@@ -7417,6 +8085,28 @@ impl SumiWorkstationApp {
                             }
                         }
                         self.show_templates_modal = tpl_open;
+                    }
+
+                    let mut keys_open = self.show_hotkeys_modal;
+                    let key_badge = match self.hotkey_profile.id {
+                        HotkeyProfileId::StandardCharting => "Std",
+                        HotkeyProfileId::InstitutionalDomFast => "DOM",
+                        HotkeyProfileId::ReplayPractice => "Rpl",
+                        HotkeyProfileId::Custom => "Cust",
+                    };
+                    let keys_label = format!("Keys:{key_badge}");
+                    if indicator_toggle_pill(
+                        ui,
+                        &mut keys_open,
+                        &keys_label,
+                        Color32::from_rgb(255, 183, 77),
+                    ) {
+                        if keys_open {
+                            self.open_hotkeys_modal();
+                        } else {
+                            self.show_hotkeys_modal = false;
+                            self.rebinding_hotkey_action = None;
+                        }
                     }
 
                     let mut palette_open = self.command_palette.open;
@@ -7977,7 +8667,7 @@ impl SumiWorkstationApp {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(format!(
-                                    "R13 [{grid_badge}]  |  {} ({}->{})  |  RPL: {replay_tag}  |  ALT: {armed_alerts}A/{trig_events}T  |  EQ: ${:.0} ({:+.0}){bt_tag}  |  {}P/{}D  |  BARS: {}/{} ({first_date}..{last_date}) {}x  |  {scale_mode}({auto_tag})  |  {:.0}×{:.0}",
+                                    "R14 [{grid_badge}]  |  {} ({}->{})  |  RPL: {replay_tag}  |  ALT: {armed_alerts}A/{trig_events}T  |  EQ: ${:.0} ({:+.0}){bt_tag}  |  {}P/{}D  |  BARS: {}/{} ({first_date}..{last_date}) {}x  |  {scale_mode}({auto_tag})  |  {:.0}×{:.0}",
                                     self.data_source.short_label(),
                                     self.base_timeframe,
                                     self.active_timeframe,
@@ -8001,7 +8691,7 @@ impl SumiWorkstationApp {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(format!(
-                                    "R13 [{grid_badge}]  |  RPL: {replay_tag}  |  ALT: {armed_alerts} armed{bt_tag}  |  BARS: {} ({first_date}..{last_date})",
+                                    "R14 [{grid_badge}]  |  RPL: {replay_tag}  |  ALT: {armed_alerts} armed{bt_tag}  |  BARS: {} ({first_date}..{last_date})",
                                     self.candles.len()
                                 ))
                                 .monospace()
@@ -8080,6 +8770,11 @@ impl SumiWorkstationApp {
                 RightDockTab::StrategyLab | RightDockTab::Journal => {
                     let def = if win_w < 1060.0 { 282.0 } else { 312.0 };
                     ("strategy_lab_panel", def, 248.0, 386.0)
+                }
+                RightDockTab::Trading
+                    if self.trading_view_mode == TemplateTradingViewMode::DomLadder =>
+                {
+                    ("dom_ladder_panel", 298.0, 248.0, 376.0)
                 }
                 RightDockTab::Trading | RightDockTab::Alerts => {
                     ("paper_trading_panel", 258.0, 222.0, 320.0)
@@ -8342,36 +9037,84 @@ impl SumiWorkstationApp {
             ui.ctx().request_repaint();
         }
 
-        // 4b. Floating `Cmd+K` / `Ctrl+K` Command Palette & `Workspace Layout Templates` Modals (`R08` & `R12`)
+        // 4b. Floating `Cmd+K` / `Ctrl+K` Command Palette, `Workspace Layout Templates` & `Hotkeys` Modals (`R08`, `R12`, `R14`)
         if self.command_palette.open {
             self.render_command_palette_modal(ui);
         } else if self.show_templates_modal {
             self.render_templates_modal(ui);
+        } else if self.show_hotkeys_modal {
+            self.render_hotkeys_modal(ui);
         }
 
-        // 5. Non-modal keyboard transport shortcuts (suppressed whenever modal or text input holds focus)
-        if !any_modal_open && !ui.ctx().egui_wants_keyboard_input() {
-            let (esc_pressed, space_pressed, step_fwd, step_back) = ui.input(|i| {
-                let plain = !i.modifiers.command && !i.modifiers.ctrl && !i.modifiers.alt;
-                (
-                    i.key_pressed(egui::Key::Escape),
-                    plain && i.key_pressed(egui::Key::Space),
-                    plain && i.key_pressed(egui::Key::Period),
-                    plain && i.key_pressed(egui::Key::Comma),
-                )
+        // 5. Non-modal global hotkey & replay transport dispatch (gated via `is_global_hotkey_eligible`)
+        if !any_modal_open {
+            let text_edit_focused = ui.ctx().text_edit_focused();
+            let any_widget_focused = ui.ctx().egui_wants_keyboard_input();
+            let (esc_pressed, cmd_or_ctrl, pressed_events) = ui.input(|i| {
+                let cmd = i.modifiers.command || i.modifiers.ctrl || i.modifiers.mac_cmd;
+                let mut evs = Vec::new();
+                for ev in &i.events {
+                    if let egui::Event::Key {
+                        key,
+                        pressed: true,
+                        repeat,
+                        modifiers,
+                        ..
+                    } = ev
+                        && let Some(hk) = egui_key_to_hotkey_key(*key)
+                    {
+                        let ev_cmd = modifiers.command || modifiers.ctrl || modifiers.mac_cmd;
+                        if !ev_cmd {
+                            let eff_shift = if hk == HotkeyKey::Question {
+                                false
+                            } else {
+                                modifiers.shift
+                            };
+                            let chord = HotkeyChord::new(
+                                hk,
+                                HotkeyModifiers {
+                                    shift: eff_shift,
+                                    alt: modifiers.alt,
+                                },
+                            );
+                            evs.push((chord, *repeat));
+                        }
+                    }
+                }
+                (i.key_pressed(egui::Key::Escape), cmd, evs)
             });
+
             let mut changed = false;
             if was_selecting_cut_bar && esc_pressed {
                 self.cancel_replay_cut_selection();
                 changed = true;
-            } else if self.replay.is_active() {
-                if space_pressed {
-                    let _ = self.toggle_replay_play_pause();
-                    changed = true;
-                } else if step_fwd {
-                    changed = self.step_replay_forward(1);
-                } else if step_back {
-                    changed = self.step_replay_backward(1);
+            } else if is_global_hotkey_eligible(any_modal_open, text_edit_focused, cmd_or_ctrl) {
+                for (chord, repeat) in pressed_events {
+                    if chord.key == HotkeyKey::Space
+                        && !chord.modifiers.shift
+                        && !chord.modifiers.alt
+                        && any_widget_focused
+                    {
+                        continue;
+                    }
+                    if let Some(action) = self.hotkey_profile.resolve(chord) {
+                        let repeatable = matches!(
+                            action,
+                            HotkeyAction::ReplayStepForward | HotkeyAction::ReplayStepBack
+                        );
+                        if (!repeat || repeatable) && self.execute_hotkey_action(action) {
+                            changed = true;
+                        }
+                    } else if self.replay.is_active()
+                        && !chord.modifiers.shift
+                        && !chord.modifiers.alt
+                    {
+                        if chord.key == HotkeyKey::Period {
+                            changed |= self.step_replay_forward(1);
+                        } else if chord.key == HotkeyKey::Comma {
+                            changed |= self.step_replay_backward(1);
+                        }
+                    }
                 }
             }
             if changed {
@@ -8601,9 +9344,10 @@ impl SumiWorkstationApp {
 
     fn render_paper_trading_panel(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical()
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(5.0, 6.0);
+                ui.spacing_mut().item_spacing = Vec2::new(5.0, 4.0);
 
                 // Header Row
                 ui.horizontal(|ui| {
@@ -8623,6 +9367,47 @@ impl SumiWorkstationApp {
                         }
                     });
                 });
+
+                // Mode Switcher (`Order Ticket` vs `DOM Ladder` — R14)
+                ui.horizontal(|ui| {
+                    let is_ticket = self.trading_view_mode == TemplateTradingViewMode::OrderTicket;
+                    let is_dom = self.trading_view_mode == TemplateTradingViewMode::DomLadder;
+                    if ui
+                        .selectable_label(
+                            is_ticket,
+                            RichText::new("Order Ticket").monospace().size(10.5),
+                        )
+                        .clicked()
+                    {
+                        self.trading_view_mode = TemplateTradingViewMode::OrderTicket;
+                    }
+                    if ui
+                        .selectable_label(
+                            is_dom,
+                            RichText::new("DOM Ladder").monospace().size(10.5),
+                        )
+                        .clicked()
+                    {
+                        self.trading_view_mode = TemplateTradingViewMode::DomLadder;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let badge = self
+                            .hotkey_profile
+                            .chord_for(HotkeyAction::ToggleDomLadderView)
+                            .map_or_else(|| "-".to_owned(), HotkeyChord::format_badge);
+                        ui.label(
+                            RichText::new(format!("[{badge}]"))
+                                .monospace()
+                                .size(9.5)
+                                .color(palette::TEXT_MUTED),
+                        );
+                    });
+                });
+
+                if self.trading_view_mode == TemplateTradingViewMode::DomLadder {
+                    self.render_dom_ladder_view(ui);
+                    return;
+                }
 
                 let mark = self.current_mark_price();
                 let metrics = self.trading.metrics(mark);
@@ -9029,6 +9814,711 @@ impl SumiWorkstationApp {
                         });
                 }
             });
+    }
+
+    fn render_dom_ladder_view(&mut self, ui: &mut egui::Ui) {
+        let mark = self.current_mark_price();
+        let metrics = self.trading.metrics(mark);
+        let open_pos = self.trading.open_position().cloned();
+        let pnl_color = if metrics.net_pnl > 1e-6 {
+            palette::BULLISH
+        } else if metrics.net_pnl < -1e-6 {
+            palette::BEARISH
+        } else {
+            palette::TEXT_PRIMARY
+        };
+
+        // Compute active causal DOM ladder snapshot up-front so header & open position use exact decimals
+        let snap = match self.compute_active_dom_ladder() {
+            Ok(s) => s,
+            Err(err) => {
+                ui.label(
+                    RichText::new(format!("DOM unavailable: {err}"))
+                        .monospace()
+                        .size(10.5)
+                        .color(palette::BEARISH),
+                );
+                return;
+            }
+        };
+
+        // 1. Fidelity Badge + Compact Equity & Open Position Strip
+        Frame::new()
+            .fill(Color32::from_rgb(19, 24, 35))
+            .corner_radius(CornerRadius::same(4))
+            .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+            .inner_margin(Margin::symmetric(6, 3))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    Frame::new()
+                        .fill(Color32::from_rgba_unmultiplied(38, 166, 154, 32))
+                        .stroke(Stroke::new(1.0, palette::BULLISH))
+                        .corner_radius(CornerRadius::same(3))
+                        .inner_margin(Margin::symmetric(4, 1))
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new(DOM_LADDER_DATA_FIDELITY)
+                                    .monospace()
+                                    .strong()
+                                    .size(8.8)
+                                    .color(palette::BULLISH),
+                            );
+                        });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!("${:.0}", metrics.equity))
+                                .monospace()
+                                .strong()
+                                .size(10.5)
+                                .color(pnl_color),
+                        );
+                    });
+                });
+                ui.horizontal(|ui| {
+                    let pos_txt = open_pos.as_ref().map_or_else(
+                        || "FLAT".to_owned(),
+                        |p| {
+                            format!(
+                                "{} {} @ {}",
+                                p.side.short_label(),
+                                format_clean_qty(p.quantity),
+                                crate::viewport::format_price_fixed_decimals(
+                                    p.avg_entry_price,
+                                    snap.price_decimals,
+                                )
+                            )
+                        },
+                    );
+                    let pos_col = open_pos
+                        .as_ref()
+                        .map_or(palette::TEXT_MUTED, |p| match p.side {
+                            PositionSide::Long => palette::BULLISH,
+                            PositionSide::Short => palette::BEARISH,
+                        });
+                    ui.label(RichText::new(pos_txt).monospace().size(9.8).color(pos_col));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "Net {:+.1} | W{}",
+                                metrics.net_pnl, metrics.pending_order_count
+                            ))
+                            .monospace()
+                            .size(9.5)
+                            .color(palette::TEXT_MUTED),
+                        );
+                    });
+                });
+            });
+
+        let unit_lbl = snap.venue.price_unit_label(snap.resolved_unit);
+        let short_allowed = snap.venue.allows_short();
+
+        // 3. Venue / Board Lot / Daily Band Strip
+        Frame::new()
+            .fill(Color32::from_rgb(16, 20, 30))
+            .corner_radius(CornerRadius::same(4))
+            .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+            .inner_margin(Margin::symmetric(6, 3))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "{} | Lot {} | {unit_lbl} | {}",
+                            snap.venue.short_label(),
+                            format_clean_qty(snap.venue.board_lot()),
+                            if short_allowed {
+                                "Short OK"
+                            } else {
+                                "Long-only"
+                            }
+                        ))
+                        .monospace()
+                        .size(9.6)
+                        .color(palette::TEXT_PRIMARY),
+                    );
+                });
+                if let Some(band) = snap.daily_band {
+                    let flr = crate::viewport::format_price_fixed_decimals(
+                        band.floor_price,
+                        snap.price_decimals,
+                    );
+                    let ref_p = crate::viewport::format_price_fixed_decimals(
+                        band.reference_price,
+                        snap.price_decimals,
+                    );
+                    let ceil = crate::viewport::format_price_fixed_decimals(
+                        band.ceiling_price,
+                        snap.price_decimals,
+                    );
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!("FLR {flr}"))
+                                .monospace()
+                                .size(9.4)
+                                .color(Color32::from_rgb(86, 198, 255)),
+                        );
+                        ui.label(
+                            RichText::new(format!("REF {ref_p}"))
+                                .monospace()
+                                .size(9.4)
+                                .color(palette::ALERT_ARMED_AMBER),
+                        );
+                        ui.label(
+                            RichText::new(format!("CEIL {ceil}"))
+                                .monospace()
+                                .size(9.4)
+                                .color(Color32::from_rgb(206, 126, 255)),
+                        );
+                    });
+                }
+            });
+
+        // 4. Sizing, SL/TP Ticks & Lookback Controls
+        Frame::new()
+            .fill(Color32::from_rgb(18, 22, 32))
+            .corner_radius(CornerRadius::same(4))
+            .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+            .inner_margin(Margin::symmetric(6, 3))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("Qty")
+                            .monospace()
+                            .size(9.8)
+                            .color(palette::TEXT_MUTED),
+                    );
+                    if self.dom_use_risk_sizing {
+                        ui.add(
+                            egui::DragValue::new(&mut self.risk_plan_input.risk_pct)
+                                .range(0.1..=10.0)
+                                .speed(0.05)
+                                .suffix("%"),
+                        );
+                    } else {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.ticket_qty_input)
+                                .desired_width(56.0)
+                                .font(egui::FontId::monospace(10.0)),
+                        );
+                    }
+                    ui.checkbox(
+                        &mut self.dom_use_risk_sizing,
+                        RichText::new("Risk%").monospace().size(9.6),
+                    );
+                    let eff_lbl = match self.effective_dom_order_qty(
+                        OrderSide::Buy,
+                        snap.mark_price,
+                        &snap,
+                    ) {
+                        Ok(q) => (format!("={}", format_clean_qty(q)), palette::BULLISH),
+                        Err(_) => ("=--".to_owned(), palette::BEARISH),
+                    };
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(eff_lbl.0)
+                                .monospace()
+                                .strong()
+                                .size(9.8)
+                                .color(eff_lbl.1),
+                        );
+                    });
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("SLt")
+                            .monospace()
+                            .size(9.5)
+                            .color(palette::TEXT_MUTED),
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut self.dom_stop_loss_ticks)
+                            .range(0..=500)
+                            .speed(1.0),
+                    );
+                    ui.label(
+                        RichText::new("TPt")
+                            .monospace()
+                            .size(9.5)
+                            .color(palette::TEXT_MUTED),
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut self.dom_take_profit_ticks)
+                            .range(0..=1000)
+                            .speed(1.0),
+                    );
+                    ui.label(
+                        RichText::new("LB")
+                            .monospace()
+                            .size(9.5)
+                            .color(palette::TEXT_MUTED),
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut self.dom_lookback_bars)
+                            .range(10..=500)
+                            .speed(2.0),
+                    );
+                });
+
+                ui.horizontal(|ui| {
+                    if ui
+                        .small_button(RichText::new("▲").monospace().size(9.8))
+                        .clicked()
+                    {
+                        self.shift_dom_center_ticks(5);
+                    }
+                    if ui
+                        .small_button(RichText::new("Center").monospace().size(9.6))
+                        .clicked()
+                    {
+                        self.center_dom_on_mark();
+                    }
+                    if ui
+                        .small_button(RichText::new("▼").monospace().size(9.8))
+                        .clicked()
+                    {
+                        self.shift_dom_center_ticks(-5);
+                    }
+                    let can_sell = short_allowed
+                        || matches!(open_pos, Some(ref p) if p.side == PositionSide::Long);
+                    if ui
+                        .button(
+                            RichText::new("Mkt Buy")
+                                .monospace()
+                                .strong()
+                                .size(9.8)
+                                .color(palette::BULLISH),
+                        )
+                        .clicked()
+                    {
+                        let _ = self.submit_quick_market_order(OrderSide::Buy);
+                    }
+                    if ui
+                        .add_enabled(
+                            can_sell,
+                            egui::Button::new(
+                                RichText::new("Mkt Sell")
+                                    .monospace()
+                                    .strong()
+                                    .size(9.8)
+                                    .color(palette::BEARISH),
+                            ),
+                        )
+                        .clicked()
+                    {
+                        let _ = self.submit_quick_market_order(OrderSide::Sell);
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    if ui
+                        .small_button(RichText::new("Flatten").monospace().size(9.5))
+                        .clicked()
+                    {
+                        let _ = self.flatten_open_position();
+                    }
+                    if ui
+                        .small_button(RichText::new("Cancel All").monospace().size(9.5))
+                        .clicked()
+                    {
+                        let _ = self.cancel_all_working_orders();
+                    }
+                    let poc_txt = snap.poc_price.map_or_else(
+                        || "-".to_owned(),
+                        |p| crate::viewport::format_price_fixed_decimals(p, snap.price_decimals),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "Imb {:+.0}% | POC {poc_txt}",
+                                snap.bid_ask_imbalance_pct
+                            ))
+                            .monospace()
+                            .size(9.2)
+                            .color(palette::TEXT_MUTED),
+                        );
+                    });
+                });
+            });
+
+        // 5. Interactive Single-Painter 21-Row Price Ladder (`Work | Bid | Price | Ask | V×Δ`)
+        let row_h = 15.0_f32;
+        let header_h = 16.0_f32;
+        let avail_w = ui.available_width().max(220.0);
+        let total_h = header_h + (snap.rows.len() as f32) * row_h;
+        let (ladder_rect, response) =
+            ui.allocate_exact_size(Vec2::new(avail_w, total_h), egui::Sense::click());
+        let painter = ui.painter_at(ladder_rect);
+
+        // Background & outer border
+        painter.rect_filled(
+            ladder_rect,
+            CornerRadius::same(3),
+            Color32::from_rgb(14, 17, 24),
+        );
+        painter.rect_stroke(
+            ladder_rect,
+            CornerRadius::same(3),
+            Stroke::new(1.0, palette::BORDER_SUBTLE),
+            egui::StrokeKind::Inside,
+        );
+
+        let w_work = avail_w * 0.15;
+        let w_bid = avail_w * 0.21;
+        let w_price = avail_w * 0.26;
+        let w_ask = avail_w * 0.21;
+        let col_x = [
+            ladder_rect.left(),
+            ladder_rect.left() + w_work,
+            ladder_rect.left() + w_work + w_bid,
+            ladder_rect.left() + w_work + w_bid + w_price,
+            ladder_rect.left() + w_work + w_bid + w_price + w_ask,
+            ladder_rect.right(),
+        ];
+
+        // Header bar
+        let hdr_rect = Rect::from_min_max(
+            ladder_rect.min,
+            Pos2::new(ladder_rect.right(), ladder_rect.top() + header_h),
+        );
+        painter.rect_filled(hdr_rect, CornerRadius::ZERO, Color32::from_rgb(24, 28, 39));
+        let hdr_titles = ["Work", "Bid", "Price", "Ask", "V×Δ"];
+        let hdr_font = egui::FontId::monospace(9.5);
+        for (c_idx, title) in hdr_titles.iter().enumerate() {
+            let cell = Rect::from_min_max(
+                Pos2::new(col_x[c_idx], hdr_rect.top()),
+                Pos2::new(col_x[c_idx + 1], hdr_rect.bottom()),
+            );
+            let cp = painter.with_clip_rect(cell.shrink2(Vec2::new(2.0, 0.0)));
+            cp.text(
+                cell.center(),
+                egui::Align2::CENTER_CENTER,
+                *title,
+                hdr_font.clone(),
+                palette::TEXT_MUTED,
+            );
+        }
+
+        let hover_pos = response.hover_pos();
+        let row_font = egui::FontId::monospace(9.8);
+        let max_depth = snap.max_row_depth.max(1.0);
+        let max_vol = snap.max_row_volume.max(1.0);
+        let half_tick = snap.rows.first().map_or(0.005, |r| r.tick_size * 0.45);
+
+        for (r_idx, row) in snap.rows.iter().enumerate() {
+            let top = hdr_rect.bottom() + (r_idx as f32) * row_h;
+            let row_rect = Rect::from_min_max(
+                Pos2::new(ladder_rect.left(), top),
+                Pos2::new(ladder_rect.right(), top + row_h),
+            );
+            let out_of_band = matches!(
+                row.band_state,
+                DomPriceBandState::AboveCeiling | DomPriceBandState::BelowFloor
+            );
+            let row_bg = match row.band_state {
+                DomPriceBandState::Ceiling => Color32::from_rgba_unmultiplied(186, 85, 211, 24),
+                DomPriceBandState::Floor => Color32::from_rgba_unmultiplied(64, 175, 255, 24),
+                DomPriceBandState::Reference => Color32::from_rgba_unmultiplied(255, 167, 38, 22),
+                DomPriceBandState::AboveCeiling | DomPriceBandState::BelowFloor => {
+                    Color32::from_rgb(10, 12, 18)
+                }
+                DomPriceBandState::Normal => {
+                    if r_idx % 2 == 1 {
+                        Color32::from_rgb(17, 21, 30)
+                    } else {
+                        Color32::from_rgb(14, 17, 25)
+                    }
+                }
+            };
+            painter.rect_filled(row_rect, CornerRadius::ZERO, row_bg);
+
+            let work_cell =
+                Rect::from_min_max(Pos2::new(col_x[0], top), Pos2::new(col_x[1], top + row_h));
+            let bid_cell =
+                Rect::from_min_max(Pos2::new(col_x[1], top), Pos2::new(col_x[2], top + row_h));
+            let price_cell =
+                Rect::from_min_max(Pos2::new(col_x[2], top), Pos2::new(col_x[3], top + row_h));
+            let ask_cell =
+                Rect::from_min_max(Pos2::new(col_x[3], top), Pos2::new(col_x[4], top + row_h));
+            let vol_cell =
+                Rect::from_min_max(Pos2::new(col_x[4], top), Pos2::new(col_x[5], top + row_h));
+
+            // Synthetic Bid Depth Histogram (aligned toward Price column)
+            if row.synth_bid_depth > 0.0 && !out_of_band {
+                let frac = (row.synth_bid_depth / max_depth).clamp(0.0, 1.0) as f32;
+                let bar_w = (bid_cell.width() - 2.0) * frac;
+                let bar = Rect::from_min_max(
+                    Pos2::new(bid_cell.right() - bar_w, bid_cell.top() + 2.0),
+                    Pos2::new(bid_cell.right() - 1.0, bid_cell.bottom() - 2.0),
+                );
+                painter.rect_filled(
+                    bar,
+                    CornerRadius::same(2),
+                    Color32::from_rgba_unmultiplied(38, 166, 154, 72),
+                );
+            }
+
+            // Synthetic Ask Depth Histogram (aligned away from Price column)
+            if row.synth_ask_depth > 0.0 && !out_of_band {
+                let frac = (row.synth_ask_depth / max_depth).clamp(0.0, 1.0) as f32;
+                let bar_w = (ask_cell.width() - 2.0) * frac;
+                let bar = Rect::from_min_max(
+                    Pos2::new(ask_cell.left() + 1.0, ask_cell.top() + 2.0),
+                    Pos2::new(ask_cell.left() + 1.0 + bar_w, ask_cell.bottom() - 2.0),
+                );
+                painter.rect_filled(
+                    bar,
+                    CornerRadius::same(2),
+                    Color32::from_rgba_unmultiplied(239, 83, 80, 72),
+                );
+            }
+
+            // Traded Volume Bar in V×Δ cell
+            let row_vol = row.traded_buy_volume + row.traded_sell_volume;
+            if row_vol > 0.0 {
+                let frac = (row_vol / max_vol).clamp(0.0, 1.0) as f32;
+                let bar_w = (vol_cell.width() - 2.0) * frac;
+                let bar = Rect::from_min_max(
+                    Pos2::new(vol_cell.left() + 1.0, vol_cell.top() + 2.0),
+                    Pos2::new(vol_cell.left() + 1.0 + bar_w, vol_cell.bottom() - 2.0),
+                );
+                let delta_tint = if row.net_delta >= 0.0 {
+                    Color32::from_rgba_unmultiplied(38, 166, 154, 48)
+                } else {
+                    Color32::from_rgba_unmultiplied(239, 83, 80, 48)
+                };
+                painter.rect_filled(bar, CornerRadius::same(2), delta_tint);
+            }
+
+            // Working orders cell
+            if !row.working_order_ids.is_empty() {
+                let w_buy = row.working_buy_qty > 0.0;
+                let w_sell = row.working_sell_qty > 0.0;
+                let w_tot = row.working_buy_qty + row.working_sell_qty;
+                let tag = match (w_buy, w_sell) {
+                    (true, true) => format!("±{}", format_compact_volume_axis(w_tot, None)),
+                    (true, false) => format!("B{}", format_compact_volume_axis(w_tot, None)),
+                    (false, true) => format!("S{}", format_compact_volume_axis(w_tot, None)),
+                    (false, false) => format!("×{}", row.working_order_ids.len()),
+                };
+                let pill_col = if w_buy && !w_sell {
+                    palette::TRADE_ENTRY_BLUE
+                } else if w_sell && !w_buy {
+                    palette::TRADE_STOP_LOSS
+                } else {
+                    palette::ALERT_ARMED_AMBER
+                };
+                let wp = painter.with_clip_rect(work_cell.shrink2(Vec2::new(2.0, 0.0)));
+                wp.rect_filled(
+                    work_cell.shrink(1.5),
+                    CornerRadius::same(2),
+                    pill_col.gamma_multiply(0.24),
+                );
+                wp.text(
+                    work_cell.center(),
+                    egui::Align2::CENTER_CENTER,
+                    tag,
+                    row_font.clone(),
+                    pill_col,
+                );
+            }
+
+            // Bid Qty Text
+            if row.synth_bid_depth >= 1.0 && !out_of_band {
+                let bp = painter.with_clip_rect(bid_cell.shrink2(Vec2::new(2.0, 0.0)));
+                bp.text(
+                    Pos2::new(bid_cell.right() - 4.0, bid_cell.center().y),
+                    egui::Align2::RIGHT_CENTER,
+                    format_compact_volume_axis(row.synth_bid_depth, None),
+                    row_font.clone(),
+                    palette::TEXT_PRIMARY,
+                );
+            }
+
+            // Price Cell Highlight & Text
+            let is_poc = snap
+                .poc_price
+                .is_some_and(|poc| (poc - row.price).abs() <= half_tick);
+            if row.is_at_mark {
+                painter.rect_filled(
+                    price_cell.shrink(1.0),
+                    CornerRadius::same(2),
+                    Color32::from_rgba_unmultiplied(255, 213, 79, 44),
+                );
+                painter.rect_stroke(
+                    price_cell.shrink(1.0),
+                    CornerRadius::same(2),
+                    Stroke::new(1.0, palette::TRADE_FOCUS_HALO),
+                    egui::StrokeKind::Inside,
+                );
+            } else if row.is_at_position_entry {
+                painter.rect_stroke(
+                    price_cell.shrink(1.0),
+                    CornerRadius::same(2),
+                    Stroke::new(1.0, palette::TRADE_ENTRY_BLUE),
+                    egui::StrokeKind::Inside,
+                );
+            } else if is_poc {
+                painter.rect_stroke(
+                    price_cell.shrink(1.0),
+                    CornerRadius::same(2),
+                    Stroke::new(1.0, palette::ALERT_ARMED_AMBER.gamma_multiply(0.75)),
+                    egui::StrokeKind::Inside,
+                );
+            }
+
+            let price_str =
+                crate::viewport::format_price_fixed_decimals(row.price, snap.price_decimals);
+            let price_lbl = match row.band_state {
+                DomPriceBandState::Ceiling => format!("C {price_str}"),
+                DomPriceBandState::Floor => format!("F {price_str}"),
+                _ => price_str,
+            };
+            let price_col = if out_of_band {
+                palette::TEXT_MUTED.gamma_multiply(0.55)
+            } else if row.is_at_mark {
+                palette::ALERT_TRIGGERED_GOLD
+            } else {
+                match row.band_state {
+                    DomPriceBandState::Ceiling => Color32::from_rgb(220, 146, 255),
+                    DomPriceBandState::Floor => Color32::from_rgb(102, 210, 255),
+                    DomPriceBandState::Reference => palette::ALERT_ARMED_AMBER,
+                    _ => palette::TEXT_PRIMARY,
+                }
+            };
+            let pp = painter.with_clip_rect(price_cell.shrink2(Vec2::new(2.0, 0.0)));
+            pp.text(
+                price_cell.center(),
+                egui::Align2::CENTER_CENTER,
+                price_lbl,
+                row_font.clone(),
+                price_col,
+            );
+
+            // Ask Qty Text
+            if row.synth_ask_depth >= 1.0 && !out_of_band {
+                let ap = painter.with_clip_rect(ask_cell.shrink2(Vec2::new(2.0, 0.0)));
+                ap.text(
+                    Pos2::new(ask_cell.left() + 4.0, ask_cell.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    format_compact_volume_axis(row.synth_ask_depth, None),
+                    row_font.clone(),
+                    palette::TEXT_PRIMARY,
+                );
+            }
+
+            // V×Δ Text
+            let delta_lbl = if row.net_delta.abs() >= 1.0 {
+                let sign = if row.net_delta > 0.0 { "+" } else { "" };
+                format!("{sign}{}", format_compact_volume_axis(row.net_delta, None))
+            } else if row_vol >= 1.0 {
+                format_compact_volume_axis(row_vol, None)
+            } else {
+                "-".to_owned()
+            };
+            let delta_col = if row.net_delta > 0.5 {
+                palette::BULLISH
+            } else if row.net_delta < -0.5 {
+                palette::BEARISH
+            } else {
+                palette::TEXT_MUTED
+            };
+            let vp = painter.with_clip_rect(vol_cell.shrink2(Vec2::new(2.0, 0.0)));
+            vp.text(
+                Pos2::new(vol_cell.right() - 3.0, vol_cell.center().y),
+                egui::Align2::RIGHT_CENTER,
+                delta_lbl,
+                row_font.clone(),
+                delta_col,
+            );
+
+            // Hover affordance on clickable cells
+            if let Some(hp) = hover_pos
+                && row_rect.contains(hp)
+            {
+                if work_cell.contains(hp) && !row.working_order_ids.is_empty() {
+                    painter.rect_stroke(
+                        work_cell.shrink(1.0),
+                        CornerRadius::same(2),
+                        Stroke::new(1.0, palette::ALERT_ARMED_AMBER),
+                        egui::StrokeKind::Inside,
+                    );
+                } else if !out_of_band && bid_cell.contains(hp) {
+                    painter.rect_stroke(
+                        bid_cell.shrink(1.0),
+                        CornerRadius::same(2),
+                        Stroke::new(1.0, palette::BULLISH),
+                        egui::StrokeKind::Inside,
+                    );
+                } else if !out_of_band && ask_cell.contains(hp) {
+                    painter.rect_stroke(
+                        ask_cell.shrink(1.0),
+                        CornerRadius::same(2),
+                        Stroke::new(1.0, palette::BEARISH),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+            }
+        }
+
+        // Column dividers
+        for &x in &col_x[1..5] {
+            painter.line_segment(
+                [
+                    Pos2::new(x, ladder_rect.top()),
+                    Pos2::new(x, ladder_rect.bottom()),
+                ],
+                Stroke::new(1.0, palette::BORDER_SUBTLE.gamma_multiply(0.75)),
+            );
+        }
+
+        // Click interaction (Work = cancel row orders, Bid = stage Buy Limit/Stop, Ask = stage Sell Limit/Stop)
+        if response.clicked()
+            && let Some(click_pos) = response.interact_pointer_pos()
+            && click_pos.y >= hdr_rect.bottom()
+        {
+            let r_idx = ((click_pos.y - hdr_rect.bottom()) / row_h).floor() as usize;
+            if let Some(row) = snap.rows.get(r_idx) {
+                let out_of_band = matches!(
+                    row.band_state,
+                    DomPriceBandState::AboveCeiling | DomPriceBandState::BelowFloor
+                );
+                if click_pos.x < col_x[1] && !row.working_order_ids.is_empty() {
+                    let ids = row.working_order_ids.clone();
+                    let _ = self.cancel_dom_row_orders(&ids);
+                } else if !out_of_band && click_pos.x >= col_x[1] && click_pos.x < col_x[2] {
+                    let _ = self.stage_dom_click_order(OrderSide::Buy, row.price);
+                } else if !out_of_band && click_pos.x >= col_x[3] && click_pos.x < col_x[4] {
+                    let _ = self.stage_dom_click_order(OrderSide::Sell, row.price);
+                }
+            }
+        }
+
+        ui.label(
+            RichText::new(format!(
+                "Click Bid/Ask to stage | Work to cancel | {} bars",
+                snap.causal_bar_count
+            ))
+            .monospace()
+            .size(9.0)
+            .color(palette::TEXT_MUTED),
+        );
+
+        if let Some((is_err, msg)) = &self.last_trade_status {
+            let status_col = if *is_err {
+                palette::BEARISH
+            } else {
+                palette::BULLISH
+            };
+            Frame::new()
+                .fill(status_col.gamma_multiply(0.14))
+                .stroke(Stroke::new(1.0, status_col))
+                .corner_radius(CornerRadius::same(3))
+                .inner_margin(Margin::symmetric(6, 4))
+                .show(ui, |ui| {
+                    ui.label(RichText::new(msg).monospace().size(9.5).color(status_col));
+                });
+        }
     }
 
     fn render_scanner_dock(&mut self, ui: &mut egui::Ui) {
@@ -9868,7 +11358,7 @@ impl SumiWorkstationApp {
                 // Pass 2: Place active symbol label first, then peers in multi-ring candidate search.
                 draw_items.sort_by_key(|item| if item.3 { 0_u8 } else { 1_u8 });
                 let lbl_font = egui::FontId::monospace(8.6);
-                let pad = Vec2::new(2.5, 2.0);
+                let pad = Vec2::new(4.5, 3.0);
                 for (rot, head, col, is_active_sym) in draw_items {
                     let text_col = if is_active_sym {
                         Color32::WHITE
@@ -9879,24 +11369,28 @@ impl SumiWorkstationApp {
                         painter.layout_no_wrap(rot.symbol.clone(), lbl_font.clone(), text_col);
                     let sz = galley.size();
                     let candidates = [
-                        Vec2::new(7.0, -sz.y * 0.5),
-                        Vec2::new(-7.0 - sz.x, -sz.y * 0.5),
-                        Vec2::new(-sz.x * 0.5, -8.0 - sz.y),
-                        Vec2::new(-sz.x * 0.5, 8.0),
-                        Vec2::new(7.0, -sz.y - 6.0),
-                        Vec2::new(7.0, 6.0),
-                        Vec2::new(-7.0 - sz.x, -sz.y - 6.0),
-                        Vec2::new(-7.0 - sz.x, 6.0),
-                        Vec2::new(16.0, -sz.y - 12.0),
-                        Vec2::new(16.0, 12.0),
-                        Vec2::new(-16.0 - sz.x, -sz.y - 12.0),
-                        Vec2::new(-16.0 - sz.x, 12.0),
-                        Vec2::new(-sz.x * 0.5, -20.0 - sz.y),
-                        Vec2::new(-sz.x * 0.5, 20.0),
-                        Vec2::new(26.0, -sz.y * 0.5 - 16.0),
-                        Vec2::new(-26.0 - sz.x, -sz.y * 0.5 + 16.0),
-                        Vec2::new(26.0, -sz.y * 0.5 + 16.0),
-                        Vec2::new(-26.0 - sz.x, -sz.y * 0.5 - 16.0),
+                        Vec2::new(9.0, -sz.y * 0.5),
+                        Vec2::new(-9.0 - sz.x, -sz.y * 0.5),
+                        Vec2::new(-sz.x * 0.5, -10.0 - sz.y),
+                        Vec2::new(-sz.x * 0.5, 10.0),
+                        Vec2::new(9.0, -sz.y - 7.0),
+                        Vec2::new(9.0, 7.0),
+                        Vec2::new(-9.0 - sz.x, -sz.y - 7.0),
+                        Vec2::new(-9.0 - sz.x, 7.0),
+                        Vec2::new(18.0, -sz.y - 14.0),
+                        Vec2::new(18.0, 14.0),
+                        Vec2::new(-18.0 - sz.x, -sz.y - 14.0),
+                        Vec2::new(-18.0 - sz.x, 14.0),
+                        Vec2::new(-sz.x * 0.5, -24.0 - sz.y),
+                        Vec2::new(-sz.x * 0.5, 24.0),
+                        Vec2::new(28.0, -sz.y * 0.5 - 18.0),
+                        Vec2::new(-28.0 - sz.x, -sz.y * 0.5 + 18.0),
+                        Vec2::new(28.0, -sz.y * 0.5 + 18.0),
+                        Vec2::new(-28.0 - sz.x, -sz.y * 0.5 - 18.0),
+                        Vec2::new(34.0, -sz.y - 24.0),
+                        Vec2::new(-34.0 - sz.x, -sz.y - 24.0),
+                        Vec2::new(34.0, 24.0),
+                        Vec2::new(-34.0 - sz.x, 24.0),
                     ];
                     let mut best_pos = head + candidates[0];
                     let mut best_rect = egui::Rect::from_min_size(best_pos, sz);
@@ -13743,6 +15237,457 @@ impl SumiWorkstationApp {
             ui.ctx().request_repaint();
         }
     }
+
+    #[must_use]
+    pub(crate) fn hotkeys_modal_rect(vp: egui::Rect) -> egui::Rect {
+        let max_w = (vp.width() - 16.0).max(120.0);
+        let max_h = (vp.height() - 16.0).max(120.0);
+        let w = (vp.width() - 48.0).clamp(460.0, 620.0).min(max_w);
+        let h = (vp.height() - 48.0).clamp(360.0, 668.0).min(max_h);
+        egui::Rect::from_center_size(vp.center(), egui::vec2(w, h))
+    }
+
+    fn render_hotkeys_modal(&mut self, ui: &mut egui::Ui) {
+        let vp = ui.input(|i| i.viewport_rect());
+        let target_rect = Self::hotkeys_modal_rect(vp);
+        let modal_w = target_rect.width();
+        let modal_max_h = target_rect.height();
+
+        let mut esc_pressed = false;
+        let mut unbind_pressed = false;
+        let mut captured_chord = None;
+        let is_rebinding_now = self.rebinding_hotkey_action.is_some();
+        ui.input_mut(|i| {
+            if is_rebinding_now {
+                let mut consume_idx: Option<usize> = None;
+                for (idx, ev) in i.events.iter().enumerate() {
+                    if let egui::Event::Key {
+                        key,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                        ..
+                    } = ev
+                    {
+                        let cmd = modifiers.command || modifiers.ctrl || modifiers.mac_cmd;
+                        if *key == egui::Key::Escape && *modifiers == egui::Modifiers::NONE {
+                            esc_pressed = true;
+                            consume_idx = Some(idx);
+                            break;
+                        }
+                        if (*key == egui::Key::Backspace || *key == egui::Key::Delete)
+                            && *modifiers == egui::Modifiers::NONE
+                        {
+                            unbind_pressed = true;
+                            consume_idx = Some(idx);
+                            break;
+                        }
+                        if !cmd && let Some(hk) = egui_key_to_hotkey_key(*key) {
+                            let eff_shift = if hk == HotkeyKey::Question {
+                                false
+                            } else {
+                                modifiers.shift
+                            };
+                            captured_chord = Some(HotkeyChord::new(
+                                hk,
+                                HotkeyModifiers {
+                                    shift: eff_shift,
+                                    alt: modifiers.alt,
+                                },
+                            ));
+                            consume_idx = Some(idx);
+                            break;
+                        }
+                        consume_idx = Some(idx);
+                        break;
+                    }
+                }
+                if let Some(idx) = consume_idx {
+                    i.events.remove(idx);
+                }
+            } else if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                esc_pressed = true;
+            }
+        });
+
+        let mut close_clicked = false;
+        if let Some(target_action) = self.rebinding_hotkey_action {
+            if esc_pressed {
+                self.rebinding_hotkey_action = None;
+                ui.ctx().request_repaint();
+            } else if unbind_pressed {
+                self.hotkey_profile.rebind(target_action, None);
+                self.rebinding_hotkey_action = None;
+                ui.ctx().request_repaint();
+            } else if let Some(chord) = captured_chord {
+                self.hotkey_profile.rebind(target_action, Some(chord));
+                self.rebinding_hotkey_action = None;
+                ui.ctx().request_repaint();
+            }
+        } else if esc_pressed {
+            close_clicked = true;
+        }
+
+        // Translucent backdrop scrim (`Order::Middle`, matching `render_templates_modal`)
+        let scrim_resp = egui::Area::new(egui::Id::new("hotkeys_modal_scrim"))
+            .order(egui::Order::Middle)
+            .fade_in(false)
+            .fixed_pos(vp.min)
+            .show(ui.ctx(), |ui| {
+                let (rect, resp) = ui.allocate_exact_size(vp.size(), egui::Sense::click_and_drag());
+                ui.painter().rect_filled(
+                    rect,
+                    CornerRadius::ZERO,
+                    Color32::from_rgba_unmultiplied(6, 9, 15, 192),
+                );
+                resp
+            })
+            .inner;
+
+        let modal_area = egui::Area::new(egui::Id::new("hotkeys_modal_card"))
+            .order(egui::Order::Foreground)
+            .fade_in(false)
+            .fixed_pos(target_rect.min)
+            .show(ui.ctx(), |ui| {
+                Frame::new()
+                    .fill(Color32::from_rgb(17, 22, 33))
+                    .stroke(Stroke::new(1.5, Color32::from_rgb(255, 183, 77)))
+                    .corner_radius(CornerRadius::same(8))
+                    .inner_margin(Margin::symmetric(14, 10))
+                    .show(ui, |ui| {
+                        ui.set_width((modal_w - 28.0).max(100.0));
+                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
+
+                        // Header Row
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("KEYBOARD SHORTCUTS & HOTKEY PROFILES")
+                                    .monospace()
+                                    .strong()
+                                    .size(13.0)
+                                    .color(palette::TEXT_PRIMARY),
+                            );
+                            Frame::new()
+                                .fill(Color32::from_rgba_unmultiplied(255, 183, 77, 30))
+                                .stroke(Stroke::new(1.0, Color32::from_rgb(255, 183, 77)))
+                                .corner_radius(CornerRadius::same(3))
+                                .inner_margin(Margin::symmetric(6, 2))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(self.hotkey_profile.id.short_label())
+                                            .monospace()
+                                            .strong()
+                                            .size(10.0)
+                                            .color(Color32::from_rgb(255, 183, 77)),
+                                    );
+                                });
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui
+                                    .button(RichText::new("Close ×").monospace().size(11.0))
+                                    .clicked()
+                                {
+                                    close_clicked = true;
+                                }
+                            });
+                        });
+
+                        // Preset Switcher Row
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new("Profile:")
+                                    .monospace()
+                                    .size(10.5)
+                                    .color(palette::TEXT_MUTED),
+                            );
+                            for preset_id in [
+                                HotkeyProfileId::StandardCharting,
+                                HotkeyProfileId::InstitutionalDomFast,
+                                HotkeyProfileId::ReplayPractice,
+                            ] {
+                                let selected = self.hotkey_profile.id == preset_id;
+                                if ui
+                                    .selectable_label(
+                                        selected,
+                                        RichText::new(preset_id.short_label())
+                                            .monospace()
+                                            .size(10.5),
+                                    )
+                                    .clicked()
+                                {
+                                    self.set_hotkey_profile(preset_id);
+                                }
+                            }
+                            let is_custom = self.hotkey_profile.id == HotkeyProfileId::Custom;
+                            let _ = ui.add_enabled(
+                                is_custom,
+                                egui::Button::selectable(
+                                    is_custom,
+                                    RichText::new(HotkeyProfileId::Custom.short_label())
+                                        .monospace()
+                                        .size(10.5),
+                                ),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui
+                                    .button(RichText::new("Reset Preset").monospace().size(10.5))
+                                    .clicked()
+                                {
+                                    self.hotkey_profile.reset_to_base_preset();
+                                    self.rebinding_hotkey_action = None;
+                                }
+                            });
+                        });
+
+                        // Reserved-Key & Focus Notice
+                        Frame::new()
+                            .fill(Color32::from_rgb(25, 30, 42))
+                            .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                            .corner_radius(CornerRadius::same(4))
+                            .inner_margin(Margin::symmetric(8, 5))
+                            .show(ui, |ui| {
+                                ui.label(
+                                    RichText::new(
+                                        "Reserved: Cmd/Ctrl+K (Command Palette), Escape (Cancel/Close), Tab (Focus). Global single-key hotkeys auto-mute while modals or text inputs hold focus.",
+                                    )
+                                    .size(10.2)
+                                    .color(palette::TEXT_MUTED),
+                                );
+                            });
+
+                        // Scrollable 17-Row Action Bindings Table
+                        let scroll_h = (modal_max_h - 134.0).max(180.0);
+                        egui::ScrollArea::vertical()
+                            .max_height(scroll_h)
+                            .scroll_bar_visibility(
+                                egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+                            )
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                egui::Grid::new("hotkeys_bindings_grid")
+                                    .num_columns(5)
+                                    .striped(true)
+                                    .spacing(Vec2::new(10.0, 3.5))
+                                    .min_col_width(56.0)
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            RichText::new("Category")
+                                                .monospace()
+                                                .strong()
+                                                .size(10.0)
+                                                .color(palette::TEXT_MUTED),
+                                        );
+                                        ui.label(
+                                            RichText::new("Action")
+                                                .monospace()
+                                                .strong()
+                                                .size(10.0)
+                                                .color(palette::TEXT_MUTED),
+                                        );
+                                        ui.label(
+                                            RichText::new("Shortcut")
+                                                .monospace()
+                                                .strong()
+                                                .size(10.0)
+                                                .color(palette::TEXT_MUTED),
+                                        );
+                                        ui.label(
+                                            RichText::new("")
+                                                .monospace()
+                                                .size(10.0),
+                                        );
+                                        ui.label(
+                                            RichText::new("")
+                                                .monospace()
+                                                .size(10.0),
+                                        );
+                                        ui.end_row();
+
+                                        for action in HotkeyAction::ALL {
+                                            let is_rebinding =
+                                                self.rebinding_hotkey_action == Some(action);
+                                            let current_chord =
+                                                self.hotkey_profile.chord_for(action);
+                                            ui.label(
+                                                RichText::new(action.category())
+                                                    .monospace()
+                                                    .size(9.8)
+                                                    .color(palette::TEXT_MUTED),
+                                            );
+                                            ui.add_sized(
+                                                [245.0, 18.0],
+                                                egui::Label::new(
+                                                    RichText::new(action.label())
+                                                        .size(10.8)
+                                                        .color(palette::TEXT_PRIMARY),
+                                                )
+                                                .truncate(),
+                                            );
+
+                                            if is_rebinding {
+                                                Frame::new()
+                                                    .fill(palette::ALERT_ARMED_AMBER.gamma_multiply(0.22))
+                                                    .stroke(Stroke::new(
+                                                        1.0,
+                                                        palette::ALERT_ARMED_AMBER,
+                                                    ))
+                                                    .corner_radius(CornerRadius::same(3))
+                                                    .inner_margin(Margin::symmetric(6, 2))
+                                                    .show(ui, |ui| {
+                                                        ui.label(
+                                                            RichText::new("Press key… (Esc cancel)")
+                                                                .monospace()
+                                                                .strong()
+                                                                .size(9.8)
+                                                                .color(palette::ALERT_ARMED_AMBER),
+                                                        );
+                                                    });
+                                            } else {
+                                                let (badge_txt, badge_col) = match current_chord {
+                                                    Some(c) => (
+                                                        c.format_badge(),
+                                                        Color32::from_rgb(130, 196, 255),
+                                                    ),
+                                                    None => (
+                                                        "Unbound".to_owned(),
+                                                        palette::TEXT_MUTED,
+                                                    ),
+                                                };
+                                                Frame::new()
+                                                    .fill(Color32::from_rgb(28, 34, 48))
+                                                    .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                                                    .corner_radius(CornerRadius::same(3))
+                                                    .inner_margin(Margin::symmetric(7, 2))
+                                                    .show(ui, |ui| {
+                                                        ui.label(
+                                                            RichText::new(badge_txt)
+                                                                .monospace()
+                                                                .strong()
+                                                                .size(10.0)
+                                                                .color(badge_col),
+                                                        );
+                                                    });
+                                            }
+
+                                            let rebind_lbl =
+                                                if is_rebinding { "Cancel" } else { "Rebind" };
+                                            if ui
+                                                .small_button(
+                                                    RichText::new(rebind_lbl)
+                                                        .monospace()
+                                                        .size(9.8),
+                                                )
+                                                .clicked()
+                                            {
+                                                if is_rebinding {
+                                                    self.rebinding_hotkey_action = None;
+                                                } else {
+                                                    self.rebinding_hotkey_action = Some(action);
+                                                }
+                                            }
+
+                                            if ui
+                                                .add_enabled(
+                                                    current_chord.is_some(),
+                                                    egui::Button::new(
+                                                        RichText::new("Clear")
+                                                            .monospace()
+                                                            .size(9.8),
+                                                    )
+                                                    .small(),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.hotkey_profile.rebind(action, None);
+                                                if is_rebinding {
+                                                    self.rebinding_hotkey_action = None;
+                                                }
+                                            }
+                                            ui.end_row();
+                                        }
+                                    });
+                            });
+                    });
+            });
+
+        self.last_hotkeys_modal_rect = Some(modal_area.response.rect);
+
+        if close_clicked
+            || (scrim_resp.clicked()
+                && ui
+                    .input(|i| i.pointer.interact_pos())
+                    .is_none_or(|p| !modal_area.response.rect.contains(p)))
+        {
+            self.show_hotkeys_modal = false;
+            self.rebinding_hotkey_action = None;
+            self.last_hotkeys_modal_rect = None;
+            ui.ctx().request_repaint();
+        }
+    }
+}
+
+#[inline]
+const fn egui_key_to_hotkey_key(key: egui::Key) -> Option<HotkeyKey> {
+    match key {
+        egui::Key::Space => Some(HotkeyKey::Space),
+        egui::Key::ArrowLeft => Some(HotkeyKey::ArrowLeft),
+        egui::Key::ArrowRight => Some(HotkeyKey::ArrowRight),
+        egui::Key::ArrowUp => Some(HotkeyKey::ArrowUp),
+        egui::Key::ArrowDown => Some(HotkeyKey::ArrowDown),
+        egui::Key::A => Some(HotkeyKey::A),
+        egui::Key::B => Some(HotkeyKey::B),
+        egui::Key::C => Some(HotkeyKey::C),
+        egui::Key::D => Some(HotkeyKey::D),
+        egui::Key::E => Some(HotkeyKey::E),
+        egui::Key::F => Some(HotkeyKey::F),
+        egui::Key::G => Some(HotkeyKey::G),
+        egui::Key::H => Some(HotkeyKey::H),
+        egui::Key::I => Some(HotkeyKey::I),
+        egui::Key::J => Some(HotkeyKey::J),
+        egui::Key::K => Some(HotkeyKey::K),
+        egui::Key::L => Some(HotkeyKey::L),
+        egui::Key::M => Some(HotkeyKey::M),
+        egui::Key::N => Some(HotkeyKey::N),
+        egui::Key::O => Some(HotkeyKey::O),
+        egui::Key::P => Some(HotkeyKey::P),
+        egui::Key::Q => Some(HotkeyKey::Q),
+        egui::Key::R => Some(HotkeyKey::R),
+        egui::Key::S => Some(HotkeyKey::S),
+        egui::Key::T => Some(HotkeyKey::T),
+        egui::Key::U => Some(HotkeyKey::U),
+        egui::Key::V => Some(HotkeyKey::V),
+        egui::Key::W => Some(HotkeyKey::W),
+        egui::Key::X => Some(HotkeyKey::X),
+        egui::Key::Y => Some(HotkeyKey::Y),
+        egui::Key::Z => Some(HotkeyKey::Z),
+        egui::Key::Num1 => Some(HotkeyKey::Num1),
+        egui::Key::Num2 => Some(HotkeyKey::Num2),
+        egui::Key::Num3 => Some(HotkeyKey::Num3),
+        egui::Key::Num4 => Some(HotkeyKey::Num4),
+        egui::Key::Num5 => Some(HotkeyKey::Num5),
+        egui::Key::Num6 => Some(HotkeyKey::Num6),
+        egui::Key::Num7 => Some(HotkeyKey::Num7),
+        egui::Key::Num8 => Some(HotkeyKey::Num8),
+        egui::Key::Num9 => Some(HotkeyKey::Num9),
+        egui::Key::F1 => Some(HotkeyKey::F1),
+        egui::Key::F2 => Some(HotkeyKey::F2),
+        egui::Key::F3 => Some(HotkeyKey::F3),
+        egui::Key::F4 => Some(HotkeyKey::F4),
+        egui::Key::F5 => Some(HotkeyKey::F5),
+        egui::Key::F6 => Some(HotkeyKey::F6),
+        egui::Key::F7 => Some(HotkeyKey::F7),
+        egui::Key::F8 => Some(HotkeyKey::F8),
+        egui::Key::F9 => Some(HotkeyKey::F9),
+        egui::Key::F10 => Some(HotkeyKey::F10),
+        egui::Key::F11 => Some(HotkeyKey::F11),
+        egui::Key::F12 => Some(HotkeyKey::F12),
+        egui::Key::Comma => Some(HotkeyKey::Comma),
+        egui::Key::Period => Some(HotkeyKey::Period),
+        egui::Key::Slash => Some(HotkeyKey::Slash),
+        egui::Key::Questionmark => Some(HotkeyKey::Question),
+        egui::Key::OpenBracket => Some(HotkeyKey::BracketLeft),
+        egui::Key::CloseBracket => Some(HotkeyKey::BracketRight),
+        _ => None,
+    }
 }
 
 #[inline]
@@ -14135,10 +16080,10 @@ impl SumiWorkstationApp {
     pub fn run_offscreen_wgpu_capture_batch(batch_name: &str) -> Result<(), String> {
         if !matches!(
             batch_name,
-            "r04" | "r05" | "r06" | "r07" | "r08" | "r09" | "r10" | "r11" | "r12" | "r13"
+            "r04" | "r05" | "r06" | "r07" | "r08" | "r09" | "r10" | "r11" | "r12" | "r13" | "r14"
         ) {
             return Err(format!(
-                "unknown SUMI_CAPTURE_BATCH '{batch_name}' (expected 'r04'..'r13')"
+                "unknown SUMI_CAPTURE_BATCH '{batch_name}' (expected 'r04'..'r14')"
             ));
         }
         std::fs::create_dir_all("docs/evidence")
@@ -14159,6 +16104,7 @@ impl SumiWorkstationApp {
                 "r11" => app.apply_r11_batch_step_state(step),
                 "r12" => app.apply_r12_batch_step_state(step),
                 "r13" => app.apply_r13_batch_step_state(step),
+                "r14" => app.apply_r14_batch_step_state(step),
                 _ => unreachable!(),
             };
             let image = harness.capture_app_frame(&mut app, logical_w, logical_h, 6)?;
@@ -16090,6 +18036,211 @@ impl SumiWorkstationApp {
         }
     }
 
+    fn apply_r14_batch_step_state(
+        &mut self,
+        step: usize,
+    ) -> (u32, u32, &'static str, &'static str) {
+        use crate::indicators::VwapAnchorMode;
+
+        self.exit_replay();
+        self.reset_trading_session();
+        self.show_replay_bar = false;
+        self.show_scanner_dock = false;
+        self.show_trading_panel = false;
+        self.show_alerts_panel = false;
+        self.show_strategy_panel = false;
+        self.show_journal_panel = false;
+        self.show_equity_pane = false;
+        self.show_backtest_trades = false;
+        self.command_palette.open = false;
+        self.show_templates_modal = false;
+        self.show_hotkeys_modal = false;
+        self.rebinding_hotkey_action = None;
+        self.dom_center_override = None;
+        self.saved_workspace_templates.clear();
+
+        let builtins = builtin_workspace_templates();
+        match step {
+            0 => {
+                // Scenario 0 (`1280x800` @ `2.0x`): `FPT 1D` (`HOSE`) + `298px` `DOM Ladder` dock
+                // (`OHLCV_SYNTH_DOM_PROXY`), staged working Buy Limit (`-2t`) + Buy Stop (`+2t`),
+                // Session TPO/POC + CVD + `InstitutionalDomFast` hotkeys.
+                self.apply_workspace_template(&builtins[0]);
+                self.grid_sync.sync_time_range = false;
+                self.pending_grid_time_sync = None;
+                self.indicators.show_market_profile = true;
+                self.indicators.show_vwap = true;
+                self.indicators.vwap_anchor_mode = VwapAnchorMode::Weekly;
+                self.indicators.show_cvd = true;
+                self.indicators.cvd_reset_mode = CvdResetMode::Cumulative;
+                self.viewport.reset_pane_stretches();
+                self.viewport.cvd_stretch = 0.78;
+                self.viewport.time_scale.set_width(860.0);
+                self.viewport.time_scale.set_bar_spacing(8.0);
+                self.viewport.time_scale.set_right_offset(18.0);
+                self.sync_indicators_and_benchmarks();
+
+                self.open_dom_ladder();
+                self.set_hotkey_profile(HotkeyProfileId::InstitutionalDomFast);
+                self.dom_use_risk_sizing = false;
+                self.dom_stop_loss_ticks = 4;
+                self.dom_take_profit_ticks = 8;
+                self.ticket_qty_input = "200".to_owned();
+                if let Ok(snap) = self.compute_active_dom_ladder() {
+                    if let Some(p_lim) =
+                        step_ladder_price_ticks(snap.mark_price, -2, snap.venue, snap.resolved_unit)
+                    {
+                        let _ = self.stage_dom_click_order(OrderSide::Buy, p_lim);
+                    }
+                    if let Some(p_stp) =
+                        step_ladder_price_ticks(snap.mark_price, 2, snap.venue, snap.resolved_unit)
+                    {
+                        let _ = self.stage_dom_click_order(OrderSide::Buy, p_stp);
+                    }
+                }
+                self.pinned_crosshair_timestamp = self
+                    .candles
+                    .get(self.candles.len().saturating_sub(14))
+                    .map(|c| c.timestamp);
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r14_step1_dom_ladder_execution_fpt.png",
+                    "docs/evidence/r14_step1_dom_ladder_execution_fpt.json",
+                )
+            }
+            1 => {
+                // Scenario 1 (`1280x800` @ `2.0x`): `2x2` Quad Desk (`FPT` / `VNINDEX` / `VCB` / `VN30F1M`)
+                // + Left `Breadth` dock proving R14 right-axis top/bottom clearance (`S2 VNINDEX`)
+                // and uniform scale-wide `.2` precision across the `100.0` boundary (`S3 VCB`).
+                self.apply_workspace_template(&builtins[3]);
+                self.grid_sync.sync_time_range = false;
+                self.pending_grid_time_sync = None;
+                self.indicators.show_market_profile = true;
+                self.indicators.show_vwap = true;
+                self.indicators.show_cvd = true;
+                self.viewport.reset_pane_stretches();
+                self.viewport.cvd_stretch = 0.78;
+                self.viewport.main_price_scale.set_auto_scale(true);
+                self.viewport.time_scale.set_width(420.0);
+                self.viewport.time_scale.set_bar_spacing(7.5);
+                self.viewport.time_scale.set_right_offset(18.0);
+
+                for slot in &mut self.secondary_slots {
+                    slot.indicators.show_cvd = true;
+                    slot.viewport.reset_pane_stretches();
+                    slot.viewport.cvd_stretch = 0.78;
+                    slot.viewport.main_price_scale.set_auto_scale(true);
+                    slot.viewport.time_scale.set_width(420.0);
+                    slot.viewport.time_scale.set_bar_spacing(7.5);
+                    slot.viewport.time_scale.set_right_offset(18.0);
+                }
+                // Position S3 (`VCB`) so visible bars straddle `100.0` (`100.00` / `98.00` uniform decimals).
+                if let Some(cross_idx) = self.secondary_slots[1].candles.windows(2).rposition(|w| {
+                    (w[0].close - 100.0) * (w[1].close - 100.0) <= 0.0
+                        || (w[0].high >= 100.0 && w[0].low <= 100.0)
+                }) {
+                    let len = self.secondary_slots[1].candles.len();
+                    let bars_from_right = len.saturating_sub(cross_idx);
+                    self.secondary_slots[1]
+                        .viewport
+                        .time_scale
+                        .set_bar_spacing(4.5);
+                    let offset = if bars_from_right > 65 {
+                        -((bars_from_right - 40) as f64)
+                    } else {
+                        12.0
+                    };
+                    self.secondary_slots[1]
+                        .viewport
+                        .time_scale
+                        .set_right_offset(offset);
+                } else {
+                    self.secondary_slots[1]
+                        .viewport
+                        .time_scale
+                        .set_bar_spacing(3.8);
+                    self.secondary_slots[1]
+                        .viewport
+                        .time_scale
+                        .set_right_offset(12.0);
+                }
+
+                self.show_scanner_dock = true;
+                self.scanner_tab = ScannerDockTab::Breadth;
+                self.set_hotkey_profile(HotkeyProfileId::StandardCharting);
+                self.active_chart_slot = 0;
+                self.sync_indicators_and_benchmarks();
+                self.sync_secondary_slots();
+                self.sync_scanner_caches();
+                let _ = self.market_breadth_snapshot().participating_count;
+                self.pinned_crosshair_timestamp = self
+                    .candles
+                    .get(self.candles.len().saturating_sub(14))
+                    .map(|c| c.timestamp);
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r14_step2_quad_axis_polish_and_dock_preset.png",
+                    "docs/evidence/r14_step2_quad_axis_polish_and_dock_preset.json",
+                )
+            }
+            _ => {
+                // Scenario 2 (`1280x800` @ `2.0x`): Built-in Template #6 (`VN30F DOM Execution & Flow`,
+                // `1x2` `VN30F1M 15m` + `FPT 1D`) under Causal Bar Replay (`70%`) + staged working Buy Limit
+                // + open Keyboard Shortcuts & Hotkey Profiles modal.
+                self.apply_workspace_template(&builtins[5]);
+                self.grid_sync.sync_time_range = false;
+                self.pending_grid_time_sync = None;
+                let n_base = self.base_candles.len();
+                let replay_cut = ((n_base * 70) / 100).max(30).min(n_base.saturating_sub(8));
+                let _ = self.start_replay_at_base_index(replay_cut);
+                self.show_replay_bar = true;
+                self.show_scanner_dock = false;
+
+                self.viewport.reset_pane_stretches();
+                self.viewport.cvd_stretch = 0.78;
+                self.viewport.time_scale.set_width(450.0);
+                self.viewport.time_scale.set_bar_spacing(7.5);
+                self.viewport.time_scale.set_right_offset(14.0);
+
+                self.secondary_slots[0].viewport.reset_pane_stretches();
+                self.secondary_slots[0].viewport.cvd_stretch = 0.78;
+                self.secondary_slots[0].viewport.time_scale.set_width(450.0);
+                self.secondary_slots[0]
+                    .viewport
+                    .time_scale
+                    .set_bar_spacing(7.0);
+                self.secondary_slots[0]
+                    .viewport
+                    .time_scale
+                    .set_right_offset(14.0);
+
+                self.sync_indicators_and_benchmarks();
+                self.sync_secondary_slots();
+                self.dom_use_risk_sizing = false;
+                self.ticket_qty_input = "2".to_owned();
+                if let Ok(snap) = self.compute_active_dom_ladder()
+                    && let Some(p_lim) =
+                        step_ladder_price_ticks(snap.mark_price, -2, snap.venue, snap.resolved_unit)
+                {
+                    let _ = self.stage_dom_click_order(OrderSide::Buy, p_lim);
+                }
+                self.open_hotkeys_modal();
+                self.pinned_crosshair_timestamp = self
+                    .candles
+                    .get(self.candles.len().saturating_sub(8))
+                    .map(|c| c.timestamp);
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r14_step3_replay_causal_dom_and_hotkeys_modal.png",
+                    "docs/evidence/r14_step3_replay_causal_dom_and_hotkeys_modal.json",
+                )
+            }
+        }
+    }
+
     fn persist_capture_artifacts(
         &self,
         screenshot_path: &str,
@@ -16187,7 +18338,7 @@ impl SumiWorkstationApp {
                 crate::viewport::PriceAxisFormatMode::CompactVolume => "CompactVolume",
             };
             let json = format!(
-                "{{\n  \"symbol\": \"{}\",\n  \"timeframe\": \"{}\",\n  \"base_timeframe\": \"{}\",\n  \"data_source\": \"{}\",\n  \"available_symbols\": [{}],\n  \"base_candles\": {},\n  \"total_candles\": {},\n  \"culled_candles\": {},\n  \"rendered_candles\": {},\n  \"conflation_factor\": {},\n  \"bar_spacing\": {:.6},\n  \"right_offset\": {:.6},\n  \"scale_mode\": \"{}\",\n  \"auto_scale\": {},\n  \"pane_count\": {},\n  \"active_overlay_count\": {},\n  \"drawing_count\": {},\n  \"active_drawing_tool\": \"{}\",\n  \"selected_drawing_id\": {},\n  \"magnet_mode\": \"{}\",\n  \"replay_active\": {},\n  \"replay_status\": \"{}\",\n  \"replay_base_cursor\": {},\n  \"replay_step_unit\": \"{}\",\n  \"show_trading_panel\": {},\n  \"show_scanner_dock\": {},\n  \"show_alerts_panel\": {},\n  \"show_strategy_panel\": {},\n  \"show_journal_panel\": {},\n  \"show_equity_pane\": {},\n  \"equity_pane_source\": \"{}\",\n  \"equity_pane_active\": {},\n  \"show_vwap\": {},\n  \"show_vrvp\": {},\n  \"show_rs\": {},\n  \"show_compare_overlay\": {},\n  \"compare_benchmark\": {},\n  \"vrvp_poc_price\": {},\n  \"active_frvp_count\": {},\n  \"rs_stretch\": {:.3},\n  \"grid_layout\": \"{}\",\n  \"grid_slot_count\": {},\n  \"active_chart_slot\": {},\n  \"sync_crosshair\": {},\n  \"sync_time_range\": {},\n  \"show_ichimoku\": {},\n  \"ichimoku_active\": {},\n  \"show_cvd\": {},\n  \"cvd_reset_mode\": \"{}\",\n  \"cvd_pane_active\": {},\n  \"cvd_stretch\": {:.3},\n  \"saved_template_count\": {},\n  \"vwap_anchor_mode\": \"{}\",\n  \"show_market_profile\": {},\n  \"market_profile_active\": {},\n  \"scanner_tab\": \"{}\",\n  \"breadth_participating_count\": {},\n  \"vn30_participating_count\": {},\n  \"money_flow_buy_pct\": {:.2},\n  \"cvd_axis_format_mode\": \"{}\",\n  \"pinned_crosshair_timestamp\": {},\n  \"active_venue\": \"{}\",\n  \"journal_total_entries\": {},\n  \"journal_visible_entries\": {},\n  \"journal_discipline_pct\": {:.2},\n  \"wfo_verdict\": {},\n  \"wfo_wfe_pct\": {},\n  \"portfolio_return_pct\": {:.4},\n  \"portfolio_dd_reduction_pct\": {:.4},\n  \"show_backtest_trades\": {},\n  \"rendered_backtest_trades\": {},\n  \"backtest_preset\": {},\n  \"backtest_trade_count\": {},\n  \"backtest_return_pct\": {:.4},\n  \"backtest_max_dd_pct\": {:.4},\n  \"backtest_sharpe\": {},\n  \"backtest_robustness\": {},\n  \"command_palette_open\": {},\n  \"alert_rule_count\": {},\n  \"alert_trigger_count\": {},\n  \"active_alert_lines\": {},\n  \"rendered_alert_markers\": {},\n  \"scanner_signal_revealed\": {},\n  \"active_price_lines\": {},\n  \"rendered_fill_markers\": {},\n  \"equity\": {:.2},\n  \"net_pnl\": {:.2},\n  \"fill_count\": {},\n  \"closed_trade_count\": {},\n  \"pending_order_count\": {},\n  \"open_position_side\": {},\n  \"stretches\": [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}],\n  \"base_value\": {:.4},\n  \"screenshot_px\": [{}, {}],\n  \"outer_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"plot_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"price_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"time_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"raw_price_min\": {:.2},\n  \"raw_price_max\": {:.2}\n}}\n",
+                "{{\n  \"symbol\": \"{}\",\n  \"timeframe\": \"{}\",\n  \"base_timeframe\": \"{}\",\n  \"data_source\": \"{}\",\n  \"available_symbols\": [{}],\n  \"base_candles\": {},\n  \"total_candles\": {},\n  \"culled_candles\": {},\n  \"rendered_candles\": {},\n  \"conflation_factor\": {},\n  \"bar_spacing\": {:.6},\n  \"right_offset\": {:.6},\n  \"scale_mode\": \"{}\",\n  \"auto_scale\": {},\n  \"pane_count\": {},\n  \"active_overlay_count\": {},\n  \"drawing_count\": {},\n  \"active_drawing_tool\": \"{}\",\n  \"selected_drawing_id\": {},\n  \"magnet_mode\": \"{}\",\n  \"replay_active\": {},\n  \"replay_status\": \"{}\",\n  \"replay_base_cursor\": {},\n  \"replay_step_unit\": \"{}\",\n  \"show_trading_panel\": {},\n  \"show_scanner_dock\": {},\n  \"show_alerts_panel\": {},\n  \"show_strategy_panel\": {},\n  \"show_journal_panel\": {},\n  \"show_equity_pane\": {},\n  \"equity_pane_source\": \"{}\",\n  \"equity_pane_active\": {},\n  \"show_vwap\": {},\n  \"show_vrvp\": {},\n  \"show_rs\": {},\n  \"show_compare_overlay\": {},\n  \"compare_benchmark\": {},\n  \"vrvp_poc_price\": {},\n  \"active_frvp_count\": {},\n  \"rs_stretch\": {:.3},\n  \"grid_layout\": \"{}\",\n  \"grid_slot_count\": {},\n  \"active_chart_slot\": {},\n  \"sync_crosshair\": {},\n  \"sync_time_range\": {},\n  \"show_ichimoku\": {},\n  \"ichimoku_active\": {},\n  \"show_cvd\": {},\n  \"cvd_reset_mode\": \"{}\",\n  \"cvd_pane_active\": {},\n  \"cvd_stretch\": {:.3},\n  \"saved_template_count\": {},\n  \"vwap_anchor_mode\": \"{}\",\n  \"show_market_profile\": {},\n  \"market_profile_active\": {},\n  \"scanner_tab\": \"{}\",\n  \"breadth_participating_count\": {},\n  \"vn30_participating_count\": {},\n  \"money_flow_buy_pct\": {:.2},\n  \"cvd_axis_format_mode\": \"{}\",\n  \"pinned_crosshair_timestamp\": {},\n  \"active_venue\": \"{}\",\n  \"journal_total_entries\": {},\n  \"journal_visible_entries\": {},\n  \"journal_discipline_pct\": {:.2},\n  \"wfo_verdict\": {},\n  \"wfo_wfe_pct\": {},\n  \"portfolio_return_pct\": {:.4},\n  \"portfolio_dd_reduction_pct\": {:.4},\n  \"show_backtest_trades\": {},\n  \"rendered_backtest_trades\": {},\n  \"backtest_preset\": {},\n  \"backtest_trade_count\": {},\n  \"backtest_return_pct\": {:.4},\n  \"backtest_max_dd_pct\": {:.4},\n  \"backtest_sharpe\": {},\n  \"backtest_robustness\": {},\n  \"command_palette_open\": {},\n  \"alert_rule_count\": {},\n  \"alert_trigger_count\": {},\n  \"active_alert_lines\": {},\n  \"rendered_alert_markers\": {},\n  \"scanner_signal_revealed\": {},\n  \"active_price_lines\": {},\n  \"rendered_fill_markers\": {},\n  \"equity\": {:.2},\n  \"net_pnl\": {:.2},\n  \"fill_count\": {},\n  \"closed_trade_count\": {},\n  \"pending_order_count\": {},\n  \"open_position_side\": {},\n  \"stretches\": [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}],\n  \"base_value\": {:.4},\n  \"screenshot_px\": [{}, {}],\n  \"outer_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"plot_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"price_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"time_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"trading_view_mode\": \"{}\",\n  \"dom_data_fidelity\": \"{}\",\n  \"hotkey_profile\": \"{}\",\n  \"hotkeys_modal_open\": {},\n  \"raw_price_min\": {:.2},\n  \"raw_price_max\": {:.2}\n}}\n",
                 self.symbol,
                 self.timeframe,
                 self.base_timeframe,
@@ -16303,6 +18454,13 @@ impl SumiWorkstationApp {
                 rep.layout.time_axis_rect.top(),
                 rep.layout.time_axis_rect.width(),
                 rep.layout.time_axis_rect.height(),
+                match self.trading_view_mode {
+                    TemplateTradingViewMode::OrderTicket => "OrderTicket",
+                    TemplateTradingViewMode::DomLadder => "DomLadder",
+                },
+                DOM_LADDER_DATA_FIDELITY,
+                self.hotkey_profile.id.short_label(),
+                self.show_hotkeys_modal,
                 rep.bounds.raw_min,
                 rep.bounds.raw_max,
             );
@@ -18593,5 +20751,533 @@ mod tests {
             snap.participating_count
         );
         assert_eq!(snap.vn30_participating_count, 8);
+    }
+
+    #[test]
+    fn r14_dom_ladder_click_to_stage_venue_guards_and_row_cancel() {
+        let mut app = SumiWorkstationApp::default();
+        let builtins = builtin_workspace_templates();
+        app.apply_workspace_template(&builtins[0]);
+        app.reset_trading_session();
+        app.open_dom_ladder();
+        app.ticket_qty_input = "200".to_owned();
+        app.dom_stop_loss_ticks = 3;
+        app.dom_take_profit_ticks = 6;
+
+        let snap = app.compute_active_dom_ladder().expect("FPT DOM snapshot");
+        assert_eq!(snap.data_fidelity, DOM_LADDER_DATA_FIDELITY);
+        assert_eq!(snap.venue, ExchangeVenue::Hose);
+        assert!(!snap.venue.allows_short());
+        assert_eq!(snap.venue.board_lot(), 100.0);
+
+        // Quick Market Sell must fail when flat on HOSE (long-only)
+        assert!(app.submit_quick_market_order(OrderSide::Sell).is_err());
+
+        // Stage Buy Limit 2 ticks below mark and Buy Stop 2 ticks above mark
+        let p_lim = step_ladder_price_ticks(snap.mark_price, -2, snap.venue, snap.resolved_unit)
+            .expect("limit tick below mark");
+        let p_stp = step_ladder_price_ticks(snap.mark_price, 2, snap.venue, snap.resolved_unit)
+            .expect("stop tick above mark");
+        assert!(app.stage_dom_click_order(OrderSide::Buy, p_lim).is_ok());
+        assert!(app.stage_dom_click_order(OrderSide::Buy, p_stp).is_ok());
+
+        let m_after_stage = app.trading.metrics(snap.mark_price);
+        assert_eq!(m_after_stage.pending_order_count, 2);
+
+        // Refresh ladder and cancel orders belonging to a working row
+        let snap2 = app.compute_active_dom_ladder().expect("refreshed DOM");
+        let working_row = snap2
+            .rows
+            .iter()
+            .find(|r| !r.working_order_ids.is_empty())
+            .expect("working row badge populated on ladder");
+        let cancelled = app.cancel_dom_row_orders(&working_row.working_order_ids);
+        assert!(cancelled >= 1);
+        assert_eq!(app.trading.metrics(snap2.mark_price).pending_order_count, 1);
+
+        // Cancel remaining orders and switch to VN30F1M (futures, shorting allowed, 1-contract lot)
+        assert_eq!(app.cancel_all_working_orders(), 1);
+        app.apply_workspace_template(&builtins[5]);
+        app.reset_trading_session();
+        app.ticket_qty_input = "2".to_owned();
+        let vn30f_snap = app.compute_active_dom_ladder().expect("VN30F DOM snapshot");
+        assert_eq!(vn30f_snap.venue, ExchangeVenue::Vn30Futures);
+        assert!(vn30f_snap.venue.allows_short());
+        assert!(app.submit_quick_market_order(OrderSide::Sell).is_ok());
+        let pos = app
+            .trading
+            .open_position()
+            .expect("short position opened on VN30F");
+        assert_eq!(pos.side, PositionSide::Short);
+        assert!((pos.quantity - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn r14_hotkey_dispatch_rebind_and_modal_focus_gating() {
+        let mut app = SumiWorkstationApp::default();
+        let builtins = builtin_workspace_templates();
+        app.apply_workspace_template(&builtins[5]);
+        app.reset_trading_session();
+        app.ticket_qty_input = "1".to_owned();
+        assert_eq!(app.hotkey_profile.id, HotkeyProfileId::InstitutionalDomFast);
+
+        // Direct action execution works when eligible
+        assert_eq!(app.trading_view_mode, TemplateTradingViewMode::DomLadder);
+        assert!(app.execute_hotkey_action(HotkeyAction::ToggleDomLadderView));
+        assert_eq!(app.trading_view_mode, TemplateTradingViewMode::OrderTicket);
+
+        // Conflict-free rebind moves profile to Custom and resolves cleanly
+        app.hotkey_profile.rebind(
+            HotkeyAction::QuickBuyMarket,
+            Some(HotkeyChord::plain(HotkeyKey::F6)),
+        );
+        assert_eq!(app.hotkey_profile.id, HotkeyProfileId::Custom);
+        assert!(app.hotkey_profile.conflicts().is_empty());
+        assert_eq!(
+            app.hotkey_profile
+                .resolve(HotkeyChord::plain(HotkeyKey::F6)),
+            Some(HotkeyAction::QuickBuyMarket)
+        );
+
+        // When Hotkeys Modal is open, global single-key F6 dispatch MUST be muted inside UI pass
+        app.open_hotkeys_modal();
+        assert!(app.show_hotkeys_modal);
+        assert!(!is_global_hotkey_eligible(
+            app.show_hotkeys_modal,
+            false,
+            false
+        ));
+        assert!(!is_global_hotkey_eligible(false, true, false));
+        assert!(!is_global_hotkey_eligible(false, false, true));
+
+        let ctx = egui::Context::default();
+        let fills_before = app.trading.metrics(app.current_mark_price()).fill_count;
+        app.rebinding_hotkey_action = Some(HotkeyAction::CycleGridLayout);
+        let mut out1 = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                events: vec![
+                    egui::Event::Key {
+                        key: egui::Key::Escape,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::Key {
+                        key: egui::Key::Escape,
+                        physical_key: None,
+                        pressed: false,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::Key {
+                        key: egui::Key::F6,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::Key {
+                        key: egui::Key::F6,
+                        physical_key: None,
+                        pressed: false,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out1.textures_delta.clear();
+        assert!(
+            app.rebinding_hotkey_action.is_none(),
+            "first Escape inside hotkeys modal must cancel pending rebind target"
+        );
+        assert!(
+            app.show_hotkeys_modal,
+            "first Escape cancelling rebind must leave hotkeys modal open"
+        );
+        assert_eq!(
+            app.trading.metrics(app.current_mark_price()).fill_count,
+            fills_before,
+            "hotkeys modal open must block global QuickBuyMarket hotkey"
+        );
+
+        // Second Escape closes the modal cleanly
+        let mut out_esc2 = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                events: vec![
+                    egui::Event::Key {
+                        key: egui::Key::Escape,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::Key {
+                        key: egui::Key::Escape,
+                        physical_key: None,
+                        pressed: false,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out_esc2.textures_delta.clear();
+        assert!(
+            !app.show_hotkeys_modal,
+            "second Escape must close hotkeys modal"
+        );
+
+        // Modal closed -> F6 now executes QuickBuyMarket in global UI dispatch
+        let mut out2 = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                events: vec![
+                    egui::Event::Key {
+                        key: egui::Key::F6,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::Key {
+                        key: egui::Key::F6,
+                        physical_key: None,
+                        pressed: false,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out2.textures_delta.clear();
+        assert!(
+            app.trading.metrics(app.current_mark_price()).fill_count > fills_before,
+            "global F6 hotkey must execute QuickBuyMarket once modal closes"
+        );
+    }
+
+    #[test]
+    fn r14_workspace_template_builtin_6_and_hotkey_dock_roundtrip() {
+        let builtins = builtin_workspace_templates();
+        assert_eq!(builtins.len(), 6);
+        assert_eq!(builtins[5].name, "VN30F DOM Execution & Flow");
+
+        let mut app = SumiWorkstationApp::default();
+        app.apply_workspace_template(&builtins[5]);
+        assert_eq!(app.grid_layout, MultiChartLayoutKind::SplitVertical1x2);
+        assert_eq!(app.right_dock_tab, RightDockTab::Trading);
+        assert!(app.show_trading_panel);
+        assert_eq!(app.trading_view_mode, TemplateTradingViewMode::DomLadder);
+        assert_eq!(app.hotkey_profile.id, HotkeyProfileId::InstitutionalDomFast);
+
+        // Rebind custom hotkey and verify RON & JSON capture -> parse -> apply roundtrip
+        app.hotkey_profile.rebind(
+            HotkeyAction::CancelAllPending,
+            Some(HotkeyChord::plain(HotkeyKey::F7)),
+        );
+        let tpl = app.capture_workspace_template("R14 Custom Verification");
+        let ron_text = tpl.to_ron_pretty();
+        let json_text = tpl.to_json_pretty();
+
+        let parsed_ron = WorkspaceTemplate::from_auto_str(&ron_text).expect("parse R14 RON");
+        let parsed_json = WorkspaceTemplate::from_auto_str(&json_text).expect("parse R14 JSON");
+
+        for parsed in [parsed_ron, parsed_json] {
+            let mut restored = SumiWorkstationApp::default();
+            restored.apply_workspace_template(&parsed);
+            assert_eq!(
+                restored.trading_view_mode,
+                TemplateTradingViewMode::DomLadder
+            );
+            assert_eq!(restored.right_dock_tab, RightDockTab::Trading);
+            assert!(restored.show_trading_panel);
+            assert_eq!(restored.hotkey_profile.id, HotkeyProfileId::Custom);
+            assert_eq!(
+                restored.hotkey_profile.base_preset(),
+                HotkeyProfileId::InstitutionalDomFast
+            );
+            assert_eq!(
+                restored
+                    .hotkey_profile
+                    .resolve(HotkeyChord::plain(HotkeyKey::B)),
+                Some(HotkeyAction::QuickBuyMarket)
+            );
+            assert_eq!(
+                restored
+                    .hotkey_profile
+                    .resolve(HotkeyChord::plain(HotkeyKey::F7)),
+                Some(HotkeyAction::CancelAllPending)
+            );
+        }
+    }
+
+    #[test]
+    fn critic_r14_regression_hotkeys_rebind_modifier_and_consume_guard() {
+        let mut app = SumiWorkstationApp::default();
+        app.set_hotkey_profile(HotkeyProfileId::InstitutionalDomFast);
+        app.open_hotkeys_modal();
+        app.rebinding_hotkey_action = Some(HotkeyAction::CycleGridLayout);
+        let original_chord = app.hotkey_profile.chord_for(HotkeyAction::CycleGridLayout);
+        assert!(original_chord.is_some());
+
+        let ctx = egui::Context::default();
+        let screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+
+        // Shift+Backspace must NOT unbind while Modifiers::NONE is required for Backspace/Delete unbind
+        let mut out_shift_bs = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                events: vec![
+                    egui::Event::Key {
+                        key: egui::Key::Backspace,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers {
+                            shift: true,
+                            ..Default::default()
+                        },
+                    },
+                    egui::Event::Key {
+                        key: egui::Key::Backspace,
+                        physical_key: None,
+                        pressed: false,
+                        repeat: false,
+                        modifiers: egui::Modifiers {
+                            shift: true,
+                            ..Default::default()
+                        },
+                    },
+                ],
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out_shift_bs.textures_delta.clear();
+        assert_eq!(
+            app.hotkey_profile.chord_for(HotkeyAction::CycleGridLayout),
+            original_chord,
+            "Shift+Backspace must not unbind action"
+        );
+
+        // Plain Backspace unbinds cleanly
+        let mut out_bs = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Backspace,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out_bs.textures_delta.clear();
+        assert_eq!(
+            app.hotkey_profile.chord_for(HotkeyAction::CycleGridLayout),
+            None
+        );
+        assert!(app.rebinding_hotkey_action.is_none());
+
+        // Arm rebind -> press F9 + Escape in same event stream; captured F9 removes Event::Key cleanly
+        app.rebinding_hotkey_action = Some(HotkeyAction::CycleGridLayout);
+        let grid_before = app.grid_layout;
+        let mut out_rebind = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                events: vec![egui::Event::Key {
+                    key: egui::Key::F9,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out_rebind.textures_delta.clear();
+        assert_eq!(
+            app.hotkey_profile.chord_for(HotkeyAction::CycleGridLayout),
+            Some(HotkeyChord::plain(HotkeyKey::F9))
+        );
+        assert_eq!(app.hotkey_profile.id, HotkeyProfileId::Custom);
+        assert_eq!(app.grid_layout, grid_before);
+
+        // Resetting restores InstitutionalDomFast rather than falling back to StandardCharting
+        app.hotkey_profile.reset_to_base_preset();
+        assert_eq!(app.hotkey_profile.id, HotkeyProfileId::InstitutionalDomFast);
+        assert_eq!(
+            app.hotkey_profile.chord_for(HotkeyAction::CycleGridLayout),
+            original_chord
+        );
+    }
+
+    #[test]
+    fn critic_r14_regression_hotkeys_modal_wheel_rect_matches_card() {
+        let mut app = SumiWorkstationApp::default();
+        app.open_hotkeys_modal();
+        let ctx = egui::Context::default();
+        let vp = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0));
+        let expected_rect = SumiWorkstationApp::hotkeys_modal_rect(vp);
+
+        let mut out1 = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(vp),
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out1.textures_delta.clear();
+        let actual_rect = app
+            .last_hotkeys_modal_rect
+            .expect("hotkeys modal must record actual card rect");
+        assert!(
+            (actual_rect.left() - expected_rect.left()).abs() <= 4.0
+                && (actual_rect.top() - expected_rect.top()).abs() <= 4.0
+                && (actual_rect.width() - expected_rect.width()).abs() <= 6.0
+                && actual_rect.height() >= 360.0
+                && actual_rect.height() <= expected_rect.height() + 4.0,
+            "recorded modal rect {actual_rect:?} must align with expected anchor/bounds {expected_rect:?}"
+        );
+
+        let bs_before = app.viewport.time_scale.bar_spacing();
+        let outside_pos = Pos2::new(20.0, 20.0);
+        assert!(!actual_rect.contains(outside_pos));
+        let mut out2 = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(vp),
+                events: vec![
+                    egui::Event::PointerMoved(outside_pos),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: Vec2::new(0.0, 120.0),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out2.textures_delta.clear();
+        assert!(
+            (app.viewport.time_scale.bar_spacing() - bs_before).abs() < 1e-9,
+            "outside-modal scroll wheel must not zoom chart behind hotkeys modal"
+        );
+    }
+
+    #[test]
+    fn critic_r14_regression_template_preserves_custom_base_preset_bindings() {
+        for (base_preset, override_key) in [
+            (HotkeyProfileId::InstitutionalDomFast, HotkeyKey::F7),
+            (HotkeyProfileId::ReplayPractice, HotkeyKey::F8),
+        ] {
+            let mut app = SumiWorkstationApp {
+                hotkey_profile: HotkeyProfile::from_preset(base_preset),
+                ..SumiWorkstationApp::default()
+            };
+            app.hotkey_profile.rebind(
+                HotkeyAction::CancelAllPending,
+                Some(HotkeyChord::plain(override_key)),
+            );
+            assert_eq!(app.hotkey_profile.id, HotkeyProfileId::Custom);
+            assert_eq!(app.hotkey_profile.base_preset(), base_preset);
+
+            let captured = app.capture_workspace_template("Critic Custom Base");
+            assert_eq!(captured.hotkey_profile, HotkeyProfileId::Custom);
+            assert_eq!(captured.hotkey_base_preset, Some(base_preset));
+            assert_eq!(captured.hotkey_overrides.len(), 1);
+
+            let ron = captured.to_ron_pretty();
+            let from_ron =
+                WorkspaceTemplate::from_ron_str(&ron).expect("RON roundtrip should succeed");
+            assert_eq!(from_ron.hotkey_base_preset, Some(base_preset));
+
+            let json = captured.to_json_pretty();
+            let from_json =
+                WorkspaceTemplate::from_json_str(&json).expect("JSON roundtrip should succeed");
+            assert_eq!(from_json.hotkey_base_preset, Some(base_preset));
+
+            for restored_tpl in [&from_ron, &from_json] {
+                let mut restored = SumiWorkstationApp::default();
+                restored.apply_workspace_template(restored_tpl);
+                assert_eq!(restored.hotkey_profile.id, HotkeyProfileId::Custom);
+                assert_eq!(restored.hotkey_profile.base_preset(), base_preset);
+                assert_eq!(
+                    restored
+                        .hotkey_profile
+                        .resolve(HotkeyChord::plain(override_key)),
+                    Some(HotkeyAction::CancelAllPending)
+                );
+                assert_eq!(
+                    restored
+                        .hotkey_profile
+                        .resolve(HotkeyChord::plain(HotkeyKey::B)),
+                    Some(HotkeyAction::QuickBuyMarket)
+                );
+                assert_eq!(
+                    restored
+                        .hotkey_profile
+                        .resolve(HotkeyChord::plain(HotkeyKey::S)),
+                    Some(HotkeyAction::QuickSellMarket)
+                );
+                assert_eq!(
+                    restored
+                        .hotkey_profile
+                        .resolve(HotkeyChord::plain(HotkeyKey::F)),
+                    Some(HotkeyAction::FlattenPosition)
+                );
+                if base_preset == HotkeyProfileId::ReplayPractice {
+                    assert_eq!(
+                        restored
+                            .hotkey_profile
+                            .resolve(HotkeyChord::plain(HotkeyKey::N)),
+                        Some(HotkeyAction::ReplayStepForward)
+                    );
+                    assert_eq!(
+                        restored
+                            .hotkey_profile
+                            .resolve(HotkeyChord::plain(HotkeyKey::P)),
+                        Some(HotkeyAction::ReplayStepBack)
+                    );
+                    assert_eq!(
+                        restored
+                            .hotkey_profile
+                            .resolve(HotkeyChord::plain(HotkeyKey::R)),
+                        Some(HotkeyAction::ReplayCutTool)
+                    );
+                }
+
+                restored.hotkey_profile.reset_to_base_preset();
+                assert_eq!(restored.hotkey_profile.id, base_preset);
+                assert_eq!(restored.hotkey_profile.base_preset(), base_preset);
+                assert_eq!(
+                    restored
+                        .hotkey_profile
+                        .resolve(HotkeyChord::plain(HotkeyKey::X)),
+                    Some(HotkeyAction::CancelAllPending)
+                );
+                assert_eq!(
+                    restored
+                        .hotkey_profile
+                        .resolve(HotkeyChord::plain(override_key)),
+                    None
+                );
+            }
+        }
     }
 }

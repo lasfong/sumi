@@ -10,6 +10,7 @@
 //! - [`candle_metrics`]: LWC `optimal_candlestick_width_px`, wick parity alignment, and zero-allocation OHLCV conflation.
 
 pub mod candle_metrics;
+pub mod hotkeys;
 pub mod kinetic;
 pub mod multi_chart;
 pub mod pane_viewport;
@@ -24,6 +25,10 @@ pub use candle_metrics::{
     CandlestickBarMetrics, ConflatedCandle, ConflatedCandlesIter, conflated_candle_at,
     iter_conflated_candles, optimal_bar_width_px, optimal_candlestick_width_px,
 };
+pub use hotkeys::{
+    HotkeyAction, HotkeyChord, HotkeyKey, HotkeyModifiers, HotkeyOverride, HotkeyProfile,
+    HotkeyProfileId, is_global_hotkey_eligible,
+};
 pub use kinetic::{KineticAnimation, KineticScrollConfig};
 pub use multi_chart::{
     MAX_MULTI_CHART_SLOTS, MultiChartLayoutKind, MultiChartSyncConfig, SyncedTimeWindow,
@@ -33,15 +38,17 @@ pub use multi_chart::{
 pub use pane_viewport::{PaneViewport, PlotRect};
 pub use price_scale::{
     LogFormula, PriceAxisFormatMode, PriceRange, PriceScale, PriceScaleMode, PriceScaleOptions,
-    PriceTickMark, format_compact_volume_axis, format_price_adaptive, from_indexed_to_100,
-    from_log, from_percent, to_indexed_to_100, to_log, to_percent,
+    PriceTickMark, axis_edge_pad_px, format_compact_volume_axis, format_price_adaptive,
+    format_price_fixed_decimals, from_indexed_to_100, from_log, from_percent, to_indexed_to_100,
+    to_log, to_percent,
 };
 pub use time_scale::{
     HorzScaleOptions, LogicalRange, StrictBarRange, TimeScale, TransitionSnapshot,
 };
 pub use workspace_template::{
-    WORKSPACE_TEMPLATE_SCHEMA_VERSION, WorkspacePaneStretches, WorkspaceSlotTemplate,
-    WorkspaceTemplate, WorkspaceTemplateError, builtin_workspace_templates,
+    TemplateRightDockTab, TemplateScannerTab, TemplateTradingViewMode,
+    WORKSPACE_TEMPLATE_SCHEMA_VERSION, WorkspaceDockPreset, WorkspacePaneStretches,
+    WorkspaceSlotTemplate, WorkspaceTemplate, WorkspaceTemplateError, builtin_workspace_templates,
 };
 
 /// Panic-free clamp matching Lightweight Charts `src/helpers/mathex.ts` (`Math.min(Math.max(v, min), max)`).

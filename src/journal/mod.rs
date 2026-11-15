@@ -20,9 +20,10 @@ pub use ledger::{
 };
 pub use market_rules::{
     DailyPriceBand, ExchangeVenue, ResolvedVnPriceUnit, VnPriceUnit, compute_daily_price_band,
-    compute_settlement_timestamp, compute_settlement_timestamp_for_venue, floor_to_board_lot,
-    round_down_to_tick, round_up_to_tick, snap_to_nearest_tick, step_one_tick_above,
-    step_one_tick_below, tick_size_at_price,
+    compute_daily_price_band_with_resolved_unit, compute_settlement_timestamp,
+    compute_settlement_timestamp_for_venue, floor_to_board_lot, round_down_to_tick,
+    round_up_to_tick, snap_to_nearest_tick, step_one_tick_above, step_one_tick_below,
+    tick_size_at_price,
 };
 pub use planner::{
     PlanWarning, TradePlanComputed, TradePlanError, TradePlanInput, compute_trade_plan,

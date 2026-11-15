@@ -883,7 +883,7 @@ fn r12_workspace_template_ron_json_roundtrip_and_validation() {
     };
 
     let builtins = builtin_workspace_templates();
-    assert_eq!(builtins.len(), 5);
+    assert_eq!(builtins.len(), 6);
     for tpl in &builtins {
         let json = tpl.to_json_pretty();
         let ron = tpl.to_ron_pretty();
@@ -1069,9 +1069,9 @@ fn r13_compact_volume_axis_formatting_and_template_backwards_compat() {
     assert_eq!(ps.format_price(1_500_000.0, 1.0), "1.5M");
     assert_eq!(ps.format_price(-12_345_678.0, 1.0), "-12.35M");
 
-    // 2. 5 built-in templates + RON/JSON roundtrip for new R13 IndicatorConfig fields
+    // 2. 6 built-in templates + RON/JSON roundtrip for new R13 IndicatorConfig fields
     let builtins = builtin_workspace_templates();
-    assert_eq!(builtins.len(), 5);
+    assert_eq!(builtins.len(), 6);
     let prof_tpl = &builtins[4];
     assert!(prof_tpl.slots[0].indicators.show_market_profile);
     assert_eq!(
@@ -1100,4 +1100,287 @@ fn r13_compact_volume_axis_formatting_and_template_backwards_compat() {
     assert_eq!(decoded.slots[0].indicators.mp_num_bins, 24);
     assert_eq!(decoded.slots[0].indicators.mp_ib_bars, 4);
     assert!(decoded.slots[0].indicators.mp_extend_naked_poc);
+}
+
+#[test]
+fn r14_axis_edge_padding_and_uniform_decimal_consistency() {
+    use super::format_price_fixed_decimals;
+    use super::price_scale::axis_edge_pad_px;
+
+    // 1. Top/bottom border clearance (`>= 11.5 px` at >= 48px) and panic-free tiny heights
+    for &h in &[0.0, 2.0, 6.0, 12.0, 18.0, 36.0, 48.0, 120.0, 260.0] {
+        let pad = axis_edge_pad_px(h);
+        assert!(pad.is_finite() && pad >= 0.0, "height {h} -> pad {pad}");
+        if h >= 48.0 {
+            assert!((pad - 11.5).abs() < 1e-9);
+        }
+    }
+
+    for &mode in &[PriceScaleMode::Normal, PriceScaleMode::Logarithmic] {
+        let mut ps = PriceScale::new(
+            "right",
+            PriceScaleOptions {
+                mode,
+                auto_scale: false,
+                scale_margin_top: 0.0,
+                scale_margin_bottom: 0.0,
+                ..PriceScaleOptions::default()
+            },
+        );
+        ps.set_height(220.0);
+        ps.set_raw_price_range(94.0, 106.0, 100.0);
+        let ticks = ps.nice_ticks(7, 100.0);
+        assert!(!ticks.is_empty(), "mode {mode:?} produced ticks");
+        for tm in &ticks {
+            assert!(
+                tm.local_y >= 11.5 && tm.local_y <= 220.0 - 11.5,
+                "tick {} at y={} violates 11.5px border clearance",
+                tm.label,
+                tm.local_y
+            );
+            // Uniform `.2` decimals across the 100.0 magnitude boundary (never jump to `.0000`)
+            assert!(
+                !tm.label.ends_with("0000"),
+                "label {} jumped mid-scale decimals on VCB [94, 106] range",
+                tm.label
+            );
+            let frac_len = tm.label.split('.').nth(1).map_or(0, str::len);
+            assert_eq!(
+                frac_len, 2,
+                "tick {} in mode {mode:?} should format uniformly to 2 decimals",
+                tm.label
+            );
+        }
+
+        // Tiny quad/oscillator pane heights never panic or emit ticks
+        let mut tiny = ps.clone();
+        for &h in &[6.0, 12.0, 17.5, 52.0] {
+            tiny.set_height(h);
+            let tiny_ticks = tiny.nice_ticks(5, 100.0);
+            let pad = axis_edge_pad_px(h);
+            for tm in &tiny_ticks {
+                assert!(tm.local_y >= pad - 1e-9 && tm.local_y <= h - pad + 1e-9);
+            }
+        }
+    }
+
+    // 2. Signed `-0.0` suppression in fixed-decimal formatter
+    assert_eq!(format_price_fixed_decimals(-1e-7, 2), "0.00");
+    assert_eq!(format_price_fixed_decimals(-0.0, 2), "0.00");
+    assert_eq!(format_price_fixed_decimals(f64::NAN, 2), "—");
+}
+
+#[test]
+fn r14_hotkey_profiles_conflicts_canonicalization_and_eligibility() {
+    use super::{
+        HotkeyAction, HotkeyChord, HotkeyKey, HotkeyModifiers, HotkeyProfile, HotkeyProfileId,
+        is_global_hotkey_eligible,
+    };
+
+    for id in [
+        HotkeyProfileId::StandardCharting,
+        HotkeyProfileId::InstitutionalDomFast,
+        HotkeyProfileId::ReplayPractice,
+    ] {
+        let prof = HotkeyProfile::from_preset(id);
+        assert!(
+            prof.conflicts().is_empty(),
+            "preset {id:?} has duplicate conflicts: {:?}",
+            prof.conflicts()
+        );
+        assert_eq!(prof.bindings().len(), HotkeyAction::ALL.len());
+    }
+
+    // Shift+/ canonicalizes identically to Question
+    let shifted_slash = HotkeyChord::new(
+        HotkeyKey::Slash,
+        HotkeyModifiers {
+            shift: true,
+            alt: false,
+        },
+    );
+    assert_eq!(shifted_slash, HotkeyChord::plain(HotkeyKey::Question));
+
+    let mut custom = HotkeyProfile::from_preset(HotkeyProfileId::StandardCharting);
+    assert_eq!(
+        custom.resolve(shifted_slash),
+        Some(HotkeyAction::OpenShortcutsModal)
+    );
+    // Rebinding QuickBuyMarket to `T` steals `T` from ToggleTradingDock cleanly without conflict
+    custom.rebind(
+        HotkeyAction::QuickBuyMarket,
+        Some(HotkeyChord::plain(HotkeyKey::T)),
+    );
+    assert_eq!(custom.id, HotkeyProfileId::Custom);
+    assert!(custom.conflicts().is_empty());
+    assert_eq!(
+        custom.chord_for(HotkeyAction::QuickBuyMarket),
+        Some(HotkeyChord::plain(HotkeyKey::T))
+    );
+    assert_eq!(custom.chord_for(HotkeyAction::ToggleTradingDock), None);
+    let overrides = custom.overrides_from_preset();
+    assert!(!overrides.is_empty());
+    custom.sanitize();
+    assert!(custom.conflicts().is_empty());
+
+    assert!(is_global_hotkey_eligible(false, false, false));
+    assert!(!is_global_hotkey_eligible(true, false, false));
+    assert!(!is_global_hotkey_eligible(false, true, false));
+    assert!(!is_global_hotkey_eligible(false, false, true));
+}
+
+#[test]
+fn r14_workspace_template_docks_hotkey_overrides_and_legacy_backcompat() {
+    use super::{
+        HotkeyAction, HotkeyChord, HotkeyKey, HotkeyOverride, HotkeyProfileId,
+        MultiChartLayoutKind, TemplateRightDockTab, TemplateScannerTab, TemplateTradingViewMode,
+        WorkspaceDockPreset, WorkspaceTemplate, builtin_workspace_templates,
+    };
+
+    let builtins = builtin_workspace_templates();
+    assert_eq!(builtins.len(), 6);
+    assert!(builtins[4].dock_layout.show_scanner_dock);
+    assert_eq!(
+        builtins[4].dock_layout.scanner_tab,
+        TemplateScannerTab::Breadth
+    );
+
+    let dom_tpl = &builtins[5];
+    assert_eq!(dom_tpl.name, "VN30F DOM Execution & Flow");
+    assert_eq!(dom_tpl.layout, MultiChartLayoutKind::SplitVertical1x2);
+    assert!(dom_tpl.dock_layout.show_trading_panel);
+    assert_eq!(
+        dom_tpl.dock_layout.right_dock_tab,
+        TemplateRightDockTab::Trading
+    );
+    assert_eq!(
+        dom_tpl.dock_layout.trading_view_mode,
+        TemplateTradingViewMode::DomLadder
+    );
+    assert!(dom_tpl.dock_layout.show_replay_bar);
+    assert_eq!(
+        dom_tpl.hotkey_profile,
+        HotkeyProfileId::InstitutionalDomFast
+    );
+
+    let mut custom = dom_tpl.clone();
+    custom.name = "Custom DOM Desk".to_owned();
+    custom.hotkey_profile = HotkeyProfileId::Custom;
+    custom.dock_layout = WorkspaceDockPreset {
+        show_scanner_dock: true,
+        scanner_tab: TemplateScannerTab::Signals,
+        show_trading_panel: true,
+        right_dock_tab: TemplateRightDockTab::Trading,
+        trading_view_mode: TemplateTradingViewMode::DomLadder,
+        ..WorkspaceDockPreset::default()
+    };
+    custom.hotkey_overrides = vec![
+        HotkeyOverride {
+            action: HotkeyAction::QuickBuyMarket,
+            chord: Some(HotkeyChord::plain(HotkeyKey::F1)),
+        },
+        HotkeyOverride {
+            action: HotkeyAction::ToggleAlertsDock,
+            chord: None,
+        },
+    ];
+    let ron = custom.to_ron_pretty();
+    let json = custom.to_json_pretty();
+    assert_eq!(WorkspaceTemplate::from_ron_str(&ron).unwrap(), custom);
+    assert_eq!(WorkspaceTemplate::from_json_str(&json).unwrap(), custom);
+
+    // Legacy R12/R13 payload omitting R14 fields decodes with clean defaults
+    let legacy_ron =
+        "(schema_version: 1, name: \"R12\", layout: \"Single1x1\", slots: [(symbol: \"VCB\")])";
+    let decoded = WorkspaceTemplate::from_ron_str(legacy_ron).expect("R12 compat");
+    assert_eq!(decoded.dock_layout, WorkspaceDockPreset::default());
+    assert_eq!(decoded.hotkey_profile, HotkeyProfileId::StandardCharting);
+    assert!(decoded.hotkey_overrides.is_empty());
+}
+
+#[test]
+fn critic_r14_regression_price_scale_format_matches_nice_ticks_decimals() {
+    use super::{PriceScale, PriceScaleMode, PriceScaleOptions};
+
+    for &(lo, hi) in &[
+        (1290.0_f64, 1310.0_f64),
+        (24.0_f64, 26.5_f64),
+        (0.1234_f64, 0.1289_f64),
+        (84_000.0_f64, 86_500.0_f64),
+    ] {
+        let mut ps = PriceScale::new(
+            "right",
+            PriceScaleOptions {
+                mode: PriceScaleMode::Normal,
+                auto_scale: false,
+                scale_margin_top: 0.0,
+                scale_margin_bottom: 0.0,
+                ..PriceScaleOptions::default()
+            },
+        );
+        ps.set_height(432.0);
+        ps.set_raw_price_range(lo, hi, lo);
+        let ticks = ps.nice_ticks(8, lo);
+        assert!(!ticks.is_empty(), "range [{lo}, {hi}] must emit ticks");
+        for tm in &ticks {
+            let tick_dec = tm.label.split('.').nth(1).map_or(0, str::len);
+            let formatted = ps.format_price(tm.raw_price, lo);
+            let pill_dec = formatted.split('.').nth(1).map_or(0, str::len);
+            assert_eq!(
+                pill_dec, tick_dec,
+                "format_price({} -> {formatted}) must match nice_ticks decimal precision ({}) on [{lo}, {hi}]",
+                tm.raw_price, tm.label
+            );
+        }
+    }
+}
+
+#[test]
+fn critic_r14_regression_template6_and_legacy_serde_compat() {
+    use super::{
+        HotkeyAction, HotkeyChord, HotkeyKey, HotkeyProfile, HotkeyProfileId,
+        TemplateTradingViewMode, WorkspaceDockPreset, WorkspaceTemplate,
+        builtin_workspace_templates,
+    };
+
+    let builtins = builtin_workspace_templates();
+    let tpl6 = &builtins[5];
+    assert_eq!(tpl6.name, "VN30F DOM Execution & Flow");
+    assert_eq!(
+        tpl6.dock_layout.trading_view_mode,
+        TemplateTradingViewMode::DomLadder
+    );
+    assert_eq!(tpl6.hotkey_profile, HotkeyProfileId::InstitutionalDomFast);
+    let decoded_tpl6 = WorkspaceTemplate::from_ron_str(&tpl6.to_ron_pretty()).unwrap();
+    assert_eq!(&decoded_tpl6, tpl6);
+
+    // Customizing InstitutionalDomFast remembers `base_preset == InstitutionalDomFast`
+    let mut prof = HotkeyProfile::from_preset(HotkeyProfileId::InstitutionalDomFast);
+    assert_eq!(prof.base_preset(), HotkeyProfileId::InstitutionalDomFast);
+    prof.rebind(
+        HotkeyAction::CancelAllPending,
+        Some(HotkeyChord::plain(HotkeyKey::F9)),
+    );
+    assert_eq!(prof.id, HotkeyProfileId::Custom);
+    assert_eq!(prof.base_preset(), HotkeyProfileId::InstitutionalDomFast);
+    let overrides = prof.overrides_from_preset();
+    assert_eq!(overrides.len(), 1);
+    assert_eq!(overrides[0].action, HotkeyAction::CancelAllPending);
+
+    prof.reset_to_base_preset();
+    assert_eq!(prof.id, HotkeyProfileId::InstitutionalDomFast);
+    assert_eq!(
+        prof.resolve(HotkeyChord::plain(HotkeyKey::B)),
+        Some(HotkeyAction::QuickBuyMarket)
+    );
+    assert_eq!(
+        prof.resolve(HotkeyChord::plain(HotkeyKey::X)),
+        Some(HotkeyAction::CancelAllPending)
+    );
+
+    let legacy_ron = "(schema_version: 1, name: \"LegacyR13\", layout: \"Single1x1\", slots: [(symbol: \"FPT\")])";
+    let legacy = WorkspaceTemplate::from_ron_str(legacy_ron).expect("legacy R13 RON compat");
+    assert_eq!(legacy.dock_layout, WorkspaceDockPreset::default());
+    assert_eq!(legacy.hotkey_profile, HotkeyProfileId::StandardCharting);
+    assert!(legacy.hotkey_overrides.is_empty());
 }

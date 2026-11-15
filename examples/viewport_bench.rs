@@ -46,11 +46,15 @@ use sumi_workstation::scanner::{
     BreadthFeedInput, ScannerFilter, WatchlistSortColumn, compute_market_breadth_and_rrg,
     evaluate_symbol_scan_and_signals, filter_and_sort_watchlist,
 };
-use sumi_workstation::trading::{OrderKind, OrderRequest, OrderSide, TradingSession};
+use sumi_workstation::trading::{
+    DOM_LADDER_DATA_FIDELITY, DomLadderConfig, OrderKind, OrderRequest, OrderSide, TradingSession,
+    compute_causal_dom_ladder, step_ladder_price_ticks,
+};
 use sumi_workstation::viewport::{
-    HorzScaleOptions, KineticAnimation, MultiChartLayoutKind, PaneViewport, PlotRect, PriceScale,
-    PriceScaleMode, PriceScaleOptions, TimeScale, WorkspaceTemplate, builtin_workspace_templates,
-    format_compact_volume_axis,
+    HorzScaleOptions, HotkeyAction, HotkeyChord, HotkeyKey, HotkeyProfile, HotkeyProfileId,
+    KineticAnimation, MultiChartLayoutKind, PaneViewport, PlotRect, PriceScale, PriceScaleMode,
+    PriceScaleOptions, TemplateTradingViewMode, TimeScale, WorkspaceTemplate,
+    builtin_workspace_templates, format_compact_volume_axis, format_price_fixed_decimals,
 };
 
 #[derive(Debug, Clone)]
@@ -165,6 +169,10 @@ fn main() {
     }
     if std::env::args().any(|a| a == "--r13") {
         run_r13_market_profile_breadth_benchmark(&cpu_brand, mem_bytes, &rustc_ver, profile);
+        return;
+    }
+    if std::env::args().any(|a| a == "--r14") {
+        run_r14_dom_ladder_hotkeys_axis_benchmark(&cpu_brand, mem_bytes, &rustc_ver, profile);
         return;
     }
 
@@ -8429,6 +8437,779 @@ fn format_r13_markdown_report(
     let _ = writeln!(
         s,
         "\n## 2. End-to-End Workstation R13 Frame Budget (`DECISION-RENDERER-002` Gate: `< 4.0 ms`)\n"
+    );
+    let _ = writeln!(
+        s,
+        "| Bars (Total) | Workload | Scale | Conflation | Culled | Drawn | Vertices | Indices | Mean (`ms`) | Median (`ms`) | P99 (`ms`) | `< 4.0ms` Gate |"
+    );
+    let _ = writeln!(
+        s,
+        "| ---: | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |"
+    );
+    for (r, p99_ms) in render.iter().zip(p99_ms_list.iter()) {
+        let mean_ms = r.total_cpu_frame_stats.mean_us / 1_000.0;
+        let med_ms = r.total_cpu_frame_stats.median_us / 1_000.0;
+        let gate = if mean_ms < 4.0 && *p99_ms < 4.0 {
+            "PASS (<4ms)"
+        } else {
+            "EXCEEDS"
+        };
+        let _ = writeln!(
+            s,
+            "| `{}` | `{}` ({}) | `{}` | `{}x` | `{}` | `{}` | `{}` | `{}` | **`{:.3}`** | **`{:.3}`** | `{:.3}` | `{gate}` |",
+            r.dataset_bars,
+            r.workload_id,
+            r.description,
+            r.scale_mode,
+            r.conflation_factor,
+            r.culled_bars,
+            r.rendered_candles,
+            r.total_vertices,
+            r.total_indices,
+            mean_ms,
+            med_ms,
+            p99_ms,
+        );
+    }
+    s
+}
+
+fn run_r14_dom_ladder_hotkeys_axis_benchmark(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+) {
+    println!(
+        "=== Sumi R14 Synthetic DOM Price Ladder, Conflict-Free Hotkey Profiles & Right-Axis Polish Benchmark ==="
+    );
+    println!(
+        "CPU: {cpu} | RAM: {:.1} GiB | {rustc_ver} | profile={profile}",
+        (mem_bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+    );
+
+    let candles_50k_1m = generate_intraday_vn30f_1m_report(50_000).candles;
+    let mark = candles_50k_1m.last().map_or(1450.0, |c| c.close);
+    let mut trading = TradingSession::default();
+    let base_idx = candles_50k_1m.len().saturating_sub(1);
+    if let Some(p_lim) = step_ladder_price_ticks(
+        mark,
+        -2,
+        ExchangeVenue::Vn30Futures,
+        sumi_workstation::journal::ResolvedVnPriceUnit::ThousandVnd,
+    ) {
+        let _ = trading.submit_order(
+            OrderRequest {
+                side: OrderSide::Buy,
+                kind: OrderKind::Limit { limit_price: p_lim },
+                quantity: 2.0,
+                stop_loss: None,
+                take_profit: None,
+            },
+            &candles_50k_1m,
+            base_idx,
+        );
+    }
+    if let Some(p_stp) = step_ladder_price_ticks(
+        mark,
+        2,
+        ExchangeVenue::Vn30Futures,
+        sumi_workstation::journal::ResolvedVnPriceUnit::ThousandVnd,
+    ) {
+        let _ = trading.submit_order(
+            OrderRequest {
+                side: OrderSide::Sell,
+                kind: OrderKind::Limit { limit_price: p_stp },
+                quantity: 1.0,
+                stop_loss: None,
+                take_profit: None,
+            },
+            &candles_50k_1m,
+            base_idx,
+        );
+    }
+
+    let mut domain_cases = Vec::new();
+
+    // 1. Causal 21-row DOM Ladder + 120-bar footprint lookback compute on 50,000 VN30F bars
+    let dom_cfg = DomLadderConfig {
+        venue: ExchangeVenue::Vn30Futures,
+        vn_unit: VnPriceUnit::Auto,
+        half_rows: 10,
+        lookback_bars: 120,
+        center_price_override: None,
+        reference_price_override: None,
+    };
+    let working = trading.orders();
+    let open_pos = trading.open_position();
+    let mut dom_samples = Vec::with_capacity(64);
+    let mut dom_rows = 0_usize;
+    for step in 0..76 {
+        let t0 = Instant::now();
+        let snap = compute_causal_dom_ladder(
+            std::hint::black_box(&candles_50k_1m),
+            std::hint::black_box(&dom_cfg),
+            std::hint::black_box(working),
+            open_pos,
+            None,
+        )
+        .expect("r14 causal dom bench");
+        let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        dom_rows = snap.rows.len();
+        if step >= 12 {
+            dom_samples.push(us);
+        }
+    }
+    domain_cases.push(R09DomainBenchCase {
+        case_id: "r14_dom_ladder_21row_120bar_50k_vn30f1m",
+        description: "Causal 21-row OHLCV_SYNTH_DOM_PROXY ladder (120-bar footprint + band/working join) on 50,000 bars",
+        input_units: candles_50k_1m.len(),
+        output_items: dom_rows,
+        stats: TimingStats::from_samples(dom_samples),
+    });
+
+    // 2. Conflict-free HotkeyProfile::resolve + rebind cycle (10,000 ops)
+    let mut hk_samples = Vec::with_capacity(48);
+    let probe_chords = [
+        HotkeyChord::plain(HotkeyKey::Space),
+        HotkeyChord::plain(HotkeyKey::B),
+        HotkeyChord::plain(HotkeyKey::S),
+        HotkeyChord::plain(HotkeyKey::L),
+        HotkeyChord::plain(HotkeyKey::C),
+        HotkeyChord::shifted(HotkeyKey::X),
+        HotkeyChord::plain(HotkeyKey::Question),
+        HotkeyChord::plain(HotkeyKey::F6),
+    ];
+    let mut hk_hits = 0_usize;
+    for step in 0..56 {
+        let mut prof = HotkeyProfile::from_preset(HotkeyProfileId::InstitutionalDomFast);
+        let t0 = Instant::now();
+        let mut hits = 0_usize;
+        for i in 0..10_000 {
+            let c = probe_chords[i % probe_chords.len()];
+            if prof.resolve(std::hint::black_box(c)).is_some() {
+                hits += 1;
+            }
+            if i % 1_000 == 0 {
+                prof.rebind(
+                    HotkeyAction::QuickBuyMarket,
+                    Some(HotkeyChord::plain(HotkeyKey::F6)),
+                );
+            }
+        }
+        let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        hk_hits = hits;
+        if step >= 8 {
+            hk_samples.push(us);
+        }
+    }
+    domain_cases.push(R09DomainBenchCase {
+        case_id: "r14_hotkey_profile_resolve_and_rebind_10k",
+        description: "10,000 conflict-free HotkeyProfile::resolve + custom rebind operations",
+        input_units: 10_000,
+        output_items: hk_hits,
+        stats: TimingStats::from_samples(hk_samples),
+    });
+
+    // 3. Right-Axis edge-padded nice_ticks + uniform magnitude-boundary formatting (10,000 ops)
+    let mut ps = PriceScale::new("bench-r14", PriceScaleOptions::default());
+    ps.set_height(240.0);
+    ps.set_raw_price_range(94.0, 104.0, 99.0);
+    let mut axis_samples = Vec::with_capacity(48);
+    let mut tick_count = 0_usize;
+    for step in 0..56 {
+        let t0 = Instant::now();
+        let mut count = 0_usize;
+        for i in 0..10_000 {
+            let ticks = ps.nice_ticks(std::hint::black_box(5), 99.0);
+            if let Some(first) = ticks.first() {
+                let _s = format_price_fixed_decimals(first.raw_price + (i as f64) * 0.0, 2);
+            }
+            count = ticks.len();
+        }
+        let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        tick_count = count;
+        if step >= 8 {
+            axis_samples.push(us);
+        }
+    }
+    domain_cases.push(R09DomainBenchCase {
+        case_id: "r14_axis_edge_pad_nice_ticks_uniform_10k",
+        description: "10,000 edge-padded PriceScale::nice_ticks + uniform boundary decimal formats",
+        input_units: 10_000,
+        output_items: tick_count,
+        stats: TimingStats::from_samples(axis_samples),
+    });
+
+    println!("\n--- R14 Synthetic DOM, Hotkey Engine & Axis Precision Kernels ---");
+    for d in &domain_cases {
+        println!(
+            "  {:<48} | in={:>6} out={:>6} | med={:>8.2} µs ({:.3} ms) p95={:>8.2} µs",
+            d.case_id,
+            d.input_units,
+            d.output_items,
+            d.stats.median_us,
+            d.stats.median_us / 1_000.0,
+            d.stats.p95_us
+        );
+    }
+
+    // Phase 2: Full Workstation 1280x800 (`2560x1600` Retina `2.0x`) UI + GPU Tessellation Frame Budgets
+    let (r_dom_1x1, r_dom_1x1_p99) = bench_r14_full_workstation_ui(
+        &candles_50k_1m,
+        0,
+        "r14_single_1x1_fpt_dom_ladder_working_orders",
+        "1x1 FPT 1D + 298px 21-Row DOM Ladder (OHLCV_SYNTH_DOM_PROXY) + Staged Orders + TPO + CVD",
+        10,
+        60,
+    );
+    let (r_tpl6_1x2, r_tpl6_1x2_p99) = bench_r14_full_workstation_ui(
+        &candles_50k_1m,
+        1,
+        "r14_split_1x2_template6_vn30f_dom_execution",
+        "1x2 Built-in Template #6 (VN30F DOM Execution & Flow) + DOM Ladder + InstitutionalDomFast",
+        10,
+        60,
+    );
+    let (r_quad_axis, r_quad_axis_p99) = bench_r14_full_workstation_ui(
+        &candles_50k_1m,
+        2,
+        "r14_quad_2x2_axis_polish_and_breadth_dock",
+        "2x2 Quad Desk (FPT/VNINDEX/VCB/VN30F1M) Edge-Padded & Uniform Axis Precision + Breadth Dock",
+        10,
+        60,
+    );
+    let (r_100k_modal, r_100k_modal_p99) = bench_r14_full_workstation_ui(
+        &candles_50k_1m,
+        3,
+        "r14_100k_conflated_dom_ladder_and_hotkeys_modal",
+        "1x1 100k Conflated Chart + Active DOM Ladder + Open Keyboard Shortcuts & Hotkey Profiles Modal",
+        10,
+        60,
+    );
+    let (r_quad_50k, r_quad_50k_p99) = bench_r14_full_workstation_ui(
+        &candles_50k_1m,
+        4,
+        "r14_quad_2x2_50k_conflated_stress",
+        "Quad2x2 50k bars/slot (200k total) conflated fit_all + CVD + DOM Ladder",
+        10,
+        60,
+    );
+
+    let render_cases = vec![r_dom_1x1, r_tpl6_1x2, r_quad_axis, r_100k_modal, r_quad_50k];
+    let p99_ms_list = [
+        r_dom_1x1_p99,
+        r_tpl6_1x2_p99,
+        r_quad_axis_p99,
+        r_100k_modal_p99,
+        r_quad_50k_p99,
+    ];
+
+    println!("\n--- Workstation R14 Full-Frame Budget (< 4.0 ms target) ---");
+    for (r, p99_ms) in render_cases.iter().zip(p99_ms_list.iter()) {
+        let mean_ms = r.total_cpu_frame_stats.mean_us / 1_000.0;
+        let med_ms = r.total_cpu_frame_stats.median_us / 1_000.0;
+        println!(
+            "  {:<48} | bars={:>6} conf={}x drawn={:>5} verts={:>6} | mean={:.3} ms med={:.3} ms p99={:.3} ms",
+            r.workload_id,
+            r.dataset_bars,
+            r.conflation_factor,
+            r.rendered_candles,
+            r.total_vertices,
+            mean_ms,
+            med_ms,
+            p99_ms
+        );
+        assert!(
+            mean_ms < 4.0 && *p99_ms < 4.0,
+            "R14 frame budget exceeded on {}: mean={mean_ms:.3} ms, p99={p99_ms:.3} ms (must be < 4.0 ms)",
+            r.workload_id
+        );
+    }
+
+    let _ = std::fs::create_dir_all("docs/evidence");
+    let json_doc = format_r14_json_report(
+        cpu,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        &domain_cases,
+        &render_cases,
+        &p99_ms_list,
+    );
+    let md_doc = format_r14_markdown_report(
+        cpu,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        &domain_cases,
+        &render_cases,
+        &p99_ms_list,
+    );
+    std::fs::write(
+        "docs/evidence/r14_dom_ladder_hotkeys_axis_bench.json",
+        json_doc,
+    )
+    .expect("write r14 benchmark json");
+    std::fs::write("docs/evidence/r14_dom_ladder_hotkeys_axis_bench.md", md_doc)
+        .expect("write r14 benchmark md");
+    println!(
+        "\nSaved R14 benchmark artifacts to docs/evidence/r14_dom_ladder_hotkeys_axis_bench.{{json,md}}"
+    );
+}
+
+fn bench_r14_full_workstation_ui(
+    candles_50k_1m: &[Candle],
+    mode: u8,
+    workload_id: &'static str,
+    description: &'static str,
+    warmup: usize,
+    iters: usize,
+) -> (RenderCaseResult, f64) {
+    let ctx = egui::Context::default();
+    SumiWorkstationApp::configure_dark_workstation_visuals(&ctx);
+    let screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+    ctx.set_pixels_per_point(2.0);
+
+    let mut app = SumiWorkstationApp::default();
+    let builtins = builtin_workspace_templates();
+
+    match mode {
+        0 => {
+            app.apply_workspace_template(&builtins[0]);
+            app.open_dom_ladder();
+            app.set_hotkey_profile(HotkeyProfileId::InstitutionalDomFast);
+            app.ticket_qty_input = "200".to_owned();
+            app.dom_stop_loss_ticks = 4;
+            app.dom_take_profit_ticks = 8;
+            app.indicators.show_market_profile = true;
+            app.indicators.show_vwap = true;
+            app.indicators.show_cvd = true;
+            app.viewport.reset_pane_stretches();
+            app.viewport.cvd_stretch = 0.78;
+            app.viewport.time_scale.set_width(860.0);
+            app.viewport.time_scale.set_bar_spacing(8.0);
+            app.viewport.time_scale.set_right_offset(18.0);
+            app.sync_indicators_and_benchmarks();
+            if let Ok(snap) = app.compute_active_dom_ladder()
+                && let Some(p_lim) =
+                    step_ladder_price_ticks(snap.mark_price, -2, snap.venue, snap.resolved_unit)
+            {
+                let _ = app.stage_dom_click_order(OrderSide::Buy, p_lim);
+            }
+        }
+        1 => {
+            app.apply_workspace_template(&builtins[5]);
+            app.viewport.time_scale.set_width(450.0);
+            app.viewport.time_scale.set_bar_spacing(7.5);
+            app.viewport.time_scale.set_right_offset(14.0);
+            app.secondary_slots[0].viewport.time_scale.set_width(450.0);
+            app.secondary_slots[0]
+                .viewport
+                .time_scale
+                .set_bar_spacing(7.0);
+            app.secondary_slots[0]
+                .viewport
+                .time_scale
+                .set_right_offset(14.0);
+            app.sync_indicators_and_benchmarks();
+            app.sync_secondary_slots();
+        }
+        2 => {
+            app.apply_workspace_template(&builtins[3]);
+            app.show_scanner_dock = true;
+            app.scanner_tab = ScannerDockTab::Breadth;
+            app.indicators.show_cvd = true;
+            app.viewport.reset_pane_stretches();
+            app.viewport.cvd_stretch = 0.78;
+            app.viewport.time_scale.set_width(420.0);
+            app.viewport.time_scale.set_bar_spacing(7.5);
+            app.viewport.time_scale.set_right_offset(18.0);
+            for slot in &mut app.secondary_slots {
+                slot.indicators.show_cvd = true;
+                slot.viewport.reset_pane_stretches();
+                slot.viewport.cvd_stretch = 0.78;
+                slot.viewport.time_scale.set_width(420.0);
+                slot.viewport.time_scale.set_bar_spacing(7.5);
+                slot.viewport.time_scale.set_right_offset(18.0);
+            }
+            app.sync_indicators_and_benchmarks();
+            app.sync_secondary_slots();
+            app.sync_scanner_caches();
+        }
+        3 => {
+            app.set_dataset_size(100_000);
+            app.grid_layout = MultiChartLayoutKind::Single1x1;
+            app.indicators = IndicatorConfig {
+                show_vwap: true,
+                vwap_anchor_mode: VwapAnchorMode::Weekly,
+                show_market_profile: true,
+                mp_num_bins: 24,
+                mp_ib_bars: 4,
+                mp_extend_naked_poc: true,
+                show_cvd: true,
+                cvd_reset_mode: CvdResetMode::Cumulative,
+                show_rsi: false,
+                show_macd: false,
+                show_atr: false,
+                ..IndicatorConfig::default()
+            };
+            app.open_dom_ladder();
+            app.open_hotkeys_modal();
+            app.sync_indicators_and_benchmarks();
+            app.viewport.time_scale.set_width(860.0);
+            app.fit_content();
+        }
+        _ => {
+            let _ = candles_50k_1m;
+            app.set_dataset_size(50_000);
+            app.grid_layout = MultiChartLayoutKind::Quad2x2;
+            app.grid_sync.sync_crosshair = true;
+            app.grid_sync.sync_time_range = true;
+            app.grid_sync.sync_symbol = false;
+            app.grid_sync.sync_timeframe = false;
+            app.open_dom_ladder();
+            app.set_hotkey_profile(HotkeyProfileId::InstitutionalDomFast);
+            app.indicators = IndicatorConfig {
+                show_vwap: true,
+                show_cvd: true,
+                cvd_reset_mode: CvdResetMode::Session,
+                show_rsi: false,
+                show_macd: false,
+                show_atr: false,
+                ..IndicatorConfig::default()
+            };
+            for slot in &mut app.secondary_slots {
+                slot.data_source = DataSourcePreset::SyntheticVnindex;
+                slot.symbol = "VNINDEX".to_owned();
+                slot.base_timeframe = Timeframe::D1;
+                slot.active_timeframe = Timeframe::D1;
+                slot.indicators = app.indicators.clone();
+                slot.viewport.reset_pane_stretches();
+                slot.viewport.cvd_stretch = 0.78;
+                slot.viewport.time_scale.set_width(420.0);
+            }
+            app.sync_indicators_and_benchmarks();
+            app.sync_secondary_slots();
+            app.viewport.reset_pane_stretches();
+            app.viewport.cvd_stretch = 0.78;
+            app.viewport.time_scale.set_width(420.0);
+            app.viewport.fit_all();
+            for slot in &mut app.secondary_slots {
+                slot.viewport.fit_all();
+            }
+            app.propagate_time_window_from_slot(0);
+            assert_eq!(app.candles.len(), 50_000);
+            assert!(
+                app.secondary_slots
+                    .iter()
+                    .all(|s| s.candles.len() == 50_000),
+                "all 3 secondary Quad2x2 slots must hold 50,000 bars (200k total)"
+            );
+        }
+    }
+
+    for _ in 0..2 {
+        let mut init_out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect,
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        init_out.textures_delta.clear();
+    }
+    if matches!(mode, 3 | 4) {
+        app.viewport.fit_all();
+        if mode == 4 {
+            app.propagate_time_window_from_slot(0);
+        }
+    }
+
+    let mut ui_samples = Vec::with_capacity(iters);
+    let mut tess_samples = Vec::with_capacity(iters);
+    let mut total_samples = Vec::with_capacity(iters);
+    let mut paint_shapes = 0_usize;
+    let mut clipped_primitives = 0_usize;
+    let mut total_vertices = 0_usize;
+    let mut total_indices = 0_usize;
+
+    for step in 0..(warmup + iters) {
+        let hover_x = 1040.0 + ((step % 10) as f32) * 8.0;
+        let hover_y = 320.0 + ((step % 12) as f32) * 14.0;
+        let events = vec![egui::Event::PointerMoved(Pos2::new(hover_x, hover_y))];
+        let raw_input = egui::RawInput {
+            screen_rect,
+            time: Some(step as f64 * 0.016),
+            events,
+            ..Default::default()
+        };
+
+        let t_frame = Instant::now();
+        let t_ui = Instant::now();
+        let mut full_out = ctx.run_ui(raw_input, |ui| {
+            app.render_workstation_ui(ui);
+        });
+        let ui_us = t_ui.elapsed().as_secs_f64() * 1_000_000.0;
+
+        paint_shapes = full_out.shapes.len();
+        let t_tess = Instant::now();
+        let primitives = ctx.tessellate(full_out.shapes, full_out.pixels_per_point);
+        let tess_us = t_tess.elapsed().as_secs_f64() * 1_000_000.0;
+        let total_us = t_frame.elapsed().as_secs_f64() * 1_000_000.0;
+        full_out.textures_delta.clear();
+
+        if step + 1 == warmup + iters {
+            clipped_primitives = primitives.len();
+            total_vertices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.vertices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+            total_indices = primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.indices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+        }
+
+        if step >= warmup {
+            ui_samples.push(ui_us);
+            tess_samples.push(tess_us);
+            total_samples.push(total_us);
+        }
+    }
+
+    let mut sorted_tot = total_samples.clone();
+    sorted_tot.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let p99_idx =
+        ((sorted_tot.len() as f64 * 0.99).floor() as usize).min(sorted_tot.len().saturating_sub(1));
+    let p99_ms = sorted_tot.get(p99_idx).copied().unwrap_or(0.0) / 1_000.0;
+
+    let rep = app.last_report.expect("full app r14 report");
+    assert!(
+        rep.rendered_candle_count > 0,
+        "slot 0 failed R14 render check in mode={mode}: {rep:?}"
+    );
+    if matches!(mode, 0 | 1 | 3 | 4) {
+        assert_eq!(app.trading_view_mode, TemplateTradingViewMode::DomLadder);
+    }
+    if mode == 1 {
+        assert_eq!(app.hotkey_profile.id, HotkeyProfileId::InstitutionalDomFast);
+        let sr = app.secondary_slots[0].last_report.expect("slot 1 report");
+        assert!(sr.rendered_candle_count > 0);
+    }
+    if matches!(mode, 2 | 4) {
+        if mode == 2 {
+            assert_eq!(app.scanner_tab, ScannerDockTab::Breadth);
+        } else {
+            assert_eq!(app.candles.len(), 50_000);
+            assert!(rep.conflation_factor >= 8);
+            assert!(
+                app.secondary_slots
+                    .iter()
+                    .all(|s| s.candles.len() == 50_000),
+                "all 4 Quad2x2 slots must hold 50,000 1m bars (200k total) in R14 mode=4"
+            );
+        }
+        for (i, slot) in app.secondary_slots.iter().enumerate() {
+            let sr = slot
+                .last_report
+                .unwrap_or_else(|| panic!("slot {} missing report in R14 mode={mode}", i + 1));
+            assert!(sr.rendered_candle_count > 0);
+        }
+    }
+    if mode == 3 {
+        assert_eq!(app.candles.len(), 100_000);
+        assert!(rep.conflation_factor >= 8);
+        assert!(app.show_hotkeys_modal);
+    }
+
+    let sec_limit = match mode {
+        1 => 1,
+        2 | 4 => 3,
+        _ => 0,
+    };
+    let mut total_rendered_candles = rep.rendered_candle_count;
+    let mut total_culled_bars = rep.culled_bar_count;
+    let mut reported_bars = app.candles.len();
+    for slot in &app.secondary_slots[..sec_limit] {
+        if let Some(sr) = slot.last_report {
+            total_rendered_candles += sr.rendered_candle_count;
+            total_culled_bars += sr.culled_bar_count;
+        }
+        reported_bars += slot.candles.len();
+    }
+
+    (
+        RenderCaseResult {
+            dataset_bars: reported_bars,
+            workload_id,
+            description,
+            scale_mode: app.viewport.main_price_scale.mode().label(),
+            conflation_enabled: true,
+            bar_spacing: rep.bar_spacing,
+            conflation_factor: rep.conflation_factor,
+            culled_bars: total_culled_bars,
+            rendered_candles: total_rendered_candles,
+            paint_shapes,
+            clipped_primitives,
+            total_vertices,
+            total_indices,
+            ui_build_stats: TimingStats::from_samples(ui_samples),
+            tessellate_stats: TimingStats::from_samples(tess_samples),
+            total_cpu_frame_stats: TimingStats::from_samples(total_samples),
+        },
+        p99_ms,
+    )
+}
+
+fn format_r14_json_report(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+    domain: &[R09DomainBenchCase],
+    render: &[RenderCaseResult],
+    p99_ms_list: &[f64],
+) -> String {
+    let mut s = String::with_capacity(8192);
+    let _ = writeln!(s, "{{");
+    let overall_pass = render
+        .iter()
+        .zip(p99_ms_list.iter())
+        .all(|(r, p99)| (r.total_cpu_frame_stats.mean_us / 1_000.0) < 4.0 && *p99 < 4.0);
+    let _ = writeln!(s, "  \"milestone\": \"R14\",");
+    let _ = writeln!(s, "  \"overall_pass\": {overall_pass},");
+    let _ = writeln!(
+        s,
+        "  \"dom_data_fidelity\": \"{DOM_LADDER_DATA_FIDELITY}\","
+    );
+    let _ = writeln!(s, "  \"environment\": {{");
+    let _ = writeln!(s, "    \"cpu\": \"{}\",", cpu.replace('"', "\\\""));
+    let _ = writeln!(s, "    \"os\": \"{}\",", std::env::consts::OS);
+    let _ = writeln!(s, "    \"arch\": \"{}\",", std::env::consts::ARCH);
+    let _ = writeln!(s, "    \"ram_bytes\": {mem_bytes},");
+    let _ = writeln!(s, "    \"rustc\": \"{}\",", rustc_ver.replace('"', "\\\""));
+    let _ = writeln!(s, "    \"profile\": \"{profile}\",");
+    let _ = writeln!(s, "    \"viewport_logical_px\": [1280, 800],");
+    let _ = writeln!(s, "    \"pixels_per_point\": 2.0");
+    let _ = writeln!(s, "  }},");
+    let _ = writeln!(s, "  \"r14_domain_throughput\": [");
+    for (idx, d) in domain.iter().enumerate() {
+        let comma = if idx + 1 == domain.len() { "" } else { "," };
+        let _ = writeln!(
+            s,
+            "    {{ \"case_id\": \"{}\", \"description\": \"{}\", \"input_units\": {}, \"output_items\": {}, \"median_us\": {:.3}, \"median_ms\": {:.4}, \"p95_us\": {:.3}, \"max_us\": {:.3} }}{comma}",
+            d.case_id,
+            d.description.replace('"', "\\\""),
+            d.input_units,
+            d.output_items,
+            d.stats.median_us,
+            d.stats.median_us / 1_000.0,
+            d.stats.p95_us,
+            d.stats.max_us,
+        );
+    }
+    let _ = writeln!(s, "  ],");
+    let _ = writeln!(s, "  \"workstation_r14_workloads\": [");
+    for (idx, (r, p99_ms)) in render.iter().zip(p99_ms_list.iter()).enumerate() {
+        let comma = if idx + 1 == render.len() { "" } else { "," };
+        let _ = writeln!(
+            s,
+            "    {{ \"dataset_bars\": {}, \"workload_id\": \"{}\", \"scale_mode\": \"{}\", \"bar_spacing\": {:.5}, \"conflation_factor\": {}, \"culled_bars\": {}, \"rendered_candles\": {}, \"paint_shapes\": {}, \"clipped_primitives\": {}, \"total_vertices\": {}, \"total_indices\": {}, \"ui_median_ms\": {:.4}, \"tessellate_median_ms\": {:.4}, \"total_cpu_mean_ms\": {:.4}, \"total_cpu_median_ms\": {:.4}, \"total_cpu_p95_ms\": {:.4}, \"total_cpu_p99_ms\": {:.4} }}{comma}",
+            r.dataset_bars,
+            r.workload_id,
+            r.scale_mode,
+            r.bar_spacing,
+            r.conflation_factor,
+            r.culled_bars,
+            r.rendered_candles,
+            r.paint_shapes,
+            r.clipped_primitives,
+            r.total_vertices,
+            r.total_indices,
+            r.ui_build_stats.median_us / 1_000.0,
+            r.tessellate_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.mean_us / 1_000.0,
+            r.total_cpu_frame_stats.median_us / 1_000.0,
+            r.total_cpu_frame_stats.p95_us / 1_000.0,
+            p99_ms,
+        );
+    }
+    let _ = writeln!(s, "  ]");
+    let _ = writeln!(s, "}}");
+    s
+}
+
+fn format_r14_markdown_report(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+    domain: &[R09DomainBenchCase],
+    render: &[RenderCaseResult],
+    p99_ms_list: &[f64],
+) -> String {
+    let mut s = String::with_capacity(8192);
+    let _ = writeln!(
+        s,
+        "# Milestone R14 — Synthetic DOM Price Ladder, Conflict-Free Hotkey Profiles & Right-Axis Polish Benchmark Evidence\n"
+    );
+    let _ = writeln!(
+        s,
+        "- **Command:** `cargo run --release --example viewport_bench -- --r14`"
+    );
+    let _ = writeln!(
+        s,
+        "- **Hardware:** `{cpu}` (`{}-{}`), `{:.1} GiB` RAM",
+        std::env::consts::ARCH,
+        std::env::consts::OS,
+        (mem_bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+    );
+    let _ = writeln!(
+        s,
+        "- **Toolchain & Profile:** `{rustc_ver}` (`--{profile}`)"
+    );
+    let _ = writeln!(
+        s,
+        "- **Active Stack:** Causal `OHLCV_SYNTH_DOM_PROXY` 21-Row DOM Execution Ladder (`HOSE`/`HNX`/`UPCOM`/`VN30F` dynamic tick/band/lot/short guards), Conflict-Free `HotkeyProfile` + Modal/TextEdit Focus Eligibility, Built-in Template #6 (`VN30F DOM Execution & Flow`), & Edge-Padded Uniform Right-Axis Decimals\n"
+    );
+
+    let _ = writeln!(
+        s,
+        "## 1. Synthetic DOM Ladder, Hotkey Engine & Right-Axis Precision Kernel Throughput\n"
+    );
+    let _ = writeln!(
+        s,
+        "| Case ID | Description | Input Units | Output Items | Median (`µs`) | Median (`ms`) | P95 (`µs`) | Max (`µs`) |"
+    );
+    let _ = writeln!(
+        s,
+        "| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: |"
+    );
+    for d in domain {
+        let _ = writeln!(
+            s,
+            "| `{}` | {} | `{}` | `{}` | **`{:.2} µs`** | **`{:.3} ms`** | `{:.2} µs` | `{:.2} µs` |",
+            d.case_id,
+            d.description,
+            d.input_units,
+            d.output_items,
+            d.stats.median_us,
+            d.stats.median_us / 1_000.0,
+            d.stats.p95_us,
+            d.stats.max_us,
+        );
+    }
+
+    let _ = writeln!(
+        s,
+        "\n## 2. End-to-End Workstation R14 Frame Budget (`DECISION-RENDERER-002` Gate: `< 4.0 ms`)\n"
     );
     let _ = writeln!(
         s,

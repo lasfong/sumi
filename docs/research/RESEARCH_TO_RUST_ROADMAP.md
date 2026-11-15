@@ -1,7 +1,7 @@
 # RESEARCH TO RUST ROADMAP — SESSION R01
 
 - **Session Identity:** `SESSION-R01-20261110T202837+0700`
-- **Updated By:** `SESSION-R13-20261115T163000+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Updated By:** `SESSION-R14-20261115T191000+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 - **Principle:** No Rust implementation begins without prior REA or reference-source research evidence.
 
 ---
@@ -350,13 +350,38 @@ cargo test app::tests::critic_r11_regression_benchmark_cache_invalidation_and_co
 
 ---
 
-## Wave 13 — Synthetic Depth-of-Market / Footprint Execution Ladder, Custom Hotkey Profiles & Non-Blocking R13 Axis Polish (`PROPOSED — MILESTONE R14`)
+## Wave 13 — Synthetic Depth-of-Market / Footprint Execution Ladder, Custom Hotkey Profiles, Dock Layout Persistence & Right-Axis Polish (`COMPLETE — SESSION R14`)
+
+### Completed Research & Audit Gates (`VERIFIED`)
+- [x] Executed `10` live REA MCP JS/TS operations (`REA-R14-01`..`10` across `ARCHIVE/frontend` `TradeControls.tsx`/`PendingOrdersPanel.tsx`/`PositionPanel.tsx`/`KeyboardShortcutsModal.tsx`/`globalShortcutPolicy.ts`/`PositionLineManager.ts` & `LWC v5.2.0` `price-formatter.ts`/`price-tick-mark-builder.ts`/`price-scale.ts`/`price-tick-span-calculator.ts`) plus `2` post-build binary REA ops (`REA-R14-11`..`12` on final R14 release Mach-O `52ef3d8c86297c33d451ff389945a5deeb469ac4dddff6f680323ca5180ab33f`, UUID `F6C4D83C-C21B-3D9A-8F94-28BB912C4BF5`) -> [`docs/research/EXECUTION_LADDER_HOTKEYS_AND_AXIS_POLISH_SPEC.md`](EXECUTION_LADDER_HOTKEYS_AND_AXIS_POLISH_SPEC.md).
+
+### Shipped Deliverables & Verification (`cargo test r14_`, `cargo test critic_r14_`, `--r14`, `SUMI_CAPTURE_BATCH=r14`)
+| Component | Research Source | Rust Target | Status |
+|---|---|---|---|
+| Pure `f64`/`i64` WASM-safe Causal 21-Row `OHLCV_SYNTH_DOM_PROXY` Price Ladder (`HOSE`/`HNX`/`UPCOM`/`VN30F` tier-crossing ticks, `ResolvedVnPriceUnit`, `CEIL`/`REF`/`FLOOR` bands, `CLV` footprint, 1-click staging, working-order cancel, short guard, risk-budget sizing, & `compute_active_dom_ladder()`-synced `shift_dom_center_ticks`) | `ARCHIVE/frontend` `TradeControls.tsx`/`PendingOrdersPanel.tsx`/`PositionPanel.tsx` + `EXECUTION_LADDER_HOTKEYS_AND_AXIS_POLISH_SPEC.md` | `src/trading/ladder.rs`, `src/trading/mod.rs`, `src/journal/market_rules.rs`, `src/app.rs` | Shipped & Critic-Hardened (`277.12 µs` `50k` `VN30F1M` ladder, `CRITIC_PASS`) |
+| Conflict-Free `17`-Action `HotkeyProfile` (`from_preset_with_base_and_overrides`, `is_global_hotkey_eligible` + `Space` focus guard, `[Keys]` modal), & Backwards-Compatible `WorkspaceTemplate` (`dock_layout`, `hotkey_profile`, `hotkey_base_preset`, `hotkey_overrides`, Preset #5 Breadth & Preset #6 `"VN30F DOM Execution & Flow"`) | `ARCHIVE/frontend` `KeyboardShortcutsModal.tsx`/`globalShortcutPolicy.ts` + `EXECUTION_LADDER_HOTKEYS_AND_AXIS_POLISH_SPEC.md` | `src/viewport/hotkeys.rs`, `src/viewport/workspace_template.rs`, `src/app.rs` | Shipped & Critic-Hardened (`96.96 µs` `10k` resolves/rebinds, `RON`/`JSON` base-preset roundtrip verified) |
+| Non-Blocking R13 Right-Axis Edge & Decimal Polish (`axis_edge_pad_px`, `scale_decimals_for_range_and_step`, `format_price_for_tick_density`, `safe_clamp_f32`, pill/badge collision avoidance & time-cursor occlusion) | `LWC v5.2.0` `price-formatter.ts`/`price-tick-mark-builder.ts`/`price-scale.ts` + `EXECUTION_LADDER_HOTKEYS_AND_AXIS_POLISH_SPEC.md` | `src/viewport/price_scale.rs`, `src/chart.rs`, `src/main.rs` | Shipped & Critic-Hardened (`204/204` tests + `wasm32` Clippy, `--r14` `0.378–1.391 ms` mean / `p99 <= 2.198 ms < 4.0 ms`) |
+
+### Verified Acceptance Tests (`cargo test` — 204/204 PASS)
+```bash
+cargo test trading::ladder::tests::r14_
+cargo test trading::ladder::tests::critic_r14_
+cargo test viewport::tests::r14_
+cargo test viewport::tests::critic_r14_
+cargo test chart::tests::critic_r14_
+cargo test app::tests::r14_
+cargo test app::tests::critic_r14_
+```
+
+---
+
+## Wave 14 — Explainable Signal Catalog & Causal Confluence Inspector, Interactive Drawing Property Inspector, & Monte Carlo Bootstrap Tearsheet Risk Envelopes (`PROPOSED — MILESTONE R15`)
 
 ### Proposed Deliverables (Awaiting Product Owner Authorization)
 | Component | Research Source | Rust Target | Status |
 |---|---|---|---|
-| Pure `f64`/`i64` WASM-safe Depth-of-Market / Price-Ladder Staging Widget integrated with `TradingSession` + `Journal` Friction Sizer | `ARCHIVE/frontend` order ticket & `LWC v5.2.0` price-axis primitives | `src/trading/`, `src/journal/`, `src/app.rs` | Proposed (`Milestone R14`) |
-| Customizable Hotkey Profiles + Dock Panel Presets (`WorkspaceTemplate` extension) & Non-Blocking R13 Axis Tick Top-Margin/Scale-Transition Polish | `src/viewport/price_scale.rs`, `src/viewport/workspace_template.rs`, `src/app.rs` | `src/viewport/`, `src/chart.rs`, `src/app.rs` | Proposed (`Milestone R14`) |
+| Explainable Signal Catalog & `DEF-001` Causal Confluence Inspector (`SignalCatalog`, feature attribution, multi-signal filter, click-to-jump chart review) | `ARCHIVE/frontend/src/components/signals/{SignalCatalog,SignalCatalogModal,SignalInspector,SignalExplanationInspector}.tsx` | `src/scanner/`, `src/app.rs` | Proposed (`Milestone R15`) |
+| Interactive Drawing Property Inspector (live style/color/dash/anchor editing backed by 64-step Undo/Redo) & Deterministic `SplitMix64` Monte Carlo Bootstrap Tearsheet Envelopes (`OscillatorPaneId::Equity` fan bands) | `ARCHIVE/frontend/src/components/chart/DrawingInspector.tsx` + `analytics/EquityChart.tsx` + `LWC v5.2.0` | `src/drawings/`, `src/backtest/`, `src/chart.rs`, `src/app.rs` | Proposed (`Milestone R15`) |
 
 ---
 

@@ -1,7 +1,7 @@
 # SUMI TRADING WORKSTATION — DECISION LOG
 
 - **Session Identity (Created):** `SESSION-01-20261110T160909+0700`
-- **Updated By:** `SESSION-R13-20261115T163000+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Updated By:** `SESSION-R14-20261115T191000+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 
 ## Decisions Recorded in Session 01
 
@@ -238,3 +238,13 @@
   3. Implement pure `f64`/`i64` WASM-safe `src/scanner/breadth.rs` (`AT09` Aggregate-Before-Ratio value-weighted Money Flow, `AT05` zero-value `50.0` fallback (`money_flow_buy_pct: f64`, `vn30_money_flow_buy_pct: f64`), `AT17` VN30/Universe participation ratios, JdK `RS-Ratio`/`RS-Momentum` 4-quadrant `RRG` trajectories gated strictly by `replay_causal_close_timestamp` (`0` bar lag on `1D`) + `causal_peer_open_cutoff` + `is_active_tail_incomplete()`), and render inside the 340px `Watch`/`Sig`/`Breadth` dock with obstacle-seeded multi-ring `RRG` labels and symmetric `allocate_exact_size` Liquidity Heatmap tiles.
 
 
+---
+
+### DEC-R14-001 — Causal `OHLCV_SYNTH_DOM_PROXY` Price Ladder & VN Microstructure Execution, Conflict-Free `HotkeyProfile` Algebra + `hotkey_base_preset` Persistence, & Scale-Wide Right-Axis Edge/Decimal Polish
+- **Date:** `2026-11-15`
+- **Status:** Accepted & Shipped (`Milestone R14 / Wave 13`, verified via `204/204` Cargo unit tests, native + `wasm32` `clippy -D warnings`, `--r14` release benchmark `0.378–1.391 ms` / `p99 <= 2.198 ms < 4.0 ms`, `SUMI_CAPTURE_BATCH=r14`, `sumi-critic` `CRITIC_PASS`, and post-build `rea` audit `REA-R14-11`..`12`).
+- **Context:** Legacy React order entry (`TradeControls.tsx`, `529` lines) and static shortcut tables (`KeyboardShortcutsModal.tsx`, `globalShortcutPolicy.ts`) lacked a visual price ladder, `HOSE` `10.00`/`50.00` tier-crossing tick stepping, daily `CEIL`/`REF`/`FLOOR` band validation, customizable conflict-free hotkey profiles, and persistent workstation dock/keybinding states. Simultaneously, short quad panes from R13 occasionally let outer ticks graze pane borders or switch decimal counts across `100.00` magnitude boundaries.
+- **Decision:**
+  1. Implement pure `f64`/`i64` WASM-safe `src/trading/ladder.rs` (`compute_causal_dom_ladder`, `infer_causal_prior_session_close`, `exact_tick_distance`, `stage_ladder_order`, `compute_quick_market_brackets`, `step_ladder_price_ticks`, `size_ladder_qty_from_risk_budget`) tagged honestly as `OHLCV_SYNTH_DOM_PROXY` (`DEF-001`), backed by `src/journal/market_rules.rs` (`ResolvedVnPriceUnit`), 1-click staging/row cancellation, short-selling guards, and `SumiWorkstationApp::shift_dom_center_ticks` resolved directly from `compute_active_dom_ladder()`.
+  2. Implement pure WASM-safe `src/viewport/hotkeys.rs` (`17`-action `HotkeyProfile`, `from_preset_with_base_and_overrides`, `reset_to_base_preset`, reserved `Escape`/`Tab`/`Cmd+K` protection, `is_global_hotkey_eligible` + non-text `Space` guard) paired with `WorkspaceTemplate` (`schema_version = 1` backwards-compatible `RON` & `JSON` codecs) storing `dock_layout`, `hotkey_profile`, `hotkey_base_preset: Option<HotkeyProfileId>`, and `hotkey_overrides`, Preset #5 (`"VN30 Session Profile & Flow"`) Breadth dock visibility, and Preset #6 (`"VN30F DOM Execution & Flow"`).
+  3. Add uniform `axis_edge_pad_px`, scale-step-locked `scale_decimals_for_range_and_step` + `format_price_for_tick_density` (`(24.0, 3, 6)` for oscillator/equity badges; `(54.0, 4, 12)` for main chart), panic-free `safe_clamp_f32`/`clamp_axis_pill_center_y`, non-overlapping order pill/badge collision avoidance, and time-axis cursor pill tick culling in `src/viewport/price_scale.rs` and `src/chart.rs`.

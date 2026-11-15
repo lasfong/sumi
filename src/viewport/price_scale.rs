@@ -986,9 +986,63 @@ impl PriceScale {
         }
     }
 
-    /// Formats a raw price according to the active `PriceScaleMode` and `PriceAxisFormatMode` (for crosshair pills & badges).
+    /// Derives the scale-wide decimal precision used by `nice_ticks` in `Normal` / `Logarithmic` modes
+    /// so `format_price` pills never drop `.0`/`.00` across tick or `100.0`/`1000.0` boundaries.
+    fn standard_axis_decimals_for_density(
+        &self,
+        base_value: f64,
+        px_per_tick: f64,
+        min_ticks: usize,
+        max_ticks: usize,
+    ) -> Option<usize> {
+        if self.is_empty() {
+            return None;
+        }
+        let top_price = self.local_y_to_price(0.0, base_value)?;
+        let bottom_price = self.local_y_to_price((self.height - 1.0).max(0.0), base_value)?;
+        let p_min = top_price.min(bottom_price);
+        let p_max = top_price.max(bottom_price);
+        let est_ticks = ((self.height.max(0.0) / px_per_tick.max(1.0)).floor() as usize)
+            .clamp(min_ticks, max_ticks.max(min_ticks));
+        match self.options.mode {
+            PriceScaleMode::Normal => {
+                let (_, step) = generate_nice_linear_steps(p_min, p_max, est_ticks);
+                Some(scale_decimals_for_range_and_step(p_min, p_max, step))
+            }
+            PriceScaleMode::Logarithmic => {
+                let (candidates, step_hint) =
+                    generate_nice_log_or_linear_steps(p_min, p_max, est_ticks);
+                let step = step_hint.unwrap_or_else(|| {
+                    candidates
+                        .windows(2)
+                        .filter_map(|w| {
+                            let d = w[1] - w[0];
+                            (d.is_finite() && d > 0.0).then_some(d)
+                        })
+                        .fold(f64::INFINITY, f64::min)
+                });
+                let eff_step = if step.is_finite() && step > 0.0 {
+                    step
+                } else {
+                    ((p_max - p_min) / (est_ticks.max(2) as f64)).max(1.0e-12)
+                };
+                Some(scale_decimals_for_range_and_step(p_min, p_max, eff_step))
+            }
+            PriceScaleMode::Percentage | PriceScaleMode::IndexedTo100 => None,
+        }
+    }
+
+    /// Formats a raw price using an explicit target tick density (`px_per_tick`, `min_ticks..=max_ticks`)
+    /// so compact oscillator/baseline axis badges stay aligned with their rendered axis tick decimals.
     #[must_use]
-    pub fn format_price(&self, raw_price: f64, base_value: f64) -> String {
+    pub fn format_price_for_tick_density(
+        &self,
+        raw_price: f64,
+        base_value: f64,
+        px_per_tick: f64,
+        min_ticks: usize,
+        max_ticks: usize,
+    ) -> String {
         match self.options.mode {
             PriceScaleMode::Percentage => format!("{:+.2}%", to_percent(raw_price, base_value)),
             PriceScaleMode::IndexedTo100 => {
@@ -996,13 +1050,30 @@ impl PriceScale {
             }
             PriceScaleMode::Normal | PriceScaleMode::Logarithmic => {
                 match self.options.format_mode {
-                    PriceAxisFormatMode::Standard => format_price_adaptive(raw_price),
+                    PriceAxisFormatMode::Standard => {
+                        if let Some(dec) = self.standard_axis_decimals_for_density(
+                            base_value,
+                            px_per_tick,
+                            min_ticks,
+                            max_ticks,
+                        ) {
+                            format_price_fixed_decimals(raw_price, dec)
+                        } else {
+                            format_price_adaptive(raw_price)
+                        }
+                    }
                     PriceAxisFormatMode::CompactVolume => {
                         format_compact_volume_axis(raw_price, None)
                     }
                 }
             }
         }
+    }
+
+    /// Formats a raw price according to the active `PriceScaleMode` and `PriceAxisFormatMode` (for crosshair pills & badges).
+    #[must_use]
+    pub fn format_price(&self, raw_price: f64, base_value: f64) -> String {
+        self.format_price_for_tick_density(raw_price, base_value, 54.0, 4, 12)
     }
 
     /// Generates clean, human-readable axis tick marks across `[0, height)` in the active scale mode.
@@ -1029,13 +1100,15 @@ impl PriceScale {
                 let l_high = range.max + range.len() * (self.top_margin_px() / ih);
                 let (steps, step_size) = generate_nice_linear_steps(l_low, l_high, target_count);
                 let dec = decimals_for_step(step_size, 2, 6);
+                let edge_pad = axis_edge_pad_px(self.height);
+                let min_gap = if self.height < 130.0 { 16.0 } else { 22.0 };
                 let mut last_accepted_y: Option<f64> = None;
                 for logical in steps {
                     let raw = self.logical_to_raw(logical, base_value);
                     if let Some(ly) = self.price_to_local_y(raw, base_value)
-                        && (4.0..=(self.height - 6.0)).contains(&ly)
+                        && (edge_pad..=(self.height - edge_pad)).contains(&ly)
                     {
-                        if last_accepted_y.is_some_and(|prev_y| (prev_y - ly).abs() < 22.0) {
+                        if last_accepted_y.is_some_and(|prev_y| (prev_y - ly).abs() < min_gap) {
                             continue;
                         }
                         last_accepted_y = Some(ly);
@@ -1062,8 +1135,25 @@ impl PriceScale {
                     let (v, step) = generate_nice_linear_steps(p_min, p_max, target_count);
                     (v, Some(step))
                 };
+                let effective_step = step_hint
+                    .filter(|s| s.is_finite() && *s > 0.0)
+                    .unwrap_or_else(|| {
+                        candidates
+                            .windows(2)
+                            .filter_map(|w| {
+                                let d = (w[1] - w[0]).abs();
+                                (d.is_finite() && d > 0.0).then_some(d)
+                            })
+                            .fold(f64::INFINITY, f64::min)
+                    });
+                let step_for_dec = if effective_step.is_finite() && effective_step > 0.0 {
+                    effective_step
+                } else {
+                    1.0
+                };
+                let scale_dec = scale_decimals_for_range_and_step(p_min, p_max, step_for_dec);
                 let mut last_accepted_y: Option<f64> = None;
-                let edge_pad = (self.height * 0.1).min(9.0);
+                let edge_pad = axis_edge_pad_px(self.height);
                 let min_gap = if self.height < 130.0 { 16.0 } else { 22.0 };
                 for raw in candidates {
                     if let Some(ly) = self.price_to_local_y(raw, base_value)
@@ -1078,11 +1168,7 @@ impl PriceScale {
                                 format_compact_volume_axis(raw, step_hint)
                             }
                             PriceAxisFormatMode::Standard => {
-                                if let Some(step) = step_hint {
-                                    format_price_with_step(raw, step)
-                                } else {
-                                    format_price_adaptive(raw)
-                                }
+                                format_price_fixed_decimals(raw, scale_dec)
                             }
                         };
                         marks.push(PriceTickMark {
@@ -1214,37 +1300,99 @@ fn generate_nice_log_or_linear_steps(
     }
 }
 
-fn decimals_for_step(step: f64, min_dec: usize, max_dec: usize) -> usize {
-    if !step.is_finite() || step <= 0.0 || step >= 1.0 {
-        return min_dec;
+/// Vertical edge clearance (px) keeping right-axis tick labels inside top/bottom pane borders
+/// without clipping on short quad/oscillator panes or shifting labels off gridlines.
+/// Computes symmetric edge padding inside `[0, height)` for price axis tick labels (`11.5 px` at
+/// heights `>= 48.0 px`, smoothly tapered for compact oscillator panes down to `0.5 px`).
+#[inline]
+#[must_use]
+pub fn axis_edge_pad_px(height: f64) -> f64 {
+    if !height.is_finite() || height <= 4.0 {
+        0.5
+    } else if height >= 48.0 {
+        11.5
+    } else {
+        (height * 0.24).clamp(1.0, 11.5).min(0.45 * height)
     }
-    let step_dec = (-step.log10().floor()).max(0.0) as usize;
-    step_dec.clamp(min_dec, max_dec)
 }
 
+fn decimals_for_step(step: f64, min_dec: usize, max_dec: usize) -> usize {
+    if !step.is_finite() || step <= 0.0 {
+        return min_dec;
+    }
+    let mut d = if step >= 1.0 {
+        0
+    } else {
+        (-step.log10().floor()).max(0.0) as usize
+    };
+    while d < max_dec {
+        let scaled = step * 10_f64.powi(d as i32);
+        if (scaled - scaled.round()).abs() <= 1.0e-6 {
+            break;
+        }
+        d += 1;
+    }
+    d.clamp(min_dec, max_dec)
+}
+
+/// Computes a single uniform decimal precision across an entire price axis `[p_min, p_max]`
+/// so labels never jump from `.00` to `.0000` across numeric magnitude boundaries like `100.0`.
+#[must_use]
+pub(crate) fn scale_decimals_for_range_and_step(p_min: f64, p_max: f64, step: f64) -> usize {
+    let scale_mag = p_min.abs().max(p_max.abs());
+    let min_dec = if !scale_mag.is_finite() || scale_mag >= 1.0 || scale_mag == 0.0 {
+        2
+    } else if scale_mag >= 0.01 {
+        4
+    } else {
+        6
+    };
+    decimals_for_step(step, min_dec, 8)
+}
+
+/// Formats `raw` with an exact `decimals` count while suppressing `-0.00` signed zero artifacts.
+#[must_use]
+pub fn format_price_fixed_decimals(raw: f64, decimals: usize) -> String {
+    if !raw.is_finite() {
+        return "—".to_owned();
+    }
+    let dec = decimals.min(8);
+    let clean = if raw.abs() < 0.5 * 10_f64.powi(-(dec as i32)) {
+        0.0
+    } else {
+        raw
+    };
+    format!("{clean:.dec$}")
+}
+
+#[allow(dead_code)]
 fn format_price_with_step(price: f64, step: f64) -> String {
     let abs = price.abs();
-    let base_dec = if abs >= 100.0 || abs == 0.0 {
+    let base_dec = if !abs.is_finite() || abs >= 1.0 || abs == 0.0 {
         2
-    } else if abs >= 1.0 {
+    } else if abs >= 0.01 {
         4
     } else {
         6
     };
     let dec = decimals_for_step(step, base_dec, 8);
-    format!("{price:.dec$}")
+    format_price_fixed_decimals(price, dec)
 }
 
 #[must_use]
 pub fn format_price_adaptive(price: f64) -> String {
-    let abs = price.abs();
-    if abs >= 100.0 || abs == 0.0 {
-        format!("{price:.2}")
-    } else if abs >= 1.0 {
-        format!("{price:.4}")
-    } else {
-        format!("{price:.6}")
+    if !price.is_finite() {
+        return "—".to_owned();
     }
+    let abs = price.abs();
+    let dec = if abs >= 1.0 || abs == 0.0 {
+        2
+    } else if abs >= 0.01 {
+        4
+    } else {
+        6
+    };
+    format_price_fixed_decimals(price, dec)
 }
 
 /// Formats signed large quantities (`K`, `M`, `B`, `T`) with rollover promotion so
