@@ -1,0 +1,26 @@
+{
+  "milestone": "R16",
+  "overall_pass": true,
+  "environment": {
+    "cpu": "Apple M1",
+    "os": "macos",
+    "arch": "aarch64",
+    "ram_bytes": 17179869184,
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "profile": "release",
+    "viewport_logical_px": [1280, 800],
+    "pixels_per_point": 2.0
+  },
+  "r16_domain_throughput": [
+    { "case_id": "r16_custom_signal_rule_backtest_btc_15m", "description": "O(N) 17-signal PrecomputedCatalogMatrix + 2-level CustomSignalRuleSpec Open[T+1] backtest on BTCUSDT 15m", "input_units": 1344, "output_items": 32, "median_us": 784.125, "median_ms": 0.7841, "p95_us": 869.584, "max_us": 883.167 },
+    { "case_id": "r16_causal_signal_confluence_alerts_and_csv_json_export", "description": "3-rule SignalCatalog & Confluence closed-bucket alert scan + cooldown + formula-safe CSV/JSON export on FPT 1D", "input_units": 180, "output_items": 7, "median_us": 71.084, "median_ms": 0.0711, "p95_us": 72.375, "max_us": 76.000 },
+    { "case_id": "r16_snapshot_store_ron_roundtrip_diff_and_quarantine", "description": "WorkspaceSnapshotStore RON encode/decode + field-level diff + corrupt-payload quarantine", "input_units": 3, "output_items": 4, "median_us": 822.083, "median_ms": 0.8221, "p95_us": 864.000, "max_us": 921.708 }
+  ],
+  "workstation_r16_workloads": [
+    { "dataset_bars": 1344, "workload_id": "r16_btc_15m_custom_rule_builder_and_mc_fan", "scale_mode": "Linear", "bar_spacing": 0.63864, "conflation_factor": 1, "culled_bars": 1344, "rendered_candles": 1343, "paint_shapes": 644, "clipped_primitives": 69, "total_vertices": 141068, "total_indices": 459558, "ui_median_ms": 0.8450, "tessellate_median_ms": 0.4712, "total_cpu_mean_ms": 1.3317, "total_cpu_median_ms": 1.3165, "total_cpu_p95_ms": 1.4187, "total_cpu_p99_ms": 1.5011 },
+    { "dataset_bars": 180, "workload_id": "r16_fpt_signal_confluence_alerts_and_markers", "scale_mode": "Linear", "bar_spacing": 8.00000, "conflation_factor": 1, "culled_bars": 104, "rendered_candles": 103, "paint_shapes": 422, "clipped_primitives": 62, "total_vertices": 21208, "total_indices": 72900, "ui_median_ms": 0.2133, "tessellate_median_ms": 0.1050, "total_cpu_mean_ms": 0.3215, "total_cpu_median_ms": 0.3186, "total_cpu_p95_ms": 0.3427, "total_cpu_p99_ms": 0.3835 },
+    { "dataset_bars": 540, "workload_id": "r16_1x2_snapshots_diff_and_quarantine_modal", "scale_mode": "Linear", "bar_spacing": 8.00000, "conflation_factor": 1, "culled_bars": 72, "rendered_candles": 70, "paint_shapes": 727, "clipped_primitives": 118, "total_vertices": 31542, "total_indices": 100143, "ui_median_ms": 0.2676, "tessellate_median_ms": 0.1820, "total_cpu_mean_ms": 0.4548, "total_cpu_median_ms": 0.4497, "total_cpu_p95_ms": 0.4972, "total_cpu_p99_ms": 0.5313 },
+    { "dataset_bars": 100000, "workload_id": "r16_100k_conflated_custom_rules_and_alerts", "scale_mode": "Linear", "bar_spacing": 0.00860, "conflation_factor": 32, "culled_bars": 96713, "rendered_candles": 3020, "paint_shapes": 526, "clipped_primitives": 57, "total_vertices": 115810, "total_indices": 232278, "ui_median_ms": 0.8256, "tessellate_median_ms": 0.2431, "total_cpu_mean_ms": 1.0932, "total_cpu_median_ms": 1.0697, "total_cpu_p95_ms": 1.2549, "total_cpu_p99_ms": 1.3097 },
+    { "dataset_bars": 200000, "workload_id": "r16_quad_2x2_50k_rule_builder_and_snapshots_stress", "scale_mode": "Linear", "bar_spacing": 0.00762, "conflation_factor": 64, "culled_bars": 192624, "rendered_candles": 3008, "paint_shapes": 644, "clipped_primitives": 113, "total_vertices": 92304, "total_indices": 211314, "ui_median_ms": 0.9012, "tessellate_median_ms": 0.3075, "total_cpu_mean_ms": 1.2183, "total_cpu_median_ms": 1.2123, "total_cpu_p95_ms": 1.2519, "total_cpu_p99_ms": 1.2872 }
+  ]
+}

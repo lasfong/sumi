@@ -752,6 +752,24 @@ pub fn find_catalog_entry(id: &str) -> Option<&'static SignalCatalogEntry> {
     SIGNAL_CATALOG.iter().find(|e| e.id == id)
 }
 
+/// Resolves the canonical `[0..17)` index of `id` inside [`SIGNAL_CATALOG`].
+#[must_use]
+pub fn catalog_entry_index(id: &str) -> Option<usize> {
+    SIGNAL_CATALOG.iter().position(|e| e.id == id)
+}
+
+/// Returns `true` when a [`SignalOutputType::Bool`] catalog entry can fire in **either**
+/// `Bullish` or `Bearish` direction on `bool_value == Some(true)` (requiring directional
+/// disambiguation in Long vs Short rules and directional alerts).
+#[inline]
+#[must_use]
+pub fn is_bidirectional_bool_signal(id: &str) -> bool {
+    matches!(
+        id,
+        "divergence.rsi_hidden_or_classic" | "sr.prior_20b_breakout" | "structure.swing_bos"
+    )
+}
+
 /// Looks up the catalog definition mapped to a [`ScanSignalKind`].
 #[must_use]
 pub fn find_catalog_entry_for_scan_kind(kind: ScanSignalKind) -> &'static SignalCatalogEntry {
@@ -2158,5 +2176,723 @@ impl SignalEvaluation {
     const fn output_type_hint(&self, entry: &SignalCatalogEntry) -> SignalOutputType {
         let _ = self;
         entry.output_type
+    }
+}
+
+/// Zero-heap-allocation compact evaluation of one [`SignalCatalogEntry`] at bar `t` (`Milestone R16 / Wave 15`).
+///
+/// Mirrors [`SignalEvaluation`]'s `(quality, bool_value, float_value, direction)` bit-for-bit without
+/// allocating explanation strings, enabling $O(N)$ precomputation across `100,000+` bars for custom
+/// strategy backtests, parameter sweeps, Walk-Forward Optimization, and causal alert scans.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CompactSignalPoint {
+    pub quality: SignalQuality,
+    pub bool_value: Option<bool>,
+    pub float_value: Option<f64>,
+    pub direction: Option<SignalDirection>,
+}
+
+impl CompactSignalPoint {
+    #[inline]
+    #[must_use]
+    pub const fn non_valid(quality: SignalQuality) -> Self {
+        Self {
+            quality,
+            bool_value: None,
+            float_value: None,
+            direction: None,
+        }
+    }
+}
+
+/// Precomputed $O(N)$ matrix over [`SIGNAL_CATALOG`], [`MarketRegime`], and 4-family Technical Health
+/// scores (`Balanced` & `TrendFocused`) across a causal candle slice (`Milestone R16 / Wave 15`).
+#[derive(Debug, Clone)]
+pub struct PrecomputedCatalogMatrix {
+    pub bar_count: usize,
+    pub points: [Vec<CompactSignalPoint>; SIGNAL_CATALOG.len()],
+    pub regimes: Vec<MarketRegime>,
+    pub health_balanced: Vec<Result<f64, SignalQuality>>,
+    pub health_trend_focused: Vec<Result<f64, SignalQuality>>,
+    pub counts_balanced: Vec<(u8, u8)>,
+    pub counts_trend_focused: Vec<(u8, u8)>,
+}
+
+impl PrecomputedCatalogMatrix {
+    /// Precomputes all 17 [`SIGNAL_CATALOG`] series, [`MarketRegime`], and both [`ConfluenceWeightProfile`]
+    /// composite scores across `candles` in $O(N)$ time with zero per-bar string allocations.
+    #[must_use]
+    pub fn compute(candles: &[Candle]) -> Self {
+        let n = candles.len();
+        let mut points: [Vec<CompactSignalPoint>; SIGNAL_CATALOG.len()] =
+            core::array::from_fn(|_| Vec::with_capacity(n));
+        if n == 0 {
+            return Self {
+                bar_count: 0,
+                points,
+                regimes: Vec::new(),
+                health_balanced: Vec::new(),
+                health_trend_focused: Vec::new(),
+                counts_balanced: Vec::new(),
+                counts_trend_focused: Vec::new(),
+            };
+        }
+
+        let bundle = ConfluenceSeriesBundle::compute(candles);
+        let mut regimes = Vec::with_capacity(n);
+        let mut health_balanced = Vec::with_capacity(n);
+        let mut health_trend_focused = Vec::with_capacity(n);
+        let mut counts_balanced = Vec::with_capacity(n);
+        let mut counts_trend_focused = Vec::with_capacity(n);
+
+        for t in 0..n {
+            let regime = super::engine::classify_regime_from_slices(
+                candles,
+                &bundle.ema_20,
+                &bundle.ema_50,
+                &bundle.atr_14,
+                &bundle.bb,
+                t,
+            );
+            regimes.push(regime);
+
+            let rvol20 = inspect_prior_rvol_at(candles, t, 20);
+            let h_bal = compute_health_compact_at(
+                candles,
+                &bundle,
+                regime,
+                rvol20,
+                t,
+                ConfluenceWeightProfile::Balanced,
+            );
+            let h_trd = compute_health_compact_at(
+                candles,
+                &bundle,
+                regime,
+                rvol20,
+                t,
+                ConfluenceWeightProfile::TrendFocused,
+            );
+            health_balanced.push(h_bal);
+            health_trend_focused.push(h_trd);
+
+            let mut bull_non_health = 0_u8;
+            let mut bear_non_health = 0_u8;
+
+            for (cat_idx, entry) in SIGNAL_CATALOG.iter().enumerate() {
+                let pt =
+                    evaluate_compact_entry_at(entry, candles, &bundle, regime, rvol20, h_bal, t);
+                if cat_idx != 0 {
+                    let active = match entry.output_type {
+                        SignalOutputType::Bool => pt.bool_value == Some(true),
+                        SignalOutputType::Float | SignalOutputType::Enum => pt.direction.is_some(),
+                    };
+                    if active {
+                        match pt.direction {
+                            Some(SignalDirection::Bullish) => {
+                                bull_non_health = bull_non_health.saturating_add(1);
+                            }
+                            Some(SignalDirection::Bearish) => {
+                                bear_non_health = bear_non_health.saturating_add(1);
+                            }
+                            None => {}
+                        }
+                    }
+                }
+                points[cat_idx].push(pt);
+            }
+
+            let add_health_dir = |res: Result<f64, SignalQuality>, b: u8, s: u8| -> (u8, u8) {
+                match res {
+                    Ok(sc) if sc >= 12.0 => (b.saturating_add(1), s),
+                    Ok(sc) if sc <= -12.0 => (b, s.saturating_add(1)),
+                    _ => (b, s),
+                }
+            };
+            counts_balanced.push(add_health_dir(h_bal, bull_non_health, bear_non_health));
+            counts_trend_focused.push(add_health_dir(h_trd, bull_non_health, bear_non_health));
+        }
+
+        Self {
+            bar_count: n,
+            points,
+            regimes,
+            health_balanced,
+            health_trend_focused,
+            counts_balanced,
+            counts_trend_focused,
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn point_at(&self, catalog_idx: usize, bar_index: usize) -> Option<CompactSignalPoint> {
+        self.points.get(catalog_idx)?.get(bar_index).copied()
+    }
+
+    /// Returns the [`CompactSignalPoint`] for `catalog_idx` at `bar_index` under `profile`
+    /// (`catalog_idx == 0` / `"health.technical_composite"` adapts to `Balanced` vs `TrendFocused`).
+    #[inline]
+    #[must_use]
+    pub fn point_at_with_profile(
+        &self,
+        catalog_idx: usize,
+        bar_index: usize,
+        profile: ConfluenceWeightProfile,
+    ) -> Option<CompactSignalPoint> {
+        if catalog_idx == 0 && profile == ConfluenceWeightProfile::TrendFocused {
+            let base_pt = self.points.first()?.get(bar_index).copied()?;
+            if !base_pt.quality.is_valid() {
+                return Some(base_pt);
+            }
+            return Some(match self.health_trend_focused.get(bar_index).copied()? {
+                Ok(score) => CompactSignalPoint {
+                    quality: SignalQuality::Valid,
+                    bool_value: None,
+                    float_value: Some(score),
+                    direction: if score >= 12.0 {
+                        Some(SignalDirection::Bullish)
+                    } else if score <= -12.0 {
+                        Some(SignalDirection::Bearish)
+                    } else {
+                        None
+                    },
+                },
+                Err(q) => CompactSignalPoint::non_valid(q),
+            });
+        }
+        self.point_at(catalog_idx, bar_index)
+    }
+
+    #[inline]
+    pub fn health_score_at(
+        &self,
+        bar_index: usize,
+        profile: ConfluenceWeightProfile,
+    ) -> Result<f64, SignalQuality> {
+        let vec = match profile {
+            ConfluenceWeightProfile::Balanced => &self.health_balanced,
+            ConfluenceWeightProfile::TrendFocused => &self.health_trend_focused,
+        };
+        vec.get(bar_index)
+            .copied()
+            .unwrap_or(Err(SignalQuality::InsufficientHistory))
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn regime_at(&self, bar_index: usize) -> MarketRegime {
+        self.regimes
+            .get(bar_index)
+            .copied()
+            .unwrap_or(MarketRegime::InsufficientHistory)
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn counts_at(&self, bar_index: usize, profile: ConfluenceWeightProfile) -> (u8, u8) {
+        let vec = match profile {
+            ConfluenceWeightProfile::Balanced => &self.counts_balanced,
+            ConfluenceWeightProfile::TrendFocused => &self.counts_trend_focused,
+        };
+        vec.get(bar_index).copied().unwrap_or((0, 0))
+    }
+}
+
+fn compute_health_compact_at(
+    candles: &[Candle],
+    bundle: &ConfluenceSeriesBundle,
+    regime: MarketRegime,
+    rvol20: PriorRvolCheck,
+    t: usize,
+    profile: ConfluenceWeightProfile,
+) -> Result<f64, SignalQuality> {
+    if t < CONFLUENCE_WARMUP_BARS || t >= candles.len() {
+        return Err(SignalQuality::InsufficientHistory);
+    }
+    let c = &candles[t];
+    if !c.close.is_finite() || !c.high.is_finite() || !c.low.is_finite() {
+        return Err(SignalQuality::InsufficientHistory);
+    }
+    let (Some(e20), Some(e50), Some(rsi), Some(atr)) = (
+        bundle.ema_20[t],
+        bundle.ema_50[t],
+        bundle.rsi_14[t],
+        bundle.atr_14[t],
+    ) else {
+        return Err(SignalQuality::InsufficientHistory);
+    };
+    let atr_safe = atr.max((c.close.abs() * 0.002).max(1.0e-8));
+
+    let stack_unit = ((e20 - e50) / (2.0 * atr_safe)).clamp(-1.0, 1.0);
+    let price_vs_e20 = ((c.close - e20) / (2.0 * atr_safe)).clamp(-1.0, 1.0);
+    let slope_unit = bundle.ema_20[t.saturating_sub(5)].map_or(0.0, |e_prev| {
+        ((e20 - e_prev) / (1.5 * atr_safe)).clamp(-1.0, 1.0)
+    });
+    let kumo_unit = match (
+        bundle.ichimoku.senkou_a.get(t).copied().flatten(),
+        bundle.ichimoku.senkou_b.get(t).copied().flatten(),
+    ) {
+        (Some(sa), Some(sb)) => {
+            let k_top = sa.max(sb);
+            let k_bot = sa.min(sb);
+            if c.close > k_top {
+                0.85
+            } else if c.close < k_bot {
+                -0.85
+            } else {
+                0.0
+            }
+        }
+        _ => stack_unit,
+    };
+    let trend_unit =
+        (0.35 * stack_unit + 0.30 * price_vs_e20 + 0.20 * slope_unit + 0.15 * kumo_unit)
+            .clamp(-1.0, 1.0);
+
+    let rsi_unit = ((rsi - 50.0) / 25.0).clamp(-1.0, 1.0);
+    let macd_unit =
+        bundle.macd.histogram[t].map_or(0.0, |mh| (mh / (0.6 * atr_safe)).clamp(-1.0, 1.0));
+    let mom_unit = (0.55 * rsi_unit + 0.45 * macd_unit).clamp(-1.0, 1.0);
+
+    let regime_unit: f64 = match regime {
+        MarketRegime::Uptrend => 0.70,
+        MarketRegime::Pullback => 0.35,
+        MarketRegime::Recovery => 0.45,
+        MarketRegime::SidewaysSqueeze
+        | MarketRegime::Neutral
+        | MarketRegime::InsufficientHistory => 0.0,
+        MarketRegime::Downtrend => -0.70,
+    };
+    let bw_shift_unit: f64 = match (
+        bb_bandwidth_ratio_at(&bundle.bb, t),
+        bb_bandwidth_ratio_at(&bundle.bb, t.saturating_sub(1)),
+    ) {
+        (Some(curr_bw), Some(prev_bw)) if curr_bw > prev_bw => {
+            if c.close >= e20 {
+                0.35
+            } else {
+                -0.35
+            }
+        }
+        _ => 0.0,
+    };
+    let shift_unit = (0.70 * regime_unit + 0.30 * bw_shift_unit).clamp(-1.0, 1.0);
+
+    let flow_unit = match rvol20 {
+        PriorRvolCheck::Valid { rvol, .. } => {
+            let amp = ((rvol - 0.8) / 1.4).clamp(0.0, 1.0);
+            let dir = signed_clv_m1_p1(c);
+            (amp * dir).clamp(-1.0, 1.0)
+        }
+        PriorRvolCheck::ZeroBaseline => 0.0,
+        PriorRvolCheck::InvalidVolume => return Err(SignalQuality::InvalidVolume),
+        PriorRvolCheck::InsufficientHistory => return Err(SignalQuality::InsufficientHistory),
+    };
+
+    let (w_trend, w_mom, w_shift, w_flow) = profile.weights();
+    let composite_unit =
+        (w_trend * trend_unit + w_mom * mom_unit + w_shift * shift_unit + w_flow * flow_unit)
+            .clamp(-1.0, 1.0);
+    Ok(composite_unit * 100.0)
+}
+
+fn evaluate_compact_entry_at(
+    entry: &'static SignalCatalogEntry,
+    candles: &[Candle],
+    bundle: &ConfluenceSeriesBundle,
+    regime: MarketRegime,
+    rvol20: PriorRvolCheck,
+    health_bal: Result<f64, SignalQuality>,
+    t: usize,
+) -> CompactSignalPoint {
+    if t < entry.warmup_bars || t >= candles.len() {
+        return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+    }
+    let c = &candles[t];
+    if !c.open.is_finite()
+        || !c.high.is_finite()
+        || !c.low.is_finite()
+        || !c.close.is_finite()
+        || c.high < c.low
+    {
+        return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+    }
+
+    match entry.id {
+        "health.technical_composite" => match health_bal {
+            Ok(score) => CompactSignalPoint {
+                quality: SignalQuality::Valid,
+                bool_value: None,
+                float_value: Some(score),
+                direction: if score >= 12.0 {
+                    Some(SignalDirection::Bullish)
+                } else if score <= -12.0 {
+                    Some(SignalDirection::Bearish)
+                } else {
+                    None
+                },
+            },
+            Err(q) => CompactSignalPoint::non_valid(q),
+        },
+        "regime.market_state" => {
+            if regime == MarketRegime::InsufficientHistory {
+                return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+            }
+            let dir = match regime {
+                MarketRegime::Uptrend | MarketRegime::Pullback | MarketRegime::Recovery => {
+                    Some(SignalDirection::Bullish)
+                }
+                MarketRegime::Downtrend => Some(SignalDirection::Bearish),
+                MarketRegime::SidewaysSqueeze
+                | MarketRegime::Neutral
+                | MarketRegime::InsufficientHistory => None,
+            };
+            CompactSignalPoint {
+                quality: SignalQuality::Valid,
+                bool_value: None,
+                float_value: None,
+                direction: dir,
+            }
+        }
+        "technical.rsi_oversold_cross" => {
+            let (Some(prev), Some(curr)) = (bundle.rsi_14[t - 1], bundle.rsi_14[t]) else {
+                return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+            };
+            let fired = prev <= 30.0 && curr > 30.0;
+            CompactSignalPoint {
+                quality: SignalQuality::Valid,
+                bool_value: Some(fired),
+                float_value: Some(curr),
+                direction: fired.then_some(SignalDirection::Bullish),
+            }
+        }
+        "technical.rsi_overbought_cross" => {
+            let (Some(prev), Some(curr)) = (bundle.rsi_14[t - 1], bundle.rsi_14[t]) else {
+                return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+            };
+            let fired = prev >= 70.0 && curr < 70.0;
+            CompactSignalPoint {
+                quality: SignalQuality::Valid,
+                bool_value: Some(fired),
+                float_value: Some(curr),
+                direction: fired.then_some(SignalDirection::Bearish),
+            }
+        }
+        "technical.macd_bull_cross" | "technical.macd_bear_cross" => {
+            let is_bull = entry.id == "technical.macd_bull_cross";
+            let (Some(prev_h), Some(curr_h)) =
+                (bundle.macd.histogram[t - 1], bundle.macd.histogram[t])
+            else {
+                return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+            };
+            let fired = if is_bull {
+                prev_h <= 0.0 && curr_h > 0.0
+            } else {
+                prev_h >= 0.0 && curr_h < 0.0
+            };
+            CompactSignalPoint {
+                quality: SignalQuality::Valid,
+                bool_value: Some(fired),
+                float_value: Some(curr_h),
+                direction: fired.then_some(if is_bull {
+                    SignalDirection::Bullish
+                } else {
+                    SignalDirection::Bearish
+                }),
+            }
+        }
+        "technical.sma_ema_golden_cross" | "technical.sma_ema_death_cross" => {
+            let is_gold = entry.id == "technical.sma_ema_golden_cross";
+            let (Some(sp), Some(ep), Some(sc), Some(ec)) = (
+                bundle.sma_20[t - 1],
+                bundle.ema_50[t - 1],
+                bundle.sma_20[t],
+                bundle.ema_50[t],
+            ) else {
+                return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+            };
+            let prev_d = sp - ep;
+            let curr_d = sc - ec;
+            let fired = if is_gold {
+                prev_d <= 0.0 && curr_d > 0.0
+            } else {
+                prev_d >= 0.0 && curr_d < 0.0
+            };
+            CompactSignalPoint {
+                quality: SignalQuality::Valid,
+                bool_value: Some(fired),
+                float_value: Some(curr_d),
+                direction: fired.then_some(if is_gold {
+                    SignalDirection::Bullish
+                } else {
+                    SignalDirection::Bearish
+                }),
+            }
+        }
+        "pattern.bollinger_squeeze_breakout" => {
+            let (Some(prev_bw), Some(prev_up), Some(curr_up)) = (
+                bb_bandwidth_ratio_at(&bundle.bb, t - 1),
+                bundle.bb.upper[t - 1],
+                bundle.bb.upper[t],
+            ) else {
+                return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+            };
+            let fired = prev_bw <= 0.10 && candles[t - 1].close <= prev_up && c.close > curr_up;
+            CompactSignalPoint {
+                quality: SignalQuality::Valid,
+                bool_value: Some(fired),
+                float_value: Some(prev_bw * 100.0),
+                direction: fired.then_some(SignalDirection::Bullish),
+            }
+        }
+        "volume.spike_2x" => match rvol20 {
+            PriorRvolCheck::Valid { rvol, .. } => {
+                let fired = rvol >= 2.0 && c.close >= c.open;
+                CompactSignalPoint {
+                    quality: SignalQuality::Valid,
+                    bool_value: Some(fired),
+                    float_value: Some(rvol),
+                    direction: fired.then_some(SignalDirection::Bullish),
+                }
+            }
+            PriorRvolCheck::InsufficientHistory => {
+                CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory)
+            }
+            PriorRvolCheck::InvalidVolume => {
+                CompactSignalPoint::non_valid(SignalQuality::InvalidVolume)
+            }
+            PriorRvolCheck::ZeroBaseline => {
+                CompactSignalPoint::non_valid(SignalQuality::ZeroBaseline)
+            }
+        },
+        "vsa.climax_up" => match (rvol20, bundle.atr_14[t]) {
+            (PriorRvolCheck::Valid { rvol, .. }, Some(atr)) if atr > 1.0e-12 => {
+                let range_atr = (c.high - c.low).max(0.0) / atr;
+                let cloc = close_location_01(c);
+                let fired = rvol >= 2.0 && range_atr >= 1.35 && cloc >= 0.65;
+                CompactSignalPoint {
+                    quality: SignalQuality::Valid,
+                    bool_value: Some(fired),
+                    float_value: Some(rvol),
+                    direction: fired.then_some(SignalDirection::Bullish),
+                }
+            }
+            (PriorRvolCheck::InvalidVolume, _) => {
+                CompactSignalPoint::non_valid(SignalQuality::InvalidVolume)
+            }
+            (PriorRvolCheck::ZeroBaseline, _) => {
+                CompactSignalPoint::non_valid(SignalQuality::ZeroBaseline)
+            }
+            _ => CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory),
+        },
+        "vsa.stopping_volume" => match rvol20 {
+            PriorRvolCheck::Valid { rvol, .. } => {
+                let mut prior_low = f64::INFINITY;
+                for b in &candles[t - 10..t] {
+                    if b.low.is_finite() && b.low < prior_low {
+                        prior_low = b.low;
+                    }
+                }
+                if !prior_low.is_finite() {
+                    return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+                }
+                let cloc = close_location_01(c);
+                let fired = c.low <= prior_low && rvol >= 1.8 && cloc >= 0.60;
+                CompactSignalPoint {
+                    quality: SignalQuality::Valid,
+                    bool_value: Some(fired),
+                    float_value: Some(cloc),
+                    direction: fired.then_some(SignalDirection::Bullish),
+                }
+            }
+            PriorRvolCheck::InvalidVolume => {
+                CompactSignalPoint::non_valid(SignalQuality::InvalidVolume)
+            }
+            PriorRvolCheck::ZeroBaseline => {
+                CompactSignalPoint::non_valid(SignalQuality::ZeroBaseline)
+            }
+            PriorRvolCheck::InsufficientHistory => {
+                CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory)
+            }
+        },
+        "divergence.rsi_hidden_or_classic" => {
+            let Some(curr_rsi) = bundle.rsi_14[t] else {
+                return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+            };
+            let mut min_low_idx: Option<usize> = None;
+            let mut max_high_idx: Option<usize> = None;
+            for idx in (t - 10)..t {
+                let b = &candles[idx];
+                if b.low.is_finite() && min_low_idx.is_none_or(|m| b.low < candles[m].low) {
+                    min_low_idx = Some(idx);
+                }
+                if b.high.is_finite() && max_high_idx.is_none_or(|m| b.high > candles[m].high) {
+                    max_high_idx = Some(idx);
+                }
+            }
+            let (Some(lo_idx), Some(hi_idx)) = (min_low_idx, max_high_idx) else {
+                return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+            };
+            let bull_div = bundle.rsi_14[lo_idx].is_some_and(|prev_rsi| {
+                c.low < candles[lo_idx].low && curr_rsi > prev_rsi + 2.0 && curr_rsi < 48.0
+            });
+            let bear_div = bundle.rsi_14[hi_idx].is_some_and(|prev_rsi| {
+                c.high > candles[hi_idx].high && curr_rsi < prev_rsi - 2.0 && curr_rsi > 52.0
+            });
+            let fired = bull_div || bear_div;
+            let dir = if bull_div {
+                Some(SignalDirection::Bullish)
+            } else if bear_div {
+                Some(SignalDirection::Bearish)
+            } else {
+                None
+            };
+            CompactSignalPoint {
+                quality: SignalQuality::Valid,
+                bool_value: Some(fired),
+                float_value: Some(curr_rsi),
+                direction: dir,
+            }
+        }
+        "ichimoku.tk_kumo_alignment" => {
+            let (Some(tk), Some(kj), Some(sa), Some(sb)) = (
+                bundle.ichimoku.tenkan.get(t).copied().flatten(),
+                bundle.ichimoku.kijun.get(t).copied().flatten(),
+                bundle.ichimoku.senkou_a.get(t).copied().flatten(),
+                bundle.ichimoku.senkou_b.get(t).copied().flatten(),
+            ) else {
+                return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+            };
+            let k_top = sa.max(sb);
+            let k_bot = sa.min(sb);
+            let mut pts = 0.0_f64;
+            if c.close > k_top {
+                pts += 50.0;
+            } else if c.close < k_bot {
+                pts -= 50.0;
+            }
+            if tk > kj {
+                pts += 30.0;
+            } else if tk < kj {
+                pts -= 30.0;
+            }
+            if sa > sb {
+                pts += 20.0;
+            } else if sa < sb {
+                pts -= 20.0;
+            }
+            CompactSignalPoint {
+                quality: SignalQuality::Valid,
+                bool_value: None,
+                float_value: Some(pts),
+                direction: if pts >= 40.0 {
+                    Some(SignalDirection::Bullish)
+                } else if pts <= -40.0 {
+                    Some(SignalDirection::Bearish)
+                } else {
+                    None
+                },
+            }
+        }
+        "flow.cvd_ohlcv_impulse" => match rvol20 {
+            PriorRvolCheck::Valid { baseline, .. } => {
+                let (Some(cvd_now), Some(cvd_prev5)) = (
+                    bundle.cvd_values.get(t).copied().flatten(),
+                    bundle
+                        .cvd_values
+                        .get(t.saturating_sub(5))
+                        .copied()
+                        .flatten(),
+                ) else {
+                    return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+                };
+                let norm_impulse =
+                    ((cvd_now - cvd_prev5) / (5.0 * baseline)).clamp(-5.0, 5.0) * 20.0;
+                CompactSignalPoint {
+                    quality: SignalQuality::Valid,
+                    bool_value: None,
+                    float_value: Some(norm_impulse),
+                    direction: if norm_impulse >= 20.0 {
+                        Some(SignalDirection::Bullish)
+                    } else if norm_impulse <= -20.0 {
+                        Some(SignalDirection::Bearish)
+                    } else {
+                        None
+                    },
+                }
+            }
+            PriorRvolCheck::InvalidVolume => {
+                CompactSignalPoint::non_valid(SignalQuality::InvalidVolume)
+            }
+            PriorRvolCheck::ZeroBaseline => {
+                CompactSignalPoint::non_valid(SignalQuality::ZeroBaseline)
+            }
+            PriorRvolCheck::InsufficientHistory => {
+                CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory)
+            }
+        },
+        "sr.prior_20b_breakout" => {
+            let mut prior_hi = f64::NEG_INFINITY;
+            let mut prior_lo = f64::INFINITY;
+            for b in &candles[t - 20..t] {
+                if b.high.is_finite() && b.high > prior_hi {
+                    prior_hi = b.high;
+                }
+                if b.low.is_finite() && b.low < prior_lo {
+                    prior_lo = b.low;
+                }
+            }
+            if !prior_hi.is_finite() || !prior_lo.is_finite() {
+                return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+            }
+            let up_brk = c.close > prior_hi;
+            let dn_brk = c.close < prior_lo;
+            CompactSignalPoint {
+                quality: SignalQuality::Valid,
+                bool_value: Some(up_brk || dn_brk),
+                float_value: Some(if up_brk { prior_hi } else { prior_lo }),
+                direction: if up_brk {
+                    Some(SignalDirection::Bullish)
+                } else if dn_brk {
+                    Some(SignalDirection::Bearish)
+                } else {
+                    None
+                },
+            }
+        }
+        "structure.swing_bos" => {
+            let Some(e20) = bundle.ema_20[t] else {
+                return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+            };
+            let mut prior_hi = f64::NEG_INFINITY;
+            let mut prior_lo = f64::INFINITY;
+            for b in &candles[t - 10..t] {
+                if b.high.is_finite() && b.high > prior_hi {
+                    prior_hi = b.high;
+                }
+                if b.low.is_finite() && b.low < prior_lo {
+                    prior_lo = b.low;
+                }
+            }
+            if !prior_hi.is_finite() || !prior_lo.is_finite() {
+                return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+            }
+            let bull_bos = c.close > prior_hi && c.close > e20;
+            let bear_bos = c.close < prior_lo && c.close < e20;
+            CompactSignalPoint {
+                quality: SignalQuality::Valid,
+                bool_value: Some(bull_bos || bear_bos),
+                float_value: Some(c.close - e20),
+                direction: if bull_bos {
+                    Some(SignalDirection::Bullish)
+                } else if bear_bos {
+                    Some(SignalDirection::Bearish)
+                } else {
+                    None
+                },
+            }
+        }
+        _ => CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory),
     }
 }

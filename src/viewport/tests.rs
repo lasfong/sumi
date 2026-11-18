@@ -1384,3 +1384,264 @@ fn critic_r14_regression_template6_and_legacy_serde_compat() {
     assert_eq!(legacy.hotkey_profile, HotkeyProfileId::StandardCharting);
     assert!(legacy.hotkey_overrides.is_empty());
 }
+
+#[test]
+fn r16_workspace_snapshot_store_16_slot_cap_pinned_protection_and_4_slot_auto_ring_dedup() {
+    use super::workspace_template::{
+        MAX_AUTO_CHECKPOINT_RING, MAX_NAMED_SNAPSHOT_SLOTS, WorkspaceSnapshotStore,
+        WorkspaceTemplateError, builtin_workspace_templates,
+    };
+
+    let builtins = builtin_workspace_templates();
+    let mut store = WorkspaceSnapshotStore::new();
+
+    // 1. Fill all 16 named slots (`0..4` pinned, `4..16` unpinned):
+    let mut slot_ids = Vec::with_capacity(MAX_NAMED_SNAPSHOT_SLOTS);
+    for i in 0..MAX_NAMED_SNAPSHOT_SLOTS {
+        let mut tpl = builtins[i % builtins.len()].clone();
+        tpl.active_slot = i % 4;
+        let id = store
+            .save_named_snapshot(&format!("Desk-{i:02}"), i < 4, tpl)
+            .expect("save slot");
+        slot_ids.push(id);
+    }
+    assert_eq!(store.named_slots.len(), MAX_NAMED_SNAPSHOT_SLOTS);
+
+    // Saving a 17th distinct label evicts the oldest UNPINNED slot (`Desk-04`, index 4), NEVER pinned `Desk-00..03`!
+    let mut tpl_17 = builtins[0].clone();
+    tpl_17.slots[0].symbol = "VCB".to_owned();
+    store
+        .save_named_snapshot("Desk-16", false, tpl_17)
+        .expect("evicts oldest unpinned");
+    assert_eq!(store.named_slots.len(), MAX_NAMED_SNAPSHOT_SLOTS);
+    assert!(
+        store
+            .named_slots
+            .iter()
+            .any(|s| s.label == "Desk-00" && s.pinned)
+    );
+    assert!(!store.named_slots.iter().any(|s| s.label == "Desk-04"));
+
+    // Updating an existing label (`desk-00` case-insensitive) updates in place without evicting!
+    let prev_id_0 = slot_ids[0];
+    let updated_id = store
+        .save_named_snapshot("desk-00", true, builtins[1].clone())
+        .expect("in-place update");
+    assert_eq!(updated_id, prev_id_0);
+    assert_eq!(store.named_slots.len(), MAX_NAMED_SNAPSHOT_SLOTS);
+
+    // Pin ALL 16 slots -> adding a brand-new label MUST return `Err(SnapshotSlotsFull)` without deleting any pinned slot!
+    for idx in 0..store.named_slots.len() {
+        let sid = store.named_slots[idx].slot_id;
+        if !store.named_slots[idx].pinned {
+            assert_eq!(store.toggle_pin(sid), Some(true));
+        }
+    }
+    let err = store.save_named_snapshot("BrandNewBlocked", true, builtins[2].clone());
+    assert_eq!(err, Err(WorkspaceTemplateError::SnapshotSlotsFull));
+    assert_eq!(store.named_slots.len(), MAX_NAMED_SNAPSHOT_SLOTS);
+
+    // Deleting one pinned slot frees capacity again!
+    assert!(store.delete_named_snapshot(prev_id_0));
+    assert_eq!(store.named_slots.len(), MAX_NAMED_SNAPSHOT_SLOTS - 1);
+    assert!(
+        store
+            .save_named_snapshot("NowFits", true, builtins[2].clone())
+            .is_ok()
+    );
+
+    // 2. 4-slot `auto_ring` FIFO + identical `template_digest` deduplication:
+    assert!(
+        store
+            .push_auto_checkpoint("Auto-0", builtins[0].clone())
+            .is_some()
+    );
+    assert_eq!(
+        store.push_auto_checkpoint("Auto-0-Dup", builtins[0].clone()),
+        None,
+        "identical canonical_digest must deduplicate against tail of auto_ring"
+    );
+    assert_eq!(store.auto_ring.len(), 1);
+    for k in 1..6 {
+        let mut t = builtins[k % builtins.len()].clone();
+        t.slots[0].symbol = format!("SYM{k}");
+        assert!(
+            store
+                .push_auto_checkpoint(&format!("Auto-{k}"), t)
+                .is_some()
+        );
+    }
+    assert_eq!(store.auto_ring.len(), MAX_AUTO_CHECKPOINT_RING);
+    assert_eq!(store.auto_ring.first().unwrap().label, "Auto-2");
+    assert_eq!(store.auto_ring.last().unwrap().label, "Auto-5");
+}
+
+#[test]
+fn r16_workspace_snapshot_64bit_digest_hex_lossless_ron_json_roundtrip_and_diff() {
+    use super::{
+        HotkeyAction, HotkeyChord, HotkeyKey, HotkeyOverride, HotkeyProfileId,
+        MultiChartLayoutKind, TemplateRightDockTab, WorkspaceSnapshotStore,
+        builtin_workspace_templates, compute_workspace_diff,
+    };
+
+    let builtins = builtin_workspace_templates();
+    let mut store = WorkspaceSnapshotStore::new();
+    for (idx, tpl) in builtins.iter().enumerate() {
+        store
+            .save_named_snapshot(&format!("B{idx}"), idx % 2 == 0, tpl.clone())
+            .expect("save builtin");
+    }
+    store.push_auto_checkpoint("Pre-Restore Undo", builtins[5].clone());
+
+    // Verify full 64-bit digest (> 2^53) survives BOTH `RON` and `JSON` without `f64` 53-bit mantissa truncation!
+    assert!(
+        store
+            .named_slots
+            .iter()
+            .any(|s| s.template_digest > (1_u64 << 53)),
+        "SplitMix64 canonical_digest exercises high >53-bit u64 space"
+    );
+    let ron = store.to_ron_pretty();
+    let json = store.to_json_pretty();
+    assert!(ron.contains("template_digest_hex"));
+    assert!(json.contains("\"template_digest_hex\""));
+    let dec_ron = WorkspaceSnapshotStore::from_ron_str(&ron).expect("decode store RON");
+    let dec_json = WorkspaceSnapshotStore::from_json_str(&json).expect("decode store JSON");
+    let dec_auto_r = WorkspaceSnapshotStore::from_auto_str(&ron).expect("auto store RON");
+    let dec_auto_j = WorkspaceSnapshotStore::from_auto_str(&json).expect("auto store JSON");
+    assert_eq!(dec_ron, store);
+    assert_eq!(dec_json, store);
+    assert_eq!(dec_auto_r, store);
+    assert_eq!(dec_auto_j, store);
+
+    // Verify `compute_workspace_diff` detects layout, slot symbol/TF/indicators, docks, and hotkey changes cleanly:
+    let base = &builtins[0];
+    let same_diff = compute_workspace_diff(base, base);
+    assert!(same_diff.is_identical);
+    assert_eq!(same_diff.total_changed_fields, 0);
+
+    let mut modified = base.clone();
+    modified.layout = MultiChartLayoutKind::Quad2x2;
+    modified.slots[0].symbol = "BTCUSDT".to_owned();
+    modified.slots[0].indicators.show_vwap = !modified.slots[0].indicators.show_vwap;
+    modified.dock_layout.show_strategy_panel = true;
+    modified.dock_layout.right_dock_tab = TemplateRightDockTab::StrategyLab;
+    modified.hotkey_profile = HotkeyProfileId::Custom;
+    modified.hotkey_overrides.push(HotkeyOverride {
+        action: HotkeyAction::QuickBuyMarket,
+        chord: Some(HotkeyChord::plain(HotkeyKey::F2)),
+    });
+    let diff = compute_workspace_diff(base, &modified);
+    assert!(!diff.is_identical);
+    assert_eq!(
+        diff.layout_change,
+        Some((
+            MultiChartLayoutKind::Single1x1,
+            MultiChartLayoutKind::Quad2x2
+        ))
+    );
+    assert!(!diff.slot_diffs.is_empty());
+    assert!(!diff.dock_changes.is_empty());
+    assert!(diff.hotkey_profile_change.is_some());
+    assert!(diff.hotkey_override_delta_count >= 1);
+    assert!(diff.total_changed_fields >= 5);
+}
+
+#[test]
+fn r16_corrupt_snapshot_quarantine_recovery_and_staged_import_never_panics() {
+    use super::workspace_template::{
+        MAX_SNAPSHOT_PAYLOAD_BYTES, builtin_workspace_templates, recover_or_parse_snapshot_store,
+        safe_stage_template_import,
+    };
+
+    let fallback = builtin_workspace_templates().into_iter().next().unwrap();
+
+    for corrupt in [
+        "",
+        "{ \"schema_version\": 1, \"named_slots\": [ { \"slot_id\": 1, ", // truncated mid-JSON
+        "(schema_version: 99, named_slots: [], auto_ring: [])",           // unsupported version
+        "(schema_version: 1, named_slots: [(slot_id: NaN)])",             // NaN number
+        "{ \"schema_version\": 1, \"unknown_evil_key\": true }",          // unknown field
+        "{ \"schema_version\": 1, \"schema_version\": 1 }",               // duplicate field
+        "{{{not valid ron or json\u{0000}\u{001F})))",                    // control chars & syntax
+    ] {
+        let (recovered, active_tpl) =
+            recover_or_parse_snapshot_store(corrupt, Some(fallback.clone()));
+        let diag = recovered
+            .last_quarantine
+            .as_ref()
+            .expect("quarantine diagnostic recorded");
+        assert_eq!(diag.byte_len, corrupt.len());
+        assert!(!diag.error_message.is_empty());
+        assert_eq!(active_tpl, fallback);
+        assert_eq!(recovered.last_known_good.as_ref(), Some(&fallback));
+
+        let stage_res = safe_stage_template_import(&fallback, corrupt);
+        assert!(stage_res.is_err());
+    }
+
+    // Oversized > 2 MiB payload fails closed immediately without allocating unbounded quarantined copies:
+    let huge = "x".repeat(MAX_SNAPSHOT_PAYLOAD_BYTES + 64);
+    let (recovered_huge, _) = recover_or_parse_snapshot_store(&huge, None);
+    assert!(recovered_huge.last_quarantine.is_some());
+    assert!(
+        recovered_huge.quarantined_raw_payload.is_none(),
+        "oversized > 2 MiB payload must not retain full raw string in memory"
+    );
+}
+
+#[test]
+fn critic_r16_regression_tampered_snapshot_digest_quarantines_and_schema_version_normalizes() {
+    use super::workspace_template::{
+        WORKSPACE_TEMPLATE_SCHEMA_VERSION, WorkspaceSnapshotStore, WorkspaceTemplate,
+        WorkspaceTemplateError, builtin_workspace_templates, recover_or_parse_snapshot_store,
+    };
+
+    let fallback = builtin_workspace_templates().into_iter().next().unwrap();
+    let mut store = WorkspaceSnapshotStore::new();
+    let mut fpt_tpl = fallback.clone();
+    fpt_tpl.slots[0].symbol = "FPT".to_owned();
+    store
+        .save_named_snapshot("FPT Checkpoint", true, fpt_tpl.clone())
+        .expect("save FPT checkpoint");
+    store.push_auto_checkpoint("pre-restore", fallback.clone());
+
+    let expected_hex = format!("{:016x}", store.named_slots[0].template_digest);
+    let zero_hex = "0000000000000000";
+    assert_ne!(expected_hex, zero_hex);
+
+    // 1. Tamper `template_digest_hex` directly in both RON and JSON -> `CorruptSnapshotDigest`!
+    let ron_bad_digest = store.to_ron_pretty().replacen(&expected_hex, zero_hex, 1);
+    assert!(matches!(
+        WorkspaceSnapshotStore::from_ron_str(&ron_bad_digest),
+        Err(WorkspaceTemplateError::CorruptSnapshotDigest { slot_id: 1, .. })
+    ));
+    let json_bad_digest = store.to_json_pretty().replacen(&expected_hex, zero_hex, 1);
+    assert!(matches!(
+        WorkspaceSnapshotStore::from_json_str(&json_bad_digest),
+        Err(WorkspaceTemplateError::CorruptSnapshotDigest { slot_id: 1, .. })
+    ));
+
+    // 2. Tamper inner `symbol` (`"FPT"` -> `"VNM"`) while keeping original `template_digest_hex` -> `CorruptSnapshotDigest`!
+    let json_tampered_inner = store.to_json_pretty().replacen("\"FPT\"", "\"VNM\"", 1);
+    assert!(matches!(
+        WorkspaceSnapshotStore::from_json_str(&json_tampered_inner),
+        Err(WorkspaceTemplateError::CorruptSnapshotDigest { slot_id: 1, .. })
+    ));
+    let (quarantined, recovered_tpl) =
+        recover_or_parse_snapshot_store(&json_tampered_inner, Some(fallback.clone()));
+    let diag = quarantined
+        .last_quarantine
+        .as_ref()
+        .expect("tampered digest must quarantine");
+    assert!(diag.error_message.contains("Corrupt snapshot digest"));
+    assert_eq!(recovered_tpl, fallback);
+
+    // 3. `[Minor-01]` `WorkspaceTemplate::sanitize()` normalizes out-of-range `schema_version` so strict re-parse succeeds:
+    let mut dirty_ver = fallback;
+    dirty_ver.schema_version = 0;
+    dirty_ver.sanitize();
+    assert_eq!(dirty_ver.schema_version, WORKSPACE_TEMPLATE_SCHEMA_VERSION);
+    let dirty_ron = dirty_ver.to_ron_pretty();
+    assert!(WorkspaceTemplate::from_ron_str(&dirty_ron).is_ok());
+}

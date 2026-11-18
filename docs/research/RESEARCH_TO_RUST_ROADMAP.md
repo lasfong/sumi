@@ -1,7 +1,7 @@
 # RESEARCH TO RUST ROADMAP — SESSION R01
 
 - **Session Identity:** `SESSION-R01-20261110T202837+0700`
-- **Updated By:** `SESSION-R15-20261118T074500+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Updated By:** `SESSION-R16-20261118T155000+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 - **Principle:** No Rust implementation begins without prior REA or reference-source research evidence.
 
 ---
@@ -402,13 +402,43 @@ cargo test app::tests::critic_r15_
 
 ---
 
-## Wave 15 — Composable Signal-Catalog Rule Strategy Builder, Multi-Condition Causal Alert Ledger & Export, & Crash-Safe Workspace Snapshot Auto-Recovery (`PROPOSED — MILESTONE R16`)
+## Wave 15 — Composable Signal-Catalog Rule Strategy Builder, Multi-Condition Causal Alert Ledger & Export, & Named Workspace Snapshot Checkpoints + Corrupt-State Recovery (`COMPLETE — SESSION R16`)
 
-### Proposed Deliverables (Awaiting Product Owner Authorization)
+### Completed Research & Audit Gates (`VERIFIED`)
+- [x] Executed `10` live REA MCP JS/TS operations (`REA-R16-01`..`10` across `ARCHIVE/frontend` `StrategyRuleBuilder.tsx`/`StrategyLabPage.tsx`/`MultiPhaseBatchPanel.tsx`/`SettingsModal.tsx`/`workspaceTypes.ts`/`DrawingRepository.ts`/`PracticeScoreboard.tsx`/`SessionDebriefModal.tsx` & `LWC v5.2.0` `series-markers/{primitive,pane-view,renderer,types,utils}.ts`/`expiring-markers-manager.ts`/`chart-options-defaults.ts`) plus `2` post-build binary REA ops (`REA-R16-11`..`12` on final R16 release Mach-O `d32c891c1abc364e9d709e769984a4bd9ef64a2553927e78bc64304aea875750`, UUID `03E16800-6F00-3FE2-944C-FE5D499D6FD0`) -> [`docs/research/RULE_BUILDER_ALERTS_AND_SNAPSHOT_RECOVERY_SPEC.md`](RULE_BUILDER_ALERTS_AND_SNAPSHOT_RECOVERY_SPEC.md) and [`docs/FEATURE_BACKLOG_AND_PARITY_LEDGER.md`](../FEATURE_BACKLOG_AND_PARITY_LEDGER.md).
+
+### Shipped Deliverables & Verification (`cargo test r16_`, `cargo test critic_r16_`, `--r16`, `SUMI_CAPTURE_BATCH=r16`)
 | Component | Research Source | Rust Target | Status |
 |---|---|---|---|
-| Composable Signal-Catalog Rule Strategy Builder (`AND`/`OR` `SIGNAL_CATALOG` entry/exit clauses + `ConfluenceScore` threshold feeding `Open[T+1]` Backtest, `WFO`, & `SplitMix64` Monte Carlo) | `ARCHIVE/frontend/src/components/strategy/*` | `src/backtest/`, `src/scanner/catalog.rs`, `src/app.rs` | Proposed (`Milestone R16`) |
-| Multi-Condition Causal Alert Ledger (`SignalCatalog`/`ConfluenceScore` triggers, cooldown bars, formula-safe CSV/JSON export) & Named Workspace Snapshot Checkpoints | `ARCHIVE/frontend` alerts/workspace modules + `LWC v5.2.0` | `src/alerts/`, `src/viewport/workspace_template.rs`, `src/app.rs` | Proposed (`Milestone R16`) |
+| Vectorized $O(N)$ `PrecomputedCatalogMatrix` (`point_at_with_profile`) & Composable 4-Leg DNF `CustomSignalRuleSpec` (`StrategyPresetKind::CustomSignalRules`, fail-closed `SignalQuality::Valid`, 6-bit `MarketRegime` mask, `ConfluenceThresholdGate`, 12-grid sweep, `RuleBuilderMatchCache`, feeding `Open[T+1]` Backtest, `WFO`, `Portfolio`, & `SplitMix64` Monte Carlo) | `ARCHIVE/frontend/src/components/strategy/StrategyRuleBuilder.tsx` + `ARCHIVE/backend/app/domain/strategy/{rule_evaluator,signal_binding}.py` + `RULE_BUILDER_ALERTS_AND_SNAPSHOT_RECOVERY_SPEC.md` | `src/scanner/catalog.rs`, `src/backtest/strategy.rs`, `src/backtest/engine.rs`, `src/app.rs` | Shipped & Critic-Hardened (`784.12 µs` `BTCUSDT 15m`, `CRITIC_PASS`) |
+| Multi-Condition Causal Alert Ledger (`SignalCatalogTrigger`, `ConfluenceThreshold`, `cooldown_bars`, bounded VN/US/UTC HTF close guards, independent `above`/`below` chart stacking, `append_alert_axis_pill_ys`, formula-safe CSV & RFC-8259 JSON clipboard export) | `ARCHIVE/backend/app/services/event_logging_service.py` + `LWC v5.2.0` `series-markers` + `RULE_BUILDER_ALERTS_AND_SNAPSHOT_RECOVERY_SPEC.md` | `src/alerts/mod.rs`, `src/alerts/engine.rs`, `src/chart.rs`, `src/app.rs` | Shipped & Critic-Hardened (`71.08 µs` `FPT 1D`, `CRITIC_PASS`) |
+| Named Workspace Snapshot Checkpoints (`16` named + `pinned`, `4` `auto_ring` + `"Pre-Restore Undo"`, 64-bit `CorruptSnapshotDigest`, `compute_workspace_diff`, `2 MiB` buffer, & non-panicking `QuarantinedPayloadDiagnostic` recovery) | `ARCHIVE/frontend/src/features/drawings/DrawingRepository.ts` + `workspaceTypes.ts` + `RULE_BUILDER_ALERTS_AND_SNAPSHOT_RECOVERY_SPEC.md` | `src/viewport/workspace_template.rs`, `src/viewport/mod.rs`, `src/app.rs` | Shipped & Critic-Hardened (`235/235` tests + `wasm32` Clippy, `--r16` `0.322–1.332 ms` mean / `p99 <= 1.501 ms < 4.0 ms`) |
+
+### Verified Acceptance Tests (`cargo test` — 235/235 PASS)
+```bash
+cargo test scanner::tests::r16_
+cargo test backtest::tests::r16_
+cargo test backtest::tests::critic_r16_
+cargo test alerts::tests::r16_
+cargo test alerts::tests::critic_r16_
+cargo test viewport::tests::r16_
+cargo test viewport::tests::critic_r16_
+cargo test chart::tests::r16_
+cargo test app::tests::r16_
+cargo test app::tests::critic_r16_
+```
+
+---
+
+## Waves 16–18 (`Milestones R17–R19`) — Master Anti-Miss Parity Roadmap
+
+All remaining features and sub-branches across `ARCHIVE/` (`208` frontend + `474` backend items) and `R01–R16` are systematically tracked in [`docs/FEATURE_BACKLOG_AND_PARITY_LEDGER.md`](../FEATURE_BACKLOG_AND_PARITY_LEDGER.md):
+
+| Wave / Milestone | Ledger Items | Key Scope (Awaiting Product Owner Authorization) |
+|---|---|---|
+| **Wave 16 (`Milestone R17`)** | `A1..A5` | Replay Practice Coaching (`PracticeScoreboard`, `SessionDebriefModal` + `% SL Adherence` & `Decision Note at Bar`), 1-Click `Scanner -> Replay` (`BlindPractice` / `SignalReview`) + Saved Practice Sessions, UTC-Aligned `0%` Multi-Strategy Equity Comparison Overlay, & `OutlierImpact` / `DrawdownPeriod` / Year & `MarketRegime` Tearsheet Slices |
+| **Wave 17 (`Milestone R18`)** | `B1..B4` | `14` Causal Candlestick Patterns (`CandleGeometry`), `8` Remaining Legacy Indicators (`ADX`, `Stochastic`, `SuperTrend`, `PSAR`, `Keltner`, `CCI`, `MFI`, `Volume SMA`), Confirmed-Pivot Divergences (`right_bars = 3`) + Full `VSA`/`SR`/`Ichimoku` Signals (`72+` Catalog Entries), & Multi-Horizon `ProxyBB` (`T03..T200`) + `Point-in-Time` Universe |
+| **Wave 18 (`Milestone R19`)** | `C1..C4` | Interactive Global `[Settings]` Modal & Candle Palettes, Official Vietnam Exchange Holiday Calendar (`VIETNAM_HOLIDAYS_V1`) + FIFO `T+2` Lot Release, Data Readiness & Gap/Split Audit Panel, & `TextNote` Drawing + Custom Fib Levels + Toolbar `[Export PNG]` |
 
 ---
 

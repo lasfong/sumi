@@ -22,12 +22,14 @@ pub use breadth::{
     compute_market_breadth_and_rrg,
 };
 pub use catalog::{
-    CONFLUENCE_DATA_FIDELITY_PROXY, CONFLUENCE_WARMUP_BARS, CausalConfluenceReport, ConfluenceBias,
-    ConfluenceWeightProfile, SIGNAL_AVAILABILITY_EVENT_BAR_CLOSE, SIGNAL_CATALOG,
-    SignalAttributionFactor, SignalCatalogEntry, SignalCategory, SignalEvaluation,
-    SignalOutputType, SignalParamSpec, SignalQuality, SignalStatus, TechnicalHealthBreakdown,
+    CONFLUENCE_DATA_FIDELITY_PROXY, CONFLUENCE_WARMUP_BARS, CausalConfluenceReport,
+    CompactSignalPoint, ConfluenceBias, ConfluenceWeightProfile, PrecomputedCatalogMatrix,
+    SIGNAL_AVAILABILITY_EVENT_BAR_CLOSE, SIGNAL_CATALOG, SignalAttributionFactor,
+    SignalCatalogEntry, SignalCategory, SignalEvaluation, SignalOutputType, SignalParamSpec,
+    SignalQuality, SignalStatus, TechnicalHealthBreakdown, catalog_entry_index,
     evaluate_causal_confluence, evaluate_signal_catalog_at_bar, explain_historical_signal,
     filter_signal_catalog, find_catalog_entry, find_catalog_entry_for_scan_kind,
+    is_bidirectional_bool_signal,
 };
 pub use engine::{
     DEFAULT_BLIND_PRACTICE_LOOKBACK_BARS, compute_causal_rvol, evaluate_symbol_scan,
@@ -83,6 +85,25 @@ impl MarketRegime {
             Self::SidewaysSqueeze => "Squeeze",
             Self::Neutral => "Neutral",
             Self::InsufficientHistory => "Warmup",
+        }
+    }
+
+    /// Canonical 6-bit mask covering all valid causal [`MarketRegime::ALL_FILTERABLE`] states (`0x3F`).
+    pub const ALL_VALID_MASK: u8 = 0x3F;
+
+    /// Returns the single-bit mask (`1 << 0` .. `1 << 5`) for this regime, or `0` during warmup
+    /// (`InsufficientHistory` fails closed against every bitmask).
+    #[inline]
+    #[must_use]
+    pub const fn bit(self) -> u8 {
+        match self {
+            Self::Uptrend => 1 << 0,
+            Self::Downtrend => 1 << 1,
+            Self::Pullback => 1 << 2,
+            Self::Recovery => 1 << 3,
+            Self::SidewaysSqueeze => 1 << 4,
+            Self::Neutral => 1 << 5,
+            Self::InsufficientHistory => 0,
         }
     }
 }

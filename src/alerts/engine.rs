@@ -1,13 +1,20 @@
 use std::collections::{BTreeMap, HashSet};
+use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
+use crate::backtest::is_bucket_incomplete_at_close_for_symbol;
 use crate::data::{MAX_ABS_PRICE, Timeframe, aggregate_ohlcv};
 use crate::drawings::{
     Drawing, DrawingGeometry, DrawingPaneTarget, DrawingStore, MAX_ABS_ANCHOR_TIMESTAMP,
 };
 use crate::indicators::{compute_macd_slices, compute_rsi_slices};
+use crate::journal::ledger::sanitize_csv_cell;
 use crate::model::Candle;
+use crate::scanner::{
+    MarketRegime, PrecomputedCatalogMatrix, SIGNAL_CATALOG, SignalDirection, SignalOutputType,
+    catalog_entry_index, find_catalog_entry,
+};
 
 use super::{
     AlertCondition, AlertError, AlertFrequency, AlertId, AlertRule, AlertStatus, AlertTriggerEvent,
@@ -19,6 +26,9 @@ pub const MAX_ALERT_RULES: usize = 128;
 
 /// Upper bound on retained causal trigger events per instrument.
 pub const MAX_TRIGGER_LOG_EVENTS: usize = 256;
+
+/// Upper bound on causal cooldown suppression bars (`OncePerBarClose`).
+pub const MAX_ALERT_COOLDOWN_BARS: usize = 500;
 
 const MAX_SYMBOL_BYTES: usize = 64;
 const MAX_SUMMARY_BYTES: usize = 128;
@@ -322,6 +332,40 @@ fn validate_condition(
                 Ok(())
             }
         }
+        AlertCondition::SignalCatalogTrigger {
+            ref catalog_id,
+            float_level,
+            ..
+        } => {
+            let trimmed = catalog_id.trim();
+            let Some(entry) = find_catalog_entry(trimmed) else {
+                return Err(AlertError::UnknownSignalCatalogId(catalog_id.clone()));
+            };
+            match entry.output_type {
+                SignalOutputType::Float => {
+                    let Some(lvl) = float_level else {
+                        return Err(AlertError::InvalidIndicatorParams);
+                    };
+                    if !lvl.is_finite() || lvl.abs() > MAX_ABS_PRICE {
+                        return Err(AlertError::InvalidIndicatorParams);
+                    }
+                }
+                SignalOutputType::Bool | SignalOutputType::Enum => {
+                    if let Some(lvl) = float_level
+                        && (!lvl.is_finite() || lvl.abs() > MAX_ABS_PRICE)
+                    {
+                        return Err(AlertError::InvalidIndicatorParams);
+                    }
+                }
+            }
+            Ok(())
+        }
+        AlertCondition::ConfluenceThreshold { threshold, .. } => {
+            if !threshold.is_finite() || !(-100.0..=100.0).contains(&threshold) {
+                return Err(AlertError::InvalidConfluenceThreshold);
+            }
+            Ok(())
+        }
     }
 }
 
@@ -448,6 +492,21 @@ impl AlertEngine {
         for rule in &mut self.rules {
             truncate_utf8_bytes(&mut rule.symbol, MAX_SYMBOL_BYTES);
             truncate_utf8_bytes(&mut rule.message, MAX_MESSAGE_BYTES);
+            rule.cooldown_bars = rule.cooldown_bars.min(MAX_ALERT_COOLDOWN_BARS);
+            rule.cooldown_remaining_bars = 0;
+            if let AlertCondition::SignalCatalogTrigger {
+                ref mut catalog_id,
+                ref mut float_level,
+                ..
+            } = rule.condition
+            {
+                *catalog_id = catalog_id.trim().to_owned();
+                if find_catalog_entry(catalog_id)
+                    .is_some_and(|e| e.output_type != SignalOutputType::Float)
+                {
+                    *float_level = None;
+                }
+            }
             rule.armed_bucket_timestamp = rule
                 .timeframe
                 .bucket_start_timestamp(rule.armed_at_timestamp);
@@ -536,10 +595,52 @@ impl AlertEngine {
         replay_cutoff_timestamp: Option<i64>,
         drawings: Option<&DrawingStore>,
     ) -> Result<AlertId, AlertError> {
+        self.add_alert_with_cooldown(
+            symbol,
+            timeframe,
+            condition,
+            frequency,
+            0,
+            message,
+            base_candles,
+            cursor_base_index,
+            replay_cutoff_timestamp,
+            drawings,
+        )
+    }
+
+    /// Arms a new [`AlertRule`] with explicit `cooldown_bars` (`0..=MAX_ALERT_COOLDOWN_BARS`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_alert_with_cooldown(
+        &mut self,
+        symbol: &str,
+        timeframe: Timeframe,
+        mut condition: AlertCondition,
+        frequency: AlertFrequency,
+        cooldown_bars: usize,
+        message: Option<String>,
+        base_candles: &[Candle],
+        cursor_base_index: usize,
+        replay_cutoff_timestamp: Option<i64>,
+        drawings: Option<&DrawingStore>,
+    ) -> Result<AlertId, AlertError> {
         if base_candles.is_empty() {
             return Err(AlertError::EmptySeries);
         }
         validate_condition(&condition, drawings)?;
+        if let AlertCondition::SignalCatalogTrigger {
+            ref mut catalog_id,
+            ref mut float_level,
+            ..
+        } = condition
+        {
+            *catalog_id = catalog_id.trim().to_owned();
+            if find_catalog_entry(catalog_id)
+                .is_some_and(|e| e.output_type != SignalOutputType::Float)
+            {
+                *float_level = None;
+            }
+        }
 
         while self.rules.len() >= MAX_ALERT_RULES {
             self.rules.remove(0);
@@ -573,11 +674,22 @@ impl AlertEngine {
             armed_at_timestamp,
             armed_bucket_timestamp,
             created_at_timestamp: replay_cutoff_timestamp,
+            cooldown_bars: cooldown_bars.min(MAX_ALERT_COOLDOWN_BARS),
+            cooldown_remaining_bars: 0,
             trigger_count: 0,
             last_triggered_timestamp: None,
             message: msg,
         });
         Ok(id)
+    }
+
+    /// Updates `cooldown_bars` (`0..=MAX_ALERT_COOLDOWN_BARS`) on an existing rule.
+    pub fn set_cooldown_bars(&mut self, id: AlertId, cooldown_bars: usize) -> bool {
+        let Some(rule) = self.rules.iter_mut().find(|r| r.id == id) else {
+            return false;
+        };
+        rule.cooldown_bars = cooldown_bars.min(MAX_ALERT_COOLDOWN_BARS);
+        true
     }
 
     /// Removes an [`AlertRule`] and purges its historical events from [`Self::triggers`].
@@ -630,6 +742,7 @@ impl AlertEngine {
             for rule in &mut self.rules {
                 rule.trigger_count = 0;
                 rule.last_triggered_timestamp = None;
+                rule.cooldown_remaining_bars = 0;
                 if rule.status == AlertStatus::Triggered {
                     rule.status = AlertStatus::Armed;
                 }
@@ -644,6 +757,7 @@ impl AlertEngine {
                     for rule in &mut self.rules {
                         rule.trigger_count = 0;
                         rule.last_triggered_timestamp = None;
+                        rule.cooldown_remaining_bars = 0;
                         if rule.status == AlertStatus::Triggered {
                             rule.status = AlertStatus::Armed;
                         }
@@ -656,11 +770,35 @@ impl AlertEngine {
         };
         let base_prefix = &base_candles[..=end_idx];
         let last_base_ts = base_prefix[base_prefix.len() - 1].timestamp;
+        let last_base_close_ts =
+            last_base_ts.saturating_add(base_tf.seconds().max(1).saturating_sub(1));
         let is_untruncated_live =
             replay_cutoff_timestamp.is_none() && end_idx + 1 == base_candles.len();
 
         let mut tf_candles_cache: BTreeMap<u32, Vec<Candle>> = BTreeMap::new();
+        let mut tf_catalog_cache: BTreeMap<u32, PrecomputedCatalogMatrix> = BTreeMap::new();
         let mut raw_events: Vec<AlertTriggerEvent> = Vec::new();
+
+        let compute_cooldown_rem =
+            |rule: &AlertRule, last_fired_bucket: Option<usize>, closed_buckets: usize| -> usize {
+                if rule.frequency == AlertFrequency::OncePerBarClose && rule.cooldown_bars > 0 {
+                    last_fired_bucket
+                        .map_or(0, |prev_t| {
+                            (prev_t + rule.cooldown_bars + 1).saturating_sub(closed_buckets)
+                        })
+                        .min(rule.cooldown_bars)
+                } else {
+                    0
+                }
+            };
+
+        let is_suppressed_by_cooldown =
+            |rule: &AlertRule, last_fired_bucket: Option<usize>, bucket_idx: usize| -> bool {
+                rule.frequency == AlertFrequency::OncePerBarClose
+                    && last_fired_bucket.is_some_and(|prev_t| {
+                        bucket_idx <= prev_t.saturating_add(rule.cooldown_bars)
+                    })
+            };
 
         let evaluate_horizontal_level_on_base =
             |rule: &mut AlertRule,
@@ -673,8 +811,30 @@ impl AlertEngine {
                     base_prefix.partition_point(|c| c.timestamp <= rule.armed_at_timestamp);
                 let mut allow_depart_up = true;
                 let mut allow_depart_dn = true;
+                let mut last_fired_bucket: Option<usize> = None;
+
+                // Track monotonic bucket ordinal on `rule.timeframe` across `base_prefix` for cooldowns.
+                let mut cur_bucket_start: Option<i64> = None;
+                let mut cur_bucket_idx: usize = 0;
+                for bar in &base_prefix[..start_i] {
+                    let b_ts = rule.timeframe.bucket_start_timestamp(bar.timestamp);
+                    if cur_bucket_start != Some(b_ts) {
+                        if cur_bucket_start.is_some() {
+                            cur_bucket_idx += 1;
+                        }
+                        cur_bucket_start = Some(b_ts);
+                    }
+                }
+
                 for i in start_i..base_prefix.len() {
                     let bar = &base_prefix[i];
+                    let b_ts = rule.timeframe.bucket_start_timestamp(bar.timestamp);
+                    if cur_bucket_start != Some(b_ts) {
+                        if cur_bucket_start.is_some() {
+                            cur_bucket_idx += 1;
+                        }
+                        cur_bucket_start = Some(b_ts);
+                    }
                     if min_visible_ts.is_some_and(|cts| bar.timestamp < cts) {
                         continue;
                     }
@@ -698,6 +858,10 @@ impl AlertEngine {
                             }
                             CrossDirection::CrossAny => {}
                         }
+                        if is_suppressed_by_cooldown(rule, last_fired_bucket, cur_bucket_idx) {
+                            continue;
+                        }
+                        last_fired_bucket = Some(cur_bucket_idx);
                         rule.trigger_count += 1;
                         rule.last_triggered_timestamp = Some(bar.timestamp);
                         raw_events.push(AlertTriggerEvent {
@@ -726,11 +890,30 @@ impl AlertEngine {
                         }
                     }
                 }
+
+                if let Some(last_b_ts) = cur_bucket_start {
+                    let tail_incomplete = rule.timeframe > base_tf
+                        && is_bucket_incomplete_at_close_for_symbol(
+                            &rule.symbol,
+                            last_b_ts,
+                            last_base_close_ts,
+                            base_tf,
+                            rule.timeframe,
+                        );
+                    let closed_buckets = if tail_incomplete {
+                        cur_bucket_idx
+                    } else {
+                        cur_bucket_idx + 1
+                    };
+                    rule.cooldown_remaining_bars =
+                        compute_cooldown_rem(rule, last_fired_bucket, closed_buckets);
+                }
             };
 
         for rule in &mut self.rules {
             rule.trigger_count = 0;
             rule.last_triggered_timestamp = None;
+            rule.cooldown_remaining_bars = 0;
             if rule.status == AlertStatus::Paused {
                 continue;
             }
@@ -791,6 +974,7 @@ impl AlertEngine {
                     let mut start_t = series_candles
                         .partition_point(|c| c.timestamp <= rule.armed_bucket_timestamp)
                         .max(1);
+                    let mut last_fired_bucket: Option<usize> = None;
 
                     // Intra-bucket causal check (`[CRITICAL-03]`): if `rule` was armed mid-bucket on a higher
                     // timeframe and subsequent base ticks arrived inside `armed_bucket_timestamp`, compare the
@@ -816,6 +1000,7 @@ impl AlertEngine {
                                 && let Some(fired_dir) =
                                     match_scalar_cross(arm_v, curr_v, level, direction)
                             {
+                                last_fired_bucket = Some(t_ge);
                                 let bar_ts = series_candles[t_ge].timestamp;
                                 let eval_ts = base_prefix[b_end].timestamp;
                                 rule.trigger_count += 1;
@@ -849,6 +1034,10 @@ impl AlertEngine {
                         if let Some(fired_dir) =
                             match_scalar_cross(prev_v, curr_v, level, direction)
                         {
+                            if is_suppressed_by_cooldown(rule, last_fired_bucket, t) {
+                                continue;
+                            }
+                            last_fired_bucket = Some(t);
                             let bar_ts = series_candles[t].timestamp;
                             let eval_ts = if rule.timeframe == base_tf {
                                 bar_ts
@@ -878,6 +1067,22 @@ impl AlertEngine {
                             }
                         }
                     }
+
+                    let tail_incomplete = rule.timeframe > base_tf
+                        && is_bucket_incomplete_at_close_for_symbol(
+                            &rule.symbol,
+                            series_candles[series_candles.len() - 1].timestamp,
+                            last_base_close_ts,
+                            base_tf,
+                            rule.timeframe,
+                        );
+                    let closed_buckets = if tail_incomplete {
+                        series_candles.len().saturating_sub(1)
+                    } else {
+                        series_candles.len()
+                    };
+                    rule.cooldown_remaining_bars =
+                        compute_cooldown_rem(rule, last_fired_bucket, closed_buckets);
                 }
                 AlertCondition::MacdHistogramZeroCross {
                     fast,
@@ -916,6 +1121,7 @@ impl AlertEngine {
                     let mut start_t = series_candles
                         .partition_point(|c| c.timestamp <= rule.armed_bucket_timestamp)
                         .max(1);
+                    let mut last_fired_bucket: Option<usize> = None;
 
                     if rule.timeframe > base_tf
                         && arm_base_len > 0
@@ -939,6 +1145,7 @@ impl AlertEngine {
                                 && let Some(fired_dir) =
                                     match_scalar_cross(arm_h, curr_h, 0.0, direction)
                             {
+                                last_fired_bucket = Some(t_ge);
                                 let bar_ts = series_candles[t_ge].timestamp;
                                 let eval_ts = base_prefix[b_end].timestamp;
                                 rule.trigger_count += 1;
@@ -973,6 +1180,10 @@ impl AlertEngine {
                         };
                         if let Some(fired_dir) = match_scalar_cross(prev_h, curr_h, 0.0, direction)
                         {
+                            if is_suppressed_by_cooldown(rule, last_fired_bucket, t) {
+                                continue;
+                            }
+                            last_fired_bucket = Some(t);
                             let eval_ts = if rule.timeframe == base_tf {
                                 bar.timestamp
                             } else {
@@ -1004,6 +1215,22 @@ impl AlertEngine {
                             }
                         }
                     }
+
+                    let tail_incomplete = rule.timeframe > base_tf
+                        && is_bucket_incomplete_at_close_for_symbol(
+                            &rule.symbol,
+                            series_candles[series_candles.len() - 1].timestamp,
+                            last_base_close_ts,
+                            base_tf,
+                            rule.timeframe,
+                        );
+                    let closed_buckets = if tail_incomplete {
+                        series_candles.len().saturating_sub(1)
+                    } else {
+                        series_candles.len()
+                    };
+                    rule.cooldown_remaining_bars =
+                        compute_cooldown_rem(rule, last_fired_bucket, closed_buckets);
                 }
                 AlertCondition::DrawingLine {
                     drawing_id,
@@ -1108,6 +1335,7 @@ impl AlertEngine {
                         .partition_point(|c| c.timestamp <= rule.armed_bucket_timestamp);
                     let mut allow_depart_up = true;
                     let mut allow_depart_dn = true;
+                    let mut last_fired_bucket: Option<usize> = None;
 
                     // Intra-bucket sloped line check on post-arm base ticks (`[CRITICAL-03]`)
                     if rule.timeframe > base_tf
@@ -1150,6 +1378,7 @@ impl AlertEngine {
                                     }
                                     CrossDirection::CrossAny => {}
                                 }
+                                last_fired_bucket = Some(t_ge);
                                 let bar_ts = series_candles[t_ge].timestamp;
                                 let eval_ts = base_prefix[b_end].timestamp;
                                 rule.trigger_count += 1;
@@ -1228,6 +1457,10 @@ impl AlertEngine {
                                 }
                                 CrossDirection::CrossAny => {}
                             }
+                            if is_suppressed_by_cooldown(rule, last_fired_bucket, t) {
+                                continue;
+                            }
+                            last_fired_bucket = Some(t);
                             rule.trigger_count += 1;
                             rule.last_triggered_timestamp = Some(bar_ts);
                             raw_events.push(AlertTriggerEvent {
@@ -1235,7 +1468,7 @@ impl AlertEngine {
                                 alert_id: rule.id,
                                 symbol: rule.symbol.clone(),
                                 timeframe: rule.timeframe,
-                                bar_timestamp: bar_ts,
+                                bar_timestamp: bar.timestamp,
                                 eval_base_timestamp: eval_ts,
                                 threshold_value: line_t,
                                 observed_value: observed,
@@ -1256,6 +1489,357 @@ impl AlertEngine {
                             }
                         }
                     }
+
+                    let tail_incomplete = rule.timeframe > base_tf
+                        && is_bucket_incomplete_at_close_for_symbol(
+                            &rule.symbol,
+                            series_candles[series_candles.len() - 1].timestamp,
+                            last_base_close_ts,
+                            base_tf,
+                            rule.timeframe,
+                        );
+                    let closed_buckets = if tail_incomplete {
+                        series_candles.len().saturating_sub(1)
+                    } else {
+                        series_candles.len()
+                    };
+                    rule.cooldown_remaining_bars =
+                        compute_cooldown_rem(rule, last_fired_bucket, closed_buckets);
+                }
+                AlertCondition::SignalCatalogTrigger {
+                    ref catalog_id,
+                    float_level,
+                    direction,
+                } => {
+                    let Some(cat_idx) = catalog_entry_index(catalog_id.trim()) else {
+                        continue;
+                    };
+                    let entry = &SIGNAL_CATALOG[cat_idx];
+                    let series_candles: &[Candle] = if rule.timeframe == base_tf {
+                        base_prefix
+                    } else if is_untruncated_live
+                        && rule.timeframe == active_tf
+                        && active_candles.last().is_some_and(|l| {
+                            l.timestamp == active_tf.bucket_start_timestamp(last_base_ts)
+                        })
+                    {
+                        active_candles
+                    } else if base_tf.can_aggregate_to(rule.timeframe) {
+                        let key = rule.timeframe.seconds() as u32;
+                        tf_candles_cache.entry(key).or_insert_with(|| {
+                            aggregate_ohlcv(base_prefix, base_tf, rule.timeframe)
+                                .unwrap_or_else(|_| base_prefix.to_vec())
+                        })
+                    } else {
+                        base_prefix
+                    };
+                    if series_candles.is_empty() {
+                        continue;
+                    }
+                    let tail_incomplete = rule.timeframe > base_tf
+                        && is_bucket_incomplete_at_close_for_symbol(
+                            &rule.symbol,
+                            series_candles[series_candles.len() - 1].timestamp,
+                            last_base_close_ts,
+                            base_tf,
+                            rule.timeframe,
+                        );
+                    let closed_len = if tail_incomplete {
+                        series_candles.len().saturating_sub(1)
+                    } else {
+                        series_candles.len()
+                    };
+                    if closed_len == 0 {
+                        continue;
+                    }
+                    let tf_key =
+                        if rule.timeframe == base_tf || !base_tf.can_aggregate_to(rule.timeframe) {
+                            base_tf.seconds() as u32
+                        } else {
+                            rule.timeframe.seconds() as u32
+                        };
+                    let matrix = tf_catalog_cache.entry(tf_key).or_insert_with(|| {
+                        PrecomputedCatalogMatrix::compute(&series_candles[..closed_len])
+                    });
+                    let matrix = if matrix.bar_count == closed_len {
+                        matrix as &PrecomputedCatalogMatrix
+                    } else {
+                        *matrix = PrecomputedCatalogMatrix::compute(&series_candles[..closed_len]);
+                        matrix as &PrecomputedCatalogMatrix
+                    };
+
+                    let start_t = series_candles[..closed_len]
+                        .partition_point(|c| c.timestamp < rule.armed_bucket_timestamp);
+                    let mut last_fired_bucket: Option<usize> = None;
+
+                    for (t, bar_candle) in series_candles
+                        .iter()
+                        .enumerate()
+                        .take(closed_len)
+                        .skip(start_t)
+                    {
+                        let bar_ts = bar_candle.timestamp;
+                        let eval_ts = if rule.timeframe == base_tf {
+                            bar_ts
+                        } else {
+                            base_prefix[bucket_end_base_index(base_prefix, rule.timeframe, bar_ts)]
+                                .timestamp
+                        };
+                        if eval_ts <= rule.armed_at_timestamp {
+                            continue;
+                        }
+                        let Some(pt) = matrix.point_at(cat_idx, t) else {
+                            continue;
+                        };
+                        if !pt.quality.is_valid() {
+                            continue;
+                        }
+
+                        let matched: Option<(CrossDirection, f64, f64)> = match entry.output_type {
+                            SignalOutputType::Bool => {
+                                if pt.bool_value != Some(true) {
+                                    None
+                                } else {
+                                    let prev_same_active = t > 0
+                                        && matrix.point_at(cat_idx, t - 1).is_some_and(|p| {
+                                            p.quality.is_valid()
+                                                && p.bool_value == Some(true)
+                                                && p.direction == pt.direction
+                                        });
+                                    if prev_same_active {
+                                        None
+                                    } else {
+                                        let nat_dir = match pt.direction {
+                                            Some(SignalDirection::Bearish) => {
+                                                CrossDirection::CrossBelow
+                                            }
+                                            _ => CrossDirection::CrossAbove,
+                                        };
+                                        if direction == CrossDirection::CrossAny
+                                            || direction == nat_dir
+                                        {
+                                            let obs = pt
+                                                .float_value
+                                                .filter(|v| v.is_finite())
+                                                .unwrap_or(1.0);
+                                            Some((nat_dir, 1.0, obs))
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                }
+                            }
+                            SignalOutputType::Float => {
+                                let lvl = float_level.unwrap_or(0.0);
+                                if t == 0 || !lvl.is_finite() {
+                                    None
+                                } else if let (Some(prev_pt), Some(curr_v)) =
+                                    (matrix.point_at(cat_idx, t - 1), pt.float_value)
+                                    && prev_pt.quality.is_valid()
+                                    && let Some(prev_v) = prev_pt.float_value
+                                    && prev_v.is_finite()
+                                    && curr_v.is_finite()
+                                {
+                                    match_scalar_cross(prev_v, curr_v, lvl, direction)
+                                        .map(|fd| (fd, lvl, curr_v))
+                                } else {
+                                    None
+                                }
+                            }
+                            SignalOutputType::Enum => {
+                                if t == 0 {
+                                    None
+                                } else if let Some(prev_pt) = matrix.point_at(cat_idx, t - 1)
+                                    && prev_pt.quality.is_valid()
+                                {
+                                    let prev_reg = matrix.regime_at(t - 1);
+                                    let curr_reg = matrix.regime_at(t);
+                                    if curr_reg == prev_reg
+                                        || curr_reg == MarketRegime::InsufficientHistory
+                                    {
+                                        None
+                                    } else {
+                                        let obs = f64::from(curr_reg.bit());
+                                        match curr_reg {
+                                            MarketRegime::Uptrend | MarketRegime::Recovery => {
+                                                matches!(
+                                                    direction,
+                                                    CrossDirection::CrossAbove
+                                                        | CrossDirection::CrossAny
+                                                )
+                                                .then_some((CrossDirection::CrossAbove, 0.0, obs))
+                                            }
+                                            MarketRegime::Downtrend => matches!(
+                                                direction,
+                                                CrossDirection::CrossBelow
+                                                    | CrossDirection::CrossAny
+                                            )
+                                            .then_some((CrossDirection::CrossBelow, 0.0, obs)),
+                                            MarketRegime::Pullback => (direction
+                                                == CrossDirection::CrossAny)
+                                                .then_some((CrossDirection::CrossAbove, 0.0, obs)),
+                                            MarketRegime::SidewaysSqueeze
+                                            | MarketRegime::Neutral
+                                            | MarketRegime::InsufficientHistory => (direction
+                                                == CrossDirection::CrossAny)
+                                                .then_some((CrossDirection::CrossBelow, 0.0, obs)),
+                                        }
+                                    }
+                                } else {
+                                    None
+                                }
+                            }
+                        };
+
+                        if let Some((fired_dir, thr_val, obs_val)) = matched {
+                            if is_suppressed_by_cooldown(rule, last_fired_bucket, t) {
+                                continue;
+                            }
+                            last_fired_bucket = Some(t);
+                            rule.trigger_count += 1;
+                            rule.last_triggered_timestamp = Some(bar_ts);
+                            raw_events.push(AlertTriggerEvent {
+                                event_id: 0,
+                                alert_id: rule.id,
+                                symbol: rule.symbol.clone(),
+                                timeframe: rule.timeframe,
+                                bar_timestamp: bar_ts,
+                                eval_base_timestamp: eval_ts,
+                                threshold_value: thr_val,
+                                observed_value: obs_val,
+                                direction: fired_dir,
+                                condition_summary: summary.clone(),
+                                message: rule.message.clone(),
+                            });
+                            if rule.frequency == AlertFrequency::Once {
+                                rule.status = AlertStatus::Triggered;
+                                break;
+                            }
+                        }
+                    }
+
+                    rule.cooldown_remaining_bars =
+                        compute_cooldown_rem(rule, last_fired_bucket, closed_len);
+                }
+                AlertCondition::ConfluenceThreshold {
+                    profile,
+                    threshold,
+                    direction,
+                } => {
+                    let series_candles: &[Candle] = if rule.timeframe == base_tf {
+                        base_prefix
+                    } else if is_untruncated_live
+                        && rule.timeframe == active_tf
+                        && active_candles.last().is_some_and(|l| {
+                            l.timestamp == active_tf.bucket_start_timestamp(last_base_ts)
+                        })
+                    {
+                        active_candles
+                    } else if base_tf.can_aggregate_to(rule.timeframe) {
+                        let key = rule.timeframe.seconds() as u32;
+                        tf_candles_cache.entry(key).or_insert_with(|| {
+                            aggregate_ohlcv(base_prefix, base_tf, rule.timeframe)
+                                .unwrap_or_else(|_| base_prefix.to_vec())
+                        })
+                    } else {
+                        base_prefix
+                    };
+                    if series_candles.len() < 2 {
+                        continue;
+                    }
+                    let tail_incomplete = rule.timeframe > base_tf
+                        && is_bucket_incomplete_at_close_for_symbol(
+                            &rule.symbol,
+                            series_candles[series_candles.len() - 1].timestamp,
+                            last_base_close_ts,
+                            base_tf,
+                            rule.timeframe,
+                        );
+                    let closed_len = if tail_incomplete {
+                        series_candles.len().saturating_sub(1)
+                    } else {
+                        series_candles.len()
+                    };
+                    if closed_len < 2 {
+                        continue;
+                    }
+                    let tf_key =
+                        if rule.timeframe == base_tf || !base_tf.can_aggregate_to(rule.timeframe) {
+                            base_tf.seconds() as u32
+                        } else {
+                            rule.timeframe.seconds() as u32
+                        };
+                    let matrix = tf_catalog_cache.entry(tf_key).or_insert_with(|| {
+                        PrecomputedCatalogMatrix::compute(&series_candles[..closed_len])
+                    });
+                    let matrix = if matrix.bar_count == closed_len {
+                        matrix as &PrecomputedCatalogMatrix
+                    } else {
+                        *matrix = PrecomputedCatalogMatrix::compute(&series_candles[..closed_len]);
+                        matrix as &PrecomputedCatalogMatrix
+                    };
+
+                    let start_t = series_candles[..closed_len]
+                        .partition_point(|c| c.timestamp < rule.armed_bucket_timestamp)
+                        .max(1);
+                    let mut last_fired_bucket: Option<usize> = None;
+
+                    for (t, bar_candle) in series_candles
+                        .iter()
+                        .enumerate()
+                        .take(closed_len)
+                        .skip(start_t)
+                    {
+                        let bar_ts = bar_candle.timestamp;
+                        let eval_ts = if rule.timeframe == base_tf {
+                            bar_ts
+                        } else {
+                            base_prefix[bucket_end_base_index(base_prefix, rule.timeframe, bar_ts)]
+                                .timestamp
+                        };
+                        if eval_ts <= rule.armed_at_timestamp {
+                            continue;
+                        }
+                        let (Ok(prev_s), Ok(curr_s)) = (
+                            matrix.health_score_at(t - 1, profile),
+                            matrix.health_score_at(t, profile),
+                        ) else {
+                            continue;
+                        };
+                        if !prev_s.is_finite() || !curr_s.is_finite() {
+                            continue;
+                        }
+                        if let Some(fired_dir) =
+                            match_scalar_cross(prev_s, curr_s, threshold, direction)
+                        {
+                            if is_suppressed_by_cooldown(rule, last_fired_bucket, t) {
+                                continue;
+                            }
+                            last_fired_bucket = Some(t);
+                            rule.trigger_count += 1;
+                            rule.last_triggered_timestamp = Some(bar_ts);
+                            raw_events.push(AlertTriggerEvent {
+                                event_id: 0,
+                                alert_id: rule.id,
+                                symbol: rule.symbol.clone(),
+                                timeframe: rule.timeframe,
+                                bar_timestamp: bar_ts,
+                                eval_base_timestamp: eval_ts,
+                                threshold_value: threshold,
+                                observed_value: curr_s,
+                                direction: fired_dir,
+                                condition_summary: summary.clone(),
+                                message: rule.message.clone(),
+                            });
+                            if rule.frequency == AlertFrequency::Once {
+                                rule.status = AlertStatus::Triggered;
+                                break;
+                            }
+                        }
+                    }
+
+                    rule.cooldown_remaining_bars =
+                        compute_cooldown_rem(rule, last_fired_bucket, closed_len);
                 }
             }
         }
@@ -1277,4 +1861,164 @@ impl AlertEngine {
         }
         self.triggers = raw_events;
     }
+
+    /// Returns all causally visible [`AlertTriggerEvent`] items up to `replay_cutoff_timestamp` (`DEF-001`).
+    #[must_use]
+    pub fn visible_triggers(
+        &self,
+        replay_cutoff_timestamp: Option<i64>,
+    ) -> Vec<&AlertTriggerEvent> {
+        self.triggers
+            .iter()
+            .filter(|ev| {
+                let ets = if ev.eval_base_timestamp != 0 {
+                    ev.eval_base_timestamp
+                } else {
+                    ev.bar_timestamp
+                };
+                if replay_cutoff_timestamp.is_some_and(|cut| ets > cut) {
+                    return false;
+                }
+                self.rules
+                    .iter()
+                    .find(|r| r.id == ev.alert_id)
+                    .is_none_or(|r| r.is_causally_visible(replay_cutoff_timestamp))
+            })
+            .collect()
+    }
+
+    /// Exports causally visible trigger events to RFC-4180 CSV with spreadsheet formula-injection
+    /// protection (`sanitize_csv_cell` neutralizing leading `=`, `+`, `-`, `@`, `|`, `\t`, `\r`, `\n`).
+    #[must_use]
+    pub fn export_triggers_csv(&self, replay_cutoff_timestamp: Option<i64>) -> String {
+        let visible = self.visible_triggers(replay_cutoff_timestamp);
+        let mut csv = String::with_capacity(140 + visible.len() * 120);
+        csv.push_str(
+            "event_id,alert_id,symbol,timeframe,bar_timestamp,eval_base_timestamp,direction,threshold_value,observed_value,condition_summary,message\n",
+        );
+        for ev in visible {
+            let ets = if ev.eval_base_timestamp != 0 {
+                ev.eval_base_timestamp
+            } else {
+                ev.bar_timestamp
+            };
+            let dir_code = match ev.direction {
+                CrossDirection::CrossAbove => "CROSS_ABOVE",
+                CrossDirection::CrossBelow => "CROSS_BELOW",
+                CrossDirection::CrossAny => "CROSS_ANY",
+            };
+            let thr = if ev.threshold_value.is_finite() {
+                format!("{:.6}", ev.threshold_value)
+            } else {
+                "0.000000".to_owned()
+            };
+            let obs = if ev.observed_value.is_finite() {
+                format!("{:.6}", ev.observed_value)
+            } else {
+                "0.000000".to_owned()
+            };
+            let _ = writeln!(
+                csv,
+                "{},{},{},{},{},{},{},{},{},{},{}",
+                ev.event_id,
+                ev.alert_id,
+                sanitize_csv_cell(&ev.symbol),
+                ev.timeframe.label(),
+                ev.bar_timestamp,
+                ets,
+                dir_code,
+                thr,
+                obs,
+                sanitize_csv_cell(&ev.condition_summary),
+                sanitize_csv_cell(&ev.message),
+            );
+        }
+        csv
+    }
+
+    /// Exports causally visible trigger events to deterministic RFC-8259 JSON (`0` wall-clock fields,
+    /// `0` external crates, full `\u00XX` control escaping).
+    #[must_use]
+    pub fn export_triggers_json(&self, replay_cutoff_timestamp: Option<i64>) -> String {
+        let visible = self.visible_triggers(replay_cutoff_timestamp);
+        let mut out = String::with_capacity(128 + visible.len() * 220);
+        out.push_str("{\n  \"schema_version\": 1,\n  \"replay_cutoff_timestamp\": ");
+        match replay_cutoff_timestamp {
+            Some(cut) => {
+                let _ = write!(out, "{cut}");
+            }
+            None => out.push_str("null"),
+        }
+        let _ = writeln!(
+            out,
+            ",\n  \"event_count\": {},\n  \"events\": [",
+            visible.len()
+        );
+        for (idx, ev) in visible.iter().enumerate() {
+            let ets = if ev.eval_base_timestamp != 0 {
+                ev.eval_base_timestamp
+            } else {
+                ev.bar_timestamp
+            };
+            let dir_code = match ev.direction {
+                CrossDirection::CrossAbove => "CROSS_ABOVE",
+                CrossDirection::CrossBelow => "CROSS_BELOW",
+                CrossDirection::CrossAny => "CROSS_ANY",
+            };
+            let thr = if ev.threshold_value.is_finite() {
+                ev.threshold_value
+            } else {
+                0.0
+            };
+            let obs = if ev.observed_value.is_finite() {
+                ev.observed_value
+            } else {
+                0.0
+            };
+            out.push_str("    {\n");
+            let _ = writeln!(out, "      \"event_id\": {},", ev.event_id);
+            let _ = writeln!(out, "      \"alert_id\": {},", ev.alert_id);
+            out.push_str("      \"symbol\": ");
+            push_json_escaped_str(&mut out, &ev.symbol);
+            out.push_str(",\n      \"timeframe\": ");
+            push_json_escaped_str(&mut out, ev.timeframe.label());
+            let _ = writeln!(out, ",\n      \"bar_timestamp\": {},", ev.bar_timestamp);
+            let _ = writeln!(out, "      \"eval_base_timestamp\": {ets},");
+            out.push_str("      \"direction\": ");
+            push_json_escaped_str(&mut out, dir_code);
+            let _ = writeln!(out, ",\n      \"threshold_value\": {thr:.6},");
+            let _ = writeln!(out, "      \"observed_value\": {obs:.6},");
+            out.push_str("      \"condition_summary\": ");
+            push_json_escaped_str(&mut out, &ev.condition_summary);
+            out.push_str(",\n      \"message\": ");
+            push_json_escaped_str(&mut out, &ev.message);
+            if idx + 1 == visible.len() {
+                out.push_str("\n    }\n");
+            } else {
+                out.push_str("\n    },\n");
+            }
+        }
+        out.push_str("  ]\n}\n");
+        out
+    }
+}
+
+fn push_json_escaped_str(out: &mut String, s: &str) {
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{0008}' => out.push_str("\\b"),
+            '\u{000C}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
 }

@@ -16,10 +16,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::data::Timeframe;
 use crate::drawings::DrawingId;
+use crate::scanner::{ConfluenceWeightProfile, SignalOutputType, find_catalog_entry};
 
 pub use engine::{
-    AlertEngine, MAX_ALERT_RULES, MAX_MESSAGE_BYTES, MAX_TRIGGER_LOG_EVENTS,
-    drawing_line_value_at_bar, evaluate_4_waypoint_cross,
+    AlertEngine, MAX_ALERT_COOLDOWN_BARS, MAX_ALERT_RULES, MAX_MESSAGE_BYTES,
+    MAX_TRIGGER_LOG_EVENTS, drawing_line_value_at_bar, evaluate_4_waypoint_cross,
 };
 
 /// Stable unique identifier assigned monotonically to each [`AlertRule`].
@@ -103,7 +104,7 @@ impl AlertStatus {
     }
 }
 
-/// Typed causal trigger condition for an [`AlertRule`].
+/// Typed causal trigger condition for an [`AlertRule`] (`Milestone R08 / R16`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AlertCondition {
     PriceLevel {
@@ -125,6 +126,21 @@ pub enum AlertCondition {
         drawing_id: DrawingId,
         direction: CrossDirection,
     },
+    /// Fires strictly on causal bar close (`DEF-001`) when a [`crate::scanner::SIGNAL_CATALOG`]
+    /// entry transitions (`Bool` onset, `Float` crossing `float_level`, or `Enum` regime shift).
+    SignalCatalogTrigger {
+        catalog_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        float_level: Option<f64>,
+        direction: CrossDirection,
+    },
+    /// Fires strictly on causal bar close (`DEF-001`) when 4-family Technical Health `composite_score`
+    /// crosses `threshold` in `[-100.0, +100.0]`.
+    ConfluenceThreshold {
+        profile: ConfluenceWeightProfile,
+        threshold: f64,
+        direction: CrossDirection,
+    },
 }
 
 impl AlertCondition {
@@ -135,7 +151,9 @@ impl AlertCondition {
             Self::PriceLevel { direction, .. }
             | Self::RsiThreshold { direction, .. }
             | Self::MacdHistogramZeroCross { direction, .. }
-            | Self::DrawingLine { direction, .. } => direction,
+            | Self::DrawingLine { direction, .. }
+            | Self::SignalCatalogTrigger { direction, .. }
+            | Self::ConfluenceThreshold { direction, .. } => direction,
         }
     }
 
@@ -166,6 +184,34 @@ impl AlertCondition {
             } => {
                 format!("Drawing #{drawing_id} {}", direction.short_label())
             }
+            Self::SignalCatalogTrigger {
+                ref catalog_id,
+                float_level,
+                direction,
+            } => {
+                let entry = find_catalog_entry(catalog_id.trim());
+                let alias = entry.map_or(catalog_id.as_str(), |e| e.ast_alias);
+                if entry.is_some_and(|e| e.output_type == SignalOutputType::Float) {
+                    format!(
+                        "Sig:{alias} {} {:.1}",
+                        direction.short_label(),
+                        float_level.unwrap_or(0.0)
+                    )
+                } else {
+                    format!("Sig:{alias} {}", direction.short_label())
+                }
+            }
+            Self::ConfluenceThreshold {
+                profile,
+                threshold,
+                direction,
+            } => {
+                let p_tag = match profile {
+                    ConfluenceWeightProfile::Balanced => "Bal",
+                    ConfluenceWeightProfile::TrendFocused => "Trd",
+                };
+                format!("Conf({p_tag}) {} {threshold:+.1}", direction.short_label())
+            }
         }
     }
 }
@@ -186,6 +232,12 @@ pub struct AlertRule {
     /// `Some(cutoff_ts)` when authored inside an active Bar Replay session; `None` when authored live.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at_timestamp: Option<i64>,
+    /// Number of closed `timeframe` bars (`0..=500`) to suppress repeat `OncePerBarClose` triggers after firing.
+    #[serde(default)]
+    pub cooldown_bars: usize,
+    /// Remaining closed `timeframe` bars in active cooldown at the current causal frontier (`0` = ready).
+    #[serde(default)]
+    pub cooldown_remaining_bars: usize,
     pub trigger_count: usize,
     pub last_triggered_timestamp: Option<i64>,
     pub message: String,
@@ -236,6 +288,8 @@ pub fn truncate_utf8_bytes(s: &mut String, max_bytes: usize) {
 pub enum AlertError {
     InvalidPriceLevel,
     InvalidIndicatorParams,
+    UnknownSignalCatalogId(String),
+    InvalidConfluenceThreshold,
     DrawingNotFound(DrawingId),
     UnsupportedDrawingGeometry,
     UnsupportedDrawingPane,
@@ -250,8 +304,17 @@ impl fmt::Display for AlertError {
             }
             Self::InvalidIndicatorParams => write!(
                 f,
-                "invalid indicator alert parameters (check RSI period/level or MACD periods)"
+                "invalid indicator alert parameters (check RSI period/level, MACD periods, or float signal threshold)"
             ),
+            Self::UnknownSignalCatalogId(id) => {
+                write!(f, "unknown SIGNAL_CATALOG identifier '{id}'")
+            }
+            Self::InvalidConfluenceThreshold => {
+                write!(
+                    f,
+                    "confluence alert threshold must be finite within [-100.0, +100.0]"
+                )
+            }
             Self::DrawingNotFound(id) => write!(f, "selected drawing #{id} not found"),
             Self::UnsupportedDrawingGeometry => write!(
                 f,

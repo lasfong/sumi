@@ -2133,7 +2133,7 @@ fn render_workstation_chart_inner(
         main_seed_pill_len += 1;
     }
     let main_seed_slice = &main_seed_pill_ys[..main_seed_pill_len];
-    let main_occluding_ys = if let Some(session) = replay_trading.trading_session {
+    let mut main_occluding_ys = if let Some(session) = replay_trading.trading_session {
         collect_trading_axis_pill_ys(
             session,
             &main_vp,
@@ -2144,6 +2144,18 @@ fn render_workstation_chart_inner(
     } else {
         main_seed_slice.to_vec()
     };
+    if let Some(alert_eng) = replay_trading.alert_engine {
+        append_alert_axis_pill_ys(
+            alert_eng,
+            drawings.as_deref(),
+            candles.len(),
+            replay_trading.replay_cutoff_timestamp,
+            &main_vp,
+            multi_layout.main_plot_rect,
+            multi_layout.main_price_axis_rect,
+            &mut main_occluding_ys,
+        );
+    }
     paint_horizontal_price_grid_and_ticks(
         &painter,
         multi_layout.main_plot_rect,
@@ -9624,6 +9636,54 @@ pub(crate) fn collect_trading_axis_pill_ys(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn append_alert_axis_pill_ys(
+    alert_engine: &AlertEngine,
+    drawings: Option<&DrawingStore>,
+    candle_len: usize,
+    cutoff_timestamp: Option<i64>,
+    main_vp: &PaneViewport<'_>,
+    plot_rect: Rect,
+    price_axis_rect: Rect,
+    occluding_ys: &mut Vec<f32>,
+) {
+    let mut push_price = |price: f64| {
+        if let Some(sy) = main_vp.price_to_screen_y(price) {
+            let y = sy as f32;
+            if y.is_finite()
+                && y >= plot_rect.top()
+                && y <= plot_rect.bottom()
+                && let Some(pill_y) = clamp_axis_pill_center_y(y, price_axis_rect, 9.5)
+            {
+                occluding_ys.push(pill_y);
+            }
+        }
+    };
+    for rule in &alert_engine.rules {
+        if !rule.is_causally_visible(cutoff_timestamp) || rule.status == AlertStatus::Paused {
+            continue;
+        }
+        match rule.condition {
+            AlertCondition::PriceLevel { price, .. } => push_price(price),
+            AlertCondition::DrawingLine { drawing_id, .. } => {
+                if candle_len > 0
+                    && let Some(store) = drawings
+                    && let Some(d) = store.drawings.iter().find(|d| {
+                        d.id == drawing_id && d.is_causally_visible(cutoff_timestamp, candle_len)
+                    })
+                    && let Some(frontier_price) = drawing_line_value_at_bar(d, candle_len - 1)
+                {
+                    push_price(frontier_price);
+                }
+            }
+            AlertCondition::RsiThreshold { .. }
+            | AlertCondition::MacdHistogramZeroCross { .. }
+            | AlertCondition::SignalCatalogTrigger { .. }
+            | AlertCondition::ConfluenceThreshold { .. } => {}
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn paint_trading_overlays(
     axis_painter: &egui::Painter,
     plot_painter: &egui::Painter,
@@ -9968,7 +10028,8 @@ fn paint_alert_trigger_markers(
     };
 
     let mut cur_bucket_id: Option<usize> = None;
-    let mut count_in_bucket = 0_usize;
+    let mut count_above_in_bucket = 0_usize;
+    let mut count_below_in_bucket = 0_usize;
     let mut last_bucket_geom: Option<(f32, f32, f32)> = None;
 
     for ev in &triggers[ev_start..ev_end] {
@@ -9981,7 +10042,8 @@ fn paint_alert_trigger_markers(
 
         if cur_bucket_id != Some(bucket_id) {
             cur_bucket_id = Some(bucket_id);
-            count_in_bucket = 0;
+            count_above_in_bucket = 0;
+            count_below_in_bucket = 0;
 
             let (logical_x, bar_high, bar_low) = if cf > 1 {
                 if let Some(b) = conflated_candle_at(candles, candle_cursor, cf) {
@@ -10011,15 +10073,22 @@ fn paint_alert_trigger_markers(
             continue;
         }
 
-        let slot = count_in_bucket;
-        count_in_bucket += 1;
+        let is_below = matches!(ev.direction, CrossDirection::CrossBelow);
+        let slot = if is_below {
+            let s = count_below_in_bucket;
+            count_below_in_bucket += 1;
+            s
+        } else {
+            let s = count_above_in_bucket;
+            count_above_in_bucket += 1;
+            s
+        };
         let max_slots = if cf >= 8 { 1 } else { 3 };
         if slot >= max_slots {
             continue;
         }
 
         let radius = (bar_spacing as f32 * 0.36).clamp(4.0, 5.8);
-        let is_below = matches!(ev.direction, CrossDirection::CrossBelow);
         let anchor_y = if is_below { low_y } else { high_y };
         let outward = match (is_below, inverted_scale) {
             (true, false) | (false, true) => 1.0_f32,
@@ -10198,8 +10267,10 @@ fn paint_alert_overlays(
                     }
                 }
             }
-            AlertCondition::RsiThreshold { .. } | AlertCondition::MacdHistogramZeroCross { .. } => {
-            }
+            AlertCondition::RsiThreshold { .. }
+            | AlertCondition::MacdHistogramZeroCross { .. }
+            | AlertCondition::SignalCatalogTrigger { .. }
+            | AlertCondition::ConfluenceThreshold { .. } => {}
         }
     }
 
@@ -13898,6 +13969,132 @@ mod tests {
                 .expect("conflated log equity + mc fan render");
                 assert!(rep.conflation_factor >= 2);
                 assert!(rep.equity_pane_active);
+            },
+        );
+        out.textures_delta.clear();
+    }
+
+    #[test]
+    fn r16_alert_markers_independent_above_below_slot_stacking_and_signal_overlay_render() {
+        use crate::alerts::{
+            AlertCondition, AlertEngine, AlertFrequency, AlertTriggerEvent, CrossDirection,
+        };
+        use crate::scanner::ConfluenceWeightProfile;
+
+        let candles = generate_synthetic_ohlcv(120);
+        let mut alerts = AlertEngine::new();
+        let _ = alerts.add_alert(
+            "VNINDEX",
+            Timeframe::D1,
+            AlertCondition::SignalCatalogTrigger {
+                catalog_id: "volume.spike_2x".to_owned(),
+                float_level: None,
+                direction: CrossDirection::CrossAbove,
+            },
+            AlertFrequency::OncePerBarClose,
+            None,
+            &candles,
+            60,
+            None,
+            None,
+        );
+        let _ = alerts.add_alert(
+            "VNINDEX",
+            Timeframe::D1,
+            AlertCondition::ConfluenceThreshold {
+                profile: ConfluenceWeightProfile::Balanced,
+                threshold: 15.0,
+                direction: CrossDirection::CrossBelow,
+            },
+            AlertFrequency::OncePerBarClose,
+            None,
+            &candles,
+            60,
+            None,
+            None,
+        );
+
+        let same_bar_ts = candles[90].timestamp;
+        let triggers = vec![
+            AlertTriggerEvent {
+                event_id: 1,
+                alert_id: 1,
+                symbol: "VNINDEX".to_owned(),
+                timeframe: Timeframe::D1,
+                bar_timestamp: same_bar_ts,
+                eval_base_timestamp: same_bar_ts,
+                direction: CrossDirection::CrossAbove,
+                threshold_value: 1.0,
+                observed_value: 1.0,
+                condition_summary: "VOL_SPIKE_2X ▲".to_owned(),
+                message: "up1".to_owned(),
+            },
+            AlertTriggerEvent {
+                event_id: 2,
+                alert_id: 2,
+                symbol: "VNINDEX".to_owned(),
+                timeframe: Timeframe::D1,
+                bar_timestamp: same_bar_ts,
+                eval_base_timestamp: same_bar_ts,
+                direction: CrossDirection::CrossBelow,
+                threshold_value: 15.0,
+                observed_value: -8.0,
+                condition_summary: "Confluence ▼ 15.0".to_owned(),
+                message: "dn1".to_owned(),
+            },
+            AlertTriggerEvent {
+                event_id: 3,
+                alert_id: 1,
+                symbol: "VNINDEX".to_owned(),
+                timeframe: Timeframe::D1,
+                bar_timestamp: same_bar_ts,
+                eval_base_timestamp: same_bar_ts,
+                direction: CrossDirection::CrossAbove,
+                threshold_value: 1.0,
+                observed_value: 1.0,
+                condition_summary: "VOL_SPIKE_2X ▲".to_owned(),
+                message: "up2".to_owned(),
+            },
+        ];
+
+        alerts.triggers = triggers;
+
+        let ctx = egui::Context::default();
+        let mut vp = ChartViewportState::new();
+        vp.time_scale.set_total_bars(candles.len());
+        vp.time_scale.set_width(800.0);
+        vp.fit_all();
+        let ind = IndicatorConfig::default();
+        let mut cache = IndicatorCache::new();
+        cache.sync(&candles, 1, &ind);
+        let mut drawings = DrawingStore::new();
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1024.0, 680.0))),
+                ..Default::default()
+            },
+            |ui| {
+                let rep = render_workstation_chart_full(
+                    ui,
+                    &candles,
+                    &mut vp,
+                    ChartDisplayConfig {
+                        symbol: "VNINDEX",
+                        timeframe: "1D",
+                        show_grid: true,
+                        show_crosshair: false,
+                        show_volume: true,
+                    },
+                    &ind,
+                    &cache,
+                    &mut drawings,
+                    ChartReplayTradingOverlay {
+                        alert_engine: Some(&alerts),
+                        ..ChartReplayTradingOverlay::default()
+                    },
+                )
+                .expect("render mixed above/below alert markers");
+                assert!(rep.rendered_candle_count > 0);
             },
         );
         out.textures_delta.clear();

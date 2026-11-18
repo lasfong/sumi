@@ -63,6 +63,7 @@ fn next_bar_open_causality_and_final_bar_cutoff_guard() {
         max_leverage: 1.0,
         lot_step: 0.0,
         in_sample_split_pct: None,
+        ..BacktestConfig::default()
     };
 
     let res = run_backtest("TEST", Timeframe::D1, &candles, &cfg, None);
@@ -136,6 +137,7 @@ fn pessimistic_sl_before_tp_on_dual_touch_and_post_close_trailing_stop_anti_look
         max_leverage: 1.0,
         lot_step: 0.0,
         in_sample_split_pct: None,
+        ..BacktestConfig::default()
     };
 
     let res = run_backtest("DUAL", Timeframe::D1, &candles, &cfg, None);
@@ -482,6 +484,7 @@ fn backtest_config_sanitize_clamps_nan_infinity_and_inverted_periods() {
         max_leverage: 0.0,
         lot_step: f64::NAN,
         in_sample_split_pct: Some(0.99),
+        custom_rules: CustomSignalRuleSpec::default(),
     };
     cfg.sanitize();
 
@@ -1486,5 +1489,763 @@ fn critic_r15_regression_wfo_and_portfolio_mc_fan_bar_index_alignment_and_seed_i
     assert!(
         fan_port.p50[121].is_none(),
         "bars past cutoff_timestamp must remain None in portfolio mapped fan"
+    );
+}
+
+#[test]
+fn r16_custom_signal_rules_fail_closed_bool_false_and_empty_group_vacuous_guard() {
+    use crate::scanner::ConfluenceWeightProfile;
+
+    let base_ts = 1_710_000_000_i64;
+    // 1. Series with warmup (< 50), zero-volume baseline (`volume == 0.0`), and negative-volume bar:
+    //    `BoolIs(false)` on `volume.spike_2x` MUST fail closed (`false`), NEVER invert `None` -> `true`!
+    let mut zero_and_bad_vol: Vec<Candle> = (0..75_usize)
+        .map(|i| {
+            let p = 100.0 + (i as f64) * 0.5;
+            let vol = if i == 60 { -25.0 } else { 0.0 };
+            mk_candle(
+                base_ts + (i as i64) * 86_400,
+                p - 0.3,
+                p + 0.7,
+                p - 0.6,
+                p,
+                vol,
+            )
+        })
+        .collect();
+    // Ensure warmup subset (< 50) also tested
+    let negated_spike_leg = DirectionalRuleLeg {
+        enabled: true,
+        inter_group_op: LogicalCombinator::AllAnd,
+        groups: vec![SignalClauseGroup {
+            intra_op: LogicalCombinator::AllAnd,
+            clauses: vec![SignalClause {
+                catalog_id: "volume.spike_2x".to_owned(),
+                predicate: SignalPredicate::BoolIs(false),
+                direction_filter: None,
+            }],
+        }],
+        confluence_gate: ConfluenceThresholdGate::default(),
+    };
+    let mut cfg = BacktestConfig {
+        preset: StrategyPresetKind::CustomSignalRules,
+        direction_mode: StrategyDirectionMode::LongOnly,
+        custom_rules: CustomSignalRuleSpec {
+            name: "FailClosedCheck".to_owned(),
+            long_entry: negated_spike_leg,
+            long_exit: DirectionalRuleLeg::default(),
+            short_entry: DirectionalRuleLeg::default(),
+            short_exit: DirectionalRuleLeg::default(),
+        },
+        ..BacktestConfig::default()
+    };
+    let mat_bad = crate::scanner::PrecomputedCatalogMatrix::compute(&zero_and_bad_vol);
+    let counts = count_custom_rule_matches(&cfg.custom_rules, &mat_bad);
+    assert_eq!(
+        counts,
+        (0, 0, 0, 0),
+        "BoolIs(false) must NEVER match Warmup, ZeroBaseline, or InvalidVolume bars"
+    );
+    let res = run_backtest("ZERO", Timeframe::D1, &zero_and_bad_vol, &cfg, None);
+    assert!(res.trades.is_empty() && res.open_position.is_none());
+
+    // Once positive baseline volume is restored, `BoolIs(false)` legitimately matches non-spike Valid bars >= 50!
+    for c in &mut zero_and_bad_vol {
+        c.volume = 1_000.0;
+    }
+    let mat_ok = crate::scanner::PrecomputedCatalogMatrix::compute(&zero_and_bad_vol);
+    let valid_counts = count_custom_rule_matches(&cfg.custom_rules, &mat_ok);
+    assert!(
+        valid_counts.0 > 0,
+        "BoolIs(false) matches Valid non-spike bars once baseline volume > 0"
+    );
+
+    // 2. Empty groups / empty legs must NEVER fire vacuous truth (`[].iter().all(...) == true`) even when `confluence_gate` is enabled!
+    cfg.custom_rules.long_entry = DirectionalRuleLeg {
+        enabled: true,
+        inter_group_op: LogicalCombinator::AllAnd,
+        groups: vec![SignalClauseGroup {
+            intra_op: LogicalCombinator::AllAnd,
+            clauses: Vec::new(),
+        }],
+        confluence_gate: ConfluenceThresholdGate {
+            enabled: true,
+            profile: ConfluenceWeightProfile::Balanced,
+            min_score: Some(-100.0),
+            max_score: Some(100.0),
+            min_bullish_signals: 0,
+            min_bearish_signals: 0,
+        },
+    };
+    assert_eq!(
+        count_custom_rule_matches(&cfg.custom_rules, &mat_ok),
+        (0, 0, 0, 0),
+        "empty clause groups must never vacuous-match"
+    );
+    cfg.sanitize();
+    assert!(cfg.custom_rules.long_entry.groups.is_empty());
+}
+
+#[test]
+fn r16_custom_signal_rules_two_level_and_or_cross_regime_and_bidirectional_direction_filter() {
+    use crate::scanner::{MarketRegime, SignalDirection};
+
+    // Construct a 90-bar series that trends steadily up for 0..75, then suffers a sharp Bearish breakdown
+    // (`sr.prior_20b_breakout` + `structure.swing_bos` with `bool_value = Some(true)` and `direction = Bearish`)!
+    let base_ts = 1_715_000_000_i64;
+    let mut bars: Vec<Candle> = Vec::with_capacity(90);
+    for i in 0..75_usize {
+        let p = 100.0 + (i as f64) * 0.4;
+        bars.push(mk_candle(
+            base_ts + (i as i64) * 86_400,
+            p - 0.2,
+            p + 0.5,
+            p - 0.4,
+            p,
+            1_000.0,
+        ));
+    }
+    // Bar 75 plunges below prior 20-bar low (~122.0) down to 112.0 -> Bearish `sr.prior_20b_breakout`!
+    for i in 75..90_usize {
+        let p = if i == 75 {
+            112.0
+        } else {
+            112.0 - ((i - 75) as f64) * 0.5
+        };
+        bars.push(mk_candle(
+            base_ts + (i as i64) * 86_400,
+            p + 1.5,
+            p + 1.8,
+            p - 0.6,
+            p,
+            2_500.0,
+        ));
+    }
+
+    // Long leg filtering `sr.prior_20b_breakout` with `Bullish` MUST NOT match bar 75's Bearish breakdown,
+    // whereas Short leg filtering `Bearish` MUST match bar 75!
+    let mut spec = CustomSignalRuleSpec {
+        name: "BidirectionalDisambiguation".to_owned(),
+        long_entry: DirectionalRuleLeg {
+            enabled: true,
+            inter_group_op: LogicalCombinator::AllAnd,
+            groups: vec![SignalClauseGroup {
+                intra_op: LogicalCombinator::AllAnd,
+                clauses: vec![SignalClause {
+                    catalog_id: "sr.prior_20b_breakout".to_owned(),
+                    predicate: SignalPredicate::BoolIs(true),
+                    direction_filter: Some(SignalDirection::Bullish),
+                }],
+            }],
+            confluence_gate: ConfluenceThresholdGate::default(),
+        },
+        long_exit: DirectionalRuleLeg::default(),
+        short_entry: DirectionalRuleLeg {
+            enabled: true,
+            inter_group_op: LogicalCombinator::AllAnd,
+            groups: vec![
+                SignalClauseGroup {
+                    intra_op: LogicalCombinator::AllAnd,
+                    clauses: vec![SignalClause {
+                        catalog_id: "sr.prior_20b_breakout".to_owned(),
+                        predicate: SignalPredicate::BoolIs(true),
+                        direction_filter: Some(SignalDirection::Bearish),
+                    }],
+                },
+                SignalClauseGroup {
+                    intra_op: LogicalCombinator::AnyOr,
+                    clauses: vec![
+                        SignalClause {
+                            catalog_id: "volume.spike_2x".to_owned(),
+                            predicate: SignalPredicate::BoolIs(true),
+                            direction_filter: None,
+                        },
+                        SignalClause {
+                            catalog_id: "regime.market_state".to_owned(),
+                            predicate: SignalPredicate::RegimeIn {
+                                mask: MarketRegime::ALL_VALID_MASK,
+                            },
+                            direction_filter: None,
+                        },
+                    ],
+                },
+            ],
+            confluence_gate: ConfluenceThresholdGate::default(),
+        },
+        short_exit: DirectionalRuleLeg {
+            enabled: true,
+            inter_group_op: LogicalCombinator::AllAnd,
+            groups: vec![SignalClauseGroup {
+                intra_op: LogicalCombinator::AllAnd,
+                clauses: vec![SignalClause {
+                    catalog_id: "flow.cvd_ohlcv_impulse".to_owned(),
+                    predicate: SignalPredicate::FloatCmp {
+                        op: FloatCmpOp::CrossAbove,
+                        threshold: 0.25,
+                    },
+                    direction_filter: None,
+                }],
+            }],
+            confluence_gate: ConfluenceThresholdGate::default(),
+        },
+    };
+    spec.sanitize();
+
+    let mat_75 = crate::scanner::PrecomputedCatalogMatrix::compute(&bars[..=75]);
+    let mat_74 = crate::scanner::PrecomputedCatalogMatrix::compute(&bars[..=74]);
+    let counts_at_75 = count_custom_rule_matches(&spec, &mat_75);
+    let counts_at_74 = count_custom_rule_matches(&spec, &mat_74);
+    assert_eq!(
+        counts_at_75.0 - counts_at_74.0,
+        0,
+        "Bearish breakdown at bar 75 must NOT increment Bullish-filtered long_entry"
+    );
+    assert_eq!(
+        counts_at_75.1 - counts_at_74.1,
+        1,
+        "Bearish breakdown at bar 75 MUST increment Bearish-filtered 2-group short_entry"
+    );
+}
+
+#[test]
+fn r16_custom_signal_rules_next_bar_open_fill_cutoff_and_future_poisoning_invariance() {
+    let feeds = load_bundled_watchlist_universe();
+    let fpt = feeds.iter().find(|f| f.symbol == "FPT").expect("FPT");
+    assert!(fpt.candles.len() >= 150);
+
+    let cfg = BacktestConfig {
+        preset: StrategyPresetKind::CustomSignalRules,
+        direction_mode: StrategyDirectionMode::LongOnly,
+        sizing: PositionSizingMode::PercentEquity(95.0),
+        lot_step: 100.0,
+        in_sample_split_pct: Some(0.70),
+        custom_rules: CustomSignalRuleSpec::default(),
+        ..BacktestConfig::default()
+    };
+
+    let cut_idx = 120_usize;
+    let cut_ts = fpt.candles[cut_idx].timestamp;
+    let clean_bt = run_backtest("FPT", Timeframe::D1, &fpt.candles, &cfg, Some(cut_ts));
+    let clean_mat = crate::scanner::PrecomputedCatalogMatrix::compute(&fpt.candles[..=cut_idx]);
+    let clean_matches = count_custom_rule_matches(&cfg.custom_rules, &clean_mat);
+
+    // Poison future bars > cut_idx by 50x: both `run_backtest` and causal matrix matches must stay bit-exact!
+    let mut poisoned = fpt.candles.clone();
+    for c in &mut poisoned[(cut_idx + 1)..] {
+        c.open *= 50.0;
+        c.high *= 60.0;
+        c.low *= 0.02;
+        c.close *= 55.0;
+        c.volume *= 500.0;
+    }
+    let poisoned_bt = run_backtest("FPT", Timeframe::D1, &poisoned, &cfg, Some(cut_ts));
+    let poisoned_mat = crate::scanner::PrecomputedCatalogMatrix::compute(&poisoned[..=cut_idx]);
+    let poisoned_matches = count_custom_rule_matches(&cfg.custom_rules, &poisoned_mat);
+    assert_eq!(clean_bt.trades, poisoned_bt.trades);
+    assert_eq!(clean_bt.equity_curve, poisoned_bt.equity_curve);
+    assert_eq!(clean_bt.tearsheet, poisoned_bt.tearsheet);
+    assert_eq!(clean_matches, poisoned_matches);
+
+    // Verify `Open[T+1]` fill invariant on every executed trade: entry_bar_index >= 51 (strictly after warmup bar 50)
+    // and entry_price matches `Open[entry_bar_index]` adjusted by slippage!
+    let mut zero_slip_cfg = cfg.clone();
+    zero_slip_cfg.slippage_bps = 0.0;
+    let full_bt = run_backtest("FPT", Timeframe::D1, &fpt.candles, &zero_slip_cfg, None);
+    for tr in &full_bt.trades {
+        assert!(tr.entry_bar_index >= 51);
+        assert!(
+            (tr.entry_price - fpt.candles[tr.entry_bar_index].open).abs() < 1e-9,
+            "CustomSignalRules trade must fill at exact Open[T+1]"
+        );
+    }
+
+    // Verify terminal-bar signal produces `EndOfSeriesCutoff` when `incomplete_tail_bar: false` and is suppressed when `incomplete_tail_bar: true`!
+    let mut always_valid_cfg = cfg.clone();
+    always_valid_cfg.custom_rules.long_entry = DirectionalRuleLeg {
+        enabled: true,
+        inter_group_op: LogicalCombinator::AllAnd,
+        groups: vec![SignalClauseGroup {
+            intra_op: LogicalCombinator::AllAnd,
+            clauses: vec![SignalClause {
+                catalog_id: "regime.market_state".to_owned(),
+                predicate: SignalPredicate::RegimeIn {
+                    mask: crate::scanner::MarketRegime::ALL_VALID_MASK,
+                },
+                direction_filter: None,
+            }],
+        }],
+        confluence_gate: ConfluenceThresholdGate::default(),
+    };
+    // Slice to 52 bars: bar 50 is first valid signal -> opens at bar 51; or slice to 51 bars (`0..=50`): bar 50 is terminal bar -> `EndOfSeriesCutoff`!
+    let slice_51 = &fpt.candles[..51];
+    let term_closed = run_backtest_with_options(
+        "FPT",
+        Timeframe::D1,
+        slice_51,
+        &always_valid_cfg,
+        BacktestRunOptions {
+            replay_cutoff_timestamp: None,
+            incomplete_tail_bar: false,
+        },
+    );
+    assert_eq!(term_closed.trades.len(), 0);
+    assert!(term_closed.open_position.is_none());
+    assert_eq!(term_closed.unexecuted_signals.len(), 1);
+    assert_eq!(term_closed.unexecuted_signals[0].signal_bar_index, 50);
+    assert_eq!(
+        term_closed.unexecuted_signals[0].reason,
+        UnfilledReason::EndOfSeriesCutoff
+    );
+
+    let term_incomplete = run_backtest_with_options(
+        "FPT",
+        Timeframe::D1,
+        slice_51,
+        &always_valid_cfg,
+        BacktestRunOptions {
+            replay_cutoff_timestamp: None,
+            incomplete_tail_bar: true,
+        },
+    );
+    assert!(
+        term_incomplete.unexecuted_signals.is_empty(),
+        "forming higher-TF tail bar must NOT emit premature CustomSignalRules signal"
+    );
+}
+
+#[test]
+fn r16_custom_signal_rules_12_sweep_wfo_portfolio_battle_and_monte_carlo_integration() {
+    let feeds = load_bundled_watchlist_universe();
+    let btc = feeds.iter().find(|f| f.symbol == "BTCUSDT").expect("BTC");
+
+    let cfg = BacktestConfig {
+        preset: StrategyPresetKind::CustomSignalRules,
+        direction_mode: StrategyDirectionMode::LongShort,
+        sizing: PositionSizingMode::PercentEquity(90.0),
+        in_sample_split_pct: Some(0.70),
+        custom_rules: CustomSignalRuleSpec::default(),
+        ..BacktestConfig::default()
+    };
+
+    // 1. 12-variant Sweep (`Arc<PrecomputedCatalogMatrix>` shared across all 12 variants)
+    let sweep = run_parameter_sweep(
+        "BTCUSDT",
+        btc.base_timeframe,
+        &btc.candles,
+        &cfg,
+        SweepRankingMetric::SharpeRatio,
+        BacktestRunOptions::default(),
+    );
+    assert_eq!(sweep.variants.len(), 12);
+    for (idx, v) in sweep.variants.iter().enumerate() {
+        assert_eq!(v.rank, idx + 1);
+        assert!(v.tearsheet.total_return_pct.is_finite());
+        assert!(!v.label.is_empty());
+    }
+
+    // 2. All 7 presets battle includes `CustomSignalRules`
+    let battle = run_all_presets_battle(
+        "BTCUSDT",
+        btc.base_timeframe,
+        &btc.candles,
+        &cfg,
+        SweepRankingMetric::SharpeRatio,
+        BacktestRunOptions::default(),
+    );
+    assert_eq!(battle.len(), StrategyPresetKind::ALL.len());
+    assert!(
+        battle
+            .iter()
+            .any(|v| v.preset == StrategyPresetKind::CustomSignalRules)
+    );
+
+    // 3. 4-Fold Walk-Forward Optimization + Monte Carlo bootstrap determinism
+    let wf = run_walk_forward_validation(
+        "BTCUSDT",
+        btc.base_timeframe,
+        &btc.candles,
+        &cfg,
+        WalkForwardConfig {
+            fold_count: 4,
+            in_sample_ratio: 0.70,
+            anchored: false,
+            ranking_metric: SweepRankingMetric::SharpeRatio,
+        },
+        BacktestRunOptions::default(),
+    );
+    assert_eq!(wf.folds.len(), 4);
+    assert!(!wf.stitched_oos_curve.is_empty() && wf.stitched_oos_curve.len() < btc.candles.len());
+
+    let bt = run_backtest("BTCUSDT", btc.base_timeframe, &btc.candles, &cfg, None);
+    let mc_a = run_monte_carlo_bootstrap(
+        cfg.initial_cash,
+        &bt.trades,
+        &bt.equity_curve,
+        btc.candles.len(),
+        None,
+        MonteCarloConfig {
+            simulations: 250,
+            seed: 0x516E_A116,
+            ..MonteCarloConfig::default()
+        },
+    );
+    let mc_b = run_monte_carlo_bootstrap(
+        cfg.initial_cash,
+        &bt.trades,
+        &bt.equity_curve,
+        btc.candles.len(),
+        None,
+        MonteCarloConfig {
+            simulations: 250,
+            seed: 0x516E_A116,
+            ..MonteCarloConfig::default()
+        },
+    );
+    assert_eq!(mc_a.metrics, mc_b.metrics);
+    assert_eq!(mc_a.checkpoint_envelopes, mc_b.checkpoint_envelopes);
+    assert_eq!(
+        mc_a.bar_fan.as_ref().map(|f| (&f.p5, &f.p50, &f.p95)),
+        mc_b.bar_fan.as_ref().map(|f| (&f.p5, &f.p50, &f.p95))
+    );
+
+    // 4. Multi-Asset Portfolio with `CustomSignalRules`
+    let port = run_portfolio_backtest(
+        &feeds,
+        Timeframe::D1,
+        &cfg,
+        PortfolioUniverseFilter::AllUniverseFeeds,
+        PortfolioWeightingMode::EqualWeight,
+        None,
+    );
+    assert!(!port.portfolio_equity_curve.is_empty());
+    assert!(port.portfolio_tearsheet.final_equity.is_finite());
+}
+
+#[test]
+fn critic_r16_regression_spy_thursday_w1_vn30f_session_close_longonly_exit_isolation_and_trendfocused_clause()
+ {
+    use crate::backtest::strategy::evaluate_signal_clause_at_with_profile;
+    use crate::scanner::{
+        ConfluenceWeightProfile, PrecomputedCatalogMatrix, evaluate_causal_confluence,
+    };
+
+    // 1. `[Critical-01]` Non-midnight `SPY` (`14:30:00 UTC`) `D1 -> W1` weekday uses `last_base_open_ts`:
+    //    `19789` days since Unix epoch = Thursday `2024-03-07` (`(19789 + 4) % 7 == 4`), `19790` = Friday.
+    let spy_thu_open = 19_789_i64 * 86_400 + 14 * 3_600 + 30 * 60;
+    let spy_fri_open = 19_790_i64 * 86_400 + 14 * 3_600 + 30 * 60;
+    let w1_bucket_open = Timeframe::W1.bucket_start_timestamp(spy_thu_open);
+    assert!(
+        is_bucket_incomplete_at_close_for_symbol(
+            "SPY",
+            w1_bucket_open,
+            spy_thu_open + 86_399,
+            Timeframe::D1,
+            Timeframe::W1,
+        ),
+        "Thursday 14:30 UTC D1 bar (close Fri 14:29:59 UTC) must still be incomplete on W1"
+    );
+    assert!(
+        !is_bucket_incomplete_at_close_for_symbol(
+            "SPY",
+            w1_bucket_open,
+            spy_fri_open + 86_399,
+            Timeframe::D1,
+            Timeframe::W1,
+        ),
+        "Friday 14:30 UTC D1 bar must close the W1 bucket"
+    );
+
+    // 2. `[Critical-01]` Vietnam `VN30F1M` `1m` morning (`04:29:59 UTC`) & afternoon (`07:44:59 UTC`) closes
+    //    vs 24/7 `BTCUSDT` UTC boundary behavior:
+    let thu_mid_utc = 19_789_i64 * 86_400;
+    let fri_mid_utc = 19_790_i64 * 86_400;
+    let vn_morning_close = thu_mid_utc + 4 * 3_600 + 29 * 60 + 59; // 11:30 ICT morning close
+    let vn_thu_aft_close = thu_mid_utc + 7 * 3_600 + 44 * 60 + 59; // 14:45 ICT afternoon close (Thu)
+    let vn_fri_aft_close = fri_mid_utc + 7 * 3_600 + 44 * 60 + 59; // 14:45 ICT afternoon close (Fri)
+
+    assert!(!is_bucket_incomplete_at_close_for_symbol(
+        "VN30F1M",
+        Timeframe::H1.bucket_start_timestamp(vn_morning_close),
+        vn_morning_close,
+        Timeframe::M1,
+        Timeframe::H1,
+    ));
+    assert!(is_bucket_incomplete_at_close_for_symbol(
+        "VN30F1M",
+        Timeframe::D1.bucket_start_timestamp(vn_morning_close),
+        vn_morning_close,
+        Timeframe::M1,
+        Timeframe::D1,
+    ));
+    for tf in [Timeframe::H1, Timeframe::H4, Timeframe::D1] {
+        assert!(
+            !is_bucket_incomplete_at_close_for_symbol(
+                "VN30F1M",
+                tf.bucket_start_timestamp(vn_thu_aft_close),
+                vn_thu_aft_close,
+                Timeframe::M1,
+                tf,
+            ),
+            "VN30F1M afternoon close 07:44:59 UTC must close {tf:?}"
+        );
+    }
+    assert!(
+        is_bucket_incomplete_at_close_for_symbol(
+            "VN30F1M",
+            Timeframe::W1.bucket_start_timestamp(vn_thu_aft_close),
+            vn_thu_aft_close,
+            Timeframe::M1,
+            Timeframe::W1,
+        ),
+        "Thursday afternoon close must NOT prematurely close W1"
+    );
+    assert!(
+        !is_bucket_incomplete_at_close_for_symbol(
+            "VN30F1M",
+            Timeframe::W1.bucket_start_timestamp(vn_fri_aft_close),
+            vn_fri_aft_close,
+            Timeframe::M1,
+            Timeframe::W1,
+        ),
+        "Friday afternoon close 07:44:59 UTC MUST close W1 on VN30F1M"
+    );
+    // 24/7 crypto at 07:44:59 UTC remains unclosed on both H1 and D1:
+    assert!(is_bucket_incomplete_at_close_for_symbol(
+        "BTCUSDT",
+        Timeframe::H1.bucket_start_timestamp(vn_thu_aft_close),
+        vn_thu_aft_close,
+        Timeframe::M1,
+        Timeframe::H1,
+    ));
+    assert!(is_bucket_incomplete_at_close_for_symbol(
+        "BTCUSDT",
+        Timeframe::D1.bucket_start_timestamp(vn_thu_aft_close),
+        vn_thu_aft_close,
+        Timeframe::M1,
+        Timeframe::D1,
+    ));
+
+    // Round-2 Critic regression: bounded close windows prevent mid-bucket `DEF-001` leaks after 08:00 / 21:00 UTC!
+    // (a) Custom non-VN ticker `"AMZN"` at Friday `14:32:59 UTC` (`2` mins into `14:00` `1h` bar) -> `incomplete == true` across `H1`/`H4`/`D1`/`W1`!
+    let amzn_fri_1432_close = fri_mid_utc + 14 * 3_600 + 32 * 60 + 59;
+    for tf in [Timeframe::H1, Timeframe::H4, Timeframe::D1, Timeframe::W1] {
+        assert!(
+            is_bucket_incomplete_at_close_for_symbol(
+                "AMZN",
+                tf.bucket_start_timestamp(amzn_fri_1432_close),
+                amzn_fri_1432_close,
+                Timeframe::M1,
+                tf,
+            ),
+            "Custom ticker AMZN at 14:32:59 UTC must remain incomplete on {tf:?} (no unbounded >= 07:44:59 leak!)"
+        );
+    }
+    // (b) Anonymous `is_bucket_incomplete_at_close("", ...)` at `07:44:59 UTC` and `22:02:59 UTC` -> pure UTC boundary (`true`)!
+    let anon_fri_2202_close = fri_mid_utc + 22 * 3_600 + 2 * 60 + 59;
+    for ts_close in [vn_fri_aft_close, anon_fri_2202_close] {
+        for tf in [Timeframe::H1, Timeframe::D1, Timeframe::W1] {
+            assert!(
+                is_bucket_incomplete_at_close(
+                    tf.bucket_start_timestamp(ts_close),
+                    ts_close,
+                    Timeframe::M1,
+                    tf,
+                ),
+                "Symbol-less is_bucket_incomplete_at_close must enforce pure UTC boundaries on {tf:?} at {ts_close}"
+            );
+        }
+    }
+    // (c) US equities (`"SPY"`): regular close `20:59:59 UTC` on Friday closes `H1`/`D1`/`W1` (`false`),
+    //     whereas extended-hours `21:05:59 UTC` (`5` mins into `21:00` `1h` bar) stays `incomplete == true`!
+    let spy_fri_reg_close = fri_mid_utc + 20 * 3_600 + 59 * 60 + 59;
+    let spy_fri_ah_2105_close = fri_mid_utc + 21 * 3_600 + 5 * 60 + 59;
+    for tf in [Timeframe::H1, Timeframe::D1, Timeframe::W1] {
+        assert!(
+            !is_bucket_incomplete_at_close_for_symbol(
+                "SPY",
+                tf.bucket_start_timestamp(spy_fri_reg_close),
+                spy_fri_reg_close,
+                Timeframe::M1,
+                tf,
+            ),
+            "SPY regular close 20:59:59 UTC on Friday must close {tf:?}"
+        );
+        assert!(
+            is_bucket_incomplete_at_close_for_symbol(
+                "SPY",
+                tf.bucket_start_timestamp(spy_fri_ah_2105_close),
+                spy_fri_ah_2105_close,
+                Timeframe::M1,
+                tf,
+            ),
+            "SPY extended-hours 21:05:59 UTC must remain incomplete on {tf:?}"
+        );
+    }
+
+    // 3. `[Major-03]` `CustomSignalRules` in `LongOnly` with `long_exit.enabled = false` & `short_entry.enabled = true`
+    //    must NEVER close Long positions via `short_entry` (`SignalExit`), whereas `LongShort` reverses via `SignalReversal`:
+    let mut bars = Vec::with_capacity(95);
+    let t0 = 1_710_000_000_i64;
+    for i in 0..95_usize {
+        let wave = ((i as f64) * 0.45).sin() * 2.8;
+        let p = 100.0 + (i as f64) * 0.35 + wave;
+        let vol = if i == 56 || i == 68 || i == 80 {
+            6_000.0
+        } else {
+            1_000.0
+        };
+        bars.push(mk_candle(
+            t0 + (i as i64) * 86_400,
+            p - 0.4,
+            p + 1.2,
+            p - 1.1,
+            p,
+            vol,
+        ));
+    }
+    let spike_clause = SignalClause {
+        catalog_id: "volume.spike_2x".to_owned(),
+        predicate: SignalPredicate::BoolIs(true),
+        direction_filter: None,
+    };
+    let isolated_spec = CustomSignalRuleSpec {
+        long_entry: DirectionalRuleLeg {
+            enabled: true,
+            inter_group_op: LogicalCombinator::AnyOr,
+            groups: vec![SignalClauseGroup {
+                intra_op: LogicalCombinator::AllAnd,
+                clauses: vec![spike_clause.clone()],
+            }],
+            confluence_gate: ConfluenceThresholdGate::default(),
+        },
+        long_exit: DirectionalRuleLeg {
+            enabled: false,
+            ..DirectionalRuleLeg::default()
+        },
+        short_entry: DirectionalRuleLeg {
+            enabled: true,
+            inter_group_op: LogicalCombinator::AnyOr,
+            groups: vec![SignalClauseGroup {
+                intra_op: LogicalCombinator::AllAnd,
+                clauses: vec![spike_clause],
+            }],
+            confluence_gate: ConfluenceThresholdGate::default(),
+        },
+        short_exit: DirectionalRuleLeg {
+            enabled: false,
+            ..DirectionalRuleLeg::default()
+        },
+        ..CustomSignalRuleSpec::default()
+    };
+
+    let cfg_long_only = BacktestConfig {
+        preset: StrategyPresetKind::CustomSignalRules,
+        direction_mode: StrategyDirectionMode::LongOnly,
+        risk: StopTakeConfig {
+            stop_loss_pct: None,
+            take_profit_pct: None,
+            trailing_stop_atr_mult: None,
+            max_holding_bars: None,
+            min_holding_bars: 0,
+            ..StopTakeConfig::default()
+        },
+        custom_rules: isolated_spec.clone(),
+        ..BacktestConfig::default()
+    };
+    let bt_long_only = run_backtest("BTCUSDT", Timeframe::D1, &bars, &cfg_long_only, None);
+    assert!(
+        bt_long_only
+            .trades
+            .iter()
+            .all(|t| t.exit_reason != BacktestExitReason::SignalExit),
+        "LongOnly with long_exit.enabled=false must NEVER close Long via short_entry!"
+    );
+    assert!(bt_long_only.open_position.is_some());
+
+    let mut sep_short_spec = isolated_spec;
+    bars[70].close = bars[69].close - 4.5;
+    bars[70].open = bars[69].close;
+    bars[70].low = bars[70].close - 0.5;
+    sep_short_spec.short_entry.groups[0].clauses[0] = SignalClause {
+        catalog_id: "flow.cvd_ohlcv_impulse".to_owned(),
+        predicate: SignalPredicate::FloatCmp {
+            op: FloatCmpOp::Lte,
+            threshold: -0.20,
+        },
+        direction_filter: None,
+    };
+    let cfg_long_short = BacktestConfig {
+        direction_mode: StrategyDirectionMode::LongShort,
+        custom_rules: sep_short_spec,
+        ..cfg_long_only
+    };
+    let bt_long_short = run_backtest("BTCUSDT", Timeframe::D1, &bars, &cfg_long_short, None);
+    assert!(
+        bt_long_short
+            .trades
+            .iter()
+            .any(|t| t.exit_reason == BacktestExitReason::SignalReversal),
+        "LongShort mode must still allow opposite-side entry reversal"
+    );
+
+    // 4. `[Major-04]` `evaluate_signal_clause_at_with_profile` & `evaluate_rule_leg_at` honor `TrendFocused`
+    //    on `"health.technical_composite"` clauses even when `confluence_gate.enabled == false`:
+    let trend_bars: Vec<Candle> = (0..80_usize)
+        .map(|i| {
+            let p = 100.0 + (i as f64) * 1.25;
+            mk_candle(
+                t0 + (i as i64) * 86_400,
+                p - 0.2,
+                p + 0.3,
+                p - 0.9,
+                p,
+                1_000.0,
+            )
+        })
+        .collect();
+    let eval_idx = 75_usize;
+    let rep_bal = evaluate_causal_confluence(
+        &trend_bars[..=eval_idx],
+        None,
+        false,
+        ConfluenceWeightProfile::Balanced,
+    );
+    let rep_tf = evaluate_causal_confluence(
+        &trend_bars[..=eval_idx],
+        None,
+        false,
+        ConfluenceWeightProfile::TrendFocused,
+    );
+    let s_bal = rep_bal.health.unwrap().composite_score;
+    let s_tf = rep_tf.health.unwrap().composite_score;
+    assert!(
+        (s_tf - s_bal).abs() > 1.0,
+        "TrendFocused ({s_tf}) and Balanced ({s_bal}) composite scores must diverge on pure trend"
+    );
+    let mid_thr = 0.5 * (s_bal + s_tf);
+    let health_clause = SignalClause {
+        catalog_id: "health.technical_composite".to_owned(),
+        predicate: SignalPredicate::FloatCmp {
+            op: FloatCmpOp::Gte,
+            threshold: mid_thr,
+        },
+        direction_filter: None,
+    };
+    let mat = PrecomputedCatalogMatrix::compute(&trend_bars);
+    let match_bal = evaluate_signal_clause_at_with_profile(
+        &health_clause,
+        &mat,
+        eval_idx,
+        ConfluenceWeightProfile::Balanced,
+    );
+    let match_tf = evaluate_signal_clause_at_with_profile(
+        &health_clause,
+        &mat,
+        eval_idx,
+        ConfluenceWeightProfile::TrendFocused,
+    );
+    assert_ne!(
+        match_bal, match_tf,
+        "health.technical_composite clause must distinguish TrendFocused vs Balanced around midpoint {mid_thr}"
     );
 }

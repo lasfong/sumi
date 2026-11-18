@@ -6,8 +6,9 @@ use crate::model::Candle;
 
 use super::engine::{
     BacktestRunOptions, PrecomputedFeatures, SimulationCarryState, compare_tearsheets_desc,
-    is_bucket_incomplete_at_close, normalize_config_for_universe_feed, run_backtest_with_options,
-    simulate_window_with_carry, simulate_window_with_features, slice_causal_series_for_options,
+    is_bucket_incomplete_at_close_for_symbol, normalize_config_for_universe_feed,
+    run_backtest_with_options, simulate_window_with_carry, simulate_window_with_features,
+    slice_causal_series_for_options,
 };
 use super::metrics::{BacktestEquityPoint, BacktestTearsheet, BacktestTrade, compute_tearsheet};
 use super::strategy::{
@@ -184,11 +185,24 @@ pub fn run_walk_forward_validation(
 
     let is_window_len = first_oos_start;
     let grid = build_preset_sweep_configs(&clean_base);
+    let shared_catalog = if clean_base.preset == StrategyPresetKind::CustomSignalRules
+        && !causal_candles.is_empty()
+    {
+        Some(std::sync::Arc::new(
+            crate::scanner::PrecomputedCatalogMatrix::compute(causal_candles),
+        ))
+    } else {
+        None
+    };
     // Precompute strictly prefix-causal indicator vectors once per grid variant across `causal_candles`.
     let grid_with_features: Vec<(String, BacktestConfig, PrecomputedFeatures)> = grid
         .into_iter()
         .map(|(lbl, cfg)| {
-            let feats = PrecomputedFeatures::build(causal_candles, &cfg);
+            let feats = PrecomputedFeatures::build_with_shared_catalog(
+                causal_candles,
+                &cfg,
+                shared_catalog.clone(),
+            );
             (lbl, cfg, feats)
         })
         .collect();
@@ -608,12 +622,24 @@ pub fn run_portfolio_backtest(
         }
 
         let incomplete_tail = match (replay_causal_close_timestamp, series_ref.last()) {
-            (Some(close_cut), Some(last_bar)) => is_bucket_incomplete_at_close(
-                last_bar.timestamp,
-                close_cut,
-                feed.base_timeframe,
-                effective_tf,
-            ),
+            (Some(close_cut), Some(last_bar)) => {
+                let last_feed_close_ts = closed_base_slice
+                    .last()
+                    .map_or(close_cut, |c| c.timestamp.saturating_add(base_bar_span));
+                is_bucket_incomplete_at_close_for_symbol(
+                    &feed.symbol,
+                    last_bar.timestamp,
+                    close_cut,
+                    feed.base_timeframe,
+                    effective_tf,
+                ) && is_bucket_incomplete_at_close_for_symbol(
+                    &feed.symbol,
+                    last_bar.timestamp,
+                    last_feed_close_ts,
+                    feed.base_timeframe,
+                    effective_tf,
+                )
+            }
             _ => false,
         };
 

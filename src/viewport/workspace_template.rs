@@ -23,10 +23,26 @@ use super::price_scale::PriceScaleMode;
 /// Current schema version for serialized [`WorkspaceTemplate`] documents.
 pub const WORKSPACE_TEMPLATE_SCHEMA_VERSION: u32 = 1;
 
+/// Current schema version for serialized [`WorkspaceSnapshotStore`] documents (`Milestone R16 / Wave 15`).
+pub const WORKSPACE_SNAPSHOT_STORE_VERSION: u32 = 1;
+
+/// Maximum user-named checkpoint slots in [`WorkspaceSnapshotStore::named_slots`].
+pub const MAX_NAMED_SNAPSHOT_SLOTS: usize = 16;
+
+/// Maximum rolling auto-checkpoint entries in [`WorkspaceSnapshotStore::auto_ring`].
+pub const MAX_AUTO_CHECKPOINT_RING: usize = 4;
+
+/// Maximum UTF-8 byte length of sanitized quarantine diagnostic head preview.
+pub const MAX_QUARANTINED_PREVIEW_BYTES: usize = 512;
+
+/// Maximum input byte size (`2 MiB`) accepted by snapshot/template parsers before early rejection.
+pub const MAX_SNAPSHOT_PAYLOAD_BYTES: usize = 2 * 1024 * 1024;
+
 const MAX_TEMPLATE_NAME_BYTES: usize = 64;
 const MAX_TEMPLATE_DESC_BYTES: usize = 200;
 const MAX_SYMBOL_BYTES: usize = 24;
 const MAX_PARSER_DEPTH: usize = 32;
+const MAX_SAFE_DOC_U64: u64 = 9_007_199_254_740_991;
 
 /// Proportional stretch weights for the main pane and stacked oscillator sub-panes in one chart slot.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -266,9 +282,7 @@ impl Default for WorkspaceTemplate {
 impl WorkspaceTemplate {
     /// Normalizes all fields and ensures `slots` holds exactly `4` sanitized slots `0..4`.
     pub fn sanitize(&mut self) {
-        if self.schema_version == 0 {
-            self.schema_version = WORKSPACE_TEMPLATE_SCHEMA_VERSION;
-        }
+        self.schema_version = WORKSPACE_TEMPLATE_SCHEMA_VERSION;
         truncate_utf8(&mut self.name, MAX_TEMPLATE_NAME_BYTES);
         if self.name.trim().is_empty() {
             self.name = "Untitled Template".to_owned();
@@ -339,6 +353,9 @@ impl WorkspaceTemplate {
 
     /// Auto-detects `JSON` vs `RON` from input text and parses the template safely.
     pub fn from_auto_str(input: &str) -> Result<Self, WorkspaceTemplateError> {
+        if input.len() > MAX_SNAPSHOT_PAYLOAD_BYTES {
+            return Err(WorkspaceTemplateError::PayloadTooLarge(input.len()));
+        }
         let trimmed = strip_leading_ws_and_comments(input)?;
         if trimmed.starts_with('{') {
             Self::from_json_str(trimmed)
@@ -346,15 +363,38 @@ impl WorkspaceTemplate {
             Self::from_ron_str(input)
         }
     }
+
+    /// Computes a deterministic `SplitMix64` canonical digest over all functional workspace state
+    /// (`layout`, `sync`, `active_slot`, `slots`, `dock_layout`, `hotkey_profile`, `hotkey_base_preset`,
+    /// `hotkey_overrides`), invariant to metadata `name` and `description`.
+    #[must_use]
+    pub fn canonical_digest(&self) -> u64 {
+        let mut copy = self.clone();
+        copy.name = "canonical".to_owned();
+        copy.description.clear();
+        copy.sanitize();
+        let canonical_ron = encode_ron_template(&copy);
+        splitmix64_hash_bytes(canonical_ron.as_bytes())
+    }
 }
 
-/// Errors emitted while parsing or validating a [`WorkspaceTemplate`] from `RON` or `JSON`.
+/// Errors emitted while parsing or validating a [`WorkspaceTemplate`] or [`WorkspaceSnapshotStore`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceTemplateError {
     Syntax(String),
     UnsupportedSchemaVersion(u32),
     NonFiniteNumber(String),
-    InvalidField { field: String, reason: String },
+    InvalidField {
+        field: String,
+        reason: String,
+    },
+    PayloadTooLarge(usize),
+    SnapshotSlotsFull,
+    CorruptSnapshotDigest {
+        slot_id: u64,
+        expected_hex: String,
+        actual_hex: String,
+    },
 }
 
 impl fmt::Display for WorkspaceTemplateError {
@@ -371,6 +411,22 @@ impl fmt::Display for WorkspaceTemplateError {
             Self::InvalidField { field, reason } => {
                 write!(f, "Invalid template field '{field}': {reason}")
             }
+            Self::PayloadTooLarge(len) => write!(
+                f,
+                "Snapshot payload size ({len} bytes) exceeds maximum limit ({MAX_SNAPSHOT_PAYLOAD_BYTES} bytes)"
+            ),
+            Self::SnapshotSlotsFull => write!(
+                f,
+                "All {MAX_NAMED_SNAPSHOT_SLOTS} named snapshot slots are pinned; unpin or delete a slot first"
+            ),
+            Self::CorruptSnapshotDigest {
+                slot_id,
+                expected_hex,
+                actual_hex,
+            } => write!(
+                f,
+                "Corrupt snapshot digest in slot #{slot_id}: expected {expected_hex}, computed {actual_hex}"
+            ),
         }
     }
 }
@@ -1772,6 +1828,9 @@ fn strip_leading_ws_and_comments(mut src: &str) -> Result<&str, WorkspaceTemplat
 }
 
 fn parse_json_doc(input: &str) -> Result<DocValue, WorkspaceTemplateError> {
+    if input.len() > MAX_SNAPSHOT_PAYLOAD_BYTES {
+        return Err(WorkspaceTemplateError::PayloadTooLarge(input.len()));
+    }
     let mut sc = Scanner::new(input, false);
     let doc = sc.parse_json_value(0)?;
     sc.skip_ws()?;
@@ -1785,6 +1844,9 @@ fn parse_json_doc(input: &str) -> Result<DocValue, WorkspaceTemplateError> {
 }
 
 fn parse_ron_doc(input: &str) -> Result<DocValue, WorkspaceTemplateError> {
+    if input.len() > MAX_SNAPSHOT_PAYLOAD_BYTES {
+        return Err(WorkspaceTemplateError::PayloadTooLarge(input.len()));
+    }
     let mut sc = Scanner::new(input, true);
     let doc = sc.parse_ron_value(0)?;
     sc.skip_ws()?;
@@ -2595,4 +2657,935 @@ fn decode_hotkey_profile_id(
         field: field.to_owned(),
         reason: format!("unknown HotkeyProfileId '{raw}'"),
     })
+}
+
+// ============================================================================
+// Named Workspace Snapshot Checkpoints, Diff Preview & Quarantine Recovery (`Milestone R16 / Wave 15`)
+// ============================================================================
+
+fn splitmix64_hash_bytes(bytes: &[u8]) -> u64 {
+    let mut state = 0xCBF2_9CE4_8422_2325_u64;
+    let mix = |st: &mut u64, word: u64| {
+        let mut z = st.wrapping_add(word).wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        *st = z ^ (z >> 31);
+    };
+    mix(&mut state, bytes.len() as u64);
+    for &b in bytes {
+        mix(&mut state, u64::from(b));
+    }
+    state
+}
+
+/// One user-named or auto-ring workspace checkpoint slot (`Milestone R16 / Wave 15`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceSnapshotSlot {
+    pub slot_id: u64,
+    pub label: String,
+    pub pinned: bool,
+    /// Monotonic deterministic revision counter (`0` wall-clock dependency!).
+    pub sequence_no: u64,
+    /// Canonical `SplitMix64` digest of `template` (`template.canonical_digest()`).
+    pub template_digest: u64,
+    pub template: WorkspaceTemplate,
+}
+
+impl WorkspaceSnapshotSlot {
+    pub fn sanitize(&mut self) {
+        self.label = self.label.trim().to_owned();
+        truncate_utf8(&mut self.label, MAX_TEMPLATE_NAME_BYTES);
+        if self.label.is_empty() {
+            self.label = "Checkpoint".to_owned();
+        }
+        self.slot_id = self.slot_id.clamp(1, MAX_SAFE_DOC_U64);
+        self.sequence_no = self.sequence_no.clamp(1, MAX_SAFE_DOC_U64);
+        self.template.sanitize();
+        self.template_digest = self.template.canonical_digest();
+    }
+}
+
+/// Structured corrupt-payload quarantine diagnostic emitted when parsing untrusted RON/JSON fails.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuarantinedPayloadDiagnostic {
+    pub byte_len: usize,
+    pub format_hint: String,
+    pub error_message: String,
+    pub payload_head_preview: String,
+}
+
+impl QuarantinedPayloadDiagnostic {
+    #[must_use]
+    pub fn from_failed_payload(raw_payload: &str, err: &WorkspaceTemplateError) -> Self {
+        let trimmed = raw_payload.trim_start();
+        let format_hint = if trimmed.starts_with('{') {
+            "JSON"
+        } else if trimmed.starts_with('(')
+            || trimmed.starts_with("//")
+            || trimmed.starts_with("/*")
+            || trimmed.starts_with("Workspace")
+        {
+            "RON"
+        } else {
+            "UNKNOWN"
+        }
+        .to_owned();
+
+        let mut single_line =
+            String::with_capacity(raw_payload.len().min(MAX_QUARANTINED_PREVIEW_BYTES + 16));
+        for ch in raw_payload.chars() {
+            let mapped = match ch {
+                '\n' | '\r' | '\t' => ' ',
+                c if c.is_control() => '?',
+                c => c,
+            };
+            if single_line.len() + mapped.len_utf8() > MAX_QUARANTINED_PREVIEW_BYTES {
+                break;
+            }
+            single_line.push(mapped);
+        }
+        Self {
+            byte_len: raw_payload.len(),
+            format_hint,
+            error_message: err.to_string(),
+            payload_head_preview: single_line.trim().to_owned(),
+        }
+    }
+}
+
+/// Per-slot difference summary inside a [`WorkspaceSnapshotDiff`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotDiffEntry {
+    pub slot_index: usize,
+    pub symbol_change: Option<(String, String)>,
+    pub timeframe_change: Option<(Timeframe, Timeframe)>,
+    pub scale_mode_change: Option<(PriceScaleMode, PriceScaleMode)>,
+    pub data_source_change: Option<(DataSourcePreset, DataSourcePreset)>,
+    pub indicator_toggle_deltas: usize,
+    pub indicator_param_changed: bool,
+    pub overlay_display_changed: bool,
+    pub pane_stretch_changed: bool,
+}
+
+/// Complete field-level diff between the active workspace and a candidate snapshot/template.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceSnapshotDiff {
+    pub is_identical: bool,
+    pub layout_change: Option<(MultiChartLayoutKind, MultiChartLayoutKind)>,
+    pub active_slot_change: Option<(usize, usize)>,
+    pub sync_changed: bool,
+    pub slot_diffs: Vec<SlotDiffEntry>,
+    pub dock_changes: Vec<&'static str>,
+    pub hotkey_profile_change: Option<(HotkeyProfileId, HotkeyProfileId)>,
+    pub hotkey_base_preset_changed: bool,
+    pub hotkey_override_delta_count: usize,
+    pub total_changed_fields: usize,
+}
+
+fn count_indicator_toggle_deltas(a: &IndicatorConfig, b: &IndicatorConfig) -> usize {
+    let pairs = [
+        (a.show_sma, b.show_sma),
+        (a.show_ema, b.show_ema),
+        (a.show_bbands, b.show_bbands),
+        (a.show_vwap, b.show_vwap),
+        (a.show_vrvp, b.show_vrvp),
+        (a.show_market_profile, b.show_market_profile),
+        (a.show_ichimoku, b.show_ichimoku),
+        (a.show_rsi, b.show_rsi),
+        (a.show_macd, b.show_macd),
+        (a.show_atr, b.show_atr),
+        (a.show_rs, b.show_rs),
+        (a.show_cvd, b.show_cvd),
+    ];
+    pairs.iter().filter(|&&(x, y)| x != y).count()
+}
+
+/// Computes a deterministic, field-level [`WorkspaceSnapshotDiff`] between `current` and `candidate`.
+#[must_use]
+pub fn compute_workspace_diff(
+    current: &WorkspaceTemplate,
+    candidate: &WorkspaceTemplate,
+) -> WorkspaceSnapshotDiff {
+    let mut cur = current.clone();
+    cur.sanitize();
+    let mut cand = candidate.clone();
+    cand.sanitize();
+
+    let mut total_changed_fields = 0_usize;
+
+    let layout_change = if cur.layout != cand.layout {
+        total_changed_fields += 1;
+        Some((cur.layout, cand.layout))
+    } else {
+        None
+    };
+
+    let active_slot_change = if cur.active_slot != cand.active_slot {
+        total_changed_fields += 1;
+        Some((cur.active_slot, cand.active_slot))
+    } else {
+        None
+    };
+
+    let sync_changed = cur.sync != cand.sync;
+    if sync_changed {
+        total_changed_fields += 1;
+    }
+
+    let mut slot_diffs = Vec::new();
+    for idx in 0..MAX_MULTI_CHART_SLOTS {
+        let sa = &cur.slots[idx];
+        let sb = &cand.slots[idx];
+        let symbol_change =
+            (sa.symbol != sb.symbol).then(|| (sa.symbol.clone(), sb.symbol.clone()));
+        let timeframe_change =
+            (sa.timeframe != sb.timeframe).then_some((sa.timeframe, sb.timeframe));
+        let scale_mode_change =
+            (sa.scale_mode != sb.scale_mode).then_some((sa.scale_mode, sb.scale_mode));
+        let data_source_change =
+            (sa.data_source != sb.data_source).then_some((sa.data_source, sb.data_source));
+        let indicator_toggle_deltas = count_indicator_toggle_deltas(&sa.indicators, &sb.indicators);
+        let indicator_param_changed = sa.indicators != sb.indicators
+            && indicator_toggle_deltas == 0
+            || (sa.indicators != sb.indicators && {
+                let mut a_norm = sa.indicators.clone();
+                a_norm.show_sma = sb.indicators.show_sma;
+                a_norm.show_ema = sb.indicators.show_ema;
+                a_norm.show_bbands = sb.indicators.show_bbands;
+                a_norm.show_vwap = sb.indicators.show_vwap;
+                a_norm.show_vrvp = sb.indicators.show_vrvp;
+                a_norm.show_market_profile = sb.indicators.show_market_profile;
+                a_norm.show_ichimoku = sb.indicators.show_ichimoku;
+                a_norm.show_rsi = sb.indicators.show_rsi;
+                a_norm.show_macd = sb.indicators.show_macd;
+                a_norm.show_atr = sb.indicators.show_atr;
+                a_norm.show_rs = sb.indicators.show_rs;
+                a_norm.show_cvd = sb.indicators.show_cvd;
+                a_norm != sb.indicators
+            });
+        let overlay_display_changed = sa.show_volume != sb.show_volume
+            || sa.show_grid != sb.show_grid
+            || sa.compare_benchmark != sb.compare_benchmark
+            || sa.show_compare_overlay != sb.show_compare_overlay;
+        let pane_stretch_changed = sa.pane_stretches != sb.pane_stretches;
+
+        let mut slot_fields = 0_usize;
+        if symbol_change.is_some() {
+            slot_fields += 1;
+        }
+        if timeframe_change.is_some() {
+            slot_fields += 1;
+        }
+        if scale_mode_change.is_some() {
+            slot_fields += 1;
+        }
+        if data_source_change.is_some() {
+            slot_fields += 1;
+        }
+        slot_fields += indicator_toggle_deltas;
+        if indicator_param_changed {
+            slot_fields += 1;
+        }
+        if overlay_display_changed {
+            slot_fields += 1;
+        }
+        if pane_stretch_changed {
+            slot_fields += 1;
+        }
+        if slot_fields > 0 {
+            total_changed_fields += slot_fields;
+            slot_diffs.push(SlotDiffEntry {
+                slot_index: idx,
+                symbol_change,
+                timeframe_change,
+                scale_mode_change,
+                data_source_change,
+                indicator_toggle_deltas,
+                indicator_param_changed,
+                overlay_display_changed,
+                pane_stretch_changed,
+            });
+        }
+    }
+
+    let mut dock_changes = Vec::new();
+    let da = &cur.dock_layout;
+    let db = &cand.dock_layout;
+    if da.show_scanner_dock != db.show_scanner_dock || da.scanner_tab != db.scanner_tab {
+        dock_changes.push("ScannerDock");
+    }
+    if da.show_trading_panel != db.show_trading_panel
+        || da.trading_view_mode != db.trading_view_mode
+    {
+        dock_changes.push("TradingDock");
+    }
+    if da.show_alerts_panel != db.show_alerts_panel {
+        dock_changes.push("AlertsDock");
+    }
+    if da.show_strategy_panel != db.show_strategy_panel {
+        dock_changes.push("StrategyLabDock");
+    }
+    if da.show_journal_panel != db.show_journal_panel {
+        dock_changes.push("JournalDock");
+    }
+    if da.right_dock_tab != db.right_dock_tab {
+        dock_changes.push("ActiveRightTab");
+    }
+    if da.show_replay_bar != db.show_replay_bar {
+        dock_changes.push("ReplayBar");
+    }
+    total_changed_fields += dock_changes.len();
+
+    let hotkey_profile_change = if cur.hotkey_profile != cand.hotkey_profile {
+        total_changed_fields += 1;
+        Some((cur.hotkey_profile, cand.hotkey_profile))
+    } else {
+        None
+    };
+    let hotkey_base_preset_changed = cur.hotkey_base_preset != cand.hotkey_base_preset;
+    if hotkey_base_preset_changed {
+        total_changed_fields += 1;
+    }
+
+    let hotkey_override_delta_count = if cur.hotkey_overrides == cand.hotkey_overrides {
+        0
+    } else {
+        let mut delta = 0_usize;
+        for action in HotkeyAction::ALL {
+            let ca = cur
+                .hotkey_overrides
+                .iter()
+                .find(|o| o.action == action)
+                .map(|o| o.chord);
+            let cb = cand
+                .hotkey_overrides
+                .iter()
+                .find(|o| o.action == action)
+                .map(|o| o.chord);
+            if ca != cb {
+                delta += 1;
+            }
+        }
+        delta.max(1)
+    };
+    total_changed_fields += hotkey_override_delta_count;
+
+    let is_identical =
+        total_changed_fields == 0 && cur.canonical_digest() == cand.canonical_digest();
+
+    WorkspaceSnapshotDiff {
+        is_identical,
+        layout_change,
+        active_slot_change,
+        sync_changed,
+        slot_diffs,
+        dock_changes,
+        hotkey_profile_change,
+        hotkey_base_preset_changed,
+        hotkey_override_delta_count,
+        total_changed_fields,
+    }
+}
+
+/// Non-panicking validator & staging helper for pasted/imported `RON` or `JSON` templates:
+/// returns `Ok((sanitized_template, diff_vs_current))` on valid input, or `Err(QuarantinedPayloadDiagnostic)`
+/// without mutating `current` on malformed/corrupt input.
+pub fn safe_stage_template_import(
+    current: &WorkspaceTemplate,
+    raw_input: &str,
+) -> Result<(WorkspaceTemplate, WorkspaceSnapshotDiff), QuarantinedPayloadDiagnostic> {
+    match WorkspaceTemplate::from_auto_str(raw_input) {
+        Ok(mut tpl) => {
+            tpl.sanitize();
+            let diff = compute_workspace_diff(current, &tpl);
+            Ok((tpl, diff))
+        }
+        Err(err) => Err(QuarantinedPayloadDiagnostic::from_failed_payload(
+            raw_input, &err,
+        )),
+    }
+}
+
+/// Bounded Named Snapshot & Rolling Auto-Checkpoint Store (`RON` & `JSON`, zero external crates).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceSnapshotStore {
+    pub schema_version: u32,
+    pub next_slot_id: u64,
+    pub next_sequence_no: u64,
+    pub named_slots: Vec<WorkspaceSnapshotSlot>,
+    pub auto_ring: Vec<WorkspaceSnapshotSlot>,
+    pub last_known_good: Option<WorkspaceTemplate>,
+    #[serde(skip)]
+    pub last_quarantine: Option<QuarantinedPayloadDiagnostic>,
+    #[serde(skip)]
+    pub quarantined_raw_payload: Option<String>,
+}
+
+impl Default for WorkspaceSnapshotStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WorkspaceSnapshotStore {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            schema_version: WORKSPACE_SNAPSHOT_STORE_VERSION,
+            next_slot_id: 1,
+            next_sequence_no: 1,
+            named_slots: Vec::new(),
+            auto_ring: Vec::new(),
+            last_known_good: None,
+            last_quarantine: None,
+            quarantined_raw_payload: None,
+        }
+    }
+
+    fn alloc_ids(&mut self) -> (u64, u64) {
+        let id = self.next_slot_id.clamp(1, MAX_SAFE_DOC_U64 - 1);
+        self.next_slot_id = (id + 1).min(MAX_SAFE_DOC_U64);
+        let seq = self.next_sequence_no.clamp(1, MAX_SAFE_DOC_U64 - 1);
+        self.next_sequence_no = (seq + 1).min(MAX_SAFE_DOC_U64);
+        (id, seq)
+    }
+
+    pub fn sanitize(&mut self) {
+        self.schema_version = WORKSPACE_SNAPSHOT_STORE_VERSION;
+        for slot in &mut self.named_slots {
+            slot.sanitize();
+        }
+        if self.named_slots.len() > MAX_NAMED_SNAPSHOT_SLOTS {
+            self.named_slots.truncate(MAX_NAMED_SNAPSHOT_SLOTS);
+        }
+        for slot in &mut self.auto_ring {
+            slot.pinned = false;
+            slot.sanitize();
+        }
+        if self.auto_ring.len() > MAX_AUTO_CHECKPOINT_RING {
+            let drop_n = self.auto_ring.len() - MAX_AUTO_CHECKPOINT_RING;
+            self.auto_ring.drain(0..drop_n);
+        }
+        if let Some(ref mut lkg) = self.last_known_good {
+            lkg.sanitize();
+        }
+        let max_id = self
+            .named_slots
+            .iter()
+            .chain(self.auto_ring.iter())
+            .map(|s| s.slot_id)
+            .max()
+            .unwrap_or(0);
+        let max_seq = self
+            .named_slots
+            .iter()
+            .chain(self.auto_ring.iter())
+            .map(|s| s.sequence_no)
+            .max()
+            .unwrap_or(0);
+        self.next_slot_id = self
+            .next_slot_id
+            .max(max_id.saturating_add(1))
+            .clamp(1, MAX_SAFE_DOC_U64);
+        self.next_sequence_no = self
+            .next_sequence_no
+            .max(max_seq.saturating_add(1))
+            .clamp(1, MAX_SAFE_DOC_U64);
+    }
+
+    /// Saves or updates a named snapshot slot (`<= 16`), updating `last_known_good`.
+    ///
+    /// Evicts the oldest **unpinned** slot when full, or returns `Err(WorkspaceTemplateError::SnapshotSlotsFull)`
+    /// if all `16` named slots are `pinned == true` (never silently deleting pinned user checkpoints!).
+    pub fn save_named_snapshot(
+        &mut self,
+        label: &str,
+        pinned: bool,
+        template: WorkspaceTemplate,
+    ) -> Result<u64, WorkspaceTemplateError> {
+        let mut clean_label = label.trim().to_owned();
+        truncate_utf8(&mut clean_label, MAX_TEMPLATE_NAME_BYTES);
+        if clean_label.is_empty() {
+            clean_label = template.name.trim().to_owned();
+            truncate_utf8(&mut clean_label, MAX_TEMPLATE_NAME_BYTES);
+            if clean_label.is_empty() {
+                clean_label = "Checkpoint".to_owned();
+            }
+        }
+        let mut clean_tpl = template;
+        clean_tpl.name = clean_label.clone();
+        clean_tpl.sanitize();
+        let digest = clean_tpl.canonical_digest();
+        self.last_known_good = Some(clean_tpl.clone());
+
+        if let Some(existing_idx) = self
+            .named_slots
+            .iter()
+            .position(|s| s.label.eq_ignore_ascii_case(&clean_label))
+        {
+            let seq = self.next_sequence_no.clamp(1, MAX_SAFE_DOC_U64 - 1);
+            self.next_sequence_no = (seq + 1).min(MAX_SAFE_DOC_U64);
+            let slot = &mut self.named_slots[existing_idx];
+            slot.label = clean_label;
+            slot.pinned = pinned;
+            slot.sequence_no = seq;
+            slot.template_digest = digest;
+            slot.template = clean_tpl;
+            return Ok(slot.slot_id);
+        }
+
+        if self.named_slots.len() >= MAX_NAMED_SNAPSHOT_SLOTS {
+            let Some((evict_idx, _)) = self
+                .named_slots
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| !s.pinned)
+                .min_by_key(|(_, s)| s.sequence_no)
+            else {
+                return Err(WorkspaceTemplateError::SnapshotSlotsFull);
+            };
+            self.named_slots.remove(evict_idx);
+        }
+
+        let (slot_id, seq) = self.alloc_ids();
+        self.named_slots.push(WorkspaceSnapshotSlot {
+            slot_id,
+            label: clean_label,
+            pinned,
+            sequence_no: seq,
+            template_digest: digest,
+            template: clean_tpl,
+        });
+        Ok(slot_id)
+    }
+
+    /// Appends a rolling checkpoint into `auto_ring` (`<= 4` FIFO), deduplicating against the most
+    /// recent auto-ring digest so unchanged frames never churn the ring.
+    pub fn push_auto_checkpoint(
+        &mut self,
+        label: &str,
+        template: WorkspaceTemplate,
+    ) -> Option<u64> {
+        let mut clean_tpl = template;
+        clean_tpl.sanitize();
+        let digest = clean_tpl.canonical_digest();
+        self.last_known_good = Some(clean_tpl.clone());
+
+        if self
+            .auto_ring
+            .last()
+            .is_some_and(|last| last.template_digest == digest)
+        {
+            return None;
+        }
+
+        let mut clean_label = label.trim().to_owned();
+        truncate_utf8(&mut clean_label, MAX_TEMPLATE_NAME_BYTES);
+        if clean_label.is_empty() {
+            clean_label = "Auto Checkpoint".to_owned();
+        }
+        while self.auto_ring.len() >= MAX_AUTO_CHECKPOINT_RING {
+            self.auto_ring.remove(0);
+        }
+        let (slot_id, seq) = self.alloc_ids();
+        self.auto_ring.push(WorkspaceSnapshotSlot {
+            slot_id,
+            label: clean_label,
+            pinned: false,
+            sequence_no: seq,
+            template_digest: digest,
+            template: clean_tpl,
+        });
+        Some(slot_id)
+    }
+
+    pub fn toggle_pin(&mut self, slot_id: u64) -> Option<bool> {
+        let slot = self.named_slots.iter_mut().find(|s| s.slot_id == slot_id)?;
+        slot.pinned = !slot.pinned;
+        Some(slot.pinned)
+    }
+
+    pub fn delete_named_snapshot(&mut self, slot_id: u64) -> bool {
+        let before = self.named_slots.len();
+        self.named_slots.retain(|s| s.slot_id != slot_id);
+        self.named_slots.len() < before
+    }
+
+    pub fn clear_quarantine(&mut self) {
+        self.last_quarantine = None;
+        self.quarantined_raw_payload = None;
+    }
+
+    #[must_use]
+    pub fn find_slot(&self, slot_id: u64) -> Option<&WorkspaceSnapshotSlot> {
+        self.named_slots
+            .iter()
+            .chain(self.auto_ring.iter())
+            .find(|s| s.slot_id == slot_id)
+    }
+
+    /// Encodes this snapshot store into formatted RFC-8259 `JSON` (`template_digest` serialized as 16-hex).
+    #[must_use]
+    pub fn to_json_pretty(&self) -> String {
+        let mut copy = self.clone();
+        copy.sanitize();
+        encode_json_snapshot_store(&copy)
+    }
+
+    /// Encodes this snapshot store into human-readable `RON` (`template_digest` serialized as 16-hex).
+    #[must_use]
+    pub fn to_ron_pretty(&self) -> String {
+        let mut copy = self.clone();
+        copy.sanitize();
+        encode_ron_snapshot_store(&copy)
+    }
+
+    pub fn from_json_str(input: &str) -> Result<Self, WorkspaceTemplateError> {
+        let doc = parse_json_doc(input)?;
+        Self::from_doc_value(&doc)
+    }
+
+    pub fn from_ron_str(input: &str) -> Result<Self, WorkspaceTemplateError> {
+        let doc = parse_ron_doc(input)?;
+        Self::from_doc_value(&doc)
+    }
+
+    pub fn from_auto_str(input: &str) -> Result<Self, WorkspaceTemplateError> {
+        if input.len() > MAX_SNAPSHOT_PAYLOAD_BYTES {
+            return Err(WorkspaceTemplateError::PayloadTooLarge(input.len()));
+        }
+        let trimmed = strip_leading_ws_and_comments(input)?;
+        if trimmed.starts_with('{') {
+            Self::from_json_str(trimmed)
+        } else {
+            Self::from_ron_str(input)
+        }
+    }
+
+    fn from_doc_value(val: &DocValue) -> Result<Self, WorkspaceTemplateError> {
+        let fields = expect_struct(val, "WorkspaceSnapshotStore")?;
+        validate_struct_fields(
+            fields,
+            "WorkspaceSnapshotStore",
+            &[
+                "schema_version",
+                "next_slot_id",
+                "next_sequence_no",
+                "named_slots",
+                "auto_ring",
+                "last_known_good",
+            ],
+        )?;
+        let ver_val = find_field(fields, "schema_version").ok_or_else(|| {
+            WorkspaceTemplateError::InvalidField {
+                field: "schema_version".to_owned(),
+                reason: "missing required field 'schema_version'".to_owned(),
+            }
+        })?;
+        let ver_f = expect_f64(ver_val, "schema_version")?;
+        if ver_f < 0.0 || ver_f.fract() != 0.0 || ver_f > f64::from(u32::MAX) {
+            return Err(WorkspaceTemplateError::InvalidField {
+                field: "schema_version".to_owned(),
+                reason: format!("expected integer schema_version, got {ver_f}"),
+            });
+        }
+        let ver = ver_f as u32;
+        if ver != WORKSPACE_SNAPSHOT_STORE_VERSION {
+            return Err(WorkspaceTemplateError::UnsupportedSchemaVersion(ver));
+        }
+
+        let mut store = Self::new();
+        store.schema_version = ver;
+        if let Some(v) = find_field(fields, "next_slot_id") {
+            store.next_slot_id = expect_u64_safe(v, "next_slot_id")?;
+        }
+        if let Some(v) = find_field(fields, "next_sequence_no") {
+            store.next_sequence_no = expect_u64_safe(v, "next_sequence_no")?;
+        }
+        if let Some(v) = find_field(fields, "named_slots") {
+            store.named_slots =
+                decode_snapshot_slot_array(v, "named_slots", MAX_NAMED_SNAPSHOT_SLOTS)?;
+        }
+        if let Some(v) = find_field(fields, "auto_ring") {
+            store.auto_ring = decode_snapshot_slot_array(v, "auto_ring", MAX_AUTO_CHECKPOINT_RING)?;
+        }
+        if let Some(v) = find_field(fields, "last_known_good") {
+            store.last_known_good = match v {
+                DocValue::None => None,
+                DocValue::Some(inner) => Some(WorkspaceTemplate::from_doc_value(inner)?),
+                other => Some(WorkspaceTemplate::from_doc_value(other)?),
+            };
+        }
+        store.sanitize();
+        Ok(store)
+    }
+}
+
+/// Non-panicking startup / store recovery helper: parses `raw_input` into a [`WorkspaceSnapshotStore`],
+/// or on corruption preserves the raw payload + structured [`QuarantinedPayloadDiagnostic`] while
+/// falling back cleanly to `fallback_last_known_good` -> `WorkspaceTemplate::default()`.
+#[must_use]
+pub fn recover_or_parse_snapshot_store(
+    raw_input: &str,
+    fallback_last_known_good: Option<WorkspaceTemplate>,
+) -> (WorkspaceSnapshotStore, WorkspaceTemplate) {
+    match WorkspaceSnapshotStore::from_auto_str(raw_input) {
+        Ok(store) => {
+            let active = store
+                .last_known_good
+                .clone()
+                .or_else(|| store.named_slots.last().map(|s| s.template.clone()))
+                .or_else(|| store.auto_ring.last().map(|s| s.template.clone()))
+                .or(fallback_last_known_good)
+                .unwrap_or_default();
+            (store, active)
+        }
+        Err(err) => {
+            let diag = QuarantinedPayloadDiagnostic::from_failed_payload(raw_input, &err);
+            let mut fallback = fallback_last_known_good.unwrap_or_default();
+            fallback.sanitize();
+            let mut recovered = WorkspaceSnapshotStore::new();
+            recovered.last_known_good = Some(fallback.clone());
+            recovered.last_quarantine = Some(diag);
+            if raw_input.len() <= MAX_SNAPSHOT_PAYLOAD_BYTES {
+                recovered.quarantined_raw_payload = Some(raw_input.to_owned());
+            }
+            (recovered, fallback)
+        }
+    }
+}
+
+fn expect_u64_safe(val: &DocValue, field: &str) -> Result<u64, WorkspaceTemplateError> {
+    let f = expect_f64(val, field)?;
+    if !f.is_finite() || f < 0.0 || f.fract() != 0.0 || f > (MAX_SAFE_DOC_U64 as f64) {
+        return Err(WorkspaceTemplateError::InvalidField {
+            field: field.to_owned(),
+            reason: format!("expected safe non-negative integer <= {MAX_SAFE_DOC_U64}, got {f}"),
+        });
+    }
+    Ok(f as u64)
+}
+
+fn decode_snapshot_slot_array(
+    val: &DocValue,
+    field: &str,
+    max_len: usize,
+) -> Result<Vec<WorkspaceSnapshotSlot>, WorkspaceTemplateError> {
+    let items = match val {
+        DocValue::Array(items) => items,
+        _ => {
+            return Err(WorkspaceTemplateError::InvalidField {
+                field: field.to_owned(),
+                reason: "expected array of WorkspaceSnapshotSlot".to_owned(),
+            });
+        }
+    };
+    if items.len() > max_len {
+        return Err(WorkspaceTemplateError::InvalidField {
+            field: field.to_owned(),
+            reason: format!("too many snapshot slots ({}, max {max_len})", items.len()),
+        });
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for (idx, item) in items.iter().enumerate() {
+        let ctx = format!("{field}[{idx}]");
+        let f = expect_struct(item, &ctx)?;
+        validate_struct_fields(
+            f,
+            &ctx,
+            &[
+                "slot_id",
+                "label",
+                "pinned",
+                "sequence_no",
+                "template_digest_hex",
+                "template",
+            ],
+        )?;
+        let slot_id = match find_field(f, "slot_id") {
+            Some(v) => expect_u64_safe(v, &format!("{ctx}.slot_id"))?,
+            None => (idx as u64) + 1,
+        };
+        let label = match find_field(f, "label") {
+            Some(v) => expect_string(v, &format!("{ctx}.label"))?,
+            None => format!("Checkpoint #{}", idx + 1),
+        };
+        let pinned = match find_field(f, "pinned") {
+            Some(v) => expect_bool(v, &format!("{ctx}.pinned"))?,
+            None => false,
+        };
+        let sequence_no = match find_field(f, "sequence_no") {
+            Some(v) => expect_u64_safe(v, &format!("{ctx}.sequence_no"))?,
+            None => (idx as u64) + 1,
+        };
+        let expected_digest = if let Some(v) = find_field(f, "template_digest_hex") {
+            let hex = expect_string(v, &format!("{ctx}.template_digest_hex"))?;
+            if hex.len() != 16 {
+                return Err(WorkspaceTemplateError::InvalidField {
+                    field: format!("{ctx}.template_digest_hex"),
+                    reason: format!("expected 16-char hex digest, got '{hex}'"),
+                });
+            }
+            Some(u64::from_str_radix(&hex, 16).map_err(|_| {
+                WorkspaceTemplateError::InvalidField {
+                    field: format!("{ctx}.template_digest_hex"),
+                    reason: format!("expected 16-char hex digest, got '{hex}'"),
+                }
+            })?)
+        } else {
+            None
+        };
+        let tpl_val =
+            find_field(f, "template").ok_or_else(|| WorkspaceTemplateError::InvalidField {
+                field: format!("{ctx}.template"),
+                reason: "missing required field 'template'".to_owned(),
+            })?;
+        let mut tpl = WorkspaceTemplate::from_doc_value(tpl_val)?;
+        tpl.sanitize();
+        let digest = tpl.canonical_digest();
+        if let Some(exp) = expected_digest
+            && exp != digest
+        {
+            return Err(WorkspaceTemplateError::CorruptSnapshotDigest {
+                slot_id,
+                expected_hex: format!("{exp:016x}"),
+                actual_hex: format!("{digest:016x}"),
+            });
+        }
+        let mut slot = WorkspaceSnapshotSlot {
+            slot_id,
+            label,
+            pinned,
+            sequence_no,
+            template_digest: digest,
+            template: tpl,
+        };
+        slot.sanitize();
+        out.push(slot);
+    }
+    Ok(out)
+}
+
+fn push_indented_multiline(out: &mut String, block: &str, indent_spaces: usize) {
+    let pad = " ".repeat(indent_spaces);
+    for (idx, line) in block.lines().enumerate() {
+        if idx > 0 {
+            out.push('\n');
+            out.push_str(&pad);
+        }
+        out.push_str(line);
+    }
+}
+
+fn strip_ron_header_comments(ron_str: &str) -> &str {
+    let mut rest = ron_str;
+    while let Some(stripped) = rest.trim_start().strip_prefix("//") {
+        rest = stripped.split_once('\n').map_or("", |(_, after)| after);
+    }
+    rest.trim()
+}
+
+fn encode_json_snapshot_slot_array(out: &mut String, key: &str, slots: &[WorkspaceSnapshotSlot]) {
+    let _ = write!(out, "  \"{key}\": ");
+    if slots.is_empty() {
+        out.push_str("[]");
+        return;
+    }
+    out.push_str("[\n");
+    for (idx, s) in slots.iter().enumerate() {
+        out.push_str("    {\n");
+        let _ = writeln!(out, "      \"slot_id\": {},", s.slot_id);
+        out.push_str("      \"label\": ");
+        escape_str_into(out, &s.label);
+        let _ = writeln!(out, ",\n      \"pinned\": {},", s.pinned);
+        let _ = writeln!(out, "      \"sequence_no\": {},", s.sequence_no);
+        let _ = writeln!(
+            out,
+            "      \"template_digest_hex\": \"{:016x}\",",
+            s.template_digest
+        );
+        out.push_str("      \"template\": ");
+        let tpl_json = encode_json_template(&s.template);
+        push_indented_multiline(out, &tpl_json, 6);
+        out.push('\n');
+        if idx + 1 == slots.len() {
+            out.push_str("    }\n");
+        } else {
+            out.push_str("    },\n");
+        }
+    }
+    out.push_str("  ]");
+}
+
+fn encode_json_snapshot_store(store: &WorkspaceSnapshotStore) -> String {
+    let mut out = String::with_capacity(4096);
+    out.push_str("{\n");
+    let _ = writeln!(out, "  \"schema_version\": {},", store.schema_version);
+    let _ = writeln!(out, "  \"next_slot_id\": {},", store.next_slot_id);
+    let _ = writeln!(out, "  \"next_sequence_no\": {},", store.next_sequence_no);
+    encode_json_snapshot_slot_array(&mut out, "named_slots", &store.named_slots);
+    out.push_str(",\n");
+    encode_json_snapshot_slot_array(&mut out, "auto_ring", &store.auto_ring);
+    out.push_str(",\n  \"last_known_good\": ");
+    match &store.last_known_good {
+        Some(tpl) => {
+            let tpl_json = encode_json_template(tpl);
+            push_indented_multiline(&mut out, &tpl_json, 2);
+        }
+        None => out.push_str("null"),
+    }
+    out.push_str("\n}\n");
+    out
+}
+
+fn encode_ron_snapshot_slot_array(out: &mut String, key: &str, slots: &[WorkspaceSnapshotSlot]) {
+    let _ = write!(out, "    {key}: ");
+    if slots.is_empty() {
+        out.push_str("[],\n");
+        return;
+    }
+    out.push_str("[\n");
+    for s in slots {
+        out.push_str("        WorkspaceSnapshotSlot(\n");
+        let _ = writeln!(out, "            slot_id: {},", s.slot_id);
+        out.push_str("            label: ");
+        escape_str_into(out, &s.label);
+        let _ = writeln!(out, ",\n            pinned: {},", s.pinned);
+        let _ = writeln!(out, "            sequence_no: {},", s.sequence_no);
+        let _ = writeln!(
+            out,
+            "            template_digest_hex: \"{:016x}\",",
+            s.template_digest
+        );
+        out.push_str("            template: ");
+        let tpl_ron_full = encode_ron_template(&s.template);
+        let tpl_ron_body = strip_ron_header_comments(&tpl_ron_full);
+        push_indented_multiline(out, tpl_ron_body, 12);
+        out.push_str(",\n        ),\n");
+    }
+    out.push_str("    ],\n");
+}
+
+fn encode_ron_snapshot_store(store: &WorkspaceSnapshotStore) -> String {
+    let mut out = String::with_capacity(4096);
+    out.push_str("// Sumi Workspace Snapshot Store (`schema_version = 1`)\n");
+    out.push_str("WorkspaceSnapshotStore(\n");
+    let _ = writeln!(out, "    schema_version: {},", store.schema_version);
+    let _ = writeln!(out, "    next_slot_id: {},", store.next_slot_id);
+    let _ = writeln!(out, "    next_sequence_no: {},", store.next_sequence_no);
+    encode_ron_snapshot_slot_array(&mut out, "named_slots", &store.named_slots);
+    encode_ron_snapshot_slot_array(&mut out, "auto_ring", &store.auto_ring);
+    out.push_str("    last_known_good: ");
+    match &store.last_known_good {
+        Some(tpl) => {
+            out.push_str("Some(");
+            let tpl_ron_full = encode_ron_template(tpl);
+            let tpl_ron_body = strip_ron_header_comments(&tpl_ron_full);
+            push_indented_multiline(&mut out, tpl_ron_body, 4);
+            out.push_str("),\n");
+        }
+        None => out.push_str("None,\n"),
+    }
+    out.push_str(")\n");
+    out
 }

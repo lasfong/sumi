@@ -1,11 +1,26 @@
 use serde::{Deserialize, Serialize};
 
+use crate::alerts::truncate_utf8_bytes;
+use crate::scanner::{
+    ConfluenceWeightProfile, MarketRegime, PrecomputedCatalogMatrix, SIGNAL_CATALOG,
+    SignalDirection, SignalOutputType, catalog_entry_index, find_catalog_entry,
+    is_bidirectional_bool_signal,
+};
 use crate::trading::PositionSide;
 
 /// Maximum parameter variants evaluated in a single deterministic sweep (`<= 64`).
 pub const MAX_SWEEP_VARIANTS: usize = 64;
 
-/// Canonical rule-based strategy presets available in Sumi Strategy Lab (`Milestone R09 / Wave 8`).
+/// Maximum clause groups in a single [`DirectionalRuleLeg`] (`Milestone R16 / Wave 15`).
+pub const MAX_RULE_GROUPS: usize = 4;
+
+/// Maximum atomic signal clauses inside one [`SignalClauseGroup`] (`Milestone R16 / Wave 15`).
+pub const MAX_CLAUSES_PER_GROUP: usize = 8;
+
+/// Maximum UTF-8 byte length of [`CustomSignalRuleSpec::name`].
+pub const MAX_RULE_NAME_BYTES: usize = 64;
+
+/// Canonical rule-based strategy presets available in Sumi Strategy Lab (`Milestone R09 / R16`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum StrategyPresetKind {
     #[default]
@@ -15,16 +30,18 @@ pub enum StrategyPresetKind {
     BollingerSqueezeBreakout,
     DonchianAtrBreakout,
     RsiBollingerConfluence,
+    CustomSignalRules,
 }
 
 impl StrategyPresetKind {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::SmaEmaTrendCross,
         Self::RsiMeanReversion,
         Self::MacdMomentum,
         Self::BollingerSqueezeBreakout,
         Self::DonchianAtrBreakout,
         Self::RsiBollingerConfluence,
+        Self::CustomSignalRules,
     ];
 
     #[inline]
@@ -37,6 +54,7 @@ impl StrategyPresetKind {
             Self::BollingerSqueezeBreakout => "BB Squeeze",
             Self::DonchianAtrBreakout => "Donchian ATR",
             Self::RsiBollingerConfluence => "RSI + BB Conf",
+            Self::CustomSignalRules => "Custom Rules",
         }
     }
 
@@ -50,6 +68,7 @@ impl StrategyPresetKind {
             Self::BollingerSqueezeBreakout => "Bollinger Squeeze Breakout",
             Self::DonchianAtrBreakout => "Donchian Channel + ATR Breakout",
             Self::RsiBollingerConfluence => "RSI + Bollinger Band Confluence",
+            Self::CustomSignalRules => "Composable Signal-Catalog Rule Builder",
         }
     }
 
@@ -68,6 +87,9 @@ impl StrategyPresetKind {
             }
             Self::RsiBollingerConfluence => {
                 "Close pierces Bollinger Band + RSI extreme -> Mid-Band exit"
+            }
+            Self::CustomSignalRules => {
+                "2-Level AND/OR Signal-Catalog Clauses + Confluence Gate -> Open[T+1]"
             }
         }
     }
@@ -323,6 +345,7 @@ impl StrategyParams {
                 self.bb_period,
                 self.bb_std_mult
             ),
+            StrategyPresetKind::CustomSignalRules => "Custom Signal Rules".to_owned(),
         }
     }
 }
@@ -376,12 +399,701 @@ fn sanitize_opt_range(val: Option<f64>, min: f64, max: f64) -> Option<f64> {
         .map(|v| v.clamp(min, max))
 }
 
+/// Boolean combinator joining clauses within a group or groups within a [`DirectionalRuleLeg`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum LogicalCombinator {
+    #[default]
+    AllAnd,
+    AnyOr,
+}
+
+impl LogicalCombinator {
+    pub const ALL: [Self; 2] = [Self::AllAnd, Self::AnyOr];
+
+    #[inline]
+    #[must_use]
+    pub const fn short_label(self) -> &'static str {
+        match self {
+            Self::AllAnd => "AND",
+            Self::AnyOr => "OR",
+        }
+    }
+}
+
+/// Scalar comparison & crossover operator for [`SignalOutputType::Float`] catalog signals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum FloatCmpOp {
+    #[default]
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+    CrossAbove,
+    CrossBelow,
+}
+
+impl FloatCmpOp {
+    pub const ALL: [Self; 6] = [
+        Self::Gt,
+        Self::Gte,
+        Self::Lt,
+        Self::Lte,
+        Self::CrossAbove,
+        Self::CrossBelow,
+    ];
+
+    #[inline]
+    #[must_use]
+    pub const fn short_label(self) -> &'static str {
+        match self {
+            Self::Gt => ">",
+            Self::Gte => ">=",
+            Self::Lt => "<",
+            Self::Lte => "<=",
+            Self::CrossAbove => "Cross ▲",
+            Self::CrossBelow => "Cross ▼",
+        }
+    }
+}
+
+/// 6-bit mask over [`MarketRegime::ALL_FILTERABLE`] (`Uptrend=1<<0` .. `Neutral=1<<5`).
+pub type RegimeBitmask = u8;
+
+/// Type-checked predicate matched against a [`SIGNAL_CATALOG`] entry (`Milestone R16 / Wave 15`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SignalPredicate {
+    BoolIs(bool),
+    FloatCmp { op: FloatCmpOp, threshold: f64 },
+    RegimeIn { mask: RegimeBitmask },
+}
+
+impl Default for SignalPredicate {
+    fn default() -> Self {
+        Self::BoolIs(true)
+    }
+}
+
+/// Single quality-gated `SIGNAL_CATALOG` clause inside a [`SignalClauseGroup`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SignalClause {
+    pub catalog_id: String,
+    pub predicate: SignalPredicate,
+    /// Optional `Bullish`/`Bearish` filter for bidirectional `Bool` signals (`sr.prior_20b_breakout`,
+    /// `structure.swing_bos`, `divergence.rsi_hidden_or_classic`) when `BoolIs(true)`.
+    pub direction_filter: Option<SignalDirection>,
+}
+
+impl Default for SignalClause {
+    fn default() -> Self {
+        Self {
+            catalog_id: "technical.macd_bull_cross".to_owned(),
+            predicate: SignalPredicate::BoolIs(true),
+            direction_filter: None,
+        }
+    }
+}
+
+impl SignalClause {
+    /// Creates a well-typed default clause for `catalog_id` biased toward `preferred_dir`.
+    #[must_use]
+    pub fn default_for_catalog(catalog_id: &str, preferred_dir: Option<SignalDirection>) -> Self {
+        let is_bear = preferred_dir == Some(SignalDirection::Bearish);
+        let (predicate, direction_filter) = match find_catalog_entry(catalog_id) {
+            Some(entry) => match entry.output_type {
+                SignalOutputType::Bool => {
+                    let df = if is_bidirectional_bool_signal(entry.id) {
+                        preferred_dir
+                    } else {
+                        None
+                    };
+                    (SignalPredicate::BoolIs(true), df)
+                }
+                SignalOutputType::Float => {
+                    let (op, threshold) = if is_bear {
+                        (FloatCmpOp::Lte, -15.0)
+                    } else {
+                        (FloatCmpOp::Gte, 15.0)
+                    };
+                    (SignalPredicate::FloatCmp { op, threshold }, None)
+                }
+                SignalOutputType::Enum => {
+                    let mask = if is_bear {
+                        MarketRegime::Downtrend.bit()
+                    } else {
+                        MarketRegime::Uptrend.bit() | MarketRegime::Recovery.bit()
+                    };
+                    (SignalPredicate::RegimeIn { mask }, None)
+                }
+            },
+            None => (SignalPredicate::BoolIs(true), None),
+        };
+        Self {
+            catalog_id: catalog_id.to_owned(),
+            predicate,
+            direction_filter,
+        }
+    }
+
+    pub fn sanitize(&mut self) {
+        self.catalog_id = self.catalog_id.trim().to_owned();
+        truncate_utf8_bytes(&mut self.catalog_id, MAX_RULE_NAME_BYTES);
+        if let Some(entry) = find_catalog_entry(&self.catalog_id) {
+            match entry.output_type {
+                SignalOutputType::Bool => {
+                    let expected = match self.predicate {
+                        SignalPredicate::BoolIs(b) => b,
+                        SignalPredicate::FloatCmp { .. } | SignalPredicate::RegimeIn { .. } => true,
+                    };
+                    self.predicate = SignalPredicate::BoolIs(expected);
+                    if !expected || !is_bidirectional_bool_signal(entry.id) {
+                        self.direction_filter = None;
+                    }
+                }
+                SignalOutputType::Float => {
+                    let (op, raw_thr) = match self.predicate {
+                        SignalPredicate::FloatCmp { op, threshold } => (op, threshold),
+                        SignalPredicate::BoolIs(b) => {
+                            (FloatCmpOp::Gte, if b { 15.0 } else { -15.0 })
+                        }
+                        SignalPredicate::RegimeIn { .. } => (FloatCmpOp::Gte, 0.0),
+                    };
+                    let clean_thr = if raw_thr.is_finite() {
+                        raw_thr.clamp(-1.0e12, 1.0e12)
+                    } else {
+                        0.0
+                    };
+                    self.predicate = SignalPredicate::FloatCmp {
+                        op,
+                        threshold: clean_thr,
+                    };
+                    self.direction_filter = None;
+                }
+                SignalOutputType::Enum => {
+                    let mask = match self.predicate {
+                        SignalPredicate::RegimeIn { mask } => mask & MarketRegime::ALL_VALID_MASK,
+                        SignalPredicate::BoolIs(_) | SignalPredicate::FloatCmp { .. } => {
+                            MarketRegime::Uptrend.bit()
+                        }
+                    };
+                    self.predicate = SignalPredicate::RegimeIn { mask };
+                    self.direction_filter = None;
+                }
+            }
+        } else {
+            // Unknown `catalog_id` from untrusted input: sanitize numeric payload & fail closed at eval.
+            if let SignalPredicate::FloatCmp { threshold, .. } = &mut self.predicate {
+                if !threshold.is_finite() {
+                    *threshold = 0.0;
+                } else {
+                    *threshold = threshold.clamp(-1.0e12, 1.0e12);
+                }
+            }
+            if let SignalPredicate::RegimeIn { mask } = &mut self.predicate {
+                *mask &= MarketRegime::ALL_VALID_MASK;
+            }
+            self.direction_filter = None;
+        }
+    }
+
+    #[must_use]
+    pub fn short_summary(&self) -> String {
+        let alias =
+            find_catalog_entry(&self.catalog_id).map_or(self.catalog_id.as_str(), |e| e.ast_alias);
+        match self.predicate {
+            SignalPredicate::BoolIs(b) => match (b, self.direction_filter) {
+                (true, Some(d)) => format!("{alias}[{}]", d.short_label()),
+                (true, None) => alias.to_owned(),
+                (false, _) => format!("!{alias}"),
+            },
+            SignalPredicate::FloatCmp { op, threshold } => {
+                format!("{alias} {} {threshold:.1}", op.short_label())
+            }
+            SignalPredicate::RegimeIn { mask } => {
+                let mut tags = Vec::new();
+                for reg in MarketRegime::ALL_FILTERABLE {
+                    if (mask & reg.bit()) != 0 {
+                        tags.push(reg.short_label());
+                    }
+                }
+                if tags.is_empty() {
+                    format!("{alias} in ∅")
+                } else {
+                    format!("{alias} in [{}]", tags.join("|"))
+                }
+            }
+        }
+    }
+}
+
+/// Bounded group of [`SignalClause`] items (`<= MAX_CLAUSES_PER_GROUP`).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SignalClauseGroup {
+    pub intra_op: LogicalCombinator,
+    pub clauses: Vec<SignalClause>,
+}
+
+impl SignalClauseGroup {
+    pub fn sanitize(&mut self) {
+        self.clauses.truncate(MAX_CLAUSES_PER_GROUP);
+        for cl in &mut self.clauses {
+            cl.sanitize();
+        }
+    }
+}
+
+/// Optional 4-family composite Technical Health / Confluence filter gate (`[-100, +100]`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConfluenceThresholdGate {
+    pub enabled: bool,
+    pub profile: ConfluenceWeightProfile,
+    pub min_score: Option<f64>,
+    pub max_score: Option<f64>,
+    pub min_bullish_signals: u8,
+    pub min_bearish_signals: u8,
+}
+
+impl Default for ConfluenceThresholdGate {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            profile: ConfluenceWeightProfile::Balanced,
+            min_score: None,
+            max_score: None,
+            min_bullish_signals: 0,
+            min_bearish_signals: 0,
+        }
+    }
+}
+
+impl ConfluenceThresholdGate {
+    pub fn sanitize(&mut self) {
+        self.min_score = self
+            .min_score
+            .filter(|v| v.is_finite())
+            .map(|v| v.clamp(-100.0, 100.0));
+        self.max_score = self
+            .max_score
+            .filter(|v| v.is_finite())
+            .map(|v| v.clamp(-100.0, 100.0));
+        if let (Some(lo), Some(hi)) = (self.min_score, self.max_score)
+            && lo > hi
+        {
+            self.min_score = Some(hi);
+            self.max_score = Some(lo);
+        }
+        let max_cnt = SIGNAL_CATALOG.len() as u8;
+        self.min_bullish_signals = self.min_bullish_signals.min(max_cnt);
+        self.min_bearish_signals = self.min_bearish_signals.min(max_cnt);
+    }
+}
+
+/// Bounded 2-level rule leg (`long_entry`, `long_exit`, `short_entry`, or `short_exit`).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DirectionalRuleLeg {
+    pub enabled: bool,
+    pub inter_group_op: LogicalCombinator,
+    pub groups: Vec<SignalClauseGroup>,
+    pub confluence_gate: ConfluenceThresholdGate,
+}
+
+impl DirectionalRuleLeg {
+    pub fn sanitize(&mut self) {
+        self.groups.truncate(MAX_RULE_GROUPS);
+        for g in &mut self.groups {
+            g.sanitize();
+        }
+        // Prevent vacuous truth on empty groups (`[].iter().all(...) == true`).
+        self.groups.retain(|g| !g.clauses.is_empty());
+        self.confluence_gate.sanitize();
+    }
+
+    #[must_use]
+    pub fn clause_count(&self) -> usize {
+        self.groups.iter().map(|g| g.clauses.len()).sum()
+    }
+}
+
+/// Complete bounded, non-recursive user-authored Signal-Catalog Strategy Specification (`Milestone R16 / Wave 15`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CustomSignalRuleSpec {
+    pub name: String,
+    pub long_entry: DirectionalRuleLeg,
+    pub long_exit: DirectionalRuleLeg,
+    pub short_entry: DirectionalRuleLeg,
+    pub short_exit: DirectionalRuleLeg,
+}
+
+impl Default for CustomSignalRuleSpec {
+    fn default() -> Self {
+        let mut spec = Self {
+            name: "Confluence + MACD/BOS Rule".to_owned(),
+            long_entry: DirectionalRuleLeg {
+                enabled: true,
+                inter_group_op: LogicalCombinator::AllAnd,
+                groups: vec![SignalClauseGroup {
+                    intra_op: LogicalCombinator::AnyOr,
+                    clauses: vec![
+                        SignalClause {
+                            catalog_id: "technical.macd_bull_cross".to_owned(),
+                            predicate: SignalPredicate::BoolIs(true),
+                            direction_filter: None,
+                        },
+                        SignalClause {
+                            catalog_id: "structure.swing_bos".to_owned(),
+                            predicate: SignalPredicate::BoolIs(true),
+                            direction_filter: Some(SignalDirection::Bullish),
+                        },
+                        SignalClause {
+                            catalog_id: "technical.rsi_oversold_cross".to_owned(),
+                            predicate: SignalPredicate::BoolIs(true),
+                            direction_filter: None,
+                        },
+                    ],
+                }],
+                confluence_gate: ConfluenceThresholdGate {
+                    enabled: true,
+                    profile: ConfluenceWeightProfile::Balanced,
+                    min_score: Some(12.0),
+                    max_score: None,
+                    min_bullish_signals: 1,
+                    min_bearish_signals: 0,
+                },
+            },
+            long_exit: DirectionalRuleLeg {
+                enabled: true,
+                inter_group_op: LogicalCombinator::AnyOr,
+                groups: vec![SignalClauseGroup {
+                    intra_op: LogicalCombinator::AnyOr,
+                    clauses: vec![
+                        SignalClause {
+                            catalog_id: "technical.macd_bear_cross".to_owned(),
+                            predicate: SignalPredicate::BoolIs(true),
+                            direction_filter: None,
+                        },
+                        SignalClause {
+                            catalog_id: "health.technical_composite".to_owned(),
+                            predicate: SignalPredicate::FloatCmp {
+                                op: FloatCmpOp::CrossBelow,
+                                threshold: -10.0,
+                            },
+                            direction_filter: None,
+                        },
+                    ],
+                }],
+                confluence_gate: ConfluenceThresholdGate::default(),
+            },
+            short_entry: DirectionalRuleLeg {
+                enabled: true,
+                inter_group_op: LogicalCombinator::AllAnd,
+                groups: vec![SignalClauseGroup {
+                    intra_op: LogicalCombinator::AnyOr,
+                    clauses: vec![
+                        SignalClause {
+                            catalog_id: "technical.macd_bear_cross".to_owned(),
+                            predicate: SignalPredicate::BoolIs(true),
+                            direction_filter: None,
+                        },
+                        SignalClause {
+                            catalog_id: "structure.swing_bos".to_owned(),
+                            predicate: SignalPredicate::BoolIs(true),
+                            direction_filter: Some(SignalDirection::Bearish),
+                        },
+                        SignalClause {
+                            catalog_id: "technical.rsi_overbought_cross".to_owned(),
+                            predicate: SignalPredicate::BoolIs(true),
+                            direction_filter: None,
+                        },
+                    ],
+                }],
+                confluence_gate: ConfluenceThresholdGate {
+                    enabled: true,
+                    profile: ConfluenceWeightProfile::Balanced,
+                    min_score: None,
+                    max_score: Some(-12.0),
+                    min_bullish_signals: 0,
+                    min_bearish_signals: 1,
+                },
+            },
+            short_exit: DirectionalRuleLeg {
+                enabled: true,
+                inter_group_op: LogicalCombinator::AnyOr,
+                groups: vec![SignalClauseGroup {
+                    intra_op: LogicalCombinator::AnyOr,
+                    clauses: vec![
+                        SignalClause {
+                            catalog_id: "technical.macd_bull_cross".to_owned(),
+                            predicate: SignalPredicate::BoolIs(true),
+                            direction_filter: None,
+                        },
+                        SignalClause {
+                            catalog_id: "health.technical_composite".to_owned(),
+                            predicate: SignalPredicate::FloatCmp {
+                                op: FloatCmpOp::CrossAbove,
+                                threshold: 10.0,
+                            },
+                            direction_filter: None,
+                        },
+                    ],
+                }],
+                confluence_gate: ConfluenceThresholdGate::default(),
+            },
+        };
+        spec.sanitize();
+        spec
+    }
+}
+
+impl CustomSignalRuleSpec {
+    pub fn sanitize(&mut self) {
+        self.name = self.name.trim().to_owned();
+        truncate_utf8_bytes(&mut self.name, MAX_RULE_NAME_BYTES);
+        if self.name.is_empty() {
+            self.name = "Custom Signal Rule".to_owned();
+        }
+        self.long_entry.sanitize();
+        self.long_exit.sanitize();
+        self.short_entry.sanitize();
+        self.short_exit.sanitize();
+    }
+
+    #[must_use]
+    pub fn short_summary(&self) -> String {
+        format!(
+            "{} ({}LE/{}LX/{}SE/{}SX)",
+            self.name,
+            self.long_entry.clause_count(),
+            self.long_exit.clause_count(),
+            self.short_entry.clause_count(),
+            self.short_exit.clause_count()
+        )
+    }
+}
+
+/// Evaluates a single [`SignalClause`] at `bar_index` with strict fail-closed `SignalQuality::Valid` gating:
+/// any `!is_valid()` quality (`InsufficientHistory`, `InvalidVolume`, `ZeroBaseline`, `UnclosedTailBar`)
+/// returns `false` — **including** `BoolIs(false)`!
+#[must_use]
+pub fn evaluate_signal_clause_at(
+    clause: &SignalClause,
+    matrix: &PrecomputedCatalogMatrix,
+    bar_index: usize,
+) -> bool {
+    evaluate_signal_clause_at_with_profile(
+        clause,
+        matrix,
+        bar_index,
+        ConfluenceWeightProfile::Balanced,
+    )
+}
+
+/// Evaluates a single [`SignalClause`] at `bar_index` using `profile` for `"health.technical_composite"`.
+#[must_use]
+pub fn evaluate_signal_clause_at_with_profile(
+    clause: &SignalClause,
+    matrix: &PrecomputedCatalogMatrix,
+    bar_index: usize,
+    profile: ConfluenceWeightProfile,
+) -> bool {
+    let Some(cat_idx) = catalog_entry_index(&clause.catalog_id) else {
+        return false;
+    };
+    let Some(pt) = matrix.point_at_with_profile(cat_idx, bar_index, profile) else {
+        return false;
+    };
+    if !pt.quality.is_valid() {
+        return false;
+    }
+
+    match clause.predicate {
+        SignalPredicate::BoolIs(expected) => {
+            if pt.bool_value != Some(expected) {
+                return false;
+            }
+            if expected
+                && let Some(req_dir) = clause.direction_filter
+                && pt.direction != Some(req_dir)
+            {
+                return false;
+            }
+            true
+        }
+        SignalPredicate::FloatCmp { op, threshold } => {
+            if !threshold.is_finite() {
+                return false;
+            }
+            let Some(curr) = pt.float_value.filter(|v| v.is_finite()) else {
+                return false;
+            };
+            match op {
+                FloatCmpOp::Gt => curr > threshold,
+                FloatCmpOp::Gte => curr >= threshold,
+                FloatCmpOp::Lt => curr < threshold,
+                FloatCmpOp::Lte => curr <= threshold,
+                FloatCmpOp::CrossAbove => {
+                    if bar_index == 0 {
+                        return false;
+                    }
+                    let Some(prev_pt) =
+                        matrix.point_at_with_profile(cat_idx, bar_index - 1, profile)
+                    else {
+                        return false;
+                    };
+                    if !prev_pt.quality.is_valid() {
+                        return false;
+                    }
+                    let Some(prev) = prev_pt.float_value.filter(|v| v.is_finite()) else {
+                        return false;
+                    };
+                    prev <= threshold && curr > threshold
+                }
+                FloatCmpOp::CrossBelow => {
+                    if bar_index == 0 {
+                        return false;
+                    }
+                    let Some(prev_pt) =
+                        matrix.point_at_with_profile(cat_idx, bar_index - 1, profile)
+                    else {
+                        return false;
+                    };
+                    if !prev_pt.quality.is_valid() {
+                        return false;
+                    }
+                    let Some(prev) = prev_pt.float_value.filter(|v| v.is_finite()) else {
+                        return false;
+                    };
+                    prev >= threshold && curr < threshold
+                }
+            }
+        }
+        SignalPredicate::RegimeIn { mask } => {
+            let regime = matrix.regime_at(bar_index);
+            let bit = regime.bit();
+            bit != 0 && ((mask & MarketRegime::ALL_VALID_MASK) & bit) != 0
+        }
+    }
+}
+
+/// Evaluates a [`DirectionalRuleLeg`] at `bar_index` (`false` when disabled or completely empty).
+#[must_use]
+pub fn evaluate_rule_leg_at(
+    leg: &DirectionalRuleLeg,
+    matrix: &PrecomputedCatalogMatrix,
+    bar_index: usize,
+) -> bool {
+    if !leg.enabled || leg.groups.is_empty() {
+        return false;
+    }
+    let profile = leg.confluence_gate.profile;
+    let eval_group =
+        |group: &SignalClauseGroup| -> bool {
+            if group.clauses.is_empty() {
+                return false;
+            }
+            match group.intra_op {
+                LogicalCombinator::AllAnd => group.clauses.iter().all(|cl| {
+                    evaluate_signal_clause_at_with_profile(cl, matrix, bar_index, profile)
+                }),
+                LogicalCombinator::AnyOr => group.clauses.iter().any(|cl| {
+                    evaluate_signal_clause_at_with_profile(cl, matrix, bar_index, profile)
+                }),
+            }
+        };
+    let groups_ok = match leg.inter_group_op {
+        LogicalCombinator::AllAnd => leg.groups.iter().all(eval_group),
+        LogicalCombinator::AnyOr => leg.groups.iter().any(eval_group),
+    };
+    if !groups_ok {
+        return false;
+    }
+
+    if leg.confluence_gate.enabled {
+        let Ok(score) = matrix.health_score_at(bar_index, leg.confluence_gate.profile) else {
+            return false;
+        };
+        if !score.is_finite() {
+            return false;
+        }
+        if let Some(min_s) = leg.confluence_gate.min_score
+            && score < min_s
+        {
+            return false;
+        }
+        if let Some(max_s) = leg.confluence_gate.max_score
+            && score > max_s
+        {
+            return false;
+        }
+        let (bull_cnt, bear_cnt) = matrix.counts_at(bar_index, leg.confluence_gate.profile);
+        if bull_cnt < leg.confluence_gate.min_bullish_signals {
+            return false;
+        }
+        if bear_cnt < leg.confluence_gate.min_bearish_signals {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Evaluates `(long_entry, short_entry, long_exit, short_exit)` for `spec` at `bar_index`.
+#[must_use]
+pub fn evaluate_custom_rules_at_bar(
+    spec: &CustomSignalRuleSpec,
+    matrix: &PrecomputedCatalogMatrix,
+    bar_index: usize,
+) -> (bool, bool, bool, bool) {
+    if bar_index >= matrix.bar_count {
+        return (false, false, false, false);
+    }
+    (
+        evaluate_rule_leg_at(&spec.long_entry, matrix, bar_index),
+        evaluate_rule_leg_at(&spec.short_entry, matrix, bar_index),
+        evaluate_rule_leg_at(&spec.long_exit, matrix, bar_index),
+        evaluate_rule_leg_at(&spec.short_exit, matrix, bar_index),
+    )
+}
+
+/// Counts causal bar matches `(long_entries, short_entries, long_exits, short_exits)` across `matrix`
+/// (starting at `bar_index >= 1`, matching `evaluate_preset_signals_at_bar`).
+#[must_use]
+pub fn count_custom_rule_matches(
+    spec: &CustomSignalRuleSpec,
+    matrix: &PrecomputedCatalogMatrix,
+) -> (usize, usize, usize, usize) {
+    let mut le = 0_usize;
+    let mut se = 0_usize;
+    let mut lx = 0_usize;
+    let mut sx = 0_usize;
+    for i in 1..matrix.bar_count {
+        let (b_en, s_en, l_ex, s_ex) = evaluate_custom_rules_at_bar(spec, matrix, i);
+        if b_en {
+            le += 1;
+        }
+        if s_en {
+            se += 1;
+        }
+        if l_ex {
+            lx += 1;
+        }
+        if s_ex {
+            sx += 1;
+        }
+    }
+    (le, se, lx, sx)
+}
+
 /// Complete deterministic configuration for a backtest or sweep execution.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BacktestConfig {
     pub preset: StrategyPresetKind,
     pub params: StrategyParams,
+    pub custom_rules: CustomSignalRuleSpec,
     pub direction_mode: StrategyDirectionMode,
     pub sizing: PositionSizingMode,
     pub risk: StopTakeConfig,
@@ -402,6 +1114,7 @@ impl Default for BacktestConfig {
         Self {
             preset: StrategyPresetKind::SmaEmaTrendCross,
             params: StrategyParams::default(),
+            custom_rules: CustomSignalRuleSpec::default(),
             direction_mode: StrategyDirectionMode::LongOnly,
             sizing: PositionSizingMode::PercentEquity(95.0),
             risk: StopTakeConfig::default(),
@@ -419,6 +1132,7 @@ impl Default for BacktestConfig {
 impl BacktestConfig {
     pub fn sanitize(&mut self) {
         self.params.sanitize();
+        self.custom_rules.sanitize();
         self.sizing.sanitize();
         self.risk.sanitize();
 
@@ -457,6 +1171,15 @@ impl BacktestConfig {
             .in_sample_split_pct
             .filter(|v| v.is_finite())
             .map(|v| v.clamp(0.50, 0.90));
+    }
+
+    #[must_use]
+    pub fn param_summary(&self) -> String {
+        if self.preset == StrategyPresetKind::CustomSignalRules {
+            self.custom_rules.short_summary()
+        } else {
+            self.params.summary_for_preset(self.preset)
+        }
     }
 }
 
@@ -587,6 +1310,53 @@ pub fn build_preset_sweep_configs(base: &BacktestConfig) -> Vec<(String, Backtes
                         format!("R{rsi_p}({buy_lvl:.0}/{sell_lvl:.0})+BB({std_m:.1})"),
                         cfg,
                     ));
+                }
+            }
+        }
+        StrategyPresetKind::CustomSignalRules => {
+            let gates: [(&str, Option<(ConfluenceWeightProfile, f64)>); 4] = [
+                ("BaseGate", None),
+                (
+                    "ConfBal>=10",
+                    Some((ConfluenceWeightProfile::Balanced, 10.0)),
+                ),
+                (
+                    "ConfBal>=25",
+                    Some((ConfluenceWeightProfile::Balanced, 25.0)),
+                ),
+                (
+                    "ConfTrd>=20",
+                    Some((ConfluenceWeightProfile::TrendFocused, 20.0)),
+                ),
+            ];
+            let risks: [(&str, Option<(f64, f64)>); 3] = [
+                ("BaseSL/TP", None),
+                ("SL3.5/TP9", Some((3.5, 9.0))),
+                ("SL6.5/TP16", Some((6.5, 16.0))),
+            ];
+            for (g_lbl, gate_override) in gates {
+                for (r_lbl, risk_override) in risks {
+                    let mut cfg = clean_base.clone();
+                    if let Some((prof, thr)) = gate_override {
+                        if cfg.custom_rules.long_entry.enabled {
+                            cfg.custom_rules.long_entry.confluence_gate.enabled = true;
+                            cfg.custom_rules.long_entry.confluence_gate.profile = prof;
+                            cfg.custom_rules.long_entry.confluence_gate.min_score = Some(thr);
+                            cfg.custom_rules.long_entry.confluence_gate.max_score = None;
+                        }
+                        if cfg.custom_rules.short_entry.enabled {
+                            cfg.custom_rules.short_entry.confluence_gate.enabled = true;
+                            cfg.custom_rules.short_entry.confluence_gate.profile = prof;
+                            cfg.custom_rules.short_entry.confluence_gate.min_score = None;
+                            cfg.custom_rules.short_entry.confluence_gate.max_score = Some(-thr);
+                        }
+                    }
+                    if let Some((sl_pct, tp_pct)) = risk_override {
+                        cfg.risk.stop_loss_pct = Some(sl_pct);
+                        cfg.risk.take_profit_pct = Some(tp_pct);
+                    }
+                    cfg.sanitize();
+                    out.push((format!("{g_lbl}·{r_lbl}"), cfg));
                 }
             }
         }

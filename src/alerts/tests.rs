@@ -6,7 +6,7 @@ use crate::model::Candle;
 use crate::replay::{ReplayController, ReplayStepUnit};
 
 use super::{
-    AlertCondition, AlertEngine, AlertFrequency, AlertStatus, CrossDirection,
+    AlertCondition, AlertEngine, AlertError, AlertFrequency, AlertStatus, CrossDirection,
     drawing_line_value_at_bar,
 };
 
@@ -702,5 +702,770 @@ fn critic_r08_regression_intrabucket_coarse_alerts_horizontal_parity_and_causal_
     assert!(
         guard_eng.triggers.is_empty(),
         "evaluate_causal must clamp un-sliced active_candles to cursor_base_index with zero future leak"
+    );
+}
+
+#[test]
+fn r16_signal_catalog_and_confluence_alerts_bool_float_regime_and_bidirectional_matching() {
+    use crate::drawings::DrawingStore;
+    use crate::scanner::ConfluenceWeightProfile;
+
+    let base_ts = 1_710_000_000_i64;
+    let mut bars: Vec<Candle> = Vec::with_capacity(95);
+    for i in 0..75_usize {
+        let p = 100.0 + (i as f64) * 0.45;
+        let vol = if i == 62 { 5_200.0 } else { 1_000.0 };
+        bars.push(Candle {
+            timestamp: base_ts + (i as i64) * 86_400,
+            date_label: format!("d{i}"),
+            open: p - 0.3,
+            high: p + 0.25,
+            low: p - 0.65,
+            close: p,
+            volume: vol,
+        });
+    }
+    // Bar 75: sharp Bearish breakdown (`sr.prior_20b_breakout` with `direction = Bearish`) + regime transition!
+    for i in 75..95_usize {
+        let p = 112.0 - ((i - 75) as f64) * 1.1;
+        bars.push(Candle {
+            timestamp: base_ts + (i as i64) * 86_400,
+            date_label: format!("d{i}"),
+            open: p + 1.2,
+            high: p + 1.5,
+            low: p - 0.8,
+            close: p,
+            volume: 2_800.0,
+        });
+    }
+
+    let store = DrawingStore::new();
+    let mut eng = AlertEngine::new();
+    let arm_idx = 55;
+
+    // 1. Bool `volume.spike_2x` `CrossAbove` -> fires on bar 62!
+    let id_spike = eng
+        .add_alert(
+            "FPT",
+            Timeframe::D1,
+            AlertCondition::SignalCatalogTrigger {
+                catalog_id: "volume.spike_2x".to_owned(),
+                float_level: None,
+                direction: CrossDirection::CrossAbove,
+            },
+            AlertFrequency::Once,
+            Some("Spike2x".to_owned()),
+            &bars,
+            arm_idx,
+            None,
+            None,
+        )
+        .expect("spike alert");
+
+    // 2. Bidirectional `sr.prior_20b_breakout`: `CrossAbove` vs `CrossBelow`
+    //    `CrossBelow` MUST fire on bar 75's Bearish breakdown; `CrossAbove` only fires on Bullish breakouts!
+    let id_brk_bear = eng
+        .add_alert(
+            "FPT",
+            Timeframe::D1,
+            AlertCondition::SignalCatalogTrigger {
+                catalog_id: "sr.prior_20b_breakout".to_owned(),
+                float_level: None,
+                direction: CrossDirection::CrossBelow,
+            },
+            AlertFrequency::Once,
+            Some("BearBreak".to_owned()),
+            &bars,
+            73, // Armed right before bar 75 breakdown!
+            None,
+            None,
+        )
+        .expect("bear breakout alert");
+
+    let id_brk_bull_after_73 = eng
+        .add_alert(
+            "FPT",
+            Timeframe::D1,
+            AlertCondition::SignalCatalogTrigger {
+                catalog_id: "sr.prior_20b_breakout".to_owned(),
+                float_level: None,
+                direction: CrossDirection::CrossAbove,
+            },
+            AlertFrequency::Once,
+            Some("BullBreakPost73".to_owned()),
+            &bars,
+            74, // Bar 75..94 is strictly downward -> Bullish breakout must NEVER fire!
+            None,
+            None,
+        )
+        .expect("bull breakout alert");
+
+    // Unknown `catalog_id` fails closed at registration:
+    assert!(matches!(
+        eng.add_alert(
+            "FPT",
+            Timeframe::D1,
+            AlertCondition::SignalCatalogTrigger {
+                catalog_id: "unknown.signal_id".to_owned(),
+                float_level: None,
+                direction: CrossDirection::CrossAny,
+            },
+            AlertFrequency::Once,
+            None,
+            &bars,
+            70,
+            None,
+            None,
+        ),
+        Err(AlertError::UnknownSignalCatalogId(_))
+    ));
+
+    // 3. Float `flow.cvd_ohlcv_impulse` crossing below `0.0` during breakdown
+    let id_cvd_float = eng
+        .add_alert(
+            "FPT",
+            Timeframe::D1,
+            AlertCondition::SignalCatalogTrigger {
+                catalog_id: "flow.cvd_ohlcv_impulse".to_owned(),
+                float_level: Some(0.0),
+                direction: CrossDirection::CrossBelow,
+            },
+            AlertFrequency::Once,
+            None,
+            &bars,
+            70,
+            None,
+            None,
+        )
+        .expect("float signal alert");
+
+    // 4. Enum `regime.market_state` `CrossBelow` (transition into Downtrend / Pullback)
+    let id_regime = eng
+        .add_alert(
+            "FPT",
+            Timeframe::D1,
+            AlertCondition::SignalCatalogTrigger {
+                catalog_id: "regime.market_state".to_owned(),
+                float_level: None,
+                direction: CrossDirection::CrossBelow,
+            },
+            AlertFrequency::Once,
+            None,
+            &bars,
+            70,
+            None,
+            None,
+        )
+        .expect("regime signal alert");
+
+    // 5. `ConfluenceThreshold` (`Balanced`) crossing below `0.0` during breakdown
+    let id_conf = eng
+        .add_alert(
+            "FPT",
+            Timeframe::D1,
+            AlertCondition::ConfluenceThreshold {
+                profile: ConfluenceWeightProfile::Balanced,
+                threshold: 0.0,
+                direction: CrossDirection::CrossBelow,
+            },
+            AlertFrequency::Once,
+            Some("ConfluenceDrop".to_owned()),
+            &bars,
+            70,
+            None,
+            None,
+        )
+        .expect("confluence alert");
+
+    eng.evaluate_causal(
+        &bars,
+        Timeframe::D1,
+        &bars,
+        Timeframe::D1,
+        bars.len() - 1,
+        None,
+        &store,
+    );
+
+    let fired_ids: Vec<u64> = eng.triggers.iter().map(|e| e.alert_id).collect();
+    assert!(fired_ids.contains(&id_spike), "volume.spike_2x must fire");
+    assert!(
+        fired_ids.contains(&id_brk_bear),
+        "Bearish sr.prior_20b_breakout must fire CrossBelow at bar 75"
+    );
+    assert!(
+        !fired_ids.contains(&id_brk_bull_after_73),
+        "Bearish breakdown must NEVER fire CrossAbove on bidirectional Bool signal"
+    );
+    assert!(
+        fired_ids.contains(&id_cvd_float),
+        "Float flow.cvd_ohlcv_impulse CrossBelow 0.0 must fire"
+    );
+    assert!(
+        fired_ids.contains(&id_regime),
+        "Enum regime.market_state CrossBelow must fire on breakdown"
+    );
+    assert!(
+        fired_ids.contains(&id_conf),
+        "ConfluenceThreshold CrossBelow 0.0 must fire on breakdown"
+    );
+}
+
+#[test]
+fn r16_alert_def001_htf_unclosed_bucket_suppression_and_cooldown_replay_rewind_parity() {
+    use crate::alerts::MAX_ALERT_COOLDOWN_BARS;
+    use crate::data::aggregate_ohlcv;
+    use crate::drawings::DrawingStore;
+    use crate::scanner::ConfluenceWeightProfile;
+
+    // Build 960 `1m` bars (= 64 `15m` buckets) aligned to 15m boundaries (`900s`).
+    // Bucket #60 (`1m` indices `900..=914`) has a huge volume spike ONLY on sub-bar `902` (3rd minute of the 15m bucket)!
+    // Under `DEF-001`, a `15m` `SignalCatalogTrigger("volume.spike_2x")` MUST NOT fire at `1m` index `902..=913`
+    // (while the `15m` bucket is still forming!), and MUST fire strictly at `1m` index `914` (the closing 1m bar of bucket #60)!
+    let t0 = 1_710_000_000_i64; // Exact multiple of 900s (15m boundary)
+    let mut base_1m: Vec<Candle> = Vec::with_capacity(960);
+    for i in 0..960_usize {
+        let p = 100.0 + (i as f64) * 0.02;
+        let vol = if i == 902 { 50_000.0 } else { 100.0 };
+        base_1m.push(Candle {
+            timestamp: t0 + (i as i64) * 60,
+            date_label: String::new(),
+            open: p - 0.05,
+            high: p + 0.15,
+            low: p - 0.10,
+            close: p,
+            volume: vol,
+        });
+    }
+
+    let store = DrawingStore::new();
+    let mut htf_eng = AlertEngine::new();
+    let arm_base = 884; // End of 15m bucket #58
+    htf_eng
+        .add_alert(
+            "VN30F1M",
+            Timeframe::M15,
+            AlertCondition::SignalCatalogTrigger {
+                catalog_id: "volume.spike_2x".to_owned(),
+                float_level: None,
+                direction: CrossDirection::CrossAbove,
+            },
+            AlertFrequency::Once,
+            None,
+            &base_1m,
+            arm_base,
+            Some(base_1m[arm_base].timestamp + 59),
+            None,
+        )
+        .expect("15m signal alert");
+
+    // Evaluate mid-bucket at `1m` index `905` (6 minutes into bucket #60, AFTER the `902` volume burst!):
+    let m15_mid = aggregate_ohlcv(&base_1m[..=905], Timeframe::M1, Timeframe::M15).unwrap();
+    htf_eng.evaluate_causal(
+        &base_1m,
+        Timeframe::M1,
+        &m15_mid,
+        Timeframe::M15,
+        905,
+        Some(base_1m[905].timestamp + 59),
+        &store,
+    );
+    assert!(
+        htf_eng.triggers.is_empty(),
+        "DEF-001: unclosed 15m tail bucket at 1m index 905 must NEVER prematurely fire SignalCatalogTrigger"
+    );
+
+    // Evaluate at exact bucket close (`1m` index `914`, `open + 899s`): MUST fire!
+    let m15_closed = aggregate_ohlcv(&base_1m[..=914], Timeframe::M1, Timeframe::M15).unwrap();
+    htf_eng.evaluate_causal(
+        &base_1m,
+        Timeframe::M1,
+        &m15_closed,
+        Timeframe::M15,
+        914,
+        Some(base_1m[914].timestamp + 59),
+        &store,
+    );
+    assert_eq!(htf_eng.triggers.len(), 1);
+    assert_eq!(htf_eng.rules[0].status, AlertStatus::Triggered);
+
+    // Rewind back to `905` -> `Once` alert re-arms cleanly and trigger log empties!
+    htf_eng.evaluate_causal(
+        &base_1m,
+        Timeframe::M1,
+        &m15_mid,
+        Timeframe::M15,
+        905,
+        Some(base_1m[905].timestamp + 59),
+        &store,
+    );
+    assert!(htf_eng.triggers.is_empty());
+    assert_eq!(htf_eng.rules[0].status, AlertStatus::Armed);
+
+    // 2. Cooldown (`cooldown_bars = 3`) + Bar Replay step/rewind exact restoration!
+    // Odd bars & bar 0 stay strictly below `105.0` (`[103.2, 104.2]`); even bars `2, 4, 6, 8` cross above `105.0` (`106.0`)!
+    let osc_bars: Vec<Candle> = (0..10_usize)
+        .map(|i| {
+            let (open, high, low, close): (f64, f64, f64, f64) = if i >= 2 && i % 2 == 0 {
+                (104.5, 106.5, 104.0, 106.0)
+            } else {
+                (103.8, 104.2, 103.2, 104.0)
+            };
+            Candle {
+                timestamp: t0 + (i as i64) * 86_400,
+                date_label: format!("b{i}"),
+                open,
+                high,
+                low,
+                close,
+                volume: 1_000.0,
+            }
+        })
+        .collect();
+    let mut cd_eng = AlertEngine::new();
+    let cd_id = cd_eng
+        .add_alert_with_cooldown(
+            "FPT",
+            Timeframe::D1,
+            AlertCondition::PriceLevel {
+                price: 105.0,
+                direction: CrossDirection::CrossAbove,
+            },
+            AlertFrequency::OncePerBarClose,
+            3,
+            Some("Cooldown3".to_owned()),
+            &osc_bars,
+            0,
+            Some(osc_bars[0].timestamp + 86_399),
+            None,
+        )
+        .expect("cooldown alert");
+
+    // Step to bar 4 (suppressed!)
+    cd_eng.evaluate_causal(
+        &osc_bars,
+        Timeframe::D1,
+        &osc_bars[..=4],
+        Timeframe::D1,
+        4,
+        Some(osc_bars[4].timestamp + 86_399),
+        &store,
+    );
+    assert_eq!(cd_eng.triggers.len(), 1);
+    assert_eq!(cd_eng.triggers[0].bar_timestamp, osc_bars[2].timestamp);
+    // Fired at bar 2 with cooldown_bars = 3 (suppressing bars 3, 4, 5): at bar 4, 2 bars elapsed -> 1 bar (bar 5) remains!
+    assert_eq!(cd_eng.rules[0].cooldown_remaining_bars, 1);
+    let snap_at_4 = cd_eng.clone();
+
+    // Step forward to bar 8 -> fires at bar 6, suppressed at bar 8 (`8 - 6 = 2` elapsed -> `1` bar remains)
+    cd_eng.evaluate_causal(
+        &osc_bars,
+        Timeframe::D1,
+        &osc_bars[..=8],
+        Timeframe::D1,
+        8,
+        Some(osc_bars[8].timestamp + 86_399),
+        &store,
+    );
+    assert_eq!(cd_eng.triggers.len(), 2);
+    assert_eq!(cd_eng.triggers[1].bar_timestamp, osc_bars[6].timestamp);
+    assert_eq!(cd_eng.rules[0].cooldown_remaining_bars, 1);
+
+    // Rewind back to bar 4 -> bit-exact restoration of `triggers`, `trigger_count`, and `cooldown_remaining_bars`!
+    cd_eng.evaluate_causal(
+        &osc_bars,
+        Timeframe::D1,
+        &osc_bars[..=4],
+        Timeframe::D1,
+        4,
+        Some(osc_bars[4].timestamp + 86_399),
+        &store,
+    );
+    assert_eq!(cd_eng.triggers, snap_at_4.triggers);
+    assert_eq!(cd_eng.rules, snap_at_4.rules);
+    assert!(cd_eng.set_cooldown_bars(cd_id, 9999));
+    assert_eq!(cd_eng.rules[0].cooldown_bars, MAX_ALERT_COOLDOWN_BARS);
+
+    // Unused import check silence via type usage
+    let _ = ConfluenceWeightProfile::Balanced;
+}
+
+#[test]
+fn r16_alert_trigger_csv_formula_injection_sanitization_and_rfc8259_json_export() {
+    use crate::drawings::DrawingStore;
+
+    let t0 = 1_710_000_000_i64;
+    let bars = vec![
+        Candle {
+            timestamp: t0,
+            date_label: "d0".to_owned(),
+            open: 100.0,
+            high: 101.0,
+            low: 99.0,
+            close: 100.0,
+            volume: 1_000.0,
+        },
+        Candle {
+            timestamp: t0 + 86_400,
+            date_label: "d1".to_owned(),
+            open: 100.5,
+            high: 105.0,
+            low: 100.0,
+            close: 104.0,
+            volume: 1_200.0,
+        },
+    ];
+    let store = DrawingStore::new();
+    let mut eng = AlertEngine::new();
+
+    for dangerous_msg in [
+        "=CMD|' /C calc'!A0",
+        "+SUM(A1:A2),\"quoted\"",
+        "-2+3",
+        "@IMPORTXML(\"http://evil\")",
+        "|shell",
+        "  =LEADING_SPACE_FORMULA()",
+        "=TAB\tINSIDE\tFORMULA",
+    ] {
+        eng.add_alert(
+            "FPT",
+            Timeframe::D1,
+            AlertCondition::PriceLevel {
+                price: 102.0,
+                direction: CrossDirection::CrossAbove,
+            },
+            AlertFrequency::Once,
+            Some(dangerous_msg.to_owned()),
+            &bars,
+            0,
+            None,
+            None,
+        )
+        .expect("arm formula test alert");
+    }
+
+    eng.evaluate_causal(&bars, Timeframe::D1, &bars, Timeframe::D1, 1, None, &store);
+    assert_eq!(eng.triggers.len(), 7);
+
+    let csv = eng.export_triggers_csv(None);
+    let lines: Vec<&str> = csv.lines().collect();
+    assert_eq!(lines.len(), 8); // Header + 7 rows
+    for row in &lines[1..] {
+        // The trailing `message` cell must NEVER start raw with `=`, `+`, `-`, `@`, `|`, or `"` followed immediately by `=`!
+        let last_comma_tail = row.rsplit(',').next().unwrap_or("");
+        assert!(
+            !last_comma_tail.starts_with('=')
+                && !last_comma_tail.starts_with('+')
+                && !last_comma_tail.starts_with('-')
+                && !last_comma_tail.starts_with('@')
+                && !last_comma_tail.starts_with('|')
+                && !last_comma_tail.starts_with("\"="),
+            "CSV cell failed formula-injection neutralization: {row}"
+        );
+    }
+    assert!(csv.contains("'=CMD"));
+    assert!(csv.contains("\"'")); // Quoted cell with comma + leading `'` neutralization!
+
+    let json = eng.export_triggers_json(Some(t0 + 86_400));
+    assert!(json.starts_with("{\n  \"schema_version\": 1,"));
+    assert!(json.contains("\"event_count\": 7,"));
+    assert!(json.contains("\"=TAB\\tINSIDE\\tFORMULA\"")); // `\t` control character escaped per RFC-8259!
+    assert!(json.contains("\\\"quoted\\\"")); // Embedded `"` escaped per RFC-8259!
+
+    // Causal cutoff before bar 1 hides future triggers in both CSV and JSON!
+    let json_before = eng.export_triggers_json(Some(t0));
+    assert!(json_before.contains("\"event_count\": 0,"));
+}
+
+#[test]
+fn critic_r16_regression_vn30f_session_close_alerts_spy_w1_and_htf_intrabucket_cooldown_zero_and_clamp()
+ {
+    use crate::data::{aggregate_ohlcv, aggregate_ohlcv_up_to, format_utc_date};
+    use crate::drawings::DrawingStore;
+
+    let store = DrawingStore::new();
+
+    // 1. `[Critical-01]` `VN30F1M` `1m` sessions ending at `07:44:00 UTC` (`causal_close = 07:44:59 UTC`)
+    //    evaluated on `1D` (`SignalCatalogTrigger`): suppressed at `07:43 UTC`, fires at `07:44 UTC`
+    //    in BOTH replay (`Some(...)`) AND live (`None`) modes!
+    let start_day = 19_720_i64;
+    let mut vn_1m = Vec::with_capacity(62 * 3);
+    for d in 0..62_usize {
+        let day_utc = (start_day + d as i64) * 86_400;
+        let p = 1_200.0 + (d as f64) * 1.5;
+        let spike_mult = if d == 58 { 6.0 } else { 1.0 };
+        for &(sec_in_day, dp) in &[
+            (2 * 3_600_i64, 0.0),       // 09:00 ICT open
+            (7 * 3_600 + 43 * 60, 0.4), // 14:43 ICT (incomplete D1)
+            (7 * 3_600 + 44 * 60, 0.8), // 14:44..14:45 ICT afternoon session close!
+        ] {
+            let ts = day_utc + sec_in_day;
+            vn_1m.push(Candle {
+                timestamp: ts,
+                date_label: format_utc_date(ts),
+                open: p + dp - 0.2,
+                high: p + dp + 0.5,
+                low: p + dp - 0.5,
+                close: p + dp,
+                volume: 500.0 * spike_mult,
+            });
+        }
+    }
+    let arm_1m_idx = 55 * 3 + 2; // end of day 55
+    let d58_mid_idx = 58 * 3 + 1; // 07:43 UTC on spike day 58
+    let d58_close_idx = 58 * 3 + 2; // 07:44 UTC on spike day 58
+
+    let mut vn_eng = AlertEngine::new();
+    vn_eng
+        .add_alert(
+            "VN30F1M",
+            Timeframe::D1,
+            AlertCondition::SignalCatalogTrigger {
+                catalog_id: "volume.spike_2x".to_owned(),
+                float_level: None,
+                direction: CrossDirection::CrossAbove,
+            },
+            AlertFrequency::OncePerBarClose,
+            None,
+            &vn_1m,
+            arm_1m_idx,
+            Some(vn_1m[arm_1m_idx].timestamp),
+            None,
+        )
+        .expect("arm VN30F1M 1D signal alert");
+
+    // At 07:43 UTC -> still incomplete, MUST NOT fire!
+    let d1_at_0743 = aggregate_ohlcv_up_to(
+        &vn_1m,
+        Timeframe::M1,
+        Timeframe::D1,
+        vn_1m[d58_mid_idx].timestamp,
+    )
+    .unwrap();
+    vn_eng.evaluate_causal(
+        &vn_1m,
+        Timeframe::M1,
+        &d1_at_0743,
+        Timeframe::D1,
+        d58_mid_idx,
+        Some(vn_1m[d58_mid_idx].timestamp),
+        &store,
+    );
+    assert!(
+        vn_eng.triggers.is_empty(),
+        "VN30F1M 1D signal alert must NOT fire at 07:43 UTC before 07:44 session close"
+    );
+
+    // At 07:44 UTC in LIVE mode (`replay_cutoff_timestamp = None` on prefix `&vn_1m[..=d58_close_idx]`): MUST FIRE!
+    let vn_live_slice = &vn_1m[..=d58_close_idx];
+    let d1_at_0744 = aggregate_ohlcv(vn_live_slice, Timeframe::M1, Timeframe::D1).unwrap();
+    vn_eng.evaluate_causal(
+        vn_live_slice,
+        Timeframe::M1,
+        &d1_at_0744,
+        Timeframe::D1,
+        d58_close_idx,
+        None,
+        &store,
+    );
+    assert_eq!(
+        vn_eng.triggers.len(),
+        1,
+        "VN30F1M 1D signal alert MUST fire at 07:44 UTC afternoon session close in live mode"
+    );
+
+    // 2. `[Critical-01]` `SPY` `14:30:00 UTC` `D1 -> W1` alert suppressed on Thursday, fires on Friday:
+    //    `19_415` = Monday (`(19_415 + 4) % 7 == 1`). Build 58 Mon–Fri weeks at `14:30:00 UTC`!
+    let first_monday = 19_415_i64;
+    let mut spy_d1 = Vec::with_capacity(58 * 5);
+    for w in 0..58_usize {
+        for wd in 0..5_i64 {
+            let day = first_monday + (w as i64) * 7 + wd;
+            let ts = day * 86_400 + 14 * 3_600 + 30 * 60;
+            let p = 400.0 + (w as f64) * 1.2 + (wd as f64) * 0.2;
+            let vol = if w == 56 { 8_000.0 } else { 1_000.0 };
+            spy_d1.push(Candle {
+                timestamp: ts,
+                date_label: format_utc_date(ts),
+                open: p - 0.3,
+                high: p + 0.5,
+                low: p - 0.5,
+                close: p,
+                volume: vol,
+            });
+        }
+    }
+    let spy_arm_idx = 55 * 5 + 4; // Friday of week 55
+    let spy_thu_w56 = 56 * 5 + 3; // Thursday of week 56 (14:30 UTC)
+    let spy_fri_w56 = 56 * 5 + 4; // Friday of week 56 (14:30 UTC)
+
+    let mut spy_eng = AlertEngine::new();
+    spy_eng
+        .add_alert(
+            "SPY",
+            Timeframe::W1,
+            AlertCondition::SignalCatalogTrigger {
+                catalog_id: "volume.spike_2x".to_owned(),
+                float_level: None,
+                direction: CrossDirection::CrossAbove,
+            },
+            AlertFrequency::OncePerBarClose,
+            None,
+            &spy_d1,
+            spy_arm_idx,
+            Some(spy_d1[spy_arm_idx].timestamp),
+            None,
+        )
+        .expect("arm SPY W1 signal alert");
+
+    let w1_thu = aggregate_ohlcv_up_to(
+        &spy_d1,
+        Timeframe::D1,
+        Timeframe::W1,
+        spy_d1[spy_thu_w56].timestamp,
+    )
+    .unwrap();
+    spy_eng.evaluate_causal(
+        &spy_d1,
+        Timeframe::D1,
+        &w1_thu,
+        Timeframe::W1,
+        spy_thu_w56,
+        Some(spy_d1[spy_thu_w56].timestamp),
+        &store,
+    );
+    assert!(
+        spy_eng.triggers.is_empty(),
+        "SPY Thursday 14:30 UTC D1 bar must NOT fire W1 signal alert before Friday close"
+    );
+
+    let w1_fri = aggregate_ohlcv_up_to(
+        &spy_d1,
+        Timeframe::D1,
+        Timeframe::W1,
+        spy_d1[spy_fri_w56].timestamp,
+    )
+    .unwrap();
+    spy_eng.evaluate_causal(
+        &spy_d1,
+        Timeframe::D1,
+        &w1_fri,
+        Timeframe::W1,
+        spy_fri_w56,
+        Some(spy_d1[spy_fri_w56].timestamp),
+        &store,
+    );
+    assert_eq!(
+        spy_eng.triggers.len(),
+        1,
+        "SPY Friday 14:30 UTC D1 bar MUST fire W1 signal alert"
+    );
+
+    // 3. `[Major-05]` `1m -> 15m` `PriceLevel` `OncePerBarClose` with `cooldown_bars == 0` suppresses
+    //    duplicate intra-bucket crossings while still allowing immediate next-bucket firing,
+    //    AND clamps `cooldown_remaining_bars <= cooldown_bars` when `cooldown_bars > 0`:
+    let t_aligned_15m = 1_710_000_000_i64; // divisible by 900 (`1_710_000_000 % 900 == 0`)
+    assert_eq!(t_aligned_15m % 900, 0);
+    let mut m1_bars = Vec::with_capacity(45);
+    for m in 0..45_usize {
+        // Bucket 0 (`0..15`): flat 100
+        // Bucket 1 (`15..30`): crosses above 105 at m=17, dips to 101 at m=19, crosses above 105 AGAIN at m=22!
+        // Bucket 2 (`30..45`): dips to 101 at m=31, crosses above 105 at m=34!
+        let (o, h, l, c) = match m {
+            17 | 22 | 34 => (103.0, 106.5, 102.5, 106.0),
+            18..=21 | 30..=33 => (102.0, 102.5, 100.5, 101.0),
+            _ => (100.0, 100.5, 99.5, 100.0),
+        };
+        let ts = t_aligned_15m + (m as i64) * 60;
+        m1_bars.push(Candle {
+            timestamp: ts,
+            date_label: format!("m{m}"),
+            open: o,
+            high: h,
+            low: l,
+            close: c,
+            volume: 100.0,
+        });
+    }
+    let mut cd_eng = AlertEngine::new();
+    let id_cd0 = cd_eng
+        .add_alert_with_cooldown(
+            "BTCUSDT",
+            Timeframe::M15,
+            AlertCondition::PriceLevel {
+                price: 105.0,
+                direction: CrossDirection::CrossAbove,
+            },
+            AlertFrequency::OncePerBarClose,
+            0,
+            None,
+            &m1_bars,
+            10,
+            Some(m1_bars[10].timestamp),
+            None,
+        )
+        .unwrap();
+    let id_cd3 = cd_eng
+        .add_alert_with_cooldown(
+            "BTCUSDT",
+            Timeframe::M15,
+            AlertCondition::PriceLevel {
+                price: 105.0,
+                direction: CrossDirection::CrossAbove,
+            },
+            AlertFrequency::OncePerBarClose,
+            3,
+            None,
+            &m1_bars,
+            10,
+            Some(m1_bars[10].timestamp),
+            None,
+        )
+        .unwrap();
+
+    for step in 11..40_usize {
+        let m15_prefix = aggregate_ohlcv_up_to(
+            &m1_bars,
+            Timeframe::M1,
+            Timeframe::M15,
+            m1_bars[step].timestamp,
+        )
+        .unwrap();
+        cd_eng.evaluate_causal(
+            &m1_bars,
+            Timeframe::M1,
+            &m15_prefix,
+            Timeframe::M15,
+            step,
+            Some(m1_bars[step].timestamp),
+            &store,
+        );
+        let r3 = cd_eng.rules.iter().find(|r| r.id == id_cd3).unwrap();
+        assert!(
+            r3.cooldown_remaining_bars <= r3.cooldown_bars,
+            "cooldown_remaining_bars ({}) must NEVER exceed cooldown_bars ({}) at step {step}",
+            r3.cooldown_remaining_bars,
+            r3.cooldown_bars
+        );
+        if step == 25 {
+            let cd0_hits = cd_eng
+                .triggers
+                .iter()
+                .filter(|t| t.alert_id == id_cd0)
+                .count();
+            assert_eq!(
+                cd0_hits, 1,
+                "OncePerBarClose with cooldown_bars=0 must fire AT MOST ONCE inside 15m bucket 1 (m=17 & m=22)"
+            );
+        }
+    }
+    let cd0_total = cd_eng
+        .triggers
+        .iter()
+        .filter(|t| t.alert_id == id_cd0)
+        .count();
+    assert_eq!(
+        cd0_total, 2,
+        "OncePerBarClose with cooldown_bars=0 must fire once in bucket 1 (m=17) and once in bucket 2 (m=34)"
     );
 }

@@ -780,3 +780,190 @@ fn critic_r15_regression_explain_unclosed_bar_cutoff_and_nan_inf_ohlc_guards() {
         );
     }
 }
+
+#[test]
+fn r16_precomputed_catalog_matrix_matches_bar_by_bar_evaluation_across_all_17_entries() {
+    use super::catalog::{
+        ConfluenceWeightProfile, PrecomputedCatalogMatrix, SIGNAL_CATALOG, catalog_entry_index,
+        evaluate_signal_catalog_at_bar,
+    };
+
+    let mut bars: Vec<Candle> = Vec::with_capacity(140);
+    for i in 0..140_usize {
+        let wave = ((i as f64) * 0.23).sin() * 3.5;
+        let close = 100.0 + (i as f64) * 0.35 + wave;
+        let open = close - ((i % 3) as f64 - 1.0) * 0.7;
+        let high = open.max(close) + 1.1;
+        let low = open.min(close) - 1.0;
+        let vol = if i == 68 {
+            0.0 // Zero-volume edge case
+        } else if i == 112 {
+            -10.0 // Negative-volume invalid edge case
+        } else if i.is_multiple_of(13) {
+            4_800.0 // Volume spike
+        } else {
+            1_000.0 + ((i % 5) as f64) * 120.0
+        };
+        bars.push(make_bar(i, open, high, low, close, vol));
+    }
+
+    let matrix = PrecomputedCatalogMatrix::compute(&bars);
+    assert_eq!(matrix.bar_count, bars.len());
+
+    for bar_idx in 0..bars.len() {
+        let rep_bal =
+            evaluate_signal_catalog_at_bar(&bars, bar_idx, None, ConfluenceWeightProfile::Balanced)
+                .expect("bar in range");
+        let rep_tf = evaluate_signal_catalog_at_bar(
+            &bars,
+            bar_idx,
+            None,
+            ConfluenceWeightProfile::TrendFocused,
+        )
+        .expect("bar in range");
+
+        assert_eq!(matrix.regime_at(bar_idx), rep_bal.regime);
+        assert_eq!(
+            matrix.counts_at(bar_idx, ConfluenceWeightProfile::Balanced),
+            (
+                rep_bal.bullish_signal_count as u8,
+                rep_bal.bearish_signal_count as u8,
+            ),
+            "Balanced counts mismatch at bar {bar_idx}"
+        );
+        assert_eq!(
+            matrix.counts_at(bar_idx, ConfluenceWeightProfile::TrendFocused),
+            (
+                rep_tf.bullish_signal_count as u8,
+                rep_tf.bearish_signal_count as u8,
+            ),
+            "TrendFocused counts mismatch at bar {bar_idx}"
+        );
+
+        match (
+            matrix.health_score_at(bar_idx, ConfluenceWeightProfile::Balanced),
+            &rep_bal.health,
+        ) {
+            (Ok(ms), Some(h)) => {
+                assert!(
+                    (ms - h.composite_score).abs() < 1e-11,
+                    "Balanced health mismatch at bar {bar_idx}: {ms} vs {}",
+                    h.composite_score
+                );
+            }
+            (Err(mq), None) => assert_eq!(mq, rep_bal.quality),
+            other => panic!("Balanced health state mismatch at bar {bar_idx}: {other:?}"),
+        }
+
+        match (
+            matrix.health_score_at(bar_idx, ConfluenceWeightProfile::TrendFocused),
+            &rep_tf.health,
+        ) {
+            (Ok(ms), Some(h)) => {
+                assert!(
+                    (ms - h.composite_score).abs() < 1e-11,
+                    "TrendFocused health mismatch at bar {bar_idx}: {ms} vs {}",
+                    h.composite_score
+                );
+            }
+            (Err(mq), None) => assert_eq!(mq, rep_tf.quality),
+            other => panic!("TrendFocused health state mismatch at bar {bar_idx}: {other:?}"),
+        }
+
+        for ev in &rep_bal.evaluations {
+            let cat_idx = catalog_entry_index(ev.catalog_id).expect("catalog index");
+            let pt = matrix.point_at(cat_idx, bar_idx).expect("matrix point");
+            assert_eq!(
+                pt.quality, ev.quality,
+                "quality mismatch for {} at bar {bar_idx}",
+                ev.catalog_id
+            );
+            assert_eq!(
+                pt.bool_value, ev.bool_value,
+                "bool mismatch for {} at bar {bar_idx}",
+                ev.catalog_id
+            );
+            assert_eq!(
+                pt.direction, ev.direction,
+                "direction mismatch for {} at bar {bar_idx}",
+                ev.catalog_id
+            );
+            match (pt.float_value, ev.float_value) {
+                (Some(a), Some(b)) => assert!(
+                    (a - b).abs() < 1e-11,
+                    "float mismatch for {} at bar {bar_idx}: {a} vs {b}",
+                    ev.catalog_id
+                ),
+                (None, None) => {}
+                other => panic!(
+                    "float presence mismatch for {} at bar {bar_idx}: {other:?}",
+                    ev.catalog_id
+                ),
+            }
+        }
+        for ev in &rep_tf.evaluations {
+            let cat_idx = catalog_entry_index(ev.catalog_id).expect("catalog index");
+            let pt = matrix
+                .point_at_with_profile(cat_idx, bar_idx, ConfluenceWeightProfile::TrendFocused)
+                .expect("TrendFocused matrix point");
+            assert_eq!(
+                pt.quality, ev.quality,
+                "TrendFocused quality mismatch for {} at bar {bar_idx}",
+                ev.catalog_id
+            );
+            assert_eq!(
+                pt.bool_value, ev.bool_value,
+                "TrendFocused bool mismatch for {} at bar {bar_idx}",
+                ev.catalog_id
+            );
+            assert_eq!(
+                pt.direction, ev.direction,
+                "TrendFocused direction mismatch for {} at bar {bar_idx}",
+                ev.catalog_id
+            );
+            match (pt.float_value, ev.float_value) {
+                (Some(a), Some(b)) => assert!(
+                    (a - b).abs() < 1e-11,
+                    "TrendFocused float mismatch for {} at bar {bar_idx}: {a} vs {b}",
+                    ev.catalog_id
+                ),
+                (None, None) => {}
+                other => panic!(
+                    "TrendFocused float presence mismatch for {} at bar {bar_idx}: {other:?}",
+                    ev.catalog_id
+                ),
+            }
+        }
+        assert_eq!(rep_bal.evaluations.len(), SIGNAL_CATALOG.len());
+    }
+}
+
+#[test]
+fn r16_market_regime_bitmask_catalog_entry_index_and_bidirectional_bool_flags() {
+    use super::MarketRegime;
+    use super::catalog::{SIGNAL_CATALOG, catalog_entry_index, is_bidirectional_bool_signal};
+
+    let mut union_mask = 0_u8;
+    for (idx, reg) in MarketRegime::ALL_FILTERABLE.iter().copied().enumerate() {
+        let b = reg.bit();
+        assert_eq!(b, 1_u8 << idx);
+        assert_eq!(union_mask & b, 0, "regime bits must be disjoint");
+        union_mask |= b;
+    }
+    assert_eq!(union_mask, MarketRegime::ALL_VALID_MASK);
+    assert_eq!(MarketRegime::ALL_VALID_MASK, 0x3F);
+    assert_eq!(MarketRegime::InsufficientHistory.bit(), 0);
+
+    for (idx, entry) in SIGNAL_CATALOG.iter().enumerate() {
+        assert_eq!(catalog_entry_index(entry.id), Some(idx));
+    }
+    assert_eq!(catalog_entry_index("nonexistent.signal"), None);
+
+    assert!(is_bidirectional_bool_signal("sr.prior_20b_breakout"));
+    assert!(is_bidirectional_bool_signal("structure.swing_bos"));
+    assert!(is_bidirectional_bool_signal(
+        "divergence.rsi_hidden_or_classic"
+    ));
+    assert!(!is_bidirectional_bool_signal("technical.macd_bull_cross"));
+    assert!(!is_bidirectional_bool_signal("volume.spike_2x"));
+}

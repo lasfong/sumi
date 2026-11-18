@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +9,7 @@ use crate::indicators::{
     compute_ema_slices, compute_macd_slices, compute_rsi_slices, compute_sma_slices,
 };
 use crate::model::Candle;
+use crate::scanner::PrecomputedCatalogMatrix;
 use crate::trading::{
     MAX_ORDER_NOTIONAL, MAX_ORDER_PRICE, MAX_ORDER_QUANTITY, MIN_ORDER_QUANTITY, OrderSide,
     PositionSide, apply_slippage, compute_commission,
@@ -19,7 +21,7 @@ use super::metrics::{
 };
 use super::strategy::{
     BacktestConfig, PositionSizingMode, StrategyDirectionMode, StrategyPresetKind,
-    SweepRankingMetric, build_preset_sweep_configs,
+    SweepRankingMetric, build_preset_sweep_configs, evaluate_custom_rules_at_bar,
 };
 
 /// Causal execution options gating lookahead during active Bar Replay (`DEF-001`).
@@ -269,10 +271,15 @@ pub(crate) struct PrecomputedFeatures {
     donchian_exit_high: Vec<Option<f64>>,
     donchian_exit_low: Vec<Option<f64>>,
     atr: Vec<Option<f64>>,
+    catalog_matrix: Option<Arc<PrecomputedCatalogMatrix>>,
 }
 
 impl PrecomputedFeatures {
-    pub(crate) fn build(candles: &[Candle], config: &BacktestConfig) -> Self {
+    pub(crate) fn build_with_shared_catalog(
+        candles: &[Candle],
+        config: &BacktestConfig,
+        shared_catalog: Option<Arc<PrecomputedCatalogMatrix>>,
+    ) -> Self {
         let len = candles.len();
         let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
         let p = &config.params;
@@ -340,6 +347,15 @@ impl PrecomputedFeatures {
             Vec::new()
         };
 
+        let catalog_matrix = if config.preset == StrategyPresetKind::CustomSignalRules && len > 0 {
+            match shared_catalog {
+                Some(arc) if arc.bar_count == len => Some(arc),
+                _ => Some(Arc::new(PrecomputedCatalogMatrix::compute(candles))),
+            }
+        } else {
+            None
+        };
+
         Self {
             sma_fast,
             ema_slow,
@@ -352,6 +368,7 @@ impl PrecomputedFeatures {
             donchian_exit_high,
             donchian_exit_low,
             atr,
+            catalog_matrix,
         }
     }
 }
@@ -394,6 +411,17 @@ pub fn run_backtest_with_options(
     config: &BacktestConfig,
     options: BacktestRunOptions,
 ) -> BacktestRunResult {
+    run_backtest_with_shared_catalog(symbol, timeframe, candles, config, options, None)
+}
+
+fn run_backtest_with_shared_catalog(
+    symbol: impl Into<String>,
+    timeframe: Timeframe,
+    candles: &[Candle],
+    config: &BacktestConfig,
+    options: BacktestRunOptions,
+    shared_catalog: Option<Arc<PrecomputedCatalogMatrix>>,
+) -> BacktestRunResult {
     let symbol = symbol.into();
     let mut clean_cfg = config.clone();
     clean_cfg.sanitize();
@@ -423,7 +451,8 @@ pub fn run_backtest_with_options(
         };
     }
 
-    let features = PrecomputedFeatures::build(causal_candles, &clean_cfg);
+    let features =
+        PrecomputedFeatures::build_with_shared_catalog(causal_candles, &clean_cfg, shared_catalog);
     let full_sim = simulate_window_with_features(
         causal_candles,
         0,
@@ -552,9 +581,16 @@ pub fn run_parameter_sweep(
     let causal_candles = slice_causal_series_for_options(candles, timeframe, options);
 
     let grid = build_preset_sweep_configs(&clean_base);
+    let shared_catalog = if clean_base.preset == StrategyPresetKind::CustomSignalRules
+        && !causal_candles.is_empty()
+    {
+        Some(Arc::new(PrecomputedCatalogMatrix::compute(causal_candles)))
+    } else {
+        None
+    };
     let mut variants = Vec::with_capacity(grid.len());
     for (label, cfg) in grid {
-        let res = run_backtest_with_options(
+        let res = run_backtest_with_shared_catalog(
             symbol.clone(),
             timeframe,
             causal_candles,
@@ -563,6 +599,7 @@ pub fn run_parameter_sweep(
                 replay_cutoff_timestamp: None,
                 incomplete_tail_bar: options.incomplete_tail_bar,
             },
+            shared_catalog.clone(),
         );
         variants.push(SweepVariantRow {
             rank: 0,
@@ -613,7 +650,7 @@ pub fn run_all_presets_battle(
         let mut cfg = base_config.clone();
         cfg.preset = preset;
         cfg.sanitize();
-        let param_summary = cfg.params.summary_for_preset(preset);
+        let param_summary = cfg.param_summary();
         let res = run_backtest_with_options(
             symbol.clone(),
             timeframe,
@@ -654,17 +691,142 @@ pub fn is_bucket_incomplete_at_close(
     base_tf: Timeframe,
     active_tf: Timeframe,
 ) -> bool {
+    is_bucket_incomplete_at_close_for_symbol("", bar_open_ts, causal_close_ts, base_tf, active_tf)
+}
+
+/// Exchange-schedule-aware causal bucket-close check (`DEF-001`, `[CRITICAL-R16-01]`):
+/// - Pure prefix function of `(symbol, bar_open_ts, causal_close_ts, base_tf, active_tf)` — never peeks at `idx + 1`!
+/// - Computes `D1 -> W1` weekday from the `D1` bar's open day (`last_base_open_ts`) so NYSE/SPY `14:30:00` UTC
+///   Thursday bars (`close = Fri 14:29:59 UTC`) remain `incomplete = true` until Friday's session!
+/// - Recognizes Vietnam exchange intraday session closes (`04:29:59` UTC morning close for `04:00` `1h` bucket,
+///   and `07:44:59` UTC afternoon close for `1h`, `4h`, `1D`, and Friday `1W` buckets on `VN30F1M` / `HOSE` / `HNX` / `UPCOM`),
+///   while preserving 24/7 UTC boundaries on `CryptoSpotPerp` (`BTCUSDT`).
+#[must_use]
+pub fn is_bucket_incomplete_at_close_for_symbol(
+    symbol: &str,
+    bar_open_ts: i64,
+    causal_close_ts: i64,
+    base_tf: Timeframe,
+    active_tf: Timeframe,
+) -> bool {
+    use crate::journal::ExchangeVenue;
+
     if active_tf <= base_tf {
         return false;
     }
     let next_instant = causal_close_ts.saturating_add(1);
-    if active_tf == Timeframe::W1 && base_tf == Timeframe::D1 {
-        // For `D1 -> W1` equities (`5d/wk`), Friday (`dow == 4` where Mon=0..Sun=6) closes the trading week.
-        let days_since_epoch = causal_close_ts.div_euclid(86_400);
+    if active_tf.bucket_start_timestamp(next_instant)
+        != active_tf.bucket_start_timestamp(bar_open_ts)
+    {
+        return false;
+    }
+
+    let symbol_trimmed = symbol.trim();
+    let venue = if symbol_trimmed.is_empty() {
+        None
+    } else {
+        Some(ExchangeVenue::infer_from_symbol_and_preset(
+            symbol_trimmed,
+            DataSourcePreset::CustomFile,
+        ))
+    };
+    let last_base_open_ts =
+        causal_close_ts.saturating_sub(base_tf.seconds().max(1).saturating_sub(1));
+
+    if active_tf == Timeframe::W1
+        && base_tf == Timeframe::D1
+        && venue != Some(ExchangeVenue::CryptoSpotPerp)
+    {
+        // Use `last_base_open_ts` (NOT `causal_close_ts`) so non-midnight `D1` feeds like `SPY` (`14:30:00` UTC)
+        // evaluate Thursday (`dow_mon0 == 3`) as `incomplete = true` and Friday (`dow_mon0 == 4`) as `false`.
+        let days_since_epoch = last_base_open_ts.div_euclid(86_400);
         let dow_mon0 = (days_since_epoch + 3).rem_euclid(7);
         return dow_mon0 < 4;
     }
-    active_tf.bucket_start_timestamp(next_instant) == active_tf.bucket_start_timestamp(bar_open_ts)
+
+    if base_tf.seconds() < 86_400 {
+        let Some(venue) = venue else {
+            // No exchange symbol provided (`is_bucket_incomplete_at_close`): enforce pure UTC bucket boundary.
+            return true;
+        };
+        let bar_day = bar_open_ts.div_euclid(86_400);
+        let close_day = causal_close_ts.div_euclid(86_400);
+        let bar_tod = bar_open_ts.rem_euclid(86_400);
+        let last_base_tod = last_base_open_ts.rem_euclid(86_400);
+        let tod_close = causal_close_ts.rem_euclid(86_400);
+
+        let is_vn_session = matches!(
+            venue,
+            ExchangeVenue::Vn30Futures
+                | ExchangeVenue::Hose
+                | ExchangeVenue::Hnx
+                | ExchangeVenue::Upcom
+                | ExchangeVenue::VnIndexBenchmark
+        );
+        if is_vn_session {
+            const VN_MORNING_CLOSE_TOD_UTC: i64 = 4 * 3_600 + 29 * 60 + 59; // 04:29:59 UTC (11:30 ICT)
+            const VN_AFTERNOON_OPEN_TOD_UTC: i64 = 6 * 3_600; // 06:00:00 UTC (13:00 ICT)
+            const VN_AFTERNOON_CLOSE_TOD_UTC: i64 = 7 * 3_600 + 44 * 60 + 59; // 07:44:59 UTC (14:45 ICT)
+            const VN_AFTERNOON_CLOSE_END_TOD_UTC: i64 = 8 * 3_600; // 08:00:00 UTC (15:00 ICT)
+
+            // Morning 1h (`04:00..04:29:59` UTC) has zero trading bars during 11:30..13:00 ICT lunch break:
+            if active_tf == Timeframe::H1
+                && close_day == bar_day
+                && bar_tod == 4 * 3_600
+                && (VN_MORNING_CLOSE_TOD_UTC..VN_AFTERNOON_OPEN_TOD_UTC).contains(&tod_close)
+            {
+                return false;
+            }
+
+            // Afternoon session close bounded strictly to `07:44:59..08:00:00` UTC (`14:45..15:00` ICT)
+            // on buckets opened at or before `07:44:59` UTC (never leaking mid-bucket bars after `08:00` UTC!):
+            if close_day == bar_day
+                && bar_tod <= VN_AFTERNOON_CLOSE_TOD_UTC
+                && (VN_AFTERNOON_CLOSE_TOD_UTC..VN_AFTERNOON_CLOSE_END_TOD_UTC).contains(&tod_close)
+                && matches!(active_tf, Timeframe::H1 | Timeframe::H4 | Timeframe::D1)
+            {
+                return false;
+            }
+            if active_tf == Timeframe::W1
+                && Timeframe::W1.bucket_start_timestamp(causal_close_ts)
+                    == Timeframe::W1.bucket_start_timestamp(bar_open_ts)
+            {
+                let dow_mon0 = (last_base_open_ts.div_euclid(86_400) + 3).rem_euclid(7);
+                if dow_mon0 == 4
+                    && last_base_tod <= VN_AFTERNOON_CLOSE_TOD_UTC
+                    && (VN_AFTERNOON_CLOSE_TOD_UTC..VN_AFTERNOON_CLOSE_END_TOD_UTC)
+                        .contains(&tod_close)
+                {
+                    return false;
+                }
+            }
+        } else if venue == ExchangeVenue::UsEquities {
+            const US_REGULAR_CLOSE_TOD_UTC: i64 = 20 * 3_600 + 59 * 60 + 59; // 20:59:59 UTC (16:00 EST)
+            const US_REGULAR_CLOSE_END_TOD_UTC: i64 = 21 * 3_600; // 21:00:00 UTC
+
+            if close_day == bar_day
+                && bar_tod <= US_REGULAR_CLOSE_TOD_UTC
+                && (US_REGULAR_CLOSE_TOD_UTC..US_REGULAR_CLOSE_END_TOD_UTC).contains(&tod_close)
+                && matches!(active_tf, Timeframe::H1 | Timeframe::H4 | Timeframe::D1)
+            {
+                return false;
+            }
+            if active_tf == Timeframe::W1
+                && Timeframe::W1.bucket_start_timestamp(causal_close_ts)
+                    == Timeframe::W1.bucket_start_timestamp(bar_open_ts)
+            {
+                let dow_mon0 = (last_base_open_ts.div_euclid(86_400) + 3).rem_euclid(7);
+                if dow_mon0 == 4
+                    && last_base_tod <= US_REGULAR_CLOSE_TOD_UTC
+                    && (US_REGULAR_CLOSE_TOD_UTC..US_REGULAR_CLOSE_END_TOD_UTC).contains(&tod_close)
+                {
+                    return false;
+                }
+            }
+        }
+    }
+
+    true
 }
 
 /// Runs `config` causally across every feed in `feeds` using a bar-open `replay_cutoff_timestamp`.
@@ -748,12 +910,24 @@ pub fn run_multi_symbol_battle_with_close_cutoff(
         }
 
         let incomplete_tail = match (replay_causal_close_timestamp, series_ref.last()) {
-            (Some(close_cut), Some(last_bar)) => is_bucket_incomplete_at_close(
-                last_bar.timestamp,
-                close_cut,
-                feed.base_timeframe,
-                effective_tf,
-            ),
+            (Some(close_cut), Some(last_bar)) => {
+                let last_feed_close_ts = closed_base_slice
+                    .last()
+                    .map_or(close_cut, |c| c.timestamp.saturating_add(base_bar_span));
+                is_bucket_incomplete_at_close_for_symbol(
+                    &feed.symbol,
+                    last_bar.timestamp,
+                    close_cut,
+                    feed.base_timeframe,
+                    effective_tf,
+                ) && is_bucket_incomplete_at_close_for_symbol(
+                    &feed.symbol,
+                    last_bar.timestamp,
+                    last_feed_close_ts,
+                    feed.base_timeframe,
+                    effective_tf,
+                )
+            }
             _ => false,
         };
 
@@ -1651,10 +1825,18 @@ fn evaluate_close_of_bar_order(
             });
         }
 
-        // 2. Check strategy exit rule.
-        let rule_exit = match pos.side {
-            PositionSide::Long => long_exit || bear_entry,
-            PositionSide::Short => short_exit || bull_entry,
+        // 2. Check strategy exit rule (`CustomSignalRules` keeps all 4 directional legs strictly isolated
+        //    so `short_entry` / `long_entry` never leaks into `LongOnly` / `ShortOnly` exits).
+        let rule_exit = if config.preset == StrategyPresetKind::CustomSignalRules {
+            match pos.side {
+                PositionSide::Long => long_exit,
+                PositionSide::Short => short_exit,
+            }
+        } else {
+            match pos.side {
+                PositionSide::Long => long_exit || bear_entry,
+                PositionSide::Short => short_exit || bull_entry,
+            }
         };
         if rule_exit {
             return Some(PendingStrategyOrder::Exit {
@@ -1808,6 +1990,12 @@ fn evaluate_preset_signals_at_bar(
             let long_exit = close >= m_cur || r_cur >= p.rsi_confluence_sell;
             let short_exit = close <= m_cur || r_cur <= p.rsi_confluence_buy;
             (bull, bear, long_exit, short_exit)
+        }
+        StrategyPresetKind::CustomSignalRules => {
+            let Some(ref matrix) = features.catalog_matrix else {
+                return (false, false, false, false);
+            };
+            evaluate_custom_rules_at_bar(&config.custom_rules, matrix, i)
         }
     }
 }
