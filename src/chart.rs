@@ -10,7 +10,7 @@ use crate::alerts::{
     AlertCondition, AlertEngine, AlertStatus, AlertTriggerEvent, CrossDirection,
     drawing_line_value_at_bar,
 };
-use crate::backtest::{BacktestExitReason, BacktestRunResult, BacktestTrade};
+use crate::backtest::{BacktestExitReason, BacktestRunResult, BacktestTrade, MonteCarloFanSeries};
 use crate::data::Timeframe;
 use crate::drawings::{
     Drawing, DrawingColorPreset, DrawingGeometry, DrawingId, DrawingInteractionPhase,
@@ -1265,6 +1265,7 @@ pub struct ChartReplayTradingOverlay<'a> {
     pub alert_engine: Option<&'a AlertEngine>,
     pub backtest_result: Option<&'a BacktestRunResult>,
     pub equity_override: Option<EquityCurveOverlay<'a>>,
+    pub monte_carlo_fan: Option<&'a MonteCarloFanSeries>,
     pub show_equity_pane: bool,
     pub show_backtest_trades_on_chart: bool,
     pub focused_backtest_trade_id: Option<u64>,
@@ -1698,6 +1699,7 @@ fn render_workstation_chart_inner(
                 indicator_cache,
                 replay_trading.backtest_result,
                 replay_trading.equity_override,
+                replay_trading.monte_carlo_fan,
                 init_strict.clone(),
             );
         }
@@ -1907,6 +1909,7 @@ fn render_workstation_chart_inner(
             indicator_cache,
             replay_trading.backtest_result,
             replay_trading.equity_override,
+            replay_trading.monte_carlo_fan,
             strict_range.clone(),
         );
     }
@@ -2119,16 +2122,28 @@ fn render_workstation_chart_inner(
         multi_layout.main_plot_rect,
         multi_layout.main_price_axis_rect,
     );
-    let mut main_occluding_ys = [0.0_f32; 2];
-    let mut main_occluding_len = 0_usize;
+    let mut main_seed_pill_ys = [0.0_f32; 2];
+    let mut main_seed_pill_len = 0_usize;
     if let Some(py) = main_close_pill_y {
-        main_occluding_ys[main_occluding_len] = py;
-        main_occluding_len += 1;
+        main_seed_pill_ys[main_seed_pill_len] = py;
+        main_seed_pill_len += 1;
     }
     if let Some(cy) = main_cursor_occluding_y {
-        main_occluding_ys[main_occluding_len] = cy;
-        main_occluding_len += 1;
+        main_seed_pill_ys[main_seed_pill_len] = cy;
+        main_seed_pill_len += 1;
     }
+    let main_seed_slice = &main_seed_pill_ys[..main_seed_pill_len];
+    let main_occluding_ys = if let Some(session) = replay_trading.trading_session {
+        collect_trading_axis_pill_ys(
+            session,
+            &main_vp,
+            multi_layout.main_plot_rect,
+            multi_layout.main_price_axis_rect,
+            main_seed_slice,
+        )
+    } else {
+        main_seed_slice.to_vec()
+    };
     paint_horizontal_price_grid_and_ticks(
         &painter,
         multi_layout.main_plot_rect,
@@ -2140,7 +2155,7 @@ fn render_workstation_chart_inner(
         54.0,
         4,
         12,
-        &main_occluding_ys[..main_occluding_len],
+        &main_occluding_ys,
     );
     if config.show_grid {
         for tick in &time_grid_ticks {
@@ -2480,6 +2495,7 @@ fn render_workstation_chart_inner(
                 &main_vp,
                 base_value,
                 session,
+                main_seed_slice,
             )
         } else {
             (0, 0)
@@ -2661,6 +2677,7 @@ fn render_workstation_chart_inner(
                     osc.plot_rect,
                     osc.price_axis_rect,
                     eq_ov,
+                    replay_trading.monte_carlo_fan,
                     candles.len(),
                     culling_range.clone(),
                     conflation_factor,
@@ -2684,6 +2701,7 @@ fn render_workstation_chart_inner(
                     osc.plot_rect,
                     osc.price_axis_rect,
                     eq_ov,
+                    replay_trading.monte_carlo_fan,
                     candles.len(),
                     culling_range.clone(),
                     conflation_factor,
@@ -3032,6 +3050,7 @@ fn render_workstation_chart_inner(
             indicator_cache,
             replay_trading.backtest_result,
             replay_trading.equity_override,
+            replay_trading.monte_carlo_fan,
             replay_trading.rs_benchmark_label,
             hud_series_index,
         );
@@ -3274,18 +3293,15 @@ pub fn render_shared_pane_candlestick_chart(
 
     let single_close_pill_y =
         latest_close_pill_y(candles, &main_vp, layout.plot_rect, layout.price_axis_rect);
-    let mut single_occluding_ys = [0.0_f32; 2];
-    let mut single_occluding_len = 0_usize;
+    let mut single_occluding_ys = Vec::with_capacity(8);
     if let Some(py) = single_close_pill_y {
-        single_occluding_ys[single_occluding_len] = py;
-        single_occluding_len += 1;
+        single_occluding_ys.push(py);
     }
     if let Some((pos, _, _)) = single_cross_state
         && pointer_price.is_some()
         && let Some(py) = clamp_axis_pill_center_y(pos.y, layout.price_axis_rect, 10.0)
     {
-        single_occluding_ys[single_occluding_len] = py;
-        single_occluding_len += 1;
+        single_occluding_ys.push(py);
     }
 
     let single_time_occluding_span = single_cross_state.and_then(|(_, slot_idx, cross_x)| {
@@ -3305,7 +3321,7 @@ pub fn render_shared_pane_candlestick_chart(
         54.0,
         4,
         12,
-        &single_occluding_ys[..single_occluding_len],
+        &single_occluding_ys,
     );
 
     let time_grid_ticks = collect_time_grid_ticks(
@@ -6453,6 +6469,7 @@ fn paint_equity_baseline_pane(
     plot_rect: Rect,
     price_axis_rect: Rect,
     eq_ov: EquityCurveOverlay<'_>,
+    monte_carlo_fan: Option<&MonteCarloFanSeries>,
     candle_len: usize,
     culling_range: std::ops::Range<usize>,
     conflation_factor: usize,
@@ -6497,7 +6514,7 @@ fn paint_equity_baseline_pane(
             axis_painter.text(
                 Pos2::new(price_axis_rect.left() + 6.0, pill_y),
                 Align2::LEFT_CENTER,
-                price_scale.format_price_for_tick_density(baseline, 1.0, 24.0, 3, 6),
+                price_scale.format_price_for_tick_density(baseline, vp.base_value, 24.0, 3, 6),
                 FontId::monospace(9.8),
                 palette::TEXT_PRIMARY,
             );
@@ -6514,6 +6531,19 @@ fn paint_equity_baseline_pane(
             split_idx,
             vp,
             true,
+        );
+    }
+
+    // 2b. Optional Deterministic Monte Carlo Bootstrap Percentile Fan (`p5..p95`, `p25..p75`, `p50` median)
+    if let Some(fan) = monte_carlo_fan {
+        paint_monte_carlo_fan_bands(
+            plot_painter,
+            plot_rect,
+            fan,
+            candle_len,
+            culling_range.clone(),
+            conflation_factor.max(1),
+            vp,
         );
     }
 
@@ -6658,6 +6688,235 @@ fn paint_equity_baseline_pane(
     }
     if !stroke_mesh.is_empty() {
         plot_painter.add(Shape::mesh(stroke_mesh));
+    }
+}
+
+fn paint_monte_carlo_fan_bands(
+    plot_painter: &egui::Painter,
+    plot_rect: Rect,
+    fan: &MonteCarloFanSeries,
+    candle_len: usize,
+    culling_range: std::ops::Range<usize>,
+    step: usize,
+    vp: &PaneViewport<'_>,
+) {
+    let total = fan.causal_bar_count.min(fan.bar_count).min(candle_len);
+    let eff_step = step.max(1);
+    let clamped_start = culling_range.start.min(total);
+    let start = if eff_step > 1 {
+        (clamped_start / eff_step).saturating_sub(1) * eff_step
+    } else {
+        clamped_start.saturating_sub(1)
+    };
+    let end = culling_range.end.saturating_add(eff_step).min(total);
+    if start + 1 >= end {
+        return;
+    }
+
+    let plot_top = plot_rect.top();
+    let plot_bot = plot_rect.bottom();
+    let is_log = vp.price_scale.is_log();
+    let log_floor = if is_log {
+        let p_top = vp.screen_y_to_price(f64::from(plot_top)).unwrap_or(1.0);
+        let p_bot = vp.screen_y_to_price(f64::from(plot_bot)).unwrap_or(1.0);
+        let vis_lo = p_top.min(p_bot);
+        if vis_lo.is_finite() && vis_lo > 1.0e-4 {
+            (vis_lo * 0.92).max(1.0e-4)
+        } else {
+            1.0e-4
+        }
+    } else {
+        0.0
+    };
+    let outer_col = Color32::from_rgba_unmultiplied(88, 166, 255, 24);
+    let inner_col = Color32::from_rgba_unmultiplied(88, 166, 255, 48);
+    let median_col = Color32::from_rgba_unmultiplied(245, 194, 66, 215);
+
+    let est = ((end - start) / eff_step).saturating_add(6);
+    let mut band_mesh = Mesh::with_texture(egui::TextureId::default());
+    band_mesh.vertices.reserve(est * 8);
+    band_mesh.indices.reserve(est * 12);
+    let mut median_mesh = Mesh::with_texture(egui::TextureId::default());
+    median_mesh.vertices.reserve(est * 8);
+    median_mesh.indices.reserve(est * 12);
+
+    let emit_band_quad = |mesh: &mut Mesh,
+                          x0: f32,
+                          y0_hi: f32,
+                          y0_lo: f32,
+                          x1: f32,
+                          y1_hi: f32,
+                          y1_lo: f32,
+                          col: Color32| {
+        if (x1 - x0).abs() <= 1e-4 {
+            return;
+        }
+        let a_top = y0_hi.min(y0_lo).clamp(plot_top, plot_bot);
+        let a_bot = y0_hi.max(y0_lo).clamp(plot_top, plot_bot);
+        let b_top = y1_hi.min(y1_lo).clamp(plot_top, plot_bot);
+        let b_bot = y1_hi.max(y1_lo).clamp(plot_top, plot_bot);
+        if (a_bot - a_top) <= 0.05 && (b_bot - b_top) <= 0.05 {
+            return;
+        }
+        let Ok(bv) = u32::try_from(mesh.vertices.len()) else {
+            return;
+        };
+        if bv > u32::MAX - 4 {
+            return;
+        }
+        let uv = egui::epaint::WHITE_UV;
+        mesh.vertices.extend_from_slice(&[
+            egui::epaint::Vertex {
+                pos: Pos2::new(x0, a_top),
+                uv,
+                color: col,
+            },
+            egui::epaint::Vertex {
+                pos: Pos2::new(x1, b_top),
+                uv,
+                color: col,
+            },
+            egui::epaint::Vertex {
+                pos: Pos2::new(x1, b_bot),
+                uv,
+                color: col,
+            },
+            egui::epaint::Vertex {
+                pos: Pos2::new(x0, a_bot),
+                uv,
+                color: col,
+            },
+        ]);
+        mesh.indices
+            .extend_from_slice(&[bv, bv + 1, bv + 2, bv, bv + 2, bv + 3]);
+    };
+
+    const DASH_ON_PX: f32 = 5.0;
+    const DASH_GAP_PX: f32 = 3.5;
+    const DASH_PERIOD_PX: f32 = DASH_ON_PX + DASH_GAP_PX;
+
+    let emit_dashed_median = |mesh: &mut Mesh, p0: Pos2, p1: Pos2, phase_px: &mut f32| {
+        let dx = p1.x - p0.x;
+        let dy = p1.y - p0.y;
+        let seg_len = dx.hypot(dy);
+        if !seg_len.is_finite() || seg_len <= 1.0e-4 {
+            return;
+        }
+        let ux = dx / seg_len;
+        let uy = dy / seg_len;
+        let mut walked = 0.0_f32;
+        while walked + 1.0e-3 < seg_len {
+            let rem = seg_len - walked;
+            let cyc = phase_px.rem_euclid(DASH_PERIOD_PX);
+            if cyc < DASH_ON_PX {
+                let take = (DASH_ON_PX - cyc).min(rem);
+                let a = Pos2::new(p0.x + ux * walked, p0.y + uy * walked);
+                let b = Pos2::new(p0.x + ux * (walked + take), p0.y + uy * (walked + take));
+                emit_mesh_thick_segment(mesh, a, b, 0.72, median_col);
+                walked += take;
+                *phase_px = (*phase_px + take).rem_euclid(DASH_PERIOD_PX);
+            } else {
+                let take = (DASH_PERIOD_PX - cyc).min(rem);
+                walked += take;
+                *phase_px = (*phase_px + take).rem_euclid(DASH_PERIOD_PX);
+            }
+        }
+    };
+
+    let map_fan_y = |v: f64| -> Option<f64> {
+        let adj = if is_log { v.max(log_floor) } else { v };
+        vp.price_to_screen_y(adj)
+    };
+
+    type FanPt = (f32, f32, f32, f32, f32, f32);
+    let mut prev: Option<FanPt> = None;
+    let mut dash_phase_px = 0.0_f32;
+    let mut last_sampled: Option<usize> = None;
+    let mut idx = start;
+    let mut terminal_done = false;
+    loop {
+        let sample_idx = if idx < end {
+            let s = if eff_step > 1 {
+                let b_end = (idx + eff_step).min(total);
+                idx + (b_end - idx) / 2
+            } else {
+                idx
+            };
+            idx = idx.saturating_add(eff_step);
+            s
+        } else if !terminal_done
+            && eff_step > 1
+            && end == total
+            && total > 0
+            && last_sampled != Some(total - 1)
+        {
+            terminal_done = true;
+            total - 1
+        } else {
+            break;
+        };
+        last_sampled = Some(sample_idx);
+
+        if let (Some(v5), Some(v25), Some(v50), Some(v75), Some(v95)) = (
+            fan.p5.get(sample_idx).copied().flatten(),
+            fan.p25.get(sample_idx).copied().flatten(),
+            fan.p50.get(sample_idx).copied().flatten(),
+            fan.p75.get(sample_idx).copied().flatten(),
+            fan.p95.get(sample_idx).copied().flatten(),
+        ) && let (Some(sx), Some(y5), Some(y25), Some(y50), Some(y75), Some(y95)) = (
+            vp.float_index_to_screen_x(sample_idx as f64),
+            map_fan_y(v5),
+            map_fan_y(v25),
+            map_fan_y(v50),
+            map_fan_y(v75),
+            map_fan_y(v95),
+        ) {
+            let curr = (
+                sx as f32, y5 as f32, y25 as f32, y50 as f32, y75 as f32, y95 as f32,
+            );
+            if let Some((x0, py5, py25, py50, py75, py95)) = prev {
+                emit_band_quad(
+                    &mut band_mesh,
+                    x0,
+                    py95,
+                    py5,
+                    curr.0,
+                    curr.5,
+                    curr.1,
+                    outer_col,
+                );
+                emit_band_quad(
+                    &mut band_mesh,
+                    x0,
+                    py75,
+                    py25,
+                    curr.0,
+                    curr.4,
+                    curr.2,
+                    inner_col,
+                );
+                if let Some((cp0, cp1)) = clip_screen_segment_to_rect(
+                    Pos2::new(x0, py50),
+                    Pos2::new(curr.0, curr.3),
+                    plot_rect.expand(1.5),
+                ) {
+                    emit_dashed_median(&mut median_mesh, cp0, cp1, &mut dash_phase_px);
+                } else {
+                    dash_phase_px = 0.0;
+                }
+            }
+            prev = Some(curr);
+        } else {
+            prev = None;
+            dash_phase_px = 0.0;
+        }
+    }
+
+    if !band_mesh.is_empty() {
+        plot_painter.add(Shape::mesh(band_mesh));
+    }
+    if !median_mesh.is_empty() {
+        plot_painter.add(Shape::mesh(median_mesh));
     }
 }
 
@@ -7425,6 +7684,7 @@ fn paint_oscillator_hud(
     cache: &IndicatorCache,
     backtest_result: Option<&BacktestRunResult>,
     equity_override: Option<EquityCurveOverlay<'_>>,
+    monte_carlo_fan: Option<&MonteCarloFanSeries>,
     rs_benchmark_label: Option<&str>,
     idx: usize,
 ) {
@@ -7673,7 +7933,7 @@ fn paint_oscillator_hud(
                             phase_lbl,
                             0.0,
                             TextFormat {
-                                font_id: font,
+                                font_id: font.clone(),
                                 color: if clamped_idx >= split_idx {
                                     palette::BACKTEST_OOS_SPLIT
                                 } else {
@@ -7688,11 +7948,29 @@ fn paint_oscillator_hud(
                         "— (Pre-OOS / Warmup)",
                         0.0,
                         TextFormat {
-                            font_id: font,
+                            font_id: font.clone(),
                             color: palette::TEXT_MUTED,
                             ..Default::default()
                         },
                     );
+                }
+                if let Some(fan) = monte_carlo_fan {
+                    let fi = idx.min(fan.bar_count.saturating_sub(1));
+                    if let (Some(v5), Some(v50), Some(v95)) = (
+                        fan.p5.get(fi).copied().flatten(),
+                        fan.p50.get(fi).copied().flatten(),
+                        fan.p95.get(fi).copied().flatten(),
+                    ) {
+                        job.append(
+                            &format!("   MC p50 {v50:.0} [{v5:.0}..{v95:.0}]"),
+                            0.0,
+                            TextFormat {
+                                font_id: font,
+                                color: palette::ACCENT_BLUE,
+                                ..Default::default()
+                            },
+                        );
+                    }
                 }
             } else if let Some(bt) = backtest_result {
                 let clamped_idx = idx.min(bt.equity_curve.len().saturating_sub(1));
@@ -7751,7 +8029,7 @@ fn paint_oscillator_hud(
                         phase_lbl,
                         0.0,
                         TextFormat {
-                            font_id: font,
+                            font_id: font.clone(),
                             color: if clamped_idx >= split_idx {
                                 palette::BACKTEST_OOS_SPLIT
                             } else {
@@ -7760,6 +8038,24 @@ fn paint_oscillator_hud(
                             ..Default::default()
                         },
                     );
+                }
+                if let Some(fan) = monte_carlo_fan {
+                    let fi = idx.min(fan.bar_count.saturating_sub(1));
+                    if let (Some(v5), Some(v50), Some(v95)) = (
+                        fan.p5.get(fi).copied().flatten(),
+                        fan.p50.get(fi).copied().flatten(),
+                        fan.p95.get(fi).copied().flatten(),
+                    ) {
+                        job.append(
+                            &format!("   MC p50 {v50:.0} [{v5:.0}..{v95:.0}]"),
+                            0.0,
+                            TextFormat {
+                                font_id: font,
+                                color: palette::ACCENT_BLUE,
+                                ..Default::default()
+                            },
+                        );
+                    }
                 }
             } else {
                 job.append(
@@ -8177,6 +8473,7 @@ fn refresh_oscillator_autoscale(
     cache: &IndicatorCache,
     backtest_result: Option<&BacktestRunResult>,
     equity_override: Option<EquityCurveOverlay<'_>>,
+    monte_carlo_fan: Option<&MonteCarloFanSeries>,
     strict_range: std::ops::Range<usize>,
 ) {
     if !price_scale.is_auto_scale() {
@@ -8278,38 +8575,112 @@ fn refresh_oscillator_autoscale(
                 let base = eq_ov.baseline_cash.max(1.0);
                 let total = eq_ov.equity_values.len();
                 let clamped = strict_range.start.min(total)..strict_range.end.min(total);
-                let (raw_min, raw_max) = eq_ov
-                    .equity_idx
-                    .range_bounds(eq_ov.equity_values, clamped)
-                    .unwrap_or((base, base));
-                let min_v = raw_min.min(base);
-                let max_v = raw_max.max(base);
-                let pad = if (max_v - min_v).abs() < base * 1e-4 {
-                    base * 0.02
-                } else {
-                    0.0
-                };
-                price_scale.autoscale_raw_bounds(min_v - pad, max_v + pad, base);
+                let eq_bounds = eq_ov.equity_idx.range_bounds(eq_ov.equity_values, clamped);
+                autoscale_equity_bounds_with_fan(
+                    price_scale,
+                    base,
+                    eq_bounds,
+                    monte_carlo_fan,
+                    &strict_range,
+                );
             } else if let Some(bt) = backtest_result {
                 let base = bt.config.initial_cash.max(1.0);
                 let total = bt.equity_values.len();
                 let clamped = strict_range.start.min(total)..strict_range.end.min(total);
-                let (raw_min, raw_max) = bt
-                    .equity_idx
-                    .range_bounds(&bt.equity_values, clamped)
-                    .unwrap_or((base, base));
-                let min_v = raw_min.min(base);
-                let max_v = raw_max.max(base);
-                let pad = if (max_v - min_v).abs() < base * 1e-4 {
-                    base * 0.02
-                } else {
-                    0.0
-                };
-                price_scale.autoscale_raw_bounds(min_v - pad, max_v + pad, base);
+                let eq_bounds = bt.equity_idx.range_bounds(&bt.equity_values, clamped);
+                autoscale_equity_bounds_with_fan(
+                    price_scale,
+                    base,
+                    eq_bounds,
+                    monte_carlo_fan,
+                    &strict_range,
+                );
+            } else if price_scale.is_log() {
+                price_scale.autoscale_raw_bounds(1.0, 100.0, 100.0);
             } else {
                 price_scale.autoscale_raw_bounds(0.0, 100.0, 100.0);
             }
         }
+    }
+}
+
+fn autoscale_equity_bounds_with_fan(
+    price_scale: &mut PriceScale,
+    base: f64,
+    eq_bounds: Option<(f64, f64)>,
+    monte_carlo_fan: Option<&MonteCarloFanSeries>,
+    strict_range: &std::ops::Range<usize>,
+) {
+    let (raw_min, raw_max) = eq_bounds.unwrap_or((base, base));
+    if price_scale.is_log() {
+        let mut min_pos = base;
+        let mut max_pos = base;
+        let mut saw_bankrupt_tail = false;
+        for v in [raw_min, raw_max] {
+            if v.is_finite() {
+                if v > 1.0e-4 {
+                    min_pos = min_pos.min(v);
+                    max_pos = max_pos.max(v);
+                } else {
+                    saw_bankrupt_tail = true;
+                }
+            }
+        }
+        if let Some(fan) = monte_carlo_fan {
+            let ftot = fan.bar_count;
+            let fclamp = strict_range.start.min(ftot)..strict_range.end.min(ftot);
+            if let Some((f_lo, _)) = fan.p5_idx.range_bounds(&fan.p5, fclamp.clone())
+                && f_lo.is_finite()
+            {
+                if f_lo > 1.0e-4 {
+                    min_pos = min_pos.min(f_lo);
+                } else {
+                    saw_bankrupt_tail = true;
+                }
+            }
+            if let Some((f50_lo, _)) = fan.p50_idx.range_bounds(&fan.p50, fclamp.clone())
+                && f50_lo.is_finite()
+                && f50_lo > 1.0e-4
+            {
+                min_pos = min_pos.min(f50_lo);
+            }
+            if let Some((_, f_hi)) = fan.p95_idx.range_bounds(&fan.p95, fclamp)
+                && f_hi.is_finite()
+                && f_hi > 1.0e-4
+            {
+                max_pos = max_pos.max(f_hi);
+            }
+        }
+        if saw_bankrupt_tail {
+            min_pos = (min_pos * 0.85).max(1.0e-4);
+        }
+        let pad = if (max_pos - min_pos).abs() < base * 1e-4 {
+            base * 0.02
+        } else {
+            0.0
+        };
+        let lo = (min_pos - pad).max((min_pos * 0.5).max(1.0e-4));
+        let hi = (max_pos + pad).max(lo * 1.001);
+        price_scale.autoscale_raw_bounds(lo, hi, base);
+    } else {
+        let mut min_v = raw_min.min(base);
+        let mut max_v = raw_max.max(base);
+        if let Some(fan) = monte_carlo_fan {
+            let ftot = fan.bar_count;
+            let fclamp = strict_range.start.min(ftot)..strict_range.end.min(ftot);
+            if let Some((f_lo, _)) = fan.p5_idx.range_bounds(&fan.p5, fclamp.clone()) {
+                min_v = min_v.min(f_lo);
+            }
+            if let Some((_, f_hi)) = fan.p95_idx.range_bounds(&fan.p95, fclamp) {
+                max_v = max_v.max(f_hi);
+            }
+        }
+        let pad = if (max_v - min_v).abs() < base * 1e-4 {
+            base * 0.02
+        } else {
+            0.0
+        };
+        price_scale.autoscale_raw_bounds(min_v - pad, max_v + pad, base);
     }
 }
 
@@ -9210,6 +9581,49 @@ fn paint_execution_fill_markers(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn collect_trading_axis_pill_ys(
+    session: &TradingSession,
+    main_vp: &PaneViewport<'_>,
+    plot_rect: Rect,
+    price_axis_rect: Rect,
+    seed_ys: &[f32],
+) -> Vec<f32> {
+    let mut placed_axis_pills: Vec<f32> = Vec::with_capacity(seed_ys.len() + 8);
+    placed_axis_pills.extend_from_slice(seed_ys);
+
+    let mut try_price = |price: f64| {
+        if let Some(sy) = main_vp.price_to_screen_y(price) {
+            let y = sy as f32;
+            if y.is_finite() && y >= plot_rect.top() && y <= plot_rect.bottom() {
+                let _ = resolve_non_overlapping_axis_pill_y(
+                    y,
+                    price_axis_rect,
+                    9.5,
+                    &mut placed_axis_pills,
+                );
+            }
+        }
+    };
+
+    for order in session.pending_orders() {
+        if let Some(trig_price) = order.kind.trigger_price() {
+            try_price(trig_price);
+        }
+    }
+    if let Some(pos) = session.open_position() {
+        try_price(pos.avg_entry_price);
+        if let Some(sl) = pos.stop_loss {
+            try_price(sl);
+        }
+        if let Some(tp) = pos.take_profit {
+            try_price(tp);
+        }
+    }
+
+    placed_axis_pills
+}
+
+#[allow(clippy::too_many_arguments)]
 fn paint_trading_overlays(
     axis_painter: &egui::Painter,
     plot_painter: &egui::Painter,
@@ -9222,11 +9636,13 @@ fn paint_trading_overlays(
     main_vp: &PaneViewport<'_>,
     base_value: f64,
     session: &TradingSession,
+    seed_axis_pills: &[f32],
 ) -> (usize, usize) {
     let mut price_lines = 0_usize;
     let mut line_mesh = Mesh::with_texture(egui::TextureId::default());
     let mut placed_badges: Vec<Rect> = Vec::with_capacity(8);
-    let mut placed_axis_pills: Vec<f32> = Vec::with_capacity(8);
+    let mut placed_axis_pills: Vec<f32> = Vec::with_capacity(seed_axis_pills.len() + 8);
+    placed_axis_pills.extend_from_slice(seed_axis_pills);
 
     // 1. Working (`Pending`) Limit & Stop orders
     for order in session.pending_orders() {
@@ -13242,5 +13658,248 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn r15_r14_carryover_equity_baseline_badge_uses_vp_base_value_and_trading_pills_occlude() {
+        use crate::backtest::{
+            BacktestConfig, MonteCarloConfig, run_backtest, run_monte_carlo_bootstrap,
+        };
+        use crate::data::generate_synthetic_ohlcv;
+        use crate::trading::{OrderKind, OrderRequest};
+        use crate::viewport::PriceScaleMode;
+
+        let candles = generate_synthetic_ohlcv(120);
+        let bt_cfg = BacktestConfig {
+            initial_cash: 100_000.0,
+            ..BacktestConfig::default()
+        };
+        let bt = run_backtest("VNINDEX", Timeframe::D1, &candles, &bt_cfg, None);
+        let mc = run_monte_carlo_bootstrap(
+            bt_cfg.initial_cash,
+            &bt.trades,
+            &bt.equity_curve,
+            candles.len(),
+            None,
+            MonteCarloConfig::default(),
+        );
+
+        // 1. Verify PriceScale::format_price_for_tick_density(baseline, vp.base_value, ...) outputs +0.00% and 100.00
+        let mut eq_ps = PriceScale::new("eq", PriceScaleOptions::default());
+        eq_ps.set_height(180.0);
+        eq_ps.autoscale_raw_bounds(92_000.0, 118_000.0, 100_000.0);
+        eq_ps.set_mode(PriceScaleMode::Percentage);
+        assert_eq!(
+            eq_ps.format_price_for_tick_density(100_000.0, 100_000.0, 24.0, 3, 6),
+            "+0.00%"
+        );
+        eq_ps.set_mode(PriceScaleMode::IndexedTo100);
+        assert_eq!(
+            eq_ps.format_price_for_tick_density(100_000.0, 100_000.0, 24.0, 3, 6),
+            "100.00"
+        );
+
+        // 2. Verify collect_trading_axis_pill_ys includes working Limit/Stop orders & position Entry/SL/TP
+        let mut session = TradingSession::default();
+        let last_idx = candles.len() - 1;
+        let mark = candles[last_idx].close;
+        let _ = session.submit_order(
+            OrderRequest {
+                side: OrderSide::Buy,
+                kind: OrderKind::Market,
+                quantity: 10.0,
+                stop_loss: Some(mark * 0.97),
+                take_profit: Some(mark * 1.03),
+            },
+            &candles,
+            last_idx,
+        );
+        let _ = session.submit_order(
+            OrderRequest {
+                side: OrderSide::Buy,
+                kind: OrderKind::Limit {
+                    limit_price: mark * 0.985,
+                },
+                quantity: 5.0,
+                stop_loss: None,
+                take_profit: None,
+            },
+            &candles,
+            last_idx,
+        );
+
+        let mut ts = TimeScale::with_data(candles.len(), 800.0, HorzScaleOptions::default());
+        ts.set_bar_spacing(8.0);
+        let mut ps = PriceScale::new("main", PriceScaleOptions::default());
+        ps.set_height(460.0);
+        ps.autoscale_raw_bounds(mark * 0.90, mark * 1.10, mark);
+        let plot_rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 460.0));
+        let axis_rect = Rect::from_min_size(Pos2::new(800.0, 0.0), Vec2::new(84.0, 460.0));
+        let main_vp = PaneViewport::new(&ts, &ps, PlotRect::from_egui(plot_rect), mark);
+        let seeds = [230.0_f32];
+        let occluding =
+            collect_trading_axis_pill_ys(&session, &main_vp, plot_rect, axis_rect, &seeds);
+        assert_eq!(
+            occluding.len(),
+            5,
+            "seed + 1 pending limit + 1 entry + 1 SL + 1 TP must all be registered in main_occluding_ys"
+        );
+
+        // 3. Headless render pass with Equity pane + Monte Carlo fan in Percentage mode
+        let ctx = egui::Context::default();
+        let mut vp = ChartViewportState::new();
+        vp.time_scale.set_total_bars(candles.len());
+        vp.equity_price_scale.set_mode(PriceScaleMode::Percentage);
+        let ind = IndicatorConfig::default();
+        let mut cache = IndicatorCache::new();
+        cache.sync(&candles, 1, &ind);
+        let mut drawings = DrawingStore::new();
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1024.0, 680.0))),
+                ..Default::default()
+            },
+            |ui| {
+                let rep = render_workstation_chart_full(
+                    ui,
+                    &candles,
+                    &mut vp,
+                    ChartDisplayConfig {
+                        symbol: "VNINDEX",
+                        timeframe: "1D",
+                        show_grid: true,
+                        show_crosshair: true,
+                        show_volume: true,
+                    },
+                    &ind,
+                    &cache,
+                    &mut drawings,
+                    ChartReplayTradingOverlay {
+                        trading_session: Some(&session),
+                        backtest_result: Some(&bt),
+                        monte_carlo_fan: mc.bar_fan.as_ref(),
+                        show_equity_pane: true,
+                        ..ChartReplayTradingOverlay::default()
+                    },
+                )
+                .expect("equity + mc fan render report");
+                assert!(rep.equity_pane_active);
+            },
+        );
+        out.textures_delta.clear();
+    }
+
+    #[test]
+    fn critic_r15_regression_log_equity_bankrupt_p5_no_collapse_and_dashed_conflated_fan() {
+        use crate::backtest::{
+            BacktestConfig, MonteCarloConfig, MonteCarloFanSeries, run_backtest,
+            run_monte_carlo_bootstrap,
+        };
+        use crate::viewport::PriceScaleMode;
+
+        // 1. R15-M03: `PriceScaleMode::Logarithmic` with bankrupt `p5 == 0.0` must NOT crush `$80k..$180k` into 3px!
+        let n = 64_usize;
+        let p5 = vec![Some(0.0); n];
+        let p25 = vec![Some(85_000.0); n];
+        let p50 = vec![Some(110_000.0); n];
+        let p75 = vec![Some(140_000.0); n];
+        let p95 = vec![Some(180_000.0); n];
+        let fan = MonteCarloFanSeries {
+            bar_count: n,
+            causal_bar_count: n,
+            p5_idx: SeriesBlockIndex::build(&p5),
+            p50_idx: SeriesBlockIndex::build(&p50),
+            p95_idx: SeriesBlockIndex::build(&p95),
+            p5,
+            p25,
+            p50,
+            p75,
+            p95,
+        };
+        let mut log_eq_ps = PriceScale::new("eq-log", PriceScaleOptions::default());
+        log_eq_ps.set_height(200.0);
+        log_eq_ps.set_mode(PriceScaleMode::Logarithmic);
+        autoscale_equity_bounds_with_fan(
+            &mut log_eq_ps,
+            100_000.0,
+            Some((80_000.0, 155_000.0)),
+            Some(&fan),
+            &(0..n),
+        );
+        let y_80k = log_eq_ps
+            .price_to_local_y(80_000.0, 100_000.0)
+            .expect("y_80k");
+        let y_180k = log_eq_ps
+            .price_to_local_y(180_000.0, 100_000.0)
+            .expect("y_180k");
+        assert!(
+            (y_80k - y_180k).abs() > 90.0,
+            "Logarithmic Equity scale must preserve visual span for $80k..$180k even when p5 hits 0.0: span={}",
+            (y_80k - y_180k).abs()
+        );
+
+        // 2. R15-m02: Conflated `step = 64` fan render reaches terminal bar & emits dashed `p50` segments cleanly
+        let candles = generate_synthetic_ohlcv(2_048);
+        let bt = run_backtest(
+            "VNINDEX",
+            Timeframe::D1,
+            &candles,
+            &BacktestConfig::default(),
+            None,
+        );
+        let mc = run_monte_carlo_bootstrap(
+            100_000.0,
+            &bt.trades,
+            &bt.equity_curve,
+            candles.len(),
+            None,
+            MonteCarloConfig {
+                simulations: 250,
+                ..MonteCarloConfig::default()
+            },
+        );
+        let ctx = egui::Context::default();
+        let mut vp = ChartViewportState::new();
+        vp.time_scale.set_total_bars(candles.len());
+        vp.time_scale.set_width(800.0);
+        vp.fit_all();
+        vp.equity_price_scale.set_mode(PriceScaleMode::Logarithmic);
+        let ind = IndicatorConfig::default();
+        let mut cache = IndicatorCache::new();
+        cache.sync(&candles, 1, &ind);
+        let mut drawings = DrawingStore::new();
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1024.0, 680.0))),
+                ..Default::default()
+            },
+            |ui| {
+                let rep = render_workstation_chart_full(
+                    ui,
+                    &candles,
+                    &mut vp,
+                    ChartDisplayConfig {
+                        symbol: "VNINDEX",
+                        timeframe: "1D",
+                        show_grid: true,
+                        show_crosshair: false,
+                        show_volume: false,
+                    },
+                    &ind,
+                    &cache,
+                    &mut drawings,
+                    ChartReplayTradingOverlay {
+                        backtest_result: Some(&bt),
+                        monte_carlo_fan: mc.bar_fan.as_ref(),
+                        show_equity_pane: true,
+                        ..ChartReplayTradingOverlay::default()
+                    },
+                )
+                .expect("conflated log equity + mc fan render");
+                assert!(rep.conflation_factor >= 2);
+                assert!(rep.equity_pane_active);
+            },
+        );
+        out.textures_delta.clear();
     }
 }

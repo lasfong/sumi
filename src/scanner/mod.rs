@@ -7,6 +7,7 @@
 //! type-enforced [`ScannerSignalContext`] (`BlindPractice` vs `SignalReview` signal reveal lock).
 
 pub mod breadth;
+pub mod catalog;
 pub mod engine;
 #[cfg(test)]
 mod tests;
@@ -14,10 +15,19 @@ mod tests;
 use serde::{Deserialize, Serialize};
 
 use crate::data::Timeframe;
+use crate::model::Candle;
 
 pub use breadth::{
     BreadthFeedInput, MarketBreadthSnapshot, RrgQuadrant, SymbolBreadthRotation,
     compute_market_breadth_and_rrg,
+};
+pub use catalog::{
+    CONFLUENCE_DATA_FIDELITY_PROXY, CONFLUENCE_WARMUP_BARS, CausalConfluenceReport, ConfluenceBias,
+    ConfluenceWeightProfile, SIGNAL_AVAILABILITY_EVENT_BAR_CLOSE, SIGNAL_CATALOG,
+    SignalAttributionFactor, SignalCatalogEntry, SignalCategory, SignalEvaluation,
+    SignalOutputType, SignalParamSpec, SignalQuality, SignalStatus, TechnicalHealthBreakdown,
+    evaluate_causal_confluence, evaluate_signal_catalog_at_bar, explain_historical_signal,
+    filter_signal_catalog, find_catalog_entry, find_catalog_entry_for_scan_kind,
 };
 pub use engine::{
     DEFAULT_BLIND_PRACTICE_LOOKBACK_BARS, compute_causal_rvol, evaluate_symbol_scan,
@@ -328,6 +338,32 @@ impl ScannerSignalContext {
     #[must_use]
     pub fn revealed_signal(&self, cutoff_timestamp: Option<i64>) -> Option<&HistoricalSignalHit> {
         self.is_revealed(cutoff_timestamp).then_some(&self.signal)
+    }
+
+    /// Returns the full [`SignalEvaluation`] explanation for the attached signal **only** when
+    /// causally revealed at `cutoff_timestamp` (`BlindPractice` non-leakage guarantee across
+    /// forward play and backward rewind — `Milestone R15 / DEF-001`).
+    #[must_use]
+    pub fn revealed_explanation(
+        &self,
+        candles: &[Candle],
+        cutoff_timestamp: Option<i64>,
+    ) -> Option<SignalEvaluation> {
+        if let Some(ts) = cutoff_timestamp
+            && ts < self.reveal_at_timestamp
+        {
+            return None;
+        }
+        let hit = self.revealed_signal(cutoff_timestamp)?;
+        let slice = match cutoff_timestamp {
+            Some(ts) => {
+                let bound = ts.max(hit.timestamp);
+                let end = candles.partition_point(|c| c.timestamp <= bound);
+                &candles[..end]
+            }
+            None => candles,
+        };
+        explain_historical_signal(slice, hit, None)
     }
 }
 

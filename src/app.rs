@@ -11,13 +11,14 @@ use crate::alerts::{
 };
 use crate::backtest::{
     BacktestConfig, BacktestRunOptions, BacktestRunResult, MIN_STATISTICAL_SAMPLE_TRADES,
-    MultiSymbolBattleReport, ParameterSweepReport, PortfolioBacktestReport,
-    PortfolioUniverseFilter, PortfolioWeightingMode, PositionSizingMode, PresetBattleRow,
-    RobustnessVerdict, StrategyDirectionMode, StrategyPresetKind, SweepRankingMetric,
-    WalkForwardConfig, WalkForwardReport, WalkForwardVerdict, is_bucket_incomplete_at_close,
-    map_equity_curve_to_candles, run_all_presets_battle, run_backtest_with_options,
-    run_multi_symbol_battle_with_close_cutoff, run_parameter_sweep, run_portfolio_backtest,
-    run_walk_forward_validation,
+    MonteCarloConfig, MonteCarloReport, MonteCarloValidity, MultiSymbolBattleReport,
+    ParameterSweepReport, PortfolioBacktestReport, PortfolioUniverseFilter, PortfolioWeightingMode,
+    PositionSizingMode, PresetBattleRow, RobustnessVerdict, StrategyDirectionMode,
+    StrategyPresetKind, SweepRankingMetric, WalkForwardConfig, WalkForwardReport,
+    WalkForwardVerdict, is_bucket_incomplete_at_close, map_equity_curve_to_candles,
+    run_all_presets_battle, run_backtest_with_options, run_monte_carlo_bootstrap,
+    run_monte_carlo_portfolio_mapped, run_multi_symbol_battle_with_close_cutoff,
+    run_parameter_sweep, run_portfolio_backtest, run_walk_forward_validation,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::backtest::{StopTakeConfig, StrategyParams};
@@ -33,8 +34,9 @@ use crate::data::{
     resolve_benchmark_series_for_window,
 };
 use crate::drawings::{
-    DrawingAnchor, DrawingColorPreset, DrawingGeometry, DrawingPaneTarget, DrawingStore,
-    DrawingStyle, DrawingTool, FibDirection, LineDashStyle, MagnetMode,
+    DrawingAnchor, DrawingColorPreset, DrawingGeometry, DrawingId, DrawingPaneTarget,
+    DrawingPropertyPatch, DrawingStore, DrawingStyle, DrawingTool, FibDirection, LineDashStyle,
+    MagnetMode,
 };
 use crate::indicators::OscillatorPaneId;
 use crate::indicators::{
@@ -51,11 +53,14 @@ use crate::replay::{
     ReplayController, ReplaySpeed, ReplayStatus, ReplayStepUnit, ReplayTransition,
 };
 use crate::scanner::{
-    BreadthFeedInput, DEFAULT_BLIND_PRACTICE_LOOKBACK_BARS, HistoricalSignalHit,
-    MarketBreadthSnapshot, MarketRegime, RrgQuadrant, ScanSignalKind, ScannerFilter,
-    ScannerReplayIntent, ScannerSignalContext, SignalDirection, SymbolBreadthRotation,
-    SymbolScanRow, WatchlistSortColumn, compute_market_breadth_and_rrg,
-    evaluate_symbol_scan_and_signals, filter_and_sort_watchlist, filter_historical_signals,
+    BreadthFeedInput, CONFLUENCE_DATA_FIDELITY_PROXY, CausalConfluenceReport, ConfluenceBias,
+    ConfluenceWeightProfile, DEFAULT_BLIND_PRACTICE_LOOKBACK_BARS, HistoricalSignalHit,
+    MarketBreadthSnapshot, MarketRegime, RrgQuadrant, SIGNAL_CATALOG, ScanSignalKind,
+    ScannerFilter, ScannerReplayIntent, ScannerSignalContext, SignalCategory, SignalDirection,
+    SignalEvaluation, SignalStatus, SymbolBreadthRotation, SymbolScanRow, WatchlistSortColumn,
+    compute_market_breadth_and_rrg, evaluate_causal_confluence, evaluate_symbol_scan_and_signals,
+    explain_historical_signal, filter_and_sort_watchlist, filter_historical_signals,
+    filter_signal_catalog, find_catalog_entry_for_scan_kind,
 };
 use crate::trading::{
     DOM_LADDER_DATA_FIDELITY, DomLadderConfig, DomLadderError, DomLadderSnapshot,
@@ -302,6 +307,9 @@ pub enum PaletteAction {
     CenterDomLadder,
     OpenHotkeysModal,
     SetHotkeyProfile(HotkeyProfileId),
+    OpenSignalCatalogModal,
+    ToggleDrawingInspector,
+    ToggleMonteCarloEquityFan,
 }
 
 /// Ranked candidate row inside the `Cmd+K` Command Palette (`Milestone R08`).
@@ -337,6 +345,76 @@ type PortfolioSyncKey = (
     PortfolioUniverseFilter,
     PortfolioWeightingMode,
 );
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MonteCarloSyncKey {
+    dataset_generation: u64,
+    active_timeframe: Timeframe,
+    candle_len: usize,
+    last_ts: Option<i64>,
+    replay_close_cutoff: Option<i64>,
+    incomplete_tail: bool,
+    cfg_digest: u64,
+    wf_digest: u64,
+    equity_pane_source: EquityPaneSource,
+    portfolio_universe_filter: PortfolioUniverseFilter,
+    portfolio_weighting: PortfolioWeightingMode,
+    simulations: usize,
+    seed: u64,
+    ruin_bits: u64,
+    horizon_steps: Option<usize>,
+}
+type ConfluenceSyncKey = (
+    u64,
+    usize,
+    Option<i64>,
+    Option<i64>,
+    bool,
+    ConfluenceWeightProfile,
+);
+
+type ScannerSyncKey = (u64, String, Option<i64>, usize, bool);
+
+#[derive(Debug, Clone)]
+struct InspectedSignalEvalCache {
+    instrument_id: String,
+    timestamp: i64,
+    signal: ScanSignalKind,
+    close_cutoff: Option<i64>,
+    replay_cutoff: Option<i64>,
+    scanner_revealed: bool,
+    dataset_generation: u64,
+    eval: Option<SignalEvaluation>,
+}
+
+#[derive(Debug, Clone)]
+struct FilteredWatchlistCache {
+    synced_key: Option<ScannerSyncKey>,
+    filter: ScannerFilter,
+    sort_col: WatchlistSortColumn,
+    sort_asc: bool,
+    rows: Vec<SymbolScanRow>,
+}
+
+#[derive(Debug, Clone)]
+struct FilteredSignalsCache {
+    synced_key: Option<ScannerSyncKey>,
+    filter: ScannerFilter,
+    hits: Vec<HistoricalSignalHit>,
+}
+
+/// Transactional draft state backing the Interactive Drawing Property Inspector (`Milestone R15`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DrawingInspectorDraft {
+    pub instrument_key: String,
+    pub drawing_id: DrawingId,
+    pub source_snapshot: DrawingPropertyPatch,
+    pub draft: DrawingPropertyPatch,
+    pub last_error: Option<String>,
+}
+
+const fn default_true_r15() -> bool {
+    true
+}
 
 #[derive(Debug, Clone)]
 struct MappedPortfolioCurveCache {
@@ -600,6 +678,16 @@ pub struct SumiWorkstationApp {
     pub dom_take_profit_ticks: u32,
     pub dom_vn_unit: VnPriceUnit,
     pub hotkey_profile: HotkeyProfile,
+    #[serde(default)]
+    pub confluence_profile: ConfluenceWeightProfile,
+    #[serde(default = "default_true_r15")]
+    pub show_confluence_inspector: bool,
+    #[serde(default)]
+    pub show_drawing_inspector: bool,
+    #[serde(default)]
+    pub mc_config: MonteCarloConfig,
+    #[serde(default = "default_true_r15")]
+    pub show_mc_fan_on_equity: bool,
 
     #[serde(skip)]
     pub base_candles: Vec<Candle>,
@@ -715,6 +803,34 @@ pub struct SumiWorkstationApp {
     pub rebinding_hotkey_action: Option<HotkeyAction>,
     #[serde(skip)]
     pub(crate) last_hotkeys_modal_rect: Option<egui::Rect>,
+    #[serde(skip)]
+    pub show_signal_catalog_modal: bool,
+    #[serde(skip)]
+    pub signal_catalog_category: SignalCategory,
+    #[serde(skip)]
+    pub signal_catalog_search: String,
+    #[serde(skip)]
+    pub show_catalog_advanced_params: bool,
+    #[serde(skip)]
+    pub(crate) last_signal_catalog_modal_rect: Option<egui::Rect>,
+    #[serde(skip)]
+    pub inspected_signal_key: Option<(String, i64, ScanSignalKind)>,
+    #[serde(skip)]
+    inspected_signal_eval_cache: Option<InspectedSignalEvalCache>,
+    #[serde(skip)]
+    filtered_watchlist_cache: Option<FilteredWatchlistCache>,
+    #[serde(skip)]
+    filtered_signals_cache: Option<FilteredSignalsCache>,
+    #[serde(skip)]
+    pub confluence_report_cache: Option<CausalConfluenceReport>,
+    #[serde(skip)]
+    confluence_synced_key: Option<ConfluenceSyncKey>,
+    #[serde(skip)]
+    pub drawing_inspector_draft: Option<DrawingInspectorDraft>,
+    #[serde(skip)]
+    pub monte_carlo_report: Option<MonteCarloReport>,
+    #[serde(skip)]
+    mc_synced_key: Option<MonteCarloSyncKey>,
 }
 
 impl Default for SumiWorkstationApp {
@@ -803,6 +919,11 @@ impl Default for SumiWorkstationApp {
             dom_take_profit_ticks: 0,
             dom_vn_unit: VnPriceUnit::Auto,
             hotkey_profile: HotkeyProfile::default(),
+            confluence_profile: ConfluenceWeightProfile::Balanced,
+            show_confluence_inspector: true,
+            show_drawing_inspector: false,
+            mc_config: MonteCarloConfig::default(),
+            show_mc_fan_on_equity: true,
             base_candles,
             candles,
             available_symbols: vec!["VNINDEX".to_owned()],
@@ -860,6 +981,20 @@ impl Default for SumiWorkstationApp {
             show_hotkeys_modal: false,
             rebinding_hotkey_action: None,
             last_hotkeys_modal_rect: None,
+            show_signal_catalog_modal: false,
+            signal_catalog_category: SignalCategory::All,
+            signal_catalog_search: String::new(),
+            show_catalog_advanced_params: false,
+            last_signal_catalog_modal_rect: None,
+            inspected_signal_key: None,
+            inspected_signal_eval_cache: None,
+            filtered_watchlist_cache: None,
+            filtered_signals_cache: None,
+            confluence_report_cache: None,
+            confluence_synced_key: None,
+            drawing_inspector_draft: None,
+            monte_carlo_report: None,
+            mc_synced_key: None,
         }
     }
 }
@@ -951,6 +1086,7 @@ impl SumiWorkstationApp {
         truncate_utf8_bytes(&mut self.alert_message_input, 96);
         self.backtest_config.sanitize();
         self.wf_config.sanitize();
+        self.mc_config = self.mc_config.sanitized();
         self.journal.sanitize_deserialized();
         self.journal_draft_conviction = self.journal_draft_conviction.clamp(1, 5);
         truncate_utf8_bytes(
@@ -995,6 +1131,7 @@ impl SumiWorkstationApp {
         self.dom_center_override = None;
         self.show_templates_modal = false;
         self.show_hotkeys_modal = false;
+        self.show_signal_catalog_modal = false;
         self.rebinding_hotkey_action = None;
         self.last_template_status = None;
         self.linked_crosshair_timestamp = None;
@@ -1175,6 +1312,40 @@ impl SumiWorkstationApp {
     }
 
     pub fn configure_dark_workstation_visuals(ctx: &egui::Context) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            static VI_FALLBACK_FONT: std::sync::OnceLock<Option<std::sync::Arc<egui::FontData>>> =
+                std::sync::OnceLock::new();
+            let font_opt = VI_FALLBACK_FONT.get_or_init(|| {
+                for candidate in [
+                    "/System/Library/Fonts/Supplemental/Courier New.ttf",
+                    "/System/Library/Fonts/Supplemental/Arial.ttf",
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+                ] {
+                    if let Ok(bytes) = std::fs::read(candidate) {
+                        return Some(std::sync::Arc::new(egui::FontData::from_owned(bytes)));
+                    }
+                }
+                None
+            });
+            if let Some(font_data) = font_opt {
+                let mut fonts = egui::FontDefinitions::default();
+                let key = "sumi_unicode_vi_fallback".to_owned();
+                fonts.font_data.insert(key.clone(), font_data.clone());
+                fonts
+                    .families
+                    .entry(egui::FontFamily::Monospace)
+                    .or_default()
+                    .push(key.clone());
+                fonts
+                    .families
+                    .entry(egui::FontFamily::Proportional)
+                    .or_default()
+                    .push(key);
+                ctx.set_fonts(fonts);
+            }
+        }
+
         let mut visuals = Visuals::dark();
         visuals.panel_fill = palette::BG_WORKSTATION;
         visuals.window_fill = palette::BG_WORKSTATION;
@@ -2715,8 +2886,189 @@ impl SumiWorkstationApp {
     pub fn open_hotkeys_modal(&mut self) {
         self.close_command_palette();
         self.show_templates_modal = false;
+        self.show_signal_catalog_modal = false;
         self.rebinding_hotkey_action = None;
         self.show_hotkeys_modal = true;
+    }
+
+    /// Opens the Explainable Signal Catalog & Parameter Schema modal (`Milestone R15`).
+    pub fn open_signal_catalog_modal(&mut self) {
+        self.close_command_palette();
+        self.show_templates_modal = false;
+        self.show_hotkeys_modal = false;
+        self.rebinding_hotkey_action = None;
+        self.drawings.cancel_active_gesture();
+        self.show_signal_catalog_modal = true;
+        self.sync_confluence_causal();
+    }
+
+    /// Exposes cached causal historical signal hits for headless benchmark harness setup.
+    #[must_use]
+    pub fn watchlist_signal_hits_for_bench(&self) -> &[HistoricalSignalHit] {
+        &self.raw_historical_hits_cache
+    }
+
+    fn is_signal_bucket_causally_closed(
+        &self,
+        inst_id: &str,
+        bucket_open_ts: i64,
+        base_tf: Timeframe,
+        target_tf: Timeframe,
+        replay_cutoff: Option<i64>,
+        close_cutoff: Option<i64>,
+    ) -> bool {
+        let Some(cut) = close_cutoff else {
+            return true;
+        };
+        let min_base_close =
+            bucket_open_ts.saturating_add(base_tf.seconds().max(1).saturating_sub(1));
+        if cut < min_base_close {
+            return false;
+        }
+        if let Some(ref ctx) = self.scanner_context
+            && let Some(rev_hit) = ctx.revealed_signal(replay_cutoff)
+            && rev_hit.instrument_id == inst_id
+            && rev_hit.timeframe == target_tf
+            && rev_hit.timestamp == bucket_open_ts
+            && replay_cutoff.is_none_or(|rc| rc >= ctx.reveal_at_timestamp())
+        {
+            return true;
+        }
+        !is_bucket_incomplete_at_close(bucket_open_ts, cut, base_tf, target_tf)
+    }
+
+    /// Synchronizes the active symbol's 4-family [`CausalConfluenceReport`] (`DEF-001` zero-lookahead
+    /// & incomplete higher-timeframe tail exclusion) only when visible and dirty (`0.000 ms` on hover/pan/zoom).
+    pub fn sync_confluence_causal(&mut self) {
+        let close_cutoff = self.replay_causal_close_timestamp();
+        let replay_cutoff = self.replay.cutoff_timestamp(&self.base_candles);
+        if let Some((ref inst_id, inspected_ts, sig)) = self.inspected_signal_key {
+            let active_key = self.current_instrument_key();
+            let base_tf = if *inst_id == active_key {
+                self.base_timeframe
+            } else {
+                self.watchlist_universe
+                    .iter()
+                    .chain(self.custom_peer_feeds.iter())
+                    .find(|e| e.instrument_id == *inst_id)
+                    .map_or(self.base_timeframe, |e| e.base_timeframe)
+            };
+            let hit_tf = self
+                .raw_historical_hits_cache
+                .iter()
+                .find(|h| {
+                    h.instrument_id == *inst_id && h.timestamp == inspected_ts && h.signal == sig
+                })
+                .map_or(self.active_timeframe, |h| h.timeframe);
+            if !self.is_signal_bucket_causally_closed(
+                inst_id,
+                inspected_ts,
+                base_tf,
+                hit_tf,
+                replay_cutoff,
+                close_cutoff,
+            ) {
+                self.inspected_signal_key = None;
+            }
+        }
+        let needed = (self.show_scanner_dock && self.scanner_tab == ScannerDockTab::Signals)
+            || self.show_signal_catalog_modal;
+        if !needed {
+            return;
+        }
+        let incomplete_tail = self.is_active_tail_incomplete();
+        let last_ts = self.candles.last().map(|c| c.timestamp);
+        let check_key: ConfluenceSyncKey = (
+            self.dataset_generation,
+            self.candles.len(),
+            last_ts,
+            close_cutoff,
+            incomplete_tail,
+            self.confluence_profile,
+        );
+        if self.confluence_synced_key != Some(check_key) {
+            self.confluence_report_cache = Some(evaluate_causal_confluence(
+                &self.candles,
+                close_cutoff,
+                incomplete_tail,
+                self.confluence_profile,
+            ));
+            self.confluence_synced_key = Some(check_key);
+        }
+    }
+
+    /// Synchronizes [`DrawingInspectorDraft`] with the active instrument and selected causally eligible
+    /// drawing, auto-resyncing whenever selection, instrument, or external canvas state changes.
+    pub fn sync_drawing_inspector_draft(&mut self) {
+        let inst_key = self.current_instrument_key();
+        let Some(sel) = self.drawings.selected_drawing().cloned() else {
+            self.drawing_inspector_draft = None;
+            return;
+        };
+        let fresh = DrawingPropertyPatch::from_drawing(&sel);
+        let needs_reset = match &self.drawing_inspector_draft {
+            Some(st) => {
+                st.instrument_key != inst_key
+                    || st.drawing_id != sel.id
+                    || st.source_snapshot != fresh
+            }
+            None => true,
+        };
+        if needs_reset {
+            self.drawing_inspector_draft = Some(DrawingInspectorDraft {
+                instrument_key: inst_key,
+                drawing_id: sel.id,
+                source_snapshot: fresh.clone(),
+                draft: fresh,
+                last_error: None,
+            });
+        }
+    }
+
+    /// Returns `true` iff the Interactive Drawing Property Inspector holds uncommitted edits.
+    #[must_use]
+    pub fn is_drawing_inspector_dirty(&self) -> bool {
+        self.drawing_inspector_draft
+            .as_ref()
+            .is_some_and(|st| st.draft != st.source_snapshot)
+    }
+
+    /// Discards uncommitted edits in the Interactive Drawing Property Inspector without deselecting the drawing.
+    pub fn cancel_drawing_inspector_draft(&mut self) {
+        if let Some(ref mut st) = self.drawing_inspector_draft {
+            st.draft = st.source_snapshot.clone();
+            st.last_error = None;
+        }
+    }
+
+    /// Commits the current [`DrawingInspectorDraft`] as a single atomic [`DrawingCommand::Modify`]
+    /// and synchronizes causal Alerts & Risk-Reward Planner state.
+    pub fn apply_drawing_inspector_draft(&mut self) -> Result<bool, String> {
+        let Some(st) = self.drawing_inspector_draft.clone() else {
+            return Err("No drawing selected".to_owned());
+        };
+        match self.drawings.apply_drawing_property_patch(
+            st.drawing_id,
+            st.draft,
+            &self.candles,
+            self.active_timeframe,
+        ) {
+            Ok(changed) => {
+                if changed {
+                    self.auto_sync_planner_if_rr_box_changed();
+                    self.sync_alerts_causal();
+                }
+                self.sync_drawing_inspector_draft();
+                Ok(changed)
+            }
+            Err(err) => {
+                let msg = err.message().to_owned();
+                if let Some(ref mut cur) = self.drawing_inspector_draft {
+                    cur.last_error = Some(msg.clone());
+                }
+                Err(msg)
+            }
+        }
     }
 
     /// Switches to a built-in [`HotkeyProfileId`] preset (no-op for `Custom` unless already active).
@@ -3781,6 +4133,91 @@ impl SumiWorkstationApp {
             && self.equity_pane_source == EquityPaneSource::MultiAssetPortfolio
         {
             self.refresh_portfolio_mapped_curve();
+        }
+
+        // Synchronize Deterministic Monte Carlo Bootstrap (`SplitMix64`) cache (`0.000 ms` on pan/zoom/hover)
+        self.mc_config = self.mc_config.sanitized();
+        let mc_needed =
+            self.show_strategy_panel || (self.show_equity_pane && self.show_mc_fan_on_equity);
+        let mc_key = MonteCarloSyncKey {
+            dataset_generation: self.dataset_generation,
+            active_timeframe: self.active_timeframe,
+            candle_len: self.candles.len(),
+            last_ts,
+            replay_close_cutoff,
+            incomplete_tail,
+            cfg_digest,
+            wf_digest,
+            equity_pane_source: self.equity_pane_source,
+            portfolio_universe_filter: self.portfolio_universe_filter,
+            portfolio_weighting: self.portfolio_weighting,
+            simulations: self.mc_config.simulations,
+            seed: self.mc_config.seed,
+            ruin_bits: self.mc_config.ruin_drawdown_pct.to_bits(),
+            horizon_steps: self.mc_config.horizon_steps,
+        };
+        if self.mc_synced_key != Some(mc_key) {
+            if mc_needed {
+                let mc_rep = match self.equity_pane_source {
+                    EquityPaneSource::SingleAssetBacktest => {
+                        if let Some(ref bt) = self.backtest_result {
+                            Some(run_monte_carlo_bootstrap(
+                                bt.config.initial_cash,
+                                &bt.trades,
+                                &bt.equity_curve,
+                                self.candles.len(),
+                                replay_close_cutoff,
+                                self.mc_config,
+                            ))
+                        } else {
+                            None
+                        }
+                    }
+                    EquityPaneSource::WalkForwardOos => {
+                        if self.walk_forward_report.is_none() {
+                            self.run_active_walk_forward();
+                        }
+                        self.walk_forward_report.as_ref().map(|wf| {
+                            run_monte_carlo_bootstrap(
+                                self.backtest_config.initial_cash,
+                                &wf.stitched_oos_trades,
+                                &wf.stitched_oos_curve,
+                                self.candles.len(),
+                                replay_close_cutoff,
+                                self.mc_config,
+                            )
+                        })
+                    }
+                    EquityPaneSource::MultiAssetPortfolio => {
+                        if self.portfolio_report.is_none() {
+                            self.run_active_portfolio_backtest();
+                        }
+                        self.refresh_portfolio_mapped_curve();
+                        match (
+                            self.portfolio_report.as_ref(),
+                            self.portfolio_mapped_curve.as_ref(),
+                        ) {
+                            (Some(port), Some(mapped)) => Some(run_monte_carlo_portfolio_mapped(
+                                port.portfolio_tearsheet.initial_cash,
+                                &port.portfolio_equity_curve,
+                                &mapped.equity_values,
+                                &self.candles,
+                                replay_close_cutoff,
+                                self.mc_config,
+                            )),
+                            _ => None,
+                        }
+                    }
+                };
+                self.monte_carlo_report = mc_rep;
+                self.mc_synced_key = Some(mc_key);
+                if self.viewport.equity_price_scale.is_auto_scale() {
+                    self.viewport.equity_price_scale.reset_auto_scale();
+                }
+            } else {
+                self.monte_carlo_report = None;
+                self.mc_synced_key = None;
+            }
         }
     }
 
@@ -4848,6 +5285,15 @@ impl SumiWorkstationApp {
                 .then_some(self.backtest_result.as_ref())
                 .flatten(),
             equity_override,
+            monte_carlo_fan: (has_backtest_visuals
+                && self.show_equity_pane
+                && self.show_mc_fan_on_equity)
+                .then_some(
+                    self.monte_carlo_report
+                        .as_ref()
+                        .and_then(|r| r.bar_fan.as_ref()),
+                )
+                .flatten(),
             show_equity_pane: self.show_equity_pane,
             show_backtest_trades_on_chart: self.show_backtest_trades,
             focused_backtest_trade_id: self.focused_backtest_trade_id,
@@ -4924,6 +5370,7 @@ impl SumiWorkstationApp {
             alert_engine: None,
             backtest_result: None,
             equity_override: None,
+            monte_carlo_fan: None,
             show_equity_pane: false,
             show_backtest_trades_on_chart: false,
             focused_backtest_trade_id: None,
@@ -5951,6 +6398,7 @@ impl SumiWorkstationApp {
     pub fn open_command_palette(&mut self) {
         self.show_templates_modal = false;
         self.show_hotkeys_modal = false;
+        self.show_signal_catalog_modal = false;
         self.rebinding_hotkey_action = None;
         self.drawings.cancel_active_gesture();
         self.viewport.cancel_active_interactions();
@@ -6220,6 +6668,38 @@ impl SumiWorkstationApp {
             format!("Current: {:?}", self.drawings.magnet_mode),
             "magnet snap ohlc drawing".to_owned(),
             PaletteAction::ToggleMagnet,
+        );
+        push_scored(
+            PaletteCategory::Drawing,
+            "Toggle Drawing Property Inspector (R15)".to_owned(),
+            if self.show_drawing_inspector {
+                "Currently OPEN · Transactional style, anchors, lock & visibility editor"
+            } else {
+                "Currently CLOSED · Edit drawing style, anchors, lock & visibility"
+            }
+            .to_owned(),
+            "drawing property inspector edit anchors color width dash opacity lock visible"
+                .to_owned(),
+            PaletteAction::ToggleDrawingInspector,
+        );
+        push_scored(
+            PaletteCategory::Indicator,
+            "Open Explainable Signal Catalog & Confluence Schema (R15)".to_owned(),
+            "Browse 17 causal definitions across 12 categories (EN/VI + OHLCV_PROXY)".to_owned(),
+            "signal catalog confluence health vsa divergence ichimoku explain".to_owned(),
+            PaletteAction::OpenSignalCatalogModal,
+        );
+        push_scored(
+            PaletteCategory::Backtest,
+            "Toggle Monte Carlo Bootstrap Equity Fan (R15)".to_owned(),
+            if self.show_mc_fan_on_equity {
+                "Currently ON · p5/p25/p50/p75/p95 SplitMix64 envelopes on Equity pane"
+            } else {
+                "Currently OFF · Show deterministic bootstrap fan bands on Equity pane"
+            }
+            .to_owned(),
+            "monte carlo bootstrap fan var cvar quantile equity risk".to_owned(),
+            PaletteAction::ToggleMonteCarloEquityFan,
         );
 
         // 6. Workspace Docks, Alerts, Trading, Replay & Scale Modes
@@ -6856,6 +7336,7 @@ impl SumiWorkstationApp {
             }
             PaletteAction::OpenTemplatesModal => {
                 self.show_hotkeys_modal = false;
+                self.show_signal_catalog_modal = false;
                 self.rebinding_hotkey_action = None;
                 self.show_templates_modal = true;
             }
@@ -6864,6 +7345,19 @@ impl SumiWorkstationApp {
             }
             PaletteAction::SetHotkeyProfile(preset_id) => {
                 self.set_hotkey_profile(preset_id);
+            }
+            PaletteAction::OpenSignalCatalogModal => {
+                self.open_signal_catalog_modal();
+            }
+            PaletteAction::ToggleDrawingInspector => {
+                self.show_drawing_inspector = !self.show_drawing_inspector;
+                self.sync_drawing_inspector_draft();
+            }
+            PaletteAction::ToggleMonteCarloEquityFan => {
+                self.show_equity_pane = true;
+                self.show_mc_fan_on_equity = !self.show_mc_fan_on_equity;
+                self.viewport.equity_price_scale.reset_auto_scale();
+                self.sync_backtest_causal();
             }
             PaletteAction::ApplyBuiltinTemplate(idx) => {
                 if let Some(tpl) = builtin_workspace_templates().get(idx) {
@@ -7681,8 +8175,10 @@ impl SumiWorkstationApp {
             self.toggle_command_palette();
         }
 
-        let any_modal_open =
-            self.command_palette.open || self.show_templates_modal || self.show_hotkeys_modal;
+        let any_modal_open = self.command_palette.open
+            || self.show_templates_modal
+            || self.show_hotkeys_modal
+            || self.show_signal_catalog_modal;
         if self.command_palette.open {
             let vp_rect = ui.input(|i| i.viewport_rect());
             let modal_est = command_palette_modal_rect_estimate(vp_rect);
@@ -7722,8 +8218,38 @@ impl SumiWorkstationApp {
                         .retain(|ev| !matches!(ev, egui::Event::MouseWheel { .. }));
                 }
             });
+        } else if self.show_signal_catalog_modal {
+            let vp_rect = ui.input(|i| i.viewport_rect());
+            let modal_rect = self
+                .last_signal_catalog_modal_rect
+                .unwrap_or_else(|| Self::signal_catalog_modal_rect(vp_rect));
+            ui.input_mut(|i| {
+                let _ = i.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
+                let _ = i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab);
+                if i.pointer
+                    .hover_pos()
+                    .is_none_or(|pos| !modal_rect.contains(pos))
+                {
+                    i.smooth_scroll_delta = Vec2::ZERO;
+                    i.raw
+                        .events
+                        .retain(|ev| !matches!(ev, egui::Event::MouseWheel { .. }));
+                }
+            });
         } else {
             self.last_hotkeys_modal_rect = None;
+            self.last_signal_catalog_modal_rect = None;
+        }
+
+        // Intercept plain `Escape` before canvas `handle_drawing_keyboard_shortcuts` when the
+        // Drawing Property Inspector holds uncommitted dirty edits (`DrawingInspector.tsx:52-55`),
+        // discarding the draft without deselecting the drawing on the chart!
+        if !any_modal_open && self.show_drawing_inspector && self.is_drawing_inspector_dirty() {
+            let consumed_esc =
+                ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+            if consumed_esc {
+                self.cancel_drawing_inspector_draft();
+            }
         }
 
         if self.replay.is_playing() && !any_modal_open {
@@ -8476,6 +9002,12 @@ impl SumiWorkstationApp {
                     {
                         let _ = self.drawings.clear_unlocked();
                     }
+                    let _ = indicator_toggle_pill(
+                        ui,
+                        &mut self.show_drawing_inspector,
+                        "Inspect",
+                        Color32::from_rgb(255, 193, 7),
+                    );
 
                     if let Some(sel) = self.drawings.selected_drawing().cloned() {
                         ui.separator();
@@ -8596,9 +9128,13 @@ impl SumiWorkstationApp {
                 }
             });
 
-        // Synchronize dirty-tracked indicator, session VWAP, causal RS, backtest & secondary grid slots
+        // Synchronize dirty-tracked indicator, session VWAP, causal RS, backtest, confluence, alerts, planner, drawing draft & secondary grid slots
         self.sync_indicators_and_benchmarks();
         self.sync_backtest_causal();
+        self.sync_confluence_causal();
+        self.auto_sync_planner_if_rr_box_changed();
+        self.sync_alerts_causal();
+        self.sync_drawing_inspector_draft();
         self.sync_secondary_slots();
 
         // 2. Bottom Telemetry Status Bar
@@ -8667,7 +9203,7 @@ impl SumiWorkstationApp {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(format!(
-                                    "R14 [{grid_badge}]  |  {} ({}->{})  |  RPL: {replay_tag}  |  ALT: {armed_alerts}A/{trig_events}T  |  EQ: ${:.0} ({:+.0}){bt_tag}  |  {}P/{}D  |  BARS: {}/{} ({first_date}..{last_date}) {}x  |  {scale_mode}({auto_tag})  |  {:.0}×{:.0}",
+                                    "R15 [{grid_badge}]  |  {} ({}->{})  |  RPL: {replay_tag}  |  ALT: {armed_alerts}A/{trig_events}T  |  EQ: ${:.0} ({:+.0}){bt_tag}  |  {}P/{}D  |  BARS: {}/{} ({first_date}..{last_date}) {}x  |  {scale_mode}({auto_tag})  |  {:.0}×{:.0}",
                                     self.data_source.short_label(),
                                     self.base_timeframe,
                                     self.active_timeframe,
@@ -8691,7 +9227,7 @@ impl SumiWorkstationApp {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(format!(
-                                    "R14 [{grid_badge}]  |  RPL: {replay_tag}  |  ALT: {armed_alerts} armed{bt_tag}  |  BARS: {} ({first_date}..{last_date})",
+                                    "R15 [{grid_badge}]  |  RPL: {replay_tag}  |  ALT: {armed_alerts} armed{bt_tag}  |  BARS: {} ({first_date}..{last_date})",
                                     self.candles.len()
                                 ))
                                 .monospace()
@@ -8792,6 +9328,28 @@ impl SumiWorkstationApp {
                         ui.disable();
                     }
                     self.render_right_dock(ui);
+                });
+        }
+
+        // 3b. Optional Interactive Drawing Property Inspector Panel (`Milestone R15`)
+        if self.show_drawing_inspector {
+            let insp_frame = Frame::new()
+                .fill(palette::BG_WORKSTATION)
+                .inner_margin(Margin::symmetric(8, 8))
+                .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE));
+            let win_w = ui.ctx().content_rect().width();
+            let def_w = if win_w < 1060.0 { 236.0 } else { 258.0 };
+            egui::Panel::right("drawing_inspector_panel")
+                .resizable(true)
+                .default_size(def_w)
+                .size_range(216.0..=320.0)
+                .frame(insp_frame)
+                .show(ui, |ui| {
+                    if any_modal_open {
+                        ui.visuals_mut().disabled_alpha = 1.0;
+                        ui.disable();
+                    }
+                    self.render_drawing_inspector_panel(ui);
                 });
         }
 
@@ -9037,13 +9595,15 @@ impl SumiWorkstationApp {
             ui.ctx().request_repaint();
         }
 
-        // 4b. Floating `Cmd+K` / `Ctrl+K` Command Palette, `Workspace Layout Templates` & `Hotkeys` Modals (`R08`, `R12`, `R14`)
+        // 4b. Floating `Cmd+K` / `Ctrl+K` Command Palette, `Workspace Layout Templates`, `Hotkeys` & `Signal Catalog` Modals (`R08`, `R12`, `R14`, `R15`)
         if self.command_palette.open {
             self.render_command_palette_modal(ui);
         } else if self.show_templates_modal {
             self.render_templates_modal(ui);
         } else if self.show_hotkeys_modal {
             self.render_hotkeys_modal(ui);
+        } else if self.show_signal_catalog_modal {
+            self.render_signal_catalog_modal(ui);
         }
 
         // 5. Non-modal global hotkey & replay transport dispatch (gated via `is_global_hotkey_eligible`)
@@ -10524,13 +11084,45 @@ impl SumiWorkstationApp {
     fn render_scanner_dock(&mut self, ui: &mut egui::Ui) {
         self.sync_scanner_caches();
         let active_key = self.current_instrument_key();
-        let rows = filter_and_sort_watchlist(
-            &self.raw_watchlist_rows_cache,
-            &self.scanner_filter,
-            self.watchlist_sort_col,
-            self.watchlist_sort_asc,
-        );
-        let hits = filter_historical_signals(&self.raw_historical_hits_cache, &self.scanner_filter);
+        if self.filtered_watchlist_cache.as_ref().is_none_or(|c| {
+            c.synced_key != self.scanner_synced_key
+                || c.filter != self.scanner_filter
+                || c.sort_col != self.watchlist_sort_col
+                || c.sort_asc != self.watchlist_sort_asc
+        }) {
+            let built = filter_and_sort_watchlist(
+                &self.raw_watchlist_rows_cache,
+                &self.scanner_filter,
+                self.watchlist_sort_col,
+                self.watchlist_sort_asc,
+            );
+            self.filtered_watchlist_cache = Some(FilteredWatchlistCache {
+                synced_key: self.scanner_synced_key.clone(),
+                filter: self.scanner_filter.clone(),
+                sort_col: self.watchlist_sort_col,
+                sort_asc: self.watchlist_sort_asc,
+                rows: built,
+            });
+        }
+        if self.filtered_signals_cache.as_ref().is_none_or(|c| {
+            c.synced_key != self.scanner_synced_key || c.filter != self.scanner_filter
+        }) {
+            let built =
+                filter_historical_signals(&self.raw_historical_hits_cache, &self.scanner_filter);
+            self.filtered_signals_cache = Some(FilteredSignalsCache {
+                synced_key: self.scanner_synced_key.clone(),
+                filter: self.scanner_filter.clone(),
+                hits: built,
+            });
+        }
+        let rows_len = self
+            .filtered_watchlist_cache
+            .as_ref()
+            .map_or(0, |c| c.rows.len());
+        let hits_len = self
+            .filtered_signals_cache
+            .as_ref()
+            .map_or(0, |c| c.hits.len());
 
         ui.spacing_mut().item_spacing = Vec2::new(5.0, 6.0);
 
@@ -10558,8 +11150,8 @@ impl SumiWorkstationApp {
             let third_w = ((ui.available_width() - 2.0 * sp_x - 2.0) / 3.0).max(58.0);
             let breadth_count = self.breadth_snapshot_cache.rotations.len();
             for (tab, lbl) in [
-                (ScannerDockTab::Watchlist, format!("Watch ({})", rows.len())),
-                (ScannerDockTab::Signals, format!("Sig ({})", hits.len())),
+                (ScannerDockTab::Watchlist, format!("Watch ({rows_len})")),
+                (ScannerDockTab::Signals, format!("Sig ({hits_len})")),
                 (
                     ScannerDockTab::Breadth,
                     format!("Breadth ({breadth_count})"),
@@ -10750,13 +11342,17 @@ impl SumiWorkstationApp {
                     }
                 });
 
+                let rows_slice = self
+                    .filtered_watchlist_cache
+                    .as_ref()
+                    .map_or(&[][..], |c| c.rows.as_slice());
                 let mut clicked_instrument: Option<(DataSourcePreset, String)> = None;
                 egui::ScrollArea::vertical()
                     .id_salt("sumi_watchlist_scroll")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
-                        for row in &rows {
+                        for row in rows_slice {
                             let is_active = row.instrument_id == active_key;
                             let card_fill = if is_active {
                                 Color32::from_rgb(25, 36, 56)
@@ -10922,126 +11518,243 @@ impl SumiWorkstationApp {
                 }
             }
             ScannerDockTab::Signals => {
-                let mut launch_req: Option<(HistoricalSignalHit, ScannerReplayIntent)> = None;
-                egui::ScrollArea::vertical()
-                    .id_salt("sumi_signals_scroll")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing = Vec2::new(4.0, 5.0);
-                        if hits.is_empty() {
-                            ui.label(
-                                RichText::new("No causal signals match current filter.")
-                                    .monospace()
-                                    .size(10.0)
-                                    .color(palette::TEXT_MUTED),
-                            );
-                        }
-                        for hit in hits.iter().take(64) {
-                            let sig_color = match hit.direction {
-                                SignalDirection::Bullish => palette::BULLISH,
-                                SignalDirection::Bearish => palette::BEARISH,
+                self.sync_confluence_causal();
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(4.0, 3.0);
+                    let cat_btn = Button::new(
+                        RichText::new(format!("Catalog ({})", SIGNAL_CATALOG.len()))
+                            .monospace()
+                            .strong()
+                            .size(9.8)
+                            .color(Color32::from_rgb(130, 210, 255)),
+                    )
+                    .fill(palette::ACCENT_BLUE.gamma_multiply(0.18))
+                    .stroke(Stroke::new(1.0, palette::ACCENT_BLUE.gamma_multiply(0.75)));
+                    if ui.add(cat_btn).clicked() {
+                        self.open_signal_catalog_modal();
+                    }
+                    let _ = indicator_toggle_pill(
+                        ui,
+                        &mut self.show_confluence_inspector,
+                        "Confluence",
+                        palette::BULLISH,
+                    );
+                    if self.show_confluence_inspector {
+                        let prof_lbl = match self.confluence_profile {
+                            ConfluenceWeightProfile::Balanced => "35/25/20/20",
+                            ConfluenceWeightProfile::TrendFocused => "50/20/15/15",
+                        };
+                        if ui
+                            .button(RichText::new(prof_lbl).monospace().size(9.2))
+                            .clicked()
+                        {
+                            self.confluence_profile = match self.confluence_profile {
+                                ConfluenceWeightProfile::Balanced => {
+                                    ConfluenceWeightProfile::TrendFocused
+                                }
+                                ConfluenceWeightProfile::TrendFocused => {
+                                    ConfluenceWeightProfile::Balanced
+                                }
                             };
-                            Frame::new()
-                                .fill(Color32::from_rgb(18, 22, 32))
-                                .corner_radius(CornerRadius::same(4))
-                                .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
-                                .inner_margin(Margin::symmetric(7, 5))
-                                .show(ui, |ui| {
-                                    ui.set_min_width(ui.available_width());
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            RichText::new(format!(
-                                                "{} · {}",
-                                                hit.symbol,
-                                                hit.timeframe.label()
-                                            ))
-                                            .monospace()
-                                            .strong()
-                                            .size(10.8)
-                                            .color(palette::TEXT_PRIMARY),
-                                        );
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                ui.label(
-                                                    RichText::new(format!(
-                                                        "{} · {}",
-                                                        hit.signal.short_label(),
-                                                        hit.regime.short_label()
-                                                    ))
+                            self.confluence_synced_key = None;
+                            self.sync_confluence_causal();
+                        }
+                    }
+                });
+
+                let close_cutoff = self.replay_causal_close_timestamp();
+                self.sync_inspected_signal_eval_cache(close_cutoff);
+                if self.show_confluence_inspector {
+                    self.render_confluence_inspector_card(ui);
+                }
+
+                let mut launch_req: Option<(HistoricalSignalHit, ScannerReplayIntent)> = None;
+                let mut toggle_explain_key: Option<(String, i64, ScanSignalKind)> = None;
+                let hits_slice = self
+                    .filtered_signals_cache
+                    .as_ref()
+                    .map_or(&[][..], |c| c.hits.as_slice());
+                let capped_len = hits_slice.len().min(64);
+                if capped_len == 0 {
+                    ui.label(
+                        RichText::new("No causal signals match current filter.")
+                            .monospace()
+                            .size(10.0)
+                            .color(palette::TEXT_MUTED),
+                    );
+                } else {
+                    egui::ScrollArea::vertical()
+                        .id_salt("sumi_signals_scroll")
+                        .auto_shrink([false, false])
+                        .show_rows(ui, 64.0, capped_len, |ui, row_range| {
+                            ui.spacing_mut().item_spacing = Vec2::new(4.0, 5.0);
+                            for hit in &hits_slice[row_range] {
+                                let sig_color = match hit.direction {
+                                    SignalDirection::Bullish => palette::BULLISH,
+                                    SignalDirection::Bearish => palette::BEARISH,
+                                };
+                                let is_inspected = self.inspected_signal_key.as_ref().is_some_and(
+                                    |(id, ts, sig)| {
+                                        id == &hit.instrument_id
+                                            && *ts == hit.timestamp
+                                            && *sig == hit.signal
+                                    },
+                                );
+                                let cat_entry = find_catalog_entry_for_scan_kind(hit.signal);
+                                Frame::new()
+                                    .fill(Color32::from_rgb(18, 22, 32))
+                                    .corner_radius(CornerRadius::same(4))
+                                    .stroke(Stroke::new(
+                                        1.0,
+                                        if is_inspected {
+                                            palette::ACCENT_BLUE
+                                        } else {
+                                            palette::BORDER_SUBTLE
+                                        },
+                                    ))
+                                    .inner_margin(Margin::symmetric(7, 5))
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(ui.available_width());
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "{} · {}",
+                                                    hit.symbol,
+                                                    hit.timeframe.label()
+                                                ))
+                                                .monospace()
+                                                .strong()
+                                                .size(10.8)
+                                                .color(palette::TEXT_PRIMARY),
+                                            );
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    ui.label(
+                                                        RichText::new(format!(
+                                                            "{} · {}",
+                                                            hit.signal.short_label(),
+                                                            hit.regime.short_label()
+                                                        ))
+                                                        .monospace()
+                                                        .strong()
+                                                        .size(10.0)
+                                                        .color(sig_color),
+                                                    );
+                                                },
+                                            );
+                                        });
+
+                                        let ts_lbl = if hit.timeframe.is_intraday() {
+                                            format_utc_datetime_hm(hit.timestamp)
+                                        } else {
+                                            format_utc_date(hit.timestamp)
+                                        };
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "@ {} · {ts_lbl}",
+                                                    format_scanner_price(hit.price)
+                                                ))
+                                                .monospace()
+                                                .size(9.6)
+                                                .color(palette::TEXT_MUTED),
+                                            );
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    let exp_lbl = if is_inspected {
+                                                        "Hide ▲"
+                                                    } else {
+                                                        "Explain ▼"
+                                                    };
+                                                    if ui
+                                                        .small_button(
+                                                            RichText::new(exp_lbl)
+                                                                .monospace()
+                                                                .size(9.0),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        toggle_explain_key = Some((
+                                                            hit.instrument_id.clone(),
+                                                            hit.timestamp,
+                                                            hit.signal,
+                                                        ));
+                                                    }
+                                                    if cat_entry.is_ohlcv_proxy {
+                                                        ui.label(
+                                                            RichText::new("PROXY")
+                                                                .monospace()
+                                                                .size(8.6)
+                                                                .color(palette::ALERT_ARMED_AMBER),
+                                                        );
+                                                    }
+                                                },
+                                            );
+                                        });
+
+                                        if is_inspected {
+                                            self.render_inline_signal_hit_explanation(ui, hit);
+                                        }
+
+                                        ui.horizontal(|ui| {
+                                            let sp_x = ui.spacing().item_spacing.x;
+                                            let btn_w = ((ui.available_width() - sp_x - 2.0) * 0.5)
+                                                .max(60.0);
+                                            let blind_btn = Button::new(
+                                                RichText::new("Blind Practice")
                                                     .monospace()
                                                     .strong()
-                                                    .size(10.0)
-                                                    .color(sig_color),
-                                                );
-                                            },
-                                        );
+                                                    .size(9.8)
+                                                    .color(palette::ALERT_ARMED_AMBER),
+                                            )
+                                            .fill(palette::ALERT_ARMED_AMBER.gamma_multiply(0.16))
+                                            .stroke(Stroke::new(
+                                                1.0,
+                                                palette::ALERT_ARMED_AMBER.gamma_multiply(0.75),
+                                            ))
+                                            .min_size(Vec2::new(btn_w, 20.0));
+
+                                            let review_btn = Button::new(
+                                                RichText::new("Signal Review")
+                                                    .monospace()
+                                                    .strong()
+                                                    .size(9.8)
+                                                    .color(Color32::from_rgb(120, 200, 255)),
+                                            )
+                                            .fill(palette::ACCENT_BLUE.gamma_multiply(0.18))
+                                            .stroke(Stroke::new(
+                                                1.0,
+                                                palette::ACCENT_BLUE.gamma_multiply(0.75),
+                                            ))
+                                            .min_size(Vec2::new(btn_w, 20.0));
+
+                                            if ui.add(blind_btn).clicked() {
+                                                launch_req = Some((
+                                                    hit.clone(),
+                                                    ScannerReplayIntent::BlindPractice,
+                                                ));
+                                            }
+                                            if ui.add(review_btn).clicked() {
+                                                launch_req = Some((
+                                                    hit.clone(),
+                                                    ScannerReplayIntent::SignalReview,
+                                                ));
+                                            }
+                                        });
                                     });
+                            }
+                        });
+                }
 
-                                    let ts_lbl = if hit.timeframe.is_intraday() {
-                                        format_utc_datetime_hm(hit.timestamp)
-                                    } else {
-                                        format_utc_date(hit.timestamp)
-                                    };
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "@ {} · {ts_lbl}",
-                                            format_scanner_price(hit.price)
-                                        ))
-                                        .monospace()
-                                        .size(9.6)
-                                        .color(palette::TEXT_MUTED),
-                                    );
-
-                                    ui.horizontal(|ui| {
-                                        let sp_x = ui.spacing().item_spacing.x;
-                                        let btn_w =
-                                            ((ui.available_width() - sp_x - 2.0) * 0.5).max(60.0);
-                                        let blind_btn = Button::new(
-                                            RichText::new("Blind Practice")
-                                                .monospace()
-                                                .strong()
-                                                .size(9.8)
-                                                .color(palette::ALERT_ARMED_AMBER),
-                                        )
-                                        .fill(palette::ALERT_ARMED_AMBER.gamma_multiply(0.16))
-                                        .stroke(Stroke::new(
-                                            1.0,
-                                            palette::ALERT_ARMED_AMBER.gamma_multiply(0.75),
-                                        ))
-                                        .min_size(Vec2::new(btn_w, 20.0));
-
-                                        let review_btn = Button::new(
-                                            RichText::new("Signal Review")
-                                                .monospace()
-                                                .strong()
-                                                .size(9.8)
-                                                .color(Color32::from_rgb(120, 200, 255)),
-                                        )
-                                        .fill(palette::ACCENT_BLUE.gamma_multiply(0.18))
-                                        .stroke(Stroke::new(
-                                            1.0,
-                                            palette::ACCENT_BLUE.gamma_multiply(0.75),
-                                        ))
-                                        .min_size(Vec2::new(btn_w, 20.0));
-
-                                        if ui.add(blind_btn).clicked() {
-                                            launch_req = Some((
-                                                hit.clone(),
-                                                ScannerReplayIntent::BlindPractice,
-                                            ));
-                                        }
-                                        if ui.add(review_btn).clicked() {
-                                            launch_req = Some((
-                                                hit.clone(),
-                                                ScannerReplayIntent::SignalReview,
-                                            ));
-                                        }
-                                    });
-                                });
-                        }
-                    });
-
+                if let Some(k) = toggle_explain_key {
+                    if self.inspected_signal_key.as_ref() == Some(&k) {
+                        self.inspected_signal_key = None;
+                    } else {
+                        self.inspected_signal_key = Some(k);
+                    }
+                }
                 if let Some((hit, intent)) = launch_req {
                     let _ = self.start_scanner_signal_replay(hit, intent);
                 }
@@ -12232,7 +12945,14 @@ impl SumiWorkstationApp {
                                         );
                                     }
                                 });
+                        }
 
+                        if self.backtest_result.is_some() {
+                            self.render_monte_carlo_tearsheet_card(ui);
+                        }
+
+                        if let Some(ref bt) = self.backtest_result {
+                            let ts = &bt.tearsheet;
                             // Quantitative Performance Tearsheet Grid
                             Frame::new()
                                 .fill(Color32::from_rgb(16, 20, 29))
@@ -15623,6 +16343,1390 @@ impl SumiWorkstationApp {
             ui.ctx().request_repaint();
         }
     }
+
+    pub(crate) fn signal_catalog_modal_rect(vp: egui::Rect) -> egui::Rect {
+        let w = (vp.width() - 56.0).clamp(340.0, 780.0);
+        let h = (vp.height() - 56.0).clamp(280.0, 560.0);
+        let min_x = vp.left() + ((vp.width() - w) * 0.5).max(8.0);
+        let min_y = vp.top() + ((vp.height() - h) * 0.5).max(8.0);
+        egui::Rect::from_min_size(egui::Pos2::new(min_x, min_y), Vec2::new(w, h))
+    }
+
+    fn render_signal_catalog_modal(&mut self, ui: &mut egui::Ui) {
+        self.sync_confluence_causal();
+        let vp = ui.input(|i| i.viewport_rect());
+        let target_rect = Self::signal_catalog_modal_rect(vp);
+        let modal_w = target_rect.width();
+        let modal_max_h = target_rect.height();
+
+        let esc_pressed = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        let mut close_clicked = esc_pressed;
+        let mut filter_scan_req: Option<ScanSignalKind> = None;
+
+        let scrim_resp = egui::Area::new(egui::Id::new("signal_catalog_modal_scrim"))
+            .order(egui::Order::Middle)
+            .fade_in(false)
+            .fixed_pos(vp.min)
+            .show(ui.ctx(), |ui| {
+                let (rect, resp) = ui.allocate_exact_size(vp.size(), egui::Sense::click_and_drag());
+                ui.painter().rect_filled(
+                    rect,
+                    CornerRadius::ZERO,
+                    Color32::from_rgba_unmultiplied(6, 9, 15, 192),
+                );
+                resp
+            })
+            .inner;
+
+        let filtered =
+            filter_signal_catalog(self.signal_catalog_category, &self.signal_catalog_search);
+
+        let modal_area = egui::Area::new(egui::Id::new("signal_catalog_modal_card"))
+            .order(egui::Order::Foreground)
+            .fade_in(false)
+            .fixed_pos(target_rect.min)
+            .show(ui.ctx(), |ui| {
+                Frame::new()
+                    .fill(Color32::from_rgb(17, 22, 33))
+                    .stroke(Stroke::new(1.5, palette::ACCENT_BLUE))
+                    .corner_radius(CornerRadius::same(8))
+                    .inner_margin(Margin::symmetric(14, 10))
+                    .show(ui, |ui| {
+                        ui.set_width((modal_w - 28.0).max(120.0));
+                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("EXPLAINABLE SIGNAL CATALOG & CAUSAL SCHEMA")
+                                    .monospace()
+                                    .strong()
+                                    .size(12.8)
+                                    .color(palette::TEXT_PRIMARY),
+                            );
+                            Frame::new()
+                                .fill(palette::ALERT_ARMED_AMBER.gamma_multiply(0.18))
+                                .stroke(Stroke::new(1.0, palette::ALERT_ARMED_AMBER))
+                                .corner_radius(CornerRadius::same(3))
+                                .inner_margin(Margin::symmetric(6, 2))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{}/{} · {}",
+                                            filtered.len(),
+                                            SIGNAL_CATALOG.len(),
+                                            CONFLUENCE_DATA_FIDELITY_PROXY
+                                        ))
+                                        .monospace()
+                                        .size(9.5)
+                                        .color(palette::ALERT_ARMED_AMBER),
+                                    );
+                                });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .button(RichText::new("Close ×").monospace().size(11.0))
+                                        .clicked()
+                                    {
+                                        close_clicked = true;
+                                    }
+                                },
+                            );
+                        });
+
+                        ui.horizontal(|ui| {
+                            let search_w = (ui.available_width() - 135.0).max(120.0);
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.signal_catalog_search)
+                                    .desired_width(search_w)
+                                    .hint_text("Search EN / VI / AST alias / category...")
+                                    .font(egui::FontId::monospace(10.5)),
+                            );
+                            truncate_utf8_bytes(&mut self.signal_catalog_search, 64);
+                            let _ = indicator_toggle_pill(
+                                ui,
+                                &mut self.show_catalog_advanced_params,
+                                "Adv Params",
+                                palette::ACCENT_BLUE,
+                            );
+                        });
+
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(4.0, 3.0);
+                            for cat in SignalCategory::ALL_TABS {
+                                let sel = self.signal_catalog_category == cat;
+                                if ui
+                                    .selectable_label(
+                                        sel,
+                                        RichText::new(cat.short_label()).monospace().size(9.8),
+                                    )
+                                    .clicked()
+                                {
+                                    self.signal_catalog_category = cat;
+                                }
+                            }
+                        });
+
+                        let scroll_h = (modal_max_h - 128.0).max(140.0);
+                        let row_est_h = if self.show_catalog_advanced_params {
+                            84.0
+                        } else {
+                            58.0
+                        };
+                        let show_adv = self.show_catalog_advanced_params;
+                        let conf_ref = self.confluence_report_cache.as_ref();
+                        egui::ScrollArea::vertical()
+                            .id_salt("sumi_signal_catalog_scroll")
+                            .max_height(scroll_h)
+                            .auto_shrink([false, false])
+                            .show_rows(ui, row_est_h, filtered.len(), |ui, row_range| {
+                                ui.spacing_mut().item_spacing = Vec2::new(4.0, 5.0);
+                                for entry in &filtered[row_range] {
+                                    let live_ev = conf_ref.and_then(|rep| {
+                                        rep.evaluations.iter().find(|e| e.catalog_id == entry.id)
+                                    });
+                                    Frame::new()
+                                        .fill(Color32::from_rgb(22, 27, 40))
+                                        .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                                        .corner_radius(CornerRadius::same(4))
+                                        .inner_margin(Margin::symmetric(8, 6))
+                                        .show(ui, |ui| {
+                                            ui.set_min_width(ui.available_width());
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "[{}] {} · {}",
+                                                        entry.category.short_label(),
+                                                        entry.label_en,
+                                                        entry.label_vi
+                                                    ))
+                                                    .monospace()
+                                                    .strong()
+                                                    .size(10.4)
+                                                    .color(palette::TEXT_PRIMARY),
+                                                );
+                                                ui.with_layout(
+                                                    egui::Layout::right_to_left(
+                                                        egui::Align::Center,
+                                                    ),
+                                                    |ui| {
+                                                        if let Some(sk) = entry.scan_kind
+                                                            && ui
+                                                                .small_button(
+                                                                    RichText::new("Filter")
+                                                                        .monospace()
+                                                                        .size(9.2),
+                                                                )
+                                                                .clicked()
+                                                        {
+                                                            filter_scan_req = Some(sk);
+                                                        }
+                                                        if let Some(ev) = live_ev {
+                                                            let q_col = if ev.quality.is_valid() {
+                                                                palette::BULLISH
+                                                            } else {
+                                                                palette::ALERT_ARMED_AMBER
+                                                            };
+                                                            ui.label(
+                                                                RichText::new(ev.quality.code())
+                                                                    .monospace()
+                                                                    .strong()
+                                                                    .size(9.2)
+                                                                    .color(q_col),
+                                                            );
+                                                        }
+                                                        if entry.is_ohlcv_proxy {
+                                                            ui.label(
+                                                                RichText::new("OHLCV_PROXY")
+                                                                    .monospace()
+                                                                    .size(9.0)
+                                                                    .color(
+                                                                        palette::ALERT_ARMED_AMBER,
+                                                                    ),
+                                                            );
+                                                        }
+                                                        if entry.status
+                                                            == SignalStatus::Experimental
+                                                        {
+                                                            ui.label(
+                                                                RichText::new("EXP")
+                                                                    .monospace()
+                                                                    .size(9.0)
+                                                                    .color(Color32::from_rgb(
+                                                                        179, 136, 255,
+                                                                    )),
+                                                            );
+                                                        }
+                                                    },
+                                                );
+                                            });
+
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "id={} · alias={} · out={} · warmup={}B · delay={}B · v{} · hash=#{:08X}",
+                                                    entry.id,
+                                                    entry.ast_alias,
+                                                    entry.output_type.short_label(),
+                                                    entry.warmup_bars,
+                                                    entry.causal_delay_bars,
+                                                    entry.version,
+                                                    (entry.params_digest() & 0xFFFF_FFFF) as u32,
+                                                ))
+                                                .monospace()
+                                                .size(9.2)
+                                                .color(palette::TEXT_MUTED),
+                                            );
+                                            ui.label(
+                                                RichText::new(entry.description)
+                                                    .size(9.8)
+                                                    .color(palette::TEXT_PRIMARY),
+                                            );
+
+                                            if let Some(ev) = live_ev
+                                                && ev.quality.is_valid()
+                                                && !ev.reasons.is_empty()
+                                            {
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "Live @ bar[{}] ({}): {}",
+                                                        ev.available_at_index,
+                                                        ev.availability_event,
+                                                        ev.reasons.join(" · ")
+                                                    ))
+                                                    .monospace()
+                                                    .size(9.1)
+                                                    .color(Color32::from_rgb(130, 210, 255)),
+                                                );
+                                            }
+
+                                            if show_adv && !entry.params.is_empty() {
+                                                for p in entry.params {
+                                                    ui.label(
+                                                        RichText::new(format!(
+                                                            "  param `{}` = {} [{}..={}] — {}",
+                                                            p.name,
+                                                            p.default_value,
+                                                            p.min_value,
+                                                            p.max_value,
+                                                            p.description
+                                                        ))
+                                                        .monospace()
+                                                        .size(9.0)
+                                                        .color(palette::TEXT_MUTED),
+                                                    );
+                                                }
+                                            }
+                                        });
+                                }
+                            });
+                    });
+            });
+
+        self.last_signal_catalog_modal_rect = Some(modal_area.response.rect);
+
+        if let Some(sk) = filter_scan_req {
+            self.scanner_filter.signal_filter = Some(sk);
+            self.show_scanner_dock = true;
+            self.scanner_tab = ScannerDockTab::Signals;
+            close_clicked = true;
+        }
+
+        if close_clicked
+            || (scrim_resp.clicked()
+                && ui
+                    .input(|i| i.pointer.interact_pos())
+                    .is_none_or(|p| !modal_area.response.rect.contains(p)))
+        {
+            self.show_signal_catalog_modal = false;
+            self.last_signal_catalog_modal_rect = None;
+            ui.ctx().request_repaint();
+        }
+    }
+
+    fn render_confluence_inspector_card(&self, ui: &mut egui::Ui) {
+        let Some(ref rep) = self.confluence_report_cache else {
+            return;
+        };
+        let border_col = match rep.health.as_ref().map(|h| h.bias) {
+            Some(ConfluenceBias::StrongBullish | ConfluenceBias::MildBullish) => palette::BULLISH,
+            Some(ConfluenceBias::StrongBearish | ConfluenceBias::MildBearish) => palette::BEARISH,
+            _ => palette::BORDER_SUBTLE,
+        };
+        Frame::new()
+            .fill(Color32::from_rgb(16, 22, 33))
+            .stroke(Stroke::new(1.0, border_col.gamma_multiply(0.80)))
+            .corner_radius(CornerRadius::same(4))
+            .inner_margin(Margin::symmetric(7, 6))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("CONFLUENCE · {} {}", self.symbol, self.timeframe))
+                            .monospace()
+                            .strong()
+                            .size(9.8)
+                            .color(palette::TEXT_PRIMARY),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let q_col = if rep.quality.is_valid() {
+                            palette::BULLISH
+                        } else {
+                            palette::ALERT_ARMED_AMBER
+                        };
+                        ui.label(
+                            RichText::new(rep.quality.code())
+                                .monospace()
+                                .strong()
+                                .size(9.0)
+                                .color(q_col),
+                        );
+                    });
+                });
+
+                ui.label(
+                    RichText::new(format!(
+                        "{} · bar[{}]{} · +{}B/-{}S",
+                        rep.data_fidelity,
+                        rep.evaluated_bar_index,
+                        if rep.tail_bar_excluded {
+                            " [TAIL-EXCL]"
+                        } else {
+                            ""
+                        },
+                        rep.bullish_signal_count,
+                        rep.bearish_signal_count,
+                    ))
+                    .monospace()
+                    .size(8.8)
+                    .color(palette::TEXT_MUTED),
+                );
+
+                if let Some(ref bd) = rep.health {
+                    let score_col = if bd.composite_score >= 12.0 {
+                        palette::BULLISH
+                    } else if bd.composite_score <= -12.0 {
+                        palette::BEARISH
+                    } else {
+                        palette::TEXT_PRIMARY
+                    };
+                    ui.label(
+                        RichText::new(format!(
+                            "Health {:+.1} · {}",
+                            bd.composite_score,
+                            bd.bias.label()
+                        ))
+                        .monospace()
+                        .strong()
+                        .size(9.8)
+                        .color(score_col),
+                    );
+                    if bd.bb_flow_absent_neutral {
+                        ui.label(
+                            RichText::new("Flow mode: bb_absent_neutral (OHLCV CLV)")
+                                .monospace()
+                                .size(8.4)
+                                .color(palette::ALERT_ARMED_AMBER),
+                        );
+                    }
+                    egui::Grid::new("sumi_confluence_family_grid")
+                        .num_columns(2)
+                        .spacing([8.0, 2.0])
+                        .show(ui, |ui| {
+                            for (k, v) in [
+                                ("Trend", bd.trend_score),
+                                ("Momentum", bd.momentum_score),
+                                ("Transition", bd.transition_score),
+                                ("Flow Proxy", bd.participation_score),
+                            ] {
+                                let c = if v >= 10.0 {
+                                    palette::BULLISH
+                                } else if v <= -10.0 {
+                                    palette::BEARISH
+                                } else {
+                                    palette::TEXT_PRIMARY
+                                };
+                                ui.label(
+                                    RichText::new(k)
+                                        .monospace()
+                                        .size(9.0)
+                                        .color(palette::TEXT_MUTED),
+                                );
+                                ui.label(
+                                    RichText::new(format!("{v:+.1}"))
+                                        .monospace()
+                                        .strong()
+                                        .size(9.2)
+                                        .color(c),
+                                );
+                                ui.end_row();
+                            }
+                        });
+                } else {
+                    ui.label(
+                        RichText::new(format!(
+                            "Health Unavailable ({} · need >= 50 closed bars)",
+                            rep.quality.code()
+                        ))
+                        .monospace()
+                        .size(9.2)
+                        .color(palette::ALERT_ARMED_AMBER),
+                    );
+                }
+            });
+    }
+
+    fn sync_inspected_signal_eval_cache(&mut self, close_cutoff: Option<i64>) {
+        let Some((ref inst_id, ts, sig)) = self.inspected_signal_key else {
+            self.inspected_signal_eval_cache = None;
+            return;
+        };
+        let replay_cutoff = self.replay.cutoff_timestamp(&self.base_candles);
+        let scanner_revealed = self
+            .scanner_context
+            .as_ref()
+            .is_some_and(|ctx| ctx.is_revealed(replay_cutoff));
+        if self.inspected_signal_eval_cache.as_ref().is_some_and(|c| {
+            c.instrument_id == *inst_id
+                && c.timestamp == ts
+                && c.signal == sig
+                && c.close_cutoff == close_cutoff
+                && c.replay_cutoff == replay_cutoff
+                && c.scanner_revealed == scanner_revealed
+                && c.dataset_generation == self.dataset_generation
+        }) {
+            return;
+        }
+        let inst_id_owned = inst_id.clone();
+        let Some(hit) = self
+            .raw_historical_hits_cache
+            .iter()
+            .find(|h| h.instrument_id == inst_id_owned && h.timestamp == ts && h.signal == sig)
+            .cloned()
+        else {
+            self.inspected_signal_eval_cache = Some(InspectedSignalEvalCache {
+                instrument_id: inst_id_owned,
+                timestamp: ts,
+                signal: sig,
+                close_cutoff,
+                replay_cutoff,
+                scanner_revealed,
+                dataset_generation: self.dataset_generation,
+                eval: None,
+            });
+            return;
+        };
+        fn causal_closed_base_slice(
+            base: &[Candle],
+            base_tf: Timeframe,
+            close_cutoff: Option<i64>,
+        ) -> &[Candle] {
+            match close_cutoff {
+                Some(cut) => {
+                    let span = base_tf.seconds().max(1).saturating_sub(1);
+                    let end = base.partition_point(|c| c.timestamp.saturating_add(span) <= cut);
+                    &base[..end]
+                }
+                None => base,
+            }
+        }
+        let active_key = self.current_instrument_key();
+        let ev_opt: Option<SignalEvaluation> = if hit.instrument_id == active_key {
+            let base_tf = self.base_timeframe;
+            if !self.is_signal_bucket_causally_closed(
+                &hit.instrument_id,
+                hit.timestamp,
+                base_tf,
+                hit.timeframe,
+                replay_cutoff,
+                close_cutoff,
+            ) {
+                None
+            } else if hit.timeframe == self.active_timeframe && !self.is_active_tail_incomplete() {
+                explain_historical_signal(&self.candles, &hit, None)
+            } else {
+                let base_slice =
+                    causal_closed_base_slice(&self.base_candles, base_tf, close_cutoff);
+                if base_tf == hit.timeframe {
+                    explain_historical_signal(base_slice, &hit, None)
+                } else if let Ok(agg) =
+                    crate::data::aggregate_ohlcv(base_slice, base_tf, hit.timeframe)
+                {
+                    let closed_agg = if let Some(last) = agg.last()
+                        && !self.is_signal_bucket_causally_closed(
+                            &hit.instrument_id,
+                            last.timestamp,
+                            base_tf,
+                            hit.timeframe,
+                            replay_cutoff,
+                            close_cutoff,
+                        ) {
+                        &agg[..agg.len() - 1]
+                    } else {
+                        agg.as_slice()
+                    };
+                    explain_historical_signal(closed_agg, &hit, None)
+                } else {
+                    None
+                }
+            }
+        } else if let Some(entry) = self
+            .watchlist_universe
+            .iter()
+            .chain(self.custom_peer_feeds.iter())
+            .find(|e| e.instrument_id == hit.instrument_id)
+        {
+            let base_tf = entry.base_timeframe;
+            if !self.is_signal_bucket_causally_closed(
+                &hit.instrument_id,
+                hit.timestamp,
+                base_tf,
+                hit.timeframe,
+                replay_cutoff,
+                close_cutoff,
+            ) {
+                None
+            } else {
+                let base_slice = causal_closed_base_slice(&entry.candles, base_tf, close_cutoff);
+                if base_tf == hit.timeframe {
+                    explain_historical_signal(base_slice, &hit, None)
+                } else if let Ok(agg) =
+                    crate::data::aggregate_ohlcv(base_slice, base_tf, hit.timeframe)
+                {
+                    let closed_agg = if let Some(last) = agg.last()
+                        && !self.is_signal_bucket_causally_closed(
+                            &hit.instrument_id,
+                            last.timestamp,
+                            base_tf,
+                            hit.timeframe,
+                            replay_cutoff,
+                            close_cutoff,
+                        ) {
+                        &agg[..agg.len() - 1]
+                    } else {
+                        agg.as_slice()
+                    };
+                    explain_historical_signal(closed_agg, &hit, None)
+                } else {
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        self.inspected_signal_eval_cache = Some(InspectedSignalEvalCache {
+            instrument_id: inst_id_owned,
+            timestamp: ts,
+            signal: sig,
+            close_cutoff,
+            replay_cutoff,
+            scanner_revealed,
+            dataset_generation: self.dataset_generation,
+            eval: ev_opt,
+        });
+    }
+
+    fn render_inline_signal_hit_explanation(&self, ui: &mut egui::Ui, hit: &HistoricalSignalHit) {
+        let replay_cutoff = self.replay.cutoff_timestamp(&self.base_candles);
+        if let Some(ref ctx) = self.scanner_context
+            && ctx.intent() == ScannerReplayIntent::BlindPractice
+            && !ctx.is_revealed(replay_cutoff)
+            && ctx.instrument_id() == hit.instrument_id
+        {
+            ui.label(
+                RichText::new("BLIND PRACTICE · Target explanation locked until bucket close")
+                    .monospace()
+                    .size(9.0)
+                    .color(palette::ALERT_ARMED_AMBER),
+            );
+            return;
+        }
+
+        let ev_opt = self
+            .inspected_signal_eval_cache
+            .as_ref()
+            .and_then(|c| c.eval.as_ref());
+
+        Frame::new()
+            .fill(Color32::from_rgb(13, 17, 26))
+            .stroke(Stroke::new(1.0, palette::ACCENT_BLUE.gamma_multiply(0.45)))
+            .corner_radius(CornerRadius::same(3))
+            .inner_margin(Margin::symmetric(6, 4))
+            .show(ui, |ui| {
+                if let Some(ev) = ev_opt {
+                    ui.label(
+                        RichText::new(format!(
+                            "{} · {} @ idx={} · hash=#{:08X}",
+                            ev.quality.code(),
+                            ev.availability_event,
+                            ev.available_at_index,
+                            (ev.params_digest & 0xFFFF_FFFF) as u32
+                        ))
+                        .monospace()
+                        .size(8.9)
+                        .color(palette::BULLISH),
+                    );
+                    if !ev.reasons.is_empty() {
+                        ui.label(
+                            RichText::new(format!("Reasons: {}", ev.reasons.join(" · ")))
+                                .monospace()
+                                .size(9.0)
+                                .color(Color32::from_rgb(150, 215, 255)),
+                        );
+                    }
+                    for f in &ev.factors {
+                        ui.label(
+                            RichText::new(format!(
+                                "• {}: {:.2} (ref {:.2}, Δ {:+.2})",
+                                f.label, f.observed, f.reference, f.contribution
+                            ))
+                            .monospace()
+                            .size(8.9)
+                            .color(palette::TEXT_MUTED),
+                        );
+                    }
+                } else {
+                    ui.label(
+                        RichText::new("Causal explanation masked or unavailable at cutoff.")
+                            .monospace()
+                            .size(9.0)
+                            .color(palette::TEXT_MUTED),
+                    );
+                }
+            });
+    }
+
+    fn render_drawing_inspector_panel(&mut self, ui: &mut egui::Ui) {
+        self.sync_drawing_inspector_draft();
+        let mut close_panel = false;
+        let mut select_req: Option<DrawingId> = None;
+        let mut apply_req = false;
+        let mut cancel_req = false;
+        let mut delete_req = false;
+        let mut open_planner_req = false;
+
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("DRAWING INSPECTOR")
+                    .monospace()
+                    .strong()
+                    .size(11.5)
+                    .color(palette::TEXT_PRIMARY),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button(RichText::new("×").monospace().size(11.0))
+                    .clicked()
+                {
+                    close_panel = true;
+                }
+                ui.label(
+                    RichText::new(format!(
+                        "U:{} R:{}",
+                        self.drawings.undo_depth(),
+                        self.drawings.redo_depth()
+                    ))
+                    .monospace()
+                    .size(9.0)
+                    .color(palette::TEXT_MUTED),
+                );
+            });
+        });
+
+        let eligible_list: Vec<(DrawingId, DrawingPaneTarget, DrawingTool, bool, bool)> = self
+            .drawings
+            .causally_eligible_drawings()
+            .map(|d| (d.id, d.pane, d.tool_kind(), d.visible, d.locked))
+            .collect();
+
+        egui::ScrollArea::vertical()
+            .id_salt("sumi_drawing_inspector_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(4.0, 5.0);
+
+                // 1. Causal Layer / Object Picker (allows re-selecting `visible == false` annotations!)
+                Frame::new()
+                    .fill(Color32::from_rgb(18, 23, 34))
+                    .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                    .corner_radius(CornerRadius::same(4))
+                    .inner_margin(Margin::symmetric(6, 5))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.label(
+                            RichText::new(format!("LAYERS ({} eligible)", eligible_list.len()))
+                                .monospace()
+                                .strong()
+                                .size(9.4)
+                                .color(palette::TEXT_MUTED),
+                        );
+                        if eligible_list.is_empty() {
+                            ui.label(
+                                RichText::new("No causally eligible drawings on this symbol.")
+                                    .monospace()
+                                    .size(9.2)
+                                    .color(palette::TEXT_MUTED),
+                            );
+                        } else {
+                            ui.horizontal_wrapped(|ui| {
+                                for &(did, pane, tool, vis, lck) in &eligible_list {
+                                    let is_sel = self.drawings.selected_id == Some(did);
+                                    let tag = format!(
+                                        "#{did} {}{}{}",
+                                        tool.short_label(),
+                                        if !vis { " [HID]" } else { "" },
+                                        if lck { " [LCK]" } else { "" }
+                                    );
+                                    if ui
+                                        .selectable_label(
+                                            is_sel,
+                                            RichText::new(tag).monospace().size(9.2),
+                                        )
+                                        .on_hover_text(pane.short_label())
+                                        .clicked()
+                                    {
+                                        select_req = Some(did);
+                                    }
+                                }
+                            });
+                        }
+                    });
+
+                let is_dirty = self.is_drawing_inspector_dirty();
+                if let Some(ref mut st) = self.drawing_inspector_draft {
+                    let is_locked = st.draft.locked;
+                    Frame::new()
+                        .fill(Color32::from_rgb(18, 23, 34))
+                        .stroke(Stroke::new(
+                            1.0,
+                            if is_dirty {
+                                Color32::from_rgb(255, 193, 7)
+                            } else {
+                                palette::BORDER_SUBTLE
+                            },
+                        ))
+                        .corner_radius(CornerRadius::same(4))
+                        .inner_margin(Margin::symmetric(7, 6))
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "#{} · {}",
+                                        st.drawing_id,
+                                        st.draft.geometry.tool_kind().short_label()
+                                    ))
+                                    .monospace()
+                                    .strong()
+                                    .size(10.5)
+                                    .color(palette::TEXT_PRIMARY),
+                                );
+                                if is_dirty {
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.label(
+                                                RichText::new("DRAFT*")
+                                                    .monospace()
+                                                    .strong()
+                                                    .size(9.2)
+                                                    .color(Color32::from_rgb(255, 193, 7)),
+                                            );
+                                        },
+                                    );
+                                }
+                            });
+
+                            ui.horizontal(|ui| {
+                                ui.add_enabled(
+                                    !is_locked,
+                                    egui::Checkbox::new(&mut st.draft.visible, "Visible"),
+                                );
+                                ui.checkbox(&mut st.draft.locked, "Locked");
+                            });
+
+                            ui.separator();
+                            ui.add_enabled_ui(!is_locked, |ui| {
+                                ui.label(
+                                    RichText::new("STYLE")
+                                        .monospace()
+                                        .strong()
+                                        .size(9.4)
+                                        .color(palette::TEXT_MUTED),
+                                );
+                                ui.horizontal_wrapped(|ui| {
+                                    for preset in [
+                                        DrawingColorPreset::Cyan,
+                                        DrawingColorPreset::ElectricBlue,
+                                        DrawingColorPreset::AmberGold,
+                                        DrawingColorPreset::Emerald,
+                                        DrawingColorPreset::Crimson,
+                                        DrawingColorPreset::Magenta,
+                                    ] {
+                                        let [r, g, b] = preset.rgb();
+                                        let sel_c = st.draft.style.color == preset;
+                                        if ui
+                                            .selectable_label(
+                                                sel_c,
+                                                RichText::new(preset.short_label())
+                                                    .monospace()
+                                                    .size(9.2)
+                                                    .color(Color32::from_rgb(r, g, b)),
+                                            )
+                                            .clicked()
+                                        {
+                                            st.draft.style.color = preset;
+                                        }
+                                    }
+                                });
+
+                                ui.horizontal(|ui| {
+                                    for d in [
+                                        LineDashStyle::Solid,
+                                        LineDashStyle::Dashed,
+                                        LineDashStyle::Dotted,
+                                    ] {
+                                        if ui
+                                            .selectable_label(
+                                                st.draft.style.dash == d,
+                                                RichText::new(d.label()).monospace().size(9.2),
+                                            )
+                                            .clicked()
+                                        {
+                                            st.draft.style.dash = d;
+                                        }
+                                    }
+                                });
+
+                                egui::Grid::new("drawing_inspector_style_grid")
+                                    .num_columns(2)
+                                    .spacing([8.0, 3.0])
+                                    .show(ui, |ui| {
+                                        ui.label(RichText::new("Width (px)").monospace().size(9.2));
+                                        ui.add(
+                                            egui::DragValue::new(&mut st.draft.style.line_width)
+                                                .range(1.0..=8.0)
+                                                .speed(0.1)
+                                                .fixed_decimals(2),
+                                        );
+                                        ui.end_row();
+                                        ui.label(
+                                            RichText::new("Fill Alpha").monospace().size(9.2),
+                                        );
+                                        ui.add(
+                                            egui::DragValue::new(&mut st.draft.style.fill_opacity)
+                                                .range(0.0..=0.65)
+                                                .speed(0.01)
+                                                .fixed_decimals(2),
+                                        );
+                                        ui.end_row();
+                                    });
+
+                                ui.separator();
+                                ui.label(
+                                    RichText::new("ANCHORS & TOOL PARAMS")
+                                        .monospace()
+                                        .strong()
+                                        .size(9.4)
+                                        .color(palette::TEXT_MUTED),
+                                );
+
+                                let max_bar = (self.candles.len() as f64 + 250.0).max(10.0);
+                                match &mut st.draft.geometry {
+                                    DrawingGeometry::HorizontalLine { anchor } => {
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new("Price").monospace().size(9.2));
+                                            ui.add(
+                                                egui::DragValue::new(&mut anchor.value)
+                                                    .speed(0.1)
+                                                    .max_decimals(4),
+                                            );
+                                        });
+                                    }
+                                    DrawingGeometry::AnchoredVwap { anchor, show_bands } => {
+                                        egui::Grid::new("insp_avwap_grid")
+                                            .num_columns(2)
+                                            .spacing([6.0, 3.0])
+                                            .show(ui, |ui| {
+                                                ui.label(
+                                                    RichText::new("Anchor Bar")
+                                                        .monospace()
+                                                        .size(9.2),
+                                                );
+                                                ui.add(
+                                                    egui::DragValue::new(&mut anchor.bar_index)
+                                                        .range(0.0..=max_bar)
+                                                        .speed(1.0),
+                                                );
+                                                ui.end_row();
+                                                ui.label(
+                                                    RichText::new("Anchor Val")
+                                                        .monospace()
+                                                        .size(9.2),
+                                                );
+                                                ui.add(
+                                                    egui::DragValue::new(&mut anchor.value)
+                                                        .speed(0.1),
+                                                );
+                                                ui.end_row();
+                                            });
+                                        ui.checkbox(show_bands, "Show ±1σ / ±2σ Bands");
+                                    }
+                                    DrawingGeometry::TrendLine { start, end }
+                                    | DrawingGeometry::Ray {
+                                        origin: start,
+                                        through: end,
+                                    }
+                                    | DrawingGeometry::Rectangle {
+                                        corner_a: start,
+                                        corner_b: end,
+                                    } => {
+                                        render_two_anchor_drag_grid(ui, start, end, max_bar);
+                                    }
+                                    DrawingGeometry::FibonacciRetracement {
+                                        start,
+                                        end,
+                                        direction,
+                                        extend_right,
+                                    } => {
+                                        render_two_anchor_drag_grid(ui, start, end, max_bar);
+                                        ui.horizontal(|ui| {
+                                            if ui.small_button("Reverse 0↔100%").clicked() {
+                                                *direction = direction.reversed();
+                                            }
+                                            ui.checkbox(extend_right, "Extend Right");
+                                        });
+                                    }
+                                    DrawingGeometry::FixedRangeVolumeProfile {
+                                        start,
+                                        end,
+                                        row_count,
+                                    } => {
+                                        render_two_anchor_drag_grid(ui, start, end, max_bar);
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                RichText::new("Rows (8..200)")
+                                                    .monospace()
+                                                    .size(9.2),
+                                            );
+                                            ui.add(
+                                                egui::DragValue::new(row_count)
+                                                    .range(8..=200)
+                                                    .speed(1),
+                                            );
+                                        });
+                                    }
+                                    DrawingGeometry::RiskRewardBox {
+                                        start,
+                                        end,
+                                        stop_price,
+                                    } => {
+                                        egui::Grid::new("insp_rr_grid")
+                                            .num_columns(2)
+                                            .spacing([6.0, 3.0])
+                                            .show(ui, |ui| {
+                                                ui.label(
+                                                    RichText::new("Entry / Bar")
+                                                        .monospace()
+                                                        .size(9.2),
+                                                );
+                                                ui.horizontal(|ui| {
+                                                    ui.add(
+                                                        egui::DragValue::new(&mut start.value)
+                                                            .speed(0.1),
+                                                    );
+                                                    ui.add(
+                                                        egui::DragValue::new(&mut start.bar_index)
+                                                            .range(-50.0..=max_bar)
+                                                            .speed(1.0),
+                                                    );
+                                                });
+                                                ui.end_row();
+                                                ui.label(
+                                                    RichText::new("Target / End")
+                                                        .monospace()
+                                                        .size(9.2),
+                                                );
+                                                ui.horizontal(|ui| {
+                                                    ui.add(
+                                                        egui::DragValue::new(&mut end.value)
+                                                            .speed(0.1),
+                                                    );
+                                                    ui.add(
+                                                        egui::DragValue::new(&mut end.bar_index)
+                                                            .range(-50.0..=max_bar)
+                                                            .speed(1.0),
+                                                    );
+                                                });
+                                                ui.end_row();
+                                                ui.label(
+                                                    RichText::new("Stop Price")
+                                                        .monospace()
+                                                        .size(9.2),
+                                                );
+                                                ui.add(
+                                                    egui::DragValue::new(stop_price).speed(0.1),
+                                                );
+                                                ui.end_row();
+                                            });
+                                        if let Some((side, _, _, _, r_mult)) =
+                                            st.draft.geometry.risk_reward_metrics()
+                                        {
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "{} · {:.2}R gross",
+                                                    side.short_label(),
+                                                    r_mult
+                                                ))
+                                                .monospace()
+                                                .strong()
+                                                .size(9.4)
+                                                .color(palette::BULLISH),
+                                            );
+                                        } else {
+                                            ui.label(
+                                                RichText::new(
+                                                    "Invalid bracket: require Stop < Entry < Target (or Short)",
+                                                )
+                                                .monospace()
+                                                .size(8.9)
+                                                .color(palette::BEARISH),
+                                            );
+                                        }
+                                        if ui.small_button("Sync -> Risk Planner").clicked() {
+                                            open_planner_req = true;
+                                        }
+                                    }
+                                }
+                            });
+
+                            if let Some(ref err_msg) = st.last_error {
+                                ui.label(
+                                    RichText::new(err_msg)
+                                        .monospace()
+                                        .size(9.0)
+                                        .color(palette::BEARISH),
+                                );
+                            }
+
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                let apply_btn = Button::new(
+                                    RichText::new("Apply")
+                                        .monospace()
+                                        .strong()
+                                        .size(9.8)
+                                        .color(if is_dirty {
+                                            Color32::WHITE
+                                        } else {
+                                            palette::TEXT_MUTED
+                                        }),
+                                )
+                                .fill(if is_dirty {
+                                    palette::BULLISH.gamma_multiply(0.26)
+                                } else {
+                                    Color32::from_rgb(24, 29, 40)
+                                });
+                                if ui.add_enabled(is_dirty, apply_btn).clicked() {
+                                    apply_req = true;
+                                }
+                                if ui
+                                    .add_enabled(
+                                        is_dirty,
+                                        Button::new(
+                                            RichText::new("Cancel").monospace().size(9.8),
+                                        ),
+                                    )
+                                    .clicked()
+                                {
+                                    cancel_req = true;
+                                }
+                                if ui
+                                    .add_enabled(
+                                        !is_locked,
+                                        Button::new(
+                                            RichText::new("Delete")
+                                                .monospace()
+                                                .size(9.8)
+                                                .color(palette::BEARISH),
+                                        ),
+                                    )
+                                    .clicked()
+                                {
+                                    delete_req = true;
+                                }
+                            });
+                        });
+                } else {
+                    Frame::new()
+                        .fill(Color32::from_rgb(18, 23, 34))
+                        .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                        .corner_radius(CornerRadius::same(4))
+                        .inner_margin(Margin::symmetric(8, 8))
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new(
+                                    "Select an annotation on the chart (or pick from Layers above) to edit style, anchors, visibility, and lock state.",
+                                )
+                                .size(9.6)
+                                .color(palette::TEXT_MUTED),
+                            );
+                        });
+                }
+            });
+
+        if let Some(did) = select_req {
+            let _ = self.drawings.select_drawing_by_id(Some(did));
+            self.sync_drawing_inspector_draft();
+        }
+        if apply_req {
+            let _ = self.apply_drawing_inspector_draft();
+        }
+        if cancel_req {
+            self.cancel_drawing_inspector_draft();
+        }
+        if delete_req && self.drawings.delete_selected() {
+            self.auto_sync_planner_if_rr_box_changed();
+            self.sync_alerts_causal();
+            self.sync_drawing_inspector_draft();
+        }
+        if open_planner_req {
+            let _ = self.apply_drawing_inspector_draft();
+            let _ = self.sync_planner_from_selected_rr_box();
+            self.open_journal_tab();
+        }
+        if close_panel {
+            self.show_drawing_inspector = false;
+        }
+    }
+
+    fn render_monte_carlo_tearsheet_card(&mut self, ui: &mut egui::Ui) {
+        let mut cfg_changed = false;
+        Frame::new()
+            .fill(Color32::from_rgb(17, 22, 33))
+            .stroke(Stroke::new(1.0, palette::ACCENT_BLUE.gamma_multiply(0.65)))
+            .corner_radius(CornerRadius::same(4))
+            .inner_margin(Margin::symmetric(7, 6))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("MONTE CARLO BOOTSTRAP (SplitMix64)")
+                            .monospace()
+                            .strong()
+                            .size(9.8)
+                            .color(Color32::from_rgb(130, 210, 255)),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if indicator_toggle_pill(
+                            ui,
+                            &mut self.show_mc_fan_on_equity,
+                            "EQ Fan",
+                            palette::ACCENT_BLUE,
+                        ) {
+                            self.show_equity_pane = true;
+                            self.viewport.equity_price_scale.reset_auto_scale();
+                            cfg_changed = true;
+                        }
+                    });
+                });
+
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(4.0, 2.0);
+                    for (sim_n, lbl) in [(500_usize, "500"), (1_000, "1k"), (2_500, "2.5k")] {
+                        if ui
+                            .selectable_label(
+                                self.mc_config.simulations == sim_n,
+                                RichText::new(lbl).monospace().size(9.0),
+                            )
+                            .clicked()
+                        {
+                            self.mc_config.simulations = sim_n;
+                            cfg_changed = true;
+                        }
+                    }
+                    ui.label(RichText::new("Ruin%:").monospace().size(8.8));
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut self.mc_config.ruin_drawdown_pct)
+                                .range(5.0..=100.0)
+                                .speed(1.0)
+                                .fixed_decimals(0),
+                        )
+                        .changed()
+                    {
+                        cfg_changed = true;
+                    }
+                    ui.label(RichText::new("Seed:").monospace().size(8.8));
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut self.mc_config.seed)
+                                .range(0..=u64::MAX)
+                                .speed(1.0),
+                        )
+                        .changed()
+                    {
+                        cfg_changed = true;
+                    }
+                });
+
+                if let Some(ref mc) = self.monte_carlo_report {
+                    let badge_col = match mc.validity {
+                        MonteCarloValidity::Valid => palette::BULLISH,
+                        MonteCarloValidity::LowSampleWarning
+                        | MonteCarloValidity::SingleSampleDegenerate => palette::ALERT_ARMED_AMBER,
+                        MonteCarloValidity::InsufficientSamples => palette::BEARISH,
+                    };
+                    ui.label(
+                        RichText::new(format!(
+                            "{} · N={} · {} paths · {}",
+                            mc.validity.code(),
+                            mc.sample_count,
+                            mc.config.simulations,
+                            mc.status_reason
+                        ))
+                        .monospace()
+                        .size(8.8)
+                        .color(badge_col),
+                    );
+
+                    if let Some(m) = mc.metrics {
+                        egui::Grid::new("strategy_mc_bootstrap_grid")
+                            .num_columns(2)
+                            .spacing([8.0, 2.5])
+                            .striped(true)
+                            .show(ui, |ui| {
+                                let mrow = |ui: &mut egui::Ui, k: &str, v: String, col: Color32| {
+                                    ui.label(
+                                        RichText::new(k)
+                                            .monospace()
+                                            .size(9.3)
+                                            .color(palette::TEXT_MUTED),
+                                    );
+                                    ui.label(
+                                        RichText::new(v).monospace().strong().size(9.4).color(col),
+                                    );
+                                    ui.end_row();
+                                };
+                                mrow(
+                                    ui,
+                                    "Eq p5 / p50 / p95",
+                                    format!(
+                                        "${:.0} / ${:.0} / ${:.0}",
+                                        m.terminal_equity.p5,
+                                        m.terminal_equity.p50,
+                                        m.terminal_equity.p95
+                                    ),
+                                    palette::TEXT_PRIMARY,
+                                );
+                                mrow(
+                                    ui,
+                                    "Ret p5 / p50 / p95",
+                                    format!(
+                                        "{:+.1}% / {:+.1}% / {:+.1}%",
+                                        m.terminal_return_pct.p5,
+                                        m.terminal_return_pct.p50,
+                                        m.terminal_return_pct.p95
+                                    ),
+                                    if m.terminal_return_pct.p50 >= 0.0 {
+                                        palette::BULLISH
+                                    } else {
+                                        palette::BEARISH
+                                    },
+                                );
+                                mrow(
+                                    ui,
+                                    "IQR Eq (p25..p75)",
+                                    format!(
+                                        "${:.0} .. ${:.0}",
+                                        m.terminal_equity.p25, m.terminal_equity.p75
+                                    ),
+                                    palette::ACCENT_BLUE,
+                                );
+                                mrow(
+                                    ui,
+                                    "DD VaR / CVaR 95%",
+                                    format!(
+                                        "-{:.1}% / -{:.1}%",
+                                        m.max_drawdown_var_95_pct, m.max_drawdown_cvar_95_pct
+                                    ),
+                                    palette::EQUITY_BELOW_LINE,
+                                );
+                                mrow(
+                                    ui,
+                                    "DD VaR / CVaR 99%",
+                                    format!(
+                                        "-{:.1}% / -{:.1}%",
+                                        m.max_drawdown_var_99_pct, m.max_drawdown_cvar_99_pct
+                                    ),
+                                    palette::BEARISH,
+                                );
+                                mrow(
+                                    ui,
+                                    "P(Profit) / P(Ruin)",
+                                    format!(
+                                        "{:.1}% / {:.1}% (>={:.0}%)",
+                                        m.prob_of_profit_pct,
+                                        m.prob_of_ruin_pct,
+                                        mc.config.ruin_drawdown_pct
+                                    ),
+                                    if m.prob_of_profit_pct >= 50.0 {
+                                        palette::BULLISH
+                                    } else {
+                                        palette::ALERT_ARMED_AMBER
+                                    },
+                                );
+                            });
+                    } else {
+                        ui.label(
+                            RichText::new(
+                                "Unavailable — execute >= 1 closed trade to sample paths.",
+                            )
+                            .monospace()
+                            .size(9.2)
+                            .color(palette::TEXT_MUTED),
+                        );
+                    }
+                }
+            });
+
+        if cfg_changed {
+            self.mc_synced_key = None;
+            self.sync_backtest_causal();
+        }
+    }
+}
+
+fn render_two_anchor_drag_grid(
+    ui: &mut egui::Ui,
+    start: &mut DrawingAnchor,
+    end: &mut DrawingAnchor,
+    max_bar: f64,
+) {
+    egui::Grid::new("insp_two_anchor_grid")
+        .num_columns(2)
+        .spacing([6.0, 3.0])
+        .show(ui, |ui| {
+            ui.label(RichText::new("A1 Price / Bar").monospace().size(9.2));
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut start.value).speed(0.1));
+                ui.add(
+                    egui::DragValue::new(&mut start.bar_index)
+                        .range(-50.0..=max_bar)
+                        .speed(1.0),
+                );
+            });
+            ui.end_row();
+            ui.label(RichText::new("A2 Price / Bar").monospace().size(9.2));
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut end.value).speed(0.1));
+                ui.add(
+                    egui::DragValue::new(&mut end.bar_index)
+                        .range(-50.0..=max_bar)
+                        .speed(1.0),
+                );
+            });
+            ui.end_row();
+        });
 }
 
 #[inline]
@@ -16075,15 +18179,26 @@ impl SumiWorkstationApp {
         Ok(())
     }
 
-    /// Executes all 3 Retina (`2.0x`) Metal/`wgpu` verification scenarios for `"r04"`..=`"r13"`
+    /// Executes all 3 Retina (`2.0x`) Metal/`wgpu` verification scenarios for `"r04"`..=`"r15"`
     /// offscreen in one headless GPU session (zero windows, zero Dock icons, zero occlusion stalls).
     pub fn run_offscreen_wgpu_capture_batch(batch_name: &str) -> Result<(), String> {
         if !matches!(
             batch_name,
-            "r04" | "r05" | "r06" | "r07" | "r08" | "r09" | "r10" | "r11" | "r12" | "r13" | "r14"
+            "r04"
+                | "r05"
+                | "r06"
+                | "r07"
+                | "r08"
+                | "r09"
+                | "r10"
+                | "r11"
+                | "r12"
+                | "r13"
+                | "r14"
+                | "r15"
         ) {
             return Err(format!(
-                "unknown SUMI_CAPTURE_BATCH '{batch_name}' (expected 'r04'..'r14')"
+                "unknown SUMI_CAPTURE_BATCH '{batch_name}' (expected 'r04'..'r15')"
             ));
         }
         std::fs::create_dir_all("docs/evidence")
@@ -16105,6 +18220,7 @@ impl SumiWorkstationApp {
                 "r12" => app.apply_r12_batch_step_state(step),
                 "r13" => app.apply_r13_batch_step_state(step),
                 "r14" => app.apply_r14_batch_step_state(step),
+                "r15" => app.apply_r15_batch_step_state(step),
                 _ => unreachable!(),
             };
             let image = harness.capture_app_frame(&mut app, logical_w, logical_h, 6)?;
@@ -18055,6 +20171,7 @@ impl SumiWorkstationApp {
         self.command_palette.open = false;
         self.show_templates_modal = false;
         self.show_hotkeys_modal = false;
+        self.show_signal_catalog_modal = false;
         self.rebinding_hotkey_action = None;
         self.dom_center_override = None;
         self.saved_workspace_templates.clear();
@@ -18241,6 +20358,257 @@ impl SumiWorkstationApp {
         }
     }
 
+    fn apply_r15_batch_step_state(
+        &mut self,
+        step: usize,
+    ) -> (u32, u32, &'static str, &'static str) {
+        self.exit_replay();
+        self.reset_trading_session();
+        self.show_replay_bar = false;
+        self.show_scanner_dock = false;
+        self.show_trading_panel = false;
+        self.show_alerts_panel = false;
+        self.show_strategy_panel = false;
+        self.show_journal_panel = false;
+        self.show_drawing_inspector = false;
+        self.show_equity_pane = false;
+        self.show_backtest_trades = false;
+        self.command_palette.open = false;
+        self.show_templates_modal = false;
+        self.show_hotkeys_modal = false;
+        self.show_signal_catalog_modal = false;
+        self.rebinding_hotkey_action = None;
+        self.dom_center_override = None;
+        self.pinned_crosshair_timestamp = None;
+        self.inspected_signal_key = None;
+
+        let builtins = builtin_workspace_templates();
+        match step {
+            0 => {
+                // Scenario 0 (`1280x800` @ `2.0x` -> `2560x1600`): `FPT 1D` (`HOSE`),
+                // Left `ScannerDockTab::Signals` (`Causal Confluence & Technical Health` + inline
+                // `SignalExplanation`), Right `Interactive Drawing Property Inspector` editing
+                // a selected `FibonacciRetracement` alongside `RiskRewardBox` & `AnchoredVwap`.
+                self.apply_workspace_template(&builtins[0]);
+                self.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+                let _ = self.set_timeframe(Timeframe::D1);
+                self.set_scale_mode(PriceScaleMode::Normal);
+                self.indicators = IndicatorConfig {
+                    show_sma: true,
+                    show_ema: true,
+                    show_bbands: false,
+                    show_ichimoku: true,
+                    show_rsi: true,
+                    show_cvd: true,
+                    cvd_reset_mode: CvdResetMode::Cumulative,
+                    ..IndicatorConfig::default()
+                };
+                self.viewport.reset_pane_stretches();
+                self.viewport.rsi_stretch = 0.72;
+                self.viewport.cvd_stretch = 0.72;
+                self.viewport.time_scale.set_width(720.0);
+                self.viewport.time_scale.set_bar_spacing(8.2);
+                self.viewport.time_scale.set_right_offset(16.0);
+                self.sync_indicators_and_benchmarks();
+
+                self.populate_showcase_drawings();
+                // Select FibonacciRetracement (or last drawing) and stage a visible dirty draft highlight
+                if let Some(fib_id) = self
+                    .drawings
+                    .drawings
+                    .iter()
+                    .find(|d| d.tool_kind() == DrawingTool::FibonacciRetracement)
+                    .map(|d| d.id)
+                {
+                    let _ = self.drawings.select_drawing_by_id(Some(fib_id));
+                }
+                self.show_drawing_inspector = true;
+                self.sync_drawing_inspector_draft();
+                if let Some(ref mut st) = self.drawing_inspector_draft {
+                    st.draft.style.color = DrawingColorPreset::AmberGold;
+                    st.draft.style.line_width = 2.50;
+                    st.draft.style.fill_opacity = 0.22;
+                }
+                let _ = self.apply_drawing_inspector_draft();
+
+                self.show_scanner_dock = true;
+                self.scanner_tab = ScannerDockTab::Signals;
+                self.show_confluence_inspector = true;
+                self.confluence_profile = ConfluenceWeightProfile::Balanced;
+                self.scanner_filter = ScannerFilter {
+                    search_query: "FPT".to_owned(),
+                    ..ScannerFilter::default()
+                };
+                self.sync_scanner_caches();
+                self.sync_confluence_causal();
+                if let Some(first_hit) = self
+                    .raw_historical_hits_cache
+                    .iter()
+                    .find(|h| h.symbol == "FPT")
+                    .or_else(|| self.raw_historical_hits_cache.first())
+                {
+                    self.inspected_signal_key = Some((
+                        first_hit.instrument_id.clone(),
+                        first_hit.timestamp,
+                        first_hit.signal,
+                    ));
+                }
+
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r15_step1_signals_confluence_and_drawing_inspector_fpt.png",
+                    "docs/evidence/r15_step1_signals_confluence_and_drawing_inspector_fpt.json",
+                )
+            }
+            1 => {
+                // Scenario 1 (`1280x800` @ `2.0x` -> `2560x1600`): `BTCUSDT 15m` (`1,344` bars),
+                // `StrategyLabSubTab::Tearsheet` with `1,000`-path `SplitMix64` Monte Carlo Risk
+                // Envelopes (`VALID`, `N >= 30` closed trades, `VaR/CVaR 95%/99%`), `OscillatorPaneId::Equity`
+                // rendering `p5..p95` + `p25..p75` + `p50` bootstrap fan bands in `Percentage` mode
+                // (proving R14 Carry-Over #1 `+0.00%` baseline badge) + working Limit orders on Main
+                // pane (proving R14 Carry-Over #2 `main_occluding_ys`).
+                self.apply_workspace_template(&builtins[0]);
+                self.select_watchlist_instrument(DataSourcePreset::BtcUsdt15mJson, "BTCUSDT");
+                let _ = self.set_timeframe(Timeframe::M15);
+                self.indicators = IndicatorConfig {
+                    show_sma: true,
+                    sma_period: 8,
+                    show_ema: true,
+                    ema_period: 21,
+                    show_bbands: true,
+                    show_rsi: false,
+                    show_macd: true,
+                    show_atr: false,
+                    ..IndicatorConfig::default()
+                };
+                self.set_scale_mode(PriceScaleMode::Normal);
+                self.viewport.reset_pane_stretches();
+                self.viewport.equity_stretch = 1.65;
+                self.viewport.macd_stretch = 0.75;
+                self.viewport
+                    .equity_price_scale
+                    .set_mode(PriceScaleMode::Percentage);
+                self.viewport.equity_price_scale.set_auto_scale(true);
+
+                self.backtest_config = BacktestConfig {
+                    preset: StrategyPresetKind::SmaEmaTrendCross,
+                    params: StrategyParams {
+                        fast_sma: 8,
+                        slow_ema: 21,
+                        ..StrategyParams::default()
+                    },
+                    direction_mode: StrategyDirectionMode::LongShort,
+                    sizing: PositionSizingMode::PercentEquity(95.0),
+                    initial_cash: 100_000.0,
+                    commission_bps: 8.0,
+                    slippage_bps: 4.0,
+                    in_sample_split_pct: Some(0.70),
+                    ..BacktestConfig::default()
+                };
+                self.mc_config = MonteCarloConfig {
+                    simulations: 1_000,
+                    seed: crate::backtest::DEFAULT_MONTE_CARLO_SEED,
+                    ruin_drawdown_pct: 35.0,
+                    horizon_steps: None,
+                };
+                self.show_mc_fan_on_equity = true;
+                self.open_strategy_lab();
+                self.strategy_lab_tab = StrategyLabSubTab::Tearsheet;
+                self.sync_backtest_causal();
+
+                // Stage working Buy Limit & Sell Limit orders to verify R14 Carry-Over #2 (`main_occluding_ys`)
+                let mark = self.current_mark_price();
+                if mark > 100.0 {
+                    let base_idx = self.current_trading_cursor_base_index();
+                    let _ = self.trading.submit_order(
+                        OrderRequest {
+                            side: OrderSide::Buy,
+                            kind: OrderKind::Limit {
+                                limit_price: (mark * 0.992).round(),
+                            },
+                            quantity: 0.5,
+                            stop_loss: None,
+                            take_profit: None,
+                        },
+                        &self.base_candles,
+                        base_idx,
+                    );
+                    let _ = self.trading.submit_order(
+                        OrderRequest {
+                            side: OrderSide::Sell,
+                            kind: OrderKind::Limit {
+                                limit_price: (mark * 1.008).round(),
+                            },
+                            quantity: 0.5,
+                            stop_loss: None,
+                            take_profit: None,
+                        },
+                        &self.base_candles,
+                        base_idx,
+                    );
+                }
+
+                self.viewport.time_scale.set_width(866.0);
+                self.viewport.fit_all();
+                self.viewport
+                    .equity_price_scale
+                    .set_mode(PriceScaleMode::Percentage);
+                self.viewport.equity_price_scale.reset_auto_scale();
+
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r15_step2_monte_carlo_fan_and_tearsheet_btc_15m.png",
+                    "docs/evidence/r15_step2_monte_carlo_fan_and_tearsheet_btc_15m.json",
+                )
+            }
+            _ => {
+                // Scenario 2 (`1280x800` @ `2.0x` -> `2560x1600`): `VN30F1M 5m` under active
+                // `BlindPractice` Bar Replay (`DEF-001` non-leakage banner) with the 12-category
+                // Explainable Signal Catalog Modal (`17` definitions, Adv Params ON, `OHLCV_PROXY`) open.
+                self.apply_workspace_template(&builtins[0]);
+                self.select_watchlist_instrument(DataSourcePreset::IntradayVn30F1m, "VN30F1M");
+                let _ = self.set_timeframe(Timeframe::M5);
+                self.indicators = IndicatorConfig {
+                    show_ema: true,
+                    show_vwap: true,
+                    show_cvd: true,
+                    ..IndicatorConfig::default()
+                };
+                self.sync_indicators_and_benchmarks();
+                self.sync_scanner_caches();
+
+                if let Some(vn30_hit) = self
+                    .raw_historical_hits_cache
+                    .iter()
+                    .find(|h| h.symbol == "VN30F1M")
+                    .cloned()
+                {
+                    let _ = self
+                        .start_scanner_signal_replay(vn30_hit, ScannerReplayIntent::BlindPractice);
+                } else {
+                    let cut = (self.base_candles.len() * 70) / 100;
+                    let _ = self.start_replay_at_base_index(cut);
+                }
+                self.show_replay_bar = true;
+                self.show_scanner_dock = true;
+                self.scanner_tab = ScannerDockTab::Signals;
+                self.signal_catalog_category = SignalCategory::All;
+                self.signal_catalog_search.clear();
+                self.show_catalog_advanced_params = true;
+                self.open_signal_catalog_modal();
+
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r15_step3_signal_catalog_modal_and_replay_vn30f.png",
+                    "docs/evidence/r15_step3_signal_catalog_modal_and_replay_vn30f.json",
+                )
+            }
+        }
+    }
+
     fn persist_capture_artifacts(
         &self,
         screenshot_path: &str,
@@ -18338,7 +20706,7 @@ impl SumiWorkstationApp {
                 crate::viewport::PriceAxisFormatMode::CompactVolume => "CompactVolume",
             };
             let json = format!(
-                "{{\n  \"symbol\": \"{}\",\n  \"timeframe\": \"{}\",\n  \"base_timeframe\": \"{}\",\n  \"data_source\": \"{}\",\n  \"available_symbols\": [{}],\n  \"base_candles\": {},\n  \"total_candles\": {},\n  \"culled_candles\": {},\n  \"rendered_candles\": {},\n  \"conflation_factor\": {},\n  \"bar_spacing\": {:.6},\n  \"right_offset\": {:.6},\n  \"scale_mode\": \"{}\",\n  \"auto_scale\": {},\n  \"pane_count\": {},\n  \"active_overlay_count\": {},\n  \"drawing_count\": {},\n  \"active_drawing_tool\": \"{}\",\n  \"selected_drawing_id\": {},\n  \"magnet_mode\": \"{}\",\n  \"replay_active\": {},\n  \"replay_status\": \"{}\",\n  \"replay_base_cursor\": {},\n  \"replay_step_unit\": \"{}\",\n  \"show_trading_panel\": {},\n  \"show_scanner_dock\": {},\n  \"show_alerts_panel\": {},\n  \"show_strategy_panel\": {},\n  \"show_journal_panel\": {},\n  \"show_equity_pane\": {},\n  \"equity_pane_source\": \"{}\",\n  \"equity_pane_active\": {},\n  \"show_vwap\": {},\n  \"show_vrvp\": {},\n  \"show_rs\": {},\n  \"show_compare_overlay\": {},\n  \"compare_benchmark\": {},\n  \"vrvp_poc_price\": {},\n  \"active_frvp_count\": {},\n  \"rs_stretch\": {:.3},\n  \"grid_layout\": \"{}\",\n  \"grid_slot_count\": {},\n  \"active_chart_slot\": {},\n  \"sync_crosshair\": {},\n  \"sync_time_range\": {},\n  \"show_ichimoku\": {},\n  \"ichimoku_active\": {},\n  \"show_cvd\": {},\n  \"cvd_reset_mode\": \"{}\",\n  \"cvd_pane_active\": {},\n  \"cvd_stretch\": {:.3},\n  \"saved_template_count\": {},\n  \"vwap_anchor_mode\": \"{}\",\n  \"show_market_profile\": {},\n  \"market_profile_active\": {},\n  \"scanner_tab\": \"{}\",\n  \"breadth_participating_count\": {},\n  \"vn30_participating_count\": {},\n  \"money_flow_buy_pct\": {:.2},\n  \"cvd_axis_format_mode\": \"{}\",\n  \"pinned_crosshair_timestamp\": {},\n  \"active_venue\": \"{}\",\n  \"journal_total_entries\": {},\n  \"journal_visible_entries\": {},\n  \"journal_discipline_pct\": {:.2},\n  \"wfo_verdict\": {},\n  \"wfo_wfe_pct\": {},\n  \"portfolio_return_pct\": {:.4},\n  \"portfolio_dd_reduction_pct\": {:.4},\n  \"show_backtest_trades\": {},\n  \"rendered_backtest_trades\": {},\n  \"backtest_preset\": {},\n  \"backtest_trade_count\": {},\n  \"backtest_return_pct\": {:.4},\n  \"backtest_max_dd_pct\": {:.4},\n  \"backtest_sharpe\": {},\n  \"backtest_robustness\": {},\n  \"command_palette_open\": {},\n  \"alert_rule_count\": {},\n  \"alert_trigger_count\": {},\n  \"active_alert_lines\": {},\n  \"rendered_alert_markers\": {},\n  \"scanner_signal_revealed\": {},\n  \"active_price_lines\": {},\n  \"rendered_fill_markers\": {},\n  \"equity\": {:.2},\n  \"net_pnl\": {:.2},\n  \"fill_count\": {},\n  \"closed_trade_count\": {},\n  \"pending_order_count\": {},\n  \"open_position_side\": {},\n  \"stretches\": [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}],\n  \"base_value\": {:.4},\n  \"screenshot_px\": [{}, {}],\n  \"outer_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"plot_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"price_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"time_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"trading_view_mode\": \"{}\",\n  \"dom_data_fidelity\": \"{}\",\n  \"hotkey_profile\": \"{}\",\n  \"hotkeys_modal_open\": {},\n  \"raw_price_min\": {:.2},\n  \"raw_price_max\": {:.2}\n}}\n",
+                "{{\n  \"symbol\": \"{}\",\n  \"timeframe\": \"{}\",\n  \"base_timeframe\": \"{}\",\n  \"data_source\": \"{}\",\n  \"available_symbols\": [{}],\n  \"base_candles\": {},\n  \"total_candles\": {},\n  \"culled_candles\": {},\n  \"rendered_candles\": {},\n  \"conflation_factor\": {},\n  \"bar_spacing\": {:.6},\n  \"right_offset\": {:.6},\n  \"scale_mode\": \"{}\",\n  \"auto_scale\": {},\n  \"pane_count\": {},\n  \"active_overlay_count\": {},\n  \"drawing_count\": {},\n  \"active_drawing_tool\": \"{}\",\n  \"selected_drawing_id\": {},\n  \"magnet_mode\": \"{}\",\n  \"replay_active\": {},\n  \"replay_status\": \"{}\",\n  \"replay_base_cursor\": {},\n  \"replay_step_unit\": \"{}\",\n  \"show_trading_panel\": {},\n  \"show_scanner_dock\": {},\n  \"show_alerts_panel\": {},\n  \"show_strategy_panel\": {},\n  \"show_journal_panel\": {},\n  \"show_equity_pane\": {},\n  \"equity_pane_source\": \"{}\",\n  \"equity_pane_active\": {},\n  \"show_vwap\": {},\n  \"show_vrvp\": {},\n  \"show_rs\": {},\n  \"show_compare_overlay\": {},\n  \"compare_benchmark\": {},\n  \"vrvp_poc_price\": {},\n  \"active_frvp_count\": {},\n  \"rs_stretch\": {:.3},\n  \"grid_layout\": \"{}\",\n  \"grid_slot_count\": {},\n  \"active_chart_slot\": {},\n  \"sync_crosshair\": {},\n  \"sync_time_range\": {},\n  \"show_ichimoku\": {},\n  \"ichimoku_active\": {},\n  \"show_cvd\": {},\n  \"cvd_reset_mode\": \"{}\",\n  \"cvd_pane_active\": {},\n  \"cvd_stretch\": {:.3},\n  \"saved_template_count\": {},\n  \"vwap_anchor_mode\": \"{}\",\n  \"show_market_profile\": {},\n  \"market_profile_active\": {},\n  \"scanner_tab\": \"{}\",\n  \"breadth_participating_count\": {},\n  \"vn30_participating_count\": {},\n  \"money_flow_buy_pct\": {:.2},\n  \"cvd_axis_format_mode\": \"{}\",\n  \"pinned_crosshair_timestamp\": {},\n  \"active_venue\": \"{}\",\n  \"journal_total_entries\": {},\n  \"journal_visible_entries\": {},\n  \"journal_discipline_pct\": {:.2},\n  \"wfo_verdict\": {},\n  \"wfo_wfe_pct\": {},\n  \"portfolio_return_pct\": {:.4},\n  \"portfolio_dd_reduction_pct\": {:.4},\n  \"show_backtest_trades\": {},\n  \"rendered_backtest_trades\": {},\n  \"backtest_preset\": {},\n  \"backtest_trade_count\": {},\n  \"backtest_return_pct\": {:.4},\n  \"backtest_max_dd_pct\": {:.4},\n  \"backtest_sharpe\": {},\n  \"backtest_robustness\": {},\n  \"command_palette_open\": {},\n  \"alert_rule_count\": {},\n  \"alert_trigger_count\": {},\n  \"active_alert_lines\": {},\n  \"rendered_alert_markers\": {},\n  \"scanner_signal_revealed\": {},\n  \"active_price_lines\": {},\n  \"rendered_fill_markers\": {},\n  \"equity\": {:.2},\n  \"net_pnl\": {:.2},\n  \"fill_count\": {},\n  \"closed_trade_count\": {},\n  \"pending_order_count\": {},\n  \"open_position_side\": {},\n  \"stretches\": [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}],\n  \"base_value\": {:.4},\n  \"screenshot_px\": [{}, {}],\n  \"outer_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"plot_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"price_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"time_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"trading_view_mode\": \"{}\",\n  \"dom_data_fidelity\": \"{}\",\n  \"hotkey_profile\": \"{}\",\n  \"hotkeys_modal_open\": {},\n  \"show_drawing_inspector\": {},\n  \"signal_catalog_modal_open\": {},\n  \"confluence_quality\": \"{}\",\n  \"confluence_score\": {},\n  \"mc_validity\": \"{}\",\n  \"mc_simulations\": {},\n  \"mc_var_95_pct\": {},\n  \"mc_cvar_95_pct\": {},\n  \"mc_prob_profit_pct\": {},\n  \"show_mc_fan_on_equity\": {},\n  \"raw_price_min\": {:.2},\n  \"raw_price_max\": {:.2}\n}}\n",
                 self.symbol,
                 self.timeframe,
                 self.base_timeframe,
@@ -18461,6 +20829,34 @@ impl SumiWorkstationApp {
                 DOM_LADDER_DATA_FIDELITY,
                 self.hotkey_profile.id.short_label(),
                 self.show_hotkeys_modal,
+                self.show_drawing_inspector,
+                self.show_signal_catalog_modal,
+                self.confluence_report_cache
+                    .as_ref()
+                    .map_or("NONE", |c| c.quality.code()),
+                self.confluence_report_cache
+                    .as_ref()
+                    .and_then(|c| c.health.as_ref().map(|h| h.composite_score))
+                    .map_or_else(|| "null".to_owned(), |v| format!("{v:.4}")),
+                self.monte_carlo_report
+                    .as_ref()
+                    .map_or("NONE", |m| m.validity.code()),
+                self.monte_carlo_report
+                    .as_ref()
+                    .map_or(0, |m| m.config.simulations),
+                self.monte_carlo_report
+                    .as_ref()
+                    .and_then(|m| m.metrics.map(|x| x.max_drawdown_var_95_pct))
+                    .map_or_else(|| "null".to_owned(), |v| format!("{v:.4}")),
+                self.monte_carlo_report
+                    .as_ref()
+                    .and_then(|m| m.metrics.map(|x| x.max_drawdown_cvar_95_pct))
+                    .map_or_else(|| "null".to_owned(), |v| format!("{v:.4}")),
+                self.monte_carlo_report
+                    .as_ref()
+                    .and_then(|m| m.metrics.map(|x| x.prob_of_profit_pct))
+                    .map_or_else(|| "null".to_owned(), |v| format!("{v:.4}")),
+                self.show_mc_fan_on_equity,
                 rep.bounds.raw_min,
                 rep.bounds.raw_max,
             );
@@ -21279,5 +23675,369 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn r15_workstation_drawing_inspector_escape_dirty_draft_and_instrument_isolation() {
+        use eframe::App as _;
+
+        let mut app = SumiWorkstationApp::default();
+        app.populate_showcase_drawings();
+        let sel_id = app
+            .drawings
+            .selected_id
+            .expect("showcase selects last drawing");
+        app.show_drawing_inspector = true;
+        app.sync_drawing_inspector_draft();
+        assert!(!app.is_drawing_inspector_dirty());
+
+        // Stage dirty style + visibility=false in Inspector draft
+        if let Some(ref mut st) = app.drawing_inspector_draft {
+            st.draft.visible = false;
+            st.draft.style.line_width = 4.25;
+        }
+        assert!(app.is_drawing_inspector_dirty());
+
+        // Plain `Escape` cancels dirty draft WITHOUT deselecting `sel_id` on chart!
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1280.0, 800.0),
+                )),
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| {
+                app.ui(ui, &mut eframe::Frame::_new_kittest());
+            },
+        );
+        out.textures_delta.clear();
+        assert!(
+            !app.is_drawing_inspector_dirty(),
+            "Escape must discard dirty draft"
+        );
+        assert_eq!(
+            app.drawings.selected_id,
+            Some(sel_id),
+            "Escape on dirty Inspector draft must NOT deselect drawing on chart"
+        );
+
+        // Apply `visible = false` atomically -> drawing stays selected in Inspector, undo_depth increments by 1
+        let pre_undo = app.drawings.undo_depth();
+        if let Some(ref mut st) = app.drawing_inspector_draft {
+            st.draft.visible = false;
+            st.draft.style.color = DrawingColorPreset::Crimson;
+        }
+        assert_eq!(app.apply_drawing_inspector_draft(), Ok(true));
+        assert_eq!(app.drawings.undo_depth(), pre_undo + 1);
+        assert_eq!(app.drawings.selected_id, Some(sel_id));
+        assert!(!app.drawings.selected_drawing().unwrap().visible);
+
+        // Switching ticker isolates DrawingInspectorDraft cleanly
+        app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+        app.sync_drawing_inspector_draft();
+        assert!(app.drawing_inspector_draft.is_none());
+    }
+
+    #[test]
+    fn r15_signal_catalog_modal_confluence_cache_and_monte_carlo_sources() {
+        use eframe::App as _;
+
+        let mut app = SumiWorkstationApp::default();
+        app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+        app.show_scanner_dock = true;
+        app.scanner_tab = ScannerDockTab::Signals;
+        app.open_signal_catalog_modal();
+        assert!(app.show_signal_catalog_modal);
+        assert!(app.confluence_report_cache.is_some());
+
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1280.0, 800.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                app.ui(ui, &mut eframe::Frame::_new_kittest());
+            },
+        );
+        out.textures_delta.clear();
+        let modal_rect = app
+            .last_signal_catalog_modal_rect
+            .expect("catalog modal rect recorded");
+        assert!(modal_rect.width() > 300.0 && modal_rect.height() > 200.0);
+
+        // Close modal and verify Monte Carlo sync across SingleAsset, WalkForwardOos, and MultiAssetPortfolio
+        app.show_signal_catalog_modal = false;
+        app.open_strategy_lab();
+        for src in [
+            EquityPaneSource::SingleAssetBacktest,
+            EquityPaneSource::WalkForwardOos,
+            EquityPaneSource::MultiAssetPortfolio,
+        ] {
+            app.equity_pane_source = src;
+            app.sync_backtest_causal();
+            assert!(
+                app.monte_carlo_report.is_some(),
+                "Monte Carlo cache must populate for {src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn critic_r15_regression_peer_mtf_explain_cutoff_and_toolbar_undo_alert_planner_sync() {
+        // 1. R15-M02: `SyntheticVnindex` (`Preset:Synth:...`) 1D signal still resolves explanation when chart is on 1W!
+        let mut app = SumiWorkstationApp::default();
+        app.set_dataset_size(240);
+        app.sync_scanner_caches();
+        let synth_key = app.current_instrument_key();
+        if let Some(synth_hit) = app
+            .raw_historical_hits_cache
+            .iter()
+            .find(|h| h.instrument_id == synth_key && h.timeframe == Timeframe::D1)
+            .cloned()
+        {
+            let _ = app.set_timeframe(Timeframe::W1);
+            app.inspected_signal_key = Some((
+                synth_hit.instrument_id.clone(),
+                synth_hit.timestamp,
+                synth_hit.signal,
+            ));
+            app.sync_inspected_signal_eval_cache(None);
+            let ev = app
+                .inspected_signal_eval_cache
+                .as_ref()
+                .and_then(|c| c.eval.as_ref());
+            assert!(
+                ev.is_some(),
+                "SyntheticVnindex 1D hit must still resolve causal explanation when active_timeframe is 1W"
+            );
+        }
+
+        // 2. R15-M02: Mid-bucket Replay on 15m (`1m` base) clears unclosed `inspected_signal_key` & blocks unclosed eval
+        app.select_watchlist_instrument(DataSourcePreset::IntradayVn30F1m, "VN30F1M");
+        let _ = app.set_timeframe(Timeframe::M15);
+        app.sync_scanner_caches();
+        if let Some(vn_hit) = app
+            .raw_historical_hits_cache
+            .iter()
+            .find(|h| h.symbol == "VN30F1M")
+            .cloned()
+        {
+            let mid_bucket_close = vn_hit.timestamp + 120; // 2m into a 5m/15m bar (unclosed!)
+            app.inspected_signal_key = Some((
+                vn_hit.instrument_id.clone(),
+                vn_hit.timestamp,
+                vn_hit.signal,
+            ));
+            app.sync_inspected_signal_eval_cache(Some(mid_bucket_close));
+            let leaked = app
+                .inspected_signal_eval_cache
+                .as_ref()
+                .and_then(|c| c.eval.as_ref());
+            assert!(
+                leaked.is_none(),
+                "mid-bucket cutoff must NEVER evaluate an unclosed higher-TF signal hit"
+            );
+        }
+
+        // 3. R15-m03: RiskRewardBox Inspector edit -> Undo -> Redo updates Planner + Alerts cleanly
+        app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+        app.populate_showcase_drawings();
+        // Select any TrendLine and arm DrawingLine alert, then edit via Inspector and Undo
+        let trend_id = app
+            .drawings
+            .drawings
+            .iter()
+            .find(|d| matches!(d.geometry, DrawingGeometry::TrendLine { .. }) && !d.locked)
+            .map(|d| d.id)
+            .expect("unlocked trendline");
+        let _ = app.drawings.select_drawing_by_id(Some(trend_id));
+        app.add_alert_on_selected_drawing(CrossDirection::CrossAbove)
+            .expect("arm drawing alert");
+        app.sync_drawing_inspector_draft();
+        if let Some(ref mut st) = app.drawing_inspector_draft
+            && let DrawingGeometry::TrendLine { start, end } = &mut st.draft.geometry
+        {
+            start.value += 15.0;
+            end.value += 15.0;
+        }
+        assert_eq!(app.apply_drawing_inspector_draft(), Ok(true));
+        let _ = app.drawings.undo();
+        app.auto_sync_planner_if_rr_box_changed();
+        app.sync_alerts_causal();
+        assert_eq!(app.alerts.rules.len(), 1);
+    }
+
+    #[test]
+    fn critic_r15_r2_regression_signal_replay_revealed_explanation_and_1w_friday_explain() {
+        // 1. `start_scanner_signal_replay` (`SignalReview` & `BlindPractice`) -> `revealed_explanation`
+        //    must work on BOTH `FPT 1D` (`D1` base) and `VN30F1M 15m` / `1h` (`1m` base, incl. session close)
+        let mut app = SumiWorkstationApp::default();
+        app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+        app.sync_scanner_caches();
+        let fpt_hit = app
+            .raw_historical_hits_cache
+            .iter()
+            .find(|h| h.symbol == "FPT" && h.bar_index >= 55)
+            .cloned()
+            .expect("FPT 1D signal hit");
+
+        assert!(
+            app.start_scanner_signal_replay(fpt_hit.clone(), ScannerReplayIntent::SignalReview)
+        );
+        let cut_rev = app.replay.cutoff_timestamp(&app.base_candles);
+        let ev_rev = app
+            .scanner_context
+            .as_ref()
+            .unwrap()
+            .revealed_explanation(&app.candles, cut_rev);
+        assert!(
+            ev_rev.as_ref().is_some_and(|e| e.quality.is_valid()),
+            "SignalReview on FPT 1D must yield Valid revealed_explanation at reveal_ts: {ev_rev:?}"
+        );
+        // Step back 1 bar -> must hide explanation even in SignalReview!
+        let _ = app.step_replay_backward(1);
+        let cut_back = app.replay.cutoff_timestamp(&app.base_candles);
+        assert!(
+            app.scanner_context
+                .as_ref()
+                .unwrap()
+                .revealed_explanation(&app.candles, cut_back)
+                .is_none(),
+            "rewinding before reveal_ts must mask revealed_explanation"
+        );
+
+        // Now test `VN30F1M 15m` (`1m` base) under `BlindPractice` -> step forward to `reveal_ts` -> `Some(Valid)`
+        app.exit_replay();
+        app.select_watchlist_instrument(DataSourcePreset::IntradayVn30F1m, "VN30F1M");
+        let _ = app.set_timeframe(Timeframe::M15);
+        app.signal_lookback_bars = 400;
+        app.sync_scanner_caches();
+        let vn_hit = app
+            .raw_historical_hits_cache
+            .iter()
+            .find(|h| h.symbol == "VN30F1M" && h.timeframe == Timeframe::M15 && h.bar_index >= 55)
+            .cloned()
+            .expect("VN30F1M 15m signal hit");
+        assert!(
+            app.start_scanner_signal_replay(vn_hit.clone(), ScannerReplayIntent::BlindPractice)
+        );
+        let init_cut = app.replay.cutoff_timestamp(&app.base_candles);
+        assert!(
+            app.scanner_context
+                .as_ref()
+                .unwrap()
+                .revealed_explanation(&app.candles, init_cut)
+                .is_none(),
+            "BlindPractice must start masked before reveal_ts"
+        );
+        // Step forward until `cutoff_timestamp >= reveal_at_timestamp`
+        let reveal_target = app.scanner_context.as_ref().unwrap().reveal_at_timestamp();
+        for _ in 0..32 {
+            if app
+                .replay
+                .cutoff_timestamp(&app.base_candles)
+                .is_some_and(|ts| ts >= reveal_target)
+            {
+                break;
+            }
+            let _ = app.step_replay_forward(1);
+        }
+        let reached_cut = app.replay.cutoff_timestamp(&app.base_candles);
+        let vn_ev = app
+            .scanner_context
+            .as_ref()
+            .unwrap()
+            .revealed_explanation(&app.candles, reached_cut);
+        assert!(
+            vn_ev.as_ref().is_some_and(|e| e.quality.is_valid()),
+            "VN30F1M 15m BlindPractice must reveal Valid explanation once stepped to reveal_ts: {vn_ev:?}"
+        );
+        // Also verify inline `[Explain ▼]` (`sync_inspected_signal_eval_cache`) succeeds at `reveal_ts`
+        app.sync_scanner_caches();
+        app.inspected_signal_key = Some((
+            vn_hit.instrument_id.clone(),
+            vn_hit.timestamp,
+            vn_hit.signal,
+        ));
+        let close_cut = app.replay_causal_close_timestamp();
+        app.sync_confluence_causal();
+        assert!(app.inspected_signal_key.is_some());
+        app.sync_inspected_signal_eval_cache(close_cut);
+        assert!(
+            app.inspected_signal_eval_cache
+                .as_ref()
+                .and_then(|c| c.eval.as_ref())
+                .is_some_and(|e| e.quality.is_valid())
+        );
+
+        // 2. `D1 -> 1W` Friday replay `[Explain ▼]` must succeed (`dow_mon0 == 4`), while Wednesday mid-week must block!
+        app.exit_replay();
+        app.set_dataset_size(600);
+        let _ = app.set_timeframe(Timeframe::W1);
+        app.signal_lookback_bars = 200;
+        app.sync_scanner_caches();
+        let w1_hit = app
+            .raw_historical_hits_cache
+            .iter()
+            .find(|h| h.timeframe == Timeframe::W1 && h.bar_index >= 55)
+            .cloned()
+            .expect("1W signal hit on 600-day series");
+        assert!(app.start_scanner_signal_replay(w1_hit.clone(), ScannerReplayIntent::SignalReview));
+        app.sync_scanner_caches();
+        app.inspected_signal_key = Some((
+            w1_hit.instrument_id.clone(),
+            w1_hit.timestamp,
+            w1_hit.signal,
+        ));
+        let fri_close_cut = app.replay_causal_close_timestamp();
+        app.sync_confluence_causal();
+        assert!(
+            app.inspected_signal_key.is_some(),
+            "Friday-closed 1W signal must NOT be erased by sync_confluence_causal"
+        );
+        app.sync_inspected_signal_eval_cache(fri_close_cut);
+        assert!(
+            app.inspected_signal_eval_cache
+                .as_ref()
+                .and_then(|c| c.eval.as_ref())
+                .is_some_and(|e| e.quality.is_valid()),
+            "Friday-closed 1W signal must evaluate Valid in sync_inspected_signal_eval_cache"
+        );
+
+        // Step backward to Wednesday (`step_unit = BaseBar` on D1 steps 2 days back from Friday -> Wednesday)
+        app.replay.step_unit = ReplayStepUnit::BaseBar;
+        let _ = app.step_replay_backward(2);
+        let wed_close_cut = app.replay_causal_close_timestamp();
+        app.inspected_signal_key = Some((
+            w1_hit.instrument_id.clone(),
+            w1_hit.timestamp,
+            w1_hit.signal,
+        ));
+        app.sync_inspected_signal_eval_cache(wed_close_cut);
+        assert!(
+            app.inspected_signal_eval_cache
+                .as_ref()
+                .and_then(|c| c.eval.as_ref())
+                .is_none(),
+            "Wednesday mid-week replay on 1W must return None for unclosed week"
+        );
+        app.sync_confluence_causal();
+        assert!(
+            app.inspected_signal_key.is_none(),
+            "Wednesday mid-week replay on 1W must clear inspected_signal_key"
+        );
     }
 }

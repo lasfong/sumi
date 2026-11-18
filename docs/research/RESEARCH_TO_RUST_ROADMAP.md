@@ -1,7 +1,7 @@
 # RESEARCH TO RUST ROADMAP — SESSION R01
 
 - **Session Identity:** `SESSION-R01-20261110T202837+0700`
-- **Updated By:** `SESSION-R14-20261115T191000+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Updated By:** `SESSION-R15-20261118T074500+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 - **Principle:** No Rust implementation begins without prior REA or reference-source research evidence.
 
 ---
@@ -375,13 +375,40 @@ cargo test app::tests::critic_r14_
 
 ---
 
-## Wave 14 — Explainable Signal Catalog & Causal Confluence Inspector, Interactive Drawing Property Inspector, & Monte Carlo Bootstrap Tearsheet Risk Envelopes (`PROPOSED — MILESTONE R15`)
+## Wave 14 — Explainable Signal Catalog & Causal Confluence Inspector, Interactive Drawing Property Inspector, & Monte Carlo Bootstrap Tearsheet Risk Envelopes (`COMPLETE — SESSION R15`)
+
+### Completed Research & Audit Gates (`VERIFIED`)
+- [x] Executed `10` live REA MCP JS/TS operations (`REA-R15-01`..`10` across `ARCHIVE/frontend` `SignalCatalog.tsx`/`SignalCatalogModal.tsx`/`SignalExplanationInspector.tsx`/`SignalInspector.tsx`/`DrawingInspector.tsx`/`EquityChart.tsx`/`MetricResultValue.tsx`/`MultiStrategyEquityChart.tsx` & `LWC v5.2.0` `area-renderer.ts`/`baseline-renderer-area.ts`/`baseline-renderer-line.ts`/`area-pane-view.ts`/`baseline-pane-view.ts`/`primitive-drawing-utils.ts`/`ipane-primitive.ts`) plus `2` post-build binary REA ops (`REA-R15-11`..`12` on final R15 release Mach-O `d0ba48a581c3fd1c73da2f11d8deb47e46f2a094d15c62f4b1fe008de7de76ff`, UUID `F2CD9DB2-AC30-37C9-B10E-1168E6B17A88`) -> [`docs/research/SIGNALS_INSPECTOR_AND_MONTE_CARLO_SPEC.md`](SIGNALS_INSPECTOR_AND_MONTE_CARLO_SPEC.md).
+
+### Shipped Deliverables & Verification (`cargo test r15_`, `cargo test critic_r15_`, `--r15`, `SUMI_CAPTURE_BATCH=r15`)
+| Component | Research Source | Rust Target | Status |
+|---|---|---|---|
+| Pure `f64`/`i64`/`u64` WASM-safe `17`-Entry `SIGNAL_CATALOG` (`12` tabs, EN/VI/AST search, `SplitMix64` `params_digest`, `OHLCV_PROXY`), `SignalQuality` (`NaN`/`Inf` guards), 4-family `evaluate_causal_confluence` (`35/25/20/20` & `50/20/15/15`, `"bb_absent_neutral"`), `explain_historical_signal` (`1W` Friday & `VN30F1M` session-close aware), `ScannerSignalContext::revealed_explanation`, virtualized `ScrollArea::show_rows` Signals dock & Signal Catalog Modal | `ARCHIVE/frontend/src/components/signals/{SignalCatalog,SignalCatalogModal,SignalInspector,SignalExplanationInspector}.tsx` + `SIGNALS_INSPECTOR_AND_MONTE_CARLO_SPEC.md` | `src/scanner/catalog.rs`, `src/scanner/mod.rs`, `src/scanner/tests.rs`, `src/app.rs` | Shipped & Critic-Hardened (`23.75 µs` `FPT 1D`, `CRITIC_PASS`) |
+| Transactional Interactive Drawing Property Inspector (`Drawing::is_causally_eligible` vs `is_causally_visible`, `DrawingPropertyPatch`, `apply_drawing_property_patch` `<= 1` `Modify` on 64-step Undo/Redo, `Escape` dirty-draft cancel, same-frame Alerts & Planner sync) | `ARCHIVE/frontend/src/components/chart/DrawingInspector.tsx` + `SIGNALS_INSPECTOR_AND_MONTE_CARLO_SPEC.md` | `src/drawings/mod.rs`, `src/drawings/controller.rs`, `src/drawings/tests.rs`, `src/app.rs` | Shipped & Critic-Hardened (`261.96 µs` `1k` patches, `CRITIC_PASS`) |
+| Deterministic `SplitMix64` Monte Carlo Bootstrap (`DEFAULT_MONTE_CARLO_SEED = 202_615`, sequential equity returns, `VaR`/`CVaR` `95%`/`99%`, `WalkForwardOos` & `MultiAssetPortfolio` bar-aligned `MonteCarloFanSeries`, log-safe `autoscale_equity_bounds_with_fan`, `p5..p95` + `p25..p75` + dashed `p50` `egui::Mesh`) & R14 Right-Axis Carry-Overs (`vp.base_value` `+0.00%` badge + `collect_trading_axis_pill_ys`) | `ARCHIVE/frontend/src/components/analytics/{EquityChart,MetricResultValue}.tsx` + `LWC v5.2.0` `baseline-renderer-area.ts` + `SIGNALS_INSPECTOR_AND_MONTE_CARLO_SPEC.md` | `src/backtest/monte_carlo.rs`, `src/backtest/mod.rs`, `src/chart.rs`, `src/app.rs` | Shipped & Critic-Hardened (`216/216` tests + `wasm32` Clippy, `--r15` `0.337–1.557 ms` mean / `p99 <= 2.098 ms < 4.0 ms`) |
+
+### Verified Acceptance Tests (`cargo test` — 216/216 PASS)
+```bash
+cargo test scanner::tests::r15_
+cargo test scanner::tests::critic_r15_
+cargo test drawings::tests::r15_
+cargo test backtest::tests::r15_
+cargo test backtest::tests::critic_r15_
+cargo test chart::tests::r15_
+cargo test chart::tests::critic_r15_
+cargo test app::tests::r15_
+cargo test app::tests::critic_r15_
+```
+
+---
+
+## Wave 15 — Composable Signal-Catalog Rule Strategy Builder, Multi-Condition Causal Alert Ledger & Export, & Crash-Safe Workspace Snapshot Auto-Recovery (`PROPOSED — MILESTONE R16`)
 
 ### Proposed Deliverables (Awaiting Product Owner Authorization)
 | Component | Research Source | Rust Target | Status |
 |---|---|---|---|
-| Explainable Signal Catalog & `DEF-001` Causal Confluence Inspector (`SignalCatalog`, feature attribution, multi-signal filter, click-to-jump chart review) | `ARCHIVE/frontend/src/components/signals/{SignalCatalog,SignalCatalogModal,SignalInspector,SignalExplanationInspector}.tsx` | `src/scanner/`, `src/app.rs` | Proposed (`Milestone R15`) |
-| Interactive Drawing Property Inspector (live style/color/dash/anchor editing backed by 64-step Undo/Redo) & Deterministic `SplitMix64` Monte Carlo Bootstrap Tearsheet Envelopes (`OscillatorPaneId::Equity` fan bands) | `ARCHIVE/frontend/src/components/chart/DrawingInspector.tsx` + `analytics/EquityChart.tsx` + `LWC v5.2.0` | `src/drawings/`, `src/backtest/`, `src/chart.rs`, `src/app.rs` | Proposed (`Milestone R15`) |
+| Composable Signal-Catalog Rule Strategy Builder (`AND`/`OR` `SIGNAL_CATALOG` entry/exit clauses + `ConfluenceScore` threshold feeding `Open[T+1]` Backtest, `WFO`, & `SplitMix64` Monte Carlo) | `ARCHIVE/frontend/src/components/strategy/*` | `src/backtest/`, `src/scanner/catalog.rs`, `src/app.rs` | Proposed (`Milestone R16`) |
+| Multi-Condition Causal Alert Ledger (`SignalCatalog`/`ConfluenceScore` triggers, cooldown bars, formula-safe CSV/JSON export) & Named Workspace Snapshot Checkpoints | `ARCHIVE/frontend` alerts/workspace modules + `LWC v5.2.0` | `src/alerts/`, `src/viewport/workspace_template.rs`, `src/app.rs` | Proposed (`Milestone R16`) |
 
 ---
 

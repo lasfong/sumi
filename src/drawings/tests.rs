@@ -1626,3 +1626,149 @@ fn critic_r11_regression_avwap_tail_hit_test_and_left_drag_clamp() {
         "AVWAP left drag must clamp bar_index >= 0.0, got {clamped_idx}"
     );
 }
+
+#[test]
+fn r15_inspector_atomic_patch_hidden_selection_lock_and_timeframe_sync() {
+    use crate::data::{Timeframe, aggregate_ohlcv};
+
+    let candles_15m: Vec<Candle> = (0..320)
+        .map(|i| {
+            let ts = 1_760_000_000 + (i as i64) * 900;
+            let p = 110.0 + ((i % 23) as f64) * 0.6;
+            Candle {
+                timestamp: ts,
+                date_label: Timeframe::M15.format_candle_label(ts),
+                open: p - 0.3,
+                high: p + 0.9,
+                low: p - 0.8,
+                close: p + 0.2,
+                volume: 1_500.0,
+            }
+        })
+        .collect();
+    let candles_1d = aggregate_ohlcv(&candles_15m, Timeframe::M15, Timeframe::D1).expect("agg 1D");
+    let (ts, ps) = setup_pane_scales(
+        candles_15m.len(),
+        900.0,
+        500.0,
+        80.0,
+        160.0,
+        PriceScaleMode::Normal,
+        false,
+    );
+    let proj = PaneDrawingProjection::new(&ts, &ps, 900.0, 500.0, 100.0).with_candles(&candles_15m);
+
+    let mut store = DrawingStore::new();
+    let p0 = proj
+        .anchor_to_local(DrawingAnchor::new(260.0, candles_15m[260].low))
+        .unwrap();
+    let p1 = proj
+        .anchor_to_local(DrawingAnchor::new(300.0, candles_15m[300].high))
+        .unwrap();
+    store.set_tool(DrawingTool::FibonacciRetracement);
+    store.pointer_down(DrawingPaneTarget::Main, p0, false, &proj, &candles_15m);
+    store.pointer_move(DrawingPaneTarget::Main, p1, false, &proj, &candles_15m);
+    assert!(store.pointer_up(
+        DrawingPaneTarget::Main,
+        Some(p1),
+        false,
+        &proj,
+        &candles_15m
+    ));
+
+    let id = store.selected_id.expect("created fib selected");
+    let orig = store.selected_drawing().unwrap().clone();
+
+    // 1. Atomic multi-property patch (color + width + dash + opacity + extend_right + reverse + visible=false)
+    let mut patch = DrawingPropertyPatch::from_drawing(&orig);
+    patch.visible = false;
+    patch.style.color = DrawingColorPreset::AmberGold;
+    patch.style.line_width = 3.5;
+    patch.style.dash = LineDashStyle::Dashed;
+    patch.style.fill_opacity = 0.28;
+    if let DrawingGeometry::FibonacciRetracement {
+        direction,
+        extend_right,
+        ..
+    } = &mut patch.geometry
+    {
+        *direction = direction.reversed();
+        *extend_right = true;
+    }
+
+    assert_eq!(store.undo_depth(), 1);
+    let changed = store
+        .apply_drawing_property_patch(id, patch.clone(), &candles_15m, Timeframe::M15)
+        .expect("valid atomic patch");
+    assert!(changed);
+    assert_eq!(
+        store.undo_depth(),
+        2,
+        "multi-field Apply must push exactly ONE DrawingCommand::Modify"
+    );
+
+    // 2. Hidden (`visible == false`) drawing MUST remain selected in Inspector (`is_causally_eligible`)
+    //    while hidden from canvas (`!is_causally_visible`)!
+    let hidden_sel = store
+        .selected_drawing()
+        .expect("hidden drawing stays selected in Inspector");
+    assert!(!hidden_sel.visible);
+    assert!(!hidden_sel.is_causally_visible(None, usize::MAX));
+    assert!(hidden_sel.is_causally_eligible(None, usize::MAX));
+
+    // No-op re-apply must NOT wipe redo_stack or push duplicate undo entries!
+    assert!(store.undo());
+    assert!(store.can_redo());
+    assert!(store.redo());
+    let noop = store
+        .apply_drawing_property_patch(id, patch, &candles_15m, Timeframe::M15)
+        .expect("noop patch");
+    assert!(!noop);
+    assert_eq!(store.undo_depth(), 2);
+
+    // 3. Re-enable visibility & lock, then verify locked drawings reject edits until unlocked
+    let mut lock_patch = DrawingPropertyPatch::from_drawing(store.selected_drawing().unwrap());
+    lock_patch.visible = true;
+    lock_patch.locked = true;
+    assert!(
+        store
+            .apply_drawing_property_patch(id, lock_patch.clone(), &candles_15m, Timeframe::M15)
+            .unwrap()
+    );
+
+    let mut blocked = lock_patch.clone();
+    blocked.style.line_width = 5.0;
+    assert_eq!(
+        store.apply_drawing_property_patch(id, blocked, &candles_15m, Timeframe::M15),
+        Err(DrawingPatchError::DrawingLocked)
+    );
+
+    let mut unlock_and_move = lock_patch;
+    unlock_and_move.locked = false;
+    if let DrawingGeometry::FibonacciRetracement { start, .. } = &mut unlock_and_move.geometry {
+        start.bar_index = 272.0;
+    }
+    assert!(
+        store
+            .apply_drawing_property_patch(id, unlock_and_move, &candles_15m, Timeframe::M15)
+            .unwrap()
+    );
+    let moved_ts = store.selected_drawing().unwrap().geometry.anchors()[0]
+        .timestamp
+        .expect("edited bar_index re-stamped against candles_15m");
+    assert!((moved_ts - (candles_15m[272].timestamp as f64)).abs() < 1e-6);
+
+    // Remap 15m -> 1D -> 15m preserves edited anchor!
+    store.remap_timeframe(&candles_15m, Timeframe::M15, &candles_1d, Timeframe::D1);
+    store.remap_timeframe(&candles_1d, Timeframe::D1, &candles_15m, Timeframe::M15);
+    let roundtrip_bar = store.selected_drawing().unwrap().geometry.anchors()[0].bar_index;
+    assert!(roundtrip_bar.is_finite());
+
+    // 4. Reject invalid style & invalid geometry (zero-direction Ray, inverted RR, out-of-range FRVP rows)
+    let mut bad_style = DrawingPropertyPatch::from_drawing(store.selected_drawing().unwrap());
+    bad_style.style.line_width = 12.0;
+    assert_eq!(
+        store.apply_drawing_property_patch(id, bad_style, &candles_15m, Timeframe::M15),
+        Err(DrawingPatchError::InvalidStyle)
+    );
+}

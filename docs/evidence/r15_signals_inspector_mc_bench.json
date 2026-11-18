@@ -1,0 +1,27 @@
+{
+  "milestone": "R15",
+  "overall_pass": true,
+  "confluence_data_fidelity": "OHLCV_BAR_CLOSE_PROXY",
+  "environment": {
+    "cpu": "Apple M1",
+    "os": "macos",
+    "arch": "aarch64",
+    "ram_bytes": 17179869184,
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "profile": "release",
+    "viewport_logical_px": [1280, 800],
+    "pixels_per_point": 2.0
+  },
+  "r15_domain_throughput": [
+    { "case_id": "r15_signal_catalog_and_confluence_fpt_1d", "description": "17-entry Signal Catalog filter + 4-family Causal Confluence & Quality evaluation on FPT 1D", "input_units": 180, "output_items": 34, "median_us": 23.750, "median_ms": 0.0238, "p95_us": 27.667, "max_us": 133.209 },
+    { "case_id": "r15_monte_carlo_splitmix64_1000sim_btc_15m", "description": "1,000-simulation SplitMix64 bootstrap on BTCUSDT 15m (VALID N>=30, VaR/CVaR 95%/99% + p5..p95 fan)", "input_units": 1000, "output_items": 54, "median_us": 1343.083, "median_ms": 1.3431, "p95_us": 1447.875, "max_us": 1494.625 },
+    { "case_id": "r15_drawing_inspector_atomic_patch_undo_redo_1k", "description": "1,000 validated DrawingPropertyPatch Apply + Undo + Redo transactions", "input_units": 1000, "output_items": 17, "median_us": 261.958, "median_ms": 0.2620, "p95_us": 265.125, "max_us": 359.375 }
+  ],
+  "workstation_r15_workloads": [
+    { "dataset_bars": 180, "workload_id": "r15_fpt_signals_confluence_and_drawing_inspector", "scale_mode": "Linear", "bar_spacing": 8.00000, "conflation_factor": 1, "culled_bars": 70, "rendered_candles": 69, "paint_shapes": 579, "clipped_primitives": 60, "total_vertices": 24038, "total_indices": 83403, "ui_median_ms": 0.2874, "tessellate_median_ms": 0.1255, "total_cpu_mean_ms": 0.4247, "total_cpu_median_ms": 0.4129, "total_cpu_p95_ms": 0.5358, "total_cpu_p99_ms": 0.7083 },
+    { "dataset_bars": 1344, "workload_id": "r15_btc_15m_tearsheet_and_monte_carlo_equity_fan", "scale_mode": "Linear", "bar_spacing": 0.63864, "conflation_factor": 1, "culled_bars": 1344, "rendered_candles": 1343, "paint_shapes": 602, "clipped_primitives": 64, "total_vertices": 139884, "total_indices": 450801, "ui_median_ms": 0.8504, "tessellate_median_ms": 0.4889, "total_cpu_mean_ms": 1.3721, "total_cpu_median_ms": 1.3432, "total_cpu_p95_ms": 1.6435, "total_cpu_p99_ms": 1.6723 },
+    { "dataset_bars": 2150, "workload_id": "r15_vn30f_replay_and_signal_catalog_modal", "scale_mode": "Linear", "bar_spacing": 8.00000, "conflation_factor": 1, "culled_bars": 133, "rendered_candles": 132, "paint_shapes": 433, "clipped_primitives": 50, "total_vertices": 28074, "total_indices": 86412, "ui_median_ms": 0.2035, "tessellate_median_ms": 0.1266, "total_cpu_mean_ms": 0.3374, "total_cpu_median_ms": 0.3311, "total_cpu_p95_ms": 0.3584, "total_cpu_p99_ms": 0.5075 },
+    { "dataset_bars": 100000, "workload_id": "r15_100k_conflated_mc_equity_fan_and_inspector", "scale_mode": "Linear", "bar_spacing": 0.00608, "conflation_factor": 64, "culled_bars": 100000, "rendered_candles": 1562, "paint_shapes": 601, "clipped_primitives": 51, "total_vertices": 73906, "total_indices": 162537, "ui_median_ms": 0.7931, "tessellate_median_ms": 0.2148, "total_cpu_mean_ms": 1.0605, "total_cpu_median_ms": 1.0114, "total_cpu_p95_ms": 1.4765, "total_cpu_p99_ms": 1.5754 },
+    { "dataset_bars": 200000, "workload_id": "r15_quad_2x2_50k_signals_and_inspector_stress", "scale_mode": "Linear", "bar_spacing": 0.00546, "conflation_factor": 64, "culled_bars": 200000, "rendered_candles": 3124, "paint_shapes": 713, "clipped_primitives": 118, "total_vertices": 95856, "total_indices": 217584, "ui_median_ms": 1.1305, "tessellate_median_ms": 0.3914, "total_cpu_mean_ms": 1.5574, "total_cpu_median_ms": 1.5311, "total_cpu_p95_ms": 1.9451, "total_cpu_p99_ms": 2.0982 }
+  ]
+}

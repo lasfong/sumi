@@ -6,6 +6,7 @@
 
 pub mod engine;
 pub mod metrics;
+pub mod monte_carlo;
 pub mod strategy;
 #[cfg(test)]
 mod tests;
@@ -21,6 +22,14 @@ pub use metrics::{
     BacktestEquityPoint, BacktestExitReason, BacktestTearsheet, BacktestTrade,
     MIN_STATISTICAL_SAMPLE_TRADES, PNL_BREAKEVEN_EPS, RobustnessVerdict, UnexecutedSignal,
     UnfilledReason, compute_tearsheet, evaluate_robustness,
+};
+pub use monte_carlo::{
+    DEFAULT_MONTE_CARLO_SEED, MAX_MONTE_CARLO_CHECKPOINTS, MAX_MONTE_CARLO_HORIZON,
+    MAX_MONTE_CARLO_SIMULATIONS, MIN_MONTE_CARLO_SIMULATIONS, MonteCarloConfig,
+    MonteCarloFanSeries, MonteCarloReport, MonteCarloRiskMetrics, MonteCarloValidity,
+    QuantileEnvelope5, SplitMix64, extract_causal_curve_returns,
+    extract_causal_trade_equity_returns, run_monte_carlo_bootstrap,
+    run_monte_carlo_from_equity_curve, run_monte_carlo_portfolio_mapped,
 };
 pub use strategy::{
     BacktestConfig, MAX_SWEEP_VARIANTS, PositionSizingMode, StopTakeConfig, StrategyDirectionMode,

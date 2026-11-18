@@ -502,3 +502,281 @@ fn r13_breadth_aggregate_before_ratio_at05_at09_at17_and_def001_causality() {
     );
     assert_eq!(snap_orig, snap_poison);
 }
+
+#[test]
+fn r15_signal_catalog_schema_quality_gate_and_bb_absent_neutral() {
+    use super::catalog::{
+        CONFLUENCE_WARMUP_BARS, ConfluenceWeightProfile, SIGNAL_CATALOG, SignalCategory,
+        SignalQuality, evaluate_causal_confluence, filter_signal_catalog,
+        find_catalog_entry_for_scan_kind,
+    };
+
+    assert_eq!(SIGNAL_CATALOG.len(), 17);
+    for cat in SignalCategory::ALL_TABS {
+        if cat != SignalCategory::All {
+            let matches = filter_signal_catalog(cat, "");
+            assert!(
+                !matches.is_empty(),
+                "every SignalCategory ({cat:?}) must have >= 1 catalog entry"
+            );
+        }
+    }
+    for kind in ScanSignalKind::ALL {
+        let e = find_catalog_entry_for_scan_kind(kind);
+        assert_ne!(e.params_digest(), 0);
+    }
+    let vi_hits = filter_signal_catalog(SignalCategory::All, "Khối Lượng");
+    assert!(
+        vi_hits.len() >= 2,
+        "Vietnamese label search must match volume/VSA catalog entries"
+    );
+
+    // 1. Warmup < 50 bars -> InsufficientHistory & value == None
+    let short_bars: Vec<Candle> = (0..18)
+        .map(|i| {
+            make_bar(
+                i,
+                100.0 + i as f64,
+                102.0 + i as f64,
+                99.0 + i as f64,
+                101.0 + i as f64,
+                1000.0,
+            )
+        })
+        .collect();
+    let short_rep =
+        evaluate_causal_confluence(&short_bars, None, false, ConfluenceWeightProfile::Balanced);
+    assert_eq!(short_rep.quality, SignalQuality::InsufficientHistory);
+    assert!(short_rep.health.is_none());
+    let vol_ev = short_rep
+        .evaluations
+        .iter()
+        .find(|e| e.catalog_id == "volume.spike_2x")
+        .unwrap();
+    assert_eq!(vol_ev.quality, SignalQuality::InsufficientHistory);
+    assert!(vol_ev.bool_value.is_none() && vol_ev.float_value.is_none());
+
+    // 2. Zero-volume baseline -> VolumeSpike returns ZeroBaseline (`value = None`), while Health emits `bb_absent_neutral` (no negative penalty)
+    let zero_vol_bars: Vec<Candle> = (0..=CONFLUENCE_WARMUP_BARS + 5)
+        .map(|i| {
+            let p = 100.0 + (i as f64) * 0.8;
+            make_bar(i, p - 0.3, p + 0.6, p - 0.6, p, 0.0)
+        })
+        .collect();
+    let zv_rep = evaluate_causal_confluence(
+        &zero_vol_bars,
+        None,
+        false,
+        ConfluenceWeightProfile::Balanced,
+    );
+    assert_eq!(zv_rep.quality, SignalQuality::Valid);
+    let bd = zv_rep.health.expect("valid health on zero-volume uptrend");
+    assert!(bd.bb_flow_absent_neutral);
+    assert_eq!(bd.participation_score, 0.0);
+    assert!(bd.composite_score > 0.0);
+    let health_ev = zv_rep
+        .evaluations
+        .iter()
+        .find(|e| e.catalog_id == "health.technical_composite")
+        .unwrap();
+    assert!(health_ev.reasons.iter().any(|r| r == "bb_absent_neutral"));
+    assert!(health_ev.reasons.iter().any(|r| r == "OHLCV_PROXY"));
+    let zv_spike = zv_rep
+        .evaluations
+        .iter()
+        .find(|e| e.catalog_id == "volume.spike_2x")
+        .unwrap();
+    assert_eq!(zv_spike.quality, SignalQuality::ZeroBaseline);
+    assert!(zv_spike.bool_value.is_none() && zv_spike.float_value.is_none());
+
+    // 3. Negative / invalid volume -> InvalidVolume (`value = None`)
+    let mut bad_vol_bars = zero_vol_bars;
+    bad_vol_bars.last_mut().unwrap().volume = -50.0;
+    let bad_rep = evaluate_causal_confluence(
+        &bad_vol_bars,
+        None,
+        false,
+        ConfluenceWeightProfile::TrendFocused,
+    );
+    assert_eq!(bad_rep.quality, SignalQuality::InvalidVolume);
+    assert!(bad_rep.health.is_none());
+}
+
+#[test]
+fn r15_confluence_def001_future_poisoning_tail_exclusion_and_blind_practice_lock() {
+    use super::catalog::{ConfluenceWeightProfile, SignalQuality, evaluate_causal_confluence};
+
+    let mut bars: Vec<Candle> = (0..120)
+        .map(|i| {
+            let base = 50.0 + (i as f64) * 0.45 + ((i % 7) as f64 - 3.0) * 0.3;
+            let vol = if i == 95 { 4_500.0 } else { 1_000.0 };
+            make_bar(i, base - 0.4, base + 1.1, base - 0.8, base + 0.5, vol)
+        })
+        .collect();
+    let cutoff_ts = bars[95].timestamp;
+    let clean_rep = evaluate_causal_confluence(
+        &bars,
+        Some(cutoff_ts),
+        false,
+        ConfluenceWeightProfile::Balanced,
+    );
+    assert_eq!(clean_rep.evaluated_bar_index, 95);
+    assert_eq!(clean_rep.quality, SignalQuality::Valid);
+
+    // Poison future bars > cutoff_ts: report at cutoff_ts must remain bit-exact!
+    for b in &mut bars[96..] {
+        b.close *= 25.0;
+        b.high *= 30.0;
+        b.low *= 0.05;
+        b.volume *= 500.0;
+    }
+    let poisoned_rep = evaluate_causal_confluence(
+        &bars,
+        Some(cutoff_ts),
+        false,
+        ConfluenceWeightProfile::Balanced,
+    );
+    assert_eq!(clean_rep, poisoned_rep);
+
+    // Incomplete higher-TF tail bar (`exclude_incomplete_tail_signal == true`) steps back to 94!
+    let tail_excl_rep = evaluate_causal_confluence(
+        &bars,
+        Some(cutoff_ts),
+        true,
+        ConfluenceWeightProfile::Balanced,
+    );
+    assert!(tail_excl_rep.tail_bar_excluded);
+    assert_eq!(tail_excl_rep.evaluated_bar_index, 94);
+    let single_unclosed =
+        evaluate_causal_confluence(&bars[..1], None, true, ConfluenceWeightProfile::Balanced);
+    assert_eq!(single_unclosed.quality, SignalQuality::UnclosedTailBar);
+
+    // BlindPractice explanation lock: hidden before reveal_ts, revealed at reveal_ts, re-masked on rewind!
+    let (_, hits) = evaluate_symbol_scan_and_signals(
+        "Preset:FPT",
+        "FPT",
+        "CSV",
+        Timeframe::D1,
+        &bars[..=95],
+        None,
+        80,
+        false,
+    );
+    let target_hit = hits
+        .iter()
+        .find(|h| h.bar_index == 95 && h.signal == ScanSignalKind::VolumeSpike2x)
+        .expect("volume spike hit at bar 95")
+        .clone();
+    let reveal_close_ts = target_hit.timestamp + 86_399;
+    let ctx = ScannerSignalContext::with_reveal_timestamp(
+        ScannerReplayIntent::BlindPractice,
+        target_hit,
+        reveal_close_ts,
+    );
+    assert!(ctx.revealed_explanation(&bars, Some(cutoff_ts)).is_none());
+    let revealed = ctx
+        .revealed_explanation(&bars, Some(reveal_close_ts))
+        .expect("revealed at bucket close");
+    assert_eq!(revealed.bool_value, Some(true));
+    assert!(
+        ctx.revealed_explanation(&bars, Some(reveal_close_ts - 1))
+            .is_none()
+    );
+}
+
+#[test]
+fn critic_r15_regression_explain_unclosed_bar_cutoff_and_nan_inf_ohlc_guards() {
+    use super::{
+        ConfluenceWeightProfile, HistoricalSignalHit, MarketRegime, SIGNAL_CATALOG, ScanSignalKind,
+        SignalDirection, SignalQuality, evaluate_causal_confluence, evaluate_signal_catalog_at_bar,
+        explain_historical_signal,
+    };
+
+    // 1. R15-M02: `explain_historical_signal` must reject unclosed bar at mid-bucket cutoff
+    let mut bars_15m = Vec::with_capacity(64);
+    for i in 0..64_usize {
+        let ts = 1_710_000_000_i64 + (i as i64) * 900;
+        let close = 100.0 + (i as f64) * 0.4;
+        let vol = if i == 60 { 6_000.0 } else { 1_000.0 };
+        bars_15m.push(Candle {
+            timestamp: ts,
+            date_label: String::new(),
+            open: close - 0.2,
+            high: close + 0.5,
+            low: close - 0.5,
+            close,
+            volume: vol,
+        });
+    }
+    let hit_15m = HistoricalSignalHit {
+        instrument_id: "Test:15m".to_owned(),
+        symbol: "TEST".to_owned(),
+        timeframe: Timeframe::M15,
+        bar_index: 60,
+        timestamp: bars_15m[60].timestamp,
+        signal: ScanSignalKind::VolumeSpike2x,
+        direction: SignalDirection::Bullish,
+        regime: MarketRegime::Uptrend,
+        price: bars_15m[60].close,
+        metric_value: 6.0,
+    };
+    let open_ts = hit_15m.timestamp;
+    assert!(
+        explain_historical_signal(&bars_15m, &hit_15m, Some(open_ts + 179)).is_none(),
+        "3m into a 15m bucket must NOT leak unclosed bar OHLCV"
+    );
+    assert!(
+        explain_historical_signal(&bars_15m, &hit_15m, Some(open_ts + 898)).is_none(),
+        "1s before 15m bar close must still return None"
+    );
+    let closed_ev = explain_historical_signal(&bars_15m, &hit_15m, Some(open_ts + 899))
+        .expect("exact 15m bar close (open + 899s) must unlock evaluation");
+    assert_eq!(closed_ev.quality, SignalQuality::Valid);
+    assert_eq!(closed_ev.bool_value, Some(true));
+
+    // 2. R15-M04a: Non-finite prior highs/lows must NEVER trigger false `structure.swing_bos`
+    let mut nan_window_bars = bars_15m.clone();
+    for b in &mut nan_window_bars[49..59] {
+        b.high = f64::NAN;
+        b.low = f64::NAN;
+    }
+    let rep_nan_win = evaluate_signal_catalog_at_bar(
+        &nan_window_bars,
+        59,
+        None,
+        ConfluenceWeightProfile::Balanced,
+    )
+    .expect("bar 59 in range");
+    for id in [
+        "structure.swing_bos",
+        "vsa.stopping_volume",
+        "divergence.rsi_hidden_or_classic",
+    ] {
+        let ev = rep_nan_win
+            .evaluations
+            .iter()
+            .find(|e| e.catalog_id == id)
+            .unwrap();
+        assert!(
+            !ev.quality.is_valid() && ev.bool_value.is_none() && ev.float_value.is_none(),
+            "{id} must reject non-finite prior window: {ev:?}"
+        );
+    }
+
+    // 3. R15-M04b: Non-finite current-bar OHLC with valid positive volume must return non-valid across ALL 17 entries
+    let mut nan_curr = bars_15m.clone();
+    nan_curr[63].open = f64::NAN;
+    nan_curr[63].high = f64::INFINITY;
+    nan_curr[63].low = f64::NEG_INFINITY;
+    nan_curr[63].close = f64::NAN;
+    nan_curr[63].volume = 5_000.0;
+    let rep_nan_curr =
+        evaluate_causal_confluence(&nan_curr, None, false, ConfluenceWeightProfile::Balanced);
+    assert_eq!(rep_nan_curr.evaluations.len(), SIGNAL_CATALOG.len());
+    for ev in &rep_nan_curr.evaluations {
+        assert!(
+            !ev.quality.is_valid() && ev.bool_value.is_none() && ev.float_value.is_none(),
+            "all 17 catalog entries must reject NaN/Inf current OHLC: {ev:?}"
+        );
+    }
+}

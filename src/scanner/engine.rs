@@ -118,6 +118,24 @@ fn classify_regime_at(
     series: &PrecomputedScannerSeries,
     t: usize,
 ) -> MarketRegime {
+    classify_regime_from_slices(
+        candles,
+        &series.ema_20,
+        &series.ema_50,
+        &series.atr_14,
+        &series.bb,
+        t,
+    )
+}
+
+pub(super) fn classify_regime_from_slices(
+    candles: &[Candle],
+    ema_20: &[Option<f64>],
+    ema_50: &[Option<f64>],
+    atr_14: &[Option<f64>],
+    bb: &BollingerOutput,
+    t: usize,
+) -> MarketRegime {
     if t < 20 || t >= candles.len() {
         return MarketRegime::InsufficientHistory;
     }
@@ -128,11 +146,8 @@ fn classify_regime_at(
 
     // 1. SIG-REG-001 / SIG-REG-002: Uptrend & Downtrend (EMA20 vs EMA50 + 5-bar EMA20 slope)
     if t >= 54
-        && let (Some(e20), Some(e50), Some(e20_prev5)) = (
-            series.ema_20[t],
-            series.ema_50[t],
-            series.ema_20[t.saturating_sub(5)],
-        )
+        && let (Some(e20), Some(e50), Some(e20_prev5)) =
+            (ema_20[t], ema_50[t], ema_20[t.saturating_sub(5)])
     {
         if close > e20 && e20 > e50 && e20 > e20_prev5 {
             return MarketRegime::Uptrend;
@@ -144,8 +159,7 @@ fn classify_regime_at(
 
     // 2. SIG-REG-004: Pullback in Uptrend (strictly excludes bar t from prior 20-bar high: TEST-CAUSAL-003)
     if t >= 50
-        && let (Some(e20), Some(e50), Some(atr)) =
-            (series.ema_20[t], series.ema_50[t], series.atr_14[t])
+        && let (Some(e20), Some(e50), Some(atr)) = (ema_20[t], ema_50[t], atr_14[t])
         && e20 > e50
     {
         let mut recent_high = f64::NEG_INFINITY;
@@ -165,8 +179,7 @@ fn classify_regime_at(
 
     // 3. SIG-REG-005: Early Recovery from Downtrend (strictly excludes bar t from prior 20-bar low)
     if t >= 50
-        && let (Some(e20), Some(e50), Some(e20_prev3)) =
-            (series.ema_20[t], series.ema_50[t], series.ema_20[t - 3])
+        && let (Some(e20), Some(e50), Some(e20_prev3)) = (ema_20[t], ema_50[t], ema_20[t - 3])
         && e20 < e50
     {
         let mut recent_low = f64::INFINITY;
@@ -184,13 +197,13 @@ fn classify_regime_at(
     }
 
     // 4. SIG-REG-003 / Squeeze: tight Bollinger bandwidth (<= 6%) or flat 5-bar EMA20 slope (< 0.8%)
-    if let Some(bw) = bb_bandwidth_ratio(&series.bb, t)
+    if let Some(bw) = bb_bandwidth_ratio(bb, t)
         && bw <= 0.06
     {
         return MarketRegime::SidewaysSqueeze;
     }
     if t >= 25
-        && let (Some(e20), Some(e20_prev5)) = (series.ema_20[t], series.ema_20[t - 5])
+        && let (Some(e20), Some(e20_prev5)) = (ema_20[t], ema_20[t - 5])
         && e20_prev5.abs() > 1e-8
         && ((e20 - e20_prev5).abs() / e20_prev5) < 0.008
     {

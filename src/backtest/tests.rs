@@ -1219,3 +1219,272 @@ fn critic_r10_regression_wfo_open_position_carry_conservation_and_intraday_portf
         assert!((a.equity - b.equity).abs() < 1e-9);
     }
 }
+
+#[test]
+fn r15_monte_carlo_splitmix64_determinism_monotonic_quantiles_and_edge_cases() {
+    let feeds = load_bundled_watchlist_universe();
+    let fpt = feeds.iter().find(|f| f.symbol == "FPT").expect("FPT");
+    let cfg = BacktestConfig {
+        preset: StrategyPresetKind::MacdMomentum,
+        initial_cash: 100_000.0,
+        ..BacktestConfig::default()
+    };
+    let bt = run_backtest("FPT", Timeframe::D1, &fpt.candles, &cfg, None);
+    assert!(!bt.trades.is_empty());
+
+    let mc_cfg = MonteCarloConfig {
+        simulations: 1_000,
+        seed: DEFAULT_MONTE_CARLO_SEED,
+        ruin_drawdown_pct: 35.0,
+        horizon_steps: None,
+    };
+    let rep_a = run_monte_carlo_bootstrap(
+        cfg.initial_cash,
+        &bt.trades,
+        &bt.equity_curve,
+        bt.bar_count,
+        None,
+        mc_cfg,
+    );
+    let rep_b = run_monte_carlo_bootstrap(
+        cfg.initial_cash,
+        &bt.trades,
+        &bt.equity_curve,
+        bt.bar_count,
+        None,
+        mc_cfg,
+    );
+    assert_eq!(
+        rep_a.metrics, rep_b.metrics,
+        "SplitMix64 must be 100% deterministic"
+    );
+    assert_eq!(rep_a.checkpoint_envelopes, rep_b.checkpoint_envelopes);
+
+    let m = rep_a.metrics.expect("metrics present");
+    assert!(m.terminal_equity.p5 <= m.terminal_equity.p25);
+    assert!(m.terminal_equity.p25 <= m.terminal_equity.p50);
+    assert!(m.terminal_equity.p50 <= m.terminal_equity.p75);
+    assert!(m.terminal_equity.p75 <= m.terminal_equity.p95);
+    assert!(0.0 <= m.max_drawdown_p50_pct);
+    assert!(m.max_drawdown_p50_pct <= m.max_drawdown_var_95_pct);
+    assert!(m.max_drawdown_var_95_pct <= m.max_drawdown_var_99_pct);
+    assert!(m.max_drawdown_var_99_pct <= 100.0);
+    assert!(m.max_drawdown_var_95_pct <= m.max_drawdown_cvar_95_pct);
+    assert!(m.max_drawdown_var_99_pct <= m.max_drawdown_cvar_99_pct);
+
+    let fan = rep_a.bar_fan.as_ref().expect("bar_fan projected");
+    assert_eq!(fan.bar_count, bt.bar_count);
+    for i in 0..fan.causal_bar_count {
+        let (v5, v25, v50, v75, v95) = (
+            fan.p5[i].unwrap(),
+            fan.p25[i].unwrap(),
+            fan.p50[i].unwrap(),
+            fan.p75[i].unwrap(),
+            fan.p95[i].unwrap(),
+        );
+        assert!(v5 <= v25 && v25 <= v50 && v50 <= v75 && v75 <= v95);
+    }
+
+    // Edge case 1: 0 trades -> InsufficientSamples (`metrics == None`, no fake precision)
+    let empty_rep = run_monte_carlo_bootstrap(100_000.0, &[], &[], 120, None, mc_cfg);
+    assert_eq!(empty_rep.validity, MonteCarloValidity::InsufficientSamples);
+    assert!(empty_rep.metrics.is_none() && empty_rep.bar_fan.is_none());
+
+    // Edge case 2: 1 trade -> SingleSampleDegenerate (`p5 == p95`)
+    let one_rep = run_monte_carlo_bootstrap(
+        cfg.initial_cash,
+        &bt.trades[..1],
+        &bt.equity_curve,
+        bt.bar_count,
+        None,
+        mc_cfg,
+    );
+    assert_eq!(one_rep.validity, MonteCarloValidity::SingleSampleDegenerate);
+    assert!(one_rep.low_sample_warning);
+    let m1 = one_rep.metrics.unwrap();
+    assert!((m1.terminal_equity.p5 - m1.terminal_equity.p95).abs() < 1e-9);
+
+    // Edge case 3: Total liquidation (`net_pnl = -initial_cash`) -> post-bankruptcy trades ignored & permanent bankruptcy at 0.0 (`prob_ruin = 100%`)
+    let mut liq_trade = bt.trades[0].clone();
+    liq_trade.net_pnl = -100_000.0;
+    liq_trade.exit_reason = BacktestExitReason::MarginLiquidation;
+    let mut rebound_trade = bt.trades[0].clone();
+    rebound_trade.net_pnl = 50_000.0;
+    let (ext_rets, _) =
+        extract_causal_trade_equity_returns(100_000.0, &[liq_trade, rebound_trade], None);
+    assert_eq!(
+        ext_rets,
+        vec![-1.0],
+        "trades after account equity hits 0.0 must never resurrect capital"
+    );
+    let liq_rep = run_monte_carlo_bootstrap(
+        100_000.0,
+        &[BacktestTrade {
+            net_pnl: -100_000.0,
+            exit_reason: BacktestExitReason::MarginLiquidation,
+            ..bt.trades[0].clone()
+        }],
+        &bt.equity_curve,
+        bt.bar_count,
+        None,
+        mc_cfg,
+    );
+    let ml = liq_rep.metrics.unwrap();
+    assert_eq!(ml.terminal_equity.p95, 0.0);
+    assert_eq!(ml.max_drawdown_var_95_pct, 100.0);
+    assert_eq!(ml.prob_of_ruin_pct, 100.0);
+
+    // Edge case 4: DEF-001 cutoff timestamp masks future trades & future fan bars!
+    if bt.trades.len() >= 3 {
+        let mid_cut = bt.trades[bt.trades.len() / 2].exit_timestamp;
+        let cut_rep = run_monte_carlo_bootstrap(
+            cfg.initial_cash,
+            &bt.trades,
+            &bt.equity_curve,
+            bt.bar_count,
+            Some(mid_cut),
+            mc_cfg,
+        );
+        let prefix_trades: Vec<BacktestTrade> = bt
+            .trades
+            .iter()
+            .filter(|t| t.exit_timestamp <= mid_cut)
+            .cloned()
+            .collect();
+        let prefix_curve: Vec<BacktestEquityPoint> = bt
+            .equity_curve
+            .iter()
+            .filter(|p| p.timestamp <= mid_cut)
+            .copied()
+            .collect();
+        let exact_prefix_rep = run_monte_carlo_bootstrap(
+            cfg.initial_cash,
+            &prefix_trades,
+            &prefix_curve,
+            bt.bar_count,
+            Some(mid_cut),
+            mc_cfg,
+        );
+        assert_eq!(cut_rep.metrics, exact_prefix_rep.metrics);
+        let cfan = cut_rep.bar_fan.unwrap();
+        assert!(cfan.causal_bar_count < cfan.bar_count);
+        assert!(cfan.p50[cfan.causal_bar_count].is_none());
+    }
+}
+
+#[test]
+fn critic_r15_regression_wfo_and_portfolio_mc_fan_bar_index_alignment_and_seed_identity() {
+    use super::{
+        DEFAULT_MONTE_CARLO_SEED, MonteCarloConfig, PortfolioUniverseFilter,
+        PortfolioWeightingMode, WalkForwardConfig, map_equity_curve_to_candles,
+        run_monte_carlo_bootstrap, run_monte_carlo_portfolio_mapped, run_portfolio_backtest,
+        run_walk_forward_validation,
+    };
+    use crate::data::load_bundled_watchlist_universe;
+
+    assert_eq!(DEFAULT_MONTE_CARLO_SEED, 202_615);
+
+    let feeds = load_bundled_watchlist_universe();
+    let btc = feeds
+        .iter()
+        .find(|f| f.symbol == "BTCUSDT")
+        .expect("BTCUSDT");
+
+    // 1. WalkForwardOos with `fold_count = 2, in_sample_ratio = 0.75` (`first_oos_start > stitched_oos_curve.len()`)
+    let bt_cfg = BacktestConfig {
+        preset: StrategyPresetKind::SmaEmaTrendCross,
+        params: StrategyParams {
+            fast_sma: 8,
+            slow_ema: 21,
+            ..StrategyParams::default()
+        },
+        direction_mode: StrategyDirectionMode::LongShort,
+        initial_cash: 100_000.0,
+        ..BacktestConfig::default()
+    };
+    let wf_cfg = WalkForwardConfig {
+        fold_count: 2,
+        in_sample_ratio: 0.75,
+        anchored: false,
+        ranking_metric: SweepRankingMetric::SharpeRatio,
+    };
+    let wf = run_walk_forward_validation(
+        "BTCUSDT",
+        Timeframe::M15,
+        &btc.candles,
+        &bt_cfg,
+        wf_cfg,
+        BacktestRunOptions::default(),
+    );
+    let first_oos = wf.first_oos_bar_index.expect("first_oos_bar_index");
+    assert!(
+        first_oos > wf.stitched_oos_curve.len(),
+        "reproduce critic R15-M01: first_oos ({first_oos}) > oos_len ({})",
+        wf.stitched_oos_curve.len()
+    );
+
+    let mc_wfo = run_monte_carlo_bootstrap(
+        bt_cfg.initial_cash,
+        &wf.stitched_oos_trades,
+        &wf.stitched_oos_curve,
+        btc.candles.len(),
+        None,
+        MonteCarloConfig {
+            simulations: 300,
+            ..MonteCarloConfig::default()
+        },
+    );
+    let fan_wfo = mc_wfo.bar_fan.as_ref().expect("WFO bar_fan must exist");
+    assert_eq!(fan_wfo.bar_count, btc.candles.len());
+    assert_eq!(fan_wfo.causal_bar_count, btc.candles.len());
+    for i in 0..first_oos {
+        assert!(
+            fan_wfo.p50[i].is_none(),
+            "In-Sample bar {i} < {first_oos} must stay None in WFO Monte Carlo fan"
+        );
+    }
+    assert!(
+        fan_wfo.p50[btc.candles.len() - 1].is_some(),
+        "WFO Monte Carlo fan must reach terminal OOS bar"
+    );
+
+    // 2. MultiAssetPortfolio (`Vn30EquitiesOnly` 1D) mapped onto intraday `BTCUSDT 15m` candles + Replay cutoff
+    let port = run_portfolio_backtest(
+        &feeds,
+        Timeframe::D1,
+        &bt_cfg,
+        PortfolioUniverseFilter::AllUniverseFeeds,
+        PortfolioWeightingMode::EqualWeight,
+        None,
+    );
+    let fpt = feeds.iter().find(|f| f.symbol == "FPT").expect("FPT");
+    let cut_ts = fpt.candles[120].timestamp + 86_399;
+    let (mapped_eq, _, _, _) = map_equity_curve_to_candles(
+        &port.portfolio_equity_curve,
+        &fpt.candles,
+        Timeframe::D1,
+        Some(cut_ts),
+    );
+    let mc_port = run_monte_carlo_portfolio_mapped(
+        port.initial_capital,
+        &port.portfolio_equity_curve,
+        &mapped_eq,
+        &fpt.candles,
+        Some(cut_ts),
+        MonteCarloConfig {
+            simulations: 300,
+            ..MonteCarloConfig::default()
+        },
+    );
+    let fan_port = mc_port
+        .bar_fan
+        .as_ref()
+        .expect("Portfolio mapped bar_fan must exist");
+    assert_eq!(fan_port.bar_count, fpt.candles.len());
+    assert_eq!(fan_port.causal_bar_count, 121);
+    assert!(fan_port.p50[120].is_some());
+    assert!(
+        fan_port.p50[121].is_none(),
+        "bars past cutoff_timestamp must remain None in portfolio mapped fan"
+    );
+}

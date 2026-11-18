@@ -32,6 +32,54 @@ pub const MAX_PERSISTED_DRAWINGS: usize = 4_096;
 
 const COMPACT_ID_THRESHOLD: DrawingId = u64::MAX - 1_000_000;
 
+/// Transactional multi-property edit payload committed by the Interactive Drawing Property Inspector (`Milestone R15`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DrawingPropertyPatch {
+    pub visible: bool,
+    pub locked: bool,
+    pub style: DrawingStyle,
+    pub geometry: DrawingGeometry,
+}
+
+impl DrawingPropertyPatch {
+    #[inline]
+    #[must_use]
+    pub fn from_drawing(drawing: &Drawing) -> Self {
+        Self {
+            visible: drawing.visible,
+            locked: drawing.locked,
+            style: drawing.style,
+            geometry: drawing.geometry.clone(),
+        }
+    }
+}
+
+/// Validation failure returned by [`DrawingStore::apply_drawing_property_patch`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrawingPatchError {
+    DrawingNotFound,
+    CausallyMasked,
+    DrawingLocked,
+    ToolKindMismatch,
+    InvalidStyle,
+    InvalidGeometry,
+}
+
+impl DrawingPatchError {
+    #[inline]
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::DrawingNotFound => "Drawing no longer exists in store",
+            Self::CausallyMasked => "Drawing is causally masked at active Bar Replay cutoff",
+            Self::DrawingLocked => "Drawing is locked — unlock first to edit properties",
+            Self::ToolKindMismatch => "Patch geometry kind does not match target drawing",
+            Self::InvalidStyle => "Line width must be 1..=8 px and fill opacity 0..=0.65",
+            Self::InvalidGeometry => "Invalid anchor coordinates or bracket ordering for tool",
+        }
+    }
+}
+
 /// Reversible command recorded on the undo/redo stack (`DrawingCommandHistory.ts`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum DrawingCommand {
@@ -222,6 +270,18 @@ impl DrawingStore {
 
     #[inline]
     #[must_use]
+    pub fn undo_depth(&self) -> usize {
+        self.undo_stack.len()
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn redo_depth(&self) -> usize {
+        self.redo_stack.len()
+    }
+
+    #[inline]
+    #[must_use]
     pub fn has_unlocked_drawings(&self) -> bool {
         self.drawings.iter().any(|d| {
             !d.locked
@@ -234,8 +294,39 @@ impl DrawingStore {
         let id = self.selected_id?;
         self.drawings.iter().find(|d| {
             d.id == id
-                && d.is_causally_visible(self.replay_cutoff_timestamp, self.causal_visible_candles)
+                && d.is_causally_eligible(self.replay_cutoff_timestamp, self.causal_visible_candles)
         })
+    }
+
+    /// Iterates over all drawings causally eligible at the active replay cutoff (including hidden
+    /// `visible == false` or `locked == true` annotations so the Inspector layer list can manage them).
+    pub fn causally_eligible_drawings(&self) -> impl Iterator<Item = &Drawing> {
+        let cutoff = self.replay_cutoff_timestamp;
+        let vis_cnt = self.causal_visible_candles;
+        self.drawings
+            .iter()
+            .filter(move |d| d.is_causally_eligible(cutoff, vis_cnt))
+    }
+
+    /// Selects a causally eligible drawing by `id` (or clears selection when `None`).
+    pub fn select_drawing_by_id(&mut self, id: Option<DrawingId>) -> bool {
+        self.rollback_active_phase();
+        let Some(target_id) = id else {
+            self.selected_id = None;
+            return true;
+        };
+        let cutoff = self.replay_cutoff_timestamp;
+        let vis_cnt = self.causal_visible_candles;
+        if self
+            .drawings
+            .iter()
+            .any(|d| d.id == target_id && d.is_causally_eligible(cutoff, vis_cnt))
+        {
+            self.selected_id = Some(target_id);
+            true
+        } else {
+            false
+        }
     }
 
     #[inline]
@@ -268,7 +359,7 @@ impl DrawingStore {
                 .drawings
                 .iter()
                 .find(|d| d.id == sel_id)
-                .is_none_or(|d| !d.is_causally_visible(cutoff, vis_cnt));
+                .is_none_or(|d| !d.is_causally_eligible(cutoff, vis_cnt));
             if masked {
                 self.rollback_active_phase();
                 self.selected_id = None;
@@ -551,7 +642,7 @@ impl DrawingStore {
             return false;
         };
         if !self.drawings[idx]
-            .is_causally_visible(self.replay_cutoff_timestamp, self.causal_visible_candles)
+            .is_causally_eligible(self.replay_cutoff_timestamp, self.causal_visible_candles)
         {
             self.selected_id = None;
             return false;
@@ -760,6 +851,83 @@ impl DrawingStore {
                 false
             }
         })
+    }
+
+    /// Commits a validated transactional [`DrawingPropertyPatch`] from the Interactive Drawing Property
+    /// Inspector (`Milestone R15`) as **at most one** [`DrawingCommand::Modify`] on `undo_stack`.
+    ///
+    /// - Returns `Ok(false)` (leaving `redo_stack` untouched) when the sanitized target state equals `before`.
+    /// - Rejects style/geometry/visibility edits when `before.locked && patch.locked`.
+    /// - Preserves sub-bar `DrawingAnchor::timestamp` precision when `bar_index` is unchanged, and
+    ///   re-stamps `timestamp` against `candles` (`None` in right-offset whitespace) when `bar_index` moves.
+    pub fn apply_drawing_property_patch(
+        &mut self,
+        id: DrawingId,
+        patch: DrawingPropertyPatch,
+        candles: &[Candle],
+        tf: Timeframe,
+    ) -> Result<bool, DrawingPatchError> {
+        self.rollback_active_phase();
+        let cutoff = self.replay_cutoff_timestamp;
+        let vis_cnt = self.causal_visible_candles;
+        let Some(slot_idx) = self.drawings.iter().position(|d| d.id == id) else {
+            return Err(DrawingPatchError::DrawingNotFound);
+        };
+        if !self.drawings[slot_idx].is_causally_eligible(cutoff, vis_cnt) {
+            return Err(DrawingPatchError::CausallyMasked);
+        }
+
+        let before = self.drawings[slot_idx].clone();
+        if patch.geometry.tool_kind() != before.geometry.tool_kind() {
+            return Err(DrawingPatchError::ToolKindMismatch);
+        }
+        if !patch.style.line_width.is_finite()
+            || !(1.0..=8.0).contains(&patch.style.line_width)
+            || !patch.style.fill_opacity.is_finite()
+            || !(0.0..=0.65).contains(&patch.style.fill_opacity)
+        {
+            return Err(DrawingPatchError::InvalidStyle);
+        }
+
+        let mut next_geom = patch.geometry;
+        sync_patched_geometry_timestamps(&before.geometry, &mut next_geom, candles, tf);
+        if !next_geom.is_valid() {
+            return Err(DrawingPatchError::InvalidGeometry);
+        }
+
+        let mut next_style = patch.style;
+        next_style.sanitize();
+
+        if before.locked
+            && patch.locked
+            && (patch.visible != before.visible
+                || next_style != before.style
+                || next_geom != before.geometry)
+        {
+            return Err(DrawingPatchError::DrawingLocked);
+        }
+
+        let mut after = before.clone();
+        after.visible = patch.visible;
+        after.locked = patch.locked;
+        after.style = next_style;
+        after.geometry = next_geom;
+        if let Some(cut_ts) = cutoff
+            && after.created_at_timestamp.is_none()
+            && !after.is_causally_eligible(Some(cut_ts), vis_cnt)
+        {
+            after.created_at_timestamp = Some(cut_ts);
+        }
+        if !after.is_valid() {
+            return Err(DrawingPatchError::InvalidGeometry);
+        }
+
+        if after == before {
+            return Ok(false);
+        }
+        self.drawings[slot_idx] = after.clone();
+        self.push_undo(DrawingCommand::Modify { before, after });
+        Ok(true)
     }
 
     pub fn undo(&mut self) -> bool {
@@ -1471,7 +1639,7 @@ impl DrawingStore {
         let Some(slot) = self.drawings.iter_mut().find(|d| d.id == sel_id) else {
             return false;
         };
-        if !slot.is_causally_visible(cutoff, vis_cnt) {
+        if !slot.is_causally_eligible(cutoff, vis_cnt) {
             self.selected_id = None;
             return false;
         }
@@ -1726,6 +1894,66 @@ fn apply_handle_drag(
             }
         }
         _ => {}
+    }
+}
+
+fn sync_patched_anchor_timestamp(
+    prev: DrawingAnchor,
+    next: &mut DrawingAnchor,
+    candles: &[Candle],
+    tf: Timeframe,
+) {
+    if !next.bar_index.is_finite() {
+        return;
+    }
+    if (next.bar_index - prev.bar_index).abs() <= 1.0e-9 {
+        // Bar index was not edited -> preserve existing sub-bar UTC timestamp precision across TF hops!
+        if next.timestamp.is_none() {
+            next.timestamp = prev.timestamp;
+        }
+        return;
+    }
+    if candles.is_empty() {
+        next.timestamp = None;
+        return;
+    }
+    let last_idx = (candles.len() - 1) as f64;
+    if next.bar_index <= last_idx {
+        next.timestamp = resolve_anchor_timestamp(next.bar_index, candles, tf)
+            .filter(|ts| ts.is_finite() && ts.abs() <= super::MAX_ABS_ANCHOR_TIMESTAMP);
+    } else {
+        // Right-offset future whitespace (`bar_index > last_idx`) remains unstamped until bars materialize.
+        next.timestamp = None;
+    }
+}
+
+fn sync_patched_geometry_timestamps(
+    before: &DrawingGeometry,
+    after: &mut DrawingGeometry,
+    candles: &[Candle],
+    tf: Timeframe,
+) {
+    let prev_anchors = before.anchors();
+    match after {
+        DrawingGeometry::HorizontalLine { anchor }
+        | DrawingGeometry::AnchoredVwap { anchor, .. } => {
+            sync_patched_anchor_timestamp(prev_anchors[0], anchor, candles, tf);
+        }
+        DrawingGeometry::TrendLine { start, end }
+        | DrawingGeometry::Ray {
+            origin: start,
+            through: end,
+        }
+        | DrawingGeometry::Rectangle {
+            corner_a: start,
+            corner_b: end,
+        }
+        | DrawingGeometry::FibonacciRetracement { start, end, .. }
+        | DrawingGeometry::RiskRewardBox { start, end, .. }
+        | DrawingGeometry::FixedRangeVolumeProfile { start, end, .. } => {
+            sync_patched_anchor_timestamp(prev_anchors[0], start, candles, tf);
+            sync_patched_anchor_timestamp(prev_anchors[1], end, candles, tf);
+        }
     }
 }
 

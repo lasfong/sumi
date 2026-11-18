@@ -16,9 +16,9 @@ use serde::{Deserialize, Serialize};
 use crate::indicators::OscillatorPaneId;
 
 pub use controller::{
-    DRAG_COMMIT_DISTANCE_PX, DrawingCommand, DrawingInteractionPhase, DrawingStore,
-    EDIT_DRAG_THRESHOLD_PX, MAX_PERSISTED_DRAWINGS, MAX_UNDO_STEPS, PREVIEW_DRAWING_ID,
-    PointerCaptureOutcome,
+    DRAG_COMMIT_DISTANCE_PX, DrawingCommand, DrawingInteractionPhase, DrawingPatchError,
+    DrawingPropertyPatch, DrawingStore, EDIT_DRAG_THRESHOLD_PX, MAX_PERSISTED_DRAWINGS,
+    MAX_UNDO_STEPS, PREVIEW_DRAWING_ID, PointerCaptureOutcome,
 };
 pub use geometry::{
     HandlePart, LocalPoint, LocalRect, LocalSegment, PaneDrawingProjection, ProjectedDrawing,
@@ -760,16 +760,18 @@ impl Drawing {
             && created_ts_ok
     }
 
-    /// Evaluates whether this drawing is causally visible (`DEF-001`) at `replay_cutoff_timestamp`.
+    /// Evaluates whether this drawing is causally eligible (`DEF-001` zero-lookahead guard) at
+    /// `replay_cutoff_timestamp`, **independent** of the user's `self.visible` layer toggle.
+    ///
+    /// Used by the Interactive Drawing Property Inspector (`Milestone R15`) so hiding a drawing
+    /// (`visible = false`) keeps it selectable/editable in the Inspector while still masking
+    /// future-anchored drawings during Bar Replay.
     #[must_use]
-    pub fn is_causally_visible(
+    pub fn is_causally_eligible(
         &self,
         replay_cutoff_timestamp: Option<i64>,
         visible_candle_count: usize,
     ) -> bool {
-        if !self.visible {
-            return false;
-        }
         let Some(cutoff_ts) = replay_cutoff_timestamp else {
             return true;
         };
@@ -810,5 +812,16 @@ impl Drawing {
                 anchor_ok(start) && anchor_ok(end)
             }
         }
+    }
+
+    /// Evaluates whether this drawing is rendered and hit-testable on the chart at `replay_cutoff_timestamp`.
+    #[inline]
+    #[must_use]
+    pub fn is_causally_visible(
+        &self,
+        replay_cutoff_timestamp: Option<i64>,
+        visible_candle_count: usize,
+    ) -> bool {
+        self.visible && self.is_causally_eligible(replay_cutoff_timestamp, visible_candle_count)
     }
 }
