@@ -516,7 +516,7 @@ impl TradeJournalStore {
                     entry_timestamp: tr.entry_timestamp,
                     exit_timestamp: Some(tr.exit_timestamp),
                     planned_entry: Some(tr.entry_price),
-                    planned_stop: None,
+                    planned_stop: tr.initial_stop_loss,
                     planned_target: None,
                     planned_quantity: Some(tr.quantity),
                     planned_net_r: None,
@@ -530,7 +530,9 @@ impl TradeJournalStore {
                     setup: SetupTag::Untagged,
                     mistake: MistakeTag::None,
                     conviction: 3,
-                    checklist: ChecklistState::automated_import_default(tr.r_multiple.is_some()),
+                    checklist: ChecklistState::automated_import_default(
+                        tr.had_initial_sl_at_open || tr.r_multiple.is_some(),
+                    ),
                     notes: String::new(),
                 });
                 self.selected_entry_id = Some(id);

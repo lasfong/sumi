@@ -1,9 +1,9 @@
 # SUMI TRADING WORKSTATION — EXECUTION STATE
 
-- **Session Identity:** `SESSION-R16-20261118T155000+0700` (`SUMI PROGRAM ORCHESTRATOR`)
-- **Previous Session:** `SESSION-R15-20261118T074500+0700` (`IMPLEMENTATION_PASS` — Committed & pushed cleanly at `d256375`)
-- **Timestamp (Updated):** `2026-11-18T21:18:00+0700`
-- **Program Status:** `IMPLEMENTATION_PASS` (`Milestone R16 / Wave 15 Composable Signal-Catalog Rule Strategy Builder, Multi-Condition Causal Alert Ledger & Formula-Safe Export, Named Workspace Snapshot Checkpoints + Corrupt-State Quarantine Recovery, & Master Feature Backlog Ledger Shipped, Critic-Hardened & Audited`)
+- **Session Identity:** `SESSION-R17-20261118T213600+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Previous Session:** `SESSION-R16-20261118T155000+0700` (`IMPLEMENTATION_PASS` — Committed & pushed cleanly at `82e5862`)
+- **Timestamp (Updated):** `2026-11-18T23:52:00+0700`
+- **Program Status:** `IMPLEMENTATION_PASS` (`Milestone R17 / Wave 16 Live Replay Practice Scoreboard, Session Debrief & Tamper-Proof SL-Adherence Coaching, 1-Click 120b Scanner->Replay & Saved Practice/Scan Sessions, UTC-Aligned 0% Multi-Strategy Equity Comparison Overlay, & Advanced Tearsheet Analytics + Deterministic RunManifest Shipped, Critic-Hardened & Audited`)
 
 ---
 
@@ -11,7 +11,7 @@
 
 - **Working Directory:** `/Users/mizuhara/workspace/sumi`
 - **Git Branch:** `master`
-- **Batch Commit Policy (`DEC-R04-001`):** Authorized by Product Owner on `2026-11-11` — each verified milestone/batch plan is committed cleanly on `master` (`98ec576` for R03, `50a7845` for R04, `b04d2dc` for R05, `0c83290` for R06, `0e76e72` for R07, `62105d6` for R08, `d06ae78` for R09, `b06fd69` for R10, `c1ec5bd` for R11, `96bd344` for R12, `3510654` for R13, `904c13a` for R14, `d256375` for R15; Milestone R16 prepared for clean atomic commit at the close of Session R16).
+- **Batch Commit Policy (`DEC-R04-001`):** Authorized by Product Owner on `2026-11-11` — each verified milestone/batch plan is committed cleanly on `master` (`98ec576` for R03, `50a7845` for R04, `b04d2dc` for R05, `0c83290` for R06, `0e76e72` for R07, `62105d6` for R08, `d06ae78` for R09, `b06fd69` for R10, `c1ec5bd` for R11, `96bd344` for R12, `3510654` for R13, `904c13a` for R14, `d256375` for R15, `82e5862` for R16; Milestone R17 prepared for clean atomic commit at the close of Session R17).
 - **Git Tags:** `v2.0.0-rc1`, `v2.0.0-rc2` (untouched)
 - **Legacy Project Archive:** Untouched read-only reference at `/Users/mizuhara/workspace/sumi/ARCHIVE`
 - **Authorized Open-Source References (`research_repos/`, gitignored):**
@@ -27,9 +27,9 @@
 - **Crate Dependencies (`Cargo.toml` / `Cargo.lock`):** `0` new dependencies added (`git diff Cargo.toml Cargo.lock` empty).
 - **Antigravity Orchestration (`VERIFIED`):**
   - Durable charter: [`docs/operations/SUMI_ORCHESTRATION_CHARTER.md`](operations/SUMI_ORCHESTRATION_CHARTER.md)
-  - Master feature parity & anti-miss backlog ledger: [`docs/FEATURE_BACKLOG_AND_PARITY_LEDGER.md`](FEATURE_BACKLOG_AND_PARITY_LEDGER.md)
-  - Specialized subagents invoked in R16: `sumi-researcher` (verified JS/TS research gate across `ARCHIVE/frontend` + `LWC v5.2.0` and audited all `208` frontend + `474` backend archive items into `FEATURE_BACKLOG_AND_PARITY_LEDGER.md`), `sumi-critic` (3-round adversarial review -> `19` new R16/critic unit, headless UI & regression tests including bounded `07:44:59..08:00:00` / `20:59:59..21:00:00` UTC session-close guards, `SPY` Thursday `D1 -> W1` `last_base_open_ts` weekday check, 64-bit `CorruptSnapshotDigest` verification, `>32 KiB` 16-slot store buffer round-trip, 4-leg `LongOnly`/`ShortOnly` exit isolation, `TrendFocused` 17-entry matrix parity, and HTF `cooldown_bars = 0` intra-bucket suppression -> `VERDICT: CRITIC_PASS`), and `sumi-auditor` (independent read-only evidence & compliance audit).
-- **REA MCP (`rea-agents@6.8.0`):** `VERIFIED` — `12` live REA MCP operations (`10` JS/TS across `ARCHIVE/frontend` `StrategyRuleBuilder.tsx`/`StrategyLabPage.tsx`/`MultiPhaseBatchPanel.tsx`/`SettingsModal.tsx`/`workspaceTypes.ts`/`DrawingRepository.ts`/`PracticeScoreboard.tsx`/`SessionDebriefModal.tsx` & `LWC v5.2.0` `series-markers/{primitive,pane-view,renderer,types,utils}.ts`/`expiring-markers-manager.ts`/`chart-options-defaults.ts`, plus `2` binary ops on the final R16 release Mach-O `d32c891c1abc364e9d709e769984a4bd9ef64a2553927e78bc64304aea875750`, cumulative `178` live REA operations across R01–R16). Zero contact with TradingView Desktop (`DEC-006`).
+  - Master feature parity & anti-miss backlog ledger: [`docs/FEATURE_BACKLOG_AND_PARITY_LEDGER.md`](FEATURE_BACKLOG_AND_PARITY_LEDGER.md) (`A1..A5` updated to `[x] ĐÃ HOÀN THÀNH (R17)`)
+  - Specialized subagents invoked in R17: `sumi-researcher` (executed 10 live JS/TS REA MCP operations across `ARCHIVE/frontend` replay/coaching/analytics TSX/TS and `LWC v5.2.0` line/percentage/crosshair TS), `sumi-critic` (2-round adversarial review catching `slice_causal_series_for_symbol_and_options` HTF session-close & mid-bar parity, same-bar exit/entry note isolation + `MistakeTag::None` journal override, `pre_roll_bars` RON/JSON & `SplitMix64` digest coverage, transition cache invalidation, and `MultiStrategyPct` whitespace/conflated/linked crosshair dots -> `VERDICT: CRITIC_PASS`), and `sumi-auditor` (independent read-only evidence & compliance audit).
+- **REA MCP (`rea-agents@6.8.0`):** `VERIFIED` — `12` live REA MCP operations (`10` JS/TS across `ARCHIVE/frontend` `PracticeScoreboard.tsx`/`SessionDebriefModal.tsx`/`DecisionJournal.tsx`/`SessionSetup.tsx`/`ScannerSourceContext.tsx`/`practiceDomain.ts`/`MultiStrategyEquityChart.tsx`/`AnalyticsPage.tsx` & `LWC v5.2.0` `line-series.ts`/`line-pane-view.ts`/`line-renderer.ts`/`walk-line.ts`/`percentage-formatter.ts`/`crosshair.ts`/`crosshair-marks-pane-view.ts`, plus `2` binary ops on the final R17 release Mach-O `e40757f26f463b553122e3f150e29b1c05a6670a500c79c0668f6a0dad80688f`, cumulative `190` live REA operations across R01–R17). Zero contact with TradingView Desktop (`DEC-006`).
 
 ---
 
@@ -53,9 +53,10 @@
 | Session R13 — Wave 12 Engine & Audit | Session TPO / Market Profile, Multi-Interval `VWAP`, Causal VN30 Breadth & 4-Quadrant `RRG` Heatmap, Compact `K`/`M`/`B`/`T` `CVD` Axis, & R12 Minor carry-overs (`3510654`) | **PASS** | `VERIFIED` (`181/181` tests, `0.2588–2.4689 ms` UI / `p99 <= 2.8089 ms`) |
 | Session R14 — Wave 13 Engine & Audit | Causal `OHLCV_SYNTH_DOM_PROXY` 21-Row DOM Ladder, Conflict-Free `17`-Action `HotkeyProfile` + `hotkey_base_preset` Persistence, Template #6, & Right-Axis Edge/Decimal Polish (`904c13a`) | **PASS** | `VERIFIED` (`204/204` tests, `0.378–1.391 ms` UI / `p99 <= 2.198 ms`) |
 | Session R15 — Wave 14 Engine & Audit | `17`-Entry Signal Catalog & 4-Family Confluence Inspector, Transactional `DrawingPropertyPatch`, `SplitMix64` Monte Carlo Fan, & R14 Carry-Overs (`d256375`) | **PASS** | `VERIFIED` (`216/216` tests, `0.337–1.557 ms` UI / `p99 <= 2.098 ms`) |
-| Session R16 — Research & Backlog Audit | `10` live JS/TS REA ops (`ARCHIVE/frontend` `StrategyRuleBuilder`/`StrategyLabPage`/`MultiPhaseBatchPanel`/`SettingsModal`/`workspaceTypes`/`DrawingRepository`/`PracticeScoreboard`/`SessionDebriefModal` & `LWC v5.2.0` `series-markers`/`expiring-markers-manager`) + `2` post-build binary REA ops (`REA-R16-01`..`12`) -> `RULE_BUILDER_ALERTS_AND_SNAPSHOT_RECOVERY_SPEC.md` + `FEATURE_BACKLOG_AND_PARITY_LEDGER.md` | **PASS** | `VERIFIED` (`8e3c7f833c0688d3c5b11c814f538507ba866b2ba0695c69a6a5658838381cf6`) |
-| Session R16 — Wave 15 Engine | Pure `f64`/`i64`/`u64` WASM-safe `PrecomputedCatalogMatrix` (`point_at_with_profile`), `StrategyPresetKind::CustomSignalRules` + 4-leg DNF `CustomSignalRuleSpec` + 12-grid sweep, `AlertCondition::{SignalCatalogTrigger, ConfluenceThreshold}` + `cooldown_bars` + bounded VN/US/UTC HTF close guards + `export_triggers_{csv,json}`, and `WorkspaceSnapshotStore` (`16` named + `4` auto-ring + 64-bit `CorruptSnapshotDigest` + `compute_workspace_diff` + `recover_or_parse_snapshot_store`) | **PASS** | `VERIFIED` (`235/235` tests + `wasm32` Clippy) |
-| Session R16 — Workstation & Audit | `RuleBuilder` sub-tab (`RuleBuilderMatchCache` `Arc` reuse), `Signal`/`Confluence` Alert controls + CSV/JSON clipboard export + independent `above`/`below` chart stacking + `append_alert_axis_pill_ys`, `Templates & Snapshot Checkpoints` modal (Quarantine banner, Pre-Restore Diff, Pin/Restore/Undo), `--r16` (`784.12 µs` custom BT, `71.08 µs` alerts+export, `822.08 µs` snapshot store, `0.322–1.332 ms` UI / `p99 <= 1.501 ms < 4.0 ms`), `SUMI_CAPTURE_BATCH=r16`, `sumi-critic` `CRITIC_PASS`, & independent `sumi-auditor` sign-off | **PASS** | `VERIFIED` |
+| Session R16 — Wave 15 Engine & Audit | Composable 4-Leg Signal-Catalog Rule Builder (`PrecomputedCatalogMatrix`), Causal `SignalCatalog`/`Confluence` Alerts + CSV/JSON Export, `WorkspaceSnapshotStore` + Quarantine Recovery, & Master `FEATURE_BACKLOG_AND_PARITY_LEDGER.md` (`82e5862`) | **PASS** | `VERIFIED` (`235/235` tests, `0.322–1.332 ms` UI / `p99 <= 1.501 ms`) |
+| Session R17 — Research Gate | `10` live JS/TS REA ops (`ARCHIVE/frontend` replay/coaching/analytics TSX/TS & `LWC v5.2.0` line/percentage/crosshair TS) + `2` post-build binary REA ops (`REA-R17-01`..`12`) -> `PRACTICE_COACHING_AND_MULTISTRATEGY_ANALYTICS_SPEC.md` | **PASS** | `VERIFIED` (`a2957564edbcf8e10e83fc784c4037b7cca245ba90a28ee33ea356b54aae44d5`) |
+| Session R17 — Wave 16 Engine | Pure `f64`/`i64`/`u64` WASM-safe `had_initial_sl_at_open` + `sl_adherence_pct: Option<f64>`, `PracticeDecisionLog` (`DEF-001`) + `SessionDebriefReport`, `+120b` `BlindPractice` + `PracticeSessionStore`/`ScanSnapshotStore` (`SplitMix64` RON/JSON), `slice_causal_series_for_symbol_and_options` + `MultiStrategyComparisonReport` (`0.00%` UTC bar-close aligned), & `AdvancedTearsheetAnalytics` (`OutlierImpact`, `DrawdownPeriod`s, UTC Year & Signal-Bar `MarketRegime` slices, `MultiPhaseBatch`, `RunManifest`) | **PASS** | `VERIFIED` (`245/245` tests + `wasm32` Clippy) |
+| Session R17 — Workstation & Audit | Live `PracticeScoreboard` + `Reset Practice` + `SessionDebriefModal` (`.fade_in(false)`), 1-click `[Blind +120b]`/`[Review]` + `[★/☆]` Pin & `RON`/`JSON`/`Imp` stores, `OscillatorPaneId::Equity` `MultiStrategyPct` (`SignedPercentage` + `overlay_conflation_step` `SeriesBlockIndex` + crosshair marks), `Slices` tab, `--r17` (`1,253.96 µs` multi-strategy, `252.67 µs` analytics+manifest, `46.29 µs` debrief+store, `0.336–2.082 ms` UI / `p99 <= 2.422 ms < 4.0 ms`), `SUMI_CAPTURE_BATCH=r17`, `sumi-critic` `CRITIC_PASS`, & independent `sumi-auditor` sign-off | **PASS** | `VERIFIED` |
 
 ---
 
@@ -64,13 +65,13 @@
 ```bash
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
 
-# Format, native + WASM strict Clippy lints, and all 235 automated tests:
+# Format, native + WASM strict Clippy lints, and all 245 automated tests:
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo clippy --lib --target wasm32-unknown-unknown -- -D warnings
 cargo test
 
-# Reproducible R03..R16 release benchmarks:
+# Reproducible R03..R17 release benchmarks:
 cargo run --release --example viewport_bench
 cargo run --release --example viewport_bench -- --r04
 cargo run --release --example viewport_bench -- --r05
@@ -85,9 +86,10 @@ cargo run --release --example viewport_bench -- --r13
 cargo run --release --example viewport_bench -- --r14
 cargo run --release --example viewport_bench -- --r15
 cargo run --release --example viewport_bench -- --r16
+cargo run --release --example viewport_bench -- --r17
 
 # Offscreen Apple M1 Metal GPU Retina screenshot + telemetry capture (zero windows, zero focus steal):
-SUMI_CAPTURE_BATCH=r16 cargo run --release
+SUMI_CAPTURE_BATCH=r17 cargo run --release
 
 # Launch interactive native macOS Metal trading workstation:
 cargo run --release
@@ -95,20 +97,20 @@ cargo run --release
 
 ---
 
-## 5. Shipped Code & Benchmark Highlights (`Milestone R16`)
+## 5. Shipped Code & Benchmark Highlights (`Milestone R17`)
 
-- **Composable Signal-Catalog Rule Strategy Builder (`src/scanner/catalog.rs`, `src/backtest/strategy.rs`, `src/backtest/engine.rs`, `src/app.rs`):**
-  - Vectorized $O(N)$ `PrecomputedCatalogMatrix` (`point_at_with_profile` preserving bit-exact 17-entry parity across `Balanced` & `TrendFocused`), bounded 2-level DNF `CustomSignalRuleSpec` (`MAX_RULE_GROUPS = 4`, `MAX_CLAUSES_PER_GROUP = 8`) across isolated `long_entry`, `long_exit`, `short_entry`, and `short_exit` legs (`LongOnly`/`ShortOnly` never leak opposite entry signals as exits), fail-closed `SignalQuality::Valid` gating (`!is_valid() => false` even for `BoolIs(false)`), 6-bit `MarketRegime` mask, `ConfluenceThresholdGate`, 12-grid sweep, `RuleBuilderMatchCache` (`Arc` reuse on pan/zoom), and seamless `Open[T+1]` integration with `WFO`, `Portfolio`, and `SplitMix64` Monte Carlo.
-- **Multi-Condition Causal Alert Ledger & Formula-Safe Audit Export (`src/alerts/mod.rs`, `src/alerts/engine.rs`, `src/chart.rs`, `src/app.rs`):**
-  - `AlertCondition::SignalCatalogTrigger` and `AlertCondition::ConfluenceThreshold` gated by bounded exchange-schedule HTF completion (`is_bucket_incomplete_at_close_for_symbol` recognizing VN `04:29:59..06:00:00` / `07:44:59..08:00:00` UTC, US `20:59:59..21:00:00` UTC, `SPY` `D1 -> W1` Friday `last_base_open_ts`, and pure UTC boundaries on `CryptoSpotPerp` & symbol-less calls), deterministic `cooldown_bars` (`0..=500`, intra-bucket HTF duplicate suppression & Bar Replay rewind restoration), independent `above`/`below` same-bar chart marker stacking, `append_alert_axis_pill_ys` right-axis tick occlusion, and formula-injection-safe `export_triggers_csv` + RFC-8259 `export_triggers_json` copied directly to the platform clipboard.
-- **Named Workspace Snapshot Checkpoints & Corrupt-State Quarantine Recovery (`src/viewport/workspace_template.rs`, `src/app.rs`):**
-  - Zero-dependency `WorkspaceSnapshotStore` (`schema_version = 1` RON & JSON codecs, `<= 16` named slots with `pinned` protection, `<= 4` `auto_ring` rolling checkpoints with `"Pre-Restore Undo"`), lossless 64-bit `template_digest_hex` verification (`CorruptSnapshotDigest`), field-level `compute_workspace_diff` (`PRE-RESTORE DIFF` preview), `2 MiB` buffer support, and non-panicking `safe_stage_template_import` / `recover_or_parse_snapshot_store` (`QuarantinedPayloadDiagnostic`) preserving live chart, replay, and drawing state.
-- **Measured Release Performance (`Apple M1`, `2560×1600` Retina, `235/235` automated tests passing):**
-  - `r16_custom_signal_rule_backtest_btc_15m` (`1,344` bars, `32` trades): **`784.12 µs`** median (`0.784 ms`); `r16_causal_signal_confluence_alerts_and_csv_json_export` (`180` bars, `7` triggers): **`71.08 µs`** median (`0.071 ms`); `r16_snapshot_store_ron_roundtrip_diff_and_quarantine`: **`822.08 µs`** median (`0.822 ms`).
-  - Full `SumiWorkstationApp` UI (`< 4.0 ms` `DECISION-RENDERER-002` gate, `"overall_pass": true`): `1x1 BTCUSDT 15m Rule Builder + MC Fan`: **`1.332 ms`** mean (`p99 = 1.501 ms`); `1x1 FPT 1D Signal/Confluence Alerts + Markers`: **`0.322 ms`** mean (`p99 = 0.384 ms`); `1x2 Snapshots Diff + Quarantine Modal`: **`0.455 ms`** mean (`p99 = 0.531 ms`); `1x1 100k Conflated Custom Rules + Alerts` (`32x`): **`1.093 ms`** mean (`p99 = 1.310 ms`); `Quad 2x2 50k/slot Stress` (`200,000` bars, `64x`): **`1.218 ms`** mean (**`p99 = 1.287 ms`**).
+- **Live Replay Practice Scoreboard, `SessionDebriefModal` & Tamper-Proof Initial SL Adherence (`src/trading/portfolio.rs`, `src/trading/coaching.rs`, `src/app.rs`):**
+  - Immutable `had_initial_sl_at_open: bool` and `entry_stop_loss: Option<f64>` stamped solely on `None -> Some(Position)` (never overwritten by post-entry `UpdateBrackets` or same-side scale-ins, and independently re-stamped on opposite-side position flips), `sl_adherence_pct: Option<f64>` (`None` on `0` opens, eliminating the legacy `100%` vs `< 80%` empty-session contradiction), `PracticeScoreboardSummary` + 1-click `reset_practice_session()` (pruning paper trades from `TradeJournalStore` & clearing session `PracticeDecisionNote`s while preserving drawings, alerts, and Replay cursor), and `SessionDebriefReport` (`1`-to-`1` `note_claimed` isolation on same-bar exits/entries, authoritative curated `JournalEntry` overrides including `MistakeTag::None`, `MistakeCostBreakdown`, `SetupEdgeBreakdown`, and `DEF-001` causal `PracticeDecisionNote`s).
+- **1-Click `+120b` `Scanner -> Replay` (`BlindPractice` / `SignalReview`) & Saved Practice/Scan Stores (`src/scanner/`, `src/trading/coaching.rs`, `src/app.rs`):**
+  - `INSTITUTIONAL_BLIND_PRACTICE_PRE_ROLL_BARS = 120` + interactive `+15b | +60b | +120b` pre-roll selector across both `Watchlist` and `Signals` 1-click `[Blind]`/`[Review]` buttons, non-leaking `ScannerSignalContext` banner (`(+120b pre-roll) · Signal hidden until reached`), and zero-dependency `PracticeSessionStore` (`<= 16` slots, lossless `pre_roll_bars` RON/JSON codecs, `SplitMix64` digest verification, `DatasetMismatch` warning) + `ScanSnapshotStore` (`<= 16` slots, `snap.timeframe` restore, `[★/☆]` pin toggles, `RON`/`JSON`/`Imp` controls).
+- **UTC-Aligned `0%` Multi-Strategy Equity Comparison & Advanced Tearsheet Analytics (`src/backtest/analytics.rs`, `src/backtest/engine.rs`, `src/viewport/price_scale.rs`, `src/chart.rs`, `src/app.rs`):**
+  - Shared `slice_causal_series_for_symbol_and_options` honoring VN/US/Friday-W1 session closes while withholding mid-bar coarse tails across `run_backtest_with_options`, `run_multi_strategy_comparison` (`7` presets + `Asset Buy & Hold` + causal bar-close `VNINDEX`/`SPY` benchmark in `OscillatorPaneId::Equity` / `EquityPaneSource::MultiStrategyPct` with `SignedPercentage`, pre-gesture `Logarithmic -> Normal` fallback, `overlay_conflation_step` `SeriesBlockIndex` `Mesh`, and whitespace-safe/conflated/linked crosshair dots), `compute_outlier_impact` (`gross_profit` denominator, `N >= 3` symmetric `10%` trim), discrete `DrawdownPeriod`s, UTC Year & causal signal-bar (`entry_bar_index - 1`) `MarketRegime` slices, single-pass `PrecomputedFeatures` `MultiPhaseBatchReport`, and wall-clock-free `SplitMix64` `RunManifest`.
+- **Measured Release Performance (`Apple M1`, `2560×1600` Retina, `245/245` automated tests passing):**
+  - `r17_multistrategy_pct_comparison_btc_15m` (`1,344` bars, `9` curves): **`1,253.96 µs`** median (`1.254 ms`); `r17_advanced_tearsheet_analytics_and_manifest`: **`252.67 µs`** median (`0.253 ms`); `r17_debrief_coaching_and_practice_store_json_roundtrip`: **`46.29 µs`** median (`0.046 ms`).
+  - Full `SumiWorkstationApp` UI (`< 4.0 ms` `DECISION-RENDERER-002` gate, `"overall_pass": true`): `1x1 FPT 1D Scoreboard + Debrief Modal`: **`0.336 ms`** mean (`p99 = 0.399 ms`); `1x1 BTCUSDT 15m Multi-Strat % + Slices`: **`1.327 ms`** mean (`p99 = 1.499 ms`); `1x1 VN30F1M 5m 1-Click +120b + Saved Sessions`: **`0.461 ms`** mean (`p99 = 0.558 ms`); `1x1 100k Conflated Multi-Strat % + Slices` (`32x`): **`1.516 ms`** mean (`p99 = 1.880 ms`); `Quad 2x2 50k/slot Practice + Multi-Strat % Stress` (`200,000` bars, `64x`): **`2.082 ms`** mean (**`p99 = 2.422 ms`**).
 
 ---
 
-## 6. Next Proposed Milestone (`Wave 16 / Session R17 — Awaiting Product Owner Decision`)
+## 6. Next Proposed Milestone (`Wave 17 / Session R18 — Awaiting Product Owner Decision`)
 
-With Waves 1–15 shipped and all remaining legacy & deferred items cataloged in [`docs/FEATURE_BACKLOG_AND_PARITY_LEDGER.md`](FEATURE_BACKLOG_AND_PARITY_LEDGER.md), [`docs/NEXT_SESSION_BRIEF.md`](NEXT_SESSION_BRIEF.md) proposes **Milestone R17 — Wave 16: Replay Practice Coaching (`PracticeScoreboard` & `SessionDebriefModal` + SL-Adherence), 1-Click `Scanner -> Replay` (`BlindPractice`/`SignalReview`) & Saved Practice Sessions, Normalized `0%` Multi-Strategy Equity Comparison Overlay, & Outlier/Drawdown/Regime Tearsheet Analytics (`A1..A5`)** for Product Owner authorization.
+With Waves 1–16 (`S-01..S-10`, `R16-1..R16-3`, `A1..A5`) shipped and verified in [`docs/FEATURE_BACKLOG_AND_PARITY_LEDGER.md`](FEATURE_BACKLOG_AND_PARITY_LEDGER.md), [`docs/NEXT_SESSION_BRIEF.md`](NEXT_SESSION_BRIEF.md) proposes **Milestone R18 — Wave 17: Complete `72+` Signal Ecosystem (`14` Causal Candlestick Patterns + `CandleGeometry`, `8` Remaining Technical Indicators `ADX`/`Stochastic`/`SuperTrend`/`PSAR`/`Keltner`/`CCI`/`MFI`/`Volume SMA`, Confirmed-Pivot Divergences `right_bars = 3` + Full `VSA`/`SR`/`Ichimoku` Signals, & Multi-Horizon Money Flow `ProxyBB` `T03..T200` + `Point-in-Time` Universe, `B1..B4`)** for Product Owner authorization.

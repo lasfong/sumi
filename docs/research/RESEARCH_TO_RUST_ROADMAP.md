@@ -1,7 +1,7 @@
 # RESEARCH TO RUST ROADMAP — SESSION R01
 
 - **Session Identity:** `SESSION-R01-20261110T202837+0700`
-- **Updated By:** `SESSION-R16-20261118T155000+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Updated By:** `SESSION-R17-20261118T213600+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 - **Principle:** No Rust implementation begins without prior REA or reference-source research evidence.
 
 ---
@@ -430,13 +430,38 @@ cargo test app::tests::critic_r16_
 
 ---
 
-## Waves 16–18 (`Milestones R17–R19`) — Master Anti-Miss Parity Roadmap
+## Wave 16 — Replay Practice Coaching (`PracticeScoreboard` & `SessionDebriefModal`), 1-Click `+120b` `Scanner -> Replay` & Saved Sessions, UTC-Aligned `0%` Multi-Strategy Equity Overlay, & Advanced Tearsheet Analytics (`COMPLETE — SESSION R17`)
 
-All remaining features and sub-branches across `ARCHIVE/` (`208` frontend + `474` backend items) and `R01–R16` are systematically tracked in [`docs/FEATURE_BACKLOG_AND_PARITY_LEDGER.md`](../FEATURE_BACKLOG_AND_PARITY_LEDGER.md):
+### Completed Research & Audit Gates (`VERIFIED`)
+- [x] Executed `10` live REA MCP JS/TS operations (`REA-R17-01`..`10` across `ARCHIVE/frontend` `PracticeScoreboard.tsx`/`SessionDebriefModal.tsx`/`DecisionJournal.tsx`/`SessionSetup.tsx`/`ScannerSourceContext.tsx`/`practiceDomain.ts`/`MultiStrategyEquityChart.tsx`/`AnalyticsPage.tsx` & `LWC v5.2.0` `line-series.ts`/`line-pane-view.ts`/`line-renderer.ts`/`walk-line.ts`/`percentage-formatter.ts`/`crosshair.ts`/`crosshair-marks-pane-view.ts`) plus `2` post-build binary REA ops (`REA-R17-11`..`12` on final R17 release Mach-O `e40757f26f463b553122e3f150e29b1c05a6670a500c79c0668f6a0dad80688f`, UUID `53E28E8D-58EC-357C-97BD-0A47875228BC`) -> [`docs/research/PRACTICE_COACHING_AND_MULTISTRATEGY_ANALYTICS_SPEC.md`](PRACTICE_COACHING_AND_MULTISTRATEGY_ANALYTICS_SPEC.md).
+
+### Shipped Deliverables & Verification (`cargo test r17_`, `cargo test critic_r17_`, `--r17`, `SUMI_CAPTURE_BATCH=r17`)
+| Component | Research Source | Rust Target | Status |
+|---|---|---|---|
+| Tamper-Proof Initial SL Adherence (`had_initial_sl_at_open`, `sl_adherence_pct: Option<f64>`), Live `PracticeScoreboardSummary` + `reset_practice_session()`, `SessionDebriefReport` (`1`-to-`1` `note_claimed`, curated `JournalEntry` override incl. `MistakeTag::None`, `MistakeCostBreakdown`, `SetupEdgeBreakdown`), & `DEF-001` `PracticeDecisionLog` | `ARCHIVE/frontend/src/components/replay/{PracticeScoreboard,SessionDebriefModal,DecisionJournal}.tsx` + `PRACTICE_COACHING_AND_MULTISTRATEGY_ANALYTICS_SPEC.md` | `src/trading/portfolio.rs`, `src/trading/coaching.rs`, `src/journal/ledger.rs`, `src/app.rs` | Shipped & Critic-Hardened (`46.29 µs` debrief + store JSON round-trip, `CRITIC_PASS`) |
+| 1-Click `+120b` `Scanner -> Replay` (`INSTITUTIONAL_BLIND_PRACTICE_PRE_ROLL_BARS = 120`, `+15b/+60b/+120b` selector across `Watchlist` & `Signals`, non-leaking `ScannerSignalContext` banner) & `PracticeSessionStore` / `ScanSnapshotStore` (`<= 16` slots, `[★/☆]` pin, `snap.timeframe` restore, `DatasetMismatch`, `SplitMix64` RON/JSON codecs) | `ARCHIVE/frontend/src/components/replay/{SessionSetup,ScannerSourceContext}.tsx` + `PRACTICE_COACHING_AND_MULTISTRATEGY_ANALYTICS_SPEC.md` | `src/scanner/{engine,mod}.rs`, `src/trading/coaching.rs`, `src/app.rs` | Shipped & Critic-Hardened (`CRITIC_PASS`) |
+| Symbol-Aware UTC `0%` Multi-Strategy Equity Comparison (`slice_causal_series_for_symbol_and_options`, `7` presets + `Asset Buy & Hold` + causal bar-close `VNINDEX`/`SPY` benchmark, `SignedPercentage`, pre-gesture `Logarithmic -> Normal` sync, `overlay_conflation_step` `SeriesBlockIndex` `Mesh`, whitespace-safe/conflated/linked crosshair dots) & `AdvancedTearsheetAnalytics` (`OutlierImpact`, `DrawdownPeriod`s, UTC Year & Signal-Bar `MarketRegime` slices, `MultiPhaseBatch`, `RunManifest`) | `ARCHIVE/frontend/src/{components/strategy/MultiStrategyEquityChart.tsx,pages/AnalyticsPage.tsx}` + `LWC v5.2.0` `walk-line.ts`/`percentage-formatter.ts` + `PRACTICE_COACHING_AND_MULTISTRATEGY_ANALYTICS_SPEC.md` | `src/backtest/{analytics,engine,walk_forward,mod}.rs`, `src/viewport/price_scale.rs`, `src/chart.rs`, `src/app.rs` | Shipped & Critic-Hardened (`245/245` tests + `wasm32` Clippy, `--r17` `0.336–2.082 ms` mean / `p99 <= 2.422 ms < 4.0 ms`) |
+
+### Verified Acceptance Tests (`cargo test` — 245/245 PASS)
+```bash
+cargo test trading::tests::r17_
+cargo test trading::tests::critic_r17_
+cargo test backtest::tests::r17_
+cargo test backtest::tests::critic_r17_
+cargo test chart::tests::r17_
+cargo test chart::tests::critic_r17_
+cargo test app::tests::r17_
+cargo test app::tests::critic_r17_
+```
+
+---
+
+## Waves 17–18 (`Milestones R18–R19`) — Remaining Master Anti-Miss Parity Roadmap
+
+All remaining features and sub-branches across `ARCHIVE/` (`208` frontend + `474` backend items) are systematically tracked in [`docs/FEATURE_BACKLOG_AND_PARITY_LEDGER.md`](../FEATURE_BACKLOG_AND_PARITY_LEDGER.md) (`A1..A5` shipped in `R17`):
 
 | Wave / Milestone | Ledger Items | Key Scope (Awaiting Product Owner Authorization) |
 |---|---|---|
-| **Wave 16 (`Milestone R17`)** | `A1..A5` | Replay Practice Coaching (`PracticeScoreboard`, `SessionDebriefModal` + `% SL Adherence` & `Decision Note at Bar`), 1-Click `Scanner -> Replay` (`BlindPractice` / `SignalReview`) + Saved Practice Sessions, UTC-Aligned `0%` Multi-Strategy Equity Comparison Overlay, & `OutlierImpact` / `DrawdownPeriod` / Year & `MarketRegime` Tearsheet Slices |
 | **Wave 17 (`Milestone R18`)** | `B1..B4` | `14` Causal Candlestick Patterns (`CandleGeometry`), `8` Remaining Legacy Indicators (`ADX`, `Stochastic`, `SuperTrend`, `PSAR`, `Keltner`, `CCI`, `MFI`, `Volume SMA`), Confirmed-Pivot Divergences (`right_bars = 3`) + Full `VSA`/`SR`/`Ichimoku` Signals (`72+` Catalog Entries), & Multi-Horizon `ProxyBB` (`T03..T200`) + `Point-in-Time` Universe |
 | **Wave 18 (`Milestone R19`)** | `C1..C4` | Interactive Global `[Settings]` Modal & Candle Palettes, Official Vietnam Exchange Holiday Calendar (`VIETNAM_HOLIDAYS_V1`) + FIFO `T+2` Lot Release, Data Readiness & Gap/Split Audit Panel, & `TextNote` Drawing + Custom Fib Levels + Toolbar `[Export PNG]` |
 

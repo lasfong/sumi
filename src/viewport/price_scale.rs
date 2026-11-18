@@ -200,6 +200,8 @@ pub enum PriceAxisFormatMode {
     Standard,
     /// Compact K/M/B/T suffix formatting for high-magnitude cumulative volume / delta axes.
     CompactVolume,
+    /// Signed cumulative percentage formatting (`+12.50%`, `0.00%`, `-4.25%`) for `0%`-rebased overlays (`Milestone R17 / A4`).
+    SignedPercentage,
 }
 
 /// Configuration for a single `PriceScale` instance on a pane (`left`, `right`, or `overlay`).
@@ -1065,6 +1067,18 @@ impl PriceScale {
                     PriceAxisFormatMode::CompactVolume => {
                         format_compact_volume_axis(raw_price, None)
                     }
+                    PriceAxisFormatMode::SignedPercentage => {
+                        let clean = if raw_price.abs() < 1.0e-9 {
+                            0.0
+                        } else {
+                            raw_price
+                        };
+                        if clean.abs() < 1.0e-9 {
+                            "0.00%".to_owned()
+                        } else {
+                            format!("{clean:+.2}%")
+                        }
+                    }
                 }
             }
         }
@@ -1166,6 +1180,15 @@ impl PriceScale {
                         let label = match self.options.format_mode {
                             PriceAxisFormatMode::CompactVolume => {
                                 format_compact_volume_axis(raw, step_hint)
+                            }
+                            PriceAxisFormatMode::SignedPercentage => {
+                                let clean = if raw.abs() < 1.0e-9 { 0.0 } else { raw };
+                                let pct_dec = scale_dec.clamp(1, 2);
+                                if clean.abs() < 1.0e-9 {
+                                    format!("{clean:.pct_dec$}%")
+                                } else {
+                                    format!("{clean:+.pct_dec$}%")
+                                }
                             }
                             PriceAxisFormatMode::Standard => {
                                 format_price_fixed_decimals(raw, scale_dec)

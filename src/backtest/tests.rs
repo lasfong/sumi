@@ -2249,3 +2249,413 @@ fn critic_r16_regression_spy_thursday_w1_vn30f_session_close_longonly_exit_isola
         "health.technical_composite clause must distinguish TrendFocused vs Balanced around midpoint {mid_thr}"
     );
 }
+
+#[test]
+fn r17_multistrategy_pct_utc_alignment_and_intraday_vs_daily_benchmark_causality() {
+    use crate::backtest::{ComparisonCurveKind, run_multi_strategy_comparison};
+    use crate::data::{DataSourcePreset, WatchlistFeedEntry, load_bundled_watchlist_universe};
+
+    let feeds = load_bundled_watchlist_universe();
+    let btc = feeds
+        .iter()
+        .find(|f| f.symbol == "BTCUSDT")
+        .expect("BTCUSDT feed");
+    let cfg = BacktestConfig::default();
+
+    let rep = run_multi_strategy_comparison(
+        "BTCUSDT",
+        DataSourcePreset::BtcUsdt15mJson,
+        Timeframe::M15,
+        &btc.candles,
+        &cfg,
+        &feeds,
+        None,
+        false,
+    );
+    assert_eq!(rep.curves.len(), 9, "7 presets + B&H + SPY benchmark");
+    let bh = rep
+        .curves
+        .iter()
+        .find(|c| c.kind == ComparisonCurveKind::AssetBuyAndHold)
+        .expect("B&H curve");
+    assert!((bh.return_pct_values[0].unwrap() - 0.0).abs() < 1e-12);
+
+    // Strict DEF-001 cross-timeframe test: intraday 15m VN30F1M bars on Day 2 morning (`02:00 UTC`)
+    // MUST NOT leak Day 2's completed D1 VNINDEX close (`23:59:59 UTC`), using Day 1's close (`0.00%`) instead!
+    let day1 = 1_760_000_000_i64.div_euclid(86_400) * 86_400;
+    let day2 = day1 + 86_400;
+    let vnindex_d1 = vec![
+        Candle {
+            timestamp: day1,
+            date_label: "D1".to_owned(),
+            open: 1200.0,
+            high: 1210.0,
+            low: 1195.0,
+            close: 1200.0,
+            volume: 1_000_000.0,
+        },
+        Candle {
+            timestamp: day2,
+            date_label: "D2".to_owned(),
+            open: 1200.0,
+            high: 1330.0,
+            low: 1200.0,
+            close: 1320.0, // +10.0% at end of Day 2!
+            volume: 1_000_000.0,
+        },
+    ];
+    let custom_universe = vec![WatchlistFeedEntry {
+        instrument_id: "BM:VNINDEX".to_owned(),
+        preset: DataSourcePreset::CafeFIndexCsv,
+        symbol: "VNINDEX".to_owned(),
+        base_timeframe: Timeframe::D1,
+        candles: vnindex_d1,
+    }];
+    let intraday_15m = vec![
+        Candle {
+            timestamp: day2 + 2 * 3_600, // Day 2 02:00 UTC (morning)
+            date_label: "02:00".to_owned(),
+            open: 1250.0,
+            high: 1255.0,
+            low: 1248.0,
+            close: 1252.0,
+            volume: 5_000.0,
+        },
+        Candle {
+            timestamp: day2 + 86_400 + 2 * 3_600, // Day 3 02:00 UTC (after Day 2 D1 closed!)
+            date_label: "D3 02:00".to_owned(),
+            open: 1252.0,
+            high: 1260.0,
+            low: 1250.0,
+            close: 1258.0,
+            volume: 5_000.0,
+        },
+    ];
+    let ms_intra = run_multi_strategy_comparison(
+        "VN30F1M",
+        DataSourcePreset::IntradayVn30F1m,
+        Timeframe::M15,
+        &intraday_15m,
+        &cfg,
+        &custom_universe,
+        None,
+        false,
+    );
+    let bm_curve = ms_intra
+        .curves
+        .iter()
+        .find(|c| c.kind == ComparisonCurveKind::MarketBenchmark)
+        .expect("VNINDEX benchmark curve");
+    assert!(
+        (bm_curve.return_pct_values[0].unwrap() - 0.0).abs() < 1e-9,
+        "Day 2 morning 15m bar must use Day 1 completed D1 close (0.0%), NOT Day 2 EOD close (+10.0%)"
+    );
+    assert!(
+        (bm_curve.return_pct_values[1].unwrap() - 10.0).abs() < 1e-9,
+        "Day 3 morning 15m bar sees Day 2 completed D1 close (+10.0%)"
+    );
+}
+
+#[test]
+fn r17_outlier_impact_drawdown_periods_signal_bar_regime_multiphase_and_manifest() {
+    use crate::backtest::{
+        BacktestExitReason, MultiPhaseSplitMode, RunManifest,
+        compute_entry_regime_breakdown_with_precomputed, compute_outlier_impact,
+        compute_yearly_breakdown, extract_drawdown_periods, run_multi_phase_batch,
+    };
+    use crate::data::load_bundled_watchlist_universe;
+    use crate::scanner::MarketRegime;
+    use crate::trading::PositionSide;
+
+    let mk_trade =
+        |id: u64, entry_bar: usize, exit_bar: usize, exit_ts: i64, pnl: f64| BacktestTrade {
+            trade_id: id,
+            side: PositionSide::Long,
+            quantity: 10.0,
+            entry_bar_index: entry_bar,
+            exit_bar_index: exit_bar,
+            entry_timestamp: exit_ts - 86_400,
+            exit_timestamp: exit_ts,
+            entry_price: 100.0,
+            exit_price: 100.0 + pnl / 10.0,
+            bars_held: exit_bar.saturating_sub(entry_bar).max(1),
+            gross_pnl: pnl,
+            entry_fee: 0.0,
+            exit_fee: 0.0,
+            exit_tax: 0.0,
+            net_pnl: pnl,
+            return_pct: pnl / 10.0,
+            r_multiple: Some(pnl / 100.0),
+            mae_pct: -1.0,
+            mfe_pct: 2.0,
+            exit_reason: BacktestExitReason::SignalExit,
+        };
+
+    // 1. `N < 3` guard on `trimmed_expectancy_10pct` + exact `gross_profit` denominator (`analytics_service.py:421` fix)
+    assert_eq!(compute_outlier_impact(&[]).trimmed_expectancy_10pct, None);
+    let two_trades = vec![
+        mk_trade(1, 1, 2, 1_700_000_000, 200.0),
+        mk_trade(2, 3, 4, 1_700_100_000, -100.0),
+    ];
+    let oi_two = compute_outlier_impact(&two_trades);
+    assert_eq!(oi_two.trimmed_expectancy_10pct, None);
+    assert!(
+        (oi_two.top_3_winners_share_of_gross_profit_pct.unwrap() - 100.0).abs() < 1e-9,
+        "200 / 200 gross_profit = 100.0% (NOT 200 / 300 gross_movement = 66.7%!)"
+    );
+
+    let five_trades = vec![
+        mk_trade(1, 1, 2, 1_704_153_600, 500.0),   // 2024
+        mk_trade(2, 3, 4, 1_704_240_000, 100.0),   // 2024
+        mk_trade(3, 5, 6, 1_735_776_000, 50.0),    // 2025
+        mk_trade(4, 7, 8, 1_735_862_400, -200.0),  // 2025
+        mk_trade(5, 9, 10, 1_735_948_800, -250.0), // 2025
+    ];
+    let oi5 = compute_outlier_impact(&five_trades);
+    // gross_profit = 650, top_3_winners = 650 -> 100%; net = +200, ex_top_3 = -450 -> outlier_dependent_warning = true!
+    assert!((oi5.gross_profit - 650.0).abs() < 1e-9);
+    assert!((oi5.top_3_winners_share_of_gross_profit_pct.unwrap() - 100.0).abs() < 1e-9);
+    assert!(oi5.outlier_dependent_warning);
+    // sorted = [-250, -200, 50, 100, 500], k = 1 -> mid = [-200, 50, 100] -> mean = -50/3
+    assert!((oi5.trimmed_expectancy_10pct.unwrap() - (-50.0 / 3.0)).abs() < 1e-9);
+
+    // 2. Discrete `DrawdownPeriod`s: 1 recovered + 1 unrecovered tail episode (`recovery_timestamp == None`)
+    let eq_curve = vec![
+        BacktestEquityPoint {
+            bar_index: 0,
+            timestamp: 1_704_067_200,
+            equity: 100_000.0,
+            cash: 100_000.0,
+            drawdown_abs: 0.0,
+            underwater_pct: 0.0,
+            position_qty: 0.0,
+        },
+        BacktestEquityPoint {
+            bar_index: 1,
+            timestamp: 1_704_153_600,
+            equity: 95_000.0,
+            cash: 95_000.0,
+            drawdown_abs: 5_000.0,
+            underwater_pct: -5.0,
+            position_qty: 0.0,
+        },
+        BacktestEquityPoint {
+            bar_index: 2,
+            timestamp: 1_704_240_000,
+            equity: 102_000.0,
+            cash: 102_000.0,
+            drawdown_abs: 0.0,
+            underwater_pct: 0.0,
+            position_qty: 0.0,
+        },
+        BacktestEquityPoint {
+            bar_index: 3,
+            timestamp: 1_735_689_600,
+            equity: 91_800.0,
+            cash: 91_800.0,
+            drawdown_abs: 10_200.0,
+            underwater_pct: -10.0,
+            position_qty: 0.0,
+        },
+    ];
+    let dds = extract_drawdown_periods(100_000.0, &eq_curve);
+    assert_eq!(dds.len(), 2);
+    assert!((dds[0].max_drawdown_pct - 10.0).abs() < 1e-9);
+    assert_eq!(
+        dds[0].recovery_timestamp, None,
+        "tail drawdown must remain unrecovered"
+    );
+    assert_eq!(dds[1].recovery_timestamp, Some(1_704_240_000));
+
+    // 3. UTC Calendar Year slices (`2024` & `2025`)
+    let yrs = compute_yearly_breakdown(100_000.0, &eq_curve, &five_trades);
+    assert_eq!(yrs.len(), 2);
+    assert_eq!(yrs[0].year, 2024);
+    assert_eq!(yrs[0].trade_count, 2);
+    assert_eq!(yrs[1].year, 2025);
+    assert_eq!(yrs[1].trade_count, 3);
+
+    // 4. Causal Signal-Bar `T = entry_bar_index - 1` regime attribution (`backtest_service.py:583` fix!)
+    //    Trade enters at bar 2 (`Open[2]`) and exits at bar 3 (`exit_bar_index = 3`):
+    //    - bar 1 (`signal_bar`): `Pullback`
+    //    - bar 2 (`entry_bar_index`): `Uptrend`
+    //    - bar 3 (`exit_bar_index`): `Downtrend`
+    //    Trade MUST be attributed strictly to `Pullback` (`regimes[1]`)!
+    let regimes = vec![
+        MarketRegime::Neutral,
+        MarketRegime::Pullback,
+        MarketRegime::Uptrend,
+        MarketRegime::Downtrend,
+    ];
+    let single_t = vec![mk_trade(99, 2, 3, 1_704_240_000, 150.0)];
+    let reg_slices = compute_entry_regime_breakdown_with_precomputed(&regimes, &single_t);
+    let pb_row = reg_slices
+        .iter()
+        .find(|r| r.regime == MarketRegime::Pullback)
+        .expect("Pullback row");
+    let up_row = reg_slices
+        .iter()
+        .find(|r| r.regime == MarketRegime::Uptrend)
+        .expect("Uptrend row");
+    let dn_row = reg_slices
+        .iter()
+        .find(|r| r.regime == MarketRegime::Downtrend)
+        .expect("Downtrend row");
+    assert_eq!(
+        pb_row.trade_count, 1,
+        "must attribute to signal bar T = entry_bar - 1"
+    );
+    assert_eq!(up_row.trade_count, 0, "must NOT peek at Close[entry_bar]");
+    assert_eq!(dn_row.trade_count, 0, "must NOT peek at exit_bar_index");
+
+    // 5. `MultiPhaseBatch` & deterministic `RunManifest`
+    let feeds = load_bundled_watchlist_universe();
+    let btc = feeds.iter().find(|f| f.symbol == "BTCUSDT").unwrap();
+    let cfg = BacktestConfig::default();
+    let mp = run_multi_phase_batch(
+        Timeframe::M15,
+        &btc.candles,
+        &cfg,
+        MultiPhaseSplitMode::Tertiles,
+        BacktestRunOptions::default(),
+    );
+    assert_eq!(mp.phases.len(), 3);
+
+    let bt1 = run_backtest_with_options(
+        "BTCUSDT",
+        Timeframe::M15,
+        &btc.candles,
+        &cfg,
+        BacktestRunOptions::default(),
+    );
+    let bt2 = run_backtest_with_options(
+        "BTCUSDT",
+        Timeframe::M15,
+        &btc.candles,
+        &cfg,
+        BacktestRunOptions::default(),
+    );
+    let m1 = RunManifest::build(&bt1, BacktestRunOptions::default());
+    let m2 = RunManifest::build(&bt2, BacktestRunOptions::default());
+    assert_eq!(m1.manifest_digest, m2.manifest_digest);
+    let mut cfg_mod = cfg.clone();
+    cfg_mod.commission_bps += 1.0;
+    let bt3 = run_backtest_with_options(
+        "BTCUSDT",
+        Timeframe::M15,
+        &btc.candles,
+        &cfg_mod,
+        BacktestRunOptions::default(),
+    );
+    let m3 = RunManifest::build(&bt3, BacktestRunOptions::default());
+    assert_ne!(m1.manifest_digest, m3.manifest_digest);
+}
+
+#[test]
+fn critic_r17_regression_multistrategy_midbar_cutoff_and_session_close_parity() {
+    use crate::data::load_bundled_watchlist_universe;
+
+    let feeds = load_bundled_watchlist_universe();
+    let fpt = feeds.iter().find(|f| f.symbol == "FPT").unwrap();
+    let cfg = BacktestConfig {
+        preset: StrategyPresetKind::DonchianAtrBreakout,
+        ..BacktestConfig::default()
+    };
+
+    // 1. `[Critical-01a]`: Mid-bar intraday cutoff on coarse `D1` series (`incomplete_tail_bar: false`)
+    // MUST withhold the unclosed last `D1` candle in `run_multi_strategy_comparison` (zero lookahead on
+    // future EOD High/Low/Close across all 7 presets AND `Asset Buy & Hold`!).
+    let mut poisoned = fpt.candles[..80].to_vec();
+    let last_open = poisoned[79].timestamp;
+    let mid_bar_cutoff = last_open + 2 * 3_600; // 02:00:00 UTC (09:00 ICT — strictly mid-session!)
+    poisoned[79].high = 9_999_999.0;
+    poisoned[79].close = 9_999_999.0;
+
+    let bt_mid = run_backtest_with_options(
+        "FPT",
+        Timeframe::D1,
+        &poisoned,
+        &cfg,
+        BacktestRunOptions {
+            replay_cutoff_timestamp: Some(mid_bar_cutoff),
+            incomplete_tail_bar: false,
+        },
+    );
+    assert_eq!(bt_mid.bar_count, 79, "unclosed bar #79 must be excluded");
+
+    let ms_mid = run_multi_strategy_comparison(
+        "FPT",
+        DataSourcePreset::Vn30Basket,
+        Timeframe::D1,
+        &poisoned,
+        &cfg,
+        &feeds,
+        Some(mid_bar_cutoff),
+        false,
+    );
+    for curve in &ms_mid.curves {
+        assert_eq!(
+            curve.return_pct_values[79], None,
+            "curve {} leaked unclosed coarse tail bar #79!",
+            curve.label
+        );
+    }
+    let active_ms = ms_mid
+        .curves
+        .iter()
+        .find(|c| c.is_active_preset)
+        .expect("active preset curve");
+    assert_eq!(active_ms.num_trades, bt_mid.tearsheet.num_trades);
+    assert!(
+        (active_ms.final_return_pct.unwrap_or(0.0) - bt_mid.tearsheet.total_return_pct).abs()
+            < 1e-9
+    );
+
+    // 2. `[Critical-01b]`: At official Vietnam ATC session close (`07:44:59 UTC` = `14:45 ICT`),
+    // `is_bucket_incomplete_at_close_for_symbol` is `false`, AND `run_backtest_with_options`,
+    // `run_multi_strategy_comparison`, and `compute_advanced_tearsheet_analytics` ALL keep bar #79
+    // with 100% identical trade count, return %, and phase bar coverage!
+    let clean_80 = &fpt.candles[..80];
+    let atc_close_cutoff = clean_80[79].timestamp + 7 * 3_600 + 44 * 60 + 59; // 07:44:59 UTC
+    assert!(!is_bucket_incomplete_at_close_for_symbol(
+        "FPT",
+        clean_80[79].timestamp,
+        atc_close_cutoff,
+        Timeframe::M1,
+        Timeframe::D1,
+    ));
+    let opts_atc = BacktestRunOptions {
+        replay_cutoff_timestamp: Some(atc_close_cutoff),
+        incomplete_tail_bar: false,
+    };
+    let bt_atc = run_backtest_with_options("FPT", Timeframe::D1, clean_80, &cfg, opts_atc);
+    assert_eq!(
+        bt_atc.bar_count, 80,
+        "completed ATC session bar must NOT be dropped"
+    );
+    let ms_atc = run_multi_strategy_comparison(
+        "FPT",
+        DataSourcePreset::Vn30Basket,
+        Timeframe::D1,
+        clean_80,
+        &cfg,
+        &feeds,
+        Some(atc_close_cutoff),
+        false,
+    );
+    let active_atc = ms_atc.curves.iter().find(|c| c.is_active_preset).unwrap();
+    assert!(active_atc.return_pct_values[79].is_some());
+    assert_eq!(active_atc.num_trades, bt_atc.tearsheet.num_trades);
+    assert!(
+        (active_atc.final_return_pct.unwrap_or(0.0) - bt_atc.tearsheet.total_return_pct).abs()
+            < 1e-9
+    );
+    let adv_atc = compute_advanced_tearsheet_analytics(
+        clean_80,
+        &bt_atc,
+        MultiPhaseSplitMode::Halves,
+        opts_atc,
+    );
+    assert_eq!(adv_atc.manifest.bar_count, 80);
+    assert_eq!(adv_atc.multi_phase.phases.last().unwrap().end_bar, 80);
+}

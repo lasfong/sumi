@@ -12,8 +12,25 @@ use super::{
     WatchlistSortColumn,
 };
 
-/// Default pre-signal lookback bars used when launching `ScannerReplayIntent::BlindPractice`.
+/// Default pre-signal lookback bars used by low-level `start_scanner_signal_replay` callers.
 pub const DEFAULT_BLIND_PRACTICE_LOOKBACK_BARS: usize = 15;
+
+/// Institutional pre-roll lookback bars (`120` candles prior to signal bar) used by 1-click UI
+/// `Scanner -> BlindPractice` launches (`Milestone R17 / Wave 16 — A3`).
+pub const INSTITUTIONAL_BLIND_PRACTICE_PRE_ROLL_BARS: usize = 120;
+
+/// Computes the causal `MarketRegime` classification (`SIG-REG-001..005`) at every bar `0..candles.len()`
+/// in a single $O(N)$ pass (`Milestone R17 / Wave 16 — A5`).
+#[must_use]
+pub fn compute_regime_series(candles: &[Candle]) -> Vec<MarketRegime> {
+    if candles.is_empty() {
+        return Vec::new();
+    }
+    let series = PrecomputedScannerSeries::compute(candles);
+    (0..candles.len())
+        .map(|t| classify_regime_at(candles, &series, t))
+        .collect()
+}
 
 struct PrecomputedScannerSeries {
     sma_20: Vec<Option<f64>>,

@@ -10,16 +10,18 @@ use crate::alerts::{
     MAX_ALERT_COOLDOWN_BARS, truncate_utf8_bytes,
 };
 use crate::backtest::{
-    BacktestConfig, BacktestRunOptions, BacktestRunResult, ConfluenceThresholdGate,
-    CustomSignalRuleSpec, DirectionalRuleLeg, FloatCmpOp, LogicalCombinator, MAX_CLAUSES_PER_GROUP,
-    MAX_RULE_GROUPS, MIN_STATISTICAL_SAMPLE_TRADES, MonteCarloConfig, MonteCarloReport,
-    MonteCarloValidity, MultiSymbolBattleReport, ParameterSweepReport, PortfolioBacktestReport,
-    PortfolioUniverseFilter, PortfolioWeightingMode, PositionSizingMode, PresetBattleRow,
-    RobustnessVerdict, SignalClause, SignalClauseGroup, SignalPredicate, StrategyDirectionMode,
-    StrategyPresetKind, SweepRankingMetric, WalkForwardConfig, WalkForwardReport,
-    WalkForwardVerdict, count_custom_rule_matches, is_bucket_incomplete_at_close_for_symbol,
+    AdvancedTearsheetAnalytics, BacktestConfig, BacktestRunOptions, BacktestRunResult,
+    ComparisonCurveKind, ConfluenceThresholdGate, CustomSignalRuleSpec, DirectionalRuleLeg,
+    FloatCmpOp, LogicalCombinator, MAX_CLAUSES_PER_GROUP, MAX_RULE_GROUPS,
+    MIN_STATISTICAL_SAMPLE_TRADES, MonteCarloConfig, MonteCarloReport, MonteCarloValidity,
+    MultiPhaseSplitMode, MultiStrategyComparisonReport, MultiSymbolBattleReport,
+    ParameterSweepReport, PortfolioBacktestReport, PortfolioUniverseFilter, PortfolioWeightingMode,
+    PositionSizingMode, PresetBattleRow, RobustnessVerdict, SignalClause, SignalClauseGroup,
+    SignalPredicate, StrategyDirectionMode, StrategyPresetKind, SweepRankingMetric,
+    WalkForwardConfig, WalkForwardReport, WalkForwardVerdict, compute_advanced_tearsheet_analytics,
+    count_custom_rule_matches, is_bucket_incomplete_at_close_for_symbol,
     map_equity_curve_to_candles, run_all_presets_battle, run_backtest_with_options,
-    run_monte_carlo_bootstrap, run_monte_carlo_portfolio_mapped,
+    run_monte_carlo_bootstrap, run_monte_carlo_portfolio_mapped, run_multi_strategy_comparison,
     run_multi_symbol_battle_with_close_cutoff, run_parameter_sweep, run_portfolio_backtest,
     run_walk_forward_validation,
 };
@@ -27,7 +29,7 @@ use crate::backtest::{
 use crate::backtest::{StopTakeConfig, StrategyParams};
 use crate::chart::{
     ChartDisplayConfig, ChartRenderReport, ChartReplayTradingOverlay, ChartViewportState,
-    EquityCurveOverlay, palette, render_workstation_chart_full,
+    EquityCurveOverlay, multi_strategy_curve_color, palette, render_workstation_chart_full,
 };
 use crate::data::{
     AggregationError, DataFileFormat, DataLoadError, DataLoadOptions, DataLoadReport,
@@ -58,17 +60,20 @@ use crate::replay::{
 use crate::scanner::{
     BreadthFeedInput, CONFLUENCE_DATA_FIDELITY_PROXY, CausalConfluenceReport, ConfluenceBias,
     ConfluenceWeightProfile, DEFAULT_BLIND_PRACTICE_LOOKBACK_BARS, HistoricalSignalHit,
-    MarketBreadthSnapshot, MarketRegime, PrecomputedCatalogMatrix, RrgQuadrant, SIGNAL_CATALOG,
-    ScanSignalKind, ScannerFilter, ScannerReplayIntent, ScannerSignalContext, SignalCategory,
-    SignalDirection, SignalEvaluation, SignalOutputType, SignalStatus, SymbolBreadthRotation,
-    SymbolScanRow, WatchlistSortColumn, compute_market_breadth_and_rrg, evaluate_causal_confluence,
-    evaluate_symbol_scan_and_signals, explain_historical_signal, filter_and_sort_watchlist,
-    filter_historical_signals, filter_signal_catalog, find_catalog_entry,
-    find_catalog_entry_for_scan_kind, is_bidirectional_bool_signal,
+    INSTITUTIONAL_BLIND_PRACTICE_PRE_ROLL_BARS, MarketBreadthSnapshot, MarketRegime,
+    PrecomputedCatalogMatrix, RrgQuadrant, SIGNAL_CATALOG, ScanSignalKind, ScannerFilter,
+    ScannerReplayIntent, ScannerSignalContext, SignalCategory, SignalDirection, SignalEvaluation,
+    SignalOutputType, SignalStatus, SymbolBreadthRotation, SymbolScanRow, WatchlistSortColumn,
+    compute_market_breadth_and_rrg, evaluate_causal_confluence, evaluate_symbol_scan_and_signals,
+    explain_historical_signal, filter_and_sort_watchlist, filter_historical_signals,
+    filter_signal_catalog, find_catalog_entry, find_catalog_entry_for_scan_kind,
+    is_bidirectional_bool_signal,
 };
 use crate::trading::{
-    DOM_LADDER_DATA_FIDELITY, DomLadderConfig, DomLadderError, DomLadderSnapshot,
+    CoachingSeverity, DOM_LADDER_DATA_FIDELITY, DomLadderConfig, DomLadderError, DomLadderSnapshot,
     DomPriceBandState, LadderStageInput, OrderKind, OrderRequest, OrderSide, PositionSide,
+    PracticeDecisionAction, PracticeDecisionLog, PracticeScoreboardSummary, PracticeSessionStore,
+    SavedPracticeSession, SavedScanSnapshot, ScanSnapshotStore, SessionDebriefReport,
     TradingSession, compute_causal_dom_ladder, extract_ticket_from_drawing,
     size_ladder_qty_from_risk_budget, stage_ladder_order, step_ladder_price_ticks,
 };
@@ -126,11 +131,12 @@ pub enum RightDockTab {
     Journal,
 }
 
-/// Active sub-view inside the `Strategy Lab` right-side dock (`Milestones R09–R16`).
+/// Active sub-view inside the `Strategy Lab` right-side dock (`Milestones R09–R17`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum StrategyLabSubTab {
     #[default]
     Tearsheet,
+    Analytics,
     RuleBuilder,
     Trades,
     Sweep,
@@ -139,8 +145,9 @@ pub enum StrategyLabSubTab {
 }
 
 impl StrategyLabSubTab {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Tearsheet,
+        Self::Analytics,
         Self::RuleBuilder,
         Self::Trades,
         Self::Sweep,
@@ -153,6 +160,7 @@ impl StrategyLabSubTab {
     pub const fn short_label(self) -> &'static str {
         match self {
             Self::Tearsheet => "Stats",
+            Self::Analytics => "Slices",
             Self::RuleBuilder => "Rules",
             Self::Trades => "Trades",
             Self::Sweep => "Sweep",
@@ -201,13 +209,14 @@ impl RuleBuilderLegTab {
     }
 }
 
-/// Active series plotted inside the synchronized `OscillatorPaneId::Equity` sub-pane (`Milestone R10`).
+/// Active series plotted inside the synchronized `OscillatorPaneId::Equity` sub-pane (`Milestones R10–R17`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum EquityPaneSource {
     #[default]
     SingleAssetBacktest,
     WalkForwardOos,
     MultiAssetPortfolio,
+    MultiStrategyPct,
 }
 
 impl EquityPaneSource {
@@ -218,6 +227,7 @@ impl EquityPaneSource {
             Self::SingleAssetBacktest => "Single BT",
             Self::WalkForwardOos => "WFO OOS",
             Self::MultiAssetPortfolio => "Portfolio",
+            Self::MultiStrategyPct => "Multi-Strat %",
         }
     }
 }
@@ -477,6 +487,31 @@ const fn default_true_r15() -> bool {
 fn default_alert_catalog_id_r16() -> String {
     "technical.macd_bull_cross".to_owned()
 }
+
+const fn default_blind_lookback_r17() -> usize {
+    INSTITUTIONAL_BLIND_PRACTICE_PRE_ROLL_BARS
+}
+
+type MultiStrategySyncKey = (
+    String,
+    u64,
+    Timeframe,
+    usize,
+    Option<i64>,
+    Option<i64>,
+    bool,
+    u64,
+);
+
+type AdvancedAnalyticsSyncKey = (
+    u64,
+    usize,
+    Option<i64>,
+    Option<i64>,
+    bool,
+    u64,
+    MultiPhaseSplitMode,
+);
 
 #[derive(Debug, Clone)]
 struct RuleBuilderMatchCache {
@@ -775,6 +810,18 @@ pub struct SumiWorkstationApp {
     pub alert_cooldown_bars: usize,
     #[serde(default)]
     pub snapshot_store: WorkspaceSnapshotStore,
+    #[serde(default = "default_blind_lookback_r17")]
+    pub blind_practice_lookback_bars: usize,
+    #[serde(default)]
+    pub practice_decisions: PracticeDecisionLog,
+    #[serde(default)]
+    decision_logs_by_instrument: BTreeMap<String, PracticeDecisionLog>,
+    #[serde(default)]
+    pub practice_session_store: PracticeSessionStore,
+    #[serde(default)]
+    pub scan_snapshot_store: ScanSnapshotStore,
+    #[serde(default)]
+    pub multi_phase_mode: MultiPhaseSplitMode,
 
     #[serde(skip)]
     pub base_candles: Vec<Candle>,
@@ -930,6 +977,50 @@ pub struct SumiWorkstationApp {
     pub staged_snapshot_preview: Option<StagedSnapshotRestorePreview>,
     #[serde(skip)]
     rule_builder_match_cache: Option<RuleBuilderMatchCache>,
+    #[serde(skip)]
+    pub show_session_debrief_modal: bool,
+    #[serde(skip)]
+    pub(crate) last_debrief_modal_rect: Option<egui::Rect>,
+    #[serde(skip)]
+    pub decision_draft_action: PracticeDecisionAction,
+    #[serde(skip)]
+    pub decision_draft_setup: SetupTag,
+    #[serde(skip)]
+    pub decision_draft_mistake: MistakeTag,
+    #[serde(skip)]
+    pub decision_draft_conviction: u8,
+    #[serde(skip)]
+    pub decision_draft_note: String,
+    #[serde(skip)]
+    pub practice_save_label_input: String,
+    #[serde(skip)]
+    pub scan_save_label_input: String,
+    #[serde(skip)]
+    pub last_practice_warning: Option<String>,
+    #[serde(skip)]
+    pub multi_strategy_report: Option<MultiStrategyComparisonReport>,
+    #[serde(skip)]
+    multi_strategy_synced_key: Option<MultiStrategySyncKey>,
+    #[serde(skip)]
+    pub advanced_analytics_report: Option<AdvancedTearsheetAnalytics>,
+    #[serde(skip)]
+    advanced_analytics_synced_key: Option<AdvancedAnalyticsSyncKey>,
+    #[serde(skip)]
+    pub last_exported_manifest_doc: Option<String>,
+    #[serde(skip)]
+    pub last_exported_practice_doc: Option<String>,
+    #[serde(skip)]
+    pub last_exported_scan_doc: Option<String>,
+    #[serde(skip)]
+    pub practice_import_buffer: String,
+    #[serde(skip)]
+    pub scan_import_buffer: String,
+    #[serde(skip)]
+    pub show_practice_import_box: bool,
+    #[serde(skip)]
+    pub show_scan_import_box: bool,
+    #[serde(skip)]
+    pub last_scan_warning: Option<String>,
 }
 
 impl Default for SumiWorkstationApp {
@@ -1028,6 +1119,12 @@ impl Default for SumiWorkstationApp {
             alert_confluence_profile: ConfluenceWeightProfile::Balanced,
             alert_cooldown_bars: 0,
             snapshot_store: WorkspaceSnapshotStore::new(),
+            blind_practice_lookback_bars: INSTITUTIONAL_BLIND_PRACTICE_PRE_ROLL_BARS,
+            practice_decisions: PracticeDecisionLog::new(),
+            decision_logs_by_instrument: BTreeMap::new(),
+            practice_session_store: PracticeSessionStore::new(),
+            scan_snapshot_store: ScanSnapshotStore::new(),
+            multi_phase_mode: MultiPhaseSplitMode::Tertiles,
             base_candles,
             candles,
             available_symbols: vec!["VNINDEX".to_owned()],
@@ -1105,6 +1202,28 @@ impl Default for SumiWorkstationApp {
             snapshot_pin_draft: false,
             staged_snapshot_preview: None,
             rule_builder_match_cache: None,
+            show_session_debrief_modal: false,
+            last_debrief_modal_rect: None,
+            decision_draft_action: PracticeDecisionAction::ObserveHold,
+            decision_draft_setup: SetupTag::TrendPullback,
+            decision_draft_mistake: MistakeTag::None,
+            decision_draft_conviction: 4,
+            decision_draft_note: String::new(),
+            practice_save_label_input: "Replay Drill #1".to_owned(),
+            scan_save_label_input: "Morning Scan #1".to_owned(),
+            last_practice_warning: None,
+            multi_strategy_report: None,
+            multi_strategy_synced_key: None,
+            advanced_analytics_report: None,
+            advanced_analytics_synced_key: None,
+            last_exported_manifest_doc: None,
+            last_exported_practice_doc: None,
+            last_exported_scan_doc: None,
+            practice_import_buffer: String::new(),
+            scan_import_buffer: String::new(),
+            show_practice_import_box: false,
+            show_scan_import_box: false,
+            last_scan_warning: None,
         }
     }
 }
@@ -1200,8 +1319,33 @@ impl SumiWorkstationApp {
         }
         self.alert_cooldown_bars = self.alert_cooldown_bars.min(MAX_ALERT_COOLDOWN_BARS);
         self.snapshot_store.sanitize();
+        self.blind_practice_lookback_bars = self.blind_practice_lookback_bars.clamp(1, 500);
+        self.practice_decisions.sanitize();
+        while self.decision_logs_by_instrument.len() > 64 {
+            self.decision_logs_by_instrument.pop_first();
+        }
+        for log in self.decision_logs_by_instrument.values_mut() {
+            log.sanitize();
+        }
+        self.practice_session_store.sanitize();
+        self.scan_snapshot_store.sanitize();
         self.last_exported_alerts_doc = None;
         self.staged_snapshot_preview = None;
+        self.show_session_debrief_modal = false;
+        self.last_debrief_modal_rect = None;
+        self.last_practice_warning = None;
+        self.multi_strategy_report = None;
+        self.multi_strategy_synced_key = None;
+        self.advanced_analytics_report = None;
+        self.advanced_analytics_synced_key = None;
+        self.last_exported_manifest_doc = None;
+        self.last_exported_practice_doc = None;
+        self.last_exported_scan_doc = None;
+        self.practice_import_buffer.clear();
+        self.scan_import_buffer.clear();
+        self.show_practice_import_box = false;
+        self.show_scan_import_box = false;
+        self.last_scan_warning = None;
         self.rule_builder_match_cache = None;
         self.backtest_config.sanitize();
         self.wf_config.sanitize();
@@ -1787,6 +1931,7 @@ impl SumiWorkstationApp {
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
         self.sync_indicators_and_benchmarks();
         self.sync_alerts_causal();
+        self.invalidate_or_sync_backtest_after_mutation();
         self.sync_timeframe_from_primary_across_slots();
 
         Ok(())
@@ -1902,6 +2047,19 @@ impl SumiWorkstationApp {
             self.scanner_context_by_instrument.remove(&outgoing_key);
         }
 
+        let outgoing_decisions = std::mem::take(&mut self.practice_decisions);
+        if !outgoing_decisions.entries.is_empty() {
+            while self.decision_logs_by_instrument.len() >= 64
+                && !self.decision_logs_by_instrument.contains_key(&outgoing_key)
+            {
+                self.decision_logs_by_instrument.pop_first();
+            }
+            self.decision_logs_by_instrument
+                .insert(outgoing_key.clone(), outgoing_decisions);
+        } else {
+            self.decision_logs_by_instrument.remove(&outgoing_key);
+        }
+
         let mut refresh_custom_peers = false;
         match custom_update {
             CustomSourceUpdate::Clear => {
@@ -1958,6 +2116,12 @@ impl SumiWorkstationApp {
         incoming_trading.sanitize_and_rebuild(&self.base_candles, cursor_idx);
         let has_existing_trades = !incoming_trading.commands.is_empty();
         self.trading = incoming_trading;
+        let mut incoming_decisions = self
+            .decision_logs_by_instrument
+            .remove(&incoming_key)
+            .unwrap_or_default();
+        incoming_decisions.sanitize();
+        self.practice_decisions = incoming_decisions;
         self.show_replay_bar = self.replay.is_active();
         self.dom_center_override = None;
         self.last_trade_status = None;
@@ -2028,6 +2192,7 @@ impl SumiWorkstationApp {
             self.reseed_risk_planner_for_active_instrument(false);
         }
         self.sync_alerts_causal();
+        self.invalidate_or_sync_backtest_after_mutation();
         self.sync_symbol_from_primary_across_slots();
         self.sync_secondary_slots();
     }
@@ -2934,7 +3099,9 @@ impl SumiWorkstationApp {
         }
     }
 
-    /// Resets the Paper Trading account cleanly at the start of the active replay session (or current bar).
+    /// Resets the Paper Trading account cleanly at the start of the active replay session (or current bar),
+    /// pruning invalidated paper trades for the active symbol from `TradeJournalStore` and clearing session
+    /// decision notes while keeping drawings, alerts, scanner context, and Replay cursor intact (`Milestone R17 / A1`).
     pub fn reset_trading_session(&mut self) {
         let start_idx = if self.replay.is_active() {
             self.replay.start_base_index
@@ -2950,10 +3117,323 @@ impl SumiWorkstationApp {
                 cursor_idx,
             );
         }
+        let venue = self.active_exchange_venue();
+        let _ = self
+            .journal
+            .sync_paper_closed_trades(&self.symbol, venue, &[]);
+        self.practice_decisions.clear();
+        self.last_practice_warning = None;
         self.last_trade_status = Some((
             false,
-            format!("Reset account (${:.0})", self.trading.config.initial_cash),
+            format!("Reset practice (${:.0})", self.trading.config.initial_cash),
         ));
+    }
+
+    /// 1-click `Reset Practice` alias (`Milestone R17 / A1`): clears paper orders, fills, closed trades,
+    /// synced paper journal rows, and session decision notes without touching chart drawings, alerts, or Replay cursor.
+    pub fn reset_practice_session(&mut self) {
+        self.reset_trading_session();
+    }
+
+    /// Computes live `PracticeScoreboardSummary` at the active causal replay cursor (`Milestone R17 / A1`).
+    #[must_use]
+    pub fn compute_practice_scoreboard(&self) -> PracticeScoreboardSummary {
+        let cursor_idx = self.current_trading_cursor_base_index();
+        let mark_price = self
+            .base_candles
+            .get(cursor_idx)
+            .or_else(|| self.candles.last())
+            .map_or(0.0, |c| c.close);
+        let cutoff = self.replay.cutoff_timestamp(&self.base_candles);
+        PracticeScoreboardSummary::compute(
+            &self.trading,
+            mark_price,
+            &self.practice_decisions,
+            &self.symbol,
+            self.replay.is_active(),
+            cursor_idx,
+            cutoff,
+        )
+    }
+
+    /// Computes the causal `SessionDebriefReport` (`Milestone R17 / A2`).
+    #[must_use]
+    pub fn compute_session_debrief_report(&self) -> SessionDebriefReport {
+        let cursor_idx = self.current_trading_cursor_base_index();
+        let mark_price = self
+            .base_candles
+            .get(cursor_idx)
+            .or_else(|| self.candles.last())
+            .map_or(0.0, |c| c.close);
+        let cutoff = self.replay.cutoff_timestamp(&self.base_candles);
+        SessionDebriefReport::build(
+            &self.symbol,
+            self.active_timeframe,
+            &self.trading,
+            mark_price,
+            &self.journal.entries,
+            &self.practice_decisions,
+            self.replay.is_active(),
+            cursor_idx,
+            cutoff,
+        )
+    }
+
+    /// Opens `SessionDebriefModal` after synchronizing closed paper trades into `TradeJournalStore` (`Milestone R17 / A2`).
+    pub fn open_session_debrief_modal(&mut self) {
+        if !self.trading.closed_trades().is_empty() {
+            let _ = self.sync_paper_trades_to_journal();
+        }
+        self.command_palette.open = false;
+        self.show_templates_modal = false;
+        self.show_hotkeys_modal = false;
+        self.show_signal_catalog_modal = false;
+        self.show_session_debrief_modal = true;
+    }
+
+    /// Stamps a causal `PracticeDecisionNote` onto the current `base_candles[cursor_idx]` bar (`Milestone R17 / A2`).
+    pub fn record_decision_note_at_cursor(&mut self) -> Option<u64> {
+        let cursor_idx = self.current_trading_cursor_base_index();
+        let bar = self.base_candles.get(cursor_idx)?;
+        let id = self.practice_decisions.record_note(
+            &self.symbol,
+            self.active_timeframe,
+            cursor_idx,
+            bar.timestamp,
+            bar.close,
+            self.decision_draft_action,
+            self.decision_draft_setup,
+            self.decision_draft_mistake,
+            self.decision_draft_conviction,
+            self.journal_draft_checklist,
+            &self.decision_draft_note,
+        );
+        self.decision_draft_note.clear();
+        self.last_trade_status = Some((
+            false,
+            format!(
+                "Logged decision note #{id} @ bar #{} ({})",
+                cursor_idx + 1,
+                self.decision_draft_action.short_label()
+            ),
+        ));
+        Some(id)
+    }
+
+    /// Saves the current Replay + Paper Trading + Decision Notes state into `practice_session_store` (`Milestone R17 / A3`).
+    pub fn save_current_practice_session(
+        &mut self,
+        label: &str,
+        pinned: bool,
+    ) -> Result<u64, WorkspaceTemplateError> {
+        let cursor_idx = self.current_trading_cursor_base_index();
+        let session = SavedPracticeSession {
+            slot_id: 0,
+            label: label.trim().to_owned(),
+            pinned,
+            sequence_no: 0,
+            data_source: self.data_source,
+            symbol: self.symbol.clone(),
+            base_timeframe: self.base_timeframe,
+            active_timeframe: self.active_timeframe,
+            expected_bar_count: self.base_candles.len(),
+            expected_first_timestamp: self.base_candles.first().map(|c| c.timestamp),
+            expected_last_timestamp: self.base_candles.last().map(|c| c.timestamp),
+            replay_active: self.replay.is_active(),
+            replay_start_base_index: self.replay.start_base_index,
+            replay_cursor_base_index: cursor_idx,
+            blind_lookback_bars: self.blind_practice_lookback_bars,
+            scanner_context: self.scanner_context.clone(),
+            account_config: self.trading.config,
+            session_start_base_index: self.trading.session_start_base_index,
+            commands: self.trading.commands.clone(),
+            decision_notes: self.practice_decisions.entries.clone(),
+            session_digest: 0,
+        };
+        let id = self.practice_session_store.save_session(session)?;
+        self.last_trade_status = Some((false, format!("Saved practice session #{id}")));
+        Ok(id)
+    }
+
+    /// Restores a `SavedPracticeSession` by `slot_id`, replaying the deterministic command log and
+    /// surfacing `last_practice_warning` if the underlying dataset (`CustomFile`, bar count, or timestamps) diverges (`Milestone R17 / A3`).
+    pub fn restore_saved_practice_session(&mut self, slot_id: u64) -> bool {
+        let Some(saved) = self.practice_session_store.get(slot_id).cloned() else {
+            return false;
+        };
+
+        if saved.data_source != DataSourcePreset::CustomFile
+            && (self.data_source != saved.data_source
+                || !self.symbol.eq_ignore_ascii_case(&saved.symbol))
+        {
+            self.ensure_watchlist_universe_loaded();
+            self.select_watchlist_instrument(saved.data_source, &saved.symbol);
+        }
+
+        let mismatch_warning =
+            saved.verify_dataset_match(self.data_source, &self.symbol, &self.base_candles);
+        self.last_practice_warning = mismatch_warning.clone();
+        if self.base_candles.is_empty() {
+            if let Some(w) = mismatch_warning {
+                self.last_trade_status = Some((true, w));
+            }
+            return false;
+        }
+
+        if self.base_timeframe.can_aggregate_to(saved.active_timeframe)
+            && self.active_timeframe != saved.active_timeframe
+        {
+            let _ = self.set_timeframe(saved.active_timeframe);
+        }
+
+        let max_idx = self.base_candles.len() - 1;
+        let clamped_start = saved.replay_start_base_index.min(max_idx);
+        let clamped_cursor = saved.replay_cursor_base_index.min(max_idx);
+
+        if saved.replay_active {
+            let _ = self.start_replay_at_base_index(clamped_start);
+            if clamped_cursor > clamped_start
+                && let Some(tr) = self
+                    .replay
+                    .jump_to_base_index(&self.base_candles, clamped_cursor)
+            {
+                self.apply_replay_transition(tr);
+            }
+            self.show_replay_bar = true;
+        } else {
+            self.exit_replay();
+        }
+
+        self.blind_practice_lookback_bars = saved.blind_lookback_bars.clamp(1, 500);
+        self.scanner_context = saved.scanner_context;
+        let effective_cursor = self.current_trading_cursor_base_index();
+        self.trading.restore_session(
+            saved.account_config,
+            saved.session_start_base_index.min(effective_cursor),
+            saved.commands,
+            &self.base_candles,
+            effective_cursor,
+        );
+        self.practice_decisions = PracticeDecisionLog {
+            entries: saved.decision_notes,
+            next_id: 1,
+        };
+        self.practice_decisions.sanitize();
+
+        let venue = self.active_exchange_venue();
+        let _ = self.journal.sync_paper_closed_trades(
+            &self.symbol,
+            venue,
+            self.trading.closed_trades(),
+        );
+        self.scanner_synced_key = None;
+        self.alerts_synced_key = None;
+        self.sync_alerts_causal();
+
+        if let Some(ref warn) = self.last_practice_warning {
+            self.last_trade_status = Some((true, warn.clone()));
+        } else {
+            self.last_trade_status = Some((false, format!("Restored practice '{}'", saved.label)));
+        }
+        true
+    }
+
+    /// Saves the active Scanner filter + historical signal hits into `scan_snapshot_store` (`Milestone R17 / A3`).
+    pub fn save_current_scan_snapshot(
+        &mut self,
+        label: &str,
+        pinned: bool,
+    ) -> Result<u64, WorkspaceTemplateError> {
+        self.sync_scanner_caches();
+        let hits = filter_historical_signals(&self.raw_historical_hits_cache, &self.scanner_filter);
+        let snap = SavedScanSnapshot {
+            slot_id: 0,
+            label: label.trim().to_owned(),
+            pinned,
+            sequence_no: 0,
+            captured_cutoff_timestamp: self.replay.cutoff_timestamp(&self.base_candles),
+            timeframe: self.active_timeframe,
+            signal_lookback_bars: self.signal_lookback_bars,
+            blind_practice_lookback_bars: self.blind_practice_lookback_bars,
+            filter: self.scanner_filter.clone(),
+            sort_col: self.watchlist_sort_col,
+            sort_asc: self.watchlist_sort_asc,
+            hits,
+            snapshot_digest: 0,
+        };
+        self.scan_snapshot_store.save_snapshot(snap)
+    }
+
+    /// Restores a `SavedScanSnapshot` timeframe, filter, sort order, lookback window, and pre-roll configuration (`Milestone R17 / A3`).
+    pub fn restore_saved_scan_snapshot(&mut self, slot_id: u64) -> bool {
+        let Some(snap) = self.scan_snapshot_store.get(slot_id).cloned() else {
+            return false;
+        };
+        if self.base_timeframe.can_aggregate_to(snap.timeframe)
+            && self.active_timeframe != snap.timeframe
+        {
+            let _ = self.set_timeframe(snap.timeframe);
+        }
+        self.scanner_filter = snap.filter;
+        self.watchlist_sort_col = snap.sort_col;
+        self.watchlist_sort_asc = snap.sort_asc;
+        self.signal_lookback_bars = snap.signal_lookback_bars.clamp(5, 1_000);
+        self.blind_practice_lookback_bars = snap.blind_practice_lookback_bars.clamp(1, 500);
+        self.filtered_watchlist_cache = None;
+        self.filtered_signals_cache = None;
+        self.scanner_synced_key = None;
+        self.sync_scanner_caches();
+        true
+    }
+
+    /// Imports a RON or JSON `PracticeSessionStore` document, verifying every `SplitMix64` slot digest
+    /// before replacing the active store (`[CRITIC-R17-MINOR-03]`).
+    pub fn import_practice_store_payload(&mut self, payload: &str) -> Result<usize, String> {
+        let trimmed = payload.trim_start();
+        let parsed = if trimmed.starts_with('{') {
+            PracticeSessionStore::from_json_str(payload)
+        } else {
+            PracticeSessionStore::from_ron_str(payload)
+        };
+        match parsed {
+            Ok(store) => {
+                let count = store.slots.len();
+                self.practice_session_store = store;
+                self.last_practice_warning = None;
+                self.show_practice_import_box = false;
+                Ok(count)
+            }
+            Err(err) => {
+                let msg = format!("Practice import rejected: {err}");
+                self.last_practice_warning = Some(msg.clone());
+                Err(msg)
+            }
+        }
+    }
+
+    /// Imports a RON or JSON `ScanSnapshotStore` document, verifying every `SplitMix64` slot digest
+    /// before replacing the active store (`[CRITIC-R17-MINOR-03]`).
+    pub fn import_scan_store_payload(&mut self, payload: &str) -> Result<usize, String> {
+        let trimmed = payload.trim_start();
+        let parsed = if trimmed.starts_with('{') {
+            ScanSnapshotStore::from_json_str(payload)
+        } else {
+            ScanSnapshotStore::from_ron_str(payload)
+        };
+        match parsed {
+            Ok(store) => {
+                let count = store.slots.len();
+                self.scan_snapshot_store = store;
+                self.last_scan_warning = None;
+                self.show_scan_import_box = false;
+                Ok(count)
+            }
+            Err(err) => {
+                let msg = format!("Scan import rejected: {err}");
+                self.last_scan_warning = Some(msg.clone());
+                Err(msg)
+            }
+        }
     }
 
     // =========================================================================
@@ -3006,6 +3486,7 @@ impl SumiWorkstationApp {
         self.close_command_palette();
         self.show_templates_modal = false;
         self.show_signal_catalog_modal = false;
+        self.show_session_debrief_modal = false;
         self.rebinding_hotkey_action = None;
         self.show_hotkeys_modal = true;
     }
@@ -3015,6 +3496,7 @@ impl SumiWorkstationApp {
         self.close_command_palette();
         self.show_templates_modal = false;
         self.show_hotkeys_modal = false;
+        self.show_session_debrief_modal = false;
         self.rebinding_hotkey_action = None;
         self.drawings.cancel_active_gesture();
         self.show_signal_catalog_modal = true;
@@ -3925,13 +4407,29 @@ impl SumiWorkstationApp {
     }
 
     /// Launches a causal Bar Replay session directly from a [`HistoricalSignalHit`] in either
-    /// [`ScannerReplayIntent::BlindPractice`] (cuts `15` bars prior & masks signal details until reached)
-    /// or [`ScannerReplayIntent::SignalReview`] (jumps directly onto the signal bar revealed).
+    /// [`ScannerReplayIntent::BlindPractice`] (cuts `DEFAULT_BLIND_PRACTICE_LOOKBACK_BARS` = `15` bars prior
+    /// & masks signal details until reached) or [`ScannerReplayIntent::SignalReview`] (jumps directly onto the signal bar revealed).
     pub fn start_scanner_signal_replay(
         &mut self,
         hit: HistoricalSignalHit,
         intent: ScannerReplayIntent,
     ) -> bool {
+        self.start_scanner_signal_replay_with_lookback(
+            hit,
+            intent,
+            DEFAULT_BLIND_PRACTICE_LOOKBACK_BARS,
+        )
+    }
+
+    /// Launches a causal Bar Replay session with an explicit `lookback_bars` pre-roll (`120` bars default
+    /// on UI 1-click `Watchlist` / `Signals` launches — `Milestone R17 / Wave 16 — A3`).
+    pub fn start_scanner_signal_replay_with_lookback(
+        &mut self,
+        hit: HistoricalSignalHit,
+        intent: ScannerReplayIntent,
+        lookback_bars: usize,
+    ) -> bool {
+        let effective_lookback = lookback_bars.clamp(1, 500);
         self.ensure_watchlist_universe_loaded();
         let active_key = self.current_instrument_key();
         if hit.instrument_id != active_key {
@@ -3996,7 +4494,7 @@ impl SumiWorkstationApp {
                     0
                 } else {
                     sig_active_idx
-                        .saturating_sub(DEFAULT_BLIND_PRACTICE_LOOKBACK_BARS)
+                        .saturating_sub(effective_lookback)
                         .min(sig_active_idx - 1)
                 }
             }
@@ -4014,9 +4512,15 @@ impl SumiWorkstationApp {
 
         let started = self.start_replay_at_base_index(cut_base_idx);
         if started {
-            self.scanner_context = Some(ScannerSignalContext::with_reveal_timestamp(
-                intent, hit, reveal_ts,
+            let pre_roll_recorded = (intent == ScannerReplayIntent::BlindPractice)
+                .then_some(sig_active_idx.saturating_sub(target_active_idx));
+            self.scanner_context = Some(ScannerSignalContext::with_reveal_and_preroll(
+                intent,
+                hit,
+                reveal_ts,
+                pre_roll_recorded,
             ));
+            self.show_replay_bar = true;
             self.scanner_synced_key = None;
         }
         started
@@ -4111,6 +4615,12 @@ impl SumiWorkstationApp {
             self.portfolio_report = None;
             self.portfolio_synced_key = None;
             self.portfolio_mapped_curve = None;
+            self.monte_carlo_report = None;
+            self.mc_synced_key = None;
+            self.multi_strategy_report = None;
+            self.multi_strategy_synced_key = None;
+            self.advanced_analytics_report = None;
+            self.advanced_analytics_synced_key = None;
         }
     }
 
@@ -4329,6 +4839,20 @@ impl SumiWorkstationApp {
                             _ => None,
                         }
                     }
+                    EquityPaneSource::MultiStrategyPct => {
+                        if let Some(ref bt) = self.backtest_result {
+                            Some(run_monte_carlo_bootstrap(
+                                bt.config.initial_cash,
+                                &bt.trades,
+                                &bt.equity_curve,
+                                self.candles.len(),
+                                replay_close_cutoff,
+                                self.mc_config,
+                            ))
+                        } else {
+                            None
+                        }
+                    }
                 };
                 self.monte_carlo_report = mc_rep;
                 self.mc_synced_key = Some(mc_key);
@@ -4338,6 +4862,79 @@ impl SumiWorkstationApp {
             } else {
                 self.monte_carlo_report = None;
                 self.mc_synced_key = None;
+            }
+        }
+
+        // Synchronize `A4` UTC-aligned `0%` Multi-Strategy Comparison Overlay (`0.000 ms` on hover/pan/zoom)
+        let ms_needed = (self.show_equity_pane
+            && self.equity_pane_source == EquityPaneSource::MultiStrategyPct)
+            || (self.show_strategy_panel
+                && self.right_dock_tab == RightDockTab::StrategyLab
+                && self.strategy_lab_tab == StrategyLabSubTab::Analytics);
+        let ms_key = (
+            self.current_instrument_key(),
+            self.dataset_generation,
+            self.active_timeframe,
+            self.candles.len(),
+            last_ts,
+            replay_close_cutoff,
+            incomplete_tail,
+            cfg_digest,
+        );
+        if self.multi_strategy_synced_key.as_ref() != Some(&ms_key) {
+            if ms_needed {
+                self.ensure_watchlist_universe_loaded();
+                let ms_rep = run_multi_strategy_comparison(
+                    &self.symbol,
+                    self.data_source,
+                    self.active_timeframe,
+                    &self.candles,
+                    &self.backtest_config,
+                    &self.watchlist_universe,
+                    replay_close_cutoff,
+                    incomplete_tail,
+                );
+                self.multi_strategy_report = Some(ms_rep);
+                self.multi_strategy_synced_key = Some(ms_key);
+                if self.equity_pane_source == EquityPaneSource::MultiStrategyPct
+                    && self.viewport.equity_price_scale.is_auto_scale()
+                {
+                    self.viewport.equity_price_scale.reset_auto_scale();
+                }
+            } else {
+                self.multi_strategy_report = None;
+                self.multi_strategy_synced_key = None;
+            }
+        }
+
+        // Synchronize `A5` Advanced Tearsheet Analytics (`OutlierImpact`, `DrawdownPeriod`s, `Year` & `Entry Regime` slices, `MultiPhaseBatch`, `RunManifest`)
+        let adv_needed =
+            self.show_strategy_panel && self.right_dock_tab == RightDockTab::StrategyLab;
+        let adv_key = (
+            self.dataset_generation,
+            self.candles.len(),
+            last_ts,
+            replay_close_cutoff,
+            incomplete_tail,
+            cfg_digest,
+            self.multi_phase_mode,
+        );
+        if self.advanced_analytics_synced_key != Some(adv_key) {
+            if adv_needed && let Some(ref bt) = self.backtest_result {
+                let adv = compute_advanced_tearsheet_analytics(
+                    &self.candles,
+                    bt,
+                    self.multi_phase_mode,
+                    BacktestRunOptions {
+                        replay_cutoff_timestamp: replay_close_cutoff,
+                        incomplete_tail_bar: incomplete_tail,
+                    },
+                );
+                self.advanced_analytics_report = Some(adv);
+                self.advanced_analytics_synced_key = Some(adv_key);
+            } else if !adv_needed {
+                self.advanced_analytics_report = None;
+                self.advanced_analytics_synced_key = None;
             }
         }
     }
@@ -5225,6 +5822,7 @@ impl SumiWorkstationApp {
         self.rebinding_hotkey_action = None;
 
         self.sync_indicators_and_benchmarks();
+        self.invalidate_or_sync_backtest_after_mutation();
         self.sync_secondary_slots();
         self.snapshot_store.last_known_good = Some(tpl);
         self.staged_snapshot_preview = None;
@@ -5499,7 +6097,7 @@ impl SumiWorkstationApp {
             None
         } else {
             match self.equity_pane_source {
-                EquityPaneSource::SingleAssetBacktest => None,
+                EquityPaneSource::SingleAssetBacktest | EquityPaneSource::MultiStrategyPct => None,
                 EquityPaneSource::WalkForwardOos => self
                     .walk_forward_report
                     .as_ref()
@@ -5553,9 +6151,15 @@ impl SumiWorkstationApp {
                 .then_some(self.backtest_result.as_ref())
                 .flatten(),
             equity_override,
+            multi_strategy_overlay: (has_backtest_visuals
+                && self.show_equity_pane
+                && self.equity_pane_source == EquityPaneSource::MultiStrategyPct)
+                .then_some(self.multi_strategy_report.as_ref())
+                .flatten(),
             monte_carlo_fan: (has_backtest_visuals
                 && self.show_equity_pane
-                && self.show_mc_fan_on_equity)
+                && self.show_mc_fan_on_equity
+                && self.equity_pane_source != EquityPaneSource::MultiStrategyPct)
                 .then_some(
                     self.monte_carlo_report
                         .as_ref()
@@ -5638,6 +6242,7 @@ impl SumiWorkstationApp {
             alert_engine: None,
             backtest_result: None,
             equity_override: None,
+            multi_strategy_overlay: None,
             monte_carlo_fan: None,
             show_equity_pane: false,
             show_backtest_trades_on_chart: false,
@@ -6754,6 +7359,7 @@ impl SumiWorkstationApp {
         self.close_command_palette();
         self.show_hotkeys_modal = false;
         self.show_signal_catalog_modal = false;
+        self.show_session_debrief_modal = false;
         self.rebinding_hotkey_action = None;
         self.drawings.cancel_active_gesture();
         self.viewport.cancel_active_interactions();
@@ -6777,6 +7383,7 @@ impl SumiWorkstationApp {
         self.show_templates_modal = false;
         self.show_hotkeys_modal = false;
         self.show_signal_catalog_modal = false;
+        self.show_session_debrief_modal = false;
         self.rebinding_hotkey_action = None;
         self.drawings.cancel_active_gesture();
         self.viewport.cancel_active_interactions();
@@ -8702,7 +9309,8 @@ impl SumiWorkstationApp {
         let any_modal_open = self.command_palette.open
             || self.show_templates_modal
             || self.show_hotkeys_modal
-            || self.show_signal_catalog_modal;
+            || self.show_signal_catalog_modal
+            || self.show_session_debrief_modal;
         if self.command_palette.open {
             let vp_rect = ui.input(|i| i.viewport_rect());
             let modal_est = command_palette_modal_rect_estimate(vp_rect);
@@ -8760,6 +9368,24 @@ impl SumiWorkstationApp {
             let modal_rect = self
                 .last_signal_catalog_modal_rect
                 .unwrap_or_else(|| Self::signal_catalog_modal_rect(vp_rect));
+            ui.input_mut(|i| {
+                let _ = i.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
+                let _ = i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab);
+                if i.pointer
+                    .hover_pos()
+                    .is_none_or(|pos| !modal_rect.contains(pos))
+                {
+                    i.smooth_scroll_delta = Vec2::ZERO;
+                    i.raw
+                        .events
+                        .retain(|ev| !matches!(ev, egui::Event::MouseWheel { .. }));
+                }
+            });
+        } else if self.show_session_debrief_modal {
+            let vp_rect = ui.input(|i| i.viewport_rect());
+            let modal_rect = self
+                .last_debrief_modal_rect
+                .unwrap_or_else(|| Self::session_debrief_modal_rect(vp_rect));
             ui.input_mut(|i| {
                 let _ = i.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
                 let _ = i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab);
@@ -9732,7 +10358,7 @@ impl SumiWorkstationApp {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(format!(
-                                    "R16 [{grid_badge}]  |  {} ({}->{})  |  RPL: {replay_tag}  |  ALT: {armed_alerts}A/{trig_events}T  |  EQ: ${:.0} ({:+.0}){bt_tag}  |  {}P/{}D  |  BARS: {}/{} ({first_date}..{last_date}) {}x  |  {scale_mode}({auto_tag})  |  {:.0}×{:.0}",
+                                    "R17 [{grid_badge}]  |  {} ({}->{})  |  RPL: {replay_tag}  |  ALT: {armed_alerts}A/{trig_events}T  |  EQ: ${:.0} ({:+.0}){bt_tag}  |  {}P/{}D  |  BARS: {}/{} ({first_date}..{last_date}) {}x  |  {scale_mode}({auto_tag})  |  {:.0}×{:.0}",
                                     self.data_source.short_label(),
                                     self.base_timeframe,
                                     self.active_timeframe,
@@ -9756,7 +10382,7 @@ impl SumiWorkstationApp {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(format!(
-                                    "R16 [{grid_badge}]  |  RPL: {replay_tag}  |  ALT: {armed_alerts} armed{bt_tag}  |  BARS: {} ({first_date}..{last_date})",
+                                    "R17 [{grid_badge}]  |  RPL: {replay_tag}  |  ALT: {armed_alerts} armed{bt_tag}  |  BARS: {} ({first_date}..{last_date})",
                                     self.candles.len()
                                 ))
                                 .monospace()
@@ -10133,6 +10759,8 @@ impl SumiWorkstationApp {
             self.render_hotkeys_modal(ui);
         } else if self.show_signal_catalog_modal {
             self.render_signal_catalog_modal(ui);
+        } else if self.show_session_debrief_modal {
+            self.render_session_debrief_modal(ui);
         }
         if let Some(txt) = self.pending_clipboard_copy.take() {
             ui.ctx().copy_text(txt);
@@ -10395,10 +11023,11 @@ impl SumiWorkstationApp {
                                 .show(ui, |ui| {
                                     ui.label(
                                         RichText::new(format!(
-                                            "{} · {} ({})",
+                                            "{} · {} ({}) @ {}",
                                             ctx.intent().short_label(),
                                             sig.signal.short_label(),
-                                            sig.direction.short_label()
+                                            sig.direction.short_label(),
+                                            format_scanner_price(sig.price),
                                         ))
                                         .monospace()
                                         .strong()
@@ -10407,6 +11036,10 @@ impl SumiWorkstationApp {
                                     );
                                 });
                         } else {
+                            let pre_lbl = ctx.pre_roll_bars().map_or_else(
+                                || "BLIND PRACTICE · Signal hidden until reached".to_owned(),
+                                |b| format!("BLIND PRACTICE (+{b}b pre-roll) · Signal hidden until reached"),
+                            );
                             Frame::new()
                                 .fill(palette::ALERT_ARMED_AMBER.gamma_multiply(0.18))
                                 .stroke(Stroke::new(1.0, palette::ALERT_ARMED_AMBER))
@@ -10414,13 +11047,11 @@ impl SumiWorkstationApp {
                                 .inner_margin(Margin::symmetric(6, 2))
                                 .show(ui, |ui| {
                                     ui.label(
-                                        RichText::new(
-                                            "BLIND PRACTICE · Signal hidden until reached",
-                                        )
-                                        .monospace()
-                                        .strong()
-                                        .size(10.5)
-                                        .color(palette::ALERT_ARMED_AMBER),
+                                        RichText::new(pre_lbl)
+                                            .monospace()
+                                            .strong()
+                                            .size(10.5)
+                                            .color(palette::ALERT_ARMED_AMBER),
                                     );
                                 });
                         }
@@ -10431,6 +11062,95 @@ impl SumiWorkstationApp {
                         self.show_replay_bar = false;
                     }
                 });
+
+                // Live `PracticeScoreboard` Strip (`Milestone R17 / A1`)
+                let sb = self.compute_practice_scoreboard();
+                if self.replay.is_active()
+                    || sb.closed_trades > 0
+                    || sb.has_open_position
+                    || sb.visible_decision_notes > 0
+                {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 3.0);
+                        ui.label(
+                            RichText::new("PRACTICE SCOREBOARD:")
+                                .monospace()
+                                .strong()
+                                .size(10.0)
+                                .color(palette::REPLAY_CUT_GOLD),
+                        );
+                        ui.label(
+                            RichText::new(format!(
+                                "Trades {} ({}W·{}L·{}BE)",
+                                sb.closed_trades, sb.win_count, sb.loss_count, sb.breakeven_count
+                            ))
+                            .monospace()
+                            .size(10.0)
+                            .color(palette::TEXT_PRIMARY),
+                        );
+                        ui.label(
+                            RichText::new(format!("WR {:.0}%", sb.win_rate_pct))
+                                .monospace()
+                                .strong()
+                                .size(10.0)
+                                .color(if sb.win_rate_pct >= 50.0 && sb.closed_trades > 0 {
+                                    palette::BULLISH
+                                } else {
+                                    palette::TEXT_PRIMARY
+                                }),
+                        );
+                        let r_col = if sb.net_r_multiple > 1e-6 {
+                            palette::BULLISH
+                        } else if sb.net_r_multiple < -1e-6 {
+                            palette::BEARISH
+                        } else {
+                            palette::TEXT_MUTED
+                        };
+                        let avg_r_txt = sb
+                            .avg_r_multiple
+                            .map_or_else(|| "—".to_owned(), |r| format!("{r:+.2}R"));
+                        ui.label(
+                            RichText::new(format!(
+                                "Net {:+.2}R (Avg {avg_r_txt}) · Avg {:+.2}%",
+                                sb.net_r_multiple, sb.avg_return_pct
+                            ))
+                            .monospace()
+                            .size(10.0)
+                            .color(r_col),
+                        );
+                        let (adh_txt, adh_col) = match sb.sl_adherence_pct {
+                            None => ("SL Adh N/A".to_owned(), palette::TEXT_MUTED),
+                            Some(p) if p >= 80.0 => (format!("SL Adh {p:.0}%"), palette::BULLISH),
+                            Some(p) => (format!("SL Adh {p:.0}%"), palette::BEARISH),
+                        };
+                        ui.label(RichText::new(adh_txt).monospace().strong().size(10.0).color(adh_col));
+                        ui.label(
+                            RichText::new(format!("Notes {}", sb.visible_decision_notes))
+                                .monospace()
+                                .size(10.0)
+                                .color(palette::ACCENT_BLUE),
+                        );
+
+                        let debrief_btn = Button::new(
+                            RichText::new("Debrief")
+                                .monospace()
+                                .strong()
+                                .size(9.8)
+                                .color(Color32::from_rgb(130, 210, 255)),
+                        )
+                        .fill(palette::ACCENT_BLUE.gamma_multiply(0.20))
+                        .stroke(Stroke::new(1.0, palette::ACCENT_BLUE));
+                        if ui.add(debrief_btn).clicked() {
+                            self.open_session_debrief_modal();
+                        }
+                        if ui
+                            .button(RichText::new("Reset Practice").monospace().size(9.8))
+                            .clicked()
+                        {
+                            self.reset_practice_session();
+                        }
+                    });
+                }
             });
     }
 
@@ -10452,13 +11172,27 @@ impl SumiWorkstationApp {
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .button(RichText::new("Reset").monospace().size(10.5))
+                            .button(RichText::new("Reset Practice").monospace().size(10.0))
                             .clicked()
                         {
-                            self.reset_trading_session();
+                            self.reset_practice_session();
+                        }
+                        if ui
+                            .button(
+                                RichText::new("Debrief")
+                                    .monospace()
+                                    .strong()
+                                    .size(10.0)
+                                    .color(Color32::from_rgb(130, 210, 255)),
+                            )
+                            .clicked()
+                        {
+                            self.open_session_debrief_modal();
                         }
                     });
                 });
+
+                self.render_practice_coaching_and_sessions_card(ui);
 
                 // Mode Switcher (`Order Ticket` vs `DOM Ladder` — R14)
                 ui.horizontal(|ui| {
@@ -11790,6 +12524,141 @@ impl SumiWorkstationApp {
                         }
                     });
 
+                    // `A3`: 1-Click Blind Practice Pre-Roll (`15b | 60b | 120b`) + Saved Scan Snapshots
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new("Pre-Roll:")
+                                .monospace()
+                                .size(9.4)
+                                .color(palette::TEXT_MUTED),
+                        );
+                        for pr in [15_usize, 60, 120] {
+                            if ui
+                                .selectable_label(
+                                    self.blind_practice_lookback_bars == pr,
+                                    RichText::new(format!("+{pr}b")).monospace().size(9.5),
+                                )
+                                .clicked()
+                            {
+                                self.blind_practice_lookback_bars = pr;
+                            }
+                        }
+                        ui.separator();
+                        if ui
+                            .small_button(RichText::new("+ Save Scan").monospace().size(9.3))
+                            .clicked()
+                        {
+                            let lbl = if self.scan_save_label_input.trim().is_empty() {
+                                format!(
+                                    "Scan #{}",
+                                    self.scan_snapshot_store.slots.len().saturating_add(1)
+                                )
+                            } else {
+                                self.scan_save_label_input.clone()
+                            };
+                            let _ = self.save_current_scan_snapshot(&lbl, false);
+                        }
+                        if !self.scan_snapshot_store.slots.is_empty() {
+                            if ui
+                                .small_button(RichText::new("RON").monospace().size(9.0))
+                                .clicked()
+                            {
+                                let doc = self.scan_snapshot_store.to_ron_pretty();
+                                self.last_exported_scan_doc = Some(doc.clone());
+                                self.pending_clipboard_copy = Some(doc);
+                            }
+                            if ui
+                                .small_button(RichText::new("JSON").monospace().size(9.0))
+                                .clicked()
+                            {
+                                let doc = self.scan_snapshot_store.to_json_pretty();
+                                self.last_exported_scan_doc = Some(doc.clone());
+                                self.pending_clipboard_copy = Some(doc);
+                            }
+                        }
+                        if ui
+                            .selectable_label(
+                                self.show_scan_import_box,
+                                RichText::new("Imp").monospace().size(9.0),
+                            )
+                            .clicked()
+                        {
+                            self.show_scan_import_box = !self.show_scan_import_box;
+                        }
+                    });
+                    if self.show_scan_import_box {
+                        ui.horizontal(|ui| {
+                            let iw = (ui.available_width() - 48.0).max(60.0);
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.scan_import_buffer)
+                                    .desired_width(iw)
+                                    .hint_text("Paste ScanSnapshotStore RON/JSON")
+                                    .font(egui::FontId::monospace(8.8)),
+                            );
+                            if ui
+                                .small_button(RichText::new("Apply").monospace().size(8.8))
+                                .clicked()
+                            {
+                                let payload = self.scan_import_buffer.clone();
+                                let _ = self.import_scan_store_payload(&payload);
+                            }
+                        });
+                    }
+                    if let Some(ref sw) = self.last_scan_warning {
+                        ui.label(
+                            RichText::new(sw)
+                                .monospace()
+                                .size(8.6)
+                                .color(palette::ALERT_ARMED_AMBER),
+                        );
+                    }
+                    if !self.scan_snapshot_store.slots.is_empty() {
+                        let mut load_scan_id: Option<u64> = None;
+                        let mut pin_scan_id: Option<u64> = None;
+                        let mut del_scan_id: Option<u64> = None;
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(3.0, 2.0);
+                            for slot in &self.scan_snapshot_store.slots {
+                                let pin_glyph = if slot.pinned { "★" } else { "☆" };
+                                if ui
+                                    .small_button(RichText::new(pin_glyph).monospace().size(8.8))
+                                    .clicked()
+                                {
+                                    pin_scan_id = Some(slot.slot_id);
+                                }
+                                if ui
+                                    .small_button(
+                                        RichText::new(format!(
+                                            "{} ({})",
+                                            slot.label,
+                                            slot.hits.len()
+                                        ))
+                                        .monospace()
+                                        .size(9.0),
+                                    )
+                                    .clicked()
+                                {
+                                    load_scan_id = Some(slot.slot_id);
+                                }
+                                if ui
+                                    .small_button(RichText::new("×").monospace().size(8.8))
+                                    .clicked()
+                                {
+                                    del_scan_id = Some(slot.slot_id);
+                                }
+                            }
+                        });
+                        if let Some(id) = pin_scan_id {
+                            let _ = self.scan_snapshot_store.toggle_pin(id);
+                        }
+                        if let Some(id) = load_scan_id {
+                            let _ = self.restore_saved_scan_snapshot(id);
+                        }
+                        if let Some(id) = del_scan_id {
+                            let _ = self.scan_snapshot_store.delete_snapshot(id);
+                        }
+                    }
+
                     ui.horizontal(|ui| {
                         let reg_lbl = self
                             .scanner_filter
@@ -11879,6 +12748,8 @@ impl SumiWorkstationApp {
                     .as_ref()
                     .map_or(&[][..], |c| c.rows.as_slice());
                 let mut clicked_instrument: Option<(DataSourcePreset, String)> = None;
+                let mut wl_launch_req: Option<(HistoricalSignalHit, ScannerReplayIntent)> = None;
+                let blind_lb = self.blind_practice_lookback_bars;
                 egui::ScrollArea::vertical()
                     .id_salt("sumi_watchlist_scroll")
                     .auto_shrink([false, false])
@@ -12011,6 +12882,47 @@ impl SumiWorkstationApp {
                                             );
                                         }
                                     });
+                                    if let Some(ref latest_hit) = row.latest_signal {
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing = Vec2::new(4.0, 2.0);
+                                            let b_btn = Button::new(
+                                                RichText::new(format!("Blind +{blind_lb}b"))
+                                                    .monospace()
+                                                    .strong()
+                                                    .size(9.0)
+                                                    .color(palette::ALERT_ARMED_AMBER),
+                                            )
+                                            .fill(palette::ALERT_ARMED_AMBER.gamma_multiply(0.14))
+                                            .stroke(Stroke::new(
+                                                1.0,
+                                                palette::ALERT_ARMED_AMBER.gamma_multiply(0.65),
+                                            ));
+                                            let r_btn = Button::new(
+                                                RichText::new("Review")
+                                                    .monospace()
+                                                    .strong()
+                                                    .size(9.0)
+                                                    .color(Color32::from_rgb(120, 200, 255)),
+                                            )
+                                            .fill(palette::ACCENT_BLUE.gamma_multiply(0.16))
+                                            .stroke(Stroke::new(
+                                                1.0,
+                                                palette::ACCENT_BLUE.gamma_multiply(0.65),
+                                            ));
+                                            if ui.add(b_btn).clicked() {
+                                                wl_launch_req = Some((
+                                                    latest_hit.clone(),
+                                                    ScannerReplayIntent::BlindPractice,
+                                                ));
+                                            }
+                                            if ui.add(r_btn).clicked() {
+                                                wl_launch_req = Some((
+                                                    latest_hit.clone(),
+                                                    ScannerReplayIntent::SignalReview,
+                                                ));
+                                            }
+                                        });
+                                    }
                                 });
 
                             let click_resp = ui.interact(
@@ -12045,7 +12957,13 @@ impl SumiWorkstationApp {
                         }
                     });
 
-                if let Some((preset, sym)) = clicked_instrument {
+                if let Some((hit, intent)) = wl_launch_req {
+                    let _ = self.start_scanner_signal_replay_with_lookback(
+                        hit,
+                        intent,
+                        self.blind_practice_lookback_bars,
+                    );
+                } else if let Some((preset, sym)) = clicked_instrument {
                     self.select_watchlist_instrument(preset, &sym);
                 }
             }
@@ -12235,11 +13153,14 @@ impl SumiWorkstationApp {
                                             let btn_w = ((ui.available_width() - sp_x - 2.0) * 0.5)
                                                 .max(60.0);
                                             let blind_btn = Button::new(
-                                                RichText::new("Blind Practice")
-                                                    .monospace()
-                                                    .strong()
-                                                    .size(9.8)
-                                                    .color(palette::ALERT_ARMED_AMBER),
+                                                RichText::new(format!(
+                                                    "Blind (+{}b)",
+                                                    self.blind_practice_lookback_bars
+                                                ))
+                                                .monospace()
+                                                .strong()
+                                                .size(9.8)
+                                                .color(palette::ALERT_ARMED_AMBER),
                                             )
                                             .fill(palette::ALERT_ARMED_AMBER.gamma_multiply(0.16))
                                             .stroke(Stroke::new(
@@ -12288,7 +13209,11 @@ impl SumiWorkstationApp {
                     }
                 }
                 if let Some((hit, intent)) = launch_req {
-                    let _ = self.start_scanner_signal_replay(hit, intent);
+                    let _ = self.start_scanner_signal_replay_with_lookback(
+                        hit,
+                        intent,
+                        self.blind_practice_lookback_bars,
+                    );
                 }
             }
             ScannerDockTab::Breadth => {
@@ -13355,17 +14280,18 @@ impl SumiWorkstationApp {
                         });
                     });
 
-                // 6-Way Sub-Tab Switcher (`Stats` | `Rules` | `Trd(N)` | `Sweep` | `Battle` | `WFO`)
+                // 7-Way Sub-Tab Switcher (`Stats` | `Slices` | `Rules` | `Trd(N)` | `Sweep` | `Battle` | `WFO`)
                 let trade_n = self
                     .backtest_result
                     .as_ref()
                     .map_or(0, |r| r.trades.len());
                 ui.horizontal(|ui| {
                     let sp_x = ui.spacing().item_spacing.x;
-                    let w6 = ((ui.available_width() - 5.0 * sp_x - 2.0) / 6.0).max(32.0);
+                    let w7 = ((ui.available_width() - 6.0 * sp_x - 2.0) / 7.0).max(28.0);
                     for sub in StrategyLabSubTab::ALL {
                         let lbl = match sub {
                             StrategyLabSubTab::Tearsheet => "Stats".to_owned(),
+                            StrategyLabSubTab::Analytics => "Slices".to_owned(),
                             StrategyLabSubTab::RuleBuilder => "Rules".to_owned(),
                             StrategyLabSubTab::Trades => format!("Tr({trade_n})"),
                             StrategyLabSubTab::Sweep => "Sweep".to_owned(),
@@ -13377,7 +14303,7 @@ impl SumiWorkstationApp {
                             RichText::new(lbl)
                                 .monospace()
                                 .strong()
-                                .size(9.2)
+                                .size(9.0)
                                 .color(if sel {
                                     Color32::WHITE
                                 } else {
@@ -13397,7 +14323,7 @@ impl SumiWorkstationApp {
                                 palette::BORDER_SUBTLE
                             },
                         ))
-                        .min_size(Vec2::new(w6, 21.0));
+                        .min_size(Vec2::new(w7, 21.0));
                         if ui.add(btn).clicked() {
                             self.strategy_lab_tab = sub;
                         }
@@ -13418,6 +14344,7 @@ impl SumiWorkstationApp {
                             EquityPaneSource::SingleAssetBacktest,
                             EquityPaneSource::WalkForwardOos,
                             EquityPaneSource::MultiAssetPortfolio,
+                            EquityPaneSource::MultiStrategyPct,
                         ] {
                             let is_sel = self.equity_pane_source == src;
                             if ui
@@ -14692,6 +15619,9 @@ impl SumiWorkstationApp {
                                     }
                                 }
                             });
+                    }
+                    StrategyLabSubTab::Analytics => {
+                        self.render_advanced_analytics_subtab(ui);
                     }
                     StrategyLabSubTab::RuleBuilder => {
                         self.render_rule_builder_subtab(ui);
@@ -18540,6 +19470,1160 @@ impl SumiWorkstationApp {
         });
     }
 
+    // =========================================================================
+    // Milestone R17 / Wave 16 — Practice Coaching, Debrief Modal, & Analytics Slices UI
+    // =========================================================================
+
+    fn render_practice_coaching_and_sessions_card(&mut self, ui: &mut egui::Ui) {
+        let sb = self.compute_practice_scoreboard();
+        let cursor_idx = self.current_trading_cursor_base_index();
+        let cutoff = self.replay.cutoff_timestamp(&self.base_candles);
+
+        Frame::new()
+            .fill(Color32::from_rgb(18, 24, 36))
+            .corner_radius(CornerRadius::same(4))
+            .stroke(Stroke::new(
+                1.0,
+                palette::REPLAY_CUT_GOLD.gamma_multiply(0.55),
+            ))
+            .inner_margin(Margin::symmetric(7, 5))
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(4.0, 3.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "PRACTICE: {}T ({}W·{}L·{}BE)",
+                            sb.closed_trades, sb.win_count, sb.loss_count, sb.breakeven_count
+                        ))
+                        .monospace()
+                        .strong()
+                        .size(9.8)
+                        .color(palette::TEXT_PRIMARY),
+                    );
+                    let adh_str = sb
+                        .sl_adherence_pct
+                        .map_or_else(|| "SL N/A".to_owned(), |p| format!("SL {p:.0}%"));
+                    let adh_col = match sb.sl_adherence_pct {
+                        None => palette::TEXT_MUTED,
+                        Some(p) if p >= 80.0 => palette::BULLISH,
+                        Some(_) => palette::BEARISH,
+                    };
+                    ui.label(
+                        RichText::new(adh_str)
+                            .monospace()
+                            .strong()
+                            .size(9.8)
+                            .color(adh_col),
+                    );
+                    ui.label(
+                        RichText::new(format!(
+                            "Net {:+.2}R · Avg {:+.2}%",
+                            sb.net_r_multiple, sb.avg_return_pct
+                        ))
+                        .monospace()
+                        .size(9.6)
+                        .color(if sb.net_r_multiple >= 0.0 {
+                            palette::BULLISH
+                        } else {
+                            palette::BEARISH
+                        }),
+                    );
+                });
+
+                // Decision Note @ Bar composer (`DEF-001` causal bar stamping)
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    egui::ComboBox::from_id_salt("r17_dec_action")
+                        .width(74.0)
+                        .selected_text(
+                            RichText::new(self.decision_draft_action.short_label())
+                                .monospace()
+                                .size(9.3),
+                        )
+                        .show_ui(ui, |ui| {
+                            for act in PracticeDecisionAction::ALL {
+                                ui.selectable_value(
+                                    &mut self.decision_draft_action,
+                                    act,
+                                    act.short_label(),
+                                );
+                            }
+                        });
+                    egui::ComboBox::from_id_salt("r17_dec_setup")
+                        .width(76.0)
+                        .selected_text(
+                            RichText::new(self.decision_draft_setup.short_label())
+                                .monospace()
+                                .size(9.3),
+                        )
+                        .show_ui(ui, |ui| {
+                            for st in SetupTag::ALL {
+                                ui.selectable_value(
+                                    &mut self.decision_draft_setup,
+                                    st,
+                                    st.short_label(),
+                                );
+                            }
+                        });
+                    egui::ComboBox::from_id_salt("r17_dec_mistake")
+                        .width(80.0)
+                        .selected_text(
+                            RichText::new(self.decision_draft_mistake.short_label())
+                                .monospace()
+                                .size(9.3),
+                        )
+                        .show_ui(ui, |ui| {
+                            for mk in MistakeTag::ALL {
+                                ui.selectable_value(
+                                    &mut self.decision_draft_mistake,
+                                    mk,
+                                    mk.short_label(),
+                                );
+                            }
+                        });
+                });
+                ui.horizontal(|ui| {
+                    let edit_w = (ui.available_width() - 62.0).max(80.0);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.decision_draft_note)
+                            .desired_width(edit_w)
+                            .hint_text("Decision note @ current bar...")
+                            .font(egui::FontId::monospace(9.6)),
+                    );
+                    truncate_utf8_bytes(&mut self.decision_draft_note, 512);
+                    if ui
+                        .button(
+                            RichText::new("+ Note")
+                                .monospace()
+                                .strong()
+                                .size(9.5)
+                                .color(palette::ACCENT_BLUE),
+                        )
+                        .clicked()
+                    {
+                        let _ = self.record_decision_note_at_cursor();
+                    }
+                });
+
+                let vis_notes = self.practice_decisions.visible_notes(
+                    &self.symbol,
+                    self.replay.is_active(),
+                    cursor_idx,
+                    cutoff,
+                );
+                if !vis_notes.is_empty() {
+                    let mut del_note_id: Option<u64> = None;
+                    for n in vis_notes.iter().rev().take(3) {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "B#{} {} · {} · {}",
+                                    n.base_bar_index + 1,
+                                    n.action.short_label(),
+                                    n.setup.short_label(),
+                                    if n.note.is_empty() {
+                                        n.mistake.short_label()
+                                    } else {
+                                        n.note.as_str()
+                                    }
+                                ))
+                                .monospace()
+                                .size(9.0)
+                                .color(palette::TEXT_MUTED),
+                            );
+                            if ui
+                                .small_button(RichText::new("×").monospace().size(8.6))
+                                .clicked()
+                            {
+                                del_note_id = Some(n.id);
+                            }
+                        });
+                    }
+                    if let Some(id) = del_note_id {
+                        let _ = self.practice_decisions.delete_note(id);
+                    }
+                }
+
+                // Saved Practice Sessions (`A3`)
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let w = (ui.available_width() - 138.0).max(58.0);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.practice_save_label_input)
+                            .desired_width(w)
+                            .hint_text("Practice session name")
+                            .font(egui::FontId::monospace(9.4)),
+                    );
+                    truncate_utf8_bytes(&mut self.practice_save_label_input, 80);
+                    if ui
+                        .small_button(RichText::new("Save").monospace().strong().size(9.2))
+                        .clicked()
+                    {
+                        let lbl = if self.practice_save_label_input.trim().is_empty() {
+                            format!(
+                                "Practice #{}",
+                                self.practice_session_store.slots.len().saturating_add(1)
+                            )
+                        } else {
+                            self.practice_save_label_input.clone()
+                        };
+                        let _ = self.save_current_practice_session(&lbl, false);
+                    }
+                    if !self.practice_session_store.slots.is_empty() {
+                        if ui
+                            .small_button(RichText::new("RON").monospace().size(9.0))
+                            .clicked()
+                        {
+                            let doc = self.practice_session_store.to_ron_pretty();
+                            self.last_exported_practice_doc = Some(doc.clone());
+                            self.pending_clipboard_copy = Some(doc);
+                        }
+                        if ui
+                            .small_button(RichText::new("JSON").monospace().size(9.0))
+                            .clicked()
+                        {
+                            let doc = self.practice_session_store.to_json_pretty();
+                            self.last_exported_practice_doc = Some(doc.clone());
+                            self.pending_clipboard_copy = Some(doc);
+                        }
+                    }
+                    if ui
+                        .selectable_label(
+                            self.show_practice_import_box,
+                            RichText::new("Imp").monospace().size(9.0),
+                        )
+                        .clicked()
+                    {
+                        self.show_practice_import_box = !self.show_practice_import_box;
+                    }
+                });
+                if self.show_practice_import_box {
+                    ui.horizontal(|ui| {
+                        let iw = (ui.available_width() - 48.0).max(60.0);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.practice_import_buffer)
+                                .desired_width(iw)
+                                .hint_text("Paste PracticeSessionStore RON/JSON")
+                                .font(egui::FontId::monospace(8.8)),
+                        );
+                        if ui
+                            .small_button(RichText::new("Apply").monospace().size(8.8))
+                            .clicked()
+                        {
+                            let payload = self.practice_import_buffer.clone();
+                            let _ = self.import_practice_store_payload(&payload);
+                        }
+                    });
+                }
+                if let Some(ref warn) = self.last_practice_warning {
+                    ui.label(
+                        RichText::new(warn)
+                            .monospace()
+                            .size(8.9)
+                            .color(palette::ALERT_ARMED_AMBER),
+                    );
+                }
+                if !self.practice_session_store.slots.is_empty() {
+                    let mut load_id: Option<u64> = None;
+                    let mut pin_id: Option<u64> = None;
+                    let mut del_id: Option<u64> = None;
+                    ui.horizontal_wrapped(|ui| {
+                        for slot in &self.practice_session_store.slots {
+                            let pin_glyph = if slot.pinned { "★" } else { "☆" };
+                            if ui
+                                .small_button(RichText::new(pin_glyph).monospace().size(8.6))
+                                .clicked()
+                            {
+                                pin_id = Some(slot.slot_id);
+                            }
+                            if ui
+                                .small_button(
+                                    RichText::new(format!(
+                                        "{} ({}·{}c)",
+                                        slot.label,
+                                        slot.symbol,
+                                        slot.commands.len()
+                                    ))
+                                    .monospace()
+                                    .size(9.0),
+                                )
+                                .clicked()
+                            {
+                                load_id = Some(slot.slot_id);
+                            }
+                            if ui
+                                .small_button(RichText::new("×").monospace().size(8.6))
+                                .clicked()
+                            {
+                                del_id = Some(slot.slot_id);
+                            }
+                        }
+                    });
+                    if let Some(id) = pin_id {
+                        let _ = self.practice_session_store.toggle_pin(id);
+                    }
+                    if let Some(id) = load_id {
+                        let _ = self.restore_saved_practice_session(id);
+                    }
+                    if let Some(id) = del_id {
+                        let _ = self.practice_session_store.delete_session(id);
+                    }
+                }
+            });
+    }
+
+    #[must_use]
+    pub(crate) fn session_debrief_modal_rect(vp: egui::Rect) -> egui::Rect {
+        let max_w = (vp.width() - 20.0).max(200.0);
+        let max_h = (vp.height() - 20.0).max(200.0);
+        let w = (vp.width() - 64.0).clamp(380.0, 748.0).min(max_w);
+        let top = vp.top() + (vp.height() * 0.05).clamp(14.0, 36.0);
+        let h = (vp.bottom() - top - 18.0).clamp(200.0, 710.0).min(max_h);
+        egui::Rect::from_min_size(
+            egui::Pos2::new(vp.center().x - w * 0.5, top),
+            egui::vec2(w, h),
+        )
+    }
+
+    fn render_session_debrief_modal(&mut self, ui: &mut egui::Ui) {
+        let esc = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        if esc {
+            self.show_session_debrief_modal = false;
+            self.last_debrief_modal_rect = None;
+            ui.ctx().request_repaint();
+            return;
+        }
+
+        let vp_rect = ui.input(|i| i.viewport_rect());
+        let target_rect = Self::session_debrief_modal_rect(vp_rect);
+        let scrim_resp = egui::Area::new(egui::Id::new("sumi_debrief_scrim"))
+            .order(egui::Order::Middle)
+            .fade_in(false)
+            .fixed_pos(vp_rect.min)
+            .show(ui.ctx(), |ui| {
+                let (rect, resp) =
+                    ui.allocate_exact_size(vp_rect.size(), egui::Sense::click_and_drag());
+                ui.painter()
+                    .rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(6, 9, 15, 192));
+                resp
+            })
+            .inner;
+
+        let report = self.compute_session_debrief_report();
+        let modal_w = target_rect.width();
+        let scroll_max_h = (target_rect.height() - 58.0).max(120.0);
+        let mut close_clicked = false;
+        let mut reset_clicked = false;
+
+        let modal_area = egui::Area::new(egui::Id::new("sumi_session_debrief_modal"))
+            .order(egui::Order::Foreground)
+            .fade_in(false)
+            .default_size(target_rect.size())
+            .fixed_pos(target_rect.min)
+            .show(ui.ctx(), |ui| {
+                Frame::new()
+                    .fill(Color32::from_rgb(17, 22, 33))
+                    .corner_radius(CornerRadius::same(8))
+                    .stroke(Stroke::new(1.5, palette::REPLAY_CUT_GOLD))
+                    .inner_margin(Margin::symmetric(14, 12))
+                    .show(ui, |ui| {
+                        ui.set_width((modal_w - 28.0).max(160.0));
+                        ui.set_max_height((target_rect.height() - 24.0).max(120.0));
+                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "PRACTICE SESSION DEBRIEF & RISK COACHING — {} · {}",
+                                    report.symbol,
+                                    report.timeframe.label()
+                                ))
+                                .monospace()
+                                .strong()
+                                .size(11.5)
+                                .color(palette::REPLAY_CUT_GOLD),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.button("Close (Esc)").clicked() {
+                                        close_clicked = true;
+                                    }
+                                    if ui.button("Reset Practice").clicked() {
+                                        reset_clicked = true;
+                                    }
+                                },
+                            );
+                        });
+
+                        egui::ScrollArea::vertical()
+                            .id_salt("sumi_debrief_scroll")
+                            .max_height(scroll_max_h)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+
+                                // 1. KPI Strip (`Total PnL`, `Win Rate`, `PF`, `Max DD %`, `% SL Adherence`)
+                                Frame::new()
+                                    .fill(Color32::from_rgb(22, 28, 42))
+                                    .corner_radius(CornerRadius::same(5))
+                                    .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                                    .inner_margin(Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing = Vec2::new(14.0, 4.0);
+                                            let pnl_col = if report.total_net_pnl >= 0.0 {
+                                                palette::BULLISH
+                                            } else {
+                                                palette::BEARISH
+                                            };
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "Net PnL {:+.2} ({:+.2}%)",
+                                                    report.total_net_pnl, report.total_return_pct
+                                                ))
+                                                .monospace()
+                                                .strong()
+                                                .size(11.2)
+                                                .color(pnl_col),
+                                            );
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "WR {:.1}% ({}W·{}L·{}BE / {}T)",
+                                                    report.win_rate_pct,
+                                                    report.win_count,
+                                                    report.loss_count,
+                                                    report.breakeven_count,
+                                                    report.closed_trades
+                                                ))
+                                                .monospace()
+                                                .size(10.5)
+                                                .color(palette::TEXT_PRIMARY),
+                                            );
+                                            let pf_txt = report
+                                                .profit_factor
+                                                .map_or_else(|| "PF —".to_owned(), |v| format!("PF {v:.2}"));
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "{pf_txt} · MaxDD {:.2}% · Net {:+.2}R",
+                                                    report.max_drawdown_pct, report.net_r_multiple
+                                                ))
+                                                .monospace()
+                                                .size(10.5)
+                                                .color(palette::TEXT_PRIMARY),
+                                            );
+                                            let (sl_txt, sl_col) = match report.sl_adherence_pct {
+                                                None => (
+                                                    "Initial SL Adherence: N/A (0 opens)".to_owned(),
+                                                    palette::TEXT_MUTED,
+                                                ),
+                                                Some(p) if p >= 80.0 => (
+                                                    format!(
+                                                        "Initial SL Adherence: {p:.0}% ({}/{})",
+                                                        report.sl_adherent_positions,
+                                                        report.total_opened_positions
+                                                    ),
+                                                    palette::BULLISH,
+                                                ),
+                                                Some(p) => (
+                                                    format!(
+                                                        "Initial SL Adherence: {p:.0}% ({}/{})",
+                                                        report.sl_adherent_positions,
+                                                        report.total_opened_positions
+                                                    ),
+                                                    palette::BEARISH,
+                                                ),
+                                            };
+                                            ui.label(
+                                                RichText::new(sl_txt)
+                                                    .monospace()
+                                                    .strong()
+                                                    .size(10.8)
+                                                    .color(sl_col),
+                                            );
+                                        });
+                                    });
+
+                                // 2. Coaching Callouts
+                                for c in &report.callouts {
+                                    let col = match c.severity {
+                                        CoachingSeverity::Positive => palette::BULLISH,
+                                        CoachingSeverity::Neutral => palette::ACCENT_BLUE,
+                                        CoachingSeverity::Caution => palette::ALERT_ARMED_AMBER,
+                                        CoachingSeverity::Critical => palette::BEARISH,
+                                    };
+                                    Frame::new()
+                                        .fill(col.gamma_multiply(0.14))
+                                        .corner_radius(CornerRadius::same(4))
+                                        .stroke(Stroke::new(1.0, col.gamma_multiply(0.75)))
+                                        .inner_margin(Margin::symmetric(8, 5))
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "[{}] {}",
+                                                    c.severity.short_label(),
+                                                    c.title
+                                                ))
+                                                .monospace()
+                                                .strong()
+                                                .size(10.2)
+                                                .color(col),
+                                            );
+                                            ui.label(
+                                                RichText::new(&c.detail)
+                                                    .monospace()
+                                                    .size(9.6)
+                                                    .color(palette::TEXT_PRIMARY),
+                                            );
+                                        });
+                                }
+
+                                // 3. Mistake Cost & Setup Edge Tables
+                                ui.columns(2, |cols| {
+                                    cols[0].label(
+                                        RichText::new("MISTAKE COST BREAKDOWN")
+                                            .monospace()
+                                            .strong()
+                                            .size(10.0)
+                                            .color(palette::BEARISH),
+                                    );
+                                    if report.mistake_breakdown.is_empty() {
+                                        cols[0].label(
+                                            RichText::new("0 behavioral mistakes recorded.")
+                                                .monospace()
+                                                .size(9.4)
+                                                .color(palette::TEXT_MUTED),
+                                        );
+                                    } else {
+                                        egui::Grid::new("r17_debrief_mistakes_grid")
+                                            .num_columns(4)
+                                            .striped(true)
+                                            .show(&mut cols[0], |ui| {
+                                                for h in ["Mistake", "Trd", "Notes", "Loss Cost"] {
+                                                    ui.label(
+                                                        RichText::new(h)
+                                                            .monospace()
+                                                            .strong()
+                                                            .size(9.2)
+                                                            .color(palette::TEXT_MUTED),
+                                                    );
+                                                }
+                                                ui.end_row();
+                                                for m in &report.mistake_breakdown {
+                                                    ui.label(
+                                                        RichText::new(m.mistake.short_label())
+                                                            .monospace()
+                                                            .size(9.3),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new(format!("{}", m.trade_count))
+                                                            .monospace()
+                                                            .size(9.3),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new(format!(
+                                                            "{}",
+                                                            m.decision_note_count
+                                                        ))
+                                                        .monospace()
+                                                        .size(9.3),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new(format!(
+                                                            "-{:.2}",
+                                                            m.adverse_cost_abs
+                                                        ))
+                                                        .monospace()
+                                                        .strong()
+                                                        .size(9.3)
+                                                        .color(palette::BEARISH),
+                                                    );
+                                                    ui.end_row();
+                                                }
+                                            });
+                                    }
+
+                                    cols[1].label(
+                                        RichText::new("SETUP PERFORMANCE BREAKDOWN")
+                                            .monospace()
+                                            .strong()
+                                            .size(10.0)
+                                            .color(palette::BULLISH),
+                                    );
+                                    if report.setup_breakdown.is_empty() {
+                                        cols[1].label(
+                                            RichText::new("0 closed setups in causal window.")
+                                                .monospace()
+                                                .size(9.4)
+                                                .color(palette::TEXT_MUTED),
+                                        );
+                                    } else {
+                                        egui::Grid::new("r17_debrief_setups_grid")
+                                            .num_columns(4)
+                                            .striped(true)
+                                            .show(&mut cols[1], |ui| {
+                                                for h in ["Setup", "Trd", "WR%", "Net PnL"] {
+                                                    ui.label(
+                                                        RichText::new(h)
+                                                            .monospace()
+                                                            .strong()
+                                                            .size(9.2)
+                                                            .color(palette::TEXT_MUTED),
+                                                    );
+                                                }
+                                                ui.end_row();
+                                                for s in &report.setup_breakdown {
+                                                    ui.label(
+                                                        RichText::new(s.setup.short_label())
+                                                            .monospace()
+                                                            .size(9.3),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new(format!("{}", s.trade_count))
+                                                            .monospace()
+                                                            .size(9.3),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new(format!(
+                                                            "{:.0}%",
+                                                            s.win_rate_pct
+                                                        ))
+                                                        .monospace()
+                                                        .size(9.3),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new(format!("{:+.2}", s.net_pnl))
+                                                            .monospace()
+                                                            .strong()
+                                                            .size(9.3)
+                                                            .color(if s.net_pnl >= 0.0 {
+                                                                palette::BULLISH
+                                                            } else {
+                                                                palette::BEARISH
+                                                            }),
+                                                    );
+                                                    ui.end_row();
+                                                }
+                                            });
+                                    }
+                                });
+
+                                // 4. Causal Decision Notes Log (`DEF-001`)
+                                if !report.visible_decision_notes.is_empty() {
+                                    ui.separator();
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "CAUSAL BAR DECISION NOTES ({} visible at current replay cursor)",
+                                            report.visible_decision_notes.len()
+                                        ))
+                                        .monospace()
+                                        .strong()
+                                        .size(10.0)
+                                        .color(palette::ACCENT_BLUE),
+                                    );
+                                    for n in report.visible_decision_notes.iter().rev().take(8) {
+                                        let ts_txt = if n.timeframe.is_intraday() {
+                                            format_utc_datetime_hm(n.bar_timestamp)
+                                        } else {
+                                            format_utc_date(n.bar_timestamp)
+                                        };
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "• Bar #{} ({ts_txt}) @ {:.2} [{} | {} | {}] {}",
+                                                n.base_bar_index + 1,
+                                                n.mark_price,
+                                                n.action.short_label(),
+                                                n.setup.short_label(),
+                                                n.mistake.short_label(),
+                                                n.note
+                                            ))
+                                            .monospace()
+                                            .size(9.3)
+                                            .color(palette::TEXT_PRIMARY),
+                                        );
+                                    }
+                                }
+                            });
+                    });
+            });
+
+        self.last_debrief_modal_rect = Some(modal_area.response.rect);
+        let clicked_outside = scrim_resp.clicked()
+            && !modal_area
+                .response
+                .rect
+                .contains(scrim_resp.interact_pointer_pos().unwrap_or(Pos2::ZERO));
+        if reset_clicked {
+            self.reset_practice_session();
+        }
+        if close_clicked || clicked_outside {
+            self.show_session_debrief_modal = false;
+            self.last_debrief_modal_rect = None;
+        }
+    }
+
+    fn render_advanced_analytics_subtab(&mut self, ui: &mut egui::Ui) {
+        let mut switch_to_ms_overlay = false;
+        let mut next_phase_mode: Option<MultiPhaseSplitMode> = None;
+        let mut copy_manifest_json: Option<String> = None;
+        let mut copy_manifest_ron: Option<String> = None;
+
+        egui::ScrollArea::vertical()
+            .id_salt("sumi_adv_analytics_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(4.0, 5.0);
+
+                // 1. Multi-Strategy `0%` Overlay Quick Card (`A4`)
+                Frame::new()
+                    .fill(Color32::from_rgb(18, 24, 36))
+                    .corner_radius(4.0)
+                    .stroke(Stroke::new(1.0, palette::ACCENT_BLUE.gamma_multiply(0.65)))
+                    .inner_margin(Margin::symmetric(7, 5))
+                    .show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new("MULTI-STRATEGY 0% UTC OVERLAY")
+                                    .monospace()
+                                    .strong()
+                                    .size(9.6)
+                                    .color(Color32::from_rgb(125, 208, 255)),
+                            );
+                            let is_ms = self.show_equity_pane
+                                && self.equity_pane_source == EquityPaneSource::MultiStrategyPct;
+                            if ui
+                                .small_button(
+                                    RichText::new(if is_ms {
+                                        "Active on Equity ✓"
+                                    } else {
+                                        "Plot on Equity Pane"
+                                    })
+                                    .monospace()
+                                    .strong()
+                                    .size(9.0),
+                                )
+                                .clicked()
+                            {
+                                switch_to_ms_overlay = true;
+                            }
+                        });
+                        if let Some(ref ms) = self.multi_strategy_report {
+                            egui::Grid::new("r17_ms_curves_grid")
+                                .num_columns(4)
+                                .striped(true)
+                                .spacing(Vec2::new(6.0, 2.0))
+                                .show(ui, |ui| {
+                                    for h in ["Curve", "Cum %", "MaxDD", "Trd"] {
+                                        ui.label(
+                                            RichText::new(h)
+                                                .monospace()
+                                                .strong()
+                                                .size(8.8)
+                                                .color(palette::TEXT_MUTED),
+                                        );
+                                    }
+                                    ui.end_row();
+                                    for c in &ms.curves {
+                                        let col = multi_strategy_curve_color(c.kind);
+                                        let pfx = if c.is_active_preset { "★" } else { "●" };
+                                        ui.label(
+                                            RichText::new(format!("{pfx}{}", c.label))
+                                                .monospace()
+                                                .strong()
+                                                .size(8.9)
+                                                .color(col),
+                                        );
+                                        let ret_txt = c
+                                            .final_return_pct
+                                            .map_or_else(|| "—".to_owned(), |v| format!("{v:+.2}%"));
+                                        ui.label(
+                                            RichText::new(ret_txt).monospace().size(8.9).color(
+                                                if c.final_return_pct.unwrap_or(0.0) >= 0.0 {
+                                                    palette::EQUITY_ABOVE_LINE
+                                                } else {
+                                                    palette::EQUITY_BELOW_LINE
+                                                },
+                                            ),
+                                        );
+                                        ui.label(
+                                            RichText::new(format!("-{:.1}%", c.max_drawdown_pct))
+                                                .monospace()
+                                                .size(8.9)
+                                                .color(palette::TEXT_MUTED),
+                                        );
+                                        ui.label(
+                                            RichText::new(match c.kind {
+                                                ComparisonCurveKind::MarketBenchmark => {
+                                                    "—".to_owned()
+                                                }
+                                                _ => format!("{}", c.num_trades),
+                                            })
+                                            .monospace()
+                                            .size(8.9),
+                                        );
+                                        ui.end_row();
+                                    }
+                                });
+                        }
+                    });
+
+                let Some(ref adv) = self.advanced_analytics_report else {
+                    ui.label(
+                        RichText::new("Run backtest to populate advanced analytics.")
+                            .monospace()
+                            .size(9.4)
+                            .color(palette::TEXT_MUTED),
+                    );
+                    return;
+                };
+
+                // 2. Deterministic `RunManifest` Card (`A5`)
+                Frame::new()
+                    .fill(Color32::from_rgb(18, 22, 32))
+                    .corner_radius(4.0)
+                    .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                    .inner_margin(Margin::symmetric(7, 5))
+                    .show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "MANIFEST {}",
+                                    adv.manifest.short_digest_tag()
+                                ))
+                                .monospace()
+                                .strong()
+                                .size(9.4)
+                                .color(palette::REPLAY_CUT_GOLD),
+                            );
+                            if ui
+                                .small_button(RichText::new("JSON").monospace().size(8.8))
+                                .clicked()
+                            {
+                                copy_manifest_json = Some(adv.manifest.to_json_pretty());
+                            }
+                            if ui
+                                .small_button(RichText::new("RON").monospace().size(8.8))
+                                .clicked()
+                            {
+                                copy_manifest_ron = Some(adv.manifest.to_ron_pretty());
+                            }
+                        });
+                        ui.label(
+                            RichText::new(format!(
+                                "{} · {} · {} bars · {} trades",
+                                adv.manifest.symbol,
+                                adv.manifest.timeframe.label(),
+                                adv.manifest.bar_count,
+                                adv.manifest.num_trades
+                            ))
+                            .monospace()
+                            .size(8.9)
+                            .color(palette::TEXT_MUTED),
+                        );
+                    });
+
+                // 3. Outlier Impact Card (`A5`)
+                let oi = &adv.outlier_impact;
+                Frame::new()
+                    .fill(Color32::from_rgb(18, 22, 32))
+                    .corner_radius(4.0)
+                    .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                    .inner_margin(Margin::symmetric(7, 5))
+                    .show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new("OUTLIER IMPACT")
+                                    .monospace()
+                                    .strong()
+                                    .size(9.4)
+                                    .color(palette::TEXT_PRIMARY),
+                            );
+                            if oi.outlier_dependent_warning {
+                                ui.label(
+                                    RichText::new("OUTLIER DEPENDENT")
+                                        .monospace()
+                                        .strong()
+                                        .size(8.8)
+                                        .color(palette::ALERT_ARMED_AMBER),
+                                );
+                            }
+                        });
+                        let top3_w_pct = oi.top_3_winners_share_of_gross_profit_pct.map_or_else(
+                            || "N/A".to_owned(),
+                            |v| format!("{v:.1}% of Gross Profit"),
+                        );
+                        let trim_exp = oi
+                            .trimmed_expectancy_10pct
+                            .map_or_else(|| "N/A (N<3)".to_owned(), |v| format!("{v:+.2}"));
+                        ui.label(
+                            RichText::new(format!(
+                                "Top 3 Wins: {:+.1} ({top3_w_pct})\nEx-Top 3 Net: {:+.1} · Trim(10%) Exp: {trim_exp}",
+                                oi.top_3_winners_pnl, oi.net_pnl_ex_top_3_winners
+                            ))
+                            .monospace()
+                            .size(8.9)
+                            .color(palette::TEXT_MUTED),
+                        );
+                    });
+
+                // 4. Multi-Phase Batch Degradation Matrix (`A5`)
+                Frame::new()
+                    .fill(Color32::from_rgb(18, 22, 32))
+                    .corner_radius(4.0)
+                    .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                    .inner_margin(Margin::symmetric(7, 5))
+                    .show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new("MULTI-PHASE:")
+                                    .monospace()
+                                    .strong()
+                                    .size(9.2)
+                                    .color(palette::TEXT_PRIMARY),
+                            );
+                            for m in MultiPhaseSplitMode::ALL {
+                                if ui
+                                    .selectable_label(
+                                        self.multi_phase_mode == m,
+                                        RichText::new(m.short_label()).monospace().size(8.8),
+                                    )
+                                    .clicked()
+                                {
+                                    next_phase_mode = Some(m);
+                                }
+                            }
+                        });
+                        let mp = &adv.multi_phase;
+                        ui.label(
+                            RichText::new(format!(
+                                "Prof {}/{} ({:.0}%) · Disp {:.1}% · Late-Early {:+.1}%",
+                                mp.profitable_phases,
+                                mp.phases.len(),
+                                mp.consistency_pct,
+                                mp.return_dispersion_pct,
+                                mp.late_vs_early_return_delta_pct
+                            ))
+                            .monospace()
+                            .size(8.8)
+                            .color(palette::TEXT_MUTED),
+                        );
+                        egui::Grid::new("r17_multiphase_grid")
+                            .num_columns(4)
+                            .striped(true)
+                            .spacing(Vec2::new(6.0, 2.0))
+                            .show(ui, |ui| {
+                                for h in ["Phase", "Ret%", "MaxDD", "Trd"] {
+                                    ui.label(
+                                        RichText::new(h)
+                                            .monospace()
+                                            .strong()
+                                            .size(8.7)
+                                            .color(palette::TEXT_MUTED),
+                                    );
+                                }
+                                ui.end_row();
+                                for p in &mp.phases {
+                                    ui.label(RichText::new(&p.label).monospace().size(8.8));
+                                    ui.label(
+                                        RichText::new(format!("{:+.2}%", p.tearsheet.total_return_pct))
+                                            .monospace()
+                                            .size(8.8)
+                                            .color(if p.tearsheet.total_return_pct >= 0.0 {
+                                                palette::EQUITY_ABOVE_LINE
+                                            } else {
+                                                palette::EQUITY_BELOW_LINE
+                                            }),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!("-{:.1}%", p.tearsheet.max_drawdown_pct))
+                                            .monospace()
+                                            .size(8.8),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!("{}", p.tearsheet.num_trades))
+                                            .monospace()
+                                            .size(8.8),
+                                    );
+                                    ui.end_row();
+                                }
+                            });
+                    });
+
+                // 5. Causal Signal-Bar `MarketRegime` & UTC Calendar `Year` Breakdowns (`A5`)
+                Frame::new()
+                    .fill(Color32::from_rgb(18, 22, 32))
+                    .corner_radius(4.0)
+                    .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                    .inner_margin(Margin::symmetric(7, 5))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new("SIGNAL-BAR REGIME BREAKDOWN (Close[T] -> Open[T+1])")
+                                .monospace()
+                                .strong()
+                                .size(9.0)
+                                .color(palette::TEXT_PRIMARY),
+                        );
+                        egui::Grid::new("r17_regime_slices_grid")
+                            .num_columns(5)
+                            .striped(true)
+                            .spacing(Vec2::new(5.0, 2.0))
+                            .show(ui, |ui| {
+                                for h in ["Regime", "Bars", "Trd", "WR%", "Net PnL"] {
+                                    ui.label(
+                                        RichText::new(h)
+                                            .monospace()
+                                            .strong()
+                                            .size(8.7)
+                                            .color(palette::TEXT_MUTED),
+                                    );
+                                }
+                                ui.end_row();
+                                for r in &adv.entry_regime_slices {
+                                    ui.label(
+                                        RichText::new(r.regime.short_label())
+                                            .monospace()
+                                            .strong()
+                                            .size(8.8)
+                                            .color(regime_badge_color(r.regime)),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!("{}", r.bar_count))
+                                            .monospace()
+                                            .size(8.8),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!("{}", r.trade_count))
+                                            .monospace()
+                                            .size(8.8),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!("{:.0}%", r.win_rate_pct))
+                                            .monospace()
+                                            .size(8.8),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!("{:+.1}", r.net_pnl))
+                                            .monospace()
+                                            .size(8.8)
+                                            .color(if r.net_pnl >= 0.0 {
+                                                palette::EQUITY_ABOVE_LINE
+                                            } else {
+                                                palette::EQUITY_BELOW_LINE
+                                            }),
+                                    );
+                                    ui.end_row();
+                                }
+                            });
+
+                        if !adv.yearly_slices.is_empty() {
+                            ui.separator();
+                            ui.label(
+                                RichText::new("UTC CALENDAR YEAR BREAKDOWN")
+                                    .monospace()
+                                    .strong()
+                                    .size(9.0)
+                                    .color(palette::TEXT_PRIMARY),
+                            );
+                            egui::Grid::new("r17_year_slices_grid")
+                                .num_columns(5)
+                                .striped(true)
+                                .spacing(Vec2::new(5.0, 2.0))
+                                .show(ui, |ui| {
+                                    for h in ["UTC Yr", "Eq%", "MaxDD", "Trd", "WR%"] {
+                                        ui.label(
+                                            RichText::new(h)
+                                                .monospace()
+                                                .strong()
+                                                .size(8.7)
+                                                .color(palette::TEXT_MUTED),
+                                        );
+                                    }
+                                    ui.end_row();
+                                    for y in &adv.yearly_slices {
+                                        ui.label(
+                                            RichText::new(format!("{}", y.year))
+                                                .monospace()
+                                                .strong()
+                                                .size(8.8),
+                                        );
+                                        ui.label(
+                                            RichText::new(format!("{:+.2}%", y.equity_return_pct))
+                                                .monospace()
+                                                .size(8.8)
+                                                .color(if y.equity_return_pct >= 0.0 {
+                                                    palette::EQUITY_ABOVE_LINE
+                                                } else {
+                                                    palette::EQUITY_BELOW_LINE
+                                                }),
+                                        );
+                                        ui.label(
+                                            RichText::new(format!("-{:.1}%", y.max_drawdown_pct))
+                                                .monospace()
+                                                .size(8.8),
+                                        );
+                                        ui.label(
+                                            RichText::new(format!("{}", y.trade_count))
+                                                .monospace()
+                                                .size(8.8),
+                                        );
+                                        ui.label(
+                                            RichText::new(format!("{:.0}%", y.win_rate_pct))
+                                                .monospace()
+                                                .size(8.8),
+                                        );
+                                        ui.end_row();
+                                    }
+                                });
+                        }
+
+                        if !adv.drawdown_periods.is_empty() {
+                            ui.separator();
+                            ui.label(
+                                RichText::new("TOP UNDERWATER DRAWDOWN EPISODES")
+                                    .monospace()
+                                    .strong()
+                                    .size(9.0)
+                                    .color(palette::TEXT_PRIMARY),
+                            );
+                            for ep in adv.drawdown_periods.iter().take(3) {
+                                let status = ep.recovery_timestamp.map_or_else(
+                                    || "UNRECOVERED".to_owned(),
+                                    |ts| format!("Rec {}", format_utc_date(ts)),
+                                );
+                                ui.label(
+                                    RichText::new(format!(
+                                        "• -{:.2}% ({}b) Peak {} -> Trough {} [{}]",
+                                        ep.max_drawdown_pct,
+                                        ep.duration_bars,
+                                        format_utc_date(ep.peak_timestamp),
+                                        format_utc_date(ep.trough_timestamp),
+                                        status
+                                    ))
+                                    .monospace()
+                                    .size(8.6)
+                                    .color(palette::TEXT_MUTED),
+                                );
+                            }
+                        }
+                    });
+            });
+
+        if switch_to_ms_overlay {
+            self.show_equity_pane = true;
+            self.equity_pane_source = EquityPaneSource::MultiStrategyPct;
+            self.viewport.equity_price_scale.reset_auto_scale();
+            self.sync_backtest_causal();
+        }
+        if let Some(m) = next_phase_mode {
+            self.multi_phase_mode = m;
+            self.sync_backtest_causal();
+        }
+        if let Some(doc) = copy_manifest_json.or(copy_manifest_ron) {
+            self.last_exported_manifest_doc = Some(doc.clone());
+            self.pending_clipboard_copy = Some(doc);
+        }
+    }
+
     fn render_inline_signal_hit_explanation(&self, ui: &mut egui::Ui, hit: &HistoricalSignalHit) {
         let replay_cutoff = self.replay.cutoff_timestamp(&self.base_candles);
         if let Some(ref ctx) = self.scanner_context
@@ -19812,9 +21896,10 @@ impl SumiWorkstationApp {
                 | "r14"
                 | "r15"
                 | "r16"
+                | "r17"
         ) {
             return Err(format!(
-                "unknown SUMI_CAPTURE_BATCH '{batch_name}' (expected 'r04'..'r16')"
+                "unknown SUMI_CAPTURE_BATCH '{batch_name}' (expected 'r04'..'r17')"
             ));
         }
         std::fs::create_dir_all("docs/evidence")
@@ -19838,6 +21923,7 @@ impl SumiWorkstationApp {
                 "r14" => app.apply_r14_batch_step_state(step),
                 "r15" => app.apply_r15_batch_step_state(step),
                 "r16" => app.apply_r16_batch_step_state(step),
+                "r17" => app.apply_r17_batch_step_state(step),
                 _ => unreachable!(),
             };
             let image = harness.capture_app_frame(&mut app, logical_w, logical_h, 6)?;
@@ -22475,6 +24561,255 @@ impl SumiWorkstationApp {
         }
     }
 
+    fn apply_r17_batch_step_state(
+        &mut self,
+        step: usize,
+    ) -> (u32, u32, &'static str, &'static str) {
+        self.exit_replay();
+        self.reset_practice_session();
+        self.show_replay_bar = false;
+        self.show_scanner_dock = false;
+        self.show_trading_panel = false;
+        self.show_alerts_panel = false;
+        self.show_strategy_panel = false;
+        self.show_journal_panel = false;
+        self.show_drawing_inspector = false;
+        self.show_equity_pane = false;
+        self.show_backtest_trades = false;
+        self.command_palette.open = false;
+        self.show_templates_modal = false;
+        self.show_hotkeys_modal = false;
+        self.show_signal_catalog_modal = false;
+        self.show_session_debrief_modal = false;
+        self.rebinding_hotkey_action = None;
+        self.dom_center_override = None;
+        self.pinned_crosshair_timestamp = None;
+        self.inspected_signal_key = None;
+        self.staged_snapshot_preview = None;
+        self.practice_session_store = PracticeSessionStore::new();
+        self.scan_snapshot_store = ScanSnapshotStore::new();
+
+        let builtins = builtin_workspace_templates();
+        match step {
+            0 => {
+                // Scenario 0 (`1280x800` @ `2.0x` -> `2560x1600`): `FPT 1D` (`HOSE`) active Replay
+                // Practice session with Live `PracticeScoreboard`, 3 round-trip paper trades (2 with
+                // initial SL + 1 naked loss exposing `67% (<80%)` tamper-proof SL adherence),
+                // causal `PracticeDecisionNote`s, and `SessionDebriefModal` open.
+                self.apply_workspace_template(&builtins[0]);
+                self.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+                let _ = self.set_timeframe(Timeframe::D1);
+                self.set_scale_mode(PriceScaleMode::Normal);
+                self.reset_practice_session();
+
+                let start_idx = 60_usize.min(self.base_candles.len().saturating_sub(50));
+                let _ = self.start_replay_at_base_index(start_idx);
+                self.show_replay_bar = true;
+                self.show_trading_panel = true;
+                self.right_dock_tab = RightDockTab::Trading;
+
+                // Trade 1 (with valid initial SL -> adherent!)
+                let c0 = self.base_candles[self.current_trading_cursor_base_index()].close;
+                let _ = self.trading.submit_order(
+                    OrderRequest {
+                        side: OrderSide::Buy,
+                        kind: OrderKind::Market,
+                        quantity: 200.0,
+                        stop_loss: Some((c0 * 0.94).max(1.0)),
+                        take_profit: Some(c0 * 1.12),
+                    },
+                    &self.base_candles,
+                    self.current_trading_cursor_base_index(),
+                );
+                self.decision_draft_action = PracticeDecisionAction::PlanLong;
+                self.decision_draft_setup = SetupTag::TrendPullback;
+                self.decision_draft_mistake = MistakeTag::None;
+                self.decision_draft_note =
+                    "Pullback into EMA20 support with initial protective stop".to_owned();
+                let _ = self.record_decision_note_at_cursor();
+                let _ = self.step_replay_forward(8);
+                let _ = self.flatten_open_position();
+
+                // Trade 2 (opened NAKED without initial SL, then SL attached later -> still counted non-adherent!)
+                let cur2 = self.current_trading_cursor_base_index();
+                let c2 = self.base_candles[cur2].close;
+                let _ = self.trading.submit_order(
+                    OrderRequest {
+                        side: OrderSide::Buy,
+                        kind: OrderKind::Market,
+                        quantity: 300.0,
+                        stop_loss: None,
+                        take_profit: None,
+                    },
+                    &self.base_candles,
+                    cur2,
+                );
+                let _ = self.trading.update_position_brackets(
+                    Some((c2 * 0.93).max(1.0)),
+                    Some(c2 * 1.10),
+                    &self.base_candles,
+                    cur2,
+                );
+                self.decision_draft_action = PracticeDecisionAction::ManagePosition;
+                self.decision_draft_setup = SetupTag::MomentumContinuation;
+                self.decision_draft_mistake = MistakeTag::FomoChase;
+                self.decision_draft_note =
+                    "Chased breakout candle without initial SL attached at open".to_owned();
+                let _ = self.record_decision_note_at_cursor();
+                let _ = self.step_replay_forward(6);
+                let _ = self.flatten_open_position();
+
+                // Trade 3 (with valid initial SL -> adherent!)
+                let cur3 = self.current_trading_cursor_base_index();
+                let c3 = self.base_candles[cur3].close;
+                let _ = self.trading.submit_order(
+                    OrderRequest {
+                        side: OrderSide::Buy,
+                        kind: OrderKind::Market,
+                        quantity: 200.0,
+                        stop_loss: Some((c3 * 0.95).max(1.0)),
+                        take_profit: Some(c3 * 1.10),
+                    },
+                    &self.base_candles,
+                    cur3,
+                );
+                let _ = self.step_replay_forward(7);
+                let _ = self.flatten_open_position();
+
+                let _ = self.sync_paper_trades_to_journal();
+                if let Some(je) = self.journal.entries.get_mut(0) {
+                    je.setup = SetupTag::TrendPullback;
+                }
+                if let Some(je) = self.journal.entries.get_mut(1) {
+                    je.setup = SetupTag::MomentumContinuation;
+                    je.mistake = MistakeTag::FomoChase;
+                }
+                if let Some(je) = self.journal.entries.get_mut(2) {
+                    je.setup = SetupTag::SqueezeBreakout;
+                }
+                self.open_session_debrief_modal();
+
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r17_step1_practice_scoreboard_and_debrief_modal_fpt.png",
+                    "docs/evidence/r17_step1_practice_scoreboard_and_debrief_modal_fpt.json",
+                )
+            }
+            1 => {
+                // Scenario 1 (`1280x800` @ `2.0x` -> `2560x1600`): `BTCUSDT 15m` (`1,344` bars),
+                // `OscillatorPaneId::Equity` in `EquityPaneSource::MultiStrategyPct` (`0.00%` UTC-aligned
+                // 7 presets + `B&H (BTCUSDT)` + `Bench (SPY)` with `+X.XX%` right axis & crosshair HUD)
+                // paired with `StrategyLabSubTab::Analytics` (`RunManifest`, `OutlierImpact`, `Multi-Phase`,
+                // `Signal-Bar MarketRegime` & `UTC Year` breakdowns).
+                self.apply_workspace_template(&builtins[0]);
+                self.select_watchlist_instrument(DataSourcePreset::BtcUsdt15mJson, "BTCUSDT");
+                let _ = self.set_timeframe(Timeframe::M15);
+                self.set_scale_mode(PriceScaleMode::Normal);
+                self.indicators = IndicatorConfig {
+                    show_sma: true,
+                    sma_period: 20,
+                    show_ema: true,
+                    ema_period: 50,
+                    show_bbands: true,
+                    show_rsi: false,
+                    show_macd: false,
+                    show_cvd: false,
+                    ..IndicatorConfig::default()
+                };
+                self.viewport.reset_pane_stretches();
+                self.viewport.equity_stretch = 1.65;
+
+                self.backtest_config = BacktestConfig {
+                    preset: StrategyPresetKind::DonchianAtrBreakout,
+                    direction_mode: StrategyDirectionMode::LongShort,
+                    sizing: PositionSizingMode::PercentEquity(95.0),
+                    initial_cash: 100_000.0,
+                    commission_bps: 8.0,
+                    slippage_bps: 4.0,
+                    in_sample_split_pct: Some(0.70),
+                    ..BacktestConfig::default()
+                };
+                self.multi_phase_mode = MultiPhaseSplitMode::Tertiles;
+                self.open_strategy_lab();
+                self.show_equity_pane = true;
+                self.equity_pane_source = EquityPaneSource::MultiStrategyPct;
+                self.strategy_lab_tab = StrategyLabSubTab::Analytics;
+                self.sync_indicators_and_benchmarks();
+                self.sync_backtest_causal();
+
+                self.viewport.time_scale.set_width(866.0);
+                self.viewport.fit_all();
+                self.viewport.equity_price_scale.reset_auto_scale();
+
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r17_step2_multistrategy_pct_overlay_and_analytics_btc_15m.png",
+                    "docs/evidence/r17_step2_multistrategy_pct_overlay_and_analytics_btc_15m.json",
+                )
+            }
+            _ => {
+                // Scenario 2 (`1280x800` @ `2.0x` -> `2560x1600`): `VN30F1M 5m` launched via 1-click
+                // `+120b` `BlindPractice` from Scanner (`BLIND PRACTICE (+120b pre-roll) · Signal hidden until reached`),
+                // Left `Scanner` dock showing `+120b` pre-roll + Watchlist 1-click `[Blind +120b]`/`[Review]` + Saved Scans,
+                // and Right `Paper Trading` dock showing `PracticeScoreboard` + `Saved Practice Sessions`.
+                self.apply_workspace_template(&builtins[0]);
+                self.select_watchlist_instrument(DataSourcePreset::IntradayVn30F1m, "VN30F1M");
+                let _ = self.set_timeframe(Timeframe::M5);
+                self.blind_practice_lookback_bars = INSTITUTIONAL_BLIND_PRACTICE_PRE_ROLL_BARS;
+                self.indicators = IndicatorConfig {
+                    show_ema: true,
+                    show_vwap: true,
+                    show_cvd: true,
+                    ..IndicatorConfig::default()
+                };
+                self.sync_indicators_and_benchmarks();
+                self.sync_scanner_caches();
+
+                let _ = self.save_current_scan_snapshot("VN30 Morning Scan", true);
+                if let Some(vn30_hit) = self
+                    .raw_historical_hits_cache
+                    .iter()
+                    .find(|h| h.symbol == "VN30F1M" && h.bar_index >= 130)
+                    .or_else(|| {
+                        self.raw_historical_hits_cache
+                            .iter()
+                            .find(|h| h.symbol == "VN30F1M")
+                    })
+                    .cloned()
+                {
+                    let _ = self.start_scanner_signal_replay_with_lookback(
+                        vn30_hit,
+                        ScannerReplayIntent::BlindPractice,
+                        INSTITUTIONAL_BLIND_PRACTICE_PRE_ROLL_BARS,
+                    );
+                }
+                self.decision_draft_action = PracticeDecisionAction::ObserveHold;
+                self.decision_draft_setup = SetupTag::SqueezeBreakout;
+                self.decision_draft_note =
+                    "Monitoring VWAP + CVD absorption on +120b blind drill".to_owned();
+                let _ = self.record_decision_note_at_cursor();
+                let _ = self.save_current_practice_session("VN30F +120b Drill", true);
+
+                self.show_replay_bar = true;
+                self.show_scanner_dock = true;
+                self.scanner_tab = ScannerDockTab::Watchlist;
+                self.show_trading_panel = true;
+                self.right_dock_tab = RightDockTab::Trading;
+                self.trading_view_mode = TemplateTradingViewMode::OrderTicket;
+                self.sync_scanner_caches();
+
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r17_step3_scanner_1click_120b_and_saved_sessions_vn30f.png",
+                    "docs/evidence/r17_step3_scanner_1click_120b_and_saved_sessions_vn30f.json",
+                )
+            }
+        }
+    }
+
     fn persist_capture_artifacts(
         &self,
         screenshot_path: &str,
@@ -22570,9 +24905,27 @@ impl SumiWorkstationApp {
             let cvd_axis_mode_lbl = match self.viewport.cvd_price_scale.format_mode() {
                 crate::viewport::PriceAxisFormatMode::Standard => "Standard",
                 crate::viewport::PriceAxisFormatMode::CompactVolume => "CompactVolume",
+                crate::viewport::PriceAxisFormatMode::SignedPercentage => "SignedPercentage",
             };
+            let sl_adh_json = metrics
+                .sl_adherence_pct
+                .map_or_else(|| "null".to_owned(), |v| format!("{v:.4}"));
+            let mc_ref = bt_active
+                .then_some(self.monte_carlo_report.as_ref())
+                .flatten();
+            let ms_curve_count = bt_active
+                .then_some(self.multi_strategy_report.as_ref())
+                .flatten()
+                .map_or(0, |m| m.curves.len());
+            let manifest_hex_json = bt_active
+                .then_some(self.advanced_analytics_report.as_ref())
+                .flatten()
+                .map_or_else(
+                    || "null".to_owned(),
+                    |a| format!("\"{:016x}\"", a.manifest.manifest_digest),
+                );
             let json = format!(
-                "{{\n  \"symbol\": \"{}\",\n  \"timeframe\": \"{}\",\n  \"base_timeframe\": \"{}\",\n  \"data_source\": \"{}\",\n  \"available_symbols\": [{}],\n  \"base_candles\": {},\n  \"total_candles\": {},\n  \"culled_candles\": {},\n  \"rendered_candles\": {},\n  \"conflation_factor\": {},\n  \"bar_spacing\": {:.6},\n  \"right_offset\": {:.6},\n  \"scale_mode\": \"{}\",\n  \"auto_scale\": {},\n  \"pane_count\": {},\n  \"active_overlay_count\": {},\n  \"drawing_count\": {},\n  \"active_drawing_tool\": \"{}\",\n  \"selected_drawing_id\": {},\n  \"magnet_mode\": \"{}\",\n  \"replay_active\": {},\n  \"replay_status\": \"{}\",\n  \"replay_base_cursor\": {},\n  \"replay_step_unit\": \"{}\",\n  \"show_trading_panel\": {},\n  \"show_scanner_dock\": {},\n  \"show_alerts_panel\": {},\n  \"show_strategy_panel\": {},\n  \"show_journal_panel\": {},\n  \"show_equity_pane\": {},\n  \"equity_pane_source\": \"{}\",\n  \"equity_pane_active\": {},\n  \"show_vwap\": {},\n  \"show_vrvp\": {},\n  \"show_rs\": {},\n  \"show_compare_overlay\": {},\n  \"compare_benchmark\": {},\n  \"vrvp_poc_price\": {},\n  \"active_frvp_count\": {},\n  \"rs_stretch\": {:.3},\n  \"grid_layout\": \"{}\",\n  \"grid_slot_count\": {},\n  \"active_chart_slot\": {},\n  \"sync_crosshair\": {},\n  \"sync_time_range\": {},\n  \"show_ichimoku\": {},\n  \"ichimoku_active\": {},\n  \"show_cvd\": {},\n  \"cvd_reset_mode\": \"{}\",\n  \"cvd_pane_active\": {},\n  \"cvd_stretch\": {:.3},\n  \"saved_template_count\": {},\n  \"vwap_anchor_mode\": \"{}\",\n  \"show_market_profile\": {},\n  \"market_profile_active\": {},\n  \"scanner_tab\": \"{}\",\n  \"breadth_participating_count\": {},\n  \"vn30_participating_count\": {},\n  \"money_flow_buy_pct\": {:.2},\n  \"cvd_axis_format_mode\": \"{}\",\n  \"pinned_crosshair_timestamp\": {},\n  \"active_venue\": \"{}\",\n  \"journal_total_entries\": {},\n  \"journal_visible_entries\": {},\n  \"journal_discipline_pct\": {:.2},\n  \"wfo_verdict\": {},\n  \"wfo_wfe_pct\": {},\n  \"portfolio_return_pct\": {:.4},\n  \"portfolio_dd_reduction_pct\": {:.4},\n  \"show_backtest_trades\": {},\n  \"rendered_backtest_trades\": {},\n  \"backtest_preset\": {},\n  \"backtest_trade_count\": {},\n  \"backtest_return_pct\": {:.4},\n  \"backtest_max_dd_pct\": {:.4},\n  \"backtest_sharpe\": {},\n  \"backtest_robustness\": {},\n  \"command_palette_open\": {},\n  \"alert_rule_count\": {},\n  \"alert_trigger_count\": {},\n  \"active_alert_lines\": {},\n  \"rendered_alert_markers\": {},\n  \"scanner_signal_revealed\": {},\n  \"active_price_lines\": {},\n  \"rendered_fill_markers\": {},\n  \"equity\": {:.2},\n  \"net_pnl\": {:.2},\n  \"fill_count\": {},\n  \"closed_trade_count\": {},\n  \"pending_order_count\": {},\n  \"open_position_side\": {},\n  \"stretches\": [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}],\n  \"base_value\": {:.4},\n  \"screenshot_px\": [{}, {}],\n  \"outer_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"plot_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"price_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"time_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"trading_view_mode\": \"{}\",\n  \"dom_data_fidelity\": \"{}\",\n  \"hotkey_profile\": \"{}\",\n  \"hotkeys_modal_open\": {},\n  \"show_drawing_inspector\": {},\n  \"signal_catalog_modal_open\": {},\n  \"confluence_quality\": \"{}\",\n  \"confluence_score\": {},\n  \"mc_validity\": \"{}\",\n  \"mc_simulations\": {},\n  \"mc_var_95_pct\": {},\n  \"mc_cvar_95_pct\": {},\n  \"mc_prob_profit_pct\": {},\n  \"show_mc_fan_on_equity\": {},\n  \"custom_rule_clause_count\": {},\n  \"alert_cooldown_rules\": {},\n  \"snapshot_named_count\": {},\n  \"snapshot_auto_ring_count\": {},\n  \"snapshot_quarantined\": {},\n  \"raw_price_min\": {:.2},\n  \"raw_price_max\": {:.2}\n}}\n",
+                "{{\n  \"symbol\": \"{}\",\n  \"timeframe\": \"{}\",\n  \"base_timeframe\": \"{}\",\n  \"data_source\": \"{}\",\n  \"available_symbols\": [{}],\n  \"base_candles\": {},\n  \"total_candles\": {},\n  \"culled_candles\": {},\n  \"rendered_candles\": {},\n  \"conflation_factor\": {},\n  \"bar_spacing\": {:.6},\n  \"right_offset\": {:.6},\n  \"scale_mode\": \"{}\",\n  \"auto_scale\": {},\n  \"pane_count\": {},\n  \"active_overlay_count\": {},\n  \"drawing_count\": {},\n  \"active_drawing_tool\": \"{}\",\n  \"selected_drawing_id\": {},\n  \"magnet_mode\": \"{}\",\n  \"replay_active\": {},\n  \"replay_status\": \"{}\",\n  \"replay_base_cursor\": {},\n  \"replay_step_unit\": \"{}\",\n  \"show_trading_panel\": {},\n  \"show_scanner_dock\": {},\n  \"show_alerts_panel\": {},\n  \"show_strategy_panel\": {},\n  \"show_journal_panel\": {},\n  \"show_equity_pane\": {},\n  \"equity_pane_source\": \"{}\",\n  \"equity_pane_active\": {},\n  \"show_vwap\": {},\n  \"show_vrvp\": {},\n  \"show_rs\": {},\n  \"show_compare_overlay\": {},\n  \"compare_benchmark\": {},\n  \"vrvp_poc_price\": {},\n  \"active_frvp_count\": {},\n  \"rs_stretch\": {:.3},\n  \"grid_layout\": \"{}\",\n  \"grid_slot_count\": {},\n  \"active_chart_slot\": {},\n  \"sync_crosshair\": {},\n  \"sync_time_range\": {},\n  \"show_ichimoku\": {},\n  \"ichimoku_active\": {},\n  \"show_cvd\": {},\n  \"cvd_reset_mode\": \"{}\",\n  \"cvd_pane_active\": {},\n  \"cvd_stretch\": {:.3},\n  \"saved_template_count\": {},\n  \"vwap_anchor_mode\": \"{}\",\n  \"show_market_profile\": {},\n  \"market_profile_active\": {},\n  \"scanner_tab\": \"{}\",\n  \"breadth_participating_count\": {},\n  \"vn30_participating_count\": {},\n  \"money_flow_buy_pct\": {:.2},\n  \"cvd_axis_format_mode\": \"{}\",\n  \"pinned_crosshair_timestamp\": {},\n  \"active_venue\": \"{}\",\n  \"journal_total_entries\": {},\n  \"journal_visible_entries\": {},\n  \"journal_discipline_pct\": {:.2},\n  \"wfo_verdict\": {},\n  \"wfo_wfe_pct\": {},\n  \"portfolio_return_pct\": {:.4},\n  \"portfolio_dd_reduction_pct\": {:.4},\n  \"show_backtest_trades\": {},\n  \"rendered_backtest_trades\": {},\n  \"backtest_preset\": {},\n  \"backtest_trade_count\": {},\n  \"backtest_return_pct\": {:.4},\n  \"backtest_max_dd_pct\": {:.4},\n  \"backtest_sharpe\": {},\n  \"backtest_robustness\": {},\n  \"command_palette_open\": {},\n  \"alert_rule_count\": {},\n  \"alert_trigger_count\": {},\n  \"active_alert_lines\": {},\n  \"rendered_alert_markers\": {},\n  \"scanner_signal_revealed\": {},\n  \"active_price_lines\": {},\n  \"rendered_fill_markers\": {},\n  \"equity\": {:.2},\n  \"net_pnl\": {:.2},\n  \"fill_count\": {},\n  \"closed_trade_count\": {},\n  \"pending_order_count\": {},\n  \"open_position_side\": {},\n  \"stretches\": [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}],\n  \"base_value\": {:.4},\n  \"screenshot_px\": [{}, {}],\n  \"outer_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"plot_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"price_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"time_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"trading_view_mode\": \"{}\",\n  \"dom_data_fidelity\": \"{}\",\n  \"hotkey_profile\": \"{}\",\n  \"hotkeys_modal_open\": {},\n  \"show_drawing_inspector\": {},\n  \"signal_catalog_modal_open\": {},\n  \"confluence_quality\": \"{}\",\n  \"confluence_score\": {},\n  \"mc_validity\": \"{}\",\n  \"mc_simulations\": {},\n  \"mc_var_95_pct\": {},\n  \"mc_cvar_95_pct\": {},\n  \"mc_prob_profit_pct\": {},\n  \"show_mc_fan_on_equity\": {},\n  \"custom_rule_clause_count\": {},\n  \"alert_cooldown_rules\": {},\n  \"snapshot_named_count\": {},\n  \"snapshot_auto_ring_count\": {},\n  \"snapshot_quarantined\": {},\n  \"session_debrief_modal_open\": {},\n  \"sl_adherence_pct\": {},\n  \"blind_practice_lookback_bars\": {},\n  \"saved_practice_sessions\": {},\n  \"saved_scan_snapshots\": {},\n  \"multi_strategy_curve_count\": {},\n  \"manifest_digest_hex\": {},\n  \"raw_price_min\": {:.2},\n  \"raw_price_max\": {:.2}\n}}\n",
                 self.symbol,
                 self.timeframe,
                 self.base_timeframe,
@@ -22704,22 +25057,15 @@ impl SumiWorkstationApp {
                     .as_ref()
                     .and_then(|c| c.health.as_ref().map(|h| h.composite_score))
                     .map_or_else(|| "null".to_owned(), |v| format!("{v:.4}")),
-                self.monte_carlo_report
-                    .as_ref()
-                    .map_or("NONE", |m| m.validity.code()),
-                self.monte_carlo_report
-                    .as_ref()
-                    .map_or(0, |m| m.config.simulations),
-                self.monte_carlo_report
-                    .as_ref()
+                mc_ref.map_or("NONE", |m| m.validity.code()),
+                mc_ref.map_or(0, |m| m.config.simulations),
+                mc_ref
                     .and_then(|m| m.metrics.map(|x| x.max_drawdown_var_95_pct))
                     .map_or_else(|| "null".to_owned(), |v| format!("{v:.4}")),
-                self.monte_carlo_report
-                    .as_ref()
+                mc_ref
                     .and_then(|m| m.metrics.map(|x| x.max_drawdown_cvar_95_pct))
                     .map_or_else(|| "null".to_owned(), |v| format!("{v:.4}")),
-                self.monte_carlo_report
-                    .as_ref()
+                mc_ref
                     .and_then(|m| m.metrics.map(|x| x.prob_of_profit_pct))
                     .map_or_else(|| "null".to_owned(), |v| format!("{v:.4}")),
                 self.show_mc_fan_on_equity,
@@ -22735,6 +25081,13 @@ impl SumiWorkstationApp {
                 self.snapshot_store.named_slots.len(),
                 self.snapshot_store.auto_ring.len(),
                 self.snapshot_store.last_quarantine.is_some(),
+                self.show_session_debrief_modal,
+                sl_adh_json,
+                self.blind_practice_lookback_bars,
+                self.practice_session_store.slots.len(),
+                self.scan_snapshot_store.slots.len(),
+                ms_curve_count,
+                manifest_hex_json,
                 rep.bounds.raw_min,
                 rep.bounds.raw_max,
             );
@@ -26255,6 +28608,267 @@ mod tests {
                 .iter()
                 .any(|cmd| matches!(cmd, egui::OutputCommand::CopyText(s) if s.starts_with("event_id,alert_id,"))),
             "ExportAlertsCsv must copy the exported CSV payload to platform clipboard"
+        );
+    }
+
+    #[test]
+    fn r17_workstation_1click_120b_scanner_reset_practice_debrief_modal_and_multistrategy_ui() {
+        let mut app = SumiWorkstationApp::default();
+        assert_eq!(
+            app.blind_practice_lookback_bars,
+            INSTITUTIONAL_BLIND_PRACTICE_PRE_ROLL_BARS
+        );
+
+        // 1. Launch 120-bar BlindPractice from VN30F1M Scanner hit
+        app.select_watchlist_instrument(DataSourcePreset::IntradayVn30F1m, "VN30F1M");
+        let _ = app.set_timeframe(Timeframe::M5);
+        app.sync_scanner_caches();
+        let hit = app
+            .raw_historical_hits_cache
+            .iter()
+            .find(|h| h.symbol == "VN30F1M" && h.bar_index >= 130)
+            .or_else(|| {
+                app.raw_historical_hits_cache
+                    .iter()
+                    .find(|h| h.symbol == "VN30F1M")
+            })
+            .cloned()
+            .expect("VN30F1M historical hit");
+
+        assert!(app.start_scanner_signal_replay_with_lookback(
+            hit.clone(),
+            ScannerReplayIntent::BlindPractice,
+            INSTITUTIONAL_BLIND_PRACTICE_PRE_ROLL_BARS,
+        ));
+        assert!(app.replay.is_active());
+        let cutoff0 = app.replay.cutoff_timestamp(&app.base_candles);
+        let s_ctx = app.scanner_context.as_ref().expect("scanner context set");
+        assert!(
+            s_ctx.revealed_signal(cutoff0).is_none(),
+            "signal hidden during pre-roll"
+        );
+        assert!(s_ctx.pre_roll_bars().unwrap_or(0) >= 1);
+
+        // 2. Place a drawing + alert + paper trade + decision note, sync journal, then call `reset_practice_session()`
+        let cur_idx = app.current_trading_cursor_base_index();
+        let px = app.base_candles[cur_idx].close;
+        let draw_id = app
+            .drawings
+            .add_drawing(
+                DrawingPaneTarget::Main,
+                DrawingGeometry::HorizontalLine {
+                    anchor: DrawingAnchor::with_timestamp(0.0, px, app.candles[0].timestamp as f64),
+                },
+                Some(DrawingStyle::default_for_tool(DrawingTool::HorizontalLine)),
+            )
+            .expect("drawing added");
+        let _ = app.alerts.add_alert(
+            "VN30F1M",
+            Timeframe::M5,
+            AlertCondition::PriceLevel {
+                price: px * 1.01,
+                direction: CrossDirection::CrossAbove,
+            },
+            AlertFrequency::Once,
+            None,
+            &app.base_candles,
+            cur_idx,
+            None,
+            Some(&app.drawings),
+        );
+        app.trading
+            .submit_order(
+                OrderRequest {
+                    side: OrderSide::Buy,
+                    kind: OrderKind::Market,
+                    quantity: 2.0,
+                    stop_loss: Some(px * 0.98),
+                    take_profit: Some(px * 1.04),
+                },
+                &app.base_candles,
+                cur_idx,
+            )
+            .unwrap();
+        let _ = app.step_replay_forward(3);
+        app.flatten_open_position().unwrap();
+        assert_eq!(app.sync_paper_trades_to_journal(), 1);
+        app.decision_draft_note = "Test bar note".to_owned();
+        let _ = app.record_decision_note_at_cursor();
+        assert_eq!(app.practice_decisions.entries.len(), 1);
+
+        let saved_cursor = app.replay.base_cursor_index;
+        app.reset_practice_session();
+        assert_eq!(app.trading.closed_trades().len(), 0);
+        assert_eq!(app.practice_decisions.entries.len(), 0);
+        assert_eq!(
+            app.journal
+                .entries
+                .iter()
+                .filter(|e| matches!(e.source, JournalEntrySource::PaperTrade { .. }))
+                .count(),
+            0,
+            "reset_practice_session must prune paper trades from TradeJournalStore"
+        );
+        assert_eq!(
+            app.replay.base_cursor_index, saved_cursor,
+            "Replay cursor preserved"
+        );
+        assert!(
+            app.drawings.drawings.iter().any(|d| d.id == draw_id),
+            "Drawings preserved"
+        );
+        assert_eq!(app.alerts.rules.len(), 1, "Alerts preserved");
+
+        // 3. `SessionDebriefModal` wheel isolation, compact viewport fit, and `Escape` close
+        app.open_session_debrief_modal();
+        assert!(app.show_session_debrief_modal);
+        let ctx = egui::Context::default();
+        let bs_before = app.viewport.time_scale.bar_spacing();
+        let mut out_deb = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(960.0, 640.0))),
+                events: vec![
+                    egui::Event::PointerMoved(Pos2::new(24.0, 24.0)),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: Vec2::new(0.0, 60.0),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out_deb.textures_delta.clear();
+        assert!((app.viewport.time_scale.bar_spacing() - bs_before).abs() < 1e-12);
+        let d_rect = app.last_debrief_modal_rect.expect("debrief modal rect");
+        assert!(d_rect.bottom() <= 641.0 && d_rect.top() >= -1.0);
+
+        let mut out_esc = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(960.0, 640.0))),
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out_esc.textures_delta.clear();
+        assert!(!app.show_session_debrief_modal);
+
+        // 4. `EquityPaneSource::MultiStrategyPct` + `StrategyLabSubTab::Analytics` full UI pass
+        app.exit_replay();
+        app.select_watchlist_instrument(DataSourcePreset::BtcUsdt15mJson, "BTCUSDT");
+        app.open_strategy_lab();
+        app.show_equity_pane = true;
+        app.equity_pane_source = EquityPaneSource::MultiStrategyPct;
+        app.strategy_lab_tab = StrategyLabSubTab::Analytics;
+        let mut out_ms = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out_ms.textures_delta.clear();
+        assert!(app.last_report.unwrap().equity_pane_active);
+        assert_eq!(app.multi_strategy_report.as_ref().unwrap().curves.len(), 9);
+        assert!(app.advanced_analytics_report.is_some());
+    }
+
+    #[test]
+    fn critic_r17_regression_stale_analytics_invalidation_scan_tf_restore_and_store_import() {
+        let mut app = SumiWorkstationApp::default();
+
+        // 1. `[Major-03]`: Populate `multi_strategy_report`, `advanced_analytics_report`, and `monte_carlo_report`
+        // on `BTCUSDT 15m`, then close Strategy Lab / Equity Pane and switch to `VN30F1M 5m` Replay:
+        // ALL three caches MUST be invalidated (`None`) so zero prior-symbol/full-history state leaks!
+        app.select_watchlist_instrument(DataSourcePreset::BtcUsdt15mJson, "BTCUSDT");
+        app.open_strategy_lab();
+        app.equity_pane_source = EquityPaneSource::MultiStrategyPct;
+        app.strategy_lab_tab = StrategyLabSubTab::Analytics;
+        app.sync_backtest_causal();
+        assert!(app.multi_strategy_report.is_some());
+        assert!(app.advanced_analytics_report.is_some());
+        assert!(app.monte_carlo_report.is_some());
+
+        app.show_strategy_panel = false;
+        app.show_equity_pane = false;
+        app.show_backtest_trades = false;
+        app.select_watchlist_instrument(DataSourcePreset::IntradayVn30F1m, "VN30F1M");
+        assert!(app.multi_strategy_report.is_none());
+        assert!(app.advanced_analytics_report.is_none());
+        assert!(app.monte_carlo_report.is_none());
+
+        // 2. `[Minor-03a]`: `restore_saved_scan_snapshot` restores `snap.timeframe` (`15m` -> `5m` -> `15m`)
+        // and `toggle_pin` + RON/JSON `import_scan_store_payload` / `import_practice_store_payload` round-trip!
+        app.set_timeframe(Timeframe::M15).unwrap();
+        let scan_id = app
+            .save_current_scan_snapshot("VN30F 15m Scan", false)
+            .unwrap();
+        assert_eq!(app.scan_snapshot_store.toggle_pin(scan_id), Some(true));
+        let scan_ron = app.scan_snapshot_store.to_ron_pretty();
+        app.set_timeframe(Timeframe::M5).unwrap();
+        assert_eq!(app.active_timeframe, Timeframe::M5);
+        app.scan_snapshot_store.delete_snapshot(scan_id); // cannot delete? No, delete removes even pinned on explicit delete
+        assert!(app.scan_snapshot_store.slots.is_empty());
+        assert_eq!(app.import_scan_store_payload(&scan_ron).unwrap(), 1);
+        assert!(app.scan_snapshot_store.slots[0].pinned);
+        assert!(app.restore_saved_scan_snapshot(scan_id));
+        assert_eq!(
+            app.active_timeframe,
+            Timeframe::M15,
+            "restore_saved_scan_snapshot must restore compatible snap.timeframe"
+        );
+
+        // 3. `[Minor-03b]` & `[Major-02]`: Practice session saved from 1-click `+120b` Blind Practice
+        // preserves `pre_roll_bars == Some(120)` and `pinned` across RON/JSON import, and rejects corrupt payloads!
+        let fpt_ts = app
+            .watchlist_universe
+            .iter()
+            .find(|f| f.symbol == "FPT")
+            .unwrap()
+            .candles[150]
+            .timestamp;
+        let fpt_hit = crate::scanner::HistoricalSignalHit {
+            instrument_id: "Preset:VN30 Basket:FPT".to_owned(),
+            symbol: "FPT".to_owned(),
+            timeframe: Timeframe::D1,
+            bar_index: 150,
+            timestamp: fpt_ts,
+            price: 180.0,
+            signal: ScanSignalKind::MacdBullCross,
+            direction: crate::scanner::SignalDirection::Bullish,
+            regime: crate::scanner::MarketRegime::Uptrend,
+            metric_value: 2.4,
+        };
+        assert!(app.start_scanner_signal_replay_with_lookback(
+            fpt_hit,
+            ScannerReplayIntent::BlindPractice,
+            120,
+        ));
+        let p_id = app
+            .save_current_practice_session("FPT +120b Blind", false)
+            .unwrap();
+        assert_eq!(app.practice_session_store.toggle_pin(p_id), Some(true));
+        let p_json = app.practice_session_store.to_json_pretty();
+        app.practice_session_store.slots.clear();
+        assert!(app.import_practice_store_payload("{ corrupt }").is_err());
+        assert!(app.last_practice_warning.is_some());
+        assert_eq!(app.import_practice_store_payload(&p_json).unwrap(), 1);
+        assert!(app.last_practice_warning.is_none());
+        app.exit_replay();
+        assert!(app.restore_saved_practice_session(p_id));
+        assert!(app.last_practice_warning.is_none());
+        assert_eq!(
+            app.scanner_context.as_ref().and_then(|c| c.pre_roll_bars()),
+            Some(120)
         );
     }
 }

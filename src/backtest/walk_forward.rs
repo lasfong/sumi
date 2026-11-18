@@ -8,7 +8,7 @@ use super::engine::{
     BacktestRunOptions, PrecomputedFeatures, SimulationCarryState, compare_tearsheets_desc,
     is_bucket_incomplete_at_close_for_symbol, normalize_config_for_universe_feed,
     run_backtest_with_options, simulate_window_with_carry, simulate_window_with_features,
-    slice_causal_series_for_options,
+    slice_causal_series_for_symbol_and_options,
 };
 use super::metrics::{BacktestEquityPoint, BacktestTearsheet, BacktestTrade, compute_tearsheet};
 use super::strategy::{
@@ -145,7 +145,8 @@ pub fn run_walk_forward_validation(
     let mut clean_wf = wf_config;
     clean_wf.sanitize();
 
-    let causal_candles = slice_causal_series_for_options(candles, timeframe, options);
+    let causal_candles =
+        slice_causal_series_for_symbol_and_options(Some(&symbol), candles, timeframe, options);
     let n = causal_candles.len();
 
     let alpha = clean_wf.in_sample_ratio / (1.0 - clean_wf.in_sample_ratio);

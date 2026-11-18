@@ -22,6 +22,13 @@ pub struct Position {
     pub take_profit: Option<f64>,
     pub initial_stop_loss: Option<f64>,
     pub initial_risk_amount: Option<f64>,
+    /// Immutable stop-loss attached strictly at `None -> Some(Position)` creation (`Milestone R17 / A2`).
+    /// Never mutated by post-entry `UpdateBrackets` or same-side scale-in fills.
+    #[serde(default)]
+    pub entry_stop_loss: Option<f64>,
+    /// Tamper-proof discipline flag (`true` iff a valid protective stop-loss was attached at initial position open).
+    #[serde(default)]
+    pub had_initial_sl_at_open: bool,
     pub total_entry_qty: f64,
     pub total_entry_notional: f64,
     pub total_entry_fees: f64,
@@ -69,6 +76,10 @@ pub struct ExecutionFill {
     pub timestamp: i64,
 }
 
+const fn default_closed_trade_exit_reason() -> FillReason {
+    FillReason::MarketImmediate
+}
+
 /// Completed round-trip position lifecycle record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClosedTrade {
@@ -77,8 +88,18 @@ pub struct ClosedTrade {
     pub quantity: f64,
     pub entry_price: f64,
     pub exit_price: f64,
+    #[serde(default)]
+    pub entry_base_index: usize,
+    #[serde(default)]
+    pub exit_base_index: usize,
     pub entry_timestamp: i64,
     pub exit_timestamp: i64,
+    #[serde(default = "default_closed_trade_exit_reason")]
+    pub exit_reason: FillReason,
+    #[serde(default)]
+    pub initial_stop_loss: Option<f64>,
+    #[serde(default)]
+    pub had_initial_sl_at_open: bool,
     pub gross_pnl: f64,
     pub total_fees: f64,
     pub net_pnl: f64,
@@ -109,9 +130,23 @@ pub struct PortfolioMetrics {
     pub closed_trade_count: usize,
     pub win_count: usize,
     pub loss_count: usize,
+    #[serde(default)]
+    pub breakeven_count: usize,
     pub win_rate_pct: f64,
+    #[serde(default)]
+    pub avg_return_pct: f64,
     pub profit_factor: Option<f64>,
+    #[serde(default)]
+    pub net_r_multiple: f64,
     pub avg_r_multiple: Option<f64>,
+    #[serde(default)]
+    pub expectancy_pnl: Option<f64>,
+    #[serde(default)]
+    pub total_opened_positions: usize,
+    #[serde(default)]
+    pub sl_adherent_positions: usize,
+    #[serde(default)]
+    pub sl_adherence_pct: Option<f64>,
 }
 
 /// Deterministic user action stored in the command log for bit-exact causal rewind.
@@ -432,6 +467,23 @@ impl TradingSession {
         self.cash_balance + unreal
     }
 
+    /// Restores a saved practice session's configuration, start bar, and causal command log
+    /// onto `base_candles` up to `cursor_base_index` (`Milestone R17 / A3`).
+    pub fn restore_session(
+        &mut self,
+        mut config: AccountConfig,
+        session_start_base_index: usize,
+        commands: Vec<RecordedCommand>,
+        base_candles: &[Candle],
+        cursor_base_index: usize,
+    ) {
+        config.sanitize();
+        self.config = config;
+        self.session_start_base_index = session_start_base_index;
+        self.commands = commands;
+        self.sanitize_and_rebuild(base_candles, cursor_base_index);
+    }
+
     /// Computes a complete snapshot of portfolio performance metrics at `mark_price`.
     #[must_use]
     pub fn metrics(&self, mark_price: f64) -> PortfolioMetrics {
@@ -451,10 +503,20 @@ impl TradingSession {
         let mut loss_count = 0_usize;
         let mut gross_wins = 0.0_f64;
         let mut gross_losses = 0.0_f64;
+        let mut realized_net_sum = 0.0_f64;
+        let mut return_pct_sum = 0.0_f64;
         let mut r_sum = 0.0_f64;
         let mut r_count = 0_usize;
+        let mut sl_adherent_closed = 0_usize;
 
         for t in &self.closed_trades {
+            realized_net_sum += t.net_pnl;
+            if t.return_pct.is_finite() {
+                return_pct_sum += t.return_pct;
+            }
+            if t.had_initial_sl_at_open {
+                sl_adherent_closed += 1;
+            }
             if t.net_pnl > 1e-9 {
                 win_count += 1;
                 gross_wins += t.net_pnl;
@@ -471,8 +533,14 @@ impl TradingSession {
         }
 
         let closed_trade_count = self.closed_trades.len();
+        let breakeven_count = closed_trade_count.saturating_sub(win_count + loss_count);
         let win_rate_pct = if closed_trade_count > 0 {
             ((win_count as f64) / (closed_trade_count as f64)) * 100.0
+        } else {
+            0.0
+        };
+        let avg_return_pct = if closed_trade_count > 0 {
+            return_pct_sum / (closed_trade_count as f64)
         } else {
             0.0
         };
@@ -481,8 +549,27 @@ impl TradingSession {
         } else {
             None
         };
+        let net_r_multiple = if r_count > 0 { r_sum } else { 0.0 };
         let avg_r_multiple = if r_count > 0 {
             Some(r_sum / (r_count as f64))
+        } else {
+            None
+        };
+        let expectancy_pnl = if closed_trade_count > 0 {
+            Some(realized_net_sum / (closed_trade_count as f64))
+        } else {
+            None
+        };
+        let open_count = usize::from(self.open_position.is_some());
+        let open_adherent = usize::from(
+            self.open_position
+                .as_ref()
+                .is_some_and(|p| p.had_initial_sl_at_open),
+        );
+        let total_opened_positions = closed_trade_count + open_count;
+        let sl_adherent_positions = sl_adherent_closed + open_adherent;
+        let sl_adherence_pct = if total_opened_positions > 0 {
+            Some(((sl_adherent_positions as f64) / (total_opened_positions as f64)) * 100.0)
         } else {
             None
         };
@@ -510,9 +597,16 @@ impl TradingSession {
             closed_trade_count,
             win_count,
             loss_count,
+            breakeven_count,
             win_rate_pct,
+            avg_return_pct,
             profit_factor,
+            net_r_multiple,
             avg_r_multiple,
+            expectancy_pnl,
+            total_opened_positions,
+            sl_adherent_positions,
+            sl_adherence_pct,
         }
     }
 
@@ -1155,6 +1249,8 @@ impl TradingSession {
                     take_profit: clean_tp,
                     initial_stop_loss: clean_sl,
                     initial_risk_amount,
+                    entry_stop_loss: clean_sl,
+                    had_initial_sl_at_open: clean_sl.is_some(),
                     total_entry_qty: quantity,
                     total_entry_notional: exec_price * quantity,
                     total_entry_fees: fee,
@@ -1283,8 +1379,13 @@ impl TradingSession {
                 quantity: pos.closed_qty_acc,
                 entry_price: entry_vwap,
                 exit_price: exit_vwap,
+                entry_base_index: pos.opened_base_index,
+                exit_base_index: base_index,
                 entry_timestamp: pos.opened_timestamp,
                 exit_timestamp: timestamp,
+                exit_reason: reason,
+                initial_stop_loss: pos.entry_stop_loss,
+                had_initial_sl_at_open: pos.had_initial_sl_at_open,
                 gross_pnl: pos.realized_gross_pnl_acc,
                 total_fees,
                 net_pnl,

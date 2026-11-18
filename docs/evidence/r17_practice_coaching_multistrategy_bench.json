@@ -1,0 +1,26 @@
+{
+  "milestone": "R17",
+  "overall_pass": true,
+  "environment": {
+    "cpu": "Apple M1",
+    "os": "macos",
+    "arch": "aarch64",
+    "ram_bytes": 17179869184,
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "profile": "release",
+    "viewport_logical_px": [1280, 800],
+    "pixels_per_point": 2.0
+  },
+  "r17_domain_throughput": [
+    { "case_id": "r17_multistrategy_pct_comparison_btc_15m", "description": "UTC bar-close aligned 0% Multi-Strategy Comparison (7 presets + B&H + SPY Bench) on BTCUSDT 15m", "input_units": 1344, "output_items": 9, "median_us": 1253.958, "median_ms": 1.2540, "p95_us": 1347.583, "max_us": 1348.208 },
+    { "case_id": "r17_advanced_tearsheet_analytics_and_manifest", "description": "OutlierImpact + DrawdownPeriods + UTC Year & Signal-Bar MarketRegime slices + MultiPhase Tertiles + SplitMix64 RunManifest", "input_units": 1344, "output_items": 9, "median_us": 252.667, "median_ms": 0.2527, "p95_us": 274.250, "max_us": 341.250 },
+    { "case_id": "r17_debrief_coaching_and_practice_store_json_roundtrip", "description": "Tamper-proof SL Adherence Debrief + Causal DecisionLog + PracticeSessionStore JSON encode/decode & SplitMix64 verify", "input_units": 6, "output_items": 4, "median_us": 46.292, "median_ms": 0.0463, "p95_us": 49.000, "max_us": 54.708 }
+  ],
+  "workstation_r17_workloads": [
+    { "dataset_bars": 75, "workload_id": "r17_fpt_practice_scoreboard_and_debrief_modal", "scale_mode": "Linear", "bar_spacing": 8.00000, "conflation_factor": 1, "culled_bars": 75, "rendered_candles": 75, "paint_shapes": 472, "clipped_primitives": 53, "total_vertices": 23766, "total_indices": 76626, "ui_median_ms": 0.2139, "tessellate_median_ms": 0.1178, "total_cpu_mean_ms": 0.3355, "total_cpu_median_ms": 0.3310, "total_cpu_p95_ms": 0.3765, "total_cpu_p99_ms": 0.3989 },
+    { "dataset_bars": 1344, "workload_id": "r17_btc_15m_multistrategy_pct_and_analytics_slices", "scale_mode": "Linear", "bar_spacing": 0.63864, "conflation_factor": 1, "culled_bars": 1321, "rendered_candles": 1319, "paint_shapes": 574, "clipped_primitives": 56, "total_vertices": 121914, "total_indices": 426282, "ui_median_ms": 0.8777, "tessellate_median_ms": 0.4259, "total_cpu_mean_ms": 1.3274, "total_cpu_median_ms": 1.3052, "total_cpu_p95_ms": 1.4545, "total_cpu_p99_ms": 1.4992 },
+    { "dataset_bars": 960, "workload_id": "r17_vn30f_scanner_1click_120b_and_saved_sessions", "scale_mode": "Linear", "bar_spacing": 8.00000, "conflation_factor": 1, "culled_bars": 62, "rendered_candles": 61, "paint_shapes": 525, "clipped_primitives": 54, "total_vertices": 23906, "total_indices": 84297, "ui_median_ms": 0.3296, "tessellate_median_ms": 0.1232, "total_cpu_mean_ms": 0.4614, "total_cpu_median_ms": 0.4528, "total_cpu_p95_ms": 0.5253, "total_cpu_p99_ms": 0.5578 },
+    { "dataset_bars": 100000, "workload_id": "r17_100k_conflated_multistrategy_pct_and_slices", "scale_mode": "Linear", "bar_spacing": 0.00847, "conflation_factor": 32, "culled_bars": 97101, "rendered_candles": 3033, "paint_shapes": 625, "clipped_primitives": 48, "total_vertices": 51992, "total_indices": 120822, "ui_median_ms": 1.3022, "tessellate_median_ms": 0.1634, "total_cpu_mean_ms": 1.5160, "total_cpu_median_ms": 1.4727, "total_cpu_p95_ms": 1.7997, "total_cpu_p99_ms": 1.8800 },
+    { "dataset_bars": 200000, "workload_id": "r17_quad_2x2_50k_practice_and_multistrategy_stress", "scale_mode": "Linear", "bar_spacing": 0.00749, "conflation_factor": 64, "culled_bars": 193444, "rendered_candles": 3020, "paint_shapes": 781, "clipped_primitives": 124, "total_vertices": 99234, "total_indices": 223704, "ui_median_ms": 1.6610, "tessellate_median_ms": 0.3666, "total_cpu_mean_ms": 2.0821, "total_cpu_median_ms": 2.0362, "total_cpu_p95_ms": 2.3736, "total_cpu_p99_ms": 2.4219 }
+  ]
+}

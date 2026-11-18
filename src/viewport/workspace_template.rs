@@ -817,7 +817,7 @@ fn truncate_utf8(s: &mut String, max_bytes: usize) {
 // Pretty Encoders (`JSON` & `RON`)
 // ============================================================================
 
-fn escape_str_into(out: &mut String, s: &str) {
+pub(crate) fn escape_str_into(out: &mut String, s: &str) {
     out.push('"');
     for ch in s.chars() {
         match ch {
@@ -837,7 +837,7 @@ fn escape_str_into(out: &mut String, s: &str) {
     out.push('"');
 }
 
-fn fmt_f64(v: f64) -> String {
+pub(crate) fn fmt_f64(v: f64) -> String {
     let safe = if v.is_finite() { v } else { 0.0 };
     format!("{safe:?}")
 }
@@ -1323,7 +1323,7 @@ fn encode_ron_stretches(out: &mut String, st: &WorkspacePaneStretches) {
 // ============================================================================
 
 #[derive(Debug, Clone)]
-enum DocValue {
+pub(crate) enum DocValue {
     Struct(Vec<(String, DocValue)>),
     Array(Vec<DocValue>),
     String(String),
@@ -1792,7 +1792,7 @@ impl<'a> Scanner<'a> {
     }
 }
 
-fn strip_leading_ws_and_comments(mut src: &str) -> Result<&str, WorkspaceTemplateError> {
+pub(crate) fn strip_leading_ws_and_comments(mut src: &str) -> Result<&str, WorkspaceTemplateError> {
     loop {
         src = src.trim_start();
         if let Some(rest) = src.strip_prefix("//") {
@@ -1827,7 +1827,7 @@ fn strip_leading_ws_and_comments(mut src: &str) -> Result<&str, WorkspaceTemplat
     Ok(src)
 }
 
-fn parse_json_doc(input: &str) -> Result<DocValue, WorkspaceTemplateError> {
+pub(crate) fn parse_json_doc(input: &str) -> Result<DocValue, WorkspaceTemplateError> {
     if input.len() > MAX_SNAPSHOT_PAYLOAD_BYTES {
         return Err(WorkspaceTemplateError::PayloadTooLarge(input.len()));
     }
@@ -1843,7 +1843,7 @@ fn parse_json_doc(input: &str) -> Result<DocValue, WorkspaceTemplateError> {
     Ok(doc)
 }
 
-fn parse_ron_doc(input: &str) -> Result<DocValue, WorkspaceTemplateError> {
+pub(crate) fn parse_ron_doc(input: &str) -> Result<DocValue, WorkspaceTemplateError> {
     if input.len() > MAX_SNAPSHOT_PAYLOAD_BYTES {
         return Err(WorkspaceTemplateError::PayloadTooLarge(input.len()));
     }
@@ -1988,7 +1988,7 @@ impl WorkspaceTemplate {
     }
 }
 
-fn validate_struct_fields(
+pub(crate) fn validate_struct_fields(
     fields: &[(String, DocValue)],
     parent: &str,
     allowed: &[&str],
@@ -2011,11 +2011,11 @@ fn validate_struct_fields(
     Ok(())
 }
 
-fn find_field<'a>(fields: &'a [(String, DocValue)], key: &str) -> Option<&'a DocValue> {
+pub(crate) fn find_field<'a>(fields: &'a [(String, DocValue)], key: &str) -> Option<&'a DocValue> {
     fields.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
 
-fn expect_struct<'a>(
+pub(crate) fn expect_struct<'a>(
     val: &'a DocValue,
     field: &str,
 ) -> Result<&'a [(String, DocValue)], WorkspaceTemplateError> {
@@ -2028,7 +2028,7 @@ fn expect_struct<'a>(
     }
 }
 
-fn expect_f64(val: &DocValue, field: &str) -> Result<f64, WorkspaceTemplateError> {
+pub(crate) fn expect_f64(val: &DocValue, field: &str) -> Result<f64, WorkspaceTemplateError> {
     match val {
         DocValue::Number(v) if v.is_finite() => Ok(*v),
         DocValue::Number(_) => Err(WorkspaceTemplateError::NonFiniteNumber(field.to_owned())),
@@ -2048,7 +2048,7 @@ fn expect_f32(val: &DocValue, field: &str) -> Result<f32, WorkspaceTemplateError
     }
 }
 
-fn expect_usize(val: &DocValue, field: &str) -> Result<usize, WorkspaceTemplateError> {
+pub(crate) fn expect_usize(val: &DocValue, field: &str) -> Result<usize, WorkspaceTemplateError> {
     let n = expect_f64(val, field)?;
     let max_exact = ((1_u64 << 53) - 1) as f64;
     if n < 0.0 || n.fract() != 0.0 || n > max_exact || (n as u128) > (usize::MAX as u128) {
@@ -2060,7 +2060,7 @@ fn expect_usize(val: &DocValue, field: &str) -> Result<usize, WorkspaceTemplateE
     Ok(n as usize)
 }
 
-fn expect_bool(val: &DocValue, field: &str) -> Result<bool, WorkspaceTemplateError> {
+pub(crate) fn expect_bool(val: &DocValue, field: &str) -> Result<bool, WorkspaceTemplateError> {
     match val {
         DocValue::Bool(b) => Ok(*b),
         _ => Err(WorkspaceTemplateError::InvalidField {
@@ -2070,7 +2070,7 @@ fn expect_bool(val: &DocValue, field: &str) -> Result<bool, WorkspaceTemplateErr
     }
 }
 
-fn expect_string(val: &DocValue, field: &str) -> Result<String, WorkspaceTemplateError> {
+pub(crate) fn expect_string(val: &DocValue, field: &str) -> Result<String, WorkspaceTemplateError> {
     match val {
         DocValue::String(s) => Ok(s.clone()),
         _ => Err(WorkspaceTemplateError::InvalidField {
@@ -2080,7 +2080,7 @@ fn expect_string(val: &DocValue, field: &str) -> Result<String, WorkspaceTemplat
     }
 }
 
-fn expect_label(val: &DocValue, field: &str) -> Result<String, WorkspaceTemplateError> {
+pub(crate) fn expect_label(val: &DocValue, field: &str) -> Result<String, WorkspaceTemplateError> {
     match val {
         DocValue::String(s) | DocValue::Ident(s) => Ok(s.clone()),
         _ => Err(WorkspaceTemplateError::InvalidField {
@@ -2090,7 +2090,7 @@ fn expect_label(val: &DocValue, field: &str) -> Result<String, WorkspaceTemplate
     }
 }
 
-fn expect_opt_string(
+pub(crate) fn expect_opt_string(
     val: &DocValue,
     field: &str,
 ) -> Result<Option<String>, WorkspaceTemplateError> {
@@ -2423,7 +2423,7 @@ fn decode_stretches(val: &DocValue) -> Result<WorkspacePaneStretches, WorkspaceT
     Ok(st)
 }
 
-fn parse_data_source(raw: &str) -> Option<DataSourcePreset> {
+pub(crate) fn parse_data_source(raw: &str) -> Option<DataSourcePreset> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "syntheticvnindex" | "vnindex synth" => Some(DataSourcePreset::SyntheticVnindex),
         "intradayvn30f1m" | "vn30f1m 1m" => Some(DataSourcePreset::IntradayVn30F1m),
@@ -2436,7 +2436,7 @@ fn parse_data_source(raw: &str) -> Option<DataSourcePreset> {
     }
 }
 
-fn parse_timeframe(raw: &str) -> Option<Timeframe> {
+pub(crate) fn parse_timeframe(raw: &str) -> Option<Timeframe> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "m1" | "1m" => Some(Timeframe::M1),
         "m5" | "5m" => Some(Timeframe::M5),
@@ -2663,7 +2663,7 @@ fn decode_hotkey_profile_id(
 // Named Workspace Snapshot Checkpoints, Diff Preview & Quarantine Recovery (`Milestone R16 / Wave 15`)
 // ============================================================================
 
-fn splitmix64_hash_bytes(bytes: &[u8]) -> u64 {
+pub(crate) fn splitmix64_hash_bytes(bytes: &[u8]) -> u64 {
     let mut state = 0xCBF2_9CE4_8422_2325_u64;
     let mix = |st: &mut u64, word: u64| {
         let mut z = st.wrapping_add(word).wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -3355,7 +3355,7 @@ pub fn recover_or_parse_snapshot_store(
     }
 }
 
-fn expect_u64_safe(val: &DocValue, field: &str) -> Result<u64, WorkspaceTemplateError> {
+pub(crate) fn expect_u64_safe(val: &DocValue, field: &str) -> Result<u64, WorkspaceTemplateError> {
     let f = expect_f64(val, field)?;
     if !f.is_finite() || f < 0.0 || f.fract() != 0.0 || f > (MAX_SAFE_DOC_U64 as f64) {
         return Err(WorkspaceTemplateError::InvalidField {
@@ -3364,6 +3364,20 @@ fn expect_u64_safe(val: &DocValue, field: &str) -> Result<u64, WorkspaceTemplate
         });
     }
     Ok(f as u64)
+}
+
+pub(crate) fn expect_i64_safe(val: &DocValue, field: &str) -> Result<i64, WorkspaceTemplateError> {
+    let f = expect_f64(val, field)?;
+    let max_abs = MAX_SAFE_DOC_U64 as f64;
+    if !f.is_finite() || f.fract() != 0.0 || !(-max_abs..=max_abs).contains(&f) {
+        return Err(WorkspaceTemplateError::InvalidField {
+            field: field.to_owned(),
+            reason: format!(
+                "expected safe integer in [-{MAX_SAFE_DOC_U64}, {MAX_SAFE_DOC_U64}], got {f}"
+            ),
+        });
+    }
+    Ok(f as i64)
 }
 
 fn decode_snapshot_slot_array(

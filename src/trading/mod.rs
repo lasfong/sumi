@@ -4,11 +4,21 @@
 //! symmetric `Long` and `Short` net-position accounting with exact fee conservation across scale-ins and
 //! partial closes, and command-log prefix replay for bit-exact state reconstruction on Bar Replay rewind.
 
+pub mod coaching;
 pub mod ladder;
 pub mod orders;
 pub mod portfolio;
 #[cfg(test)]
 mod tests;
+
+pub use coaching::{
+    CoachingCallout, CoachingSeverity, MAX_DECISION_NOTE_BYTES, MAX_DECISION_NOTES,
+    MAX_SAVED_PRACTICE_SESSIONS, MAX_SAVED_SCAN_SNAPSHOTS, MAX_SNAPSHOT_HITS, MistakeCostBreakdown,
+    PRACTICE_STORE_SCHEMA_VERSION, PracticeDecisionAction, PracticeDecisionLog,
+    PracticeDecisionNote, PracticeScoreboardSummary, PracticeSessionStore,
+    SCAN_STORE_SCHEMA_VERSION, SavedPracticeSession, SavedScanSnapshot, ScanSnapshotStore,
+    SessionDebriefReport, SetupEdgeBreakdown,
+};
 
 pub use ladder::{
     DOM_LADDER_DATA_FIDELITY, DomLadderConfig, DomLadderError, DomLadderRow, DomLadderSnapshot,

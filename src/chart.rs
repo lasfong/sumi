@@ -10,7 +10,10 @@ use crate::alerts::{
     AlertCondition, AlertEngine, AlertStatus, AlertTriggerEvent, CrossDirection,
     drawing_line_value_at_bar,
 };
-use crate::backtest::{BacktestExitReason, BacktestRunResult, BacktestTrade, MonteCarloFanSeries};
+use crate::backtest::{
+    BacktestExitReason, BacktestRunResult, BacktestTrade, ComparisonCurveKind, MonteCarloFanSeries,
+    MultiStrategyComparisonReport, StrategyPresetKind,
+};
 use crate::data::Timeframe;
 use crate::drawings::{
     Drawing, DrawingColorPreset, DrawingGeometry, DrawingId, DrawingInteractionPhase,
@@ -1265,6 +1268,7 @@ pub struct ChartReplayTradingOverlay<'a> {
     pub alert_engine: Option<&'a AlertEngine>,
     pub backtest_result: Option<&'a BacktestRunResult>,
     pub equity_override: Option<EquityCurveOverlay<'a>>,
+    pub multi_strategy_overlay: Option<&'a MultiStrategyComparisonReport>,
     pub monte_carlo_fan: Option<&'a MonteCarloFanSeries>,
     pub show_equity_pane: bool,
     pub show_backtest_trades_on_chart: bool,
@@ -1440,7 +1444,9 @@ fn render_workstation_chart_inner(
 
     let mut active_osc_ids = indicators.active_oscillator_panes();
     let equity_pane_active = replay_trading.show_equity_pane
-        && (replay_trading.equity_override.is_some() || replay_trading.backtest_result.is_some());
+        && (replay_trading.multi_strategy_overlay.is_some()
+            || replay_trading.equity_override.is_some()
+            || replay_trading.backtest_result.is_some());
     if equity_pane_active && !active_osc_ids.contains(&OscillatorPaneId::Equity) {
         active_osc_ids.push(OscillatorPaneId::Equity);
     }
@@ -1687,18 +1693,26 @@ fn render_workstation_chart_inner(
         candles[init_strict.start].close
     };
     for osc in &multi_layout.oscillators {
-        if viewport
-            .oscillator_price_scale(osc.id)
-            .price_range()
-            .is_none()
-            || viewport.oscillator_price_scale(osc.id).is_auto_scale()
-        {
+        let ps = viewport.oscillator_price_scale_mut(osc.id);
+        if osc.id == OscillatorPaneId::Equity {
+            if replay_trading.multi_strategy_overlay.is_some() {
+                if ps.is_log() {
+                    ps.set_mode(crate::viewport::PriceScaleMode::Normal);
+                    ps.reset_auto_scale();
+                }
+                ps.set_format_mode(crate::viewport::PriceAxisFormatMode::SignedPercentage);
+            } else {
+                ps.set_format_mode(crate::viewport::PriceAxisFormatMode::Standard);
+            }
+        }
+        if ps.price_range().is_none() || ps.is_auto_scale() {
             refresh_oscillator_autoscale(
                 osc.id,
-                viewport.oscillator_price_scale_mut(osc.id),
+                ps,
                 indicator_cache,
                 replay_trading.backtest_result,
                 replay_trading.equity_override,
+                replay_trading.multi_strategy_overlay,
                 replay_trading.monte_carlo_fan,
                 init_strict.clone(),
             );
@@ -1903,12 +1917,25 @@ fn render_workstation_chart_inner(
         compute_compare_viewport_scale(candles, s, idx, strict_range.clone())
     });
     for osc in &multi_layout.oscillators {
+        let ps = viewport.oscillator_price_scale_mut(osc.id);
+        if osc.id == OscillatorPaneId::Equity {
+            if replay_trading.multi_strategy_overlay.is_some() {
+                if ps.is_log() {
+                    ps.set_mode(crate::viewport::PriceScaleMode::Normal);
+                    ps.reset_auto_scale();
+                }
+                ps.set_format_mode(crate::viewport::PriceAxisFormatMode::SignedPercentage);
+            } else {
+                ps.set_format_mode(crate::viewport::PriceAxisFormatMode::Standard);
+            }
+        }
         refresh_oscillator_autoscale(
             osc.id,
-            viewport.oscillator_price_scale_mut(osc.id),
+            ps,
             indicator_cache,
             replay_trading.backtest_result,
             replay_trading.equity_override,
+            replay_trading.multi_strategy_overlay,
             replay_trading.monte_carlo_fan,
             strict_range.clone(),
         );
@@ -1944,15 +1971,19 @@ fn render_workstation_chart_inner(
         1.0,
     );
 
-    let equity_base_val = replay_trading
-        .equity_override
-        .map(|ov| ov.baseline_cash.max(1.0))
-        .or_else(|| {
-            replay_trading
-                .backtest_result
-                .map(|bt| bt.config.initial_cash.max(1.0))
-        })
-        .unwrap_or(100_000.0);
+    let equity_base_val = if replay_trading.multi_strategy_overlay.is_some() {
+        1.0
+    } else {
+        replay_trading
+            .equity_override
+            .map(|ov| ov.baseline_cash.max(1.0))
+            .or_else(|| {
+                replay_trading
+                    .backtest_result
+                    .map(|bt| bt.config.initial_cash.max(1.0))
+            })
+            .unwrap_or(100_000.0)
+    };
 
     #[derive(Clone, Copy)]
     enum HoveredPane {
@@ -2626,14 +2657,18 @@ fn render_workstation_chart_inner(
         let mut osc_occluding_ys = [0.0_f32; 2];
         let mut osc_occluding_len = 0_usize;
         if osc.id == OscillatorPaneId::Equity {
-            let baseline = replay_trading
-                .equity_override
-                .map(|ov| ov.baseline_cash.max(1.0))
-                .or_else(|| {
-                    replay_trading
-                        .backtest_result
-                        .map(|bt| bt.config.initial_cash.max(1.0))
-                });
+            let baseline = if replay_trading.multi_strategy_overlay.is_some() {
+                Some(0.0)
+            } else {
+                replay_trading
+                    .equity_override
+                    .map(|ov| ov.baseline_cash.max(1.0))
+                    .or_else(|| {
+                        replay_trading
+                            .backtest_result
+                            .map(|bt| bt.config.initial_cash.max(1.0))
+                    })
+            };
             if let Some(bl) = baseline
                 && let Some(base_sy) = osc_vp.price_to_screen_y(bl)
             {
@@ -2682,7 +2717,51 @@ fn render_workstation_chart_inner(
 
         let osc_painter = painter.with_clip_rect(osc.plot_rect);
         if osc.id == OscillatorPaneId::Equity {
-            if let Some(eq_ov) = replay_trading.equity_override {
+            if let Some(ms) = replay_trading.multi_strategy_overlay {
+                let ms_crosshair_mark: Option<(usize, f32)> = if let Some((_, slot_idx, cross_x)) =
+                    active_cross_state
+                {
+                    if slot_idx >= 0 && (slot_idx as usize) < candles.len() {
+                        let idx = slot_idx as usize;
+                        let hud_idx = conflated_candle_at(candles, idx, conflation_factor)
+                            .map_or(idx, |b| b.end_index);
+                        Some((hud_idx, cross_x))
+                    } else {
+                        None
+                    }
+                } else if config.show_crosshair
+                    && let Some(l_idx) = linked_bar_idx
+                    && l_idx < candles.len()
+                {
+                    let snapped_sx = if conflation_factor > 1 {
+                        conflated_candle_at(candles, l_idx, conflation_factor)
+                            .and_then(|b| osc_vp.float_index_to_screen_x(b.center_logical_index))
+                            .or_else(|| osc_vp.index_to_screen_x(l_idx as i64))
+                    } else {
+                        osc_vp.index_to_screen_x(l_idx as i64)
+                    };
+                    let hud_idx = conflated_candle_at(candles, l_idx, conflation_factor)
+                        .map_or(l_idx, |b| b.end_index);
+                    snapped_sx
+                        .map(|sx| sx as f32)
+                        .filter(|&cx| cx >= osc.plot_rect.left() && cx <= osc.plot_rect.right())
+                        .map(|cx| (hud_idx, cx))
+                } else {
+                    None
+                };
+                paint_multi_strategy_equity_pane(
+                    &painter,
+                    &osc_painter,
+                    osc.plot_rect,
+                    osc.price_axis_rect,
+                    ms,
+                    candles.len(),
+                    culling_range.clone(),
+                    conflation_factor,
+                    &osc_vp,
+                    ms_crosshair_mark,
+                );
+            } else if let Some(eq_ov) = replay_trading.equity_override {
                 paint_equity_baseline_pane(
                     &painter,
                     &osc_painter,
@@ -3062,6 +3141,7 @@ fn render_workstation_chart_inner(
             indicator_cache,
             replay_trading.backtest_result,
             replay_trading.equity_override,
+            replay_trading.multi_strategy_overlay,
             replay_trading.monte_carlo_fan,
             replay_trading.rs_benchmark_label,
             hud_series_index,
@@ -6474,6 +6554,166 @@ fn paint_oos_split_marker(
     }
 }
 
+#[inline]
+#[must_use]
+pub fn multi_strategy_curve_color(kind: ComparisonCurveKind) -> Color32 {
+    match kind {
+        ComparisonCurveKind::StrategyPreset(StrategyPresetKind::SmaEmaTrendCross) => {
+            Color32::from_rgb(56, 189, 248)
+        }
+        ComparisonCurveKind::StrategyPreset(StrategyPresetKind::RsiMeanReversion) => {
+            Color32::from_rgb(168, 85, 247)
+        }
+        ComparisonCurveKind::StrategyPreset(StrategyPresetKind::MacdMomentum) => {
+            Color32::from_rgb(34, 197, 94)
+        }
+        ComparisonCurveKind::StrategyPreset(StrategyPresetKind::BollingerSqueezeBreakout) => {
+            Color32::from_rgb(249, 115, 22)
+        }
+        ComparisonCurveKind::StrategyPreset(StrategyPresetKind::DonchianAtrBreakout) => {
+            Color32::from_rgb(236, 72, 153)
+        }
+        ComparisonCurveKind::StrategyPreset(StrategyPresetKind::RsiBollingerConfluence) => {
+            Color32::from_rgb(45, 212, 191)
+        }
+        ComparisonCurveKind::StrategyPreset(StrategyPresetKind::CustomSignalRules) => {
+            Color32::from_rgb(250, 204, 21)
+        }
+        ComparisonCurveKind::AssetBuyAndHold => Color32::from_rgb(226, 232, 240),
+        ComparisonCurveKind::MarketBenchmark => Color32::from_rgb(244, 63, 94),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_multi_strategy_equity_pane(
+    axis_painter: &egui::Painter,
+    plot_painter: &egui::Painter,
+    plot_rect: Rect,
+    price_axis_rect: Rect,
+    report: &MultiStrategyComparisonReport,
+    candle_len: usize,
+    culling_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    vp: &PaneViewport<'_>,
+    crosshair_mark: Option<(usize, f32)>,
+) {
+    // 1. `0.00%` horizontal baseline + right-axis badge
+    if let Some(base_sy) = vp.price_to_screen_y(0.0) {
+        let base_y = base_sy as f32;
+        if base_y >= plot_rect.top() && base_y <= plot_rect.bottom() {
+            let mut ref_mesh = Mesh::with_texture(egui::TextureId::default());
+            append_horizontal_styled_line_mesh(
+                &mut ref_mesh,
+                plot_rect.left(),
+                plot_rect.right(),
+                base_y,
+                1.0,
+                palette::EQUITY_BASELINE_REF.gamma_multiply(0.70),
+                LineDashStyle::Dashed,
+            );
+            if !ref_mesh.is_empty() {
+                plot_painter.add(Shape::mesh(ref_mesh));
+            }
+            if let Some(pill_y) = clamp_axis_pill_center_y(base_y, price_axis_rect, 8.0) {
+                let pill_rect = Rect::from_min_max(
+                    Pos2::new(price_axis_rect.left() + 2.0, pill_y - 7.5),
+                    Pos2::new(price_axis_rect.right() - 2.0, pill_y + 7.5),
+                );
+                axis_painter.rect_filled(pill_rect, 2.5, Color32::from_rgb(31, 39, 53));
+                axis_painter.rect_stroke(
+                    pill_rect,
+                    2.5,
+                    Stroke::new(1.0, palette::EQUITY_BASELINE_REF.gamma_multiply(0.55)),
+                    StrokeKind::Inside,
+                );
+                axis_painter.text(
+                    Pos2::new(price_axis_rect.left() + 6.0, pill_y),
+                    Align2::LEFT_CENTER,
+                    "0.00%",
+                    FontId::monospace(9.8),
+                    palette::TEXT_PRIMARY,
+                );
+            }
+        }
+    }
+
+    // 2. Single-pass conflated multi-line Mesh (`7` presets + `B&H` + `Benchmark`)
+    let line_step = overlay_conflation_step(conflation_factor.max(1), vp.time_scale.bar_spacing());
+    let mut dense_mesh = Some(Mesh::with_texture(egui::TextureId::default()));
+    let mut pts_scratch = Vec::with_capacity(256);
+
+    // Draw non-active curves first, then active preset on top so it never gets occluded.
+    for pass_active in [false, true] {
+        for curve in &report.curves {
+            if curve.is_active_preset != pass_active {
+                continue;
+            }
+            let total = curve.return_pct_values.len().min(candle_len);
+            if total == 0 {
+                continue;
+            }
+            let base_col = multi_strategy_curve_color(curve.kind);
+            let (width, color) = if curve.is_active_preset {
+                (2.05, base_col)
+            } else if matches!(
+                curve.kind,
+                ComparisonCurveKind::AssetBuyAndHold | ComparisonCurveKind::MarketBenchmark
+            ) {
+                (1.50, base_col.gamma_multiply(0.92))
+            } else {
+                (1.18, base_col.gamma_multiply(0.76))
+            };
+            append_conflated_line_segment(
+                plot_painter,
+                &mut dense_mesh,
+                &mut pts_scratch,
+                &curve.return_pct_values[..total],
+                Some(&curve.block_index),
+                0,
+                0..total,
+                culling_range.clone(),
+                line_step,
+                vp,
+                Stroke::new(width, color),
+                1.0,
+            );
+        }
+    }
+
+    if let Some(mesh) = dense_mesh
+        && !mesh.is_empty()
+    {
+        plot_painter.add(Shape::mesh(mesh));
+    }
+
+    // 3. Synchronized Crosshair Dot Marks (`LWC CrosshairMarksPaneView` parity —
+    // suppressed in right-margin whitespace, snapped to conflated bucket center & `end_index`,
+    // and rendered for both direct hover and linked multi-chart crosshairs `[CRITIC-R17-MINOR-01]`).
+    if let Some((mark_idx, x)) = crosshair_mark
+        && mark_idx < candle_len
+        && x >= plot_rect.left()
+        && x <= plot_rect.right()
+    {
+        for curve in &report.curves {
+            if let Some(v) = curve
+                .return_pct_values
+                .get(mark_idx)
+                .copied()
+                .flatten()
+                .filter(|v| v.is_finite())
+                && let Some(sy) = vp.price_to_screen_y(v)
+            {
+                let y = sy as f32;
+                if y >= plot_rect.top() && y <= plot_rect.bottom() {
+                    let col = multi_strategy_curve_color(curve.kind);
+                    let r = if curve.is_active_preset { 3.4 } else { 2.4 };
+                    plot_painter.circle_filled(Pos2::new(x, y), r, col);
+                }
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_equity_baseline_pane(
     axis_painter: &egui::Painter,
@@ -7696,6 +7936,7 @@ fn paint_oscillator_hud(
     cache: &IndicatorCache,
     backtest_result: Option<&BacktestRunResult>,
     equity_override: Option<EquityCurveOverlay<'_>>,
+    multi_strategy_overlay: Option<&MultiStrategyComparisonReport>,
     monte_carlo_fan: Option<&MonteCarloFanSeries>,
     rs_benchmark_label: Option<&str>,
     idx: usize,
@@ -7882,7 +8123,45 @@ fn paint_oscillator_hud(
             }
         }
         OscillatorPaneId::Equity => {
-            if let Some(eq_ov) = equity_override {
+            if let Some(ms) = multi_strategy_overlay {
+                job.append(
+                    "MULTI-STRAT [0% UTC]  ",
+                    0.0,
+                    TextFormat {
+                        font_id: font.clone(),
+                        color: palette::TEXT_PRIMARY,
+                        ..Default::default()
+                    },
+                );
+                for curve in &ms.curves {
+                    let clamped_i = idx.min(curve.return_pct_values.len().saturating_sub(1));
+                    let val_opt = curve
+                        .return_pct_values
+                        .get(clamped_i)
+                        .copied()
+                        .flatten()
+                        .filter(|v| v.is_finite());
+                    let col = multi_strategy_curve_color(curve.kind);
+                    let short = match curve.kind {
+                        ComparisonCurveKind::StrategyPreset(p) => p.short_label(),
+                        ComparisonCurveKind::AssetBuyAndHold => "B&H",
+                        ComparisonCurveKind::MarketBenchmark => {
+                            ms.benchmark_label.as_deref().unwrap_or("Bench")
+                        }
+                    };
+                    let val_txt = val_opt.map_or_else(|| "—".to_owned(), |v| format!("{v:+.2}%"));
+                    let marker = if curve.is_active_preset { "★" } else { "●" };
+                    job.append(
+                        &format!("{marker}{short} {val_txt}  "),
+                        0.0,
+                        TextFormat {
+                            font_id: font.clone(),
+                            color: col,
+                            ..Default::default()
+                        },
+                    );
+                }
+            } else if let Some(eq_ov) = equity_override {
                 let base = eq_ov.baseline_cash.max(1.0);
                 let clamped_idx = idx.min(eq_ov.equity_values.len().saturating_sub(1));
                 let eq_opt = eq_ov
@@ -8479,12 +8758,14 @@ fn refresh_main_pane_autoscale_and_bounds(
     Some((base_value, bounds))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn refresh_oscillator_autoscale(
     id: OscillatorPaneId,
     price_scale: &mut PriceScale,
     cache: &IndicatorCache,
     backtest_result: Option<&BacktestRunResult>,
     equity_override: Option<EquityCurveOverlay<'_>>,
+    multi_strategy_overlay: Option<&MultiStrategyComparisonReport>,
     monte_carlo_fan: Option<&MonteCarloFanSeries>,
     strict_range: std::ops::Range<usize>,
 ) {
@@ -8583,7 +8864,14 @@ fn refresh_oscillator_autoscale(
             price_scale.autoscale_raw_bounds(min_v.min(99.5), max_v.max(100.5), 100.0);
         }
         OscillatorPaneId::Equity => {
-            if let Some(eq_ov) = equity_override {
+            if let Some(ms) = multi_strategy_overlay {
+                let (lo, hi) = ms.range_bounds(strict_range).unwrap_or((-2.0, 2.0));
+                let min_v = lo.min(0.0);
+                let max_v = hi.max(0.0);
+                let span = (max_v - min_v).abs();
+                let pad = if span < 0.5 { 1.0 } else { span * 0.05 };
+                price_scale.autoscale_raw_bounds(min_v - pad, max_v + pad, 1.0);
+            } else if let Some(eq_ov) = equity_override {
                 let base = eq_ov.baseline_cash.max(1.0);
                 let total = eq_ov.equity_values.len();
                 let clamped = strict_range.start.min(total)..strict_range.end.min(total);
@@ -14098,5 +14386,231 @@ mod tests {
             },
         );
         out.textures_delta.clear();
+    }
+
+    #[test]
+    fn r17_multistrategy_equity_overlay_rendering_and_log_scale_fallback() {
+        use crate::backtest::{BacktestConfig, run_multi_strategy_comparison};
+        use crate::data::{DataSourcePreset, generate_synthetic_ohlcv};
+        use crate::viewport::{PriceAxisFormatMode, PriceScaleMode};
+
+        let candles = generate_synthetic_ohlcv(240);
+        let cfg = BacktestConfig::default();
+        let ms = run_multi_strategy_comparison(
+            "VNINDEX",
+            DataSourcePreset::SyntheticVnindex,
+            Timeframe::D1,
+            &candles,
+            &cfg,
+            &[],
+            None,
+            false,
+        );
+        assert!(ms.curves.len() >= 8);
+
+        let ctx = egui::Context::default();
+        let mut vp = ChartViewportState::new();
+        vp.time_scale.set_total_bars(candles.len());
+        vp.time_scale.set_width(820.0);
+        vp.fit_all();
+        // Start Equity scale in Logarithmic mode to verify auto-fallback to Normal + SignedPercentage!
+        vp.equity_price_scale.set_mode(PriceScaleMode::Logarithmic);
+
+        let ind = IndicatorConfig::default();
+        let mut cache = IndicatorCache::new();
+        cache.sync(&candles, 1, &ind);
+        let mut drawings = DrawingStore::new();
+
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1024.0, 680.0))),
+                ..Default::default()
+            },
+            |ui| {
+                let rep = render_workstation_chart_full(
+                    ui,
+                    &candles,
+                    &mut vp,
+                    ChartDisplayConfig {
+                        symbol: "VNINDEX",
+                        timeframe: "1D",
+                        show_grid: true,
+                        show_crosshair: true,
+                        show_volume: true,
+                    },
+                    &ind,
+                    &cache,
+                    &mut drawings,
+                    ChartReplayTradingOverlay {
+                        show_equity_pane: true,
+                        multi_strategy_overlay: Some(&ms),
+                        ..ChartReplayTradingOverlay::default()
+                    },
+                )
+                .expect("render MultiStrategyComparisonReport on Equity pane");
+                assert!(rep.equity_pane_active);
+            },
+        );
+        out.textures_delta.clear();
+        assert_eq!(vp.equity_price_scale.mode(), PriceScaleMode::Normal);
+        assert_eq!(
+            vp.equity_price_scale.format_mode(),
+            PriceAxisFormatMode::SignedPercentage
+        );
+    }
+
+    #[test]
+    fn critic_r17_regression_multistrategy_whitespace_conflated_and_linked_crosshair_dots() {
+        use crate::backtest::{BacktestConfig, run_multi_strategy_comparison};
+        use crate::data::{DataSourcePreset, load_preset_dataset};
+        use crate::viewport::{PriceAxisFormatMode, PriceScaleMode};
+
+        let loaded = load_preset_dataset(DataSourcePreset::SyntheticVnindex, 240, None);
+        let candles = loaded.candles;
+        let ms = run_multi_strategy_comparison(
+            "VNINDEX",
+            DataSourcePreset::SyntheticVnindex,
+            Timeframe::D1,
+            &candles,
+            &BacktestConfig::default(),
+            &[],
+            None,
+            false,
+        );
+
+        let count_circles = |shapes: &[egui::epaint::ClippedShape]| -> usize {
+            shapes
+                .iter()
+                .filter(|cs| matches!(cs.shape, Shape::Circle(_)))
+                .count()
+        };
+
+        let ctx = egui::Context::default();
+        let mut vp = ChartViewportState::new();
+        vp.time_scale.set_total_bars(candles.len());
+        vp.time_scale.set_width(820.0);
+        vp.time_scale.set_right_offset(30.0); // Generous right-margin whitespace!
+        vp.equity_price_scale.set_mode(PriceScaleMode::Logarithmic);
+
+        let ind = IndicatorConfig::default();
+        let mut cache = IndicatorCache::new();
+        cache.sync(&candles, 1, &ind);
+        let mut drawings = DrawingStore::new();
+
+        // Pass 1: Hover inside right-margin whitespace -> ZERO phantom circle markers on Equity pane!
+        let mut plot_rect = Rect::NOTHING;
+        let mut out_ws = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1024.0, 680.0))),
+                events: vec![egui::Event::PointerMoved(Pos2::new(910.0, 260.0))],
+                ..Default::default()
+            },
+            |ui| {
+                let rep = render_workstation_chart_full(
+                    ui,
+                    &candles,
+                    &mut vp,
+                    ChartDisplayConfig {
+                        symbol: "VNINDEX",
+                        timeframe: "1D",
+                        show_grid: true,
+                        show_crosshair: true,
+                        show_volume: true,
+                    },
+                    &ind,
+                    &cache,
+                    &mut drawings,
+                    ChartReplayTradingOverlay {
+                        show_equity_pane: true,
+                        multi_strategy_overlay: Some(&ms),
+                        ..ChartReplayTradingOverlay::default()
+                    },
+                )
+                .unwrap();
+                plot_rect = rep.layout.plot_rect;
+            },
+        );
+        // Hover near `plot_rect.right() - 4.0` (deep inside the 30-bar right whitespace)
+        let ws_pos = Pos2::new(plot_rect.right() - 4.0, plot_rect.center().y);
+        let mut out_ws2 = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1024.0, 680.0))),
+                events: vec![egui::Event::PointerMoved(ws_pos)],
+                ..Default::default()
+            },
+            |ui| {
+                let _ = render_workstation_chart_full(
+                    ui,
+                    &candles,
+                    &mut vp,
+                    ChartDisplayConfig {
+                        symbol: "VNINDEX",
+                        timeframe: "1D",
+                        show_grid: true,
+                        show_crosshair: true,
+                        show_volume: true,
+                    },
+                    &ind,
+                    &cache,
+                    &mut drawings,
+                    ChartReplayTradingOverlay {
+                        show_equity_pane: true,
+                        multi_strategy_overlay: Some(&ms),
+                        ..ChartReplayTradingOverlay::default()
+                    },
+                );
+            },
+        );
+        out_ws.textures_delta.clear();
+        out_ws2.textures_delta.clear();
+        assert_eq!(
+            count_circles(&out_ws2.shapes),
+            0,
+            "hovering right whitespace must NOT render phantom curve dot markers"
+        );
+
+        // Pass 2: Linked multi-chart crosshair (`external_crosshair_timestamp = Some(ts)`, no local hover)
+        // MUST render curve dot markers on all active curves!
+        let target_ts = candles[candles.len() - 10].timestamp;
+        let mut out_linked = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1024.0, 680.0))),
+                events: vec![egui::Event::PointerGone],
+                ..Default::default()
+            },
+            |ui| {
+                let _ = render_workstation_chart_full(
+                    ui,
+                    &candles,
+                    &mut vp,
+                    ChartDisplayConfig {
+                        symbol: "VNINDEX",
+                        timeframe: "1D",
+                        show_grid: true,
+                        show_crosshair: true,
+                        show_volume: true,
+                    },
+                    &ind,
+                    &cache,
+                    &mut drawings,
+                    ChartReplayTradingOverlay {
+                        show_equity_pane: true,
+                        multi_strategy_overlay: Some(&ms),
+                        external_crosshair_timestamp: Some(target_ts),
+                        ..ChartReplayTradingOverlay::default()
+                    },
+                );
+            },
+        );
+        assert!(
+            count_circles(&out_linked.shapes) >= 8,
+            "linked multi-chart crosshair must render synchronized curve dot markers"
+        );
+        assert_eq!(vp.equity_price_scale.mode(), PriceScaleMode::Normal);
+        assert_eq!(
+            vp.equity_price_scale.format_mode(),
+            PriceAxisFormatMode::SignedPercentage
+        );
+        out_linked.textures_delta.clear();
     }
 }

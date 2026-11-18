@@ -32,7 +32,8 @@ pub use catalog::{
     is_bidirectional_bool_signal,
 };
 pub use engine::{
-    DEFAULT_BLIND_PRACTICE_LOOKBACK_BARS, compute_causal_rvol, evaluate_symbol_scan,
+    DEFAULT_BLIND_PRACTICE_LOOKBACK_BARS, INSTITUTIONAL_BLIND_PRACTICE_PRE_ROLL_BARS,
+    compute_causal_rvol, compute_regime_series, evaluate_symbol_scan,
     evaluate_symbol_scan_and_signals, filter_and_sort_watchlist, filter_historical_signals,
     scan_historical_signals,
 };
@@ -268,6 +269,8 @@ impl ScannerReplayIntent {
 pub struct ScannerSignalContext {
     intent: ScannerReplayIntent,
     reveal_at_timestamp: i64,
+    #[serde(default)]
+    pre_roll_bars: Option<usize>,
     signal: HistoricalSignalHit,
 }
 
@@ -278,6 +281,7 @@ impl ScannerSignalContext {
         Self {
             intent,
             reveal_at_timestamp,
+            pre_roll_bars: None,
             signal,
         }
     }
@@ -295,8 +299,34 @@ impl ScannerSignalContext {
         Self {
             intent,
             reveal_at_timestamp: reveal_ts,
+            pre_roll_bars: None,
             signal,
         }
+    }
+
+    /// Constructs a [`ScannerSignalContext`] recording both the causal reveal timestamp and the
+    /// configured pre-roll bar count (`Milestone R17 / A3` — safe to show in banner without revealing
+    /// the remaining countdown to the signal bar).
+    #[must_use]
+    pub fn with_reveal_and_preroll(
+        intent: ScannerReplayIntent,
+        signal: HistoricalSignalHit,
+        reveal_at_timestamp: i64,
+        pre_roll_bars: Option<usize>,
+    ) -> Self {
+        let reveal_ts = reveal_at_timestamp.max(signal.timestamp);
+        Self {
+            intent,
+            reveal_at_timestamp: reveal_ts,
+            pre_roll_bars: pre_roll_bars.map(|b| b.clamp(1, 500)),
+            signal,
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn pre_roll_bars(&self) -> Option<usize> {
+        self.pre_roll_bars
     }
 
     pub fn sanitize_deserialized(&mut self) {
@@ -309,6 +339,7 @@ impl ScannerSignalContext {
             self.signal.metric_value = 0.0;
         }
         self.reveal_at_timestamp = self.reveal_at_timestamp.max(self.signal.timestamp);
+        self.pre_roll_bars = self.pre_roll_bars.map(|b| b.clamp(1, 500));
     }
 
     #[inline]

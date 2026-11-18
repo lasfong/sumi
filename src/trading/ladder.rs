@@ -1207,6 +1207,8 @@ mod tests {
             take_profit: None,
             initial_stop_loss: None,
             initial_risk_amount: None,
+            entry_stop_loss: None,
+            had_initial_sl_at_open: false,
             total_entry_qty: 200.0,
             total_entry_notional: 9_900.0,
             total_entry_fees: 0.0,

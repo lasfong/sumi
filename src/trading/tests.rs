@@ -912,3 +912,490 @@ fn critic_r07_regression_multi_pending_causal_segment_order_scale_in_r_multiple_
     assert_eq!(sync_s.stop_loss, Some(133.5));
     assert_eq!(sync_s.take_profit, Some(118.0));
 }
+
+#[test]
+fn r17_tamper_proof_initial_sl_adherence_and_zero_open_guard() {
+    use crate::data::Timeframe;
+    use crate::journal::{ChecklistState, MistakeTag, SetupTag};
+    use crate::trading::{
+        CoachingSeverity, PracticeDecisionAction, PracticeDecisionLog, PracticeScoreboardSummary,
+        SessionDebriefReport,
+    };
+
+    let bars = vec![
+        candle(10_000, 100.0, 101.0, 99.0, 100.0),
+        candle(10_060, 100.0, 102.0, 98.0, 99.0),
+        candle(10_120, 99.0, 106.0, 98.5, 105.0),
+        candle(10_180, 105.0, 107.0, 104.0, 105.0),
+    ];
+    let mut session = TradingSession::new(zero_friction_config());
+    session.reset_at(&bars, 0);
+    let mut dec_log = PracticeDecisionLog::new();
+
+    // 1. Zero opened positions: `sl_adherence_pct == None` and ZERO contradictory `< 80%` callout!
+    let m0 = session.metrics(100.0);
+    assert_eq!(m0.total_opened_positions, 0);
+    assert_eq!(m0.sl_adherence_pct, None);
+    let deb0 = SessionDebriefReport::build(
+        "FPT",
+        Timeframe::D1,
+        &session,
+        100.0,
+        &[],
+        &dec_log,
+        true,
+        0,
+        Some(10_000),
+    );
+    assert_eq!(deb0.sl_adherence_pct, None);
+    assert!(
+        deb0.callouts
+            .iter()
+            .all(|c| c.severity != CoachingSeverity::Critical),
+        "empty session must NEVER emit a false-alarm Critical <80% SL callout"
+    );
+
+    // 2. Open Position #1 NAKED (`stop_loss: None`), then attach SL via `update_position_brackets`
+    //    AND scale in with SL -> `had_initial_sl_at_open` MUST remain `false`!
+    session
+        .submit_order(
+            OrderRequest {
+                side: OrderSide::Buy,
+                kind: OrderKind::Market,
+                quantity: 10.0,
+                stop_loss: None,
+                take_profit: None,
+            },
+            &bars,
+            0,
+        )
+        .unwrap();
+    session
+        .update_position_brackets(Some(95.0), Some(112.0), &bars, 0)
+        .unwrap();
+    session
+        .submit_order(
+            OrderRequest {
+                side: OrderSide::Buy,
+                kind: OrderKind::Market,
+                quantity: 10.0,
+                stop_loss: Some(96.0),
+                take_profit: Some(112.0),
+            },
+            &bars,
+            0,
+        )
+        .unwrap();
+    let open_p = session.open_position().expect("open position");
+    assert!(!open_p.had_initial_sl_at_open);
+    assert_eq!(open_p.entry_stop_loss, None);
+    assert_eq!(session.metrics(100.0).sl_adherence_pct, Some(0.0));
+
+    session.advance_through_bars(&bars, 1, 1);
+    session.flatten_position(&bars, 1).unwrap(); // closed at 99.0 (loss without initial SL)
+    assert!(!session.closed_trades()[0].had_initial_sl_at_open);
+
+    // 3. Open Position #2 WITH valid initial SL (`97.0`) and close breakeven, then Position #3 WITH initial SL (`103.0`)
+    session
+        .submit_order(
+            OrderRequest {
+                side: OrderSide::Buy,
+                kind: OrderKind::Market,
+                quantity: 10.0,
+                stop_loss: Some(97.0),
+                take_profit: Some(110.0),
+            },
+            &bars,
+            1,
+        )
+        .unwrap();
+    session.flatten_position(&bars, 1).unwrap(); // breakeven `0.0` PnL!
+
+    session.advance_through_bars(&bars, 2, 2);
+    session
+        .submit_order(
+            OrderRequest {
+                side: OrderSide::Buy,
+                kind: OrderKind::Market,
+                quantity: 10.0,
+                stop_loss: Some(103.0),
+                take_profit: Some(112.0),
+            },
+            &bars,
+            2,
+        )
+        .unwrap();
+
+    let _ = dec_log.record_note(
+        "FPT",
+        Timeframe::D1,
+        1,
+        10_060,
+        99.0,
+        PracticeDecisionAction::PlanLong,
+        SetupTag::TrendPullback,
+        MistakeTag::None,
+        4,
+        ChecklistState::all_checked(),
+        "Bar 1 note",
+    );
+    let _ = dec_log.record_note(
+        "FPT",
+        Timeframe::D1,
+        3,
+        10_180,
+        105.0,
+        PracticeDecisionAction::ObserveHold,
+        SetupTag::SqueezeBreakout,
+        MistakeTag::FomoChase,
+        2,
+        ChecklistState::empty(),
+        "Future bar 3 note",
+    );
+
+    // At bar 2 (`ts = 10_120`), bar-3 note MUST be causally hidden (`DEF-001`)!
+    let sb =
+        PracticeScoreboardSummary::compute(&session, 105.0, &dec_log, "FPT", true, 2, Some(10_120));
+    assert_eq!(sb.closed_trades, 2);
+    assert_eq!(sb.breakeven_count, 1);
+    assert_eq!(sb.loss_count, 1);
+    assert_eq!(sb.visible_decision_notes, 1);
+    assert!((sb.sl_adherence_pct.unwrap() - (200.0 / 3.0)).abs() < 1e-6);
+
+    let deb = SessionDebriefReport::build(
+        "FPT",
+        Timeframe::D1,
+        &session,
+        105.0,
+        &[],
+        &dec_log,
+        true,
+        2,
+        Some(10_120),
+    );
+    assert_eq!(deb.total_opened_positions, 3);
+    assert_eq!(deb.sl_adherent_positions, 2);
+    assert_eq!(deb.visible_decision_notes.len(), 1);
+    assert!(
+        deb.callouts
+            .iter()
+            .any(|c| c.severity == CoachingSeverity::Critical && c.title.contains("< 80%"))
+    );
+}
+
+#[test]
+fn r17_practice_and_scan_stores_ron_json_roundtrip_pin_eviction_and_mismatch() {
+    use crate::data::{DataSourcePreset, Timeframe};
+    use crate::scanner::{
+        HistoricalSignalHit, MarketRegime, ScanSignalKind, ScannerFilter, ScannerReplayIntent,
+        ScannerSignalContext, SignalDirection, WatchlistSortColumn,
+    };
+    use crate::trading::{
+        MAX_SAVED_PRACTICE_SESSIONS, PracticeSessionStore, SavedPracticeSession, SavedScanSnapshot,
+        ScanSnapshotStore,
+    };
+    use crate::viewport::WorkspaceTemplateError;
+
+    let bars = vec![
+        candle(1_000, 50.0, 52.0, 49.0, 51.0),
+        candle(2_000, 51.0, 54.0, 50.5, 53.0),
+    ];
+    let hit = HistoricalSignalHit {
+        instrument_id: "Preset:VN30 Basket:FPT".to_owned(),
+        symbol: "FPT".to_owned(),
+        timeframe: Timeframe::D1,
+        bar_index: 1,
+        timestamp: 2_000,
+        price: 53.0,
+        signal: ScanSignalKind::MacdBullCross,
+        direction: SignalDirection::Bullish,
+        regime: MarketRegime::Uptrend,
+        metric_value: 1.25,
+    };
+
+    let mut p_store = PracticeSessionStore::new();
+    for idx in 0..MAX_SAVED_PRACTICE_SESSIONS {
+        p_store
+            .save_session(SavedPracticeSession {
+                slot_id: 0,
+                label: format!("Pinned #{idx}"),
+                pinned: true,
+                sequence_no: 0,
+                data_source: DataSourcePreset::Vn30Basket,
+                symbol: "FPT".to_owned(),
+                base_timeframe: Timeframe::D1,
+                active_timeframe: Timeframe::D1,
+                expected_bar_count: bars.len(),
+                expected_first_timestamp: Some(1_000),
+                expected_last_timestamp: Some(2_000),
+                replay_active: true,
+                replay_start_base_index: 0,
+                replay_cursor_base_index: 1,
+                blind_lookback_bars: 120,
+                scanner_context: Some(ScannerSignalContext::with_reveal_and_preroll(
+                    ScannerReplayIntent::BlindPractice,
+                    hit.clone(),
+                    2_000,
+                    Some(120),
+                )),
+                account_config: zero_friction_config(),
+                session_start_base_index: 0,
+                commands: Vec::new(),
+                decision_notes: Vec::new(),
+                session_digest: 0,
+            })
+            .unwrap();
+    }
+    assert_eq!(
+        p_store.save_session(p_store.slots[0].clone().tap_label("Overflow")),
+        Err(WorkspaceTemplateError::SnapshotSlotsFull)
+    );
+
+    let json_doc = p_store.to_json_pretty();
+    let ron_doc = p_store.to_ron_pretty();
+    let from_j = PracticeSessionStore::from_json_str(&json_doc).expect("JSON round-trip");
+    let from_r = PracticeSessionStore::from_ron_str(&ron_doc).expect("RON round-trip");
+    assert_eq!(from_j.slots.len(), MAX_SAVED_PRACTICE_SESSIONS);
+    assert_eq!(from_j, p_store);
+    assert_eq!(from_r, p_store);
+    assert_eq!(
+        from_j.slots[0]
+            .scanner_context
+            .as_ref()
+            .and_then(|c| c.pre_roll_bars()),
+        Some(120)
+    );
+
+    // Tampered digest MUST fail closed
+    let tampered = json_doc.replacen(
+        "\"session_digest_hex\": \"",
+        "\"session_digest_hex\": \"ff",
+        1,
+    );
+    assert!(PracticeSessionStore::from_json_str(&tampered).is_err());
+
+    // Dataset mismatch check
+    assert!(
+        from_j.slots[0]
+            .verify_dataset_match(DataSourcePreset::Vn30Basket, "FPT", &bars)
+            .is_none()
+    );
+    assert!(
+        from_j.slots[0]
+            .verify_dataset_match(DataSourcePreset::CustomFile, "FPT", &bars[..1])
+            .is_some()
+    );
+
+    let mut s_store = ScanSnapshotStore::new();
+    s_store
+        .save_snapshot(SavedScanSnapshot {
+            slot_id: 0,
+            label: "VN30 Bull Scan".to_owned(),
+            pinned: true,
+            sequence_no: 0,
+            captured_cutoff_timestamp: Some(2_000),
+            timeframe: Timeframe::D1,
+            signal_lookback_bars: 80,
+            blind_practice_lookback_bars: 120,
+            filter: ScannerFilter {
+                search_query: "FPT".to_owned(),
+                signal_filter: Some(ScanSignalKind::MacdBullCross),
+                regime_filter: Some(MarketRegime::Uptrend),
+                direction_filter: Some(SignalDirection::Bullish),
+                only_active_signals: true,
+            },
+            sort_col: WatchlistSortColumn::RelativeVolume,
+            sort_asc: false,
+            hits: vec![hit],
+            snapshot_digest: 0,
+        })
+        .unwrap();
+    let s_json = s_store.to_json_pretty();
+    let s_ron = s_store.to_ron_pretty();
+    assert_eq!(ScanSnapshotStore::from_json_str(&s_json).unwrap(), s_store);
+    assert_eq!(ScanSnapshotStore::from_ron_str(&s_ron).unwrap(), s_store);
+}
+
+#[test]
+fn critic_r17_regression_same_bar_exit_entry_note_isolation_journal_none_override_and_preroll_digest()
+ {
+    use crate::data::{DataSourcePreset, Timeframe};
+    use crate::journal::{ChecklistState, ExchangeVenue, MistakeTag, SetupTag, TradeJournalStore};
+    use crate::scanner::{
+        HistoricalSignalHit, MarketRegime, ScanSignalKind, ScannerReplayIntent,
+        ScannerSignalContext, SignalDirection,
+    };
+    use crate::trading::{
+        PracticeDecisionAction, PracticeDecisionLog, PracticeSessionStore, SavedPracticeSession,
+        SessionDebriefReport,
+    };
+
+    // 1. `[Major-01]`: Trade #1 (`entry = 0, exit = 1`, `-241.11`, disciplined pullback with SL) exits on bar 1,
+    // and Trade #2 (`entry = 1, exit = 2`, `+541.11`, naked FOMO chase) opens on the SAME bar 1 with a note at bar 1!
+    let bars = vec![
+        candle(1_000, 100.0, 101.0, 99.0, 100.0),
+        candle(2_000, 98.0, 99.0, 97.0, 97.5889), // Trade #1 flattens for -241.11 (qty 100), Trade #2 opens @ 97.5889
+        candle(3_000, 100.0, 104.0, 99.0, 103.0), // Trade #2 flattens @ 103.0 (+541.11)
+    ];
+    let mut sess = TradingSession::new(zero_friction_config());
+    sess.submit_order(
+        OrderRequest {
+            side: OrderSide::Buy,
+            kind: OrderKind::Market,
+            quantity: 100.0,
+            stop_loss: Some(94.0),
+            take_profit: Some(112.0),
+        },
+        &bars,
+        0,
+    )
+    .unwrap();
+    let mut log = PracticeDecisionLog::new();
+    let _ = log.record_note(
+        "FPT",
+        Timeframe::D1,
+        0,
+        bars[0].timestamp,
+        bars[0].close,
+        PracticeDecisionAction::PlanLong,
+        SetupTag::TrendPullback,
+        MistakeTag::EarlyExit, // Tentative pre-trade mistake that trader later clears in Journal!
+        4,
+        ChecklistState::default(),
+        "Initial tentative note",
+    );
+    sess.flatten_position(&bars, 1).unwrap();
+
+    // Trade #2 opens naked on bar 1 (`same bar` as Trade #1 exit!) + stamps FOMO Chase note at bar 1
+    sess.submit_order(
+        OrderRequest {
+            side: OrderSide::Buy,
+            kind: OrderKind::Market,
+            quantity: 100.0,
+            stop_loss: None,
+            take_profit: None,
+        },
+        &bars,
+        1,
+    )
+    .unwrap();
+    let _ = log.record_note(
+        "FPT",
+        Timeframe::D1,
+        1,
+        bars[1].timestamp,
+        bars[1].close,
+        PracticeDecisionAction::ManagePosition,
+        SetupTag::MomentumContinuation,
+        MistakeTag::FomoChase,
+        2,
+        ChecklistState::default(),
+        "Chased bar 1 without initial SL",
+    );
+    sess.flatten_position(&bars, 2).unwrap();
+
+    let mut journal = TradeJournalStore::new();
+    journal.sync_paper_closed_trades("FPT", ExchangeVenue::Hose, sess.closed_trades());
+    // Trader curates Trade #1 in Journal: explicitly clears mistake to `MistakeTag::None`!
+    journal.entries[0].setup = SetupTag::TrendPullback;
+    journal.entries[0].mistake = MistakeTag::None;
+    journal.entries[0].notes = "Valid pullback stop — no execution mistake".to_owned();
+    journal.entries[1].setup = SetupTag::MomentumContinuation;
+    journal.entries[1].mistake = MistakeTag::FomoChase;
+
+    let debrief = SessionDebriefReport::build(
+        "FPT",
+        Timeframe::D1,
+        &sess,
+        bars[2].close,
+        &journal.entries,
+        &log,
+        false,
+        usize::MAX,
+        None,
+    );
+    // `FomoChase` must have `trade_count == 1` and `adverse_cost_abs == 0.0` (Trade #1's -241.11 loss is NOT FomoChase!),
+    // and `EarlyExit` must have `trade_count == 0` because curated `JournalEntry[0]` cleared `mistake` to `MistakeTag::None`!
+    let fomo = debrief
+        .mistake_breakdown
+        .iter()
+        .find(|m| m.mistake == MistakeTag::FomoChase)
+        .expect("FomoChase row");
+    assert_eq!(fomo.trade_count, 1);
+    assert!(
+        fomo.adverse_cost_abs.abs() < 1e-9,
+        "Trade #1 loss must never leak into Trade #2 FomoChase"
+    );
+    let early = debrief
+        .mistake_breakdown
+        .iter()
+        .find(|m| m.mistake == MistakeTag::EarlyExit)
+        .expect("EarlyExit note count row");
+    assert_eq!(
+        early.trade_count, 0,
+        "curated JournalEntry MistakeTag::None must override tentative pre-trade note"
+    );
+    assert_eq!(early.decision_note_count, 1);
+
+    // 2. `[Major-02]`: `pre_roll_bars` is covered by `SplitMix64` digest and rejects tampering (`120 -> 15`)!
+    let hit = HistoricalSignalHit {
+        instrument_id: "Preset:VN30 Basket:FPT".to_owned(),
+        symbol: "FPT".to_owned(),
+        timeframe: Timeframe::D1,
+        bar_index: 2,
+        timestamp: 3_000,
+        price: 103.0,
+        signal: ScanSignalKind::MacdBullCross,
+        direction: SignalDirection::Bullish,
+        regime: MarketRegime::Uptrend,
+        metric_value: 2.5,
+    };
+    let mut store = PracticeSessionStore::new();
+    store
+        .save_session(SavedPracticeSession {
+            slot_id: 0,
+            label: "Blind +120b".to_owned(),
+            pinned: false,
+            sequence_no: 0,
+            data_source: DataSourcePreset::Vn30Basket,
+            symbol: "FPT".to_owned(),
+            base_timeframe: Timeframe::D1,
+            active_timeframe: Timeframe::D1,
+            expected_bar_count: bars.len(),
+            expected_first_timestamp: Some(1_000),
+            expected_last_timestamp: Some(3_000),
+            replay_active: true,
+            replay_start_base_index: 0,
+            replay_cursor_base_index: 1,
+            blind_lookback_bars: 120,
+            scanner_context: Some(ScannerSignalContext::with_reveal_and_preroll(
+                ScannerReplayIntent::BlindPractice,
+                hit,
+                3_000,
+                Some(120),
+            )),
+            account_config: zero_friction_config(),
+            session_start_base_index: 0,
+            commands: Vec::new(),
+            decision_notes: Vec::new(),
+            session_digest: 0,
+        })
+        .unwrap();
+    let j_doc = store.to_json_pretty();
+    let tampered_preroll = j_doc.replacen("\"pre_roll_bars\": 120", "\"pre_roll_bars\": 15", 1);
+    assert_ne!(tampered_preroll, j_doc);
+    assert!(
+        PracticeSessionStore::from_json_str(&tampered_preroll).is_err(),
+        "tampering pre_roll_bars must fail SplitMix64 digest verification"
+    );
+}
+
+trait TapLabelExt {
+    fn tap_label(self, lbl: &str) -> Self;
+}
+impl TapLabelExt for crate::trading::SavedPracticeSession {
+    fn tap_label(mut self, lbl: &str) -> Self {
+        self.label = lbl.to_owned();
+        self
+    }
+}

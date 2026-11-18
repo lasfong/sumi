@@ -426,7 +426,8 @@ fn run_backtest_with_shared_catalog(
     let mut clean_cfg = config.clone();
     clean_cfg.sanitize();
 
-    let causal_candles = slice_causal_series_for_options(candles, timeframe, options);
+    let causal_candles =
+        slice_causal_series_for_symbol_and_options(Some(&symbol), candles, timeframe, options);
     if causal_candles.is_empty() {
         return BacktestRunResult {
             symbol,
@@ -578,7 +579,8 @@ pub fn run_parameter_sweep(
     let symbol = symbol.into();
     let mut clean_base = base_config.clone();
     clean_base.sanitize();
-    let causal_candles = slice_causal_series_for_options(candles, timeframe, options);
+    let causal_candles =
+        slice_causal_series_for_symbol_and_options(Some(&symbol), candles, timeframe, options);
 
     let grid = build_preset_sweep_configs(&clean_base);
     let shared_catalog = if clean_base.preset == StrategyPresetKind::CustomSignalRules
@@ -643,7 +645,8 @@ pub fn run_all_presets_battle(
     options: BacktestRunOptions,
 ) -> Vec<PresetBattleRow> {
     let symbol = symbol.into();
-    let causal_candles = slice_causal_series_for_options(candles, timeframe, options);
+    let causal_candles =
+        slice_causal_series_for_symbol_and_options(Some(&symbol), candles, timeframe, options);
     let mut rows = Vec::with_capacity(StrategyPresetKind::ALL.len());
 
     for preset in StrategyPresetKind::ALL {
@@ -2112,13 +2115,16 @@ pub(crate) fn normalize_config_for_universe_feed(
 
 /// Slices `candles` causally up to `options.replay_cutoff_timestamp`, withholding any un-aggregated
 /// coarse tail bar whose closing boundary exceeds `cutoff` when `cutoff` falls strictly inside the
-/// interior of that bar (`[CRITICAL-01]`).
+/// interior of that bar (`[CRITICAL-01]`), while recognizing exchange-specific session closes
+/// (`VN30F1M`/`HOSE`/`HNX`/`UPCOM` `04:29:59` H1 & `07:44:59` H1/H4/D1/W1 UTC, `US` `20:59:59` UTC,
+/// and `D1 -> W1` Friday weekly closes) when `symbol` is supplied (`[CRITIC-R17-CRITICAL-01]`).
 #[inline]
-pub(crate) fn slice_causal_series_for_options(
-    candles: &[Candle],
+pub(crate) fn slice_causal_series_for_symbol_and_options<'a>(
+    symbol: Option<&str>,
+    candles: &'a [Candle],
     timeframe: Timeframe,
     options: BacktestRunOptions,
-) -> &[Candle] {
+) -> &'a [Candle] {
     match options.replay_cutoff_timestamp {
         None => candles,
         Some(cutoff) => {
@@ -2131,7 +2137,35 @@ pub(crate) fn slice_causal_series_for_options(
                     .timestamp
                     .saturating_add(timeframe.seconds().max(1).saturating_sub(1));
                 if cutoff > last.timestamp && cutoff < close_ts {
-                    end -= 1;
+                    let sym_trimmed = symbol.map(str::trim).filter(|s| !s.is_empty());
+                    let is_incomplete = match sym_trimmed {
+                        None => true,
+                        Some(sym) => {
+                            let m1_incomplete = is_bucket_incomplete_at_close_for_symbol(
+                                sym,
+                                last.timestamp,
+                                cutoff,
+                                Timeframe::M1,
+                                timeframe,
+                            );
+                            if !m1_incomplete {
+                                false
+                            } else if timeframe == Timeframe::W1 {
+                                let venue =
+                                    crate::journal::ExchangeVenue::infer_from_symbol_and_preset(
+                                        sym,
+                                        DataSourcePreset::CustomFile,
+                                    );
+                                !(venue != crate::journal::ExchangeVenue::CryptoSpotPerp
+                                    && cutoff.saturating_sub(last.timestamp) >= 4 * 86_400 + 86_399)
+                            } else {
+                                true
+                            }
+                        }
+                    };
+                    if is_incomplete {
+                        end -= 1;
+                    }
                 }
             }
             &candles[..end]

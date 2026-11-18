@@ -4,6 +4,7 @@
 //! `EndOfSeriesCutoff`, `DEF-001` Bar Replay cutoff gating, pessimistic intrabar `SL`-before-`TP`,
 //! and post-close trailing-stop ratcheting) with zero OS, wall-clock, or UI dependencies.
 
+pub mod analytics;
 pub mod engine;
 pub mod metrics;
 pub mod monte_carlo;
@@ -11,6 +12,16 @@ pub mod strategy;
 #[cfg(test)]
 mod tests;
 pub mod walk_forward;
+
+pub use analytics::{
+    AdvancedTearsheetAnalytics, ComparisonCurveKind, DrawdownPeriod, MultiPhaseBatchReport,
+    MultiPhaseSplitMode, MultiStrategyComparisonReport, MultiStrategyCurveSeries,
+    OutlierImpactReport, RUN_MANIFEST_SCHEMA_VERSION, RegimePerformanceSlice, RunManifest,
+    YearPerformanceSlice, compute_advanced_tearsheet_analytics, compute_entry_regime_breakdown,
+    compute_entry_regime_breakdown_with_precomputed, compute_outlier_impact,
+    compute_yearly_breakdown, extract_drawdown_periods, run_multi_phase_batch,
+    run_multi_phase_batch_for_symbol, run_multi_strategy_comparison,
+};
 
 pub use engine::{
     BacktestRunOptions, BacktestRunResult, MultiSymbolBattleReport, OpenBacktestPosition,
