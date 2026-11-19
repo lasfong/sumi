@@ -85,6 +85,7 @@ pub fn load_preset_dataset(
                 raw_row_count: count,
                 deduplicated_count: 0,
                 repaired_envelope_count: 0,
+                quarantined_row_count: 0,
                 filtered_other_symbol_rows: 0,
             }
         }
@@ -286,6 +287,7 @@ pub fn generate_vn30_basket_report(symbol_override: Option<&str>) -> DataLoadRep
         raw_row_count: total_bars * VN30_BASKET_SYMBOLS.len(),
         deduplicated_count: 0,
         repaired_envelope_count: 0,
+        quarantined_row_count: 0,
         filtered_other_symbol_rows: total_bars * (VN30_BASKET_SYMBOLS.len() - 1),
         candles,
     }
@@ -358,6 +360,7 @@ pub fn generate_intraday_vn30f_1m_report(target_bars: usize) -> DataLoadReport {
         raw_row_count: total,
         deduplicated_count: 0,
         repaired_envelope_count: 0,
+        quarantined_row_count: 0,
         filtered_other_symbol_rows: 0,
     }
 }

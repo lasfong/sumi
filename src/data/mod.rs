@@ -46,7 +46,7 @@ pub use calendar::{
     format_time_axis_tick, format_utc_date, format_utc_datetime_hm, is_leap_year, is_valid_ymd,
     parse_epoch_i128, parse_time_of_day_hms, parse_timestamp, parse_ymd_8digit, weekday_from_days,
 };
-pub use csv_loader::load_ohlcv_csv;
+pub use csv_loader::{load_ohlcv_csv, load_ohlcv_csv_multi_symbol};
 pub use json_loader::{MAX_JSON_DEPTH, load_ohlcv_json};
 pub use presets::{
     DataSourcePreset, VN30_BASKET_SYMBOLS, WatchlistFeedEntry, build_btcusdt_15m_json_document,
@@ -68,8 +68,9 @@ pub const MAX_IMPORT_RECORDS: usize = 500_000;
 /// Maximum total records scanned across multi-symbol CSV/JSON documents (`2,000,000` rows).
 pub const MAX_SCANNED_RECORDS: usize = 2_000_000;
 
-/// Maximum distinct symbols tracked in `DataLoadReport::available_symbols` (`256` tickers).
-pub const MAX_DISCOVERED_SYMBOLS: usize = 256;
+/// Maximum distinct symbols tracked in `DataLoadReport::available_symbols` (`2,048` tickers,
+/// covering full HSX + HNX + UPCOM multi-symbol CafeF SolieuGD exports).
+pub const MAX_DISCOVERED_SYMBOLS: usize = 2_048;
 
 /// Maximum absolute price accepted in normalized OHLCV series (aligned with `PriceScale` domain guard).
 pub const MAX_ABS_PRICE: f64 = 1.0e15;
@@ -103,6 +104,17 @@ pub enum OhlcEnvelopePolicy {
     CafeFSplitAware,
 }
 
+/// Policy when an individual vendor CSV/JSON row has corrupted prices (`<= 0`, non-finite, or unrepairable OHLC inversion).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum InvalidRowPolicy {
+    /// Rejects the entire dataset on any invalid row (default for programmatic unit validation).
+    #[default]
+    RejectDataset,
+    /// Skips and counts corrupted individual rows (`DataLoadReport::quarantined_row_count`) so real-world
+    /// vendor feeds (e.g. CafeF `2025-05-05` `High = 0` or `HNX-INDEX` vendor glitches) load cleanly.
+    QuarantineRow,
+}
+
 /// Input format selector for [`load_ohlcv_bytes`] / `load_ohlcv_file`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum DataFileFormat {
@@ -132,6 +144,9 @@ pub struct DataLoadOptions {
     pub price_multiplier: f64,
     /// Requires strictly positive prices (`> 0.0`, default `true` for standard equity/crypto/FX candles).
     pub require_positive_prices: bool,
+    /// Policy when individual vendor rows fail price/timestamp/OHLC validation (`RejectDataset` vs `QuarantineRow`).
+    #[serde(default)]
+    pub invalid_row_policy: InvalidRowPolicy,
 }
 
 impl Default for DataLoadOptions {
@@ -145,6 +160,7 @@ impl Default for DataLoadOptions {
             envelope_policy: OhlcEnvelopePolicy::RejectRow,
             price_multiplier: 1.0,
             require_positive_prices: true,
+            invalid_row_policy: InvalidRowPolicy::RejectDataset,
         }
     }
 }
@@ -181,6 +197,7 @@ pub struct DataLoadReport {
     pub raw_row_count: usize,
     pub deduplicated_count: usize,
     pub repaired_envelope_count: usize,
+    pub quarantined_row_count: usize,
     pub filtered_other_symbol_rows: usize,
 }
 
@@ -389,6 +406,101 @@ pub fn load_ohlcv_file(
     load_ohlcv_bytes(&bytes, fmt, &derived_opts)
 }
 
+/// Loads all discovered symbol series from raw UTF-8 bytes in a single streaming pass (`wasm32`-compatible).
+pub fn load_ohlcv_multi_symbol_bytes(
+    bytes: &[u8],
+    format: DataFileFormat,
+    options: &DataLoadOptions,
+) -> Result<Vec<DataLoadReport>, DataLoadError> {
+    if bytes.len() > MAX_IMPORT_BYTES {
+        return Err(DataLoadError::InputTooLarge {
+            bytes: bytes.len(),
+            max_bytes: MAX_IMPORT_BYTES,
+        });
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| DataLoadError::InvalidUtf8)?;
+    let stripped = text.strip_prefix('\u{FEFF}').unwrap_or(text);
+    let resolved_format = match format {
+        DataFileFormat::Csv => DataFileFormat::Csv,
+        DataFileFormat::Json => DataFileFormat::Json,
+        DataFileFormat::Auto => {
+            let first_non_ws = stripped.trim_start().as_bytes().first().copied();
+            if matches!(first_non_ws, Some(b'[' | b'{')) {
+                DataFileFormat::Json
+            } else {
+                DataFileFormat::Csv
+            }
+        }
+    };
+    match resolved_format {
+        DataFileFormat::Json => load_ohlcv_json(stripped, options).map(|rep| vec![rep]),
+        DataFileFormat::Csv | DataFileFormat::Auto => {
+            load_ohlcv_csv_multi_symbol(stripped, options)
+        }
+    }
+}
+
+/// Native single-pass multi-symbol file loader (`471+` CafeF tickers in `< 0.3s` with zero repeated disk reads).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_ohlcv_multi_symbol_file(
+    path: impl AsRef<std::path::Path>,
+    options: &DataLoadOptions,
+) -> Result<Vec<DataLoadReport>, DataLoadError> {
+    use std::io::Read as _;
+
+    let path_ref = path.as_ref();
+    let file = std::fs::File::open(path_ref).map_err(|e| DataLoadError::IoError(e.to_string()))?;
+    let meta = file
+        .metadata()
+        .map_err(|e| DataLoadError::IoError(e.to_string()))?;
+    if meta.len() > (MAX_IMPORT_BYTES as u64) {
+        return Err(DataLoadError::InputTooLarge {
+            bytes: usize::try_from(meta.len()).unwrap_or(usize::MAX),
+            max_bytes: MAX_IMPORT_BYTES,
+        });
+    }
+
+    let cap_hint = usize::try_from(meta.len().min(MAX_IMPORT_BYTES as u64)).unwrap_or(0);
+    let mut bytes = Vec::with_capacity(cap_hint);
+    file.take((MAX_IMPORT_BYTES as u64) + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| DataLoadError::IoError(e.to_string()))?;
+    if bytes.len() > MAX_IMPORT_BYTES {
+        return Err(DataLoadError::InputTooLarge {
+            bytes: bytes.len(),
+            max_bytes: MAX_IMPORT_BYTES,
+        });
+    }
+
+    let mut derived_opts = options.clone();
+    if derived_opts.default_symbol.is_none()
+        && let Some(stem) = path_ref.file_stem().and_then(|s| s.to_str())
+    {
+        let clean = stem
+            .split('.')
+            .next()
+            .unwrap_or(stem)
+            .trim()
+            .to_ascii_uppercase();
+        if !clean.is_empty() {
+            derived_opts.default_symbol = Some(clean);
+        }
+    }
+
+    let ext = path_ref
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let fmt = match ext.as_str() {
+        "json" => DataFileFormat::Json,
+        "csv" | "tsv" | "txt" => DataFileFormat::Csv,
+        _ => DataFileFormat::Auto,
+    };
+
+    load_ohlcv_multi_symbol_bytes(&bytes, fmt, &derived_opts)
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RawCandleRecord {
     pub source_row: usize,
@@ -442,7 +554,7 @@ fn rel_identical(a: f64, b: f64, rel_tol: f64) -> bool {
 }
 
 pub(crate) fn normalize_loaded_candles(
-    mut raw_records: Vec<RawCandleRecord>,
+    raw_records: Vec<RawCandleRecord>,
     symbol: String,
     available_symbols: Vec<String>,
     filtered_other_symbol_rows: usize,
@@ -455,19 +567,23 @@ pub(crate) fn normalize_loaded_candles(
 
     let raw_row_count = raw_records.len();
     let mult = options.price_multiplier;
+    let quarantine = options.invalid_row_policy == InvalidRowPolicy::QuarantineRow;
     let mut repaired_envelope_count = 0_usize;
+    let mut quarantined_row_count = 0_usize;
     let mut any_intraday_time = false;
+    let mut valid_records = Vec::with_capacity(raw_records.len());
 
-    for rec in &mut raw_records {
+    'row_loop: for mut rec in raw_records {
         if !(MIN_SUPPORTED_EPOCH_SECS..=MAX_SUPPORTED_EPOCH_SECS).contains(&rec.timestamp) {
+            if quarantine {
+                quarantined_row_count += 1;
+                continue;
+            }
             return Err(DataLoadError::InvalidFieldValue {
                 row: rec.source_row,
                 field: "timestamp",
                 message: format!("timestamp {} out of supported UTC range", rec.timestamp),
             });
-        }
-        if rec.has_time_component {
-            any_intraday_time = true;
         }
 
         rec.open *= mult;
@@ -482,6 +598,10 @@ pub(crate) fn normalize_loaded_candles(
             ("close", rec.close),
         ] {
             if !val.is_finite() || val.abs() > MAX_ABS_PRICE {
+                if quarantine {
+                    quarantined_row_count += 1;
+                    continue 'row_loop;
+                }
                 return Err(DataLoadError::InvalidFieldValue {
                     row: rec.source_row,
                     field,
@@ -489,6 +609,10 @@ pub(crate) fn normalize_loaded_candles(
                 });
             }
             if options.require_positive_prices && val <= 0.0 {
+                if quarantine {
+                    quarantined_row_count += 1;
+                    continue 'row_loop;
+                }
                 return Err(DataLoadError::InvalidFieldValue {
                     row: rec.source_row,
                     field,
@@ -498,6 +622,10 @@ pub(crate) fn normalize_loaded_candles(
         }
 
         if !rec.volume.is_finite() || rec.volume < 0.0 || rec.volume > MAX_CANDLE_VOLUME {
+            if quarantine {
+                quarantined_row_count += 1;
+                continue;
+            }
             return Err(DataLoadError::InvalidFieldValue {
                 row: rec.source_row,
                 field: "volume",
@@ -510,6 +638,10 @@ pub(crate) fn normalize_loaded_candles(
         if rec.high < body_max || rec.low > body_min || rec.low > rec.high {
             match options.envelope_policy {
                 OhlcEnvelopePolicy::RejectRow => {
+                    if quarantine {
+                        quarantined_row_count += 1;
+                        continue;
+                    }
                     return Err(DataLoadError::InvalidOhlcEnvelope {
                         row: rec.source_row,
                         open: rec.open,
@@ -538,6 +670,10 @@ pub(crate) fn normalize_loaded_candles(
                             repaired_envelope_count += 1;
                         }
                         CafeFSplitNormOutcome::RejectedGenuineViolation => {
+                            if quarantine {
+                                quarantined_row_count += 1;
+                                continue;
+                            }
                             return Err(DataLoadError::InvalidOhlcEnvelope {
                                 row: rec.source_row,
                                 open: rec.open,
@@ -550,9 +686,18 @@ pub(crate) fn normalize_loaded_candles(
                 }
             }
         }
+        if rec.has_time_component {
+            any_intraday_time = true;
+        }
+        valid_records.push(rec);
+    }
+
+    if valid_records.is_empty() {
+        return Err(DataLoadError::EmptyDataset);
     }
 
     // Stable chronological sort by `(timestamp, original_ordinal)`.
+    let mut raw_records = valid_records;
     raw_records.sort_by_key(|r| r.timestamp);
 
     // Deterministic duplicate-timestamp resolution using scale-relative tolerances (`MEDIUM-03`).
@@ -640,6 +785,7 @@ pub(crate) fn normalize_loaded_candles(
         raw_row_count,
         deduplicated_count,
         repaired_envelope_count,
+        quarantined_row_count,
         filtered_other_symbol_rows,
     })
 }

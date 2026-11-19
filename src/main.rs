@@ -2,8 +2,26 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 #[cfg(not(target_arch = "wasm32"))]
+fn ensure_workstation_working_dir() {
+    if std::path::Path::new("ARCHIVE").exists() || std::path::Path::new("Cargo.toml").exists() {
+        return;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let mut cursor = exe.parent();
+        while let Some(dir) = cursor {
+            if dir.join("Cargo.toml").exists() || dir.join("ARCHIVE").exists() {
+                let _ = std::env::set_current_dir(dir);
+                return;
+            }
+            cursor = dir.parent();
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
     env_logger::init();
+    ensure_workstation_working_dir();
 
     let initial_width = std::env::var("SUMI_WINDOW_WIDTH")
         .ok()

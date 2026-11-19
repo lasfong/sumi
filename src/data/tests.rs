@@ -605,10 +605,10 @@ fn critic_r06_regression_json_klines_mismatched_envelope_symbol_multiline_csv_an
     assert!((rep_w1.candles[0].high - 110.0).abs() < 1e-9);
     assert!((rep_w1.candles[0].volume - 2_500.0).abs() < 1e-9);
 
-    // 5. Bounded `SymbolTracker` (`MAX_DISCOVERED_SYMBOLS = 256`) + `load_ohlcv_file` (`LOW-01`, `HIGH-06`)
+    // 5. Bounded `SymbolTracker` (`MAX_DISCOVERED_SYMBOLS = 2_048`) + `load_ohlcv_file` (`LOW-01`, `HIGH-06`)
     let mut many_sym_csv = String::from("symbol,date,open,high,low,close\n");
-    for i in 0..300 {
-        many_sym_csv.push_str(&format!("SYM{i:03},2026-10-05,10,11,9,10.5\n"));
+    for i in 0..(MAX_DISCOVERED_SYMBOLS + 44) {
+        many_sym_csv.push_str(&format!("SYM{i:04},2026-10-05,10,11,9,10.5\n"));
     }
     let rep_many = load_ohlcv_csv(&many_sym_csv, &DataLoadOptions::default()).unwrap();
     assert_eq!(rep_many.available_symbols.len(), MAX_DISCOVERED_SYMBOLS);
@@ -986,4 +986,71 @@ fn r19_data_quality_audit_vn_holidays_w1_no_false_gaps_outliers_and_causal_readi
         audit_ohlcv_series_with_venue("FPT", ExchangeVenue::Hose, Timeframe::W1, &w1_masked, None);
     assert_eq!(w1_masked_rep.missing_session_count, 1);
     assert_eq!(w1_masked_rep.status, DataReadinessStatus::PartialWarning);
+}
+
+#[test]
+fn r19_multi_symbol_cafef_quarantine_and_471_symbol_single_pass_loader() {
+    use super::{InvalidRowPolicy, load_ohlcv_csv_multi_symbol};
+
+    // 1. Deterministic synthetic multi-symbol CafeF SolieuGD batch containing:
+    //    - `C69` valid 4-decimal post-split rounding (`16.9506` High vs `16.9523` Close -> repaired!)
+    //    - `BVS` `2025-05-05` `High = 0` vendor KRX glitch -> quarantined without aborting `BVS`!
+    //    - `HNX-INDEX` `2025-07-16` `High = 3` vendor glitch -> quarantined without aborting `HNX-INDEX`!
+    let batch_csv = "\
+<Ticker>,<DTYYYYMMDD>,<Open>,<High>,<Low>,<Close>,<Volume>
+C69,20261030,16.8543,16.9506,16.7579,16.9523,123300
+C69,20261031,16.9000,17.2000,16.8000,17.1000,150000
+BVS,20250505,29.6856,0,29.1974,29.4903,297800
+BVS,20250506,29.5000,30.1000,29.4000,29.9000,210000
+HNX-INDEX,20250716,240.46,3,239.78,241.31,150038511
+HNX-INDEX,20250717,241.31,244.10,240.80,243.55,142000000
+";
+
+    let opts = DataLoadOptions {
+        envelope_policy: OhlcEnvelopePolicy::CafeFSplitAware,
+        invalid_row_policy: InvalidRowPolicy::QuarantineRow,
+        ..DataLoadOptions::default()
+    };
+    let reports = load_ohlcv_csv_multi_symbol(batch_csv, &opts).expect("multi-symbol batch loads");
+    assert_eq!(reports.len(), 3);
+    assert_eq!(reports[0].symbol, "C69");
+    assert_eq!(reports[0].candles.len(), 2);
+    assert_eq!(reports[0].repaired_envelope_count, 1);
+    assert_eq!(reports[0].quarantined_row_count, 0);
+
+    assert_eq!(reports[1].symbol, "BVS");
+    assert_eq!(reports[1].candles.len(), 1);
+    assert_eq!(reports[1].quarantined_row_count, 1);
+
+    assert_eq!(reports[2].symbol, "HNX-INDEX");
+    assert_eq!(reports[2].candles.len(), 1);
+    assert_eq!(reports[2].quarantined_row_count, 1);
+
+    // 2. When unpacked local `data/raw/cafef/` files are present, verify full 471-symbol Adjusted
+    //    dataset (`941,648` rows) + 3-index `CafeF.INDEX` load cleanly via `SumiWorkstationApp`!
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let adj_path = "data/raw/cafef/CafeF.SolieuGD.Adjusted.Upto06112026.csv";
+        let idx_path = "data/raw/cafef/CafeF.INDEX.Upto06112026.csv";
+        if std::path::Path::new(adj_path).exists() && std::path::Path::new(idx_path).exists() {
+            let mut app = crate::SumiWorkstationApp::default();
+            app.import_file_from_path(adj_path)
+                .expect("471-symbol CafeF Adjusted CSV must load cleanly");
+            assert_eq!(app.available_symbols.len(), 471);
+            assert_eq!(app.symbol, "FPT");
+            assert!(app.candles.len() > 2_000);
+
+            for ticker in ["VCB", "HPG", "SSI", "BVS", "C69", "MWG"] {
+                app.select_symbol_in_source(ticker);
+                assert_eq!(app.symbol, ticker);
+                assert!(!app.candles.is_empty());
+            }
+
+            app.import_file_from_path(idx_path)
+                .expect("2-symbol CafeF INDEX CSV must load cleanly with quarantined bad rows");
+            assert_eq!(app.available_symbols.len(), 2);
+            assert_eq!(app.symbol, "VNINDEX");
+            assert!(app.candles.len() > 5_000);
+        }
+    }
 }

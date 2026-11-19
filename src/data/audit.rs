@@ -284,6 +284,8 @@ pub struct DataQualityAuditReport {
     pub volume_spike_10x_count: usize,
     pub loader_deduplicated_rows: usize,
     pub loader_repaired_envelope_rows: usize,
+    #[serde(default)]
+    pub loader_quarantined_rows: usize,
     pub anomalies: Vec<DataAuditAnomaly>,
 }
 
@@ -471,6 +473,7 @@ pub fn audit_ohlcv_series_with_venue(
             volume_spike_10x_count: 0,
             loader_deduplicated_rows,
             loader_repaired_envelope_rows,
+            loader_quarantined_rows: 0,
             anomalies: Vec::new(),
         };
     }
@@ -820,6 +823,7 @@ pub fn audit_ohlcv_series_with_venue(
         volume_spike_10x_count,
         loader_deduplicated_rows,
         loader_repaired_envelope_rows,
+        loader_quarantined_rows: 0,
         anomalies,
     }
 }

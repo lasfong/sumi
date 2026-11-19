@@ -1101,6 +1101,12 @@ pub struct SumiWorkstationApp {
     #[serde(skip)]
     pub last_loader_repair_counts: (usize, usize),
     #[serde(skip)]
+    pub last_loader_quarantined_rows: usize,
+    #[serde(skip)]
+    custom_peer_repair_counts: std::collections::HashMap<String, (usize, usize, usize)>,
+    #[serde(skip)]
+    symbol_picker_filter: String,
+    #[serde(skip)]
     pub fib_custom_ratio_input: String,
     #[serde(skip)]
     pub last_png_export_status: Option<(bool, String)>,
@@ -1332,6 +1338,9 @@ impl Default for SumiWorkstationApp {
             last_data_audit_modal_rect: None,
             data_audit_cache: None,
             last_loader_repair_counts: (0, 0),
+            last_loader_quarantined_rows: 0,
+            custom_peer_repair_counts: std::collections::HashMap::new(),
+            symbol_picker_filter: String::new(),
             fib_custom_ratio_input: String::new(),
             last_png_export_status: None,
             png_export_seq: 0,
@@ -1798,6 +1807,44 @@ impl SumiWorkstationApp {
         opts.symbol_filter = Some(ticker.to_owned());
 
         if self.data_source == DataSourcePreset::CustomFile {
+            if let Some(cached) = self
+                .custom_peer_feeds
+                .iter()
+                .find(|e| e.symbol.eq_ignore_ascii_case(ticker.trim()))
+                .cloned()
+            {
+                let (dedup, rep_env, quar) = self
+                    .custom_peer_repair_counts
+                    .get(&cached.symbol.to_ascii_uppercase())
+                    .copied()
+                    .unwrap_or((0, 0, 0));
+                let rep = DataLoadReport {
+                    symbol: cached.symbol.clone(),
+                    available_symbols: self.available_symbols.clone(),
+                    base_timeframe: cached.base_timeframe,
+                    raw_row_count: cached.candles.len() + dedup + quar,
+                    deduplicated_count: dedup,
+                    repaired_envelope_count: rep_env,
+                    quarantined_row_count: quar,
+                    filtered_other_symbol_rows: 0,
+                    candles: cached.candles,
+                };
+                let summary = format!(
+                    "Selected {} ({} {} bars)",
+                    rep.symbol,
+                    rep.candles.len(),
+                    rep.base_timeframe
+                );
+                self.apply_loaded_report_internal(
+                    rep,
+                    DataSourcePreset::CustomFile,
+                    CustomSourceUpdate::KeepExisting,
+                    true,
+                );
+                self.last_load_status = Some((false, summary));
+                return;
+            }
+
             if let Some((fmt, doc)) = self.in_memory_custom_doc.clone() {
                 match load_ohlcv_bytes(doc.as_bytes(), fmt, &opts) {
                     Ok(rep) => {
@@ -1930,21 +1977,67 @@ impl SumiWorkstationApp {
             self.last_load_status = Some((true, err.to_string()));
             return Err(err);
         }
-        let load_opts = DataLoadOptions {
-            envelope_policy: if self.import_cafef_split_aware {
-                OhlcEnvelopePolicy::CafeFSplitAware
-            } else {
-                OhlcEnvelopePolicy::RejectRow
-            },
-            ..DataLoadOptions::default()
-        };
-        match crate::data::load_ohlcv_file(trimmed, &load_opts) {
-            Ok(rep) => {
-                let msg = format_load_summary(trimmed, &rep);
+        let load_opts = self.default_import_load_options();
+        match crate::data::load_ohlcv_multi_symbol_file(trimmed, &load_opts) {
+            Ok(mut reports) => {
+                if reports.len() > 1 {
+                    reports.sort_by(|a, b| {
+                        a.symbol
+                            .to_ascii_uppercase()
+                            .cmp(&b.symbol.to_ascii_uppercase())
+                    });
+                    let sorted_syms: Vec<String> =
+                        reports.iter().map(|r| r.symbol.clone()).collect();
+                    for r in &mut reports {
+                        r.available_symbols.clone_from(&sorted_syms);
+                    }
+                }
+                let chosen_idx = ["VNINDEX", "FPT", "VCB", "HPG", "SSI"]
+                    .iter()
+                    .find_map(|pref| {
+                        reports
+                            .iter()
+                            .position(|r| r.symbol.eq_ignore_ascii_case(pref))
+                    })
+                    .unwrap_or(0);
+                let selected_rep = reports[chosen_idx].clone();
+                let total_syms = reports.len();
+                let msg = if total_syms > 1 {
+                    format!(
+                        "{} · {total_syms} symbols loaded in memory",
+                        format_load_summary(trimmed, &selected_rep)
+                    )
+                } else {
+                    format_load_summary(trimmed, &selected_rep)
+                };
+
+                self.custom_peer_feeds.clear();
+                self.custom_peer_repair_counts.clear();
+                if reports.len() > 1 {
+                    for rep in reports {
+                        let sym_upper = rep.symbol.trim().to_ascii_uppercase();
+                        self.custom_peer_repair_counts.insert(
+                            sym_upper.clone(),
+                            (
+                                rep.deduplicated_count,
+                                rep.repaired_envelope_count,
+                                rep.quarantined_row_count,
+                            ),
+                        );
+                        self.custom_peer_feeds.push(WatchlistFeedEntry {
+                            instrument_id: format!("CustomFile:{trimmed}:{sym_upper}"),
+                            preset: DataSourcePreset::CustomFile,
+                            symbol: rep.symbol,
+                            base_timeframe: rep.base_timeframe,
+                            candles: rep.candles,
+                        });
+                    }
+                }
+
                 self.apply_loaded_report_internal(
-                    rep,
+                    selected_rep,
                     DataSourcePreset::CustomFile,
-                    CustomSourceUpdate::FilePath(trimmed),
+                    CustomSourceUpdate::PreloadedFilePath(trimmed),
                     true,
                 );
                 self.last_load_status = Some((false, msg));
@@ -2207,14 +2300,14 @@ impl SumiWorkstationApp {
                 self.in_memory_custom_doc = None;
                 self.in_memory_custom_doc_hash = 0;
                 self.custom_peer_feeds.clear();
+                self.custom_peer_repair_counts.clear();
             }
             CustomSourceUpdate::KeepExisting => {}
             #[cfg(not(target_arch = "wasm32"))]
-            CustomSourceUpdate::FilePath(p) => {
+            CustomSourceUpdate::PreloadedFilePath(p) => {
                 self.in_memory_custom_doc = None;
                 self.in_memory_custom_doc_hash = 0;
                 self.import_path_input = p.to_owned();
-                refresh_custom_peers = true;
             }
             CustomSourceUpdate::InMemory(fmt, text) => {
                 self.in_memory_custom_doc_hash = fnv1a_64(text.as_bytes());
@@ -2226,6 +2319,7 @@ impl SumiWorkstationApp {
         self.viewport_focus_lock = None;
         self.last_loader_repair_counts =
             (report.deduplicated_count, report.repaired_envelope_count);
+        self.last_loader_quarantined_rows = report.quarantined_row_count;
         self.data_audit_cache = None;
         self.data_source = source;
         self.symbol = report.symbol;
@@ -3699,6 +3793,7 @@ impl SumiWorkstationApp {
             } else {
                 OhlcEnvelopePolicy::RejectRow
             },
+            invalid_row_policy: crate::data::InvalidRowPolicy::QuarantineRow,
             ..DataLoadOptions::default()
         }
     }
@@ -3855,13 +3950,14 @@ impl SumiWorkstationApp {
             } else {
                 &self.candles
             };
-            let active_report = audit_ohlcv_series_with_venue(
+            let mut active_report = audit_ohlcv_series_with_venue(
                 &self.symbol,
                 venue,
                 self.active_timeframe,
                 audit_slice,
                 Some(repair_counts),
             );
+            active_report.loader_quarantined_rows = self.last_loader_quarantined_rows;
             let close_cap = self.replay_causal_close_timestamp();
             let feeds_ref = if self.data_source == DataSourcePreset::CustomFile
                 && !self.custom_peer_feeds.is_empty()
@@ -4488,47 +4584,45 @@ impl SumiWorkstationApp {
 
     fn rebuild_custom_peer_feeds(&mut self) {
         self.custom_peer_feeds.clear();
+        self.custom_peer_repair_counts.clear();
         if self.data_source != DataSourcePreset::CustomFile || self.available_symbols.len() <= 1 {
             return;
         }
-        for sym in self.available_symbols.clone().into_iter().take(32) {
-            let sym_upper = sym.trim().to_ascii_uppercase();
-            let instrument_id = if let Some((fmt, _)) = self.in_memory_custom_doc {
-                format!(
-                    "CustomMem:{fmt:?}:{:016x}:{sym_upper}",
-                    self.in_memory_custom_doc_hash
-                )
-            } else {
-                format!("CustomFile:{}:{sym_upper}", self.import_path_input.trim())
-            };
-            if sym.eq_ignore_ascii_case(&self.symbol) {
-                self.custom_peer_feeds.push(WatchlistFeedEntry {
-                    instrument_id,
-                    preset: DataSourcePreset::CustomFile,
-                    symbol: sym,
-                    base_timeframe: self.base_timeframe,
-                    candles: self.base_candles.clone(),
-                });
-                continue;
+        let opts = self.default_import_load_options();
+        let multi_loaded = if let Some((fmt, ref doc)) = self.in_memory_custom_doc {
+            crate::data::load_ohlcv_multi_symbol_bytes(doc.as_bytes(), fmt, &opts).ok()
+        } else {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let p = self.import_path_input.trim();
+                (!p.is_empty())
+                    .then(|| crate::data::load_ohlcv_multi_symbol_file(p, &opts).ok())
+                    .flatten()
             }
-            let mut opts = self.default_import_load_options();
-            opts.symbol_filter = Some(sym.clone());
-            let loaded = if let Some((fmt, ref doc)) = self.in_memory_custom_doc {
-                load_ohlcv_bytes(doc.as_bytes(), fmt, &opts).ok()
-            } else {
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    let p = self.import_path_input.trim();
-                    (!p.is_empty())
-                        .then(|| crate::data::load_ohlcv_file(p, &opts).ok())
-                        .flatten()
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    None
-                }
-            };
-            if let Some(rep) = loaded {
+            #[cfg(target_arch = "wasm32")]
+            {
+                None
+            }
+        };
+        if let Some(reports) = multi_loaded {
+            for rep in reports {
+                let sym_upper = rep.symbol.trim().to_ascii_uppercase();
+                let instrument_id = if let Some((fmt, _)) = self.in_memory_custom_doc {
+                    format!(
+                        "CustomMem:{fmt:?}:{:016x}:{sym_upper}",
+                        self.in_memory_custom_doc_hash
+                    )
+                } else {
+                    format!("CustomFile:{}:{sym_upper}", self.import_path_input.trim())
+                };
+                self.custom_peer_repair_counts.insert(
+                    sym_upper,
+                    (
+                        rep.deduplicated_count,
+                        rep.repaired_envelope_count,
+                        rep.quarantined_row_count,
+                    ),
+                );
                 self.custom_peer_feeds.push(WatchlistFeedEntry {
                     instrument_id,
                     preset: DataSourcePreset::CustomFile,
@@ -9650,7 +9744,7 @@ enum CustomSourceUpdate<'a> {
     Clear,
     KeepExisting,
     #[cfg(not(target_arch = "wasm32"))]
-    FilePath(&'a str),
+    PreloadedFilePath(&'a str),
     InMemory(DataFileFormat, &'a str),
 }
 
@@ -9664,14 +9758,26 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
 }
 
 fn format_load_summary(source_tag: &str, rep: &DataLoadReport) -> String {
-    format!(
-        "Loaded {source_tag}: {} · base {} · {} bars (dedup {}, filtered {})",
-        rep.symbol,
-        rep.base_timeframe,
-        rep.candles.len(),
-        rep.deduplicated_count,
-        rep.filtered_other_symbol_rows
-    )
+    if rep.quarantined_row_count > 0 || rep.repaired_envelope_count > 0 {
+        format!(
+            "Loaded {source_tag}: {} · {} · {} bars (split-norm {}, quarantined {}, dedup {})",
+            rep.symbol,
+            rep.base_timeframe,
+            rep.candles.len(),
+            rep.repaired_envelope_count,
+            rep.quarantined_row_count,
+            rep.deduplicated_count
+        )
+    } else {
+        format!(
+            "Loaded {source_tag}: {} · base {} · {} bars (dedup {}, filtered {})",
+            rep.symbol,
+            rep.base_timeframe,
+            rep.candles.len(),
+            rep.deduplicated_count,
+            rep.filtered_other_symbol_rows
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -10277,8 +10383,48 @@ impl SumiWorkstationApp {
                             egui::ComboBox::from_id_salt("multi_symbol_picker")
                                 .selected_text(RichText::new(&self.symbol).monospace().size(11.0))
                                 .width(116.0)
+                                .height(360.0)
                                 .show_ui(ui, |ui| {
+                                    if self.available_symbols.len() > 16 {
+                                        let filt_resp = ui.add(
+                                            egui::TextEdit::singleline(
+                                                &mut self.symbol_picker_filter,
+                                            )
+                                            .hint_text("Filter mã...")
+                                            .desired_width(108.0)
+                                            .font(egui::FontId::monospace(10.5)),
+                                        );
+                                        if filt_resp.lost_focus()
+                                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                        {
+                                            let q = self
+                                                .symbol_picker_filter
+                                                .trim()
+                                                .to_ascii_uppercase();
+                                            if let Some(exact) = self
+                                                .available_symbols
+                                                .iter()
+                                                .find(|s| s.eq_ignore_ascii_case(&q))
+                                                .or_else(|| {
+                                                    self.available_symbols.iter().find(|s| {
+                                                        s.to_ascii_uppercase().starts_with(&q)
+                                                    })
+                                                })
+                                            {
+                                                picked_sym = Some(exact.clone());
+                                                ui.close();
+                                            }
+                                        }
+                                        ui.separator();
+                                    }
+                                    let q_upper =
+                                        self.symbol_picker_filter.trim().to_ascii_uppercase();
                                     for sym in &self.available_symbols {
+                                        if !q_upper.is_empty()
+                                            && !sym.to_ascii_uppercase().contains(&q_upper)
+                                        {
+                                            continue;
+                                        }
                                         let is_cur = self.symbol.eq_ignore_ascii_case(sym);
                                         if ui.selectable_label(is_cur, sym).clicked() {
                                             picked_sym = Some(sym.clone());
@@ -10582,6 +10728,30 @@ impl SumiWorkstationApp {
                         if ui.button("Load File").clicked() || enter_pressed {
                             let path_copy = self.import_path_input.clone();
                             let _ = self.import_file_from_path(&path_copy);
+                        }
+                        for (quick_lbl, quick_rel) in [
+                            (
+                                "CafeF Adj (471 mã)",
+                                "data/raw/cafef/CafeF.SolieuGD.Adjusted.Upto06112026.csv",
+                            ),
+                            (
+                                "CafeF Raw (471 mã)",
+                                "data/raw/cafef/CafeF.SolieuGD.Raw.Upto06112026.csv",
+                            ),
+                            (
+                                "CafeF Index",
+                                "data/raw/cafef/CafeF.INDEX.Upto06112026.csv",
+                            ),
+                        ] {
+                            if std::path::Path::new(quick_rel).exists()
+                                && ui
+                                    .small_button(RichText::new(quick_lbl).monospace().size(10.2))
+                                    .on_hover_text(quick_rel)
+                                    .clicked()
+                            {
+                                self.import_path_input = quick_rel.to_owned();
+                                let _ = self.import_file_from_path(quick_rel);
+                            }
                         }
                         if let Some((is_err, ref status_msg)) = self.last_load_status {
                             let st_color = if is_err {
@@ -21838,8 +22008,9 @@ impl SumiWorkstationApp {
                                                 );
                                                 ui.label(
                                                     RichText::new(format!(
-                                                        "Deduped / Non-Mono: {} / {}",
+                                                        "Dedup / Quarantined / Non-Mono: {} / {} / {}",
                                                         rep_clone.loader_deduplicated_rows,
+                                                        rep_clone.loader_quarantined_rows,
                                                         rep_clone.non_monotonic_count
                                                     ))
                                                     .monospace()
@@ -21891,6 +22062,30 @@ impl SumiWorkstationApp {
                                 }
 
                                 if !uni_clone.feed_audits.is_empty() {
+                                    let mut sorted_feeds = uni_clone.feed_audits.clone();
+                                    sorted_feeds.sort_by(|a, b| {
+                                        let rank = |s: DataReadinessStatus| match s {
+                                            DataReadinessStatus::Empty => 0_u8,
+                                            DataReadinessStatus::PartialWarning => 1,
+                                            DataReadinessStatus::Ready => 2,
+                                        };
+                                        rank(a.status)
+                                            .cmp(&rank(b.status))
+                                            .then_with(|| a.symbol.cmp(&b.symbol))
+                                    });
+                                    let shown_cap = 64_usize;
+                                    let hdr_txt = if sorted_feeds.len() > shown_cap {
+                                        format!(
+                                            "UNIVERSE FEED MATRIX (showing {} / {} feeds · warnings first)",
+                                            shown_cap,
+                                            sorted_feeds.len()
+                                        )
+                                    } else {
+                                        format!(
+                                            "UNIVERSE FEED MATRIX ({} feeds)",
+                                            sorted_feeds.len()
+                                        )
+                                    };
                                     Frame::new()
                                         .fill(Color32::from_rgb(13, 17, 26))
                                         .corner_radius(CornerRadius::same(4))
@@ -21899,14 +22094,11 @@ impl SumiWorkstationApp {
                                         .show(ui, |ui| {
                                             ui.set_min_width(ui.available_width());
                                             ui.label(
-                                                RichText::new(format!(
-                                                    "UNIVERSE FEED MATRIX ({} feeds)",
-                                                    uni_clone.feed_audits.len()
-                                                ))
-                                                .monospace()
-                                                .strong()
-                                                .size(9.6)
-                                                .color(Color32::from_rgb(79, 195, 247)),
+                                                RichText::new(hdr_txt)
+                                                    .monospace()
+                                                    .strong()
+                                                    .size(9.6)
+                                                    .color(Color32::from_rgb(79, 195, 247)),
                                             );
                                             egui::Grid::new("sumi_data_audit_universe_matrix")
                                                 .num_columns(6)
@@ -21930,7 +22122,7 @@ impl SumiWorkstationApp {
                                                         );
                                                     }
                                                     ui.end_row();
-                                                    for row in &uni_clone.feed_audits {
+                                                    for row in sorted_feeds.iter().take(shown_cap) {
                                                         let r_col = match row.status {
                                                             DataReadinessStatus::Ready => {
                                                                 palette::BULLISH
@@ -24641,14 +24833,29 @@ impl SumiWorkstationApp {
         } else {
             clean_sym.as_str()
         };
-        let path = format!(
-            "exports/sumi_{}_{}_{:03}.png",
+        let file_name = format!(
+            "sumi_{}_{}_{:03}.png",
             sym_part.to_ascii_lowercase(),
             self.active_timeframe.label().to_ascii_lowercase(),
             self.png_export_seq
         );
-        let _ = self.export_workstation_png_to_path(&path, logical_width, logical_height)?;
-        Ok(path)
+        let rel_path = format!("exports/{file_name}");
+        if self
+            .export_workstation_png_to_path(&rel_path, logical_width, logical_height)
+            .is_ok()
+        {
+            return Ok(rel_path);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(home) = std::env::var("HOME")
+            && !home.trim().is_empty()
+        {
+            let fallback = format!("{}/Downloads/{file_name}", home.trim_end_matches('/'));
+            let _ =
+                self.export_workstation_png_to_path(&fallback, logical_width, logical_height)?;
+            return Ok(fallback);
+        }
+        Err("failed to write PNG export".to_owned())
     }
 
     /// Executes all 3 Retina (`2.0x`) Metal/`wgpu` verification scenarios for `"r04"`..=`"r19"`
