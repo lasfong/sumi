@@ -1772,3 +1772,410 @@ fn r15_inspector_atomic_patch_hidden_selection_lock_and_timeframe_sync() {
         Err(DrawingPatchError::InvalidStyle)
     );
 }
+
+#[test]
+fn r19_text_note_utf8_wrapping_drag_timeframe_remap_and_replay_mask() {
+    use super::{MAX_TEXT_NOTE_CHARS, sanitize_text_note_content, wrap_text_note_lines};
+    use crate::data::{Timeframe, aggregate_ohlcv, generate_intraday_vn30f_1m_report};
+
+    // 1. Multibyte Vietnamese UTF-8 sanitization (`<= 280` scalar chars, never panics on byte boundaries!)
+    let long_vi =
+        "Điểm phá vỡ kháng cự VSD T+2 lúc 13:00 ICT — kiểm định khối lượng đột biến! ".repeat(8);
+    assert!(long_vi.chars().count() > MAX_TEXT_NOTE_CHARS);
+    let clean = sanitize_text_note_content(&format!("  \t{long_vi}\u{0007}\u{0000}  "));
+    assert!(clean.chars().count() <= MAX_TEXT_NOTE_CHARS);
+    assert!(!clean.contains('\u{0007}'));
+    assert!(!clean.contains('\t'));
+
+    let wrapped = wrap_text_note_lines(&clean, 34, 4);
+    assert_eq!(wrapped.len(), 4);
+    assert!(wrapped.last().unwrap().ends_with('…'));
+    for line in &wrapped {
+        assert!(line.chars().count() <= 34);
+    }
+    assert_eq!(wrap_text_note_lines("   ", 28, 4), vec!["Note".to_owned()]);
+
+    // 2. Interactive 1-click `DrawingTool::TextNote` placement, callout card hit-test, body drag,
+    //    `15m -> 1D -> 15m` timeframe remap, and `DEF-001` Replay causal cutoff masking!
+    let rep_1m = generate_intraday_vn30f_1m_report(1_530);
+    let c_15m = aggregate_ohlcv(&rep_1m.candles, Timeframe::M1, Timeframe::M15).unwrap();
+    let c_1d = aggregate_ohlcv(&rep_1m.candles, Timeframe::M1, Timeframe::D1).unwrap();
+    let (ts, ps) = setup_pane_scales(
+        c_15m.len(),
+        900.0,
+        500.0,
+        1_240.0,
+        1_340.0,
+        PriceScaleMode::Normal,
+        false,
+    );
+    let proj = PaneDrawingProjection::new(&ts, &ps, 900.0, 500.0, 1_280.0).with_candles(&c_15m);
+
+    let mut store = DrawingStore::new();
+    store.set_tool(DrawingTool::TextNote);
+    let anchor_idx = (c_15m.len() - 12) as f64;
+    let anchor_pt = proj
+        .anchor_to_local(DrawingAnchor::new(anchor_idx, 1_295.0))
+        .unwrap();
+    assert_eq!(
+        store.pointer_down(DrawingPaneTarget::Main, anchor_pt, false, &proj, &c_15m),
+        PointerCaptureOutcome::CapturedByDrawing
+    );
+    assert!(store.pointer_up(
+        DrawingPaneTarget::Main,
+        Some(anchor_pt),
+        false,
+        &proj,
+        &c_15m
+    ));
+    assert_eq!(store.drawings.len(), 1);
+    assert_eq!(store.active_tool, DrawingTool::Select);
+    let note_id = store.drawings[0].id;
+
+    // Update note text via `DrawingPropertyPatch`
+    let mut patch = DrawingPropertyPatch::from_drawing(&store.drawings[0]);
+    if let DrawingGeometry::TextNote { text, .. } = &mut patch.geometry {
+        *text = "Vùng tích lũy FPT\nUnlock T+2 13:00 ICT".to_owned();
+    }
+    assert!(
+        store
+            .apply_drawing_property_patch(note_id, patch, &c_15m, Timeframe::M15)
+            .unwrap()
+    );
+
+    let projected = proj.project_drawing(&store.drawings[0]).unwrap();
+    let card_rect = match &projected.shape {
+        ProjectedDrawingShape::TextNote {
+            box_rect, lines, ..
+        } => {
+            assert_eq!(lines.len(), 2);
+            box_rect.expect("visible TextNote card rect")
+        }
+        other => panic!("expected ProjectedDrawingShape::TextNote, got {other:?}"),
+    };
+
+    // Hit-test inside the callout card body and drag by `(+24.0, -18.0)` px:
+    let card_center = LocalPoint::new(
+        0.5 * (card_rect.left + card_rect.right),
+        0.5 * (card_rect.top + card_rect.bottom),
+    );
+    assert_eq!(
+        store.pointer_down(DrawingPaneTarget::Main, card_center, false, &proj, &c_15m),
+        PointerCaptureOutcome::CapturedByDrawing
+    );
+    let dragged_center = LocalPoint::new(card_center.x + 24.0, card_center.y - 18.0);
+    store.pointer_move(
+        DrawingPaneTarget::Main,
+        dragged_center,
+        false,
+        &proj,
+        &c_15m,
+    );
+    assert!(store.pointer_up(
+        DrawingPaneTarget::Main,
+        Some(dragged_center),
+        false,
+        &proj,
+        &c_15m
+    ));
+    let moved_proj = proj.project_drawing(&store.drawings[0]).unwrap();
+    assert!((moved_proj.anchors_local[0].x - (anchor_pt.x + 24.0)).abs() < 1e-5);
+    assert!((moved_proj.anchors_local[0].y - (anchor_pt.y - 18.0)).abs() < 1e-5);
+
+    // Causal `DEF-001` Replay cutoff before the note's anchor hides it from canvas & hit-test!
+    let early_cutoff = c_15m[5].timestamp;
+    assert!(!store.drawings[0].is_causally_visible(Some(early_cutoff), 5));
+    assert!(
+        hit_test_pane_drawings_causal(
+            &store.drawings,
+            DrawingPaneTarget::Main,
+            &proj,
+            dragged_center,
+            Some(note_id),
+            Some(early_cutoff),
+            5,
+        )
+        .is_none()
+    );
+
+    // Timeframe roundtrip `15m -> 1D -> 15m` preserves anchor!
+    let pre_bar = store.drawings[0].geometry.anchors()[0].bar_index;
+    store.remap_timeframe(&c_15m, Timeframe::M15, &c_1d, Timeframe::D1);
+    store.remap_timeframe(&c_1d, Timeframe::D1, &c_15m, Timeframe::M15);
+    let post_bar = store.drawings[0].geometry.anchors()[0].bar_index;
+    assert!((post_bar - pre_bar).abs() < 1e-6);
+
+    // `[m1]` Regression: Selected `TextNote` opaque callout card overlapping an unselected `HorizontalLine`
+    // MUST retain `HitPriority::Stroke` (not click-through to the background line behind it)!
+    let mut overlap_store = DrawingStore::new();
+    let bg_hline_id = overlap_store
+        .add_drawing(
+            DrawingPaneTarget::Main,
+            DrawingGeometry::HorizontalLine {
+                anchor: DrawingAnchor::new(anchor_idx, 1_295.0),
+            },
+            None,
+        )
+        .unwrap();
+    let top_note_id = overlap_store
+        .add_drawing(
+            DrawingPaneTarget::Main,
+            DrawingGeometry::TextNote {
+                anchor: DrawingAnchor::new(anchor_idx, 1_295.0),
+                text: "Opaque Note Card\nOver HLine".to_owned(),
+            },
+            None,
+        )
+        .unwrap();
+    overlap_store.selected_id = Some(top_note_id);
+    let note_proj = proj.project_drawing(&overlap_store.drawings[1]).unwrap();
+    let note_box = match note_proj.shape {
+        ProjectedDrawingShape::TextNote {
+            box_rect: Some(r), ..
+        } => r,
+        other => panic!("expected TextNote box, got {other:?}"),
+    };
+    let hline_y = proj
+        .anchor_to_local(DrawingAnchor::new(anchor_idx, 1_295.0))
+        .unwrap()
+        .y;
+    let overlap_cursor = LocalPoint::new(
+        0.5 * (note_box.left + note_box.right),
+        hline_y.clamp(note_box.top + 1.0, note_box.bottom - 1.0),
+    );
+    let hit = hit_test_pane_drawings(
+        &overlap_store.drawings,
+        DrawingPaneTarget::Main,
+        &proj,
+        overlap_cursor,
+        overlap_store.selected_id,
+    )
+    .expect("hit inside selected TextNote card");
+    assert_ne!(bg_hline_id, top_note_id);
+    assert_eq!(
+        hit.drawing_id, top_note_id,
+        "selected TextNote card must win over occluded background HorizontalLine"
+    );
+
+    // `[R2]` Regression: Clicking `3.5 px` inside `note_box.top` (inside the outer `6 px` border tolerance!)
+    // directly over an occluded `HorizontalLine` at that exact `y` MUST STILL hit `top_note_id` (`distance == 0.0`)!
+    let near_top_y = note_box.top + 3.5;
+    let near_top_val = ps.local_y_to_price(near_top_y, 1_280.0).unwrap();
+    overlap_store.drawings[0].geometry = DrawingGeometry::HorizontalLine {
+        anchor: DrawingAnchor::new(anchor_idx, near_top_val),
+    };
+    let near_edge_cursor = LocalPoint::new(0.5 * (note_box.left + note_box.right), near_top_y);
+    let edge_hit = hit_test_pane_drawings(
+        &overlap_store.drawings,
+        DrawingPaneTarget::Main,
+        &proj,
+        near_edge_cursor,
+        overlap_store.selected_id,
+    )
+    .expect("hit 3.5px inside TextNote top edge");
+    assert_eq!(
+        edge_hit.drawing_id, top_note_id,
+        "clicking 3.5px inside TextNote card must NOT click through to occluded line"
+    );
+    assert_eq!(edge_hit.distance, 0.0);
+}
+
+#[test]
+fn r19_custom_fibonacci_levels_and_dual_end_trendline_alert_parity() {
+    use super::{FIBONACCI_FULL_EXT_RATIOS, FIBONACCI_OTE_EXT_RATIOS, FIBONACCI_RATIOS};
+    use crate::alerts::{AlertCondition, AlertEngine, AlertError, AlertFrequency, CrossDirection};
+    use crate::data::Timeframe;
+
+    let candles = generate_synthetic_ohlcv(120);
+    let (ts, ps) = setup_pane_scales(
+        candles.len(),
+        900.0,
+        500.0,
+        50.0,
+        350.0,
+        PriceScaleMode::Normal,
+        false,
+    );
+    let proj = PaneDrawingProjection::new(&ts, &ps, 900.0, 500.0, 100.0).with_candles(&candles);
+    let mut store = DrawingStore::new();
+
+    // 1. Custom Fibonacci levels (`Std 7` -> `OTE 9` -> `Full 13` -> custom sorted deduped ratios & validation):
+    let fib_id = store
+        .add_drawing(
+            DrawingPaneTarget::Main,
+            DrawingGeometry::FibonacciRetracement {
+                start: DrawingAnchor::new(30.0, 100.0),
+                end: DrawingAnchor::new(80.0, 200.0),
+                direction: FibDirection::StartToEnd,
+                extend_right: false,
+            },
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        store.drawings[0].effective_fib_ratios(),
+        FIBONACCI_RATIOS.as_slice()
+    );
+
+    let mut ote_patch = DrawingPropertyPatch::from_drawing(&store.drawings[0]);
+    ote_patch.custom_fib_levels = Some(FIBONACCI_OTE_EXT_RATIOS.to_vec());
+    assert!(
+        store
+            .apply_drawing_property_patch(fib_id, ote_patch, &candles, Timeframe::D1)
+            .unwrap()
+    );
+    let proj_ote = proj.project_drawing(&store.drawings[0]).unwrap();
+    match &proj_ote.shape {
+        ProjectedDrawingShape::Fibonacci { levels, bands, .. } => {
+            assert_eq!(levels.len(), FIBONACCI_OTE_EXT_RATIOS.len());
+            assert_eq!(bands.len(), FIBONACCI_OTE_EXT_RATIOS.len() - 1);
+        }
+        other => panic!("expected Fibonacci shape, got {other:?}"),
+    }
+
+    let mut full_patch = DrawingPropertyPatch::from_drawing(&store.drawings[0]);
+    full_patch.custom_fib_levels = Some(FIBONACCI_FULL_EXT_RATIOS.to_vec());
+    assert!(
+        store
+            .apply_drawing_property_patch(fib_id, full_patch, &candles, Timeframe::D1)
+            .unwrap()
+    );
+    assert_eq!(
+        store.drawings[0].effective_fib_ratios().len(),
+        FIBONACCI_FULL_EXT_RATIOS.len()
+    );
+
+    // Reject empty or out-of-bounds custom Fib ratios (`> 10.0` or `> 16` levels):
+    let mut bad_fib = DrawingPropertyPatch::from_drawing(&store.drawings[0]);
+    bad_fib.custom_fib_levels = Some(vec![25.0]);
+    assert_eq!(
+        store.apply_drawing_property_patch(fib_id, bad_fib, &candles, Timeframe::D1),
+        Err(DrawingPatchError::InvalidGeometry)
+    );
+
+    // 2. Time-directional `trend_extend_left` / `trend_extend_right` on BOTH left-to-right AND right-to-left
+    //    `TrendLine`s (`start.bar_index > end.bar_index`), verified against `PaneDrawingProjection` AND `AlertEngine`!
+    let mut alert_bars: Vec<Candle> = (0..12)
+        .map(|i| Candle {
+            timestamp: 1_750_000_000 + (i as i64) * 86_400,
+            date_label: format!("2026-06-{:02}", i + 1),
+            open: 100.0,
+            high: 101.0,
+            low: 99.0,
+            close: 100.0,
+            volume: 1_000.0,
+        })
+        .collect();
+    // Bar 9 surges from 100.0 up to 115.0 (crossing above horizontal-or-sloped extended line at y=105.0):
+    alert_bars[9].high = 115.0;
+    alert_bars[9].close = 114.0;
+
+    let mut rtl_store = DrawingStore::new();
+    // Right-to-left TrendLine: `start = (6.0, 105.0)`, `end = (2.0, 105.0)`!
+    // Later-in-time endpoint is `start` (`bar 6`), earlier-in-time endpoint is `end` (`bar 2`)!
+    let rtl_id = rtl_store
+        .add_drawing(
+            DrawingPaneTarget::Main,
+            DrawingGeometry::TrendLine {
+                start: DrawingAnchor::with_timestamp(6.0, 105.0, alert_bars[6].timestamp as f64),
+                end: DrawingAnchor::with_timestamp(2.0, 105.0, alert_bars[2].timestamp as f64),
+            },
+            None,
+        )
+        .unwrap();
+
+    let mut engine = AlertEngine::new();
+    let _rule_id = engine
+        .add_alert(
+            "FPT",
+            Timeframe::D1,
+            AlertCondition::DrawingLine {
+                drawing_id: rtl_id,
+                direction: CrossDirection::CrossAbove,
+            },
+            AlertFrequency::OncePerBarClose,
+            Some("RTL Trend Break".to_owned()),
+            &alert_bars,
+            0,
+            None,
+            Some(&rtl_store),
+        )
+        .expect("TrendLine alert valid");
+
+    // Without `trend_extend_right`, bar 9 is outside `[2.0, 6.0]` -> 0 triggers!
+    engine.evaluate_causal(
+        &alert_bars,
+        Timeframe::D1,
+        &alert_bars,
+        Timeframe::D1,
+        alert_bars.len() - 1,
+        None,
+        &rtl_store,
+    );
+    assert!(
+        engine.triggers.is_empty(),
+        "unextended TrendLine [2..6] must NOT fire at bar 9"
+    );
+
+    // Enable `trend_extend_right = true` (chronological `+∞`, even though `start.bar_index > end.bar_index`!):
+    rtl_store.drawings[0].trend_extend_right = true;
+    let (ts_a, ps_a) =
+        setup_pane_scales(12, 600.0, 300.0, 90.0, 120.0, PriceScaleMode::Normal, false);
+    let proj_a = PaneDrawingProjection::new(&ts_a, &ps_a, 600.0, 300.0, 100.0);
+    let rtl_proj = proj_a.project_drawing(&rtl_store.drawings[0]).unwrap();
+    let seg = match rtl_proj.shape {
+        ProjectedDrawingShape::Segment {
+            clipped: Some(s), ..
+        } => s,
+        other => panic!("expected extended segment, got {other:?}"),
+    };
+    assert!(
+        (seg.start.x.max(seg.end.x) - 600.0).abs() < 1e-6,
+        "RTL TrendLine with trend_extend_right=true must extend rightward to pane right edge 600.0, got {seg:?}"
+    );
+
+    engine.evaluate_causal(
+        &alert_bars,
+        Timeframe::D1,
+        &alert_bars,
+        Timeframe::D1,
+        alert_bars.len() - 1,
+        None,
+        &rtl_store,
+    );
+    assert_eq!(
+        engine.triggers.len(),
+        1,
+        "RTL TrendLine with trend_extend_right=true MUST fire at bar 9!"
+    );
+    assert_eq!(engine.triggers[0].bar_timestamp, alert_bars[9].timestamp);
+
+    // Also verify `TextNote` is cleanly rejected as a `DrawingLine` alert source:
+    let note_id = rtl_store
+        .add_drawing(
+            DrawingPaneTarget::Main,
+            DrawingGeometry::TextNote {
+                anchor: DrawingAnchor::new(4.0, 102.0),
+                text: "Note".to_owned(),
+            },
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        engine.add_alert(
+            "FPT",
+            Timeframe::D1,
+            AlertCondition::DrawingLine {
+                drawing_id: note_id,
+                direction: CrossDirection::CrossAny,
+            },
+            AlertFrequency::Once,
+            Some("Bad Note Alert".to_owned()),
+            &alert_bars,
+            0,
+            None,
+            Some(&rtl_store),
+        ),
+        Err(AlertError::UnsupportedDrawingGeometry)
+    );
+}

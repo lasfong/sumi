@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::data::{DataSourcePreset, Timeframe};
 use crate::indicators::{CvdResetMode, IndicatorConfig, ProfileSessionPeriod, VwapAnchorMode};
+use crate::journal::{ExchangeVenue, VnPriceUnit};
 
 use super::hotkeys::{
     HotkeyAction, HotkeyChord, HotkeyKey, HotkeyModifiers, HotkeyOverride, HotkeyProfile,
@@ -256,6 +257,155 @@ pub struct WorkspaceDockPreset {
     pub show_replay_bar: bool,
 }
 
+/// Candlestick & volume bar color theme preset (`Milestone R19 / C1`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum CandlePalettePreset {
+    /// Sumi institutional default: solid `#26A69A` bullish, solid `#EF5350` bearish.
+    #[default]
+    EmeraldCrimson,
+    /// LWC institutional hollow: `1.25 px` `#26A69A` hollow bullish outline (wicks stop at body edges), solid `#EF5350` bearish.
+    HollowBullish,
+    /// Deuteranopia / Protanopia accessible Okabe-Ito sky-blue (`#009ADE`) vs vivid amber-orange (`#FF8C00`).
+    ColorblindOkabeIto,
+    /// High-contrast monochrome print/desk theme: crisp ice-white (`#E6EDF3`) bullish vs slate-silver (`#7D8590`) bearish.
+    ClassicMonochrome,
+}
+
+impl CandlePalettePreset {
+    pub const ALL: [Self; 4] = [
+        Self::EmeraldCrimson,
+        Self::HollowBullish,
+        Self::ColorblindOkabeIto,
+        Self::ClassicMonochrome,
+    ];
+
+    #[inline]
+    #[must_use]
+    pub const fn as_id(self) -> &'static str {
+        match self {
+            Self::EmeraldCrimson => "EmeraldCrimson",
+            Self::HollowBullish => "HollowBullish",
+            Self::ColorblindOkabeIto => "ColorblindOkabeIto",
+            Self::ClassicMonochrome => "ClassicMonochrome",
+        }
+    }
+
+    #[must_use]
+    pub fn from_id(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "emeraldcrimson" | "default" | "tealred" => Some(Self::EmeraldCrimson),
+            "hollowbullish" | "hollow" => Some(Self::HollowBullish),
+            "colorblindokabeito" | "okabeito" | "colorblind" => Some(Self::ColorblindOkabeIto),
+            "classicmonochrome" | "monochrome" | "mono" => Some(Self::ClassicMonochrome),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn short_label(self) -> &'static str {
+        match self {
+            Self::EmeraldCrimson => "Emerald / Crimson",
+            Self::HollowBullish => "Hollow Bullish",
+            Self::ColorblindOkabeIto => "Okabe-Ito (CB)",
+            Self::ClassicMonochrome => "Classic Mono",
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn bull_rgb(self) -> [u8; 3] {
+        match self {
+            Self::EmeraldCrimson | Self::HollowBullish => [38, 166, 154], // #26A69A
+            Self::ColorblindOkabeIto => [0, 154, 222],                    // #009ADE
+            Self::ClassicMonochrome => [230, 237, 243],                   // #E6EDF3
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn bear_rgb(self) -> [u8; 3] {
+        match self {
+            Self::EmeraldCrimson | Self::HollowBullish => [239, 83, 80], // #EF5350
+            Self::ColorblindOkabeIto => [255, 140, 0],                   // #FF8C00
+            Self::ClassicMonochrome => [125, 133, 144],                  // #7D8590
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_hollow_bullish(self) -> bool {
+        matches!(self, Self::HollowBullish)
+    }
+}
+
+/// Global workstation preferences persisted across `eframe` restarts and `WorkspaceTemplate` exports (`Milestone R19 / C1`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkstationSettings {
+    pub default_venue_override: Option<ExchangeVenue>,
+    pub default_vn_price_unit: VnPriceUnit,
+    pub default_initial_capital: f64,
+    pub default_commission_bps: f64,
+    pub default_tax_sell_bps: f64,
+    pub default_slippage_bps: f64,
+    pub default_risk_per_trade_pct: f64,
+    pub candle_palette: CandlePalettePreset,
+    pub auto_snapshot_interval_mins: u16,
+    pub enforce_vn_t2_lot_lock: bool,
+}
+
+impl Default for WorkstationSettings {
+    fn default() -> Self {
+        Self {
+            default_venue_override: None,
+            default_vn_price_unit: VnPriceUnit::Auto,
+            default_initial_capital: 100_000.0,
+            default_commission_bps: 15.0,
+            default_tax_sell_bps: 10.0,
+            default_slippage_bps: 5.0,
+            default_risk_per_trade_pct: 1.0,
+            candle_palette: CandlePalettePreset::EmeraldCrimson,
+            auto_snapshot_interval_mins: 5,
+            enforce_vn_t2_lot_lock: true,
+        }
+    }
+}
+
+impl WorkstationSettings {
+    pub const VALID_AUTO_SNAPSHOT_MINS: [u16; 5] = [0, 1, 5, 15, 30];
+
+    pub fn sanitize(&mut self) {
+        self.default_initial_capital =
+            sanitize_setting_f64(self.default_initial_capital, 1_000.0, 1.0e12, 100_000.0);
+        self.default_commission_bps =
+            sanitize_setting_f64(self.default_commission_bps, 0.0, 500.0, 15.0);
+        self.default_tax_sell_bps =
+            sanitize_setting_f64(self.default_tax_sell_bps, 0.0, 500.0, 10.0);
+        self.default_slippage_bps =
+            sanitize_setting_f64(self.default_slippage_bps, 0.0, 500.0, 5.0);
+        self.default_risk_per_trade_pct =
+            sanitize_setting_f64(self.default_risk_per_trade_pct, 0.05, 25.0, 1.0);
+        self.auto_snapshot_interval_mins = match self.auto_snapshot_interval_mins {
+            0 => 0,
+            1..=2 => 1,
+            3..=9 => 5,
+            10..=22 => 15,
+            _ => 30,
+        };
+    }
+}
+
+#[inline]
+fn sanitize_setting_f64(value: f64, min_val: f64, max_val: f64, fallback: f64) -> f64 {
+    if value.is_finite() {
+        let clamped = value.clamp(min_val, max_val);
+        if clamped == 0.0 { 0.0 } else { clamped }
+    } else {
+        fallback
+    }
+}
+
 /// Versioned multi-chart workspace template persisted/shared as `RON` or `JSON`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -272,6 +422,8 @@ pub struct WorkspaceTemplate {
     #[serde(default)]
     pub hotkey_base_preset: Option<HotkeyProfileId>,
     pub hotkey_overrides: Vec<HotkeyOverride>,
+    #[serde(default)]
+    pub settings: WorkstationSettings,
 }
 
 impl Default for WorkspaceTemplate {
@@ -288,6 +440,7 @@ impl Default for WorkspaceTemplate {
             hotkey_profile: HotkeyProfileId::default(),
             hotkey_base_preset: None,
             hotkey_overrides: Vec::new(),
+            settings: WorkstationSettings::default(),
         };
         tpl.sanitize();
         tpl
@@ -335,6 +488,7 @@ impl WorkspaceTemplate {
             &self.hotkey_overrides,
         );
         self.hotkey_overrides = canonical_profile.overrides_from_preset();
+        self.settings.sanitize();
     }
 
     /// Encodes this template into formatted RFC-8259 `JSON`.
@@ -381,14 +535,15 @@ impl WorkspaceTemplate {
 
     /// Computes a deterministic `SplitMix64` canonical digest over all functional workspace state
     /// (`layout`, `sync`, `active_slot`, `slots`, `dock_layout`, `hotkey_profile`, `hotkey_base_preset`,
-    /// `hotkey_overrides`), invariant to metadata `name` and `description`.
+    /// `hotkey_overrides`, and non-default `settings`), invariant to metadata `name` and `description`.
     #[must_use]
     pub fn canonical_digest(&self) -> u64 {
         let mut copy = self.clone();
         copy.name = "canonical".to_owned();
         copy.description.clear();
         copy.sanitize();
-        let canonical_ron = encode_ron_template(&copy);
+        let include_settings = copy.settings != WorkstationSettings::default();
+        let canonical_ron = encode_ron_template_inner(&copy, include_settings);
         splitmix64_hash_bytes(canonical_ron.as_bytes())
     }
 }
@@ -562,6 +717,7 @@ pub fn builtin_workspace_templates() -> Vec<WorkspaceTemplate> {
         hotkey_profile: HotkeyProfileId::default(),
         hotkey_base_preset: None,
         hotkey_overrides: Vec::new(),
+        settings: WorkstationSettings::default(),
     };
     t1.slots[0].indicators = ichimoku_daily.clone();
 
@@ -583,6 +739,7 @@ pub fn builtin_workspace_templates() -> Vec<WorkspaceTemplate> {
         hotkey_profile: HotkeyProfileId::default(),
         hotkey_base_preset: None,
         hotkey_overrides: Vec::new(),
+        settings: WorkstationSettings::default(),
     };
     t2.slots[0] = WorkspaceSlotTemplate {
         slot_index: 0,
@@ -641,6 +798,7 @@ pub fn builtin_workspace_templates() -> Vec<WorkspaceTemplate> {
         hotkey_profile: HotkeyProfileId::default(),
         hotkey_base_preset: None,
         hotkey_overrides: Vec::new(),
+        settings: WorkstationSettings::default(),
     };
     t3.slots[0].symbol = "FPT".to_owned();
     t3.slots[0].timeframe = Timeframe::D1;
@@ -673,6 +831,7 @@ pub fn builtin_workspace_templates() -> Vec<WorkspaceTemplate> {
         hotkey_profile: HotkeyProfileId::default(),
         hotkey_base_preset: None,
         hotkey_overrides: Vec::new(),
+        settings: WorkstationSettings::default(),
     };
 
     let mut t5 = WorkspaceTemplate {
@@ -697,6 +856,7 @@ pub fn builtin_workspace_templates() -> Vec<WorkspaceTemplate> {
         hotkey_profile: HotkeyProfileId::default(),
         hotkey_base_preset: None,
         hotkey_overrides: Vec::new(),
+        settings: WorkstationSettings::default(),
     };
     t5.slots[0] = WorkspaceSlotTemplate {
         slot_index: 0,
@@ -767,6 +927,7 @@ pub fn builtin_workspace_templates() -> Vec<WorkspaceTemplate> {
         hotkey_profile: HotkeyProfileId::InstitutionalDomFast,
         hotkey_base_preset: None,
         hotkey_overrides: Vec::new(),
+        settings: WorkstationSettings::default(),
     };
     t6.slots[0] = WorkspaceSlotTemplate {
         slot_index: 0,
@@ -921,8 +1082,67 @@ fn encode_json_template(t: &WorkspaceTemplate) -> String {
     }
     out.push_str(",\n");
     encode_json_hotkey_overrides(&mut out, &t.hotkey_overrides);
+    out.push_str(",\n");
+    encode_json_settings(&mut out, &t.settings);
     out.push_str("\n}");
     out
+}
+
+fn encode_json_settings(out: &mut String, st: &WorkstationSettings) {
+    out.push_str("  \"settings\": {\n");
+    out.push_str("    \"default_venue_override\": ");
+    match st.default_venue_override {
+        Some(v) => {
+            let _ = write!(out, "\"{v:?}\"");
+        }
+        None => out.push_str("null"),
+    }
+    let _ = writeln!(
+        out,
+        ",\n    \"default_vn_price_unit\": \"{:?}\",",
+        st.default_vn_price_unit
+    );
+    let _ = writeln!(
+        out,
+        "    \"default_initial_capital\": {},",
+        fmt_f64(st.default_initial_capital)
+    );
+    let _ = writeln!(
+        out,
+        "    \"default_commission_bps\": {},",
+        fmt_f64(st.default_commission_bps)
+    );
+    let _ = writeln!(
+        out,
+        "    \"default_tax_sell_bps\": {},",
+        fmt_f64(st.default_tax_sell_bps)
+    );
+    let _ = writeln!(
+        out,
+        "    \"default_slippage_bps\": {},",
+        fmt_f64(st.default_slippage_bps)
+    );
+    let _ = writeln!(
+        out,
+        "    \"default_risk_per_trade_pct\": {},",
+        fmt_f64(st.default_risk_per_trade_pct)
+    );
+    let _ = writeln!(
+        out,
+        "    \"candle_palette\": \"{}\",",
+        st.candle_palette.as_id()
+    );
+    let _ = writeln!(
+        out,
+        "    \"auto_snapshot_interval_mins\": {},",
+        st.auto_snapshot_interval_mins
+    );
+    let _ = writeln!(
+        out,
+        "    \"enforce_vn_t2_lot_lock\": {}",
+        st.enforce_vn_t2_lot_lock
+    );
+    out.push_str("  }");
 }
 
 fn encode_json_dock_layout(out: &mut String, dl: &WorkspaceDockPreset) {
@@ -1164,6 +1384,10 @@ fn encode_json_stretches(out: &mut String, st: &WorkspacePaneStretches) {
 }
 
 fn encode_ron_template(t: &WorkspaceTemplate) -> String {
+    encode_ron_template_inner(t, true)
+}
+
+fn encode_ron_template_inner(t: &WorkspaceTemplate, include_settings: bool) -> String {
     let mut out = String::with_capacity(2048);
     let _ = writeln!(
         out,
@@ -1225,8 +1449,69 @@ fn encode_ron_template(t: &WorkspaceTemplate) -> String {
         }
     }
     encode_ron_hotkey_overrides(&mut out, &t.hotkey_overrides);
+    if include_settings {
+        encode_ron_settings(&mut out, &t.settings);
+    }
     out.push(')');
     out
+}
+
+fn encode_ron_settings(out: &mut String, st: &WorkstationSettings) {
+    out.push_str("    settings: (\n");
+    match st.default_venue_override {
+        Some(v) => {
+            let _ = writeln!(out, "        default_venue_override: Some({v:?}),");
+        }
+        None => {
+            let _ = writeln!(out, "        default_venue_override: None,");
+        }
+    }
+    let _ = writeln!(
+        out,
+        "        default_vn_price_unit: {:?},",
+        st.default_vn_price_unit
+    );
+    let _ = writeln!(
+        out,
+        "        default_initial_capital: {},",
+        fmt_f64(st.default_initial_capital)
+    );
+    let _ = writeln!(
+        out,
+        "        default_commission_bps: {},",
+        fmt_f64(st.default_commission_bps)
+    );
+    let _ = writeln!(
+        out,
+        "        default_tax_sell_bps: {},",
+        fmt_f64(st.default_tax_sell_bps)
+    );
+    let _ = writeln!(
+        out,
+        "        default_slippage_bps: {},",
+        fmt_f64(st.default_slippage_bps)
+    );
+    let _ = writeln!(
+        out,
+        "        default_risk_per_trade_pct: {},",
+        fmt_f64(st.default_risk_per_trade_pct)
+    );
+    let _ = writeln!(
+        out,
+        "        candle_palette: {},",
+        st.candle_palette.as_id()
+    );
+    let _ = writeln!(
+        out,
+        "        auto_snapshot_interval_mins: {},",
+        st.auto_snapshot_interval_mins
+    );
+    let _ = writeln!(
+        out,
+        "        enforce_vn_t2_lot_lock: {},",
+        st.enforce_vn_t2_lot_lock
+    );
+    out.push_str("    ),\n");
 }
 
 fn encode_ron_dock_layout(out: &mut String, dl: &WorkspaceDockPreset) {
@@ -2064,6 +2349,7 @@ impl WorkspaceTemplate {
                 "hotkey_profile",
                 "hotkey_base_preset",
                 "hotkey_overrides",
+                "settings",
             ],
         )?;
         let mut tpl = Self::default();
@@ -2166,9 +2452,131 @@ impl WorkspaceTemplate {
         if let Some(v) = find_field(fields, "hotkey_overrides") {
             tpl.hotkey_overrides = decode_hotkey_overrides(v)?;
         }
+        if let Some(v) = find_field(fields, "settings") {
+            tpl.settings = decode_workstation_settings(v)?;
+        }
         tpl.sanitize();
         Ok(tpl)
     }
+}
+
+fn parse_exchange_venue(raw: &str) -> Option<ExchangeVenue> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "hose" => Some(ExchangeVenue::Hose),
+        "hnx" => Some(ExchangeVenue::Hnx),
+        "upcom" => Some(ExchangeVenue::Upcom),
+        "vn30futures" | "vn30f" => Some(ExchangeVenue::Vn30Futures),
+        "vnindexbenchmark" | "vn-idx" | "vnindex" => Some(ExchangeVenue::VnIndexBenchmark),
+        "usequities" | "us eq" | "us" => Some(ExchangeVenue::UsEquities),
+        "cryptospotperp" | "crypto" => Some(ExchangeVenue::CryptoSpotPerp),
+        _ => None,
+    }
+}
+
+fn parse_vn_price_unit(raw: &str) -> Option<VnPriceUnit> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "auto" => Some(VnPriceUnit::Auto),
+        "thousandvnd" | "1k vnd" | "1kvnd" | "kvnd" => Some(VnPriceUnit::ThousandVnd),
+        "rawvnd" | "full vnd" | "fullvnd" | "vnd" => Some(VnPriceUnit::RawVnd),
+        _ => None,
+    }
+}
+
+fn decode_workstation_settings(
+    val: &DocValue,
+) -> Result<WorkstationSettings, WorkspaceTemplateError> {
+    let f = expect_struct(val, "settings")?;
+    validate_struct_fields(
+        f,
+        "settings",
+        &[
+            "default_venue_override",
+            "default_vn_price_unit",
+            "default_initial_capital",
+            "default_commission_bps",
+            "default_tax_sell_bps",
+            "default_slippage_bps",
+            "default_risk_per_trade_pct",
+            "candle_palette",
+            "auto_snapshot_interval_mins",
+            "enforce_vn_t2_lot_lock",
+        ],
+    )?;
+    let mut st = WorkstationSettings::default();
+    if let Some(v) = find_field(f, "default_venue_override") {
+        st.default_venue_override = match v {
+            DocValue::None => None,
+            DocValue::Some(inner) => {
+                let raw = expect_label(inner, "settings.default_venue_override")?;
+                Some(parse_exchange_venue(&raw).ok_or_else(|| {
+                    WorkspaceTemplateError::InvalidField {
+                        field: "settings.default_venue_override".to_owned(),
+                        reason: format!("unknown ExchangeVenue '{raw}'"),
+                    }
+                })?)
+            }
+            other => {
+                let raw = expect_label(other, "settings.default_venue_override")?;
+                if raw.eq_ignore_ascii_case("auto") || raw.eq_ignore_ascii_case("none") {
+                    None
+                } else {
+                    Some(parse_exchange_venue(&raw).ok_or_else(|| {
+                        WorkspaceTemplateError::InvalidField {
+                            field: "settings.default_venue_override".to_owned(),
+                            reason: format!("unknown ExchangeVenue '{raw}'"),
+                        }
+                    })?)
+                }
+            }
+        };
+    }
+    if let Some(v) = find_field(f, "default_vn_price_unit") {
+        let raw = expect_label(v, "settings.default_vn_price_unit")?;
+        st.default_vn_price_unit =
+            parse_vn_price_unit(&raw).ok_or_else(|| WorkspaceTemplateError::InvalidField {
+                field: "settings.default_vn_price_unit".to_owned(),
+                reason: format!("unknown VnPriceUnit '{raw}'"),
+            })?;
+    }
+    if let Some(v) = find_field(f, "default_initial_capital") {
+        st.default_initial_capital = expect_f64(v, "settings.default_initial_capital")?;
+    }
+    if let Some(v) = find_field(f, "default_commission_bps") {
+        st.default_commission_bps = expect_f64(v, "settings.default_commission_bps")?;
+    }
+    if let Some(v) = find_field(f, "default_tax_sell_bps") {
+        st.default_tax_sell_bps = expect_f64(v, "settings.default_tax_sell_bps")?;
+    }
+    if let Some(v) = find_field(f, "default_slippage_bps") {
+        st.default_slippage_bps = expect_f64(v, "settings.default_slippage_bps")?;
+    }
+    if let Some(v) = find_field(f, "default_risk_per_trade_pct") {
+        st.default_risk_per_trade_pct = expect_f64(v, "settings.default_risk_per_trade_pct")?;
+    }
+    if let Some(v) = find_field(f, "candle_palette") {
+        let raw = expect_label(v, "settings.candle_palette")?;
+        st.candle_palette = CandlePalettePreset::from_id(&raw).ok_or_else(|| {
+            WorkspaceTemplateError::InvalidField {
+                field: "settings.candle_palette".to_owned(),
+                reason: format!("unknown CandlePalettePreset '{raw}'"),
+            }
+        })?;
+    }
+    if let Some(v) = find_field(f, "auto_snapshot_interval_mins") {
+        let mins = expect_usize(v, "settings.auto_snapshot_interval_mins")?;
+        if mins > usize::from(u16::MAX) {
+            return Err(WorkspaceTemplateError::InvalidField {
+                field: "settings.auto_snapshot_interval_mins".to_owned(),
+                reason: format!("auto_snapshot_interval_mins {mins} exceeds u16::MAX"),
+            });
+        }
+        st.auto_snapshot_interval_mins = mins as u16;
+    }
+    if let Some(v) = find_field(f, "enforce_vn_t2_lot_lock") {
+        st.enforce_vn_t2_lot_lock = expect_bool(v, "settings.enforce_vn_t2_lot_lock")?;
+    }
+    st.sanitize();
+    Ok(st)
 }
 
 pub(crate) fn validate_struct_fields(
@@ -3090,6 +3498,7 @@ pub struct WorkspaceSnapshotDiff {
     pub hotkey_profile_change: Option<(HotkeyProfileId, HotkeyProfileId)>,
     pub hotkey_base_preset_changed: bool,
     pub hotkey_override_delta_count: usize,
+    pub settings_changed: bool,
     pub total_changed_fields: usize,
 }
 
@@ -3301,6 +3710,44 @@ pub fn compute_workspace_diff(
     };
     total_changed_fields += hotkey_override_delta_count;
 
+    let settings_changed = cur.settings != cand.settings;
+    if settings_changed {
+        let sa = &cur.settings;
+        let sb = &cand.settings;
+        let mut st_deltas = 0_usize;
+        if sa.default_venue_override != sb.default_venue_override {
+            st_deltas += 1;
+        }
+        if sa.default_vn_price_unit != sb.default_vn_price_unit {
+            st_deltas += 1;
+        }
+        if sa.default_initial_capital != sb.default_initial_capital {
+            st_deltas += 1;
+        }
+        if sa.default_commission_bps != sb.default_commission_bps {
+            st_deltas += 1;
+        }
+        if sa.default_tax_sell_bps != sb.default_tax_sell_bps {
+            st_deltas += 1;
+        }
+        if sa.default_slippage_bps != sb.default_slippage_bps {
+            st_deltas += 1;
+        }
+        if sa.default_risk_per_trade_pct != sb.default_risk_per_trade_pct {
+            st_deltas += 1;
+        }
+        if sa.candle_palette != sb.candle_palette {
+            st_deltas += 1;
+        }
+        if sa.auto_snapshot_interval_mins != sb.auto_snapshot_interval_mins {
+            st_deltas += 1;
+        }
+        if sa.enforce_vn_t2_lot_lock != sb.enforce_vn_t2_lot_lock {
+            st_deltas += 1;
+        }
+        total_changed_fields += st_deltas.max(1);
+    }
+
     let is_identical =
         total_changed_fields == 0 && cur.canonical_digest() == cand.canonical_digest();
 
@@ -3314,6 +3761,7 @@ pub fn compute_workspace_diff(
         hotkey_profile_change,
         hotkey_base_preset_changed,
         hotkey_override_delta_count,
+        settings_changed,
         total_changed_fields,
     }
 }

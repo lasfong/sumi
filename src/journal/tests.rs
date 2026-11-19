@@ -614,3 +614,236 @@ fn critic_r10_regression_vn30f_multiplier_hose_tier_step_local_tz_and_csv_newlin
     assert_eq!(store.entries.len(), 2);
     assert_eq!(store.compute_analytics(None).profit_factor, Some(2.0));
 }
+
+#[test]
+fn r19_vietnam_holidays_v1_sorted_unique_weekdays_2018_2030_and_statutory_fallback() {
+    use super::{
+        VIETNAM_HOLIDAYS_V1, add_vn_trading_days, is_vn_exchange_holiday_ymd,
+        is_vn_exchange_trading_day_days, vn_trading_days_between,
+    };
+    use crate::data::{civil_from_days, weekday_from_days};
+
+    assert_eq!(VIETNAM_HOLIDAYS_V1.len(), 151);
+
+    for (idx, &ymd) in VIETNAM_HOLIDAYS_V1.iter().enumerate() {
+        if idx > 0 {
+            assert!(
+                VIETNAM_HOLIDAYS_V1[idx - 1] < ymd,
+                "VIETNAM_HOLIDAYS_V1 must be strictly ascending & unique at idx {idx}: {} >= {}",
+                VIETNAM_HOLIDAYS_V1[idx - 1],
+                ymd
+            );
+        }
+        let year = ymd / 10_000;
+        let month = ((ymd / 100) % 100) as u32;
+        let day = (ymd % 100) as u32;
+        assert!((2018..=2030).contains(&year));
+        let epoch_days = days_from_civil(year, month, day);
+        assert_eq!(civil_from_days(epoch_days), (year, month, day));
+        assert!(
+            weekday_from_days(epoch_days) < 5,
+            "Holiday {ymd} must be a weekday (Mon..Fri), got wd={}",
+            weekday_from_days(epoch_days)
+        );
+        assert!(is_vn_exchange_holiday_ymd(year, month, day));
+        assert!(!is_vn_exchange_trading_day_days(epoch_days));
+    }
+
+    // Out-of-range statutory fallback (`< 2018` & `> 2030`):
+    // 2017-01-01 is Sunday -> Monday 2017-01-02 is compensatory New Year holiday!
+    assert!(is_vn_exchange_holiday_ymd(2017, 1, 2));
+    assert!(!is_vn_exchange_holiday_ymd(2017, 1, 3));
+    assert!(is_vn_exchange_holiday_ymd(2031, 1, 1));
+    assert!(is_vn_exchange_holiday_ymd(2031, 4, 30));
+    assert!(is_vn_exchange_holiday_ymd(2031, 5, 1));
+    assert!(is_vn_exchange_holiday_ymd(2031, 9, 2));
+    // `[M5]`: Official 2026-01-02 swap + 24/11 Culture Day (2026..=2030 + >2030 statutory fallback):
+    assert!(is_vn_exchange_holiday_ymd(2026, 1, 2));
+    assert!(is_vn_exchange_holiday_ymd(2026, 11, 24));
+    assert!(is_vn_exchange_holiday_ymd(2029, 11, 26)); // Sat 24/11 -> Mon 26/11
+    assert!(is_vn_exchange_holiday_ymd(2030, 11, 25)); // Sun 24/11 -> Mon 25/11
+    assert!(is_vn_exchange_holiday_ymd(2031, 11, 24));
+
+    // Verify `add_vn_trading_days` & `vn_trading_days_between` antisymmetry across Tết Bính Ngọ 2026 (`16..20/02`)
+    let fri_pre_tet = days_from_civil(2026, 2, 13);
+    let mon_post_tet = add_vn_trading_days(fri_pre_tet, 1);
+    assert_eq!(civil_from_days(mon_post_tet), (2026, 2, 23));
+    assert_eq!(add_vn_trading_days(mon_post_tet, -1), fri_pre_tet);
+    assert_eq!(vn_trading_days_between(fri_pre_tet, mon_post_tet), 1);
+    assert_eq!(vn_trading_days_between(mon_post_tet, fri_pre_tet), -1);
+    // `delta_days == 0` on a Tết holiday snaps forward to Monday 2026-02-23
+    assert_eq!(
+        add_vn_trading_days(days_from_civil(2026, 2, 17), 0),
+        mon_post_tet
+    );
+}
+
+#[test]
+fn r19_vn_settlement_t2_1300_ict_holidays_and_pre_2022_t3_cutover() {
+    use super::VSD_T2_CUTOVER_YMD;
+    assert_eq!(VSD_T2_CUTOVER_YMD, 20_220_829);
+
+    let ict_ts = |y: i32, m: u32, d: u32, hh: i64, mm: i64| -> i64 {
+        days_from_civil(y, m, d) * 86_400 + hh * 3_600 + mm * 60 - 7 * 3_600
+    };
+    let check_ict = |utc_ts: i64| -> (i32, u32, u32, u32, u32) {
+        let dt = decompose_utc(utc_ts + 7 * 3_600);
+        (dt.year, dt.month, dt.day, dt.hour, dt.minute)
+    };
+
+    // 1. 2026-04-29 (Wed) before 30/04 (Thu) & 01/05 (Fri) holidays -> T+1 = Mon 04/05, T+2 = Tue 05/05 13:00 ICT!
+    let s_apr29 =
+        compute_settlement_timestamp_for_venue(ict_ts(2026, 4, 29, 10, 15), ExchangeVenue::Hose);
+    assert_eq!(check_ict(s_apr29), (2026, 5, 5, 13, 0));
+
+    // 2. 2026-02-13 (Fri) before 5-day Tết Bính Ngọ (`16..20/02`) -> T+1 = Mon 23/02, T+2 = Tue 24/02 13:00 ICT!
+    let s_tet =
+        compute_settlement_timestamp_for_venue(ict_ts(2026, 2, 13, 14, 0), ExchangeVenue::Hnx);
+    assert_eq!(check_ict(s_tet), (2026, 2, 24, 13, 0));
+
+    // 3. 2025-04-29 (Tue) before 30/04 (Wed), 01/05 (Thu), and official 02/05 (Fri) swap holiday ->
+    //    T+1 = Mon 05/05, T+2 = Tue 06/05 13:00 ICT!
+    let s_2025_swap =
+        compute_settlement_timestamp_for_venue(ict_ts(2025, 4, 29, 9, 30), ExchangeVenue::Upcom);
+    assert_eq!(check_ict(s_2025_swap), (2025, 5, 6, 13, 0));
+
+    // 4. Historical pre-`2022-08-29` VSD `T+3` (`09:00 ICT`) vs cutover day `2022-08-29` `T+2` (`13:00 ICT`)!
+    //    Thu 2022-08-25 -> T+1 = Fri 26/08, T+2 = Mon 29/08, T+3 = Tue 30/08 09:00 ICT (`02:00 UTC`).
+    let s_pre_cutover =
+        compute_settlement_timestamp_for_venue(ict_ts(2022, 8, 25, 11, 0), ExchangeVenue::Hose);
+    assert_eq!(check_ict(s_pre_cutover), (2022, 8, 30, 9, 0));
+
+    //    Mon 2022-08-29 (cutover day!) -> T+1 = Tue 30/08, T+2 = Wed 31/08 13:00 ICT (`06:00 UTC`).
+    let s_cutover =
+        compute_settlement_timestamp_for_venue(ict_ts(2022, 8, 29, 9, 15), ExchangeVenue::Hose);
+    assert_eq!(check_ict(s_cutover), (2022, 8, 31, 13, 0));
+}
+
+#[test]
+fn r19_fifo_holding_lots_partial_sells_settled_priority_and_intraday_1300_ict_unlock() {
+    use super::compute_fifo_holding_lots;
+    use crate::trading::OrderSide;
+
+    let ict_ts = |y: i32, m: u32, d: u32, hh: i64, mm: i64| -> i64 {
+        days_from_civil(y, m, d) * 86_400 + hh * 3_600 + mm * 60 - 7 * 3_600
+    };
+
+    // Lot 1: Buy 300 FPT on Mon 2026-10-05 10:00 ICT -> settles Wed 2026-10-07 13:00 ICT.
+    // Lot 2: Buy 200 FPT on Tue 2026-10-06 10:30 ICT -> settles Thu 2026-10-08 13:00 ICT.
+    // Sell 100 FPT on Wed 2026-10-07 13:30 ICT -> consumes 100 from settled Lot 1 (`remaining_qty = 200`).
+    let fills = vec![
+        (
+            1,
+            0,
+            ict_ts(2026, 10, 5, 10, 0),
+            OrderSide::Buy,
+            300.0,
+            130.0,
+        ),
+        (
+            2,
+            1,
+            ict_ts(2026, 10, 6, 10, 30),
+            OrderSide::Buy,
+            200.0,
+            132.5,
+        ),
+        (
+            3,
+            2,
+            ict_ts(2026, 10, 7, 13, 30),
+            OrderSide::Sell,
+            100.0,
+            135.0,
+        ),
+    ];
+
+    // Check morning of Wed 2026-10-07 at `11:30 ICT` (BEFORE `13:00 ICT` VSD afternoon release & BEFORE fill #3):
+    let wed_morning =
+        compute_fifo_holding_lots(&fills, ExchangeVenue::Hose, ict_ts(2026, 10, 7, 11, 30));
+    assert_eq!(wed_morning.lots.len(), 2);
+    assert!((wed_morning.total_held_qty - 500.0).abs() < 1e-9);
+    assert!((wed_morning.sellable_qty - 0.0).abs() < 1e-9);
+    assert!((wed_morning.locked_t2_qty - 500.0).abs() < 1e-9);
+    assert_eq!(
+        wed_morning.earliest_unlock_timestamp,
+        Some(ict_ts(2026, 10, 7, 13, 0))
+    );
+
+    // Check exact `13:00 ICT` on Wed 2026-10-07 (Lot 1 of 300 unlocks, Lot 2 of 200 still locked until Thu 13:00 ICT):
+    let wed_1300 =
+        compute_fifo_holding_lots(&fills, ExchangeVenue::Hose, ict_ts(2026, 10, 7, 13, 0));
+    assert!((wed_1300.sellable_qty - 300.0).abs() < 1e-9);
+    assert!((wed_1300.locked_t2_qty - 200.0).abs() < 1e-9);
+
+    // Check after 13:30 ICT partial sell of 100: Lot 1 reduced to 200 sellable, Lot 2 remains 200 locked, 0 violation:
+    let wed_1400 =
+        compute_fifo_holding_lots(&fills, ExchangeVenue::Hose, ict_ts(2026, 10, 7, 14, 0));
+    assert_eq!(wed_1400.lots.len(), 2);
+    assert!((wed_1400.lots[0].remaining_qty - 200.0).abs() < 1e-9);
+    assert!((wed_1400.sellable_qty - 200.0).abs() < 1e-9);
+    assert!((wed_1400.locked_t2_qty - 200.0).abs() < 1e-9);
+    assert!((wed_1400.unsettled_sell_violation_qty - 0.0).abs() < 1e-9);
+
+    // Causal Replay rewind back to Mon 2026-10-05 15:00 ICT restores exact single 300-share locked lot!
+    let rewound =
+        compute_fifo_holding_lots(&fills, ExchangeVenue::Hose, ict_ts(2026, 10, 5, 15, 0));
+    assert_eq!(rewound.lots.len(), 1);
+    assert!((rewound.total_held_qty - 300.0).abs() < 1e-9);
+    assert!((rewound.locked_t2_qty - 300.0).abs() < 1e-9);
+
+    // Unsettled forced sell (`enforce_vn_t2_lot_lock == false`) records exact `unsettled_sell_violation_qty`:
+    let violation_fills = vec![
+        (
+            1,
+            0,
+            ict_ts(2026, 10, 5, 10, 0),
+            OrderSide::Buy,
+            200.0,
+            130.0,
+        ),
+        (
+            2,
+            1,
+            ict_ts(2026, 10, 6, 10, 0),
+            OrderSide::Sell,
+            100.0,
+            131.0,
+        ),
+    ];
+    let viol = compute_fifo_holding_lots(
+        &violation_fills,
+        ExchangeVenue::Hose,
+        ict_ts(2026, 10, 6, 15, 0),
+    );
+    assert!((viol.total_held_qty - 100.0).abs() < 1e-9);
+    assert!((viol.unsettled_sell_violation_qty - 100.0).abs() < 1e-9);
+
+    // `[B1]` + `[m3]` Regression:
+    // 1. Coarse `D1` fill timestamps (`00:00 UTC` bar open) selling legally on Day `T+2` MUST record
+    //    `unsettled_sell_violation_qty == 0.0` when evaluated with `base_timeframe_secs = 86_400`!
+    let mon_d1_open = days_from_civil(2026, 10, 5) * 86_400; // Mon 00:00 UTC
+    let wed_d1_open = days_from_civil(2026, 10, 7) * 86_400; // Wed 00:00 UTC
+    let wed_d1_close = wed_d1_open + 86_399;
+    let d1_fills = vec![
+        (1, 0, mon_d1_open, OrderSide::Buy, 200.0, 130.0),
+        (2, 2, wed_d1_open, OrderSide::Sell, 100.0, 135.0),
+    ];
+    let d1_summary = super::compute_fifo_holding_lots_with_bar_secs(
+        &d1_fills,
+        ExchangeVenue::Hose,
+        wed_d1_close,
+        86_400,
+    );
+    assert_eq!(d1_summary.unsettled_sell_violation_qty, 0.0);
+    assert!((d1_summary.sellable_qty - 100.0).abs() < 1e-9);
+
+    // 2. `[m3]`: Weekend `entry_timestamp` (Sat `2026-06-06`) snaps to Mon `2026-06-08` (`T+0`) and settles Wed `2026-06-10 13:00 ICT`!
+    let sat_entry = days_from_civil(2026, 6, 6) * 86_400 + 3 * 3_600;
+    let sat_settle = compute_settlement_timestamp_for_venue(sat_entry, ExchangeVenue::Hose);
+    let dt_sat = decompose_utc(sat_settle + 7 * 3_600);
+    assert_eq!(
+        (dt_sat.year, dt_sat.month, dt_sat.day, dt_sat.hour),
+        (2026, 6, 10, 13)
+    );
+}

@@ -176,7 +176,7 @@ pub fn generate_vn30_basket_report(symbol_override: Option<&str>) -> DataLoadRep
     let mut prev_close = base_price;
 
     while candles.len() < total_bars {
-        if weekday_from_days(day_cursor) >= 5 {
+        if !crate::journal::is_vn_exchange_trading_day_days(day_cursor) {
             day_cursor += 1;
             continue;
         }
@@ -451,9 +451,9 @@ fn build_embedded_cafef_csv() -> String {
     let start_day = days_from_civil(2025, 1, 2);
     let mut vn_close = 1_255.0_f64;
     let mut hnx_close = 228.0_f64;
-    for d in 0..260 {
+    for d in 0..280 {
         let day = start_day + d;
-        if weekday_from_days(day) >= 5 {
+        if !crate::journal::is_vn_exchange_trading_day_days(day) {
             continue;
         }
         let dt = super::calendar::decompose_utc(day * 86_400);
@@ -486,9 +486,10 @@ fn build_embedded_spy_csv() -> String {
     let mut s = String::from("time,open,high,low,close\n");
     let start_day = days_from_civil(2025, 1, 2);
     let mut close = 586.0_f64;
-    for d in 0..260 {
+    for d in 0..280 {
         let day = start_day + d;
-        if weekday_from_days(day) >= 5 {
+        let (y, m, dm) = super::calendar::civil_from_days(day);
+        if weekday_from_days(day) >= 5 || super::audit::is_us_nyse_holiday_ymd(y, m, dm) {
             continue;
         }
         let ts = day * 86_400 + 14 * 3_600 + 30 * 60;

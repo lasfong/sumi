@@ -46,13 +46,14 @@ pub use time_scale::{
     HorzScaleOptions, LogicalRange, StrictBarRange, TimeScale, TransitionSnapshot,
 };
 pub use workspace_template::{
-    MAX_AUTO_CHECKPOINT_RING, MAX_NAMED_SNAPSHOT_SLOTS, MAX_QUARANTINED_PREVIEW_BYTES,
-    MAX_SNAPSHOT_PAYLOAD_BYTES, QuarantinedPayloadDiagnostic, SlotDiffEntry, TemplateRightDockTab,
-    TemplateScannerTab, TemplateTradingViewMode, WORKSPACE_SNAPSHOT_STORE_VERSION,
-    WORKSPACE_TEMPLATE_SCHEMA_VERSION, WorkspaceDockPreset, WorkspacePaneStretches,
-    WorkspaceSlotTemplate, WorkspaceSnapshotDiff, WorkspaceSnapshotSlot, WorkspaceSnapshotStore,
-    WorkspaceTemplate, WorkspaceTemplateError, builtin_workspace_templates, compute_workspace_diff,
-    recover_or_parse_snapshot_store, safe_stage_template_import,
+    CandlePalettePreset, MAX_AUTO_CHECKPOINT_RING, MAX_NAMED_SNAPSHOT_SLOTS,
+    MAX_QUARANTINED_PREVIEW_BYTES, MAX_SNAPSHOT_PAYLOAD_BYTES, QuarantinedPayloadDiagnostic,
+    SlotDiffEntry, TemplateRightDockTab, TemplateScannerTab, TemplateTradingViewMode,
+    WORKSPACE_SNAPSHOT_STORE_VERSION, WORKSPACE_TEMPLATE_SCHEMA_VERSION, WorkspaceDockPreset,
+    WorkspacePaneStretches, WorkspaceSlotTemplate, WorkspaceSnapshotDiff, WorkspaceSnapshotSlot,
+    WorkspaceSnapshotStore, WorkspaceTemplate, WorkspaceTemplateError, WorkstationSettings,
+    builtin_workspace_templates, compute_workspace_diff, recover_or_parse_snapshot_store,
+    safe_stage_template_import,
 };
 
 /// Panic-free clamp matching Lightweight Charts `src/helpers/mathex.ts` (`Math.min(Math.max(v, min), max)`).

@@ -1,0 +1,27 @@
+{
+  "milestone": "R19",
+  "overall_pass": true,
+  "environment": {
+    "cpu": "Apple M1",
+    "os": "macos",
+    "arch": "aarch64",
+    "ram_bytes": 17179869184,
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "profile": "release",
+    "viewport_logical_px": [1280, 800],
+    "pixels_per_point": 2.0
+  },
+  "r19_domain_throughput": [
+    { "case_id": "c1_workstation_settings_template_ron_json_roundtrip", "description": "C1 `WorkstationSettings` + `CandlePalettePreset` RON & JSON full roundtrip", "input_units": 4, "output_items": 2, "median_us": 189.584, "median_ms": 0.1896, "p95_us": 205.917, "max_us": 347.625 },
+    { "case_id": "c2_vn_holidays_t2_settlement_and_fifo_lots", "description": "C2 `500` `VIETNAM_HOLIDAYS_V1` T+2 lookups + `500`-fill FIFO `HoldingLot` ledger", "input_units": 649, "output_items": 167, "median_us": 95.208, "median_ms": 0.0952, "p95_us": 98.333, "max_us": 99.166 },
+    { "case_id": "c3_data_quality_audit_10k_and_cafef_split_gate", "description": "C3 `audit_ohlcv_series` (`10,000` D1 bars) + `13`-feed readiness + `1,000` CafeF split evals", "input_units": 10013, "output_items": 11, "median_us": 3557.292, "median_ms": 3.5573, "p95_us": 3795.417, "max_us": 3829.042 },
+    { "case_id": "c4_textnote_dual_trend_custom_fib_projection", "description": "C4 `TextNote` + Dual-Extend `TrendLine` + Custom `OTE` Fib projection & hit-test", "input_units": 3, "output_items": 3, "median_us": 1.709, "median_ms": 0.0017, "p95_us": 1.792, "max_us": 3.958 }
+  ],
+  "workstation_r19_workloads": [
+    { "dataset_bars": 180, "workload_id": "r19_fpt_hollow_candles_textnote_custom_fib_1280x800", "scale_mode": "Linear", "bar_spacing": 13.00000, "conflation_factor": 1, "culled_bars": 60, "rendered_candles": 59, "paint_shapes": 551, "clipped_primitives": 48, "total_vertices": 17636, "total_indices": 62232, "ui_median_ms": 0.1663, "tessellate_median_ms": 0.0925, "total_cpu_mean_ms": 0.2663, "total_cpu_median_ms": 0.2587, "total_cpu_p95_ms": 0.3004, "total_cpu_p99_ms": 0.4350 },
+    { "dataset_bars": 155, "workload_id": "r19_fpt_okabe_ito_vn_t2_fifo_lots_1280x800", "scale_mode": "Linear", "bar_spacing": 8.00000, "conflation_factor": 1, "culled_bars": 96, "rendered_candles": 95, "paint_shapes": 422, "clipped_primitives": 61, "total_vertices": 18290, "total_indices": 60666, "ui_median_ms": 0.1722, "tessellate_median_ms": 0.0912, "total_cpu_mean_ms": 0.2747, "total_cpu_median_ms": 0.2632, "total_cpu_p95_ms": 0.3141, "total_cpu_p99_ms": 0.4756 },
+    { "dataset_bars": 2839, "workload_id": "r19_settings_modal_open_quad_2x2_1280x800", "scale_mode": "Linear", "bar_spacing": 8.00000, "conflation_factor": 1, "culled_bars": 165, "rendered_candles": 160, "paint_shapes": 558, "clipped_primitives": 96, "total_vertices": 26374, "total_indices": 86592, "ui_median_ms": 0.2062, "tessellate_median_ms": 0.1309, "total_cpu_mean_ms": 0.3453, "total_cpu_median_ms": 0.3371, "total_cpu_p95_ms": 0.3766, "total_cpu_p99_ms": 0.5807 },
+    { "dataset_bars": 217, "workload_id": "r19_data_readiness_audit_modal_1280x800", "scale_mode": "Linear", "bar_spacing": 8.00000, "conflation_factor": 1, "culled_bars": 159, "rendered_candles": 157, "paint_shapes": 552, "clipped_primitives": 51, "total_vertices": 29418, "total_indices": 92295, "ui_median_ms": 0.2231, "tessellate_median_ms": 0.1344, "total_cpu_mean_ms": 0.3717, "total_cpu_median_ms": 0.3574, "total_cpu_p95_ms": 0.5164, "total_cpu_p99_ms": 0.5922 },
+    { "dataset_bars": 100000, "workload_id": "r19_100k_conflated_hollow_bullish_1280x800", "scale_mode": "Linear", "bar_spacing": 0.01180, "conflation_factor": 32, "culled_bars": 99832, "rendered_candles": 3118, "paint_shapes": 263, "clipped_primitives": 35, "total_vertices": 51294, "total_indices": 121458, "ui_median_ms": 0.1508, "tessellate_median_ms": 0.0945, "total_cpu_mean_ms": 0.2535, "total_cpu_median_ms": 0.2453, "total_cpu_p95_ms": 0.2938, "total_cpu_p99_ms": 0.4270 }
+  ]
+}

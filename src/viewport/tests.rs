@@ -1645,3 +1645,114 @@ fn critic_r16_regression_tampered_snapshot_digest_quarantines_and_schema_version
     let dirty_ron = dirty_ver.to_ron_pretty();
     assert!(WorkspaceTemplate::from_ron_str(&dirty_ron).is_ok());
 }
+
+#[test]
+fn r19_workstation_settings_and_candle_palette_ron_json_roundtrip_and_digest_backcompat() {
+    use super::workspace_template::{
+        CandlePalettePreset, WorkspaceSnapshotStore, WorkspaceTemplate, WorkspaceTemplateError,
+        WorkstationSettings, builtin_workspace_templates, compute_workspace_diff,
+    };
+    use crate::journal::{ExchangeVenue, VnPriceUnit};
+
+    // 1. Legacy R18 template payload (no `settings` field) preserves exact `canonical_digest()` when
+    //    `settings == WorkstationSettings::default()`, so R16-R18 snapshots NEVER false-quarantine!
+    let base_tpl = builtin_workspace_templates().into_iter().next().unwrap();
+    assert_eq!(base_tpl.settings, WorkstationSettings::default());
+    let base_digest = base_tpl.canonical_digest();
+    let json_default = base_tpl.to_json_pretty();
+    let ron_default = base_tpl.to_ron_pretty();
+    assert_eq!(
+        WorkspaceTemplate::from_json_str(&json_default)
+            .unwrap()
+            .canonical_digest(),
+        base_digest
+    );
+    assert_eq!(
+        WorkspaceTemplate::from_ron_str(&ron_default)
+            .unwrap()
+            .canonical_digest(),
+        base_digest
+    );
+
+    // Strip `"settings": { ... },` or verify minimal legacy R18 JSON without `"settings"` parses to identical digest:
+    let legacy_json = r#"{
+        "schema_version": 1,
+        "name": "Legacy R18 Desk",
+        "layout": "Single1x1",
+        "slots": [{ "symbol": "FPT" }]
+    }"#;
+    let parsed_legacy = WorkspaceTemplate::from_json_str(legacy_json).expect("legacy R18 JSON");
+    assert_eq!(parsed_legacy.settings, WorkstationSettings::default());
+
+    // 2. Roundtrip all 4 `CandlePalettePreset` variants and non-default `WorkstationSettings` across RON & JSON:
+    for palette in CandlePalettePreset::ALL {
+        assert_eq!(CandlePalettePreset::from_id(palette.as_id()), Some(palette));
+        let mut custom = base_tpl.clone();
+        custom.settings = WorkstationSettings {
+            default_venue_override: Some(ExchangeVenue::Hnx),
+            default_vn_price_unit: VnPriceUnit::RawVnd,
+            default_initial_capital: 750_000.0,
+            default_commission_bps: 12.5,
+            default_tax_sell_bps: 10.0,
+            default_slippage_bps: 3.5,
+            default_risk_per_trade_pct: 1.75,
+            candle_palette: palette,
+            auto_snapshot_interval_mins: 15,
+            enforce_vn_t2_lot_lock: false,
+        };
+        assert_ne!(
+            custom.canonical_digest(),
+            base_digest,
+            "non-default settings must change canonical_digest"
+        );
+        let diff = compute_workspace_diff(&base_tpl, &custom);
+        assert!(!diff.is_identical);
+        assert!(diff.settings_changed);
+
+        let ron = custom.to_ron_pretty();
+        let json = custom.to_json_pretty();
+        let dec_ron = WorkspaceTemplate::from_ron_str(&ron).expect("RON settings parse");
+        let dec_json = WorkspaceTemplate::from_json_str(&json).expect("JSON settings parse");
+        assert_eq!(dec_ron, custom);
+        assert_eq!(dec_json, custom);
+    }
+
+    // 3. Sanitization clamps out-of-range settings & normalizes `auto_snapshot_interval_mins`:
+    let mut dirty = WorkstationSettings {
+        default_venue_override: None,
+        default_vn_price_unit: VnPriceUnit::Auto,
+        default_initial_capital: -50.0,
+        default_commission_bps: 9_999.0,
+        default_tax_sell_bps: f64::NAN,
+        default_slippage_bps: -3.0,
+        default_risk_per_trade_pct: 99.0,
+        candle_palette: CandlePalettePreset::HollowBullish,
+        auto_snapshot_interval_mins: 7,
+        enforce_vn_t2_lot_lock: true,
+    };
+    dirty.sanitize();
+    assert!((dirty.default_initial_capital - 1_000.0).abs() < 1e-9);
+    assert!((dirty.default_commission_bps - 500.0).abs() < 1e-9);
+    assert!((dirty.default_tax_sell_bps - 10.0).abs() < 1e-9);
+    assert!((dirty.default_slippage_bps - 0.0).abs() < 1e-9);
+    assert!((dirty.default_risk_per_trade_pct - 25.0).abs() < 1e-9);
+    assert!(
+        WorkstationSettings::VALID_AUTO_SNAPSHOT_MINS.contains(&dirty.auto_snapshot_interval_mins)
+    );
+
+    // 4. Tampering `candle_palette` inside a saved `WorkspaceSnapshotStore` triggers `CorruptSnapshotDigest`!
+    let mut snap_store = WorkspaceSnapshotStore::new();
+    let mut custom_tpl = base_tpl;
+    custom_tpl.settings.candle_palette = CandlePalettePreset::ColorblindOkabeIto;
+    snap_store
+        .save_named_snapshot("Okabe Desk", true, custom_tpl)
+        .unwrap();
+    let tampered_json =
+        snap_store
+            .to_json_pretty()
+            .replacen("ColorblindOkabeIto", "ClassicMonochrome", 1);
+    assert!(matches!(
+        WorkspaceSnapshotStore::from_json_str(&tampered_json),
+        Err(WorkspaceTemplateError::CorruptSnapshotDigest { slot_id: 1, .. })
+    ));
+}

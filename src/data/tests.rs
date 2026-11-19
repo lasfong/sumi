@@ -740,3 +740,250 @@ fn critic_r06_regression_coarse_to_fine_bucket_open_snap_and_ray_boundary_and_ve
     assert!((dba.bar_index - orig_idx).abs() < 1e-9);
     assert_eq!(dba.timestamp, Some(orig_ts as f64));
 }
+
+#[test]
+fn r19_cafef_solieugd_5_rule_post_split_normalization_and_rejections() {
+    // 1. Valid 1-ULP (`0.0001 kVND == 0.1 VND`) post-split truncation on `Open` (`Open=24.6154 > High=24.6153`):
+    let out_open_ulp = evaluate_and_normalize_cafef_split_ohlc(
+        "FPT",
+        24.6154,
+        24.6153,
+        24.2000,
+        24.4500,
+        1_250_000.0,
+    );
+    assert!(matches!(
+        out_open_ulp,
+        CafeFSplitNormOutcome::NormalizedSplitPrecision { new_high, new_low, .. }
+            if (new_high - 24.6154).abs() < 1e-9 && (new_low - 24.2000).abs() < 1e-9
+    ));
+
+    // 2. Valid `Close` post-split discrepancy within `<= 6 bps` & `<= 25 VND` & `< 0.5 * min_step`:
+    //    `O = 50.1234`, `H = 50.8234`, `L = 49.5234`, `C = 50.8354` (`delta_close = 12.0 VND = 2.36 bps`, `min_step = 700 VND`):
+    let out_close_bps = evaluate_and_normalize_cafef_split_ohlc(
+        "MWG", 50.1234, 50.8234, 49.5234, 50.8354, 850_000.0,
+    );
+    assert!(matches!(
+        out_close_bps,
+        CafeFSplitNormOutcome::NormalizedSplitPrecision { new_high, .. }
+            if (new_high - 50.8354).abs() < 1e-9
+    ));
+
+    // 3. Rule 1 rejection: Index / futures / US (`AAPL`, `MSFT`, `SPY`) / Crypto symbols NEVER qualify:
+    for non_vn_eq in [
+        "VNINDEX",
+        "HNX-INDEX",
+        "VNALL",
+        "VNMID",
+        "HNXFIN",
+        "VNFINSELECT",
+        "VN30F1M",
+        "SPY",
+        "AAPL",
+        "MSFT",
+        "NVDA",
+        "BTCUSDT",
+    ] {
+        assert_eq!(
+            evaluate_and_normalize_cafef_split_ohlc(
+                non_vn_eq, 185.235, 185.50, 184.10, 185.51, 100_000.0,
+            ),
+            CafeFSplitNormOutcome::RejectedGenuineViolation,
+            "{non_vn_eq} must be rejected by Rule 1"
+        );
+    }
+    // `[M4]`: `RawVnd` distressed penny stock at `950 VND` with unadjusted `10 VND` ticks is rejected,
+    // while `kVND` luxury `1,000.0004` and domestic ETF `E1VFVN30` / CW `CFPT2501` normalize cleanly:
+    assert_eq!(
+        evaluate_and_normalize_cafef_split_ohlc("HAG", 950.0, 940.0, 910.0, 930.0, 50_000.0),
+        CafeFSplitNormOutcome::RejectedGenuineViolation
+    );
+    assert!(matches!(
+        evaluate_and_normalize_cafef_split_ohlc(
+            "VNZ", 1000.0004, 1000.0003, 980.0000, 990.0000, 10_000.0
+        ),
+        CafeFSplitNormOutcome::NormalizedSplitPrecision { .. }
+    ));
+    assert!(matches!(
+        evaluate_and_normalize_cafef_split_ohlc(
+            "E1VFVN30", 24.6154, 24.6153, 24.2000, 24.4500, 100_000.0
+        ),
+        CafeFSplitNormOutcome::NormalizedSplitPrecision { .. }
+    ));
+
+    // 4. Rule 2 rejection: Unadjusted round 10-VND ticks (`0.01 kVND` multiples) without post-split precision:
+    assert_eq!(
+        evaluate_and_normalize_cafef_split_ohlc("FPT", 24.62, 24.61, 24.20, 24.45, 500_000.0),
+        CafeFSplitNormOutcome::RejectedGenuineViolation
+    );
+
+    // 5. Rule 3 & Rule 4 rejections: `Open` > 1 ULP (`0.5 VND`) OR `Close` > `6 bps` / `25 VND`:
+    assert_eq!(
+        evaluate_and_normalize_cafef_split_ohlc(
+            "FPT", 24.6159, 24.6153, 24.2000, 24.4500, 500_000.0
+        ),
+        CafeFSplitNormOutcome::RejectedGenuineViolation
+    );
+    assert_eq!(
+        evaluate_and_normalize_cafef_split_ohlc(
+            "FPT", 50.1234, 50.8234, 49.5234, 50.8600, // +36.6 VND > 25 VND cap!
+            500_000.0
+        ),
+        CafeFSplitNormOutcome::RejectedGenuineViolation
+    );
+
+    // 6. End-to-end CSV & JSON loader integration with `OhlcEnvelopePolicy::CafeFSplitAware`:
+    let split_csv = concat!(
+        "<Ticker>,<DTYYYYMMDD>,<Open>,<High>,<Low>,<Close>,<Volume>\n",
+        "FPT,20260428,24.6154,24.6153,24.2154,24.4500,1200000\n",
+        "FPT,20260429,24.4500,24.8500,24.4232,24.4231,1350000\n",
+    );
+    assert!(matches!(
+        load_ohlcv_csv(split_csv, &DataLoadOptions::default()),
+        Err(DataLoadError::InvalidOhlcEnvelope { .. })
+    ));
+    let split_rep = load_ohlcv_csv(
+        split_csv,
+        &DataLoadOptions {
+            envelope_policy: OhlcEnvelopePolicy::CafeFSplitAware,
+            ..DataLoadOptions::default()
+        },
+    )
+    .expect("CafeFSplitAware must normalize valid post-split 4-decimal rows");
+    assert_eq!(split_rep.candles.len(), 2);
+    assert_eq!(split_rep.repaired_envelope_count, 2);
+    assert!(split_rep.candles.iter().all(Candle::is_valid));
+    assert!((split_rep.candles[0].open - 24.6154).abs() < 1e-9);
+    assert!((split_rep.candles[0].high - 24.6154).abs() < 1e-9);
+    assert!((split_rep.candles[1].close - 24.4231).abs() < 1e-9);
+    assert!((split_rep.candles[1].low - 24.4231).abs() < 1e-9);
+
+    // Genuine corruption (`Low > High`) is STILL rejected even under `CafeFSplitAware`!
+    let corrupt_csv = "<Ticker>,<DTYYYYMMDD>,<Open>,<High>,<Low>,<Close>,<Volume>\nFPT,20260428,24.6154,24.1000,24.5000,24.4500,1000\n";
+    assert!(matches!(
+        load_ohlcv_csv(
+            corrupt_csv,
+            &DataLoadOptions {
+                envelope_policy: OhlcEnvelopePolicy::CafeFSplitAware,
+                ..DataLoadOptions::default()
+            }
+        ),
+        Err(DataLoadError::InvalidOhlcEnvelope { .. })
+    ));
+}
+
+#[test]
+fn r19_data_quality_audit_vn_holidays_w1_no_false_gaps_outliers_and_causal_readiness() {
+    use crate::journal::ExchangeVenue;
+
+    let make_bar = |y: i32, m: u32, d: u32, close: f64, vol: f64| -> Candle {
+        Candle {
+            timestamp: days_from_civil(y, m, d) * 86_400,
+            date_label: format!("{y:04}-{m:02}-{d:02}"),
+            open: close * 0.995,
+            high: close * 1.01,
+            low: close * 0.99,
+            close,
+            volume: vol,
+        }
+    };
+
+    // 1. Continuous FPT `D1` series spanning Tết Bính Ngọ (`2026-02-13` Fri -> `2026-02-23` Mon)
+    //    and `30/04–01/05` (`2026-04-29` Wed -> `2026-05-04` Mon): ZERO false holiday/weekend gaps!
+    let mut fpt_clean = Vec::new();
+    let start_d = days_from_civil(2026, 2, 9);
+    let end_d = days_from_civil(2026, 5, 8);
+    for d in start_d..=end_d {
+        if crate::journal::is_vn_exchange_trading_day_days(d) {
+            let (y, m, day) = civil_from_days(d);
+            fpt_clean.push(make_bar(y, m, day, 130.0, 1_000_000.0));
+        }
+    }
+    let clean_audit = audit_ohlcv_series_with_venue(
+        "FPT",
+        ExchangeVenue::Hose,
+        Timeframe::D1,
+        &fpt_clean,
+        Some((0, 0)),
+    );
+    assert_eq!(clean_audit.status, DataReadinessStatus::Ready);
+    assert_eq!(clean_audit.missing_session_count, 0);
+    assert_eq!(clean_audit.holiday_or_weekend_bar_count, 0);
+    assert!((clean_audit.coverage_pct - 100.0).abs() < 1e-9);
+
+    // 2. Aggregated `W1` across the exact same span (including the full-week Tết break!) reports 0 false daily gaps!
+    let fpt_w1 = aggregate_ohlcv(&fpt_clean, Timeframe::D1, Timeframe::W1).unwrap();
+    let w1_audit =
+        audit_ohlcv_series_with_venue("FPT", ExchangeVenue::Hose, Timeframe::W1, &fpt_w1, None);
+    assert_eq!(w1_audit.status, DataReadinessStatus::Ready);
+    assert_eq!(w1_audit.missing_session_count, 0);
+    assert!((w1_audit.coverage_pct - 100.0).abs() < 1e-9);
+
+    // 3. Remove Wednesday `2026-03-11`, inject a holiday bar on `2026-05-01`, a `12x` volume spike,
+    //    and an unadjusted 2:1 split jump (`130.0 -> 65.0`): verify every detector fires accurately!
+    let mut fpt_dirty: Vec<Candle> = fpt_clean
+        .into_iter()
+        .filter(|c| c.date_label != "2026-03-11")
+        .collect();
+    if let Some(bar25) = fpt_dirty.get_mut(25) {
+        bar25.volume = 12_500_000.0; // > 10x RVOL(20)
+    }
+    if let Some(bar30) = fpt_dirty.get_mut(30) {
+        bar30.open = 65.0;
+        bar30.high = 66.0;
+        bar30.low = 64.0;
+        bar30.close = 65.0; // -50% unadjusted split jump exceeds HOSE -7% floor!
+    }
+    fpt_dirty.push(make_bar(2026, 5, 1, 65.0, 500_000.0)); // International Labor Day holiday bar (also out-of-order!)
+    fpt_dirty.sort_by_key(|c| c.timestamp);
+
+    let dirty_audit = audit_ohlcv_series_with_venue(
+        "FPT",
+        ExchangeVenue::Hose,
+        Timeframe::D1,
+        &fpt_dirty,
+        Some((1, 2)),
+    );
+    assert_eq!(dirty_audit.status, DataReadinessStatus::PartialWarning);
+    assert_eq!(dirty_audit.missing_session_count, 1);
+    assert_eq!(dirty_audit.missing_session_samples, vec!["2026-03-11"]);
+    assert_eq!(dirty_audit.holiday_or_weekend_bar_count, 1);
+    assert!(dirty_audit.volume_spike_10x_count >= 1);
+    assert!(dirty_audit.band_exceedance_split_hint_count >= 1);
+    assert_eq!(dirty_audit.loader_deduplicated_rows, 1);
+    assert_eq!(dirty_audit.loader_repaired_envelope_rows, 2);
+
+    // 4. Causal `summarize_universe_readiness` withholds post-cutoff candles (`DEF-001`) AND
+    //    `[M5]` audits every feed honestly (`11 / 13` gap-free feeds `Ready`, while the 2 `p0b` archive
+    //    `CafeF.INDEX.clean.csv` series genuinely contain historical `2018-01-23..24` HOSE halt & `HNX` test gaps!):
+    let feeds = load_bundled_watchlist_universe();
+    let full_uni = summarize_universe_readiness(&feeds, None);
+    assert_eq!(full_uni.symbols_total, 13);
+    assert_eq!(full_uni.symbols_ready, 11);
+    assert_eq!(full_uni.status, DataReadinessStatus::PartialWarning);
+    let non_cafef: Vec<_> = feeds
+        .iter()
+        .filter(|f| f.preset != DataSourcePreset::CafeFIndexCsv)
+        .cloned()
+        .collect();
+    let clean_uni = summarize_universe_readiness(&non_cafef, None);
+    assert_eq!(clean_uni.status, DataReadinessStatus::Ready);
+    assert_eq!(clean_uni.symbols_ready, 11);
+    let early_cutoff = feeds[0].candles[10].timestamp + 86_400;
+    let cut_uni = summarize_universe_readiness(&feeds, Some(early_cutoff));
+    assert!(cut_uni.total_candles < full_uni.total_candles);
+
+    // `[m2]`: `W1` spurious closed-Tết-week bar CANNOT mask a missing valid open week, and out-of-order
+    //         candles still report true `min_ts` / `max_ts` for `earliest_date` / `latest_date`!
+    let mut w1_masked: Vec<Candle> = fpt_w1
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, c)| (idx != 4).then_some(c)) // drop 1 valid open week!
+        .collect();
+    // Inject a spurious bar during the closed Tết week (`2026-02-16` Monday):
+    w1_masked.push(make_bar(2026, 2, 16, 130.0, 100_000.0));
+    let w1_masked_rep =
+        audit_ohlcv_series_with_venue("FPT", ExchangeVenue::Hose, Timeframe::W1, &w1_masked, None);
+    assert_eq!(w1_masked_rep.missing_session_count, 1);
+    assert_eq!(w1_masked_rep.status, DataReadinessStatus::PartialWarning);
+}

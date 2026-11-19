@@ -52,11 +52,19 @@ pub fn drawing_line_value_at_bar(drawing: &Drawing, bar_index: usize) -> Option<
             if !dx.is_finite() || dx.abs() < 1e-9 {
                 return None;
             }
-            let u = (x - start.bar_index) / dx;
-            if !(-1e-9..=1.0 + 1e-9).contains(&u) {
+            let left_bar = start.bar_index.min(end.bar_index);
+            let right_bar = start.bar_index.max(end.bar_index);
+            if !drawing.trend_extend_left && x < left_bar - 1e-9 {
                 return None;
             }
-            let val = start.value + u.clamp(0.0, 1.0) * (end.value - start.value);
+            if !drawing.trend_extend_right && x > right_bar + 1e-9 {
+                return None;
+            }
+            let mut u = (x - start.bar_index) / dx;
+            if !drawing.trend_extend_left && !drawing.trend_extend_right {
+                u = u.clamp(0.0, 1.0);
+            }
+            let val = start.value + u * (end.value - start.value);
             (val.is_finite() && val.abs() <= MAX_ABS_PRICE).then_some(val)
         }
         DrawingGeometry::Ray { origin, through } => {
@@ -75,7 +83,8 @@ pub fn drawing_line_value_at_bar(drawing: &Drawing, bar_index: usize) -> Option<
         | DrawingGeometry::FibonacciRetracement { .. }
         | DrawingGeometry::RiskRewardBox { .. }
         | DrawingGeometry::FixedRangeVolumeProfile { .. }
-        | DrawingGeometry::AnchoredVwap { .. } => None,
+        | DrawingGeometry::AnchoredVwap { .. }
+        | DrawingGeometry::TextNote { .. } => None,
     }
 }
 
@@ -324,7 +333,8 @@ fn validate_condition(
                     | DrawingGeometry::FibonacciRetracement { .. }
                     | DrawingGeometry::RiskRewardBox { .. }
                     | DrawingGeometry::FixedRangeVolumeProfile { .. }
-                    | DrawingGeometry::AnchoredVwap { .. } => {
+                    | DrawingGeometry::AnchoredVwap { .. }
+                    | DrawingGeometry::TextNote { .. } => {
                         Err(AlertError::UnsupportedDrawingGeometry)
                     }
                 }

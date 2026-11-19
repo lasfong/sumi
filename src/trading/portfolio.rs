@@ -186,7 +186,8 @@ pub fn extract_ticket_from_drawing(drawing: &Drawing) -> Option<DrawingTicketSyn
     }
     match drawing.geometry {
         DrawingGeometry::HorizontalLine { anchor }
-        | DrawingGeometry::AnchoredVwap { anchor, .. } => {
+        | DrawingGeometry::AnchoredVwap { anchor, .. }
+        | DrawingGeometry::TextNote { anchor, .. } => {
             (anchor.value.is_finite() && anchor.value > 0.0 && anchor.value <= MAX_ORDER_PRICE)
                 .then_some(DrawingTicketSync {
                     side: OrderSide::Buy,
@@ -436,6 +437,48 @@ impl TradingSession {
     #[must_use]
     pub fn fills(&self) -> &[ExecutionFill] {
         &self.fills
+    }
+
+    /// Computes causal FIFO `T+2`/`T+3`/`T+1`/`T+0` [`crate::journal::FifoSettlementSummary`] across
+    /// executed fills up to `as_of_timestamp` (`Milestone R19 / C2`, `DEF-001` replay-safe).
+    #[must_use]
+    pub fn fifo_holding_summary(
+        &self,
+        venue: crate::journal::ExchangeVenue,
+        as_of_timestamp: i64,
+    ) -> crate::journal::FifoSettlementSummary {
+        let tuples: Vec<(u64, usize, i64, OrderSide, f64, f64)> = self
+            .fills
+            .iter()
+            .map(|f| {
+                (
+                    f.fill_id,
+                    f.base_index,
+                    f.timestamp,
+                    f.side,
+                    f.quantity,
+                    f.price,
+                )
+            })
+            .collect();
+        crate::journal::compute_fifo_holding_lots_with_bar_secs(
+            &tuples,
+            venue,
+            as_of_timestamp,
+            self.config.base_timeframe_secs.max(1),
+        )
+    }
+
+    #[inline]
+    #[must_use]
+    fn available_settled_long_qty_at(&self, candle_timestamp: i64) -> Option<f64> {
+        if !self.config.enforce_vn_t2_lot_lock || !self.config.venue.is_vn_cash_equity() {
+            return None;
+        }
+        let eval_ts = candle_timestamp
+            .saturating_add(self.config.base_timeframe_secs.max(1).saturating_sub(1));
+        let fifo = self.fifo_holding_summary(self.config.venue, eval_ts);
+        Some(fifo.sellable_qty.max(0.0))
     }
 
     #[inline]
@@ -1442,7 +1485,9 @@ impl TradingSession {
         };
 
         // Phase A: Exact Gap-Open evaluation at `price = candle.open` (`t = Open`).
-        if let Some((reason, raw_exit_price)) = self.check_position_bracket_at_price(candle.open) {
+        if let Some((reason, raw_exit_price)) =
+            self.check_position_bracket_at_price(candle.timestamp, candle.open)
+        {
             self.execute_bracket_exit_at(base_index, candle.timestamp, reason, raw_exit_price);
         }
         let open_pending_indices: Vec<usize> = self
@@ -1471,7 +1516,7 @@ impl TradingSession {
                     candle.timestamp,
                 );
                 if let Some((b_reason, raw_exit)) =
-                    self.check_position_bracket_at_price(candle.open)
+                    self.check_position_bracket_at_price(candle.timestamp, candle.open)
                 {
                     self.execute_bracket_exit_at(base_index, candle.timestamp, b_reason, raw_exit);
                 }
@@ -1486,7 +1531,9 @@ impl TradingSession {
                 continue;
             }
             for _ in 0..1024 {
-                let Some(ev) = self.find_earliest_segment_event(base_index, cur_px, seg_end) else {
+                let Some(ev) =
+                    self.find_earliest_segment_event(base_index, candle.timestamp, cur_px, seg_end)
+                else {
                     break;
                 };
                 match ev {
@@ -1524,10 +1571,20 @@ impl TradingSession {
         self.record_equity_point(base_index, candle.timestamp, candle.close);
     }
 
-    fn check_position_bracket_at_price(&self, price: f64) -> Option<(FillReason, f64)> {
+    fn check_position_bracket_at_price(
+        &self,
+        candle_timestamp: i64,
+        price: f64,
+    ) -> Option<(FillReason, f64)> {
         let pos = self.open_position.as_ref()?;
         match pos.side {
             PositionSide::Long => {
+                if self
+                    .available_settled_long_qty_at(candle_timestamp)
+                    .is_some_and(|cap| cap <= 1.0e-9)
+                {
+                    return None;
+                }
                 if let Some(sl) = pos.stop_loss
                     && price <= sl
                 {
@@ -1567,7 +1624,17 @@ impl TradingSession {
             return;
         };
         let exit_side = pos.side.exit_order_side();
-        let qty = pos.quantity;
+        let qty = if pos.side == PositionSide::Long
+            && let Some(settled_cap) = self.available_settled_long_qty_at(timestamp)
+        {
+            let capped = pos.quantity.min(settled_cap);
+            if capped <= 1.0e-9 {
+                return;
+            }
+            capped
+        } else {
+            pos.quantity
+        };
         let exec_price = apply_slippage(raw_exit_price, exit_side, self.config.slippage_bps);
         let order_id = self.alloc_order_id();
         self.orders.push(Order {
@@ -1603,6 +1670,24 @@ impl TradingSession {
             }
             (o.id, o.side, o.kind, o.quantity, o.stop_loss, o.take_profit)
         };
+        if side == OrderSide::Sell
+            && let Some(settled_cap) = self.available_settled_long_qty_at(timestamp)
+            && qty > settled_cap + 1.0e-7
+        {
+            let eval_ts =
+                timestamp.saturating_add(self.config.base_timeframe_secs.max(1).saturating_sub(1));
+            let fifo = self.fifo_holding_summary(self.config.venue, eval_ts);
+            self.orders[ord_idx].status = OrderStatus::Rejected {
+                reason: TradingError::InsufficientSettledShares {
+                    requested: qty,
+                    sellable: settled_cap,
+                    locked_t2: fifo.locked_t2_qty,
+                    earliest_unlock_timestamp: fifo.earliest_unlock_timestamp,
+                }
+                .to_string(),
+            };
+            return;
+        }
         let exec_price = apply_slippage(raw_trigger_price, side, self.config.slippage_bps);
         match self.validate_execution_capacity(side, qty, exec_price) {
             Err(err) => {
@@ -1634,6 +1719,7 @@ impl TradingSession {
     fn find_earliest_segment_event(
         &self,
         base_index: usize,
+        candle_timestamp: i64,
         cur_px: f64,
         seg_end: f64,
     ) -> Option<SegmentCrossingEvent> {
@@ -1662,33 +1748,38 @@ impl TradingSession {
         if let Some(pos) = self.open_position.as_ref() {
             match pos.side {
                 PositionSide::Long => {
-                    if let Some(sl) = pos.stop_loss
-                        && seg_min <= sl
-                    {
-                        let px = sl.min(cur_px);
-                        consider(
-                            (px - cur_px).abs(),
-                            0,
-                            0,
-                            SegmentCrossingEvent::BracketExit {
-                                reason: FillReason::StopLossExit,
-                                trigger_price: px,
-                            },
-                        );
-                    }
-                    if let Some(tp) = pos.take_profit
-                        && seg_max >= tp
-                    {
-                        let px = tp.max(cur_px);
-                        consider(
-                            (px - cur_px).abs(),
-                            1,
-                            0,
-                            SegmentCrossingEvent::BracketExit {
-                                reason: FillReason::TakeProfitExit,
-                                trigger_price: px,
-                            },
-                        );
+                    let t2_blocked = self
+                        .available_settled_long_qty_at(candle_timestamp)
+                        .is_some_and(|cap| cap <= 1.0e-9);
+                    if !t2_blocked {
+                        if let Some(sl) = pos.stop_loss
+                            && seg_min <= sl
+                        {
+                            let px = sl.min(cur_px);
+                            consider(
+                                (px - cur_px).abs(),
+                                0,
+                                0,
+                                SegmentCrossingEvent::BracketExit {
+                                    reason: FillReason::StopLossExit,
+                                    trigger_price: px,
+                                },
+                            );
+                        }
+                        if let Some(tp) = pos.take_profit
+                            && seg_max >= tp
+                        {
+                            let px = tp.max(cur_px);
+                            consider(
+                                (px - cur_px).abs(),
+                                1,
+                                0,
+                                SegmentCrossingEvent::BracketExit {
+                                    reason: FillReason::TakeProfitExit,
+                                    trigger_price: px,
+                                },
+                            );
+                        }
                     }
                 }
                 PositionSide::Short => {

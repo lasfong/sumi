@@ -20,6 +20,10 @@ pub const MAX_PENDING_ORDERS: usize = 64;
 /// Maximum recorded user commands retained in the deterministic replay log.
 pub const MAX_RECORDED_COMMANDS: usize = 16_384;
 
+const fn default_base_timeframe_secs() -> i64 {
+    86_400
+}
+
 /// Paper-trading account rules and execution friction parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -34,6 +38,15 @@ pub struct AccountConfig {
     pub max_leverage: f64,
     /// Whether `Short` positions are permitted (`default = true`).
     pub allow_short: bool,
+    /// Whether VSD `T+2` (`13:00 ICT`) / historical `T+3` (`09:00 ICT`) lot lock is enforced on Vietnam cash equities.
+    #[serde(default)]
+    pub enforce_vn_t2_lot_lock: bool,
+    /// Active exchange venue governing settlement rules (`default = UsEquities`).
+    #[serde(default)]
+    pub venue: crate::journal::ExchangeVenue,
+    /// Base candle duration in seconds used to evaluate coarse-bar (`D1`/`H4`) causal close settlement (`default = 86_400`).
+    #[serde(default = "default_base_timeframe_secs")]
+    pub base_timeframe_secs: i64,
 }
 
 impl Default for AccountConfig {
@@ -44,6 +57,9 @@ impl Default for AccountConfig {
             slippage_bps: 2.0,
             max_leverage: 1.0,
             allow_short: true,
+            enforce_vn_t2_lot_lock: false,
+            venue: crate::journal::ExchangeVenue::UsEquities,
+            base_timeframe_secs: 86_400,
         }
     }
 }
@@ -69,6 +85,7 @@ impl AccountConfig {
             self.max_leverage = 1.0;
         }
         self.max_leverage = self.max_leverage.clamp(1.0, 100.0);
+        self.base_timeframe_secs = self.base_timeframe_secs.clamp(1, 31_536_000);
     }
 }
 
@@ -256,6 +273,12 @@ pub enum TradingError {
         required: f64,
         available: f64,
     },
+    InsufficientSettledShares {
+        requested: f64,
+        sellable: f64,
+        locked_t2: f64,
+        earliest_unlock_timestamp: Option<i64>,
+    },
     InvalidStopLoss {
         stop_loss: f64,
         reference: f64,
@@ -294,6 +317,15 @@ impl fmt::Display for TradingError {
             } => write!(
                 f,
                 "insufficient buying power: required {required:.2}, available {available:.2}"
+            ),
+            Self::InsufficientSettledShares {
+                requested,
+                sellable,
+                locked_t2,
+                ..
+            } => write!(
+                f,
+                "VSD T+2 lock: requested sell {requested:.0} exceeds settled {sellable:.0} ({locked_t2:.0} awaiting T+2 13:00 ICT)"
             ),
             Self::InvalidStopLoss {
                 stop_loss,

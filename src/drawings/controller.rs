@@ -39,6 +39,12 @@ pub struct DrawingPropertyPatch {
     pub locked: bool,
     pub style: DrawingStyle,
     pub geometry: DrawingGeometry,
+    #[serde(default)]
+    pub trend_extend_left: bool,
+    #[serde(default)]
+    pub trend_extend_right: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_fib_levels: Option<Vec<f64>>,
 }
 
 impl DrawingPropertyPatch {
@@ -50,6 +56,9 @@ impl DrawingPropertyPatch {
             locked: drawing.locked,
             style: drawing.style,
             geometry: drawing.geometry.clone(),
+            trend_extend_left: drawing.trend_extend_left,
+            trend_extend_right: drawing.trend_extend_right,
+            custom_fib_levels: drawing.custom_fib_levels.clone(),
         }
     }
 }
@@ -219,6 +228,7 @@ impl DrawingStore {
         let mut max_id: DrawingId = 0;
         self.drawings.retain_mut(|d| {
             d.style.sanitize();
+            d.sanitize_modifiers();
             if let DrawingGeometry::FixedRangeVolumeProfile { row_count, .. } = &mut d.geometry {
                 *row_count = (*row_count).clamp(8, 200);
             }
@@ -410,7 +420,8 @@ impl DrawingStore {
         };
         let refresh_geom = |geom: &mut DrawingGeometry| match geom {
             DrawingGeometry::HorizontalLine { anchor }
-            | DrawingGeometry::AnchoredVwap { anchor, .. } => refresh_anchor(anchor),
+            | DrawingGeometry::AnchoredVwap { anchor, .. }
+            | DrawingGeometry::TextNote { anchor, .. } => refresh_anchor(anchor),
             DrawingGeometry::TrendLine { start, end }
             | DrawingGeometry::Ray {
                 origin: start,
@@ -525,6 +536,7 @@ impl DrawingStore {
         let mut chosen_selected: Option<DrawingId> = None;
         for (idx, mut d) in entries.into_iter().enumerate() {
             d.style.sanitize();
+            d.sanitize_modifiers();
             if !d.geometry.is_valid()
                 || (matches!(
                     d.geometry,
@@ -890,10 +902,35 @@ impl DrawingStore {
         }
 
         let mut next_geom = patch.geometry;
+        if let DrawingGeometry::TextNote { text, .. } = &mut next_geom {
+            let cleaned = super::sanitize_text_note_content(text);
+            if cleaned.is_empty() {
+                return Err(DrawingPatchError::InvalidGeometry);
+            }
+            *text = cleaned;
+        }
         sync_patched_geometry_timestamps(&before.geometry, &mut next_geom, candles, tf);
         if !next_geom.is_valid() {
             return Err(DrawingPatchError::InvalidGeometry);
         }
+
+        let next_ext_l =
+            matches!(next_geom, DrawingGeometry::TrendLine { .. }) && patch.trend_extend_left;
+        let next_ext_r =
+            matches!(next_geom, DrawingGeometry::TrendLine { .. }) && patch.trend_extend_right;
+        let next_custom_fib = if matches!(next_geom, DrawingGeometry::FibonacciRetracement { .. }) {
+            match patch.custom_fib_levels {
+                None => None,
+                Some(ref raw) => {
+                    let Some(sanitized) = super::sanitize_custom_fib_levels(raw) else {
+                        return Err(DrawingPatchError::InvalidGeometry);
+                    };
+                    Some(sanitized)
+                }
+            }
+        } else {
+            None
+        };
 
         let mut next_style = patch.style;
         next_style.sanitize();
@@ -902,7 +939,10 @@ impl DrawingStore {
             && patch.locked
             && (patch.visible != before.visible
                 || next_style != before.style
-                || next_geom != before.geometry)
+                || next_geom != before.geometry
+                || next_ext_l != before.trend_extend_left
+                || next_ext_r != before.trend_extend_right
+                || next_custom_fib != before.custom_fib_levels)
         {
             return Err(DrawingPatchError::DrawingLocked);
         }
@@ -912,6 +952,9 @@ impl DrawingStore {
         after.locked = patch.locked;
         after.style = next_style;
         after.geometry = next_geom;
+        after.trend_extend_left = next_ext_l;
+        after.trend_extend_right = next_ext_r;
+        after.custom_fib_levels = next_custom_fib;
         if let Some(cut_ts) = cutoff
             && after.created_at_timestamp.is_none()
             && !after.is_causally_eligible(Some(cut_ts), vis_cnt)
@@ -1026,6 +1069,10 @@ impl DrawingStore {
                             show_bands: true,
                         }
                     }
+                    DrawingTool::TextNote => DrawingGeometry::TextNote {
+                        anchor: preview_anchor,
+                        text: "Note".to_owned(),
+                    },
                     _ => DrawingGeometry::HorizontalLine {
                         anchor: preview_anchor,
                     },
@@ -1277,7 +1324,9 @@ impl DrawingStore {
 
         // 2. Start a new drawing placement when a creation tool is active.
         match self.active_tool {
-            tool @ (DrawingTool::HorizontalLine | DrawingTool::AnchoredVwap) => {
+            tool @ (DrawingTool::HorizontalLine
+            | DrawingTool::AnchoredVwap
+            | DrawingTool::TextNote) => {
                 if tool == DrawingTool::AnchoredVwap && pane != DrawingPaneTarget::Main {
                     return PointerCaptureOutcome::PassThroughToViewport;
                 }
@@ -1434,6 +1483,10 @@ impl DrawingStore {
                             show_bands: true,
                         }
                     }
+                    DrawingTool::TextNote => DrawingGeometry::TextNote {
+                        anchor: final_anchor,
+                        text: "Note".to_owned(),
+                    },
                     _ => DrawingGeometry::HorizontalLine {
                         anchor: final_anchor,
                     },
@@ -1772,7 +1825,10 @@ fn build_two_anchor_geometry(
                 end: a1,
                 row_count: 24,
             }),
-        DrawingTool::Select | DrawingTool::HorizontalLine | DrawingTool::AnchoredVwap => None,
+        DrawingTool::Select
+        | DrawingTool::HorizontalLine
+        | DrawingTool::AnchoredVwap
+        | DrawingTool::TextNote => None,
     }
 }
 
@@ -1936,7 +1992,8 @@ fn sync_patched_geometry_timestamps(
     let prev_anchors = before.anchors();
     match after {
         DrawingGeometry::HorizontalLine { anchor }
-        | DrawingGeometry::AnchoredVwap { anchor, .. } => {
+        | DrawingGeometry::AnchoredVwap { anchor, .. }
+        | DrawingGeometry::TextNote { anchor, .. } => {
             sync_patched_anchor_timestamp(prev_anchors[0], anchor, candles, tf);
         }
         DrawingGeometry::TrendLine { start, end }
@@ -2007,7 +2064,8 @@ fn remap_drawing_geometry(
 ) {
     match geom {
         DrawingGeometry::HorizontalLine { anchor }
-        | DrawingGeometry::AnchoredVwap { anchor, .. } => {
+        | DrawingGeometry::AnchoredVwap { anchor, .. }
+        | DrawingGeometry::TextNote { anchor, .. } => {
             remap_single_anchor(anchor, old_candles, old_tf, new_candles, new_tf);
         }
         DrawingGeometry::TrendLine { start, end }
@@ -2236,6 +2294,15 @@ fn translate_geometry_in_local_space(
             let candidate = DrawingGeometry::AnchoredVwap {
                 anchor: next_anchor,
                 show_bands,
+            };
+            candidate.is_valid().then_some(candidate)
+        }
+        DrawingGeometry::TextNote { anchor, ref text } => {
+            let orig_pt = *original_local.first()?;
+            let next_anchor = translate_single_anchor_local(anchor, orig_pt, dx, dy, proj)?;
+            let candidate = DrawingGeometry::TextNote {
+                anchor: next_anchor,
+                text: text.clone(),
             };
             candidate.is_valid().then_some(candidate)
         }

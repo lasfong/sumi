@@ -1521,6 +1521,33 @@ fn parse_intent(raw: &str) -> Option<ScannerReplayIntent> {
     }
 }
 
+fn venue_id(v: crate::journal::ExchangeVenue) -> &'static str {
+    use crate::journal::ExchangeVenue;
+    match v {
+        ExchangeVenue::Hose => "Hose",
+        ExchangeVenue::Hnx => "Hnx",
+        ExchangeVenue::Upcom => "Upcom",
+        ExchangeVenue::Vn30Futures => "Vn30Futures",
+        ExchangeVenue::VnIndexBenchmark => "VnIndexBenchmark",
+        ExchangeVenue::UsEquities => "UsEquities",
+        ExchangeVenue::CryptoSpotPerp => "CryptoSpotPerp",
+    }
+}
+
+fn parse_venue_id(raw: &str) -> Option<crate::journal::ExchangeVenue> {
+    use crate::journal::ExchangeVenue;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "hose" => Some(ExchangeVenue::Hose),
+        "hnx" => Some(ExchangeVenue::Hnx),
+        "upcom" => Some(ExchangeVenue::Upcom),
+        "vn30futures" | "vn30f" => Some(ExchangeVenue::Vn30Futures),
+        "vnindexbenchmark" | "vnindex" | "vn-idx" => Some(ExchangeVenue::VnIndexBenchmark),
+        "usequities" | "us" | "us eq" => Some(ExchangeVenue::UsEquities),
+        "cryptospotperp" | "crypto" => Some(ExchangeVenue::CryptoSpotPerp),
+        _ => None,
+    }
+}
+
 fn expect_opt_i64(val: &DocValue, field: &str) -> Result<Option<i64>, WorkspaceTemplateError> {
     match val {
         DocValue::None => Ok(None),
@@ -1684,15 +1711,33 @@ fn encode_json_practice_slot(out: &mut String, s: &SavedPracticeSession) {
             out.push_str(" }");
         }
     }
-    let _ = writeln!(
-        out,
-        ",\n      \"account_config\": {{ \"initial_cash\": {}, \"commission_bps\": {}, \"slippage_bps\": {}, \"allow_short\": {}, \"max_leverage\": {} }},",
-        fmt_f64(s.account_config.initial_cash),
-        fmt_f64(s.account_config.commission_bps),
-        fmt_f64(s.account_config.slippage_bps),
-        s.account_config.allow_short,
-        fmt_f64(s.account_config.max_leverage),
-    );
+    let has_non_default_settlement = s.account_config.enforce_vn_t2_lot_lock
+        || s.account_config.venue != crate::journal::ExchangeVenue::UsEquities
+        || s.account_config.base_timeframe_secs != 86_400;
+    if has_non_default_settlement {
+        let _ = writeln!(
+            out,
+            ",\n      \"account_config\": {{ \"initial_cash\": {}, \"commission_bps\": {}, \"slippage_bps\": {}, \"allow_short\": {}, \"max_leverage\": {}, \"enforce_vn_t2_lot_lock\": {}, \"venue\": \"{}\", \"base_timeframe_secs\": {} }},",
+            fmt_f64(s.account_config.initial_cash),
+            fmt_f64(s.account_config.commission_bps),
+            fmt_f64(s.account_config.slippage_bps),
+            s.account_config.allow_short,
+            fmt_f64(s.account_config.max_leverage),
+            s.account_config.enforce_vn_t2_lot_lock,
+            venue_id(s.account_config.venue),
+            s.account_config.base_timeframe_secs,
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            ",\n      \"account_config\": {{ \"initial_cash\": {}, \"commission_bps\": {}, \"slippage_bps\": {}, \"allow_short\": {}, \"max_leverage\": {} }},",
+            fmt_f64(s.account_config.initial_cash),
+            fmt_f64(s.account_config.commission_bps),
+            fmt_f64(s.account_config.slippage_bps),
+            s.account_config.allow_short,
+            fmt_f64(s.account_config.max_leverage),
+        );
+    }
     let _ = writeln!(
         out,
         "      \"session_start_base_index\": {},",
@@ -1911,15 +1956,33 @@ fn encode_ron_practice_slot(
             out.push_str("))");
         }
     }
-    let _ = writeln!(
-        out,
-        ",\n{inner}account_config: (initial_cash: {}, commission_bps: {}, slippage_bps: {}, allow_short: {}, max_leverage: {}),",
-        fmt_f64(s.account_config.initial_cash),
-        fmt_f64(s.account_config.commission_bps),
-        fmt_f64(s.account_config.slippage_bps),
-        s.account_config.allow_short,
-        fmt_f64(s.account_config.max_leverage),
-    );
+    let has_non_default_settlement = s.account_config.enforce_vn_t2_lot_lock
+        || s.account_config.venue != crate::journal::ExchangeVenue::UsEquities
+        || s.account_config.base_timeframe_secs != 86_400;
+    if has_non_default_settlement {
+        let _ = writeln!(
+            out,
+            ",\n{inner}account_config: (initial_cash: {}, commission_bps: {}, slippage_bps: {}, allow_short: {}, max_leverage: {}, enforce_vn_t2_lot_lock: {}, venue: {}, base_timeframe_secs: {}),",
+            fmt_f64(s.account_config.initial_cash),
+            fmt_f64(s.account_config.commission_bps),
+            fmt_f64(s.account_config.slippage_bps),
+            s.account_config.allow_short,
+            fmt_f64(s.account_config.max_leverage),
+            s.account_config.enforce_vn_t2_lot_lock,
+            venue_id(s.account_config.venue),
+            s.account_config.base_timeframe_secs,
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            ",\n{inner}account_config: (initial_cash: {}, commission_bps: {}, slippage_bps: {}, allow_short: {}, max_leverage: {}),",
+            fmt_f64(s.account_config.initial_cash),
+            fmt_f64(s.account_config.commission_bps),
+            fmt_f64(s.account_config.slippage_bps),
+            s.account_config.allow_short,
+            fmt_f64(s.account_config.max_leverage),
+        );
+    }
     let _ = writeln!(
         out,
         "{inner}session_start_base_index: {},",
@@ -2255,6 +2318,9 @@ fn decode_practice_slot(
             "slippage_bps",
             "allow_short",
             "max_leverage",
+            "enforce_vn_t2_lot_lock",
+            "venue",
+            "base_timeframe_secs",
         ],
     )?;
     let mut account_config = AccountConfig::default();
@@ -2273,6 +2339,22 @@ fn decode_practice_slot(
     }
     if let Some(v) = find_field(ac_fields, "max_leverage") {
         account_config.max_leverage = expect_f64(v, &format!("{ctx}.account_config.max_leverage"))?;
+    }
+    if let Some(v) = find_field(ac_fields, "enforce_vn_t2_lot_lock") {
+        account_config.enforce_vn_t2_lot_lock =
+            expect_bool(v, &format!("{ctx}.account_config.enforce_vn_t2_lot_lock"))?;
+    }
+    if let Some(v) = find_field(ac_fields, "venue") {
+        let v_raw = expect_label(v, &format!("{ctx}.account_config.venue"))?;
+        account_config.venue =
+            parse_venue_id(&v_raw).ok_or_else(|| WorkspaceTemplateError::InvalidField {
+                field: format!("{ctx}.account_config.venue"),
+                reason: format!("unknown ExchangeVenue '{v_raw}'"),
+            })?;
+    }
+    if let Some(v) = find_field(ac_fields, "base_timeframe_secs") {
+        account_config.base_timeframe_secs =
+            expect_i64_safe(v, &format!("{ctx}.account_config.base_timeframe_secs"))?;
     }
 
     let session_start_base_index = expect_usize(

@@ -50,6 +50,7 @@ fn zero_friction_config() -> AccountConfig {
         slippage_bps: 0.0,
         max_leverage: 1.0,
         allow_short: true,
+        ..AccountConfig::default()
     }
 }
 
@@ -66,6 +67,7 @@ fn market_long_and_short_round_trips_apply_slippage_and_conserve_fees() {
         slippage_bps: 5.0,    // 0.05%
         max_leverage: 1.0,
         allow_short: true,
+        ..AccountConfig::default()
     };
     let mut session = TradingSession::new(cfg);
     session.reset_at(&candles, 0);
@@ -257,6 +259,7 @@ fn scale_ins_partial_closes_flips_and_insufficient_flip_rollback_conserve_fees()
         slippage_bps: 3.0,
         max_leverage: 1.0,
         allow_short: true,
+        ..AccountConfig::default()
     };
     let mut session = TradingSession::new(cfg);
     session.reset_at(&candles, 0);

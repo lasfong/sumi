@@ -37,6 +37,27 @@ pub type DrawingId = u64;
 /// Canonical Fibonacci retracement ratios (`ARCHIVE/frontend/src/features/drawings/drawingDomain.ts:32`).
 pub const FIBONACCI_RATIOS: [f64; 7] = [0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0];
 
+/// Institutional ICT Optimal Trade Entry (`OTE`) + extension preset ratios (`Milestone R19 / C4`).
+pub const FIBONACCI_OTE_EXT_RATIOS: [f64; 9] =
+    [-0.272, 0.0, 0.5, 0.618, 0.705, 0.786, 1.0, 1.272, 1.618];
+
+/// Full harmonic + extension Fibonacci preset ratios (`Milestone R19 / C4`).
+pub const FIBONACCI_FULL_EXT_RATIOS: [f64; 13] = [
+    -0.618, -0.272, 0.0, 0.236, 0.382, 0.5, 0.618, 0.705, 0.786, 1.0, 1.272, 1.618, 2.618,
+];
+
+/// Maximum custom Fibonacci ratios permitted on a single [`Drawing`].
+pub const MAX_CUSTOM_FIB_LEVELS: usize = 16;
+
+/// Minimum custom Fibonacci ratio accepted (`-500%` extension).
+pub const MIN_CUSTOM_FIB_RATIO: f64 = -5.0;
+
+/// Maximum custom Fibonacci ratio accepted (`+1000%` extension).
+pub const MAX_CUSTOM_FIB_RATIO: f64 = 10.0;
+
+/// Maximum UTF-8 scalar characters permitted in a [`DrawingGeometry::TextNote`] (`Milestone R19 / C4`).
+pub const MAX_TEXT_NOTE_CHARS: usize = 280;
+
 /// Maximum absolute bar-slot index accepted when sanitizing or committing anchors.
 pub const MAX_ABS_BAR_INDEX: f64 = 1.0e9;
 
@@ -108,6 +129,7 @@ pub enum DrawingTool {
     RiskRewardBox,
     FixedRangeVolumeProfile,
     AnchoredVwap,
+    TextNote,
 }
 
 impl DrawingTool {
@@ -124,6 +146,7 @@ impl DrawingTool {
             Self::RiskRewardBox => "Pos R:R",
             Self::FixedRangeVolumeProfile => "FRVP",
             Self::AnchoredVwap => "AVWAP",
+            Self::TextNote => "Note",
         }
     }
 
@@ -132,7 +155,7 @@ impl DrawingTool {
     pub const fn required_anchors(self) -> usize {
         match self {
             Self::Select => 0,
-            Self::HorizontalLine | Self::AnchoredVwap => 1,
+            Self::HorizontalLine | Self::AnchoredVwap | Self::TextNote => 1,
             Self::TrendLine
             | Self::Ray
             | Self::Rectangle
@@ -380,6 +403,12 @@ impl DrawingStyle {
                 dash: LineDashStyle::Solid,
                 fill_opacity: 0.14,
             },
+            DrawingTool::TextNote => Self {
+                color: DrawingColorPreset::AmberGold,
+                line_width: 1.5,
+                dash: LineDashStyle::Solid,
+                fill_opacity: 0.22,
+            },
             DrawingTool::Select => Self {
                 color: DrawingColorPreset::Cyan,
                 line_width: 1.75,
@@ -458,6 +487,157 @@ pub enum DrawingGeometry {
         #[serde(default = "default_avwap_show_bands")]
         show_bands: bool,
     },
+    /// Anchored UTF-8 Text Callout Note (`Milestone R19 / C4`):
+    /// `<= 280` UTF-8 scalar characters anchored at `(bar_index, value)` with word-boundary layout.
+    TextNote {
+        anchor: DrawingAnchor,
+        text: String,
+    },
+}
+
+/// Sanitizes a user-supplied [`DrawingGeometry::TextNote`] string (`<= 280` UTF-8 scalar chars,
+/// converting tabs/CR into spaces/LF and stripping other control characters).
+#[must_use]
+pub fn sanitize_text_note_content(raw: &str) -> String {
+    let mut out = String::new();
+    let mut count = 0_usize;
+    for ch in raw.chars() {
+        if count >= MAX_TEXT_NOTE_CHARS {
+            break;
+        }
+        let mapped = match ch {
+            '\t' => ' ',
+            '\n' => '\n',
+            c if c.is_control() => continue,
+            c => c,
+        };
+        out.push(mapped);
+        count += 1;
+    }
+    out.trim().to_owned()
+}
+
+/// Word-boundary UTF-8 line wrapper for [`DrawingGeometry::TextNote`] (`BUG-DRW-03` fix: never slices mid-UTF-8
+/// or mid-word when whitespace exists, capping at `max_lines` with `'…'` ellipsis when needed).
+#[must_use]
+pub fn wrap_text_note_lines(text: &str, max_line_chars: usize, max_lines: usize) -> Vec<String> {
+    let line_cap = max_line_chars.max(6);
+    let max_l = max_lines.max(1);
+    let clean = sanitize_text_note_content(text);
+    if clean.is_empty() {
+        return vec!["Note".to_owned()];
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut truncated_any = false;
+
+    'outer: for para in clean.split('\n') {
+        let trimmed = para.trim_end();
+        if trimmed.is_empty() {
+            if lines.len() >= max_l {
+                truncated_any = true;
+                break;
+            }
+            lines.push(String::new());
+            continue;
+        }
+
+        let mut current = String::new();
+        let mut current_chars = 0_usize;
+        for word in trimmed.split_whitespace() {
+            let w_chars = word.chars().count();
+            if current_chars == 0 {
+                if w_chars <= line_cap {
+                    current.push_str(word);
+                    current_chars = w_chars;
+                } else {
+                    // Long unbroken token: chunk cleanly by UTF-8 scalar characters.
+                    let mut buf = String::new();
+                    let mut c_len = 0_usize;
+                    for ch in word.chars() {
+                        buf.push(ch);
+                        c_len += 1;
+                        if c_len == line_cap {
+                            if lines.len() >= max_l {
+                                truncated_any = true;
+                                break 'outer;
+                            }
+                            lines.push(std::mem::take(&mut buf));
+                            c_len = 0;
+                        }
+                    }
+                    current = buf;
+                    current_chars = c_len;
+                }
+            } else if current_chars + 1 + w_chars <= line_cap {
+                current.push(' ');
+                current.push_str(word);
+                current_chars += 1 + w_chars;
+            } else {
+                if lines.len() >= max_l {
+                    truncated_any = true;
+                    break 'outer;
+                }
+                lines.push(std::mem::take(&mut current));
+                if w_chars <= line_cap {
+                    current.push_str(word);
+                    current_chars = w_chars;
+                } else {
+                    let mut buf = String::new();
+                    let mut c_len = 0_usize;
+                    for ch in word.chars() {
+                        buf.push(ch);
+                        c_len += 1;
+                        if c_len == line_cap {
+                            if lines.len() >= max_l {
+                                truncated_any = true;
+                                break 'outer;
+                            }
+                            lines.push(std::mem::take(&mut buf));
+                            c_len = 0;
+                        }
+                    }
+                    current = buf;
+                    current_chars = c_len;
+                }
+            }
+        }
+        if current_chars > 0 {
+            if lines.len() >= max_l {
+                truncated_any = true;
+                break 'outer;
+            }
+            lines.push(current);
+        }
+    }
+
+    if lines.is_empty() {
+        lines.push("Note".to_owned());
+    } else if truncated_any && let Some(last) = lines.last_mut() {
+        if last.chars().count() >= line_cap {
+            last.pop();
+        }
+        last.push('…');
+    }
+    lines
+}
+
+/// Validates, rounds (`4` decimals), sorts ascending, deduplicates, and caps custom Fibonacci ratios (`1..=16`).
+#[must_use]
+pub fn sanitize_custom_fib_levels(raw: &[f64]) -> Option<Vec<f64>> {
+    let mut cleaned: Vec<f64> = raw
+        .iter()
+        .copied()
+        .filter(|r| r.is_finite() && (MIN_CUSTOM_FIB_RATIO..=MAX_CUSTOM_FIB_RATIO).contains(r))
+        .map(|r| {
+            let q = (r * 10_000.0).round() / 10_000.0;
+            if q.abs() < 1.0e-9 { 0.0 } else { q }
+        })
+        .collect();
+    cleaned.sort_by(|a, b| a.total_cmp(b));
+    cleaned.dedup_by(|a, b| (*a - *b).abs() < 1.0e-4);
+    cleaned.truncate(MAX_CUSTOM_FIB_LEVELS);
+    (!cleaned.is_empty()).then_some(cleaned)
 }
 
 impl DrawingGeometry {
@@ -531,13 +711,16 @@ impl DrawingGeometry {
             Self::RiskRewardBox { .. } => DrawingTool::RiskRewardBox,
             Self::FixedRangeVolumeProfile { .. } => DrawingTool::FixedRangeVolumeProfile,
             Self::AnchoredVwap { .. } => DrawingTool::AnchoredVwap,
+            Self::TextNote { .. } => DrawingTool::TextNote,
         }
     }
 
     #[must_use]
     pub fn anchors(&self) -> [DrawingAnchor; 2] {
         match *self {
-            Self::HorizontalLine { anchor } | Self::AnchoredVwap { anchor, .. } => [anchor, anchor],
+            Self::HorizontalLine { anchor }
+            | Self::AnchoredVwap { anchor, .. }
+            | Self::TextNote { anchor, .. } => [anchor, anchor],
             Self::TrendLine { start, end }
             | Self::Ray {
                 origin: start,
@@ -557,7 +740,7 @@ impl DrawingGeometry {
     #[must_use]
     pub const fn anchor_count(&self) -> usize {
         match self {
-            Self::HorizontalLine { .. } | Self::AnchoredVwap { .. } => 1,
+            Self::HorizontalLine { .. } | Self::AnchoredVwap { .. } | Self::TextNote { .. } => 1,
             Self::TrendLine { .. }
             | Self::Ray { .. }
             | Self::Rectangle { .. }
@@ -572,6 +755,13 @@ impl DrawingGeometry {
         match *self {
             Self::HorizontalLine { anchor } => anchor.is_valid(),
             Self::AnchoredVwap { anchor, .. } => anchor.is_valid() && anchor.bar_index >= -0.5,
+            Self::TextNote { anchor, ref text } => {
+                let char_cnt = text.chars().count();
+                anchor.is_valid()
+                    && !text.trim().is_empty()
+                    && char_cnt <= MAX_TEXT_NOTE_CHARS
+                    && !text.chars().any(|c| c.is_control() && c != '\n')
+            }
             Self::TrendLine { start, end }
             | Self::Rectangle {
                 corner_a: start,
@@ -613,7 +803,7 @@ impl DrawingGeometry {
             return false;
         }
         match self {
-            Self::HorizontalLine { anchor: a } => {
+            Self::HorizontalLine { anchor: a } | Self::TextNote { anchor: a, .. } => {
                 if index == 0 {
                     *a = anchor;
                     true
@@ -723,6 +913,15 @@ pub struct Drawing {
     ///   iff every anchor lies at or before `cutoff_timestamp` (`DEF-001` zero-lookahead guard).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at_timestamp: Option<i64>,
+    /// Time-directional leftward infinite extension (`-∞` X) for [`DrawingGeometry::TrendLine`] (`Milestone R19 / C4`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub trend_extend_left: bool,
+    /// Time-directional rightward infinite extension (`+∞` X) for [`DrawingGeometry::TrendLine`] (`Milestone R19 / C4`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub trend_extend_right: bool,
+    /// Optional per-drawing custom Fibonacci ratios (`1..=16` sorted finite ratios in `[-5.0, 10.0]`, `Milestone R19 / C4`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_fib_levels: Option<Vec<f64>>,
 }
 
 impl Drawing {
@@ -743,6 +942,40 @@ impl Drawing {
             style: clean_style,
             geometry,
             created_at_timestamp: None,
+            trend_extend_left: false,
+            trend_extend_right: false,
+            custom_fib_levels: None,
+        }
+    }
+
+    /// Returns the active sorted Fibonacci ratio slice for this drawing (`custom_fib_levels` when set, else `FIBONACCI_RATIOS`).
+    #[inline]
+    #[must_use]
+    pub fn effective_fib_ratios(&self) -> &[f64] {
+        self.custom_fib_levels
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .unwrap_or(&FIBONACCI_RATIOS)
+    }
+
+    /// Sanitizes `TextNote` text, `trend_extend_left/right`, and `custom_fib_levels` in place.
+    pub fn sanitize_modifiers(&mut self) {
+        if let DrawingGeometry::TextNote { text, .. } = &mut self.geometry {
+            let cleaned = sanitize_text_note_content(text);
+            if !cleaned.is_empty() {
+                *text = cleaned;
+            }
+        }
+        if !matches!(self.geometry, DrawingGeometry::TrendLine { .. }) {
+            self.trend_extend_left = false;
+            self.trend_extend_right = false;
+        }
+        if matches!(self.geometry, DrawingGeometry::FibonacciRetracement { .. }) {
+            if let Some(raw) = self.custom_fib_levels.take() {
+                self.custom_fib_levels = sanitize_custom_fib_levels(&raw);
+            }
+        } else {
+            self.custom_fib_levels = None;
         }
     }
 
@@ -763,11 +996,27 @@ impl Drawing {
             | DrawingGeometry::AnchoredVwap { .. } => self.pane == DrawingPaneTarget::Main,
             _ => true,
         };
+        let custom_fib_ok = match (&self.geometry, &self.custom_fib_levels) {
+            (_, None) => true,
+            (DrawingGeometry::FibonacciRetracement { .. }, Some(lvls)) => {
+                !lvls.is_empty()
+                    && lvls.len() <= MAX_CUSTOM_FIB_LEVELS
+                    && lvls.iter().all(|r| {
+                        r.is_finite() && (MIN_CUSTOM_FIB_RATIO..=MAX_CUSTOM_FIB_RATIO).contains(r)
+                    })
+                    && lvls.windows(2).all(|w| w[1] > w[0] + 1.0e-5)
+            }
+            (_, Some(_)) => false,
+        };
+        let trend_ext_ok = matches!(self.geometry, DrawingGeometry::TrendLine { .. })
+            || (!self.trend_extend_left && !self.trend_extend_right);
         self.id > 0
             && self.id < PREVIEW_DRAWING_ID
             && pane_ok
             && self.geometry.is_valid()
             && created_ts_ok
+            && custom_fib_ok
+            && trend_ext_ok
     }
 
     /// Evaluates whether this drawing is causally eligible (`DEF-001` zero-lookahead guard) at
@@ -806,7 +1055,8 @@ impl Drawing {
         };
         match self.geometry {
             DrawingGeometry::HorizontalLine { anchor }
-            | DrawingGeometry::AnchoredVwap { anchor, .. } => anchor_ok(anchor),
+            | DrawingGeometry::AnchoredVwap { anchor, .. }
+            | DrawingGeometry::TextNote { anchor, .. } => anchor_ok(anchor),
             DrawingGeometry::TrendLine { start, end }
             | DrawingGeometry::Ray {
                 origin: start,

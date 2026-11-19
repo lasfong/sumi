@@ -15,6 +15,7 @@
 //!   <-> `bar_index` projection.
 //! - [`presets`]: Bundled workstation feeds + deterministic synthetic generators.
 
+pub mod audit;
 pub mod calendar;
 pub mod csv_loader;
 pub mod json_loader;
@@ -32,6 +33,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::Candle;
 
+pub use audit::{
+    CAFEF_MAX_CLOSE_ABS_TOL_VND, CAFEF_MAX_CLOSE_REL_TOL, CAFEF_SINGLE_ULP_TOL_VND,
+    CafeFSplitNormOutcome, DataAuditAnomaly, DataQualityAuditReport, DataReadinessStatus,
+    MAX_AUDIT_ANOMALY_SAMPLES, MAX_AUDIT_SAMPLE_GAPS, UniverseDataReadinessSummary,
+    UniverseFeedAuditRow, audit_ohlcv_series, audit_ohlcv_series_with_venue,
+    evaluate_and_normalize_cafef_split_ohlc, is_us_nyse_holiday_ymd, summarize_universe_readiness,
+};
 pub use calendar::{
     AUTO_EPOCH_SECONDS_CAP, MAX_SUPPORTED_EPOCH_SECS, MIN_SUPPORTED_EPOCH_SECS, ParsedTimestamp,
     TimestampUnit, UtcDateTime, civil_from_days, days_from_civil, days_in_month_i32, decompose_utc,
@@ -90,6 +98,9 @@ pub enum OhlcEnvelopePolicy {
     /// Repairs minor vendor tick inversion by clamping `high = high.max(open.max(close))` and
     /// `low = low.min(open.min(close))`, recording the count in [`DataLoadReport::repaired_envelope_count`].
     ClampToBody,
+    /// Applies the 5-rule `CafeF SolieuGD` 4-decimal post-split precision gate (`<= 6 bps` & `<= 25 VND`,
+    /// `<= 1 ULP` on `Open`, `< 0.5 * min_step`), rejecting genuine inversions (`Milestone R19 / C3`).
+    CafeFSplitAware,
 }
 
 /// Input format selector for [`load_ohlcv_bytes`] / `load_ohlcv_file`.
@@ -511,6 +522,31 @@ pub(crate) fn normalize_loaded_candles(
                     rec.high = rec.high.max(body_max);
                     rec.low = rec.low.min(body_min);
                     repaired_envelope_count += 1;
+                }
+                OhlcEnvelopePolicy::CafeFSplitAware => {
+                    match evaluate_and_normalize_cafef_split_ohlc(
+                        &symbol, rec.open, rec.high, rec.low, rec.close, rec.volume,
+                    ) {
+                        CafeFSplitNormOutcome::UnchangedValid => {}
+                        CafeFSplitNormOutcome::NormalizedSplitPrecision {
+                            new_high,
+                            new_low,
+                            ..
+                        } => {
+                            rec.high = new_high;
+                            rec.low = new_low;
+                            repaired_envelope_count += 1;
+                        }
+                        CafeFSplitNormOutcome::RejectedGenuineViolation => {
+                            return Err(DataLoadError::InvalidOhlcEnvelope {
+                                row: rec.source_row,
+                                open: rec.open,
+                                high: rec.high,
+                                low: rec.low,
+                                close: rec.close,
+                            });
+                        }
+                    }
                 }
             }
         }

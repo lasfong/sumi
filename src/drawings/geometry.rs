@@ -2,7 +2,7 @@ use crate::indicators::compute_anchored_vwap;
 use crate::model::Candle;
 use crate::viewport::{PriceScale, TimeScale};
 
-use super::{Drawing, DrawingAnchor, DrawingGeometry, FIBONACCI_RATIOS, FibDirection};
+use super::{Drawing, DrawingAnchor, DrawingGeometry, FibDirection, wrap_text_note_lines};
 
 /// Pane-local 2D coordinate (`x ∈ [0, width]`, `y ∈ [0, height]` for points inside the plot canvas).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -217,6 +217,11 @@ pub enum ProjectedDrawingShape {
         show_bands: bool,
         tail_segments: Vec<LocalSegment>,
     },
+    TextNote {
+        anchor_local: LocalPoint,
+        box_rect: Option<LocalRect>,
+        lines: Vec<String>,
+    },
 }
 
 /// Complete pane-local projection of a [`Drawing`].
@@ -343,7 +348,39 @@ impl<'a> PaneDrawingProjection<'a> {
             DrawingGeometry::TrendLine { start, end } => {
                 let p0 = self.anchor_to_local(start)?;
                 let p1 = self.anchor_to_local(end)?;
-                let clipped = clip_parametric_line(p0, p1, 0.0, 1.0, bounds);
+                // Time-directional extension (`trend_extend_left` -> `-∞` X, `trend_extend_right` -> `+∞` X),
+                // invariant to whether `start` was placed left-of or right-of `end`!
+                let has_horiz_dir = (p1.x - p0.x).abs() > 1.0e-9;
+                let (t_min, t_max) = if !has_horiz_dir {
+                    (0.0, 1.0)
+                } else if p0.x <= p1.x {
+                    (
+                        if drawing.trend_extend_left {
+                            f64::NEG_INFINITY
+                        } else {
+                            0.0
+                        },
+                        if drawing.trend_extend_right {
+                            f64::INFINITY
+                        } else {
+                            1.0
+                        },
+                    )
+                } else {
+                    (
+                        if drawing.trend_extend_right {
+                            f64::NEG_INFINITY
+                        } else {
+                            0.0
+                        },
+                        if drawing.trend_extend_left {
+                            f64::INFINITY
+                        } else {
+                            1.0
+                        },
+                    )
+                };
+                let clipped = clip_parametric_line(p0, p1, t_min, t_max, bounds);
                 let mut handles = Vec::with_capacity(2);
                 if bounds.contains_with_margin(p0, 8.0) {
                     handles.push(ProjectedHandle {
@@ -457,8 +494,9 @@ impl<'a> PaneDrawingProjection<'a> {
                 let vis_x_right = raw_x_right.min(bounds.right);
                 let has_horz_overlap = vis_x_left <= vis_x_right;
 
-                let mut levels = Vec::with_capacity(FIBONACCI_RATIOS.len());
-                for ratio in FIBONACCI_RATIOS {
+                let active_ratios = drawing.effective_fib_ratios();
+                let mut levels = Vec::with_capacity(active_ratios.len());
+                for &ratio in active_ratios {
                     let val = fibonacci_level_value(start, end, ratio, direction);
                     if let Some(y) = self.price_scale.price_to_local_y(val, self.base_value) {
                         let visible_in_pane =
@@ -788,6 +826,63 @@ impl<'a> PaneDrawingProjection<'a> {
                     },
                 })
             }
+            DrawingGeometry::TextNote { anchor, ref text } => {
+                let p0 = self.anchor_to_local(anchor)?;
+                let lines = wrap_text_note_lines(text, 34, 8);
+                let max_chars = lines
+                    .iter()
+                    .map(|l| l.chars().count())
+                    .max()
+                    .unwrap_or(4)
+                    .max(4);
+                let box_w =
+                    ((max_chars as f64) * 6.4 + 14.0).clamp(44.0, (self.width - 8.0).max(44.0));
+                let box_h =
+                    ((lines.len() as f64) * 14.5 + 10.0).clamp(24.0, (self.height - 8.0).max(24.0));
+
+                let visible_near_pane = bounds.contains_with_margin(p0, box_w.max(box_h) + 12.0);
+                let box_rect = visible_near_pane.then(|| {
+                    let prefer_x = if p0.x + 8.0 + box_w <= bounds.right - 2.0 {
+                        p0.x + 8.0
+                    } else {
+                        (p0.x - 8.0 - box_w).max(bounds.left + 2.0)
+                    };
+                    let left = prefer_x.clamp(
+                        bounds.left + 2.0,
+                        (bounds.right - box_w - 2.0).max(bounds.left + 2.0),
+                    );
+                    let top = (p0.y - 0.5 * box_h).clamp(
+                        bounds.top + 2.0,
+                        (bounds.bottom - box_h - 2.0).max(bounds.top + 2.0),
+                    );
+                    LocalRect {
+                        left,
+                        top,
+                        right: (left + box_w).min(bounds.right),
+                        bottom: (top + box_h).min(bounds.bottom),
+                    }
+                });
+
+                let mut handles = Vec::with_capacity(1);
+                if bounds.contains_with_margin(p0, 8.0) {
+                    handles.push(ProjectedHandle {
+                        part: HandlePart::Anchor(0),
+                        pos: p0,
+                    });
+                }
+
+                Some(ProjectedDrawing {
+                    id: drawing.id,
+                    locked: drawing.locked,
+                    anchors_local: vec![p0],
+                    handles,
+                    shape: ProjectedDrawingShape::TextNote {
+                        anchor_local: p0,
+                        box_rect,
+                        lines,
+                    },
+                })
+            }
         }
     }
 }
@@ -824,8 +919,10 @@ pub fn clip_parametric_line(
 ) -> Option<LocalSegment> {
     if !p0.is_finite()
         || !p1.is_finite()
-        || !t_min.is_finite()
+        || t_min.is_nan()
         || t_max.is_nan()
+        || t_min == f64::INFINITY
+        || t_max == f64::NEG_INFINITY
         || bounds.left > bounds.right
         || bounds.top > bounds.bottom
         || !bounds.left.is_finite()
@@ -863,13 +960,10 @@ pub fn clip_parametric_line(
         pt
     };
 
-    // Branch 1: Semi-infinite ray (`t_max == +Inf`). Normalize direction to a unit vector `(ux, uy)`
-    // so tiny non-zero slopes never collapse to `0 px` and near-axis slopes (`0 < |dx| <= 1e-12`)
-    // are clipped accurately against all 4 box edges (preventing phantom edge rays).
-    if t_max.is_infinite() {
-        if t_max.is_sign_negative() {
-            return None;
-        }
+    // Branch 1: Unbounded ray or infinite line (`t_min == -Inf` and/or `t_max == +Inf`).
+    // Normalize direction to a unit vector `(ux, uy)` so tiny non-zero slopes never collapse to `0 px`
+    // and near-axis slopes (`0 < |dx| <= 1e-12`) clip accurately against all 4 box edges.
+    if t_min.is_infinite() || t_max.is_infinite() {
         let (ux, uy, step_len) = if raw_dx.is_finite() && raw_dy.is_finite() {
             let len = raw_dx.hypot(raw_dy);
             if len == 0.0 || !len.is_finite() {
@@ -885,11 +979,28 @@ pub fn clip_parametric_line(
             }
             (hdx / hlen, hdy / hlen, 2.0 * hlen)
         };
-        let mut s_min = if t_min == 0.0 { 0.0 } else { t_min * step_len };
-        if !s_min.is_finite() {
-            return None;
-        }
-        let mut s_max = f64::INFINITY;
+        let mut s_min = if t_min == f64::NEG_INFINITY {
+            f64::NEG_INFINITY
+        } else if t_min == 0.0 {
+            0.0
+        } else {
+            let v = t_min * step_len;
+            if !v.is_finite() {
+                return None;
+            }
+            v
+        };
+        let mut s_max = if t_max == f64::INFINITY {
+            f64::INFINITY
+        } else if t_max == 0.0 {
+            0.0
+        } else {
+            let v = t_max * step_len;
+            if !v.is_finite() {
+                return None;
+            }
+            v
+        };
         let mut min_edge = None;
         let mut max_edge = None;
         let checks = [
@@ -927,17 +1038,31 @@ pub fn clip_parametric_line(
         if !s_min.is_finite() || !s_max.is_finite() || s_min > s_max {
             return None;
         }
+        let raw_s_start = if min_edge.is_none() && t_min == 0.0 {
+            p0
+        } else if min_edge.is_none() && t_min == 1.0 {
+            p1
+        } else {
+            LocalPoint::new(p0.x + s_min * ux, p0.y + s_min * uy)
+        };
+        let raw_s_end = if max_edge.is_none() && t_max == 0.0 {
+            p0
+        } else if max_edge.is_none() && t_max == 1.0 {
+            p1
+        } else {
+            LocalPoint::new(p0.x + s_max * ux, p0.y + s_max * uy)
+        };
         let start = snap_edge(
             LocalPoint::new(
-                (p0.x + s_min * ux).clamp(bounds.left, bounds.right),
-                (p0.y + s_min * uy).clamp(bounds.top, bounds.bottom),
+                raw_s_start.x.clamp(bounds.left, bounds.right),
+                raw_s_start.y.clamp(bounds.top, bounds.bottom),
             ),
             min_edge,
         );
         let end = snap_edge(
             LocalPoint::new(
-                (p0.x + s_max * ux).clamp(bounds.left, bounds.right),
-                (p0.y + s_max * uy).clamp(bounds.top, bounds.bottom),
+                raw_s_end.x.clamp(bounds.left, bounds.right),
+                raw_s_end.y.clamp(bounds.top, bounds.bottom),
             ),
             max_edge,
         );

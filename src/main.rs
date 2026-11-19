@@ -48,7 +48,7 @@ fn main() -> eframe::Result {
 
     let viewport = egui::ViewportBuilder::default()
         .with_title(
-            "Sumi Trading Workstation — VNINDEX · 1D (Milestone R14 Synthetic DOM Execution Ladder, Hotkey Profiles & Right-Axis Polish)",
+            "Sumi Trading Workstation — VNINDEX · 1D (Milestone R19 Global Settings, VN Holiday T+2 FIFO, Data Readiness Audit & Drawings)",
         )
         .with_inner_size([initial_width, initial_height])
         .with_min_inner_size([640.0, 420.0]);

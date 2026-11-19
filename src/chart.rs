@@ -18,7 +18,8 @@ use crate::data::Timeframe;
 use crate::drawings::{
     Drawing, DrawingColorPreset, DrawingGeometry, DrawingId, DrawingInteractionPhase,
     DrawingPaneTarget, DrawingStore, DrawingTool, HandlePart, HitTarget, LineDashStyle, LocalPoint,
-    MagnetMode, PaneDrawingProjection, PointerCaptureOutcome, ProjectedDrawingShape,
+    MAX_CUSTOM_FIB_LEVELS, MagnetMode, PaneDrawingProjection, PointerCaptureOutcome,
+    ProjectedDrawingShape,
 };
 use crate::indicators::{
     ADX_REFERENCE_LEVELS, BBHorizon, BucketLineEnvelope, CCI_REFERENCE_LEVELS,
@@ -31,9 +32,9 @@ use crate::indicators::{
 use crate::model::{Candle, PriceBounds};
 use crate::trading::{ExecutionFill, OrderSide, PositionSide, TradingSession};
 use crate::viewport::{
-    CandlestickBarMetrics, HorzScaleOptions, KineticAnimation, KineticScrollConfig, PaneViewport,
-    PlotRect, PriceScale, PriceScaleOptions, TimeScale, conflated_candle_at,
-    iter_conflated_candles, resolve_linked_crosshair_bar,
+    CandlePalettePreset, CandlestickBarMetrics, HorzScaleOptions, KineticAnimation,
+    KineticScrollConfig, PaneViewport, PlotRect, PriceScale, PriceScaleOptions, TimeScale,
+    conflated_candle_at, iter_conflated_candles, resolve_linked_crosshair_bar,
 };
 
 /// TradingView-inspired dark workstation & indicator palette.
@@ -695,6 +696,7 @@ struct PlotDataLayerKey {
     base_index: Option<i64>,
     base_value_bits: u64,
     show_volume: bool,
+    candle_palette: CandlePalettePreset,
     main_ps: PriceScaleMemoKey,
     vol_ps: PriceScaleMemoKey,
     indicators: IndicatorConfig,
@@ -1422,6 +1424,7 @@ pub struct ChartReplayTradingOverlay<'a> {
     pub rs_benchmark_label: Option<&'a str>,
     pub external_crosshair_timestamp: Option<i64>,
     pub modal_open: bool,
+    pub candle_palette: CandlePalettePreset,
 }
 
 /// Telemetry returned by a chart render pass for HUD and verification readouts.
@@ -2458,6 +2461,7 @@ fn render_workstation_chart_inner(
             base_index: viewport.time_scale.base_index(),
             base_value_bits: base_value.to_bits(),
             show_volume: config.show_volume,
+            candle_palette: replay_trading.candle_palette,
             main_ps: PriceScaleMemoKey::from_price_scale(&viewport.main_price_scale),
             vol_ps: PriceScaleMemoKey::from_price_scale(&viewport.volume_price_scale),
             indicators: indicators.clone(),
@@ -2547,6 +2551,7 @@ fn render_workstation_chart_inner(
                 bar_metrics,
                 ppp,
                 config.show_volume,
+                replay_trading.candle_palette,
             );
 
             // Main-Pane Technical Overlays (`Ichimoku Cloud`, `BollingerBands`, `SMA`, `EMA`, `Session VWAP`, `Compare Benchmark`)
@@ -2702,6 +2707,7 @@ fn render_workstation_chart_inner(
         &viewport.main_price_scale,
         &main_vp,
         base_value,
+        replay_trading.candle_palette,
     );
 
     if let Some(store) = drawings.as_deref() {
@@ -3384,6 +3390,7 @@ fn render_workstation_chart_inner(
         config,
         inspected_data_index,
         conflation_factor,
+        replay_trading.candle_palette,
     );
     if active_overlay_count > 0 {
         paint_main_overlay_hud(
@@ -3724,6 +3731,7 @@ pub fn render_shared_pane_candlestick_chart(
         bar_metrics,
         ppp,
         config.show_volume,
+        CandlePalettePreset::default(),
     );
 
     let plot_painter = painter.with_clip_rect(layout.plot_rect);
@@ -3736,6 +3744,7 @@ pub fn render_shared_pane_candlestick_chart(
         main_price_scale,
         &main_vp,
         base_value,
+        CandlePalettePreset::default(),
     );
 
     if let Some((pos, slot_idx, cross_x)) = single_cross_state {
@@ -3802,6 +3811,7 @@ pub fn render_shared_pane_candlestick_chart(
         config,
         inspected_data_index,
         conflation_factor,
+        CandlePalettePreset::default(),
     );
 
     Some(ChartRenderReport {
@@ -4064,6 +4074,29 @@ fn overlay_conflation_step(conflation_factor: usize, bar_spacing: f64) -> usize 
     step.min(512)
 }
 
+#[inline]
+pub(crate) const fn candle_palette_colors(
+    preset: CandlePalettePreset,
+) -> (Color32, Color32, Color32, Color32) {
+    let [br, bg, bb] = preset.bull_rgb();
+    let [sr, sg, sb] = preset.bear_rgb();
+    let bull = Color32::from_rgb(br, bg, bb);
+    let bear = Color32::from_rgb(sr, sg, sb);
+    let bull_vol = Color32::from_rgba_premultiplied(
+        ((br as u16 * 72 + 127) / 255) as u8,
+        ((bg as u16 * 72 + 127) / 255) as u8,
+        ((bb as u16 * 72 + 127) / 255) as u8,
+        72,
+    );
+    let bear_vol = Color32::from_rgba_premultiplied(
+        ((sr as u16 * 72 + 127) / 255) as u8,
+        ((sg as u16 * 72 + 127) / 255) as u8,
+        ((sb as u16 * 72 + 127) / 255) as u8,
+        72,
+    );
+    (bull, bear, bull_vol, bear_vol)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_candlesticks_and_volume(
     painter: &egui::Painter,
@@ -4077,7 +4110,10 @@ fn paint_candlesticks_and_volume(
     bar_metrics: CandlestickBarMetrics,
     ppp: f64,
     show_volume: bool,
+    candle_palette: CandlePalettePreset,
 ) -> usize {
+    let (bull_col, bear_col, bull_vol_col, bear_vol_col) = candle_palette_colors(candle_palette);
+    let hollow_bull = candle_palette.is_hollow_bullish();
     let half_body_w = (bar_metrics.body_width_logical as f32) * 0.5;
     let wick_stroke_w = bar_metrics.wick_width_logical as f32;
     let min_body_h = (1.0 / (ppp as f32)).max(0.25);
@@ -4103,12 +4139,22 @@ fn paint_candlesticks_and_volume(
         vol_mesh.indices.reserve(est_bars * 6);
     }
     let mut candle_mesh = Mesh::default();
-    candle_mesh
-        .vertices
-        .reserve(est_bars * if single_rect_mode { 4 } else { 12 });
-    candle_mesh
-        .indices
-        .reserve(est_bars * if single_rect_mode { 6 } else { 18 });
+    let verts_per_bar = if single_rect_mode {
+        4
+    } else if hollow_bull {
+        20
+    } else {
+        12
+    };
+    let idx_per_bar = if single_rect_mode {
+        6
+    } else if hollow_bull {
+        30
+    } else {
+        18
+    };
+    candle_mesh.vertices.reserve(est_bars * verts_per_bar);
+    candle_mesh.indices.reserve(est_bars * idx_per_bar);
 
     let mut push_bar = |center_logical_index: f64,
                         open: f64,
@@ -4131,9 +4177,9 @@ fn paint_candlesticks_and_volume(
                 safe_clamp_f32(sy as f32, plot_top, safe_vol_hi)
             });
             let fill = if is_bullish {
-                palette::BULLISH_VOL
+                bull_vol_col
             } else {
-                palette::BEARISH_VOL
+                bear_vol_col
             };
             vol_mesh.add_colored_rect(
                 Rect::from_min_max(
@@ -4160,11 +4206,7 @@ fn paint_candlesticks_and_volume(
         let open_y = open_sy as f32;
         let close_y = close_sy as f32;
 
-        let color = if is_bullish {
-            palette::BULLISH
-        } else {
-            palette::BEARISH
-        };
+        let color = if is_bullish { bull_col } else { bear_col };
 
         let top_y = open_y.min(close_y);
         let bottom_y = open_y.max(close_y).max(top_y + min_body_h);
@@ -4202,11 +4244,43 @@ fn paint_candlesticks_and_volume(
             );
         }
 
-        let body_rect = Rect::from_min_max(
-            Pos2::new(cx - half_body_w, top_y),
-            Pos2::new(cx + half_body_w, bottom_y),
-        );
-        candle_mesh.add_colored_rect(body_rect, color);
+        let body_h = bottom_y - top_y;
+        if hollow_bull && is_bullish && half_body_w >= 1.6 && body_h >= 3.0 {
+            let bw = 1.25_f32.min(half_body_w * 0.65).max(1.0);
+            let x0 = cx - half_body_w;
+            let x1 = cx + half_body_w;
+            // 4-edge inner border with zero corner overdraw and transparent hollow interior
+            candle_mesh.add_colored_rect(
+                Rect::from_min_max(Pos2::new(x0, top_y), Pos2::new(x1, top_y + bw)),
+                color,
+            );
+            candle_mesh.add_colored_rect(
+                Rect::from_min_max(Pos2::new(x0, bottom_y - bw), Pos2::new(x1, bottom_y)),
+                color,
+            );
+            if bottom_y - bw > top_y + bw {
+                candle_mesh.add_colored_rect(
+                    Rect::from_min_max(
+                        Pos2::new(x0, top_y + bw),
+                        Pos2::new(x0 + bw, bottom_y - bw),
+                    ),
+                    color,
+                );
+                candle_mesh.add_colored_rect(
+                    Rect::from_min_max(
+                        Pos2::new(x1 - bw, top_y + bw),
+                        Pos2::new(x1, bottom_y - bw),
+                    ),
+                    color,
+                );
+            }
+        } else {
+            let body_rect = Rect::from_min_max(
+                Pos2::new(cx - half_body_w, top_y),
+                Pos2::new(cx + half_body_w, bottom_y),
+            );
+            candle_mesh.add_colored_rect(body_rect, color);
+        }
     };
 
     if let Some(idx) = candle_idx {
@@ -8307,16 +8381,18 @@ fn paint_latest_close_line_and_pill(
     main_price_scale: &PriceScale,
     main_vp: &PaneViewport<'_>,
     base_value: f64,
+    candle_palette: CandlePalettePreset,
 ) {
     if let Some(last_candle) = candles.last()
         && let Some(last_sy) = main_vp.price_to_screen_y(last_candle.close)
     {
         let last_y = last_sy as f32;
         if last_y >= plot_rect.top() && last_y <= plot_rect.bottom() {
+            let (bull_col, bear_col, _, _) = candle_palette_colors(candle_palette);
             let last_color = if last_candle.is_bullish() {
-                palette::BULLISH
+                bull_col
             } else {
-                palette::BEARISH
+                bear_col
             };
             plot_painter.line_segment(
                 [
@@ -8331,6 +8407,14 @@ fn paint_latest_close_line_and_pill(
                     Pos2::new(price_axis_rect.left() + 2.0, pill_y - 10.0),
                     Pos2::new(price_axis_rect.right() - 4.0, pill_y + 10.0),
                 );
+                let luma = 0.299 * f32::from(last_color.r())
+                    + 0.587 * f32::from(last_color.g())
+                    + 0.114 * f32::from(last_color.b());
+                let text_col = if luma > 175.0 {
+                    palette::ALERT_AXIS_TEXT_DARK
+                } else {
+                    Color32::WHITE
+                };
                 let axis_painter = painter.with_clip_rect(price_axis_rect);
                 axis_painter.rect_filled(pill_rect, 3.0, last_color);
                 axis_painter.text(
@@ -8338,7 +8422,7 @@ fn paint_latest_close_line_and_pill(
                     Align2::LEFT_CENTER,
                     main_price_scale.format_price(last_candle.close, base_value),
                     FontId::monospace(11.0),
-                    Color32::WHITE,
+                    text_col,
                 );
             }
         }
@@ -8419,6 +8503,7 @@ fn paint_main_ohlcv_hud(
     config: ChartDisplayConfig<'_>,
     inspected_data_index: usize,
     conflation_factor: usize,
+    candle_palette: CandlePalettePreset,
 ) {
     let inspected_bucket = conflated_candle_at(candles, inspected_data_index, conflation_factor)
         .unwrap_or_else(|| {
@@ -8492,10 +8577,11 @@ fn paint_main_ohlcv_hud(
             11.5_f32,
         )
     };
+    let (bull_col, bear_col, _, _) = candle_palette_colors(candle_palette);
     let value_color = if inspected_bucket.is_bullish() {
-        palette::BULLISH
+        bull_col
     } else {
-        palette::BEARISH
+        bear_col
     };
     let mut hud_job = LayoutJob::single_section(
         hud_text,
@@ -12077,7 +12163,7 @@ fn paint_single_drawing(
                     dash,
                 );
 
-                // Subtle origin ring on `Ray` so directional rays are visually distinct from finite `TrendLine`s.
+                // Subtle origin ring on `Ray` or extended `TrendLine` so directional/extended lines are visually distinct.
                 if matches!(drawing.geometry, DrawingGeometry::Ray { .. })
                     && plot_rect.expand(4.0).contains(raw_origin_screen)
                 {
@@ -12086,6 +12172,19 @@ fn paint_single_drawing(
                         3.5,
                         Stroke::new(1.4, base_color),
                     );
+                } else if matches!(drawing.geometry, DrawingGeometry::TrendLine { .. })
+                    && (drawing.trend_extend_left || drawing.trend_extend_right)
+                {
+                    for anchor_pt in &projected.anchors_local {
+                        let asc = local_to_screen_pos(plot_rect, *anchor_pt);
+                        if plot_rect.expand(4.0).contains(asc) {
+                            plot_painter.circle_stroke(
+                                asc,
+                                3.0,
+                                Stroke::new(1.2, base_color.gamma_multiply(0.85)),
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -12200,11 +12299,35 @@ fn paint_single_drawing(
             }
 
             // Collision-free Fibonacci level labels prioritized by structural significance (`0.0, 1.0, 0.5, 0.618, ...`)
-            // so compressed or zero-height retracements never pile overlapping text on the same pixel row!
-            const LABEL_PRIORITY_ORDER: [usize; 7] = [0, 6, 3, 4, 2, 1, 5];
-            let mut drawn_label_ys = [0.0_f32; 7];
+            // supporting arbitrary `1..=MAX_CUSTOM_FIB_LEVELS` custom levels without fixed-7 truncation!
+            let lvl_count = levels.len().min(MAX_CUSTOM_FIB_LEVELS);
+            let mut priority_order = [0_usize; MAX_CUSTOM_FIB_LEVELS];
+            for (idx, slot) in priority_order.iter_mut().take(lvl_count).enumerate() {
+                *slot = idx;
+            }
+            let fib_ratio_tier = |ratio: f64| -> u8 {
+                if (ratio - 0.0).abs() < 1e-6 || (ratio - 1.0).abs() < 1e-6 {
+                    0
+                } else if (ratio - 0.5).abs() < 1e-6 || (ratio - 0.618).abs() < 1e-6 {
+                    1
+                } else if (ratio - 0.382).abs() < 1e-6
+                    || (ratio - 0.705).abs() < 1e-6
+                    || (ratio - 1.618).abs() < 1e-6
+                    || (ratio + 0.272).abs() < 1e-6
+                {
+                    2
+                } else {
+                    3
+                }
+            };
+            priority_order[..lvl_count].sort_by_key(|&idx| {
+                let r = levels[idx].ratio;
+                let end_bias = u8::from((r - 1.0).abs() < 1e-6);
+                (fib_ratio_tier(r), end_bias, idx)
+            });
+            let mut drawn_label_ys = [0.0_f32; MAX_CUSTOM_FIB_LEVELS];
             let mut drawn_count = 0_usize;
-            for &lvl_idx in &LABEL_PRIORITY_ORDER {
+            for &lvl_idx in &priority_order[..lvl_count] {
                 let Some(lvl) = levels.get(lvl_idx) else {
                     continue;
                 };
@@ -12583,6 +12706,74 @@ fn paint_single_drawing(
                         );
                     }
                 }
+            }
+        }
+        ProjectedDrawingShape::TextNote {
+            anchor_local,
+            box_rect,
+            lines,
+        } => {
+            let ap = local_to_screen_pos(plot_rect, *anchor_local);
+            if let Some(brect) = box_rect {
+                let srect = Rect::from_min_max(
+                    local_to_screen_pos(plot_rect, LocalPoint::new(brect.left, brect.top)),
+                    local_to_screen_pos(plot_rect, LocalPoint::new(brect.right, brect.bottom)),
+                );
+                let attach = Pos2::new(
+                    ap.x.clamp(srect.left(), srect.right()),
+                    ap.y.clamp(srect.top(), srect.bottom()),
+                );
+                if (ap - attach).length_sq() > 2.0 {
+                    plot_painter.line_segment(
+                        [ap, attach],
+                        Stroke::new(1.25, base_color.gamma_multiply(0.82)),
+                    );
+                }
+                if plot_rect.expand(6.0).contains(ap) {
+                    plot_painter.circle_filled(ap, 3.8, base_color);
+                    plot_painter.circle_stroke(ap, 5.2, Stroke::new(1.1, palette::BG_CHART_CANVAS));
+                }
+                if let Some(glow) = highlight_glow {
+                    plot_painter.rect_stroke(srect.expand(1.5), 4.0, glow, StrokeKind::Outside);
+                }
+                plot_painter.rect_filled(
+                    srect,
+                    4.0,
+                    Color32::from_rgba_unmultiplied(15, 20, 30, 234),
+                );
+                let accent_bar = Rect::from_min_max(
+                    srect.min,
+                    Pos2::new((srect.left() + 3.0).min(srect.right()), srect.bottom()),
+                );
+                plot_painter.rect_filled(accent_bar, 2.0, base_color);
+                plot_painter.rect_stroke(
+                    srect,
+                    4.0,
+                    Stroke::new(
+                        stroke_w.clamp(1.0, 2.5),
+                        base_color.gamma_multiply(if is_selected { 1.0 } else { 0.78 }),
+                    ),
+                    StrokeKind::Inside,
+                );
+                let text_clip = srect.shrink2(Vec2::new(4.0, 2.0)).intersect(plot_rect);
+                if text_clip.width() > 4.0 && text_clip.height() > 4.0 {
+                    let note_painter = plot_painter.with_clip_rect(text_clip);
+                    for (idx, line) in lines.iter().enumerate() {
+                        let ty = srect.top() + 5.0 + (idx as f32) * 14.0;
+                        if ty > srect.bottom() - 4.0 {
+                            break;
+                        }
+                        note_painter.text(
+                            Pos2::new(srect.left() + 8.0, ty),
+                            Align2::LEFT_TOP,
+                            line,
+                            FontId::monospace(10.5),
+                            palette::TEXT_PRIMARY,
+                        );
+                    }
+                }
+            } else if plot_rect.expand(6.0).contains(ap) {
+                plot_painter.circle_filled(ap, 3.8, base_color);
             }
         }
     }

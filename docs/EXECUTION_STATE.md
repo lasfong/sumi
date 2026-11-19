@@ -1,9 +1,9 @@
 # SUMI TRADING WORKSTATION — EXECUTION STATE
 
-- **Session Identity:** `SESSION-R18-20261119T085800+0700` (`SUMI PROGRAM ORCHESTRATOR`)
-- **Previous Session:** `SESSION-R17-20261118T213600+0700` (`IMPLEMENTATION_PASS` — Committed & pushed cleanly at `aad721a`)
-- **Timestamp (Updated):** `2026-11-19T12:45:00+0700`
-- **Program Status:** `IMPLEMENTATION_PASS` (`Milestone R18 / Wave 17 Complete 101-Signal Ecosystem, 14 Causal Candlestick Patterns, 8 Extended Technical Indicators, Multi-Horizon Money Flow ProxyBB T03..T200, Intraday-Rollup MarketBBAggregator & Survivorship-Bias-Free Point-in-Time Universe Shipped, Critic-Hardened & Audited`)
+- **Session Identity:** `SESSION-R19-20261119T145429+0700` (`SUMI PROGRAM ORCHESTRATOR`)
+- **Previous Session:** `SESSION-R18-20261119T085800+0700` (`IMPLEMENTATION_PASS` — Committed cleanly at `312cbf9`)
+- **Timestamp (Updated):** `2026-11-19T17:26:00+0700`
+- **Program Status:** `IMPLEMENTATION_PASS` (`Milestone R19 / Wave 18 — 100% Core Feature Parity Complete Across All Waves 1–18: Global WorkstationSettings & 4 Candle Palettes, VIETNAM_HOLIDAYS_V1 [151 Dates 2018–2030] + VSD T+2 13:00 ICT FIFO Holding Lots & Bracket Lock, Data Readiness & CafeF SolieuGD Post-Split Audit Panel, & TextNote / Custom Fibs / Dual-End TrendLine / 1-Click Retina [Export PNG] Shipped, Critic-Hardened & Audited`)
 
 ---
 
@@ -11,7 +11,7 @@
 
 - **Working Directory:** `/Users/mizuhara/workspace/sumi`
 - **Git Branch:** `master`
-- **Batch Commit Policy (`DEC-R04-001`):** Authorized by Product Owner on `2026-11-11` — each verified milestone/batch plan is committed cleanly on `master` (`98ec576` for R03, `50a7845` for R04, `b04d2dc` for R05, `0c83290` for R06, `0e76e72` for R07, `62105d6` for R08, `d06ae78` for R09, `b06fd69` for R10, `c1ec5bd` for R11, `96bd344` for R12, `3510654` for R13, `904c13a` for R14, `d256375` for R15, `82e5862` for R16, `aad721a` for R17 [pushed to `origin/master`]; Milestone R18 prepared for clean atomic commit at the close of Session R18).
+- **Batch Commit Policy (`DEC-R04-001`):** Authorized by Product Owner on `2026-11-11` — each verified milestone/batch plan is committed cleanly on `master` (`98ec576` for R03, `50a7845` for R04, `b04d2dc` for R05, `0c83290` for R06, `0e76e72` for R07, `62105d6` for R08, `d06ae78` for R09, `b06fd69` for R10, `c1ec5bd` for R11, `96bd344` for R12, `3510654` for R13, `904c13a` for R14, `d256375` for R15, `82e5862` for R16, `aad721a` for R17 [pushed to `origin/master`], `312cbf9` for R18; Milestone R19 prepared for clean atomic commit at the close of Session R19).
 - **Git Tags:** `v2.0.0-rc1`, `v2.0.0-rc2` (untouched)
 - **Legacy Project Archive:** Untouched read-only reference at `/Users/mizuhara/workspace/sumi/ARCHIVE`
 - **Authorized Open-Source References (`research_repos/`, gitignored):**
@@ -27,9 +27,9 @@
 - **Crate Dependencies (`Cargo.toml` / `Cargo.lock`):** `0` new dependencies added (`git diff Cargo.toml Cargo.lock` empty).
 - **Antigravity Orchestration (`VERIFIED`):**
   - Durable charter: [`docs/operations/SUMI_ORCHESTRATION_CHARTER.md`](operations/SUMI_ORCHESTRATION_CHARTER.md)
-  - Master feature parity & anti-miss backlog ledger: [`docs/FEATURE_BACKLOG_AND_PARITY_LEDGER.md`](FEATURE_BACKLOG_AND_PARITY_LEDGER.md) (`B1..B4` updated to `[x] ĐÃ HOÀN THÀNH (R18)`)
-  - Specialized subagents invoked in R18: `sumi-researcher` (executed 10 live JS/TS REA MCP operations across `ARCHIVE/frontend` `TechnicalFlowBBViewer.tsx`/indicator/signal TSX/TS and `LWC v5.2.0` histogram/marker TS), `sumi-critic` (2-round adversarial review catching `compute_adx`/`compute_psar` segment-causal `NaN` recovery, `MarketBBAggregator` intraday-to-`D1` session-close rollup & duplicate-date coalescing, `CausalInverseVolatility` underlying price-return volatility & newcomer median fallback, `run_pit_episodes_backtest` 1-to-1 bar alignment, inactive `market_bb_cache`/`symbol_proxy_bb_cache` mutation invalidation + HTF tail exclusion, `SuperTrend`/`Keltner` `warmup_bars`, `UniverseResolver::validate_definition` weight/interval guards, Rule Builder `0..=101` cap & `RVOL >= 2.0` default, and inverted-scale pattern badges -> `VERDICT: CRITIC_PASS`), and `sumi-auditor` (independent read-only evidence & compliance audit).
-- **REA MCP (`rea-agents@6.8.0`):** `VERIFIED` — `12` live REA MCP operations (`10` JS/TS across `ARCHIVE/frontend` `TechnicalFlowBBViewer.tsx`/`IndicatorSelector.tsx`/`IndicatorManager.tsx`/`IndicatorRenderRegistry.ts`/`SignalCatalog.tsx`/`SignalInspector.tsx`/`SignalExplanationInspector.tsx`/`StrategyLabPage.tsx` & `LWC v5.2.0` `histogram-series.ts`/`histogram-pane-view.ts`/`histogram-renderer.ts`/`draw-series-point-markers.ts`/`marks-renderer.ts`/`series-bar-colorer.ts`/`candlesticks-pane-view.ts`, plus `2` binary ops on the final R18 release Mach-O `6fef1e5140f285f53c39501d10e1330a858658deacf0db91d2a79c926d273ced`, cumulative `202` live REA operations across R01–R18). Zero contact with TradingView Desktop (`DEC-006`).
+  - Master feature parity & anti-miss backlog ledger: [`docs/FEATURE_BACKLOG_AND_PARITY_LEDGER.md`](FEATURE_BACKLOG_AND_PARITY_LEDGER.md) (`C1..C4` updated to `[x] ĐÃ HOÀN THÀNH (R19)` — **100% Core Feature Parity Complete across all Waves 1–18!**)
+  - Specialized subagents invoked in R19: `sumi-researcher` (executed 10 live JS/TS REA MCP operations across `ARCHIVE/frontend` `SettingsModal.tsx`/`DashboardPage.tsx`/`ImportPage.tsx`/`drawingDomain.ts`/`SumiPrimitiveDrawingProvider.ts`/`DrawingInspector.tsx`/`DrawingToolbar.tsx` and `LWC v5.2.0` candlestick/text/screenshot TS), `sumi-critic` (3-round adversarial review catching `compute_fifo_holding_lots_with_bar_secs` coarse-bar sell evaluation, `AccountConfig` `enforce_vn_t2_lot_lock` `SL`/`TP` bracket cap + `PracticeSessionStore` RON/JSON persistence, `default_import_load_options()`, `apply_builtin_layout_preset` settings preservation, strict VN equity/ETF/CW + 31-index `CafeFSplitAware` gate, `VIETNAM_HOLIDAYS_V1` `[i32; 151]` incl. `24/11` Culture Day + `is_us_nyse_holiday_ymd` + `Vn30Basket` holiday skip + 7-tuple `data_audit_cache`, `TextNote` `0.0`-dist interior hit-test, `W1` `obs_valid`, weekend `T+0` snap, and wall-clock auto-snapshot guard -> `VERDICT: CRITIC_PASS`), and `sumi-auditor` (independent read-only evidence & compliance audit).
+- **REA MCP (`rea-agents@6.8.0`):** `VERIFIED` — `12` live REA MCP operations (`10` JS/TS across `ARCHIVE/frontend` `SettingsModal.tsx`/`DashboardPage.tsx`/`ImportPage.tsx`/`drawingDomain.ts`/`SumiPrimitiveDrawingProvider.ts`/`DrawingInspector.tsx`/`DrawingToolbar.tsx` & `LWC v5.2.0` `candlesticks-renderer.ts`/`candlestick-series.ts`/`candlesticks-pane-view.ts`/`series-markers-text.ts`/`text-watermark/pane-renderer.ts`/`text-width-cache.ts`/`chart-api.ts`, plus `2` binary ops on the final R19 release Mach-O `427d4f7a92a4b919aec40e01c725b8e85f212dd3074649267f90ba61095ca696`, cumulative `214` live REA operations across R01–R19). Zero contact with TradingView Desktop (`DEC-006`).
 
 ---
 
@@ -55,9 +55,10 @@
 | Session R15 — Wave 14 Engine & Audit | `17`-Entry Signal Catalog & 4-Family Confluence Inspector, Transactional `DrawingPropertyPatch`, `SplitMix64` Monte Carlo Fan, & R14 Carry-Overs (`d256375`) | **PASS** | `VERIFIED` (`216/216` tests, `0.337–1.557 ms` UI / `p99 <= 2.098 ms`) |
 | Session R16 — Wave 15 Engine & Audit | Composable 4-Leg Signal-Catalog Rule Builder (`PrecomputedCatalogMatrix`), Causal `SignalCatalog`/`Confluence` Alerts + CSV/JSON Export, `WorkspaceSnapshotStore` + Quarantine Recovery, & Master `FEATURE_BACKLOG_AND_PARITY_LEDGER.md` (`82e5862`) | **PASS** | `VERIFIED` (`235/235` tests, `0.322–1.332 ms` UI / `p99 <= 1.501 ms`) |
 | Session R17 — Wave 16 Engine & Audit | Live `PracticeScoreboard` + `SessionDebriefModal` (`had_initial_sl_at_open`), 1-Click `+120b` `Scanner -> Replay` + `PracticeSessionStore`/`ScanSnapshotStore`, UTC `0%` `MultiStrategyPct`, & `AdvancedTearsheetAnalytics` + `RunManifest` (`aad721a`) | **PASS** | `VERIFIED` (`245/245` tests, `0.336–2.082 ms` UI / `p99 <= 2.422 ms`) |
-| Session R18 — Research Gate | `10` live JS/TS REA ops (`ARCHIVE/frontend` `TechnicalFlowBBViewer.tsx`/indicator/signal TSX/TS & `LWC v5.2.0` histogram/marker TS) + `2` post-build binary REA ops (`REA-R18-01`..`12`) -> `SIGNALS_72_INDICATORS_PROXYBB_AND_PIT_UNIVERSE_SPEC.md` | **PASS** | `VERIFIED` |
-| Session R18 — Wave 17 Engine | Pure `f64`/`i64`/`u64` WASM-safe `CandleGeometry` + `14` causal candlestick patterns (`patterns.rs`), `8` extended indicators (`ADX`, `Stochastic`, `SuperTrend`, `PSAR`, `Keltner`, `CCI`, `MFI`, `Volume SMA` in `extended.rs`), `101`-entry `SIGNAL_CATALOG` (`confirmed_pivot_high/low` `right_bars = 3` + `12` 4-way divergences + all `72` legacy IDs), multi-horizon `ProxyBBCalculator` (`T03..T200`), intraday-to-`D1` `MarketBBAggregator`, & `Point-in-Time` `UniverseResolver` (`run_pit_episodes_backtest`, `run_portfolio_backtest_with_universe`) | **PASS** | `VERIFIED` (`255/255` tests + `wasm32` Clippy) |
-| Session R18 — Workstation & Audit | Toolbar `"Ind+ ▾"` + `PAT` badges + `ADX`/`STOCH`/`CCI`/`MFI`/`ProxyBB` sub-panes (`ExtendedOscillatorScales`), `Breadth` multi-horizon `ProxyBB` + `MarketBB` + `PIT` universe UI, `--r18` (`292.17 µs` 10k patterns, `934.67 µs` 10k 8 indicators, `5,991.96 µs` `101 x 2,500` catalog matrix, `1,036.88 µs` 10k 6-horizon ProxyBB, `2,096.08 µs` MarketBB+PIT portfolio, `0.231–0.955 ms` UI / `p99 <= 1.340 ms < 4.0 ms`), `SUMI_CAPTURE_BATCH=r18`, `sumi-critic` `CRITIC_PASS`, & independent `sumi-auditor` sign-off | **PASS** | `VERIFIED` |
+| Session R18 — Wave 17 Engine & Audit | `14` Causal Candlestick Patterns (`patterns.rs`), `8` Extended Indicators (`extended.rs`), `101`-Entry `SIGNAL_CATALOG` (`right_bars = 3` Divergences), Multi-Horizon `ProxyBB` (`T03..T200`), Intraday-Rollup `MarketBBAggregator`, & `Point-in-Time` `UniverseResolver` (`312cbf9`) | **PASS** | `VERIFIED` (`255/255` tests, `0.231–0.955 ms` UI / `p99 <= 1.340 ms`) |
+| Session R19 — Research Gate | `10` live JS/TS REA ops (`ARCHIVE/frontend` `SettingsModal`/`DashboardPage`/`ImportPage`/`drawingDomain`/`DrawingInspector` & `LWC v5.2.0` candlestick/text/screenshot TS) + `2` post-build binary REA ops (`REA-R19-01`..`12`) -> `SETTINGS_VN_HOLIDAYS_DATA_AUDIT_AND_DRAWINGS_SPEC.md` | **PASS** | `VERIFIED` |
+| Session R19 — Wave 18 Engine | Pure `f64`/`i64` WASM-safe `WorkstationSettings` + `4` `CandlePalettePreset`s (`workspace_template.rs`), `VIETNAM_HOLIDAYS_V1` (`[i32; 151]` `2018–2030` + statutory fallback) + `T+3`/`T+2` `13:00 ICT` FIFO `HoldingLot` ledger (`market_rules.rs`, `portfolio.rs`), `DataQualityAuditReport` + `UniverseDataReadinessSummary` + 5-rule `CafeFSplitAware` gate (`audit.rs`), & `TextNote` / `1..=16` custom Fibs / `[-∞, +∞]` `TrendLine` (`drawings/`) | **PASS** | `VERIFIED` (`266/266` tests + `wasm32` Clippy) |
+| Session R19 — Workstation & Audit | Interactive `[Settings]`, `[Data Audit]` (`13`-feed matrix), & 1-click `[Export PNG]` (`OffscreenWgpuHarness`), `FIFO LOTS (VSD T+2 13:00)` + `SL`/`TP` bracket lock, `--r19` (`189.58 µs` C1 RON/JSON, `95.21 µs` C2 500 T+2 + 500 FIFO, `3,557.29 µs` C3 10k audit + 13 feeds + 1k split, `1.71 µs` C4 projection, `0.253–0.372 ms` UI / `p99 <= 0.592 ms < 4.0 ms`), `SUMI_CAPTURE_BATCH=r19`, `sumi-critic` `CRITIC_PASS`, & independent `sumi-auditor` sign-off | **PASS** | `VERIFIED` |
 
 ---
 
@@ -66,13 +67,13 @@
 ```bash
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
 
-# Format, native + WASM strict Clippy lints, and all 255 automated tests:
+# Format, native + WASM strict Clippy lints, and all 266 automated tests:
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo clippy --lib --target wasm32-unknown-unknown -- -D warnings
 cargo test
 
-# Reproducible R03..R18 release benchmarks:
+# Reproducible R03..R19 release benchmarks:
 cargo run --release --example viewport_bench
 cargo run --release --example viewport_bench -- --r04
 cargo run --release --example viewport_bench -- --r05
@@ -89,9 +90,10 @@ cargo run --release --example viewport_bench -- --r15
 cargo run --release --example viewport_bench -- --r16
 cargo run --release --example viewport_bench -- --r17
 cargo run --release --example viewport_bench -- --r18
+cargo run --release --example viewport_bench -- --r19
 
 # Offscreen Apple M1 Metal GPU Retina screenshot + telemetry capture (zero windows, zero focus steal):
-SUMI_CAPTURE_BATCH=r18 cargo run --release
+SUMI_CAPTURE_BATCH=r19 cargo run --release
 
 # Launch interactive native macOS Metal trading workstation:
 cargo run --release
@@ -99,20 +101,22 @@ cargo run --release
 
 ---
 
-## 5. Shipped Code & Benchmark Highlights (`Milestone R18`)
+## 5. Shipped Code & Benchmark Highlights (`Milestone R19`)
 
-- **`14` Causal Candlestick Patterns (`B1`) & `8` Extended Technical Indicators (`B2`) (`src/indicators/patterns.rs`, `src/indicators/extended.rs`, `src/chart.rs`, `src/app.rs`):**
-  - Scale-relative `CandleGeometry`, `14` causal candlestick patterns (`pattern.*`), `structure.candle_score ∈ [-100, +100]`, inverted-scale-aware main-pane pattern badges (`PAT`), and `ADX(14)` (`+DI/-DI`), $O(N)$ monotonic-deque `Stochastic(14,3,3)`, `SuperTrend(10,3.0)`, `Parabolic SAR(0.02,0.02,0.20)`, `Keltner Channels(20,10,2.0)`, `CCI(20)`, `MFI(14)`, and `Volume SMA(20)` — achieving a `100%` superset of Legacy `INDICATOR_REGISTRY` plus Sumi's native `VWAP`/`VRVP`/`TPO`/`CVD`/`RS`/`ProxyBB`, with strictly causal segment-by-segment `NaN` recovery and boxed `ExtendedOscillatorScales`.
-- **Complete `101`-Entry `SIGNAL_CATALOG` & Confirmed `right_bars = 3` Divergences (`B3`) (`src/scanner/catalog.rs`, `src/backtest/strategy.rs`):**
-  - Preserves all `17` R15/R16 entries verbatim (`0..17`), ports all `72` legacy `SignalRegistry` IDs (`17..89`), and adds `12` native `B2` indicator triggers (`89..101`), enforcing zero-lookahead `confirmed_pivot_high/low` (`p = t - 3` confirmed at bar close `t`, `available_at_index = t`) across 12 four-way `Regular`/`Hidden` `RSI`/`MACD`/`Stochastic` divergences, directional EMA `sr.*`, and vectorized `PrecomputedCatalogMatrix`.
-- **Multi-Horizon Money Flow `ProxyBB` (`T03..T200`), Intraday-Rollup `MarketBBAggregator` & `Point-in-Time` Universe (`B4`) (`src/indicators/proxy_bb.rs`, `src/scanner/proxy_bb.rs`, `src/scanner/universe.rs`, `src/backtest/`):**
-  - `ProxyBBCalculator` (`T03, T05, T10, T20, T50, T200`, `AT05` zero-liquidity `None`, upgraded Family 4 Participation, `OscillatorPaneId::ProxyBb`), venue-aware intraday-to-`D1` `MarketBBAggregator` (`AT09` + `AT17` `FlowBreadth`), and `UniverseResolver` (`PointInTime` vs `RetrospectiveFixed`, `BacktestExitReason::UniverseRemoval`, 1-to-1 bar-aligned `run_pit_episodes_backtest`, and underlying closed-candle return `CausalInverseVolatility` in `run_portfolio_backtest_with_universe`).
-- **Measured Release Performance (`Apple M1`, `2560×1600` Retina, `255/255` automated tests passing):**
-  - `b1_candlestick_patterns_and_scores_10k`: **`292.17 µs`** (`0.292 ms`); `b2_all_8_extended_indicators_10k`: **`934.67 µs`** (`0.935 ms`); `b3_precomputed_catalog_101_signals_2500b`: **`5,991.96 µs`** (`5.992 ms`); `b4_proxy_bb_6_horizons_10k`: **`1,036.88 µs`** (`1.037 ms`); `b4_market_bb_and_pit_portfolio_vn30`: **`2,096.08 µs`** (`2.096 ms`).
-  - Full `SumiWorkstationApp` UI (`< 4.0 ms` `DECISION-RENDERER-002` gate, `"overall_pass": true`): `FPT 1D B1+B2 Overlays + 3 Osc`: **`0.231 ms`** mean (`p99 = 0.360 ms`); `VN30F1M 15m 101-Catalog Modal + CCI/RSI/MACD`: **`0.357 ms`** mean (`p99 = 0.502 ms`); `SSI 1D ProxyBB + MarketBB + PIT Portfolio`: **`0.430 ms`** mean (`p99 = 0.607 ms`); `100k Bars All Extended Panes Conflated` (`32x`): **`0.955 ms`** mean (**`p99 = 1.340 ms`**); `Quad 2x2 Extended + ProxyBB`: **`0.356 ms`** mean (`p99 = 0.537 ms`).
+- **Interactive Global `[Settings]` Modal & `4` Candlestick Palettes (`C1`) (`src/viewport/workspace_template.rs`, `src/chart.rs`, `src/app.rs`):**
+  - `WorkstationSettings` (default venue override, VN price unit, default capital/commission/tax/slippage/risk-per-trade, wall-clock `auto_snapshot_interval_mins`, `enforce_vn_t2_lot_lock`) and `CandlePalettePreset` (`EmeraldCrimson`, LWC `HollowBullish` 4-edge inner frame + non-intruding wicks, `ColorblindOkabeIto`, `ClassicMonochrome` with instant `PlotDataLayerKey` invalidation), persisted in `eframe` + `WorkspaceTemplate` RON/JSON and preserved across built-in layout preset switches.
+- **Official Vietnam Exchange Holiday Calendar (`VIETNAM_HOLIDAYS_V1` `2018–2030`) & VSD `T+2` (`13:00 ICT`) FIFO `HoldingLot` Lock (`C2`) (`src/journal/market_rules.rs`, `src/trading/portfolio.rs`, `src/app.rs`):**
+  - `151` sorted `YYYYMMDD` official weekday closures (`2018–2030`, incl. `2018_12_31` & `2026_01_02` bridge swaps and `24/11` Culture Day `2026..=2030` per Resolution `28/2026/QH16` + `< 2018` / `> 2030` statutory fallback), historical pre-`2022-08-29` `T+3` (`09:00 ICT`) vs VSD `T+2` (`13:00 ICT = 06:00 UTC`) clearance, coarse-bar-aware `compute_fifo_holding_lots_with_bar_secs`, and `enforce_vn_t2_lot_lock` blocking/capping unsettled sells across Order Ticket, DOM Ladder, `StopLoss`/`TakeProfit` brackets, and `PracticeSessionStore`.
+- **Data Readiness, VN/NYSE Session Gap & `CafeF SolieuGD` Post-Split Audit Panel (`C3`) (`src/data/audit.rs`, `src/data/mod.rs`, `src/app.rs`):**
+  - `DataQualityAuditReport` & `UniverseDataReadinessSummary` (`13`-feed `UniverseFeedAuditRow` matrix), `VIETNAM_HOLIDAYS_V1` (`VN`) & 10-holiday + Computus Good Friday + historical unscheduled `is_us_nyse_holiday_ymd` (`SPY` `8,280` bars = `0` missing sessions) `D1` gap detectors, ISO-week `1W` continuity, outlier range/band/10x-RVOL detectors, and 5-rule `OhlcEnvelopePolicy::CafeFSplitAware` `<= 6 bps` & `<= 25 VND` post-split normalization.
+- **`TextNote` Callouts, Custom `1..=16` Fibonacci Levels, Dual-End `TrendLine` Extensions & 1-Click `[Export PNG]` (`C4`) (`src/drawings/`, `src/alerts/engine.rs`, `src/chart.rs`, `src/app.rs`):**
+  - `DrawingTool::TextNote` (`<= 280` UTF-8 scalar chars, word-boundary wrap, `0.0`-dist interior hit-test + `6 px` halo, `DEF-001` Replay masking, multiline Inspector editing), per-drawing `custom_fib_levels` (`Std 7`, `ICT OTE 9`, `Full 13`), time-directional `trend_extend_left`/`trend_extend_right` (`[-∞, +∞]` Liang-Barsky synced with `AlertEngine`), and 1-click `[Export PNG]` (`OffscreenWgpuHarness` `2.0x` Retina).
+- **Measured Release Performance (`Apple M1`, `2560×1600` Retina, `266/266` automated tests passing):**
+  - `c1_workstation_settings_template_ron_json_roundtrip`: **`189.58 µs`** (`0.190 ms`); `c2_vn_holidays_t2_settlement_and_fifo_lots`: **`95.21 µs`** (`0.095 ms`); `c3_data_quality_audit_10k_and_cafef_split_gate`: **`3,557.29 µs`** (`3.557 ms`); `c4_textnote_dual_trend_custom_fib_projection`: **`1.71 µs`** (`0.002 ms`).
+  - Full `SumiWorkstationApp` UI (`< 4.0 ms` `DECISION-RENDERER-002` gate, `"overall_pass": true`): `FPT 1D HollowBullish + TextNote + Custom OTE Fib`: **`0.266 ms`** mean (`p99 = 0.435 ms`); `FPT 1D Okabe-Ito + VSD T+2 FIFO Lots`: **`0.275 ms`** mean (`p99 = 0.476 ms`); `Settings Modal Open over Quad 2x2`: **`0.345 ms`** mean (`p99 = 0.581 ms`); `Data Audit Modal (13-Feed Matrix)`: **`0.372 ms`** mean (`p99 = 0.592 ms`); `100k Bars 32x Conflated HollowBullish`: **`0.253 ms`** mean (`p99 = 0.427 ms`).
 
 ---
 
-## 6. Next Proposed Milestone (`Wave 18 / Session R19 — Awaiting Product Owner Decision`)
+## 6. Roadmap Status (`100% Core Feature Parity Complete — Awaiting Product Owner Direction`)
 
-With Waves 1–17 (`S-01..S-10`, `R16-1..R16-3`, `A1..A5`, `B1..B4`) shipped and verified in [`docs/FEATURE_BACKLOG_AND_PARITY_LEDGER.md`](FEATURE_BACKLOG_AND_PARITY_LEDGER.md), [`docs/NEXT_SESSION_BRIEF.md`](NEXT_SESSION_BRIEF.md) proposes **Milestone R19 — Wave 18: Interactive Global `[Settings]` Modal & Candle Palettes, Official Vietnam Exchange Holiday Calendar (`VIETNAM_HOLIDAYS_V1`) + FIFO `T+2` Lot Release, Data Readiness & Gap/Split Audit Panel, & `TextNote` Callout Drawing + Custom Fibonacci Levels + Toolbar `[Export PNG]` (`C1..C4`)** for Product Owner authorization.
+With Milestone R19 (`Wave 18`: `C1..C4`) shipped, Critic-hardened, and audited, **`100%` of the planned Core Feature Parity Roadmap (`Waves 1–18 / Milestones R01–R19`: `S-01..S-10`, `R16-1..R16-3`, `A1..A5`, `B1..B4`, `C1..C4`) in [`docs/FEATURE_BACKLOG_AND_PARITY_LEDGER.md`](FEATURE_BACKLOG_AND_PARITY_LEDGER.md) is complete**. [`docs/NEXT_SESSION_BRIEF.md`](NEXT_SESSION_BRIEF.md) outlines post-parity release/extension options (`git push` of `R18`+`R19`, release tagging, optional external data-fetch CLI, or WASM browser packaging) awaiting Product Owner direction.

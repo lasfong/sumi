@@ -33,15 +33,18 @@ use crate::chart::{
 };
 use crate::data::{
     AggregationError, DataFileFormat, DataLoadError, DataLoadOptions, DataLoadReport,
-    DataSourcePreset, Timeframe, WatchlistFeedEntry, format_utc_date, format_utc_datetime_hm,
-    generate_synthetic_ohlcv, load_bundled_watchlist_universe, load_ohlcv_bytes, load_ohlcv_csv,
-    load_ohlcv_json, load_preset_dataset, remap_timestamp_to_bar_index, resolve_anchor_timestamp,
-    resolve_benchmark_series_for_window,
+    DataQualityAuditReport, DataReadinessStatus, DataSourcePreset, OhlcEnvelopePolicy, Timeframe,
+    UniverseDataReadinessSummary, WatchlistFeedEntry, audit_ohlcv_series_with_venue,
+    format_utc_date, format_utc_datetime_hm, generate_synthetic_ohlcv,
+    load_bundled_watchlist_universe, load_ohlcv_bytes, load_ohlcv_csv, load_ohlcv_json,
+    load_preset_dataset, remap_timestamp_to_bar_index, resolve_anchor_timestamp,
+    resolve_benchmark_series_for_window, summarize_universe_readiness,
 };
 use crate::drawings::{
     DrawingAnchor, DrawingColorPreset, DrawingGeometry, DrawingId, DrawingPaneTarget,
-    DrawingPropertyPatch, DrawingStore, DrawingStyle, DrawingTool, FibDirection, LineDashStyle,
-    MagnetMode,
+    DrawingPropertyPatch, DrawingStore, DrawingStyle, DrawingTool, FIBONACCI_FULL_EXT_RATIOS,
+    FIBONACCI_OTE_EXT_RATIOS, FIBONACCI_RATIOS, FibDirection, LineDashStyle, MAX_CUSTOM_FIB_LEVELS,
+    MAX_TEXT_NOTE_CHARS, MagnetMode, sanitize_custom_fib_levels, sanitize_text_note_content,
 };
 use crate::indicators::OscillatorPaneId;
 use crate::indicators::{
@@ -49,9 +52,10 @@ use crate::indicators::{
     SeriesBlockIndex, compute_proxy_bb_series, compute_rebased_comparison_series,
 };
 use crate::journal::{
-    ChecklistState, DailyPriceBand, ExchangeVenue, JournalEntrySource, JournalEntryStatus,
-    MistakeTag, SetupTag, TradeJournalStore, TradePlanComputed, TradePlanInput, VnPriceUnit,
-    compute_daily_price_band, compute_trade_plan, floor_to_board_lot,
+    ChecklistState, DailyPriceBand, ExchangeVenue, FifoSettlementSummary, JournalEntrySource,
+    JournalEntryStatus, MistakeTag, SetupTag, TradeJournalStore, TradePlanComputed, TradePlanInput,
+    VIETNAM_HOLIDAYS_V1, VnPriceUnit, compute_daily_price_band, compute_trade_plan,
+    floor_to_board_lot,
 };
 use crate::model::Candle;
 use crate::replay::{
@@ -80,15 +84,15 @@ use crate::trading::{
     size_ladder_qty_from_risk_budget, stage_ladder_order, step_ladder_price_ticks,
 };
 use crate::viewport::{
-    HotkeyAction, HotkeyChord, HotkeyKey, HotkeyModifiers, HotkeyProfile, HotkeyProfileId,
-    MAX_AUTO_CHECKPOINT_RING, MAX_NAMED_SNAPSHOT_SLOTS, MultiChartLayoutKind, MultiChartSyncConfig,
-    PlotRect, PriceScaleMode, QuarantinedPayloadDiagnostic, TemplateRightDockTab,
-    TemplateScannerTab, TemplateTradingViewMode, WorkspaceDockPreset, WorkspacePaneStretches,
-    WorkspaceSlotTemplate, WorkspaceSnapshotDiff, WorkspaceSnapshotStore, WorkspaceTemplate,
-    WorkspaceTemplateError, apply_synced_time_window, builtin_workspace_templates,
-    causal_closed_prefix_len, compute_workspace_diff, extract_visible_time_window,
-    format_compact_volume_axis, is_global_hotkey_eligible, recover_or_parse_snapshot_store,
-    safe_stage_template_import,
+    CandlePalettePreset, HotkeyAction, HotkeyChord, HotkeyKey, HotkeyModifiers, HotkeyProfile,
+    HotkeyProfileId, MAX_AUTO_CHECKPOINT_RING, MAX_NAMED_SNAPSHOT_SLOTS, MultiChartLayoutKind,
+    MultiChartSyncConfig, PlotRect, PriceScaleMode, QuarantinedPayloadDiagnostic,
+    TemplateRightDockTab, TemplateScannerTab, TemplateTradingViewMode, WorkspaceDockPreset,
+    WorkspacePaneStretches, WorkspaceSlotTemplate, WorkspaceSnapshotDiff, WorkspaceSnapshotStore,
+    WorkspaceTemplate, WorkspaceTemplateError, WorkstationSettings, apply_synced_time_window,
+    builtin_workspace_templates, causal_closed_prefix_len, compute_workspace_diff,
+    extract_visible_time_window, format_compact_volume_axis, is_global_hotkey_eligible,
+    recover_or_parse_snapshot_store, safe_stage_template_import,
 };
 
 /// Order-type tab selection in the workstation Paper Trading ticket.
@@ -380,6 +384,10 @@ pub enum PaletteAction {
     OpenRuleBuilder,
     ExportAlertsCsv,
     SaveQuickWorkspaceCheckpoint,
+    OpenSettingsModal,
+    SetCandlePalette(CandlePalettePreset),
+    OpenDataAuditModal,
+    ExportChartPng,
 }
 
 /// Ranked candidate row inside the `Cmd+K` Command Palette (`Milestone R08`).
@@ -569,6 +577,17 @@ struct MappedPortfolioCurveCache {
 }
 
 type SecondaryRsCompareKey = (u64, Timeframe, String, Option<i64>, bool, bool, usize);
+type DataAuditCacheBox = Box<(
+    u64,
+    String,
+    Timeframe,
+    Option<i64>,
+    ExchangeVenue,
+    (usize, usize),
+    bool,
+    DataQualityAuditReport,
+    UniverseDataReadinessSummary,
+)>;
 
 /// Independent chart slot state for `1x2`, `2x1`, and `2x2` secondary multi-chart panes (`Milestone R12`).
 ///
@@ -854,6 +873,10 @@ pub struct SumiWorkstationApp {
     pub pit_universe_mode: UniverseMode,
     #[serde(default = "default_pit_universe_def_r18")]
     pub pit_universe_def: UniverseDefinition,
+    #[serde(default)]
+    pub settings: WorkstationSettings,
+    #[serde(default = "default_true_r15")]
+    pub import_cafef_split_aware: bool,
 
     #[serde(skip)]
     pub base_candles: Vec<Candle>,
@@ -1065,6 +1088,30 @@ pub struct SumiWorkstationApp {
     pub show_universe_import_box: bool,
     #[serde(skip)]
     pub last_universe_status: Option<(bool, String)>,
+    #[serde(skip)]
+    pub show_settings_modal: bool,
+    #[serde(skip)]
+    pub show_data_audit_modal: bool,
+    #[serde(skip)]
+    pub(crate) last_settings_modal_rect: Option<egui::Rect>,
+    #[serde(skip)]
+    pub(crate) last_data_audit_modal_rect: Option<egui::Rect>,
+    #[serde(skip)]
+    data_audit_cache: Option<DataAuditCacheBox>,
+    #[serde(skip)]
+    pub last_loader_repair_counts: (usize, usize),
+    #[serde(skip)]
+    pub fib_custom_ratio_input: String,
+    #[serde(skip)]
+    pub last_png_export_status: Option<(bool, String)>,
+    #[serde(skip)]
+    png_export_seq: u64,
+    #[serde(skip)]
+    pending_png_export: bool,
+    #[serde(skip)]
+    in_offscreen_png_export: bool,
+    #[serde(skip)]
+    last_auto_snapshot_time_secs: Option<f64>,
 }
 
 impl Default for SumiWorkstationApp {
@@ -1172,6 +1219,8 @@ impl Default for SumiWorkstationApp {
             pit_universe_enabled: false,
             pit_universe_mode: UniverseMode::PointInTime,
             pit_universe_def: UniverseDefinition::bundled_vn30_pit(),
+            settings: WorkstationSettings::default(),
+            import_cafef_split_aware: true,
             base_candles,
             candles,
             available_symbols: vec!["VNINDEX".to_owned()],
@@ -1277,6 +1326,18 @@ impl Default for SumiWorkstationApp {
             universe_import_buffer: String::new(),
             show_universe_import_box: false,
             last_universe_status: None,
+            show_settings_modal: false,
+            show_data_audit_modal: false,
+            last_settings_modal_rect: None,
+            last_data_audit_modal_rect: None,
+            data_audit_cache: None,
+            last_loader_repair_counts: (0, 0),
+            fib_custom_ratio_input: String::new(),
+            last_png_export_status: None,
+            png_export_seq: 0,
+            pending_png_export: false,
+            in_offscreen_png_export: false,
+            last_auto_snapshot_time_secs: None,
         }
     }
 }
@@ -1328,6 +1389,7 @@ impl SumiWorkstationApp {
     /// `active_timeframe` *before* binding `TimeScale` or `DrawingStore`, preventing `right_offset`
     /// shifts or `base_tf -> active_tf` double-remapping (`CRITICAL-01`).
     pub fn restore_persisted_session(&mut self) {
+        self.settings.sanitize();
         self.viewport.sanitize_deserialized();
         self.indicators.sanitize_deserialized();
         self.drawings.sanitize_deserialized();
@@ -1493,13 +1555,25 @@ impl SumiWorkstationApp {
                 let loaded = if custom_path.is_empty() {
                     None
                 } else {
+                    let env_pol = if self.import_cafef_split_aware {
+                        OhlcEnvelopePolicy::CafeFSplitAware
+                    } else {
+                        OhlcEnvelopePolicy::RejectRow
+                    };
                     let opts_with_sym = DataLoadOptions {
                         symbol_filter: (!saved_sym.is_empty()).then(|| saved_sym.clone()),
+                        envelope_policy: env_pol,
                         ..DataLoadOptions::default()
                     };
                     crate::data::load_ohlcv_file(&custom_path, &opts_with_sym)
                         .or_else(|_| {
-                            crate::data::load_ohlcv_file(&custom_path, &DataLoadOptions::default())
+                            crate::data::load_ohlcv_file(
+                                &custom_path,
+                                &DataLoadOptions {
+                                    envelope_policy: env_pol,
+                                    ..DataLoadOptions::default()
+                                },
+                            )
                         })
                         .ok()
                 };
@@ -1610,6 +1684,7 @@ impl SumiWorkstationApp {
         self.rebuild_custom_peer_feeds();
 
         let cursor_idx = self.current_trading_cursor_base_index();
+        self.sync_trading_settlement_rules();
         self.trading
             .sanitize_and_rebuild(&self.base_candles, cursor_idx);
 
@@ -1719,10 +1794,8 @@ impl SumiWorkstationApp {
     /// Switches between tickers discovered in a multi-symbol CSV/JSON source (e.g. `HNX-INDEX` <-> `VNINDEX` in CafeF CSV,
     /// as well as in-memory `load_from_csv_str` / `load_from_json_str` documents on both native and `wasm32`).
     pub fn select_symbol_in_source(&mut self, ticker: &str) {
-        let opts = DataLoadOptions {
-            symbol_filter: Some(ticker.to_owned()),
-            ..DataLoadOptions::default()
-        };
+        let mut opts = self.default_import_load_options();
+        opts.symbol_filter = Some(ticker.to_owned());
 
         if self.data_source == DataSourcePreset::CustomFile {
             if let Some((fmt, doc)) = self.in_memory_custom_doc.clone() {
@@ -1802,6 +1875,8 @@ impl SumiWorkstationApp {
     ) -> Result<(), DataLoadError> {
         match load_ohlcv_csv(csv_text, options) {
             Ok(rep) => {
+                self.import_cafef_split_aware =
+                    options.envelope_policy == OhlcEnvelopePolicy::CafeFSplitAware;
                 let msg = format_load_summary("CSV", &rep);
                 self.apply_loaded_report_internal(
                     rep,
@@ -1827,6 +1902,8 @@ impl SumiWorkstationApp {
     ) -> Result<(), DataLoadError> {
         match load_ohlcv_json(json_text, options) {
             Ok(rep) => {
+                self.import_cafef_split_aware =
+                    options.envelope_policy == OhlcEnvelopePolicy::CafeFSplitAware;
                 let msg = format_load_summary("JSON", &rep);
                 self.apply_loaded_report_internal(
                     rep,
@@ -1853,7 +1930,15 @@ impl SumiWorkstationApp {
             self.last_load_status = Some((true, err.to_string()));
             return Err(err);
         }
-        match crate::data::load_ohlcv_file(trimmed, &DataLoadOptions::default()) {
+        let load_opts = DataLoadOptions {
+            envelope_policy: if self.import_cafef_split_aware {
+                OhlcEnvelopePolicy::CafeFSplitAware
+            } else {
+                OhlcEnvelopePolicy::RejectRow
+            },
+            ..DataLoadOptions::default()
+        };
+        match crate::data::load_ohlcv_file(trimmed, &load_opts) {
             Ok(rep) => {
                 let msg = format_load_summary(trimmed, &rep);
                 self.apply_loaded_report_internal(
@@ -2139,6 +2224,9 @@ impl SumiWorkstationApp {
         }
 
         self.viewport_focus_lock = None;
+        self.last_loader_repair_counts =
+            (report.deduplicated_count, report.repaired_envelope_count);
+        self.data_audit_cache = None;
         self.data_source = source;
         self.symbol = report.symbol;
         self.available_symbols = report.available_symbols;
@@ -2169,6 +2257,9 @@ impl SumiWorkstationApp {
         self.replay = incoming_replay;
 
         let cursor_idx = self.current_trading_cursor_base_index();
+        incoming_trading.config.enforce_vn_t2_lot_lock = self.settings.enforce_vn_t2_lot_lock;
+        incoming_trading.config.venue = self.active_exchange_venue();
+        incoming_trading.config.base_timeframe_secs = self.base_timeframe.seconds().max(1);
         incoming_trading.sanitize_and_rebuild(&self.base_candles, cursor_idx);
         let has_existing_trades = !incoming_trading.commands.is_empty();
         self.trading = incoming_trading;
@@ -2743,6 +2834,7 @@ impl SumiWorkstationApp {
         if self.base_candles.is_empty() {
             return;
         }
+        self.sync_trading_settlement_rules();
         if tr.new_base_index > tr.prev_base_index {
             self.trading.advance_through_bars(
                 &self.base_candles,
@@ -2888,6 +2980,7 @@ impl SumiWorkstationApp {
         if !was_active || self.base_candles.is_empty() {
             return;
         }
+        self.sync_trading_settlement_rules();
 
         let last_base = self.base_candles.len() - 1;
         if prev_cursor < last_base
@@ -2968,6 +3061,10 @@ impl SumiWorkstationApp {
             })?;
 
         let cursor_idx = self.current_trading_cursor_base_index();
+        if let Err(t2_err) = self.check_vn_t2_sell_lock(side, qty) {
+            self.last_trade_status = Some((true, t2_err.to_string()));
+            return Err(t2_err);
+        }
         let req = OrderRequest {
             side,
             kind,
@@ -3093,6 +3190,13 @@ impl SumiWorkstationApp {
 
     /// Closes the entire open position at the current causal bar close (`Flatten`).
     pub fn flatten_open_position(&mut self) -> Result<(), crate::trading::TradingError> {
+        if let Some(pos) = self.trading.open_position()
+            && pos.side == PositionSide::Long
+            && let Err(t2_err) = self.check_vn_t2_sell_lock(OrderSide::Sell, pos.quantity)
+        {
+            self.last_trade_status = Some((true, t2_err.to_string()));
+            return Err(t2_err);
+        }
         let cursor_idx = self.current_trading_cursor_base_index();
         match self
             .trading
@@ -3227,6 +3331,8 @@ impl SumiWorkstationApp {
         self.show_templates_modal = false;
         self.show_hotkeys_modal = false;
         self.show_signal_catalog_modal = false;
+        self.show_settings_modal = false;
+        self.show_data_audit_modal = false;
         self.show_session_debrief_modal = true;
     }
 
@@ -3265,6 +3371,7 @@ impl SumiWorkstationApp {
         label: &str,
         pinned: bool,
     ) -> Result<u64, WorkspaceTemplateError> {
+        self.sync_trading_settlement_rules();
         let cursor_idx = self.current_trading_cursor_base_index();
         let session = SavedPracticeSession {
             slot_id: 0,
@@ -3526,6 +3633,8 @@ impl SumiWorkstationApp {
         self.show_templates_modal = false;
         self.show_signal_catalog_modal = false;
         self.show_session_debrief_modal = false;
+        self.show_settings_modal = false;
+        self.show_data_audit_modal = false;
         self.rebinding_hotkey_action = None;
         self.show_hotkeys_modal = true;
     }
@@ -3536,10 +3645,249 @@ impl SumiWorkstationApp {
         self.show_templates_modal = false;
         self.show_hotkeys_modal = false;
         self.show_session_debrief_modal = false;
+        self.show_settings_modal = false;
+        self.show_data_audit_modal = false;
         self.rebinding_hotkey_action = None;
         self.drawings.cancel_active_gesture();
         self.show_signal_catalog_modal = true;
         self.sync_confluence_causal();
+    }
+
+    /// Opens the Global Workstation `[Settings]` modal (`Milestone R19 / C1`).
+    pub fn open_settings_modal(&mut self) {
+        self.close_command_palette();
+        self.show_templates_modal = false;
+        self.show_hotkeys_modal = false;
+        self.show_signal_catalog_modal = false;
+        self.show_session_debrief_modal = false;
+        self.show_data_audit_modal = false;
+        self.rebinding_hotkey_action = None;
+        self.drawings.cancel_active_gesture();
+        self.viewport.cancel_active_interactions();
+        for slot in &mut self.secondary_slots {
+            slot.drawings.cancel_active_gesture();
+            slot.viewport.cancel_active_interactions();
+        }
+        self.show_settings_modal = true;
+    }
+
+    /// Opens the Data Readiness & Gap / Outlier / `CafeF SolieuGD` Audit modal (`Milestone R19 / C3`).
+    pub fn open_data_audit_modal(&mut self) {
+        self.close_command_palette();
+        self.show_templates_modal = false;
+        self.show_hotkeys_modal = false;
+        self.show_signal_catalog_modal = false;
+        self.show_session_debrief_modal = false;
+        self.show_settings_modal = false;
+        self.rebinding_hotkey_action = None;
+        self.drawings.cancel_active_gesture();
+        self.viewport.cancel_active_interactions();
+        for slot in &mut self.secondary_slots {
+            slot.drawings.cancel_active_gesture();
+            slot.viewport.cancel_active_interactions();
+        }
+        let _ = self.ensure_data_audit_synced();
+        self.show_data_audit_modal = true;
+    }
+
+    /// Returns the active [`DataLoadOptions`] honoring `self.import_cafef_split_aware` (`Milestone R19 / C3`).
+    #[must_use]
+    pub fn default_import_load_options(&self) -> DataLoadOptions {
+        DataLoadOptions {
+            envelope_policy: if self.import_cafef_split_aware {
+                OhlcEnvelopePolicy::CafeFSplitAware
+            } else {
+                OhlcEnvelopePolicy::RejectRow
+            },
+            ..DataLoadOptions::default()
+        }
+    }
+
+    /// Propagates global [`WorkstationSettings`] defaults onto the active Paper Trading session,
+    /// Strategy Backtest Lab config, DOM price unit, and Risk Planner (`Milestone R19 / C1`).
+    pub fn apply_settings_defaults_to_active_sessions(&mut self) {
+        self.settings.sanitize();
+        let st = self.settings;
+        self.risk_venue_override = st.default_venue_override;
+        let venue = self.active_exchange_venue();
+        if self.trading.open_position().is_none()
+            && self.trading.fills().is_empty()
+            && self.trading.commands.is_empty()
+        {
+            self.trading.config.initial_cash = st.default_initial_capital;
+            let start_idx = self.trading.session_start_base_index;
+            self.trading.reset_at(&self.base_candles, start_idx);
+        }
+        self.trading.config.commission_bps = st.default_commission_bps;
+        self.trading.config.slippage_bps = st.default_slippage_bps;
+        self.trading.config.allow_short = venue.allows_short();
+        self.sync_trading_settlement_rules();
+
+        self.backtest_config.initial_cash = st.default_initial_capital;
+        self.backtest_config.commission_bps = st.default_commission_bps;
+        self.backtest_config.tax_sell_bps = st.default_tax_sell_bps;
+        self.backtest_config.slippage_bps = st.default_slippage_bps;
+        self.backtest_config.lot_step = venue.board_lot();
+
+        self.dom_vn_unit = st.default_vn_price_unit;
+        self.risk_plan_input.account_equity = st.default_initial_capital;
+        self.risk_plan_input.risk_pct = st.default_risk_per_trade_pct;
+        self.risk_plan_input.price_unit = st.default_vn_price_unit;
+        self.risk_plan_input.commission_bps = st.default_commission_bps;
+        self.risk_plan_input.tax_sell_bps = st.default_tax_sell_bps;
+        self.risk_plan_input.slippage_bps = st.default_slippage_bps;
+
+        self.data_audit_cache = None;
+        self.invalidate_or_sync_backtest_after_mutation();
+    }
+
+    /// Synchronizes VSD `T+2` / `T+3` settlement lock rules onto `self.trading.config` so bracket exits
+    /// (`StopLoss` / `TakeProfit`), pending working sells, and `fifo_holding_summary` enforce exact causal rules.
+    #[inline]
+    pub fn sync_trading_settlement_rules(&mut self) {
+        self.trading.config.enforce_vn_t2_lot_lock = self.settings.enforce_vn_t2_lot_lock;
+        self.trading.config.venue = self.active_exchange_venue();
+        self.trading.config.base_timeframe_secs = self.base_timeframe.seconds().max(1);
+    }
+
+    /// Resets [`WorkstationSettings`] back to clean factory defaults (`Milestone R19 / C1`).
+    pub fn reset_workstation_settings_to_default(&mut self) {
+        self.settings = WorkstationSettings::default();
+        self.sync_trading_settlement_rules();
+        self.data_audit_cache = None;
+    }
+
+    /// Computes the causal timestamp (`bar_close = bar_start + base_tf_secs - 1`) governing VSD `T+2`
+    /// (`13:00 ICT`) / historical `T+3` (`09:00 ICT`) lot unlock evaluation (`Milestone R19 / C2`).
+    #[must_use]
+    pub fn causal_settlement_eval_timestamp(&self) -> i64 {
+        let idx = self.current_trading_cursor_base_index();
+        self.base_candles.get(idx).map_or(0, |b| {
+            b.timestamp
+                .saturating_add(self.base_timeframe.seconds().saturating_sub(1))
+        })
+    }
+
+    /// Computes the causal FIFO [`FifoSettlementSummary`] for the active Paper Trading session (`Milestone R19 / C2`).
+    #[must_use]
+    pub fn active_fifo_settlement_summary(&self) -> FifoSettlementSummary {
+        let venue = self.active_exchange_venue();
+        let as_of = self.causal_settlement_eval_timestamp();
+        let tuples: Vec<_> = self
+            .trading
+            .fills()
+            .iter()
+            .map(|f| {
+                (
+                    f.fill_id,
+                    f.base_index,
+                    f.timestamp,
+                    f.side,
+                    f.quantity,
+                    f.price,
+                )
+            })
+            .collect();
+        crate::journal::compute_fifo_holding_lots_with_bar_secs(
+            &tuples,
+            venue,
+            as_of,
+            self.base_timeframe.seconds().max(1),
+        )
+    }
+
+    /// Validates Vietnam cash-equity (`HOSE` / `HNX` / `UPCOM`) sell orders against settled FIFO `T+2` lots
+    /// (minus any already-working `Pending` sell orders) when `settings.enforce_vn_t2_lot_lock` is active.
+    pub fn check_vn_t2_sell_lock(
+        &self,
+        side: OrderSide,
+        requested_qty: f64,
+    ) -> Result<(), crate::trading::TradingError> {
+        if !self.settings.enforce_vn_t2_lot_lock || side != OrderSide::Sell {
+            return Ok(());
+        }
+        let venue = self.active_exchange_venue();
+        if !venue.is_vn_cash_equity() {
+            return Ok(());
+        }
+        let fifo = self.active_fifo_settlement_summary();
+        let pending_sell_qty: f64 = self
+            .trading
+            .pending_orders()
+            .filter(|o| o.side == OrderSide::Sell && o.quantity.is_finite() && o.quantity > 0.0)
+            .map(|o| o.quantity)
+            .sum();
+        let available_sellable = (fifo.sellable_qty - pending_sell_qty).max(0.0);
+        if requested_qty > available_sellable + 1.0e-7 {
+            return Err(crate::trading::TradingError::InsufficientSettledShares {
+                requested: requested_qty,
+                sellable: available_sellable,
+                locked_t2: fifo.locked_t2_qty,
+                earliest_unlock_timestamp: fifo.earliest_unlock_timestamp,
+            });
+        }
+        Ok(())
+    }
+
+    /// Computes or returns the memoized causal [`DataQualityAuditReport`] and [`UniverseDataReadinessSummary`]
+    /// at the current dataset / timeframe / Replay frontier (`Milestone R19 / C3`, `DEF-001` zero-lookahead!).
+    pub fn ensure_data_audit_synced(
+        &mut self,
+    ) -> (&DataQualityAuditReport, &UniverseDataReadinessSummary) {
+        self.ensure_watchlist_universe_loaded();
+        let cutoff_ts = self.replay.cutoff_timestamp(&self.base_candles);
+        let venue = self.active_exchange_venue();
+        let inst_key = self.current_instrument_key();
+        let repair_counts = self.last_loader_repair_counts;
+        let tail_inc = self.is_active_tail_incomplete();
+        let needs_recompute = self.data_audit_cache.as_ref().is_none_or(|c| {
+            c.0 != self.dataset_generation
+                || c.1 != inst_key
+                || c.2 != self.active_timeframe
+                || c.3 != cutoff_ts
+                || c.4 != venue
+                || c.5 != repair_counts
+                || c.6 != tail_inc
+        });
+        if needs_recompute {
+            let audit_slice = if tail_inc && self.candles.len() > 1 {
+                &self.candles[..self.candles.len() - 1]
+            } else {
+                &self.candles
+            };
+            let active_report = audit_ohlcv_series_with_venue(
+                &self.symbol,
+                venue,
+                self.active_timeframe,
+                audit_slice,
+                Some(repair_counts),
+            );
+            let close_cap = self.replay_causal_close_timestamp();
+            let feeds_ref = if self.data_source == DataSourcePreset::CustomFile
+                && !self.custom_peer_feeds.is_empty()
+            {
+                &self.custom_peer_feeds
+            } else {
+                &self.watchlist_universe
+            };
+            let uni_summary = summarize_universe_readiness(feeds_ref, close_cap);
+            self.data_audit_cache = Some(Box::new((
+                self.dataset_generation,
+                inst_key,
+                self.active_timeframe,
+                cutoff_ts,
+                venue,
+                repair_counts,
+                tail_inc,
+                active_report,
+                uni_summary,
+            )));
+        }
+        let cached = self
+            .data_audit_cache
+            .as_ref()
+            .expect("audit cache populated");
+        (&cached.7, &cached.8)
     }
 
     /// Exposes cached causal historical signal hits for headless benchmark harness setup.
@@ -3829,6 +4177,11 @@ impl SumiWorkstationApp {
             self.last_trade_status = Some((true, msg.clone()));
             msg
         })?;
+        if let Err(t2_err) = self.check_vn_t2_sell_lock(req.side, req.quantity) {
+            let msg = t2_err.to_string();
+            self.last_trade_status = Some((true, msg.clone()));
+            return Err(msg);
+        }
         let cursor_idx = self.current_trading_cursor_base_index();
         match self
             .trading
@@ -3940,6 +4293,12 @@ impl SumiWorkstationApp {
                 msg
             })?
         };
+
+        if let Err(t2_err) = self.check_vn_t2_sell_lock(side, qty) {
+            let msg = t2_err.to_string();
+            self.last_trade_status = Some((true, msg.clone()));
+            return Err(msg);
+        }
 
         let cursor_idx = self.current_trading_cursor_base_index();
         match self.trading.submit_order(
@@ -4152,10 +4511,8 @@ impl SumiWorkstationApp {
                 });
                 continue;
             }
-            let opts = DataLoadOptions {
-                symbol_filter: Some(sym.clone()),
-                ..DataLoadOptions::default()
-            };
+            let mut opts = self.default_import_load_options();
+            opts.symbol_filter = Some(sym.clone());
             let loaded = if let Some((fmt, ref doc)) = self.in_memory_custom_doc {
                 load_ohlcv_bytes(doc.as_bytes(), fmt, &opts).ok()
             } else {
@@ -5775,13 +6132,22 @@ impl SumiWorkstationApp {
                 ))
             .then_some(self.hotkey_profile.base_preset()),
             hotkey_overrides: self.hotkey_profile.overrides_from_preset(),
+            settings: self.settings,
         };
         tpl.sanitize();
         tpl
     }
 
+    /// Applies one of the 6 built-in layout presets while preserving the user's global [`WorkstationSettings`]
+    /// (`CandlePalettePreset`, capital, fees, `enforce_vn_t2_lot_lock`, and auto-snapshot cadence; `M3` fix).
+    pub fn apply_builtin_layout_preset(&mut self, preset_template: &WorkspaceTemplate) {
+        let mut tpl = preset_template.clone();
+        tpl.settings = self.settings;
+        self.apply_workspace_template(&tpl);
+    }
+
     /// Applies a validated [`WorkspaceTemplate`] across the primary slot, all secondary slots,
-    /// dock visibility/tabs, DOM view mode, and hotkey profile/overrides.
+    /// dock visibility/tabs, DOM view mode, hotkey profile/overrides, and global workstation settings.
     pub fn apply_workspace_template(&mut self, template: &WorkspaceTemplate) {
         let mut tpl = template.clone();
         tpl.sanitize();
@@ -5791,6 +6157,10 @@ impl SumiWorkstationApp {
                 .snapshot_store
                 .push_auto_checkpoint("Pre-Restore Undo", pre_restore_tpl);
         }
+        self.settings = tpl.settings;
+        self.settings.sanitize();
+        self.sync_trading_settlement_rules();
+        self.data_audit_cache = None;
         // Temporarily reset grid layout to `Single1x1` while applying slot 0 so `sync_symbol` /
         // `sync_timeframe` propagation hooks never overwrite template secondary slots mid-load.
         self.grid_layout = MultiChartLayoutKind::Single1x1;
@@ -6255,6 +6625,7 @@ impl SumiWorkstationApp {
                 .then_some(self.active_benchmark_label.as_str()),
             external_crosshair_timestamp: external_crosshair_ts,
             modal_open: any_modal_open,
+            candle_palette: self.settings.candle_palette,
         };
         self.last_report = render_workstation_chart_full(
             ui,
@@ -6296,6 +6667,7 @@ impl SumiWorkstationApp {
     ) {
         let show_grid = self.show_grid;
         let show_crosshair = self.show_crosshair;
+        let active_candle_palette = self.settings.candle_palette;
         let base_causal_cap = self.replay_causal_close_timestamp();
         let sec = &mut self.secondary_slots[sec_idx];
         let sec_causal_cap = base_causal_cap.map(|cap| {
@@ -6333,6 +6705,7 @@ impl SumiWorkstationApp {
                 .then_some(sec.active_benchmark_label.as_str()),
             external_crosshair_timestamp: external_crosshair_ts,
             modal_open: any_modal_open,
+            candle_palette: active_candle_palette,
         };
         sec.last_report = render_workstation_chart_full(
             ui,
@@ -6449,9 +6822,11 @@ impl SumiWorkstationApp {
     #[inline]
     #[must_use]
     pub fn active_exchange_venue(&self) -> ExchangeVenue {
-        self.risk_venue_override.unwrap_or_else(|| {
-            ExchangeVenue::infer_from_symbol_and_preset(&self.symbol, self.data_source)
-        })
+        self.risk_venue_override
+            .or(self.settings.default_venue_override)
+            .unwrap_or_else(|| {
+                ExchangeVenue::infer_from_symbol_and_preset(&self.symbol, self.data_source)
+            })
     }
 
     /// Computes the strictly causal reference price (`<=` current replay/live frontier) for daily price bands (`DEF-001` & `M-09`).
@@ -7444,6 +7819,8 @@ impl SumiWorkstationApp {
         self.show_hotkeys_modal = false;
         self.show_signal_catalog_modal = false;
         self.show_session_debrief_modal = false;
+        self.show_settings_modal = false;
+        self.show_data_audit_modal = false;
         self.rebinding_hotkey_action = None;
         self.drawings.cancel_active_gesture();
         self.viewport.cancel_active_interactions();
@@ -7468,6 +7845,8 @@ impl SumiWorkstationApp {
         self.show_hotkeys_modal = false;
         self.show_signal_catalog_modal = false;
         self.show_session_debrief_modal = false;
+        self.show_settings_modal = false;
+        self.show_data_audit_modal = false;
         self.rebinding_hotkey_action = None;
         self.drawings.cancel_active_gesture();
         self.viewport.cancel_active_interactions();
@@ -7768,6 +8147,7 @@ impl SumiWorkstationApp {
             DrawingTool::RiskRewardBox,
             DrawingTool::FixedRangeVolumeProfile,
             DrawingTool::AnchoredVwap,
+            DrawingTool::TextNote,
         ] {
             push_scored(
                 PaletteCategory::Drawing,
@@ -8040,6 +8420,61 @@ impl SumiWorkstationApp {
             "Snapshot active layout, slots, docks & hotkeys into checkpoint store".to_owned(),
             "snapshot checkpoint save workspace recovery".to_owned(),
             PaletteAction::SaveQuickWorkspaceCheckpoint,
+        );
+        push_scored(
+            PaletteCategory::Workspace,
+            "Open Global Workstation Settings & Candle Palettes (R19)".to_owned(),
+            format!(
+                "Theme: {} · Capital {:.0} · T+2 Lock: {}",
+                self.settings.candle_palette.short_label(),
+                self.settings.default_initial_capital,
+                if self.settings.enforce_vn_t2_lot_lock {
+                    "ON"
+                } else {
+                    "OFF"
+                }
+            ),
+            "settings preferences candle palette color theme hollow colorblind fees capital t+2"
+                .to_owned(),
+            PaletteAction::OpenSettingsModal,
+        );
+        for pal in CandlePalettePreset::ALL {
+            push_scored(
+                PaletteCategory::Workspace,
+                format!("Candle Palette: {}", pal.short_label()),
+                if self.settings.candle_palette == pal {
+                    "Active candlestick & volume color palette".to_owned()
+                } else {
+                    "Switch candlestick & volume color palette".to_owned()
+                },
+                format!(
+                    "candle palette color theme {} {}",
+                    pal.as_id(),
+                    pal.short_label()
+                ),
+                PaletteAction::SetCandlePalette(pal),
+            );
+        }
+        push_scored(
+            PaletteCategory::Workspace,
+            "Open Data Readiness, Holiday Gaps & CafeF Split Audit (R19)".to_owned(),
+            format!(
+                "Audit {} ({}) against VIETNAM_HOLIDAYS_V1 (144 dates · 2018–2030)",
+                self.symbol, self.timeframe
+            ),
+            "data audit readiness gap outlier cafef split holiday calendar quality".to_owned(),
+            PaletteAction::OpenDataAuditModal,
+        );
+        #[cfg(not(target_arch = "wasm32"))]
+        push_scored(
+            PaletteCategory::Workspace,
+            "Export Chart & Drawings to Retina 2x PNG (R19)".to_owned(),
+            format!(
+                "Capture crisp offscreen wgpu PNG of {} · {} into exports/",
+                self.symbol, self.timeframe
+            ),
+            "export png screenshot image capture save chart".to_owned(),
+            PaletteAction::ExportChartPng,
         );
         for preset in StrategyPresetKind::ALL {
             push_scored(
@@ -8606,8 +9041,20 @@ impl SumiWorkstationApp {
             }
             PaletteAction::ApplyBuiltinTemplate(idx) => {
                 if let Some(tpl) = builtin_workspace_templates().get(idx) {
-                    self.apply_workspace_template(tpl);
+                    self.apply_builtin_layout_preset(tpl);
                 }
+            }
+            PaletteAction::OpenSettingsModal => {
+                self.open_settings_modal();
+            }
+            PaletteAction::SetCandlePalette(pal) => {
+                self.settings.candle_palette = pal;
+            }
+            PaletteAction::OpenDataAuditModal => {
+                self.open_data_audit_modal();
+            }
+            PaletteAction::ExportChartPng => {
+                self.pending_png_export = true;
             }
         }
     }
@@ -8732,6 +9179,8 @@ fn compute_drawings_alert_digest(store: &DrawingStore) -> u64 {
                 mix(&mut h, end.bar_index.to_bits());
                 mix(&mut h, end.value.to_bits());
                 mix(&mut h, end.timestamp.map_or(u64::MAX, f64::to_bits));
+                mix(&mut h, u64::from(d.trend_extend_left));
+                mix(&mut h, u64::from(d.trend_extend_right));
             }
             DrawingGeometry::Ray { origin, through } => {
                 mix(&mut h, 3);
@@ -8765,6 +9214,13 @@ fn compute_drawings_alert_digest(store: &DrawingStore) -> u64 {
                 mix(&mut h, anchor.value.to_bits());
                 mix(&mut h, anchor.timestamp.map_or(u64::MAX, f64::to_bits));
                 mix(&mut h, u64::from(show_bands));
+            }
+            DrawingGeometry::TextNote { anchor, ref text } => {
+                mix(&mut h, 9);
+                mix(&mut h, anchor.bar_index.to_bits());
+                mix(&mut h, anchor.value.to_bits());
+                mix(&mut h, anchor.timestamp.map_or(u64::MAX, f64::to_bits));
+                mix(&mut h, fnv1a_64(text.as_bytes()));
             }
         }
     }
@@ -9529,7 +9985,9 @@ impl SumiWorkstationApp {
             || self.show_templates_modal
             || self.show_hotkeys_modal
             || self.show_signal_catalog_modal
-            || self.show_session_debrief_modal;
+            || self.show_session_debrief_modal
+            || self.show_settings_modal
+            || self.show_data_audit_modal;
         if self.command_palette.open {
             let vp_rect = ui.input(|i| i.viewport_rect());
             let modal_est = command_palette_modal_rect_estimate(vp_rect);
@@ -9618,10 +10076,48 @@ impl SumiWorkstationApp {
                         .retain(|ev| !matches!(ev, egui::Event::MouseWheel { .. }));
                 }
             });
+        } else if self.show_settings_modal {
+            let vp_rect = ui.input(|i| i.viewport_rect());
+            let modal_rect = self
+                .last_settings_modal_rect
+                .unwrap_or_else(|| Self::settings_modal_rect(vp_rect));
+            ui.input_mut(|i| {
+                let _ = i.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
+                let _ = i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab);
+                if i.pointer
+                    .hover_pos()
+                    .is_none_or(|pos| !modal_rect.contains(pos))
+                {
+                    i.smooth_scroll_delta = Vec2::ZERO;
+                    i.raw
+                        .events
+                        .retain(|ev| !matches!(ev, egui::Event::MouseWheel { .. }));
+                }
+            });
+        } else if self.show_data_audit_modal {
+            let vp_rect = ui.input(|i| i.viewport_rect());
+            let modal_rect = self
+                .last_data_audit_modal_rect
+                .unwrap_or_else(|| Self::data_audit_modal_rect(vp_rect));
+            ui.input_mut(|i| {
+                let _ = i.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
+                let _ = i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab);
+                if i.pointer
+                    .hover_pos()
+                    .is_none_or(|pos| !modal_rect.contains(pos))
+                {
+                    i.smooth_scroll_delta = Vec2::ZERO;
+                    i.raw
+                        .events
+                        .retain(|ev| !matches!(ev, egui::Event::MouseWheel { .. }));
+                }
+            });
         } else {
             self.last_templates_modal_rect = None;
             self.last_hotkeys_modal_rect = None;
             self.last_signal_catalog_modal_rect = None;
+            self.last_settings_modal_rect = None;
+            self.last_data_audit_modal_rect = None;
         }
 
         // Intercept plain `Escape` before canvas `handle_drawing_keyboard_shortcuts` when the
@@ -10009,6 +10505,45 @@ impl SumiWorkstationApp {
                         }
                     }
 
+                    let mut settings_open = self.show_settings_modal;
+                    if indicator_toggle_pill(
+                        ui,
+                        &mut settings_open,
+                        "Settings",
+                        Color32::from_rgb(129, 199, 132),
+                    ) {
+                        if settings_open {
+                            self.open_settings_modal();
+                        } else {
+                            self.show_settings_modal = false;
+                            self.last_settings_modal_rect = None;
+                        }
+                    }
+
+                    let mut audit_open = self.show_data_audit_modal;
+                    if indicator_toggle_pill(
+                        ui,
+                        &mut audit_open,
+                        "Data Audit",
+                        Color32::from_rgb(79, 195, 247),
+                    ) {
+                        if audit_open {
+                            self.open_data_audit_modal();
+                        } else {
+                            self.show_data_audit_modal = false;
+                            self.last_data_audit_modal_rect = None;
+                        }
+                    }
+
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if ui
+                        .small_button(RichText::new("Export PNG").monospace().size(10.5))
+                        .on_hover_text("Capture active chart & drawings at 2.0x Retina PNG into exports/")
+                        .clicked()
+                    {
+                        self.pending_png_export = true;
+                    }
+
                     let mut palette_open = self.command_palette.open;
                     if indicator_toggle_pill(
                         ui,
@@ -10035,9 +10570,13 @@ impl SumiWorkstationApp {
                         );
                         let edit_resp = ui.add(
                             egui::TextEdit::singleline(&mut self.import_path_input)
-                                .desired_width(360.0)
+                                .desired_width(320.0)
                                 .font(egui::FontId::monospace(11.0)),
                         );
+                        ui.checkbox(&mut self.import_cafef_split_aware, "CafeF Split Norm")
+                            .on_hover_text(
+                                "Normalize sub-10 VND CafeF SolieuGD 4-decimal post-split rounding artifacts (<= 6 bps & <= 25 VND)",
+                            );
                         let enter_pressed =
                             edit_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                         if ui.button("Load File").clicked() || enter_pressed {
@@ -10327,6 +10866,7 @@ impl SumiWorkstationApp {
                         DrawingTool::RiskRewardBox,
                         DrawingTool::FixedRangeVolumeProfile,
                         DrawingTool::AnchoredVwap,
+                        DrawingTool::TextNote,
                     ] {
                         let is_active = self.drawings.active_tool == tool;
                         if ui.selectable_label(is_active, tool.short_label()).clicked() {
@@ -10416,6 +10956,44 @@ impl SumiWorkstationApp {
                         {
                             let _ = self.drawings.cycle_selected_dash();
                         }
+                        if matches!(sel.geometry, DrawingGeometry::TrendLine { .. }) {
+                            let ext_l_lbl = if sel.trend_extend_left {
+                                "<< Ext L: ON"
+                            } else {
+                                "<< Ext L: OFF"
+                            };
+                            if ui
+                                .add_enabled(!sel.locked, Button::new(ext_l_lbl))
+                                .clicked()
+                            {
+                                let mut patch = DrawingPropertyPatch::from_drawing(&sel);
+                                patch.trend_extend_left = !patch.trend_extend_left;
+                                let _ = self.drawings.apply_drawing_property_patch(
+                                    sel.id,
+                                    patch,
+                                    &self.candles,
+                                    self.active_timeframe,
+                                );
+                            }
+                            let ext_r_lbl = if sel.trend_extend_right {
+                                "Ext R >>: ON"
+                            } else {
+                                "Ext R >>: OFF"
+                            };
+                            if ui
+                                .add_enabled(!sel.locked, Button::new(ext_r_lbl))
+                                .clicked()
+                            {
+                                let mut patch = DrawingPropertyPatch::from_drawing(&sel);
+                                patch.trend_extend_right = !patch.trend_extend_right;
+                                let _ = self.drawings.apply_drawing_property_patch(
+                                    sel.id,
+                                    patch,
+                                    &self.candles,
+                                    self.active_timeframe,
+                                );
+                            }
+                        }
                         if let DrawingGeometry::FibonacciRetracement { extend_right, .. } =
                             sel.geometry
                         {
@@ -10436,6 +11014,41 @@ impl SumiWorkstationApp {
                             {
                                 let _ = self.drawings.toggle_selected_fib_extend();
                             }
+                            let fib_preset_lbl = match sel.custom_fib_levels.as_deref() {
+                                None => "Fib: Std7".to_owned(),
+                                Some(lvls) if lvls == FIBONACCI_OTE_EXT_RATIOS => {
+                                    "Fib: OTE9".to_owned()
+                                }
+                                Some(lvls) if lvls == FIBONACCI_FULL_EXT_RATIOS => {
+                                    "Fib: Full13".to_owned()
+                                }
+                                Some(lvls) => format!("Fib: Cust({})", lvls.len()),
+                            };
+                            if ui
+                                .add_enabled(!sel.locked, Button::new(fib_preset_lbl))
+                                .on_hover_text("Cycle Fibonacci Ratios (Std 7 -> ICT OTE 9 -> Full 13)")
+                                .clicked()
+                            {
+                                let mut patch = DrawingPropertyPatch::from_drawing(&sel);
+                                patch.custom_fib_levels = match sel.custom_fib_levels.as_deref() {
+                                    None => Some(FIBONACCI_OTE_EXT_RATIOS.to_vec()),
+                                    Some(lvls) if lvls == FIBONACCI_OTE_EXT_RATIOS => {
+                                        Some(FIBONACCI_FULL_EXT_RATIOS.to_vec())
+                                    }
+                                    _ => None,
+                                };
+                                let _ = self.drawings.apply_drawing_property_patch(
+                                    sel.id,
+                                    patch,
+                                    &self.candles,
+                                    self.active_timeframe,
+                                );
+                            }
+                        }
+                        if matches!(sel.geometry, DrawingGeometry::TextNote { .. })
+                            && ui.button("Edit Note...").clicked()
+                        {
+                            self.show_drawing_inspector = true;
                         }
                         if matches!(sel.geometry, DrawingGeometry::RiskRewardBox { .. }) {
                             if ui
@@ -10574,11 +11187,15 @@ impl SumiWorkstationApp {
                         String::new()
                     };
                     let grid_badge = self.grid_layout.short_label();
+                    let png_tag = self
+                        .last_png_export_status
+                        .as_ref()
+                        .map_or_else(String::new, |(_, s)| format!("  |  {s}"));
                     if let Some(rep) = self.last_report {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(format!(
-                                    "R18 [{grid_badge}]  |  {} ({}->{})  |  RPL: {replay_tag}  |  ALT: {armed_alerts}A/{trig_events}T  |  EQ: ${:.0} ({:+.0}){bt_tag}  |  {}P/{}D  |  BARS: {}/{} ({first_date}..{last_date}) {}x  |  {scale_mode}({auto_tag})  |  {:.0}×{:.0}",
+                                    "R19 [{grid_badge}]  |  {} ({}->{})  |  RPL: {replay_tag}  |  ALT: {armed_alerts}A/{trig_events}T  |  EQ: ${:.0} ({:+.0}){bt_tag}  |  {}P/{}D  |  BARS: {}/{} ({first_date}..{last_date}) {}x  |  {scale_mode}({auto_tag})  |  {:.0}×{:.0}{png_tag}",
                                     self.data_source.short_label(),
                                     self.base_timeframe,
                                     self.active_timeframe,
@@ -10602,7 +11219,7 @@ impl SumiWorkstationApp {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(format!(
-                                    "R18 [{grid_badge}]  |  RPL: {replay_tag}  |  ALT: {armed_alerts} armed{bt_tag}  |  BARS: {} ({first_date}..{last_date})",
+                                    "R19 [{grid_badge}]  |  RPL: {replay_tag}  |  ALT: {armed_alerts} armed{bt_tag}  |  BARS: {} ({first_date}..{last_date}){png_tag}",
                                     self.candles.len()
                                 ))
                                 .monospace()
@@ -10981,6 +11598,10 @@ impl SumiWorkstationApp {
             self.render_signal_catalog_modal(ui);
         } else if self.show_session_debrief_modal {
             self.render_session_debrief_modal(ui);
+        } else if self.show_settings_modal {
+            self.render_settings_modal(ui);
+        } else if self.show_data_audit_modal {
+            self.render_data_audit_modal(ui);
         }
         if let Some(txt) = self.pending_clipboard_copy.take() {
             ui.ctx().copy_text(txt);
@@ -11063,6 +11684,38 @@ impl SumiWorkstationApp {
         }
 
         self.frame_count = self.frame_count.saturating_add(1);
+        let now_secs = ui.input(|i| i.time);
+        if !self.in_offscreen_png_export && self.settings.auto_snapshot_interval_mins > 0 {
+            let interval_secs = f64::from(self.settings.auto_snapshot_interval_mins) * 60.0;
+            if now_secs.is_finite() && now_secs >= 0.0 {
+                match self.last_auto_snapshot_time_secs {
+                    None => {
+                        self.last_auto_snapshot_time_secs = Some(now_secs);
+                    }
+                    Some(prev) if now_secs < prev => {
+                        self.last_auto_snapshot_time_secs = Some(now_secs);
+                    }
+                    Some(prev) if (now_secs - prev) >= interval_secs => {
+                        self.last_auto_snapshot_time_secs = Some(now_secs);
+                        let tpl = self.capture_workspace_template("Periodic Auto");
+                        let _ = self
+                            .snapshot_store
+                            .push_auto_checkpoint("Periodic Auto", tpl);
+                    }
+                    _ => {}
+                }
+            }
+        } else if self.settings.auto_snapshot_interval_mins == 0 {
+            self.last_auto_snapshot_time_secs = None;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if std::mem::take(&mut self.pending_png_export) {
+            let vp = ui.ctx().content_rect();
+            let lw = (vp.width().round() as u32).clamp(640, 3840);
+            let lh = (vp.height().round() as u32).clamp(420, 2400);
+            let _ = self.trigger_quick_png_export(lw, lh);
+            ui.ctx().request_repaint();
+        }
     }
 
     fn render_replay_dock(&mut self, ui: &mut egui::Ui) {
@@ -11685,7 +12338,10 @@ impl SumiWorkstationApp {
                         }
                     });
 
-                // 3. Open Position Card
+                // 3a. Causal FIFO `T+2` (`13:00 ICT`) Holding Lots Card (`Milestone R19 / C2`)
+                self.render_fifo_settlement_lots_card(ui);
+
+                // 3b. Open Position Card
                 Frame::new()
                     .fill(Color32::from_rgb(19, 24, 35))
                     .corner_radius(CornerRadius::same(4))
@@ -16072,6 +16728,8 @@ impl SumiWorkstationApp {
                                     new_v.default_commission_bps();
                                 self.risk_plan_input.tax_sell_bps = new_v.default_tax_sell_bps();
                                 self.risk_plan_input.contract_multiplier = 1.0;
+                                self.sync_trading_settlement_rules();
+                                self.data_audit_cache = None;
                                 self.risk_plan_input.initial_margin_pct =
                                     new_v.default_initial_margin_pct();
                                 if !new_v.allows_short() {
@@ -16160,6 +16818,9 @@ impl SumiWorkstationApp {
                                 .size(9.1)
                                 .color(palette::TEXT_MUTED),
                             );
+                        }
+                        if active_venue.is_vn_cash_equity() {
+                            self.render_fifo_settlement_lots_card(ui);
                         }
 
                         // Side + Capital + Risk %
@@ -18467,6 +19128,9 @@ impl SumiWorkstationApp {
                                                         staged.diff.hotkey_override_delta_count
                                                     ));
                                                 }
+                                                if staged.diff.settings_changed {
+                                                    summary_parts.push("Settings".to_owned());
+                                                }
                                             }
                                             ui.label(
                                                 RichText::new(summary_parts.join(" · "))
@@ -18500,19 +19164,21 @@ impl SumiWorkstationApp {
                                                 if ui.small_button("Diff").clicked() {
                                                     let cur =
                                                         self.capture_workspace_template("Current");
-                                                    let diff = compute_workspace_diff(&cur, &tpl);
+                                                    let mut cand = tpl.clone();
+                                                    cand.settings = self.settings;
+                                                    let diff = compute_workspace_diff(&cur, &cand);
                                                     self.staged_snapshot_preview =
                                                         Some(StagedSnapshotRestorePreview {
                                                             source_label: format!(
                                                                 "Preset '{}'",
                                                                 tpl.name
                                                             ),
-                                                            candidate: tpl.clone(),
+                                                            candidate: cand,
                                                             diff,
                                                         });
                                                 }
                                                 if ui.small_button("Apply").clicked() {
-                                                    self.apply_workspace_template(&tpl);
+                                                    self.apply_builtin_layout_preset(&tpl);
                                                     self.last_template_status = Some((
                                                         false,
                                                         format!("Applied preset '{}'", tpl.name),
@@ -20437,6 +21103,913 @@ impl SumiWorkstationApp {
         }
     }
 
+    fn render_fifo_settlement_lots_card(&mut self, ui: &mut egui::Ui) {
+        let venue = self.active_exchange_venue();
+        let as_of_ts = self.causal_settlement_eval_timestamp();
+        let fifo = self.trading.fifo_holding_summary(venue, as_of_ts);
+        if !venue.is_vn_cash_equity() && fifo.lots.is_empty() {
+            return;
+        }
+
+        Frame::new()
+            .fill(Color32::from_rgb(17, 22, 33))
+            .corner_radius(CornerRadius::same(4))
+            .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+            .inner_margin(Margin::symmetric(8, 6))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "FIFO LOTS ({})",
+                            if venue.is_vn_cash_equity() {
+                                "VSD T+2 13:00"
+                            } else {
+                                venue.short_label()
+                            }
+                        ))
+                        .monospace()
+                        .strong()
+                        .size(9.5)
+                        .color(Color32::from_rgb(125, 211, 252)),
+                    );
+                    if venue.is_vn_cash_equity() {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .checkbox(&mut self.settings.enforce_vn_t2_lot_lock, "T+2 Lock")
+                                .on_hover_text(
+                                    "Block VN cash-equity sell orders exceeding settled T+2 shares",
+                                )
+                                .changed()
+                            {
+                                self.sync_trading_settlement_rules();
+                            }
+                        });
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!("Sellable: {:.0}", fifo.sellable_qty))
+                            .monospace()
+                            .strong()
+                            .size(9.5)
+                            .color(palette::BULLISH),
+                    );
+                    ui.label(
+                        RichText::new(format!("Locked T+2: {:.0}", fifo.locked_t2_qty))
+                            .monospace()
+                            .strong()
+                            .size(9.5)
+                            .color(if fifo.locked_t2_qty > 0.0 {
+                                palette::ALERT_ARMED_AMBER
+                            } else {
+                                palette::TEXT_MUTED
+                            }),
+                    );
+                    ui.label(
+                        RichText::new(format!("Held: {:.0}", fifo.total_held_qty))
+                            .monospace()
+                            .size(9.4)
+                            .color(palette::TEXT_MUTED),
+                    );
+                });
+                if fifo.lots.is_empty() {
+                    ui.label(
+                        RichText::new("No open FIFO holding lots.")
+                            .monospace()
+                            .size(9.1)
+                            .color(palette::TEXT_MUTED),
+                    );
+                } else {
+                    for lot in fifo.lots.iter().take(6) {
+                        let settled = lot.is_sellable_at(as_of_ts);
+                        let unlock_txt = if venue.is_vn_cash_equity() {
+                            format!(
+                                "{} ICT",
+                                format_utc_datetime_hm(
+                                    lot.sellable_at_timestamp.saturating_add(7 * 3_600)
+                                )
+                            )
+                        } else {
+                            format_utc_date(lot.sellable_at_timestamp)
+                        };
+                        let (badge, col) = if settled {
+                            ("[SELLABLE]", palette::BULLISH)
+                        } else {
+                            ("[LOCKED T+2]", palette::ALERT_ARMED_AMBER)
+                        };
+                        ui.label(
+                            RichText::new(format!(
+                                "Lot #{} · {:.0} @ {:.2} · {badge} ({unlock_txt})",
+                                lot.lot_id, lot.remaining_qty, lot.buy_price
+                            ))
+                            .monospace()
+                            .size(9.1)
+                            .color(col),
+                        );
+                    }
+                }
+                if fifo.unsettled_sell_violation_qty > 1.0e-6 {
+                    ui.label(
+                        RichText::new(format!(
+                            "Warning: {:.0} sh historical unsettled exit recorded",
+                            fifo.unsettled_sell_violation_qty
+                        ))
+                        .monospace()
+                        .size(8.9)
+                        .color(palette::BEARISH),
+                    );
+                }
+            });
+    }
+
+    #[must_use]
+    pub(crate) fn settings_modal_rect(vp: egui::Rect) -> egui::Rect {
+        let max_w = (vp.width() - 24.0).max(220.0);
+        let max_h = (vp.height() - 24.0).max(220.0);
+        let w = (vp.width() - 80.0).clamp(380.0, 660.0).min(max_w);
+        let top = vp.top() + (vp.height() * 0.07).clamp(16.0, 48.0);
+        let h = (vp.bottom() - top - 24.0).clamp(240.0, 620.0).min(max_h);
+        egui::Rect::from_min_size(
+            egui::Pos2::new(vp.center().x - w * 0.5, top),
+            egui::vec2(w, h),
+        )
+    }
+
+    fn render_settings_modal(&mut self, ui: &mut egui::Ui) {
+        let esc = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        if esc {
+            self.show_settings_modal = false;
+            self.last_settings_modal_rect = None;
+            ui.ctx().request_repaint();
+            return;
+        }
+
+        let vp_rect = ui.input(|i| i.viewport_rect());
+        let target_rect = Self::settings_modal_rect(vp_rect);
+        let scrim_resp = egui::Area::new(egui::Id::new("sumi_settings_scrim"))
+            .order(egui::Order::Middle)
+            .fade_in(false)
+            .fixed_pos(vp_rect.min)
+            .show(ui.ctx(), |ui| {
+                let (rect, resp) =
+                    ui.allocate_exact_size(vp_rect.size(), egui::Sense::click_and_drag());
+                ui.painter()
+                    .rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(6, 9, 15, 192));
+                resp
+            })
+            .inner;
+
+        let modal_w = target_rect.width();
+        let scroll_max_h = (target_rect.height() - 62.0).max(120.0);
+        let mut close_clicked = false;
+        let mut apply_to_session_clicked = false;
+        let mut reset_defaults_clicked = false;
+
+        let modal_area = egui::Area::new(egui::Id::new("sumi_settings_modal"))
+            .order(egui::Order::Foreground)
+            .fade_in(false)
+            .default_size(target_rect.size())
+            .fixed_pos(target_rect.min)
+            .show(ui.ctx(), |ui| {
+                Frame::new()
+                    .fill(Color32::from_rgb(17, 22, 33))
+                    .corner_radius(CornerRadius::same(8))
+                    .stroke(Stroke::new(1.5, Color32::from_rgb(129, 199, 132)))
+                    .inner_margin(Margin::symmetric(14, 12))
+                    .show(ui, |ui| {
+                        ui.set_width((modal_w - 28.0).max(180.0));
+                        ui.set_max_height((target_rect.height() - 24.0).max(120.0));
+
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("GLOBAL WORKSTATION SETTINGS & CANDLE PALETTES (R19)")
+                                    .monospace()
+                                    .strong()
+                                    .size(12.0)
+                                    .color(Color32::WHITE),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("Close (Esc)").clicked() {
+                                    close_clicked = true;
+                                }
+                            });
+                        });
+                        ui.separator();
+
+                        egui::ScrollArea::vertical()
+                            .id_salt("sumi_settings_scroll")
+                            .max_height(scroll_max_h)
+                            .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+
+                                // 1. Candlestick & Volume Color Palette
+                                Frame::new()
+                                    .fill(Color32::from_rgb(13, 17, 26))
+                                    .corner_radius(CornerRadius::same(4))
+                                    .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                                    .inner_margin(Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(ui.available_width());
+                                        ui.label(
+                                            RichText::new("1. CANDLESTICK & VOLUME COLOR PALETTE")
+                                                .monospace()
+                                                .strong()
+                                                .size(10.0)
+                                                .color(Color32::from_rgb(129, 199, 132)),
+                                        );
+                                        ui.horizontal_wrapped(|ui| {
+                                            for pal in CandlePalettePreset::ALL {
+                                                let [br, bg, bb] = pal.bull_rgb();
+                                                let [sr, sg, sb] = pal.bear_rgb();
+                                                let is_sel = self.settings.candle_palette == pal;
+                                                let resp = ui.selectable_label(
+                                                    is_sel,
+                                                    RichText::new(pal.short_label())
+                                                        .monospace()
+                                                        .strong()
+                                                        .size(10.0)
+                                                        .color(Color32::from_rgb(br, bg, bb)),
+                                                );
+                                                if resp.clicked() {
+                                                    self.settings.candle_palette = pal;
+                                                }
+                                                let swatch = Rect::from_min_size(
+                                                    Pos2::new(
+                                                        ui.cursor().min.x,
+                                                        ui.cursor().min.y + 4.0,
+                                                    ),
+                                                    Vec2::new(10.0, 10.0),
+                                                );
+                                                let (_, _) = ui.allocate_exact_size(
+                                                    Vec2::new(12.0, 16.0),
+                                                    egui::Sense::hover(),
+                                                );
+                                                ui.painter().rect_filled(
+                                                    swatch,
+                                                    2.0,
+                                                    Color32::from_rgb(sr, sg, sb),
+                                                );
+                                            }
+                                        });
+                                    });
+
+                                // 2. Market Microstructure, Capital & Friction Defaults
+                                Frame::new()
+                                    .fill(Color32::from_rgb(13, 17, 26))
+                                    .corner_radius(CornerRadius::same(4))
+                                    .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                                    .inner_margin(Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(ui.available_width());
+                                        ui.label(
+                                            RichText::new(
+                                                "2. DEFAULT VENUE, CAPITAL, FRICTION & RISK BUDGET",
+                                            )
+                                            .monospace()
+                                            .strong()
+                                            .size(10.0)
+                                            .color(Color32::from_rgb(125, 211, 252)),
+                                        );
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label(
+                                                RichText::new("Default Venue:")
+                                                    .monospace()
+                                                    .size(9.6)
+                                                    .color(palette::TEXT_MUTED),
+                                            );
+                                            if ui
+                                                .selectable_label(
+                                                    self.settings.default_venue_override.is_none(),
+                                                    "Auto-Infer",
+                                                )
+                                                .clicked()
+                                            {
+                                                self.settings.default_venue_override = None;
+                                                self.data_audit_cache = None;
+                                            }
+                                            for v in ExchangeVenue::ALL {
+                                                if ui
+                                                    .selectable_label(
+                                                        self.settings.default_venue_override
+                                                            == Some(v),
+                                                        v.short_label(),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    self.settings.default_venue_override = Some(v);
+                                                    self.data_audit_cache = None;
+                                                }
+                                            }
+                                        });
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label(
+                                                RichText::new("VN Price Unit:")
+                                                    .monospace()
+                                                    .size(9.6)
+                                                    .color(palette::TEXT_MUTED),
+                                            );
+                                            for u in VnPriceUnit::ALL {
+                                                if ui
+                                                    .selectable_label(
+                                                        self.settings.default_vn_price_unit == u,
+                                                        u.short_label(),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    self.settings.default_vn_price_unit = u;
+                                                }
+                                            }
+                                        });
+                                        egui::Grid::new("sumi_settings_numeric_grid")
+                                            .num_columns(4)
+                                            .spacing([10.0, 5.0])
+                                            .show(ui, |ui| {
+                                                ui.label(
+                                                    RichText::new("Initial Capital")
+                                                        .monospace()
+                                                        .size(9.5),
+                                                );
+                                                ui.add(
+                                                    egui::DragValue::new(
+                                                        &mut self.settings.default_initial_capital,
+                                                    )
+                                                    .range(1_000.0..=1.0e12)
+                                                    .speed(1_000.0),
+                                                );
+                                                ui.label(
+                                                    RichText::new("Risk / Trade (%)")
+                                                        .monospace()
+                                                        .size(9.5),
+                                                );
+                                                ui.add(
+                                                    egui::DragValue::new(
+                                                        &mut self.settings.default_risk_per_trade_pct,
+                                                    )
+                                                    .range(0.05..=25.0)
+                                                    .speed(0.05)
+                                                    .fixed_decimals(2),
+                                                );
+                                                ui.end_row();
+
+                                                ui.label(
+                                                    RichText::new("Commission (bps)")
+                                                        .monospace()
+                                                        .size(9.5),
+                                                );
+                                                ui.add(
+                                                    egui::DragValue::new(
+                                                        &mut self.settings.default_commission_bps,
+                                                    )
+                                                    .range(0.0..=500.0)
+                                                    .speed(0.5)
+                                                    .fixed_decimals(1),
+                                                );
+                                                ui.label(
+                                                    RichText::new("VN Sell Tax (bps)")
+                                                        .monospace()
+                                                        .size(9.5),
+                                                );
+                                                ui.add(
+                                                    egui::DragValue::new(
+                                                        &mut self.settings.default_tax_sell_bps,
+                                                    )
+                                                    .range(0.0..=500.0)
+                                                    .speed(0.5)
+                                                    .fixed_decimals(1),
+                                                );
+                                                ui.end_row();
+
+                                                ui.label(
+                                                    RichText::new("Slippage (bps)")
+                                                        .monospace()
+                                                        .size(9.5),
+                                                );
+                                                ui.add(
+                                                    egui::DragValue::new(
+                                                        &mut self.settings.default_slippage_bps,
+                                                    )
+                                                    .range(0.0..=500.0)
+                                                    .speed(0.5)
+                                                    .fixed_decimals(1),
+                                                );
+                                                ui.label(
+                                                    RichText::new("Auto-Snapshot")
+                                                        .monospace()
+                                                        .size(9.5),
+                                                );
+                                                ui.horizontal(|ui| {
+                                                    for mins in
+                                                        WorkstationSettings::VALID_AUTO_SNAPSHOT_MINS
+                                                    {
+                                                        let lbl = if mins == 0 {
+                                                            "Manual".to_owned()
+                                                        } else {
+                                                            format!("{mins}m")
+                                                        };
+                                                        if ui
+                                                            .selectable_label(
+                                                                self.settings
+                                                                    .auto_snapshot_interval_mins
+                                                                    == mins,
+                                                                lbl,
+                                                            )
+                                                            .clicked()
+                                                        {
+                                                            self.settings
+                                                                .auto_snapshot_interval_mins = mins;
+                                                        }
+                                                    }
+                                                });
+                                                ui.end_row();
+                                            });
+                                        if ui
+                                            .checkbox(
+                                                &mut self.settings.enforce_vn_t2_lot_lock,
+                                                "Enforce VSD T+2 (13:00 ICT) FIFO Settled-Shares Sell Lock on HOSE/HNX/UPCOM",
+                                            )
+                                            .changed()
+                                        {
+                                            self.sync_trading_settlement_rules();
+                                        }
+                                    });
+
+                                ui.horizontal_wrapped(|ui| {
+                                    if ui
+                                        .button(
+                                            RichText::new(
+                                                "Apply Defaults to Active Session, Planner & Backtest",
+                                            )
+                                            .monospace()
+                                            .strong()
+                                            .size(10.0)
+                                            .color(palette::BULLISH),
+                                        )
+                                        .clicked()
+                                    {
+                                        apply_to_session_clicked = true;
+                                    }
+                                    if ui
+                                        .button(
+                                            RichText::new("Reset to Factory Defaults")
+                                                .monospace()
+                                                .size(10.0),
+                                        )
+                                        .clicked()
+                                    {
+                                        reset_defaults_clicked = true;
+                                    }
+                                });
+                            });
+                    });
+            });
+
+        self.last_settings_modal_rect = Some(modal_area.response.rect);
+        let clicked_outside = scrim_resp.clicked()
+            && !modal_area
+                .response
+                .rect
+                .contains(scrim_resp.interact_pointer_pos().unwrap_or(Pos2::ZERO));
+        if apply_to_session_clicked {
+            self.apply_settings_defaults_to_active_sessions();
+        }
+        if reset_defaults_clicked {
+            self.reset_workstation_settings_to_default();
+        }
+        if close_clicked || clicked_outside {
+            self.show_settings_modal = false;
+            self.last_settings_modal_rect = None;
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn data_audit_modal_rect(vp: egui::Rect) -> egui::Rect {
+        let max_w = (vp.width() - 20.0).max(240.0);
+        let max_h = (vp.height() - 20.0).max(240.0);
+        let w = (vp.width() - 64.0).clamp(420.0, 780.0).min(max_w);
+        let top = vp.top() + (vp.height() * 0.05).clamp(14.0, 36.0);
+        let h = (vp.bottom() - top - 18.0).clamp(260.0, 700.0).min(max_h);
+        egui::Rect::from_min_size(
+            egui::Pos2::new(vp.center().x - w * 0.5, top),
+            egui::vec2(w, h),
+        )
+    }
+
+    fn render_data_audit_modal(&mut self, ui: &mut egui::Ui) {
+        let esc = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        if esc {
+            self.show_data_audit_modal = false;
+            self.last_data_audit_modal_rect = None;
+            ui.ctx().request_repaint();
+            return;
+        }
+
+        let vp_rect = ui.input(|i| i.viewport_rect());
+        let target_rect = Self::data_audit_modal_rect(vp_rect);
+        let scrim_resp = egui::Area::new(egui::Id::new("sumi_data_audit_scrim"))
+            .order(egui::Order::Middle)
+            .fade_in(false)
+            .fixed_pos(vp_rect.min)
+            .show(ui.ctx(), |ui| {
+                let (rect, resp) =
+                    ui.allocate_exact_size(vp_rect.size(), egui::Sense::click_and_drag());
+                ui.painter()
+                    .rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(6, 9, 15, 192));
+                resp
+            })
+            .inner;
+
+        let (rep_clone, uni_clone) = {
+            let (r, u) = self.ensure_data_audit_synced();
+            (r.clone(), u.clone())
+        };
+        let modal_w = target_rect.width();
+        let scroll_max_h = (target_rect.height() - 58.0).max(120.0);
+        let mut close_clicked = false;
+        let mut cafef_toggle = self.import_cafef_split_aware;
+
+        let modal_area = egui::Area::new(egui::Id::new("sumi_data_audit_modal"))
+            .order(egui::Order::Foreground)
+            .fade_in(false)
+            .default_size(target_rect.size())
+            .fixed_pos(target_rect.min)
+            .show(ui.ctx(), |ui| {
+                Frame::new()
+                    .fill(Color32::from_rgb(17, 22, 33))
+                    .corner_radius(CornerRadius::same(8))
+                    .stroke(Stroke::new(1.5, Color32::from_rgb(79, 195, 247)))
+                    .inner_margin(Margin::symmetric(14, 12))
+                    .show(ui, |ui| {
+                        ui.set_width((modal_w - 28.0).max(180.0));
+                        ui.set_max_height((target_rect.height() - 24.0).max(120.0));
+
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "DATA READINESS, VN HOLIDAY GAPS & CAFEF SPLIT AUDIT — {} · {}",
+                                    rep_clone.symbol,
+                                    rep_clone.timeframe.label()
+                                ))
+                                .monospace()
+                                .strong()
+                                .size(11.8)
+                                .color(Color32::WHITE),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("Close (Esc)").clicked() {
+                                    close_clicked = true;
+                                }
+                            });
+                        });
+                        ui.separator();
+
+                        egui::ScrollArea::vertical()
+                            .id_salt("sumi_data_audit_scroll")
+                            .max_height(scroll_max_h)
+                            .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+
+                                // 1. Universe Readiness Summary
+                                Frame::new()
+                                    .fill(Color32::from_rgb(13, 17, 26))
+                                    .corner_radius(CornerRadius::same(4))
+                                    .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                                    .inner_margin(Margin::symmetric(10, 7))
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(ui.available_width());
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "UNIVERSE READINESS ({} / {} feeds ready)",
+                                                    uni_clone.symbols_ready,
+                                                    uni_clone.symbols_total
+                                                ))
+                                                .monospace()
+                                                .strong()
+                                                .size(10.0)
+                                                .color(Color32::from_rgb(79, 195, 247)),
+                                            );
+                                            let uni_st_col = match uni_clone.status {
+                                                DataReadinessStatus::Ready => palette::BULLISH,
+                                                DataReadinessStatus::PartialWarning => {
+                                                    palette::ALERT_ARMED_AMBER
+                                                }
+                                                DataReadinessStatus::Empty => palette::BEARISH,
+                                            };
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "[{}]",
+                                                    uni_clone.status.short_label()
+                                                ))
+                                                .monospace()
+                                                .strong()
+                                                .size(9.8)
+                                                .color(uni_st_col),
+                                            );
+                                            let u_span = match (
+                                                &uni_clone.earliest_date,
+                                                &uni_clone.latest_date,
+                                            ) {
+                                                (Some(a), Some(b)) => format!("{a}..{b}"),
+                                                _ => "empty".to_owned(),
+                                            };
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "Total Bars: {} ({u_span}) · Calendar: VIETNAM_HOLIDAYS_V1 ({} dates, 2018–2030)",
+                                                    uni_clone.total_candles,
+                                                    VIETNAM_HOLIDAYS_V1.len()
+                                                ))
+                                                .monospace()
+                                                .size(9.5)
+                                                .color(palette::TEXT_MUTED),
+                                            );
+                                        });
+                                    });
+
+                                // 2. Active Instrument Coverage & Quality Counters
+                                let st_col = match rep_clone.status {
+                                    DataReadinessStatus::Ready => palette::BULLISH,
+                                    DataReadinessStatus::PartialWarning => {
+                                        palette::ALERT_ARMED_AMBER
+                                    }
+                                    DataReadinessStatus::Empty => palette::BEARISH,
+                                };
+                                Frame::new()
+                                    .fill(Color32::from_rgb(13, 17, 26))
+                                    .corner_radius(CornerRadius::same(4))
+                                    .stroke(Stroke::new(1.0, st_col.gamma_multiply(0.65)))
+                                    .inner_margin(Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(ui.available_width());
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "[{}] {} ({})",
+                                                    rep_clone.status.short_label(),
+                                                    rep_clone.symbol,
+                                                    rep_clone.venue.short_label()
+                                                ))
+                                                .monospace()
+                                                .strong()
+                                                .size(10.5)
+                                                .color(st_col),
+                                            );
+                                            let span_lbl = match (
+                                                &rep_clone.earliest_date,
+                                                &rep_clone.latest_date,
+                                            ) {
+                                                (Some(a), Some(b)) => format!("{a} .. {b}"),
+                                                _ => "empty".to_owned(),
+                                            };
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "Bars: {} / {} expected · Coverage {:.2}% · Span [{span_lbl}]",
+                                                    rep_clone.bar_count,
+                                                    rep_clone.expected_sessions,
+                                                    rep_clone.coverage_pct
+                                                ))
+                                                .monospace()
+                                                .size(9.6)
+                                                .color(palette::TEXT_PRIMARY),
+                                            );
+                                        });
+                                        egui::Grid::new("sumi_data_audit_counters")
+                                            .num_columns(4)
+                                            .striped(true)
+                                            .spacing([12.0, 4.0])
+                                            .show(ui, |ui| {
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "Missing Sessions: {}",
+                                                        rep_clone.missing_session_count
+                                                    ))
+                                                    .monospace()
+                                                    .size(9.4),
+                                                );
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "Holiday/Wknd Bars: {}",
+                                                        rep_clone.holiday_or_weekend_bar_count
+                                                    ))
+                                                    .monospace()
+                                                    .size(9.4),
+                                                );
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "Extreme Range (>25%): {}",
+                                                        rep_clone.extreme_range_bar_count
+                                                    ))
+                                                    .monospace()
+                                                    .size(9.4),
+                                                );
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "Band Breach / Split Hint: {}",
+                                                        rep_clone.band_exceedance_split_hint_count
+                                                    ))
+                                                    .monospace()
+                                                    .size(9.4),
+                                                );
+                                                ui.end_row();
+
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "RVOL >= 10x Spikes: {}",
+                                                        rep_clone.volume_spike_10x_count
+                                                    ))
+                                                    .monospace()
+                                                    .size(9.4),
+                                                );
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "Zero-Vol Bars (Info): {}",
+                                                        rep_clone.zero_volume_count
+                                                    ))
+                                                    .monospace()
+                                                    .size(9.4),
+                                                );
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "Loader Repaired / Split Norm: {}",
+                                                        rep_clone.loader_repaired_envelope_rows
+                                                    ))
+                                                    .monospace()
+                                                    .size(9.4)
+                                                    .color(Color32::from_rgb(129, 199, 132)),
+                                                );
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "Deduped / Non-Mono: {} / {}",
+                                                        rep_clone.loader_deduplicated_rows,
+                                                        rep_clone.non_monotonic_count
+                                                    ))
+                                                    .monospace()
+                                                    .size(9.4),
+                                                );
+                                                ui.end_row();
+                                            });
+                                        ui.checkbox(
+                                            &mut cafef_toggle,
+                                            "Auto-normalize CafeF SolieuGD 4-decimal post-split rounding on CSV/JSON file import (<= 6 bps & <= 25 VND)",
+                                        );
+                                    });
+
+                                if !rep_clone.missing_session_samples.is_empty() {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "Missing Trading Dates (first {}): {}",
+                                            rep_clone.missing_session_samples.len(),
+                                            rep_clone.missing_session_samples.join(", ")
+                                        ))
+                                        .monospace()
+                                        .size(9.2)
+                                        .color(palette::ALERT_ARMED_AMBER),
+                                    );
+                                }
+                                if !rep_clone.anomalies.is_empty() {
+                                    ui.separator();
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "ANOMALY & OUTLIER LOG ({} samples)",
+                                            rep_clone.anomalies.len()
+                                        ))
+                                        .monospace()
+                                        .strong()
+                                        .size(9.6)
+                                        .color(palette::TEXT_PRIMARY),
+                                    );
+                                    for anom in rep_clone.anomalies.iter().take(12) {
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "• [{}] {} — {}",
+                                                anom.date_label, anom.kind, anom.detail
+                                            ))
+                                            .monospace()
+                                            .size(9.1)
+                                            .color(palette::TEXT_MUTED),
+                                        );
+                                    }
+                                }
+
+                                if !uni_clone.feed_audits.is_empty() {
+                                    Frame::new()
+                                        .fill(Color32::from_rgb(13, 17, 26))
+                                        .corner_radius(CornerRadius::same(4))
+                                        .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+                                        .inner_margin(Margin::symmetric(10, 7))
+                                        .show(ui, |ui| {
+                                            ui.set_min_width(ui.available_width());
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "UNIVERSE FEED MATRIX ({} feeds)",
+                                                    uni_clone.feed_audits.len()
+                                                ))
+                                                .monospace()
+                                                .strong()
+                                                .size(9.6)
+                                                .color(Color32::from_rgb(79, 195, 247)),
+                                            );
+                                            egui::Grid::new("sumi_data_audit_universe_matrix")
+                                                .num_columns(6)
+                                                .striped(true)
+                                                .spacing([14.0, 3.0])
+                                                .show(ui, |ui| {
+                                                    for hdr in [
+                                                        "Symbol",
+                                                        "Venue",
+                                                        "TF",
+                                                        "Bars",
+                                                        "Coverage / Missing",
+                                                        "Status",
+                                                    ] {
+                                                        ui.label(
+                                                            RichText::new(hdr)
+                                                                .monospace()
+                                                                .strong()
+                                                                .size(9.0)
+                                                                .color(palette::TEXT_MUTED),
+                                                        );
+                                                    }
+                                                    ui.end_row();
+                                                    for row in &uni_clone.feed_audits {
+                                                        let r_col = match row.status {
+                                                            DataReadinessStatus::Ready => {
+                                                                palette::BULLISH
+                                                            }
+                                                            DataReadinessStatus::PartialWarning => {
+                                                                palette::ALERT_ARMED_AMBER
+                                                            }
+                                                            DataReadinessStatus::Empty => {
+                                                                palette::BEARISH
+                                                            }
+                                                        };
+                                                        ui.label(
+                                                            RichText::new(&row.symbol)
+                                                                .monospace()
+                                                                .strong()
+                                                                .size(9.1)
+                                                                .color(palette::TEXT_PRIMARY),
+                                                        );
+                                                        ui.label(
+                                                            RichText::new(row.venue.short_label())
+                                                                .monospace()
+                                                                .size(9.1)
+                                                                .color(palette::TEXT_MUTED),
+                                                        );
+                                                        ui.label(
+                                                            RichText::new(row.timeframe.label())
+                                                                .monospace()
+                                                                .size(9.1)
+                                                                .color(palette::TEXT_MUTED),
+                                                        );
+                                                        ui.label(
+                                                            RichText::new(format!(
+                                                                "{}",
+                                                                row.bar_count
+                                                            ))
+                                                            .monospace()
+                                                            .size(9.1),
+                                                        );
+                                                        ui.label(
+                                                            RichText::new(format!(
+                                                                "{:.2}% ({} gaps)",
+                                                                row.coverage_pct,
+                                                                row.missing_session_count
+                                                            ))
+                                                            .monospace()
+                                                            .size(9.1),
+                                                        );
+                                                        ui.label(
+                                                            RichText::new(format!(
+                                                                "[{}]",
+                                                                row.status.short_label()
+                                                            ))
+                                                            .monospace()
+                                                            .strong()
+                                                            .size(9.0)
+                                                            .color(r_col),
+                                                        );
+                                                        ui.end_row();
+                                                    }
+                                                });
+                                        });
+                                }
+                            });
+                    });
+            });
+
+        self.import_cafef_split_aware = cafef_toggle;
+        self.last_data_audit_modal_rect = Some(modal_area.response.rect);
+        let clicked_outside = scrim_resp.clicked()
+            && !modal_area
+                .response
+                .rect
+                .contains(scrim_resp.interact_pointer_pos().unwrap_or(Pos2::ZERO));
+        if close_clicked || clicked_outside {
+            self.show_data_audit_modal = false;
+            self.last_data_audit_modal_rect = None;
+        }
+    }
+
     fn render_advanced_analytics_subtab(&mut self, ui: &mut egui::Ui) {
         let mut switch_to_ms_overlay = false;
         let mut next_phase_mode: Option<MultiPhaseSplitMode> = None;
@@ -21245,8 +22818,20 @@ impl SumiWorkstationApp {
                                             });
                                         ui.checkbox(show_bands, "Show ±1σ / ±2σ Bands");
                                     }
-                                    DrawingGeometry::TrendLine { start, end }
-                                    | DrawingGeometry::Ray {
+                                    DrawingGeometry::TrendLine { start, end } => {
+                                        render_two_anchor_drag_grid(ui, start, end, max_bar);
+                                        ui.horizontal(|ui| {
+                                            ui.checkbox(
+                                                &mut st.draft.trend_extend_left,
+                                                "Extend Left (-∞)",
+                                            );
+                                            ui.checkbox(
+                                                &mut st.draft.trend_extend_right,
+                                                "Extend Right (+∞)",
+                                            );
+                                        });
+                                    }
+                                    DrawingGeometry::Ray {
                                         origin: start,
                                         through: end,
                                     }
@@ -21269,6 +22854,115 @@ impl SumiWorkstationApp {
                                             }
                                             ui.checkbox(extend_right, "Extend Right");
                                         });
+                                        ui.separator();
+                                        ui.label(
+                                            RichText::new("FIBONACCI RATIOS (1..16)")
+                                                .monospace()
+                                                .strong()
+                                                .size(9.0)
+                                                .color(palette::TEXT_MUTED),
+                                        );
+                                        ui.horizontal_wrapped(|ui| {
+                                            let is_std = st.draft.custom_fib_levels.is_none();
+                                            let is_ote = st
+                                                .draft
+                                                .custom_fib_levels
+                                                .as_deref()
+                                                .is_some_and(|l| l == FIBONACCI_OTE_EXT_RATIOS);
+                                            let is_full = st
+                                                .draft
+                                                .custom_fib_levels
+                                                .as_deref()
+                                                .is_some_and(|l| l == FIBONACCI_FULL_EXT_RATIOS);
+                                            if ui.selectable_label(is_std, "Std 7").clicked() {
+                                                st.draft.custom_fib_levels = None;
+                                            }
+                                            if ui.selectable_label(is_ote, "ICT OTE 9").clicked() {
+                                                st.draft.custom_fib_levels =
+                                                    Some(FIBONACCI_OTE_EXT_RATIOS.to_vec());
+                                            }
+                                            if ui.selectable_label(is_full, "Full 13").clicked() {
+                                                st.draft.custom_fib_levels =
+                                                    Some(FIBONACCI_FULL_EXT_RATIOS.to_vec());
+                                            }
+                                        });
+                                        let mut cur_levels: Vec<f64> = st
+                                            .draft
+                                            .custom_fib_levels
+                                            .clone()
+                                            .unwrap_or_else(|| FIBONACCI_RATIOS.to_vec());
+                                        let mut changed_lvls = false;
+                                        ui.horizontal_wrapped(|ui| {
+                                            for &cand in &FIBONACCI_FULL_EXT_RATIOS {
+                                                let active_pos = cur_levels
+                                                    .iter()
+                                                    .position(|&x| (x - cand).abs() < 1e-4);
+                                                let lbl = if (cand - 0.0).abs() < 1e-6
+                                                    || (cand - 0.5).abs() < 1e-6
+                                                    || (cand - 1.0).abs() < 1e-6
+                                                {
+                                                    format!("{cand:.1}")
+                                                } else {
+                                                    format!("{cand:.3}")
+                                                };
+                                                if ui
+                                                    .selectable_label(active_pos.is_some(), lbl)
+                                                    .clicked()
+                                                {
+                                                    if let Some(p) = active_pos {
+                                                        if cur_levels.len() > 1 {
+                                                            cur_levels.remove(p);
+                                                            changed_lvls = true;
+                                                        }
+                                                    } else if cur_levels.len()
+                                                        < MAX_CUSTOM_FIB_LEVELS
+                                                    {
+                                                        cur_levels.push(cand);
+                                                        changed_lvls = true;
+                                                    }
+                                                }
+                                            }
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.add(
+                                                egui::TextEdit::singleline(
+                                                    &mut self.fib_custom_ratio_input,
+                                                )
+                                                .desired_width(64.0)
+                                                .hint_text("e.g. 0.705")
+                                                .font(egui::FontId::monospace(9.2)),
+                                            );
+                                            if ui
+                                                .add_enabled(
+                                                    cur_levels.len() < MAX_CUSTOM_FIB_LEVELS,
+                                                    egui::Button::new(
+                                                        RichText::new("+ Ratio")
+                                                            .monospace()
+                                                            .size(9.0),
+                                                    ),
+                                                )
+                                                .clicked()
+                                                && let Ok(parsed) =
+                                                    self.fib_custom_ratio_input.trim().parse::<f64>()
+                                                && let Some(clean_one) =
+                                                    sanitize_custom_fib_levels(&[parsed])
+                                            {
+                                                cur_levels.extend(clean_one);
+                                                changed_lvls = true;
+                                                self.fib_custom_ratio_input.clear();
+                                            }
+                                        });
+                                        if changed_lvls
+                                            && let Some(clean) =
+                                                sanitize_custom_fib_levels(&cur_levels)
+                                        {
+                                            st.draft.custom_fib_levels =
+                                                if clean.as_slice() == FIBONACCI_RATIOS {
+                                                    None
+                                                } else {
+                                                    Some(clean)
+                                                };
+                                        }
                                     }
                                     DrawingGeometry::FixedRangeVolumeProfile {
                                         start,
@@ -21368,6 +23062,53 @@ impl SumiWorkstationApp {
                                         }
                                         if ui.small_button("Sync -> Risk Planner").clicked() {
                                             open_planner_req = true;
+                                        }
+                                    }
+                                    DrawingGeometry::TextNote { anchor, text } => {
+                                        egui::Grid::new("insp_textnote_grid")
+                                            .num_columns(2)
+                                            .spacing([6.0, 3.0])
+                                            .show(ui, |ui| {
+                                                ui.label(
+                                                    RichText::new("Anchor Bar")
+                                                        .monospace()
+                                                        .size(9.2),
+                                                );
+                                                ui.add(
+                                                    egui::DragValue::new(&mut anchor.bar_index)
+                                                        .range(-50.0..=max_bar)
+                                                        .speed(1.0),
+                                                );
+                                                ui.end_row();
+                                                ui.label(
+                                                    RichText::new("Anchor Price")
+                                                        .monospace()
+                                                        .size(9.2),
+                                                );
+                                                ui.add(
+                                                    egui::DragValue::new(&mut anchor.value)
+                                                        .speed(0.1)
+                                                        .max_decimals(4),
+                                                );
+                                                ui.end_row();
+                                            });
+                                        let char_len = text.chars().count();
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "Note Text ({char_len}/{MAX_TEXT_NOTE_CHARS} chars)"
+                                            ))
+                                            .monospace()
+                                            .size(9.0)
+                                            .color(palette::TEXT_MUTED),
+                                        );
+                                        let resp = ui.add(
+                                            egui::TextEdit::multiline(text)
+                                                .desired_rows(3)
+                                                .desired_width(f32::INFINITY)
+                                                .font(egui::FontId::monospace(9.5)),
+                                        );
+                                        if resp.changed() && text.chars().count() > MAX_TEXT_NOTE_CHARS {
+                                            *text = sanitize_text_note_content(text);
                                         }
                                     }
                                 }
@@ -22610,10 +24351,13 @@ impl OffscreenWgpuHarness {
                 for id in &full_out.textures_delta.free {
                     renderer.free_texture(id);
                 }
+                drop(renderer);
+                let mut discarded = full_out;
+                discarded.textures_delta.clear();
             }
         }
 
-        let full_out = final_output.ok_or_else(|| "missing final egui output".to_owned())?;
+        let mut full_out = final_output.ok_or_else(|| "missing final egui output".to_owned())?;
         let primitives = self
             .ctx
             .tessellate(full_out.shapes, full_out.pixels_per_point);
@@ -22714,6 +24458,7 @@ impl OffscreenWgpuHarness {
                 renderer.free_texture(id);
             }
         }
+        full_out.textures_delta.clear();
 
         let buffer_slice = readback_buffer.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -22833,7 +24578,80 @@ impl SumiWorkstationApp {
         Ok(())
     }
 
-    /// Executes all 3 Retina (`2.0x`) Metal/`wgpu` verification scenarios for `"r04"`..=`"r15"`
+    /// Captures the live workstation state (candlesticks, sub-panes, overlays, top-layer drawings)
+    /// into a `2.0x` Retina PNG at `output_path` via [`OffscreenWgpuHarness`] (`Milestone R19 / C4`).
+    pub fn export_workstation_png_to_path(
+        &mut self,
+        output_path: &str,
+        logical_width: u32,
+        logical_height: u32,
+    ) -> Result<(u32, u32), String> {
+        let trimmed = output_path.trim();
+        if trimmed.is_empty() {
+            return Err("PNG export path cannot be empty".to_owned());
+        }
+        let harness = OffscreenWgpuHarness::new()?;
+        let saved_toast = self.last_png_export_status.take();
+        let saved_pending = std::mem::replace(&mut self.pending_png_export, false);
+        let saved_in_export = std::mem::replace(&mut self.in_offscreen_png_export, true);
+        let lw = logical_width.clamp(320, 3840);
+        let lh = logical_height.clamp(240, 2400);
+        let capture_res = harness.capture_app_frame(self, lw, lh, 4);
+        self.pending_png_export = saved_pending;
+        self.in_offscreen_png_export = saved_in_export;
+        let image = match capture_res {
+            Ok(img) => img,
+            Err(err) => {
+                self.last_png_export_status = Some((true, format!("PNG export failed: {err}")));
+                return Err(err);
+            }
+        };
+        if let Some(parent) = std::path::Path::new(trimmed).parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)
+                .map_err(|err| format!("failed to create export directory: {err}"))?;
+        }
+        Self::write_color_image_png(trimmed, &image).map_err(|err| {
+            let msg = format!("failed to write PNG '{trimmed}': {err}");
+            self.last_png_export_status = Some((true, msg.clone()));
+            msg
+        })?;
+        let px_w = image.width() as u32;
+        let px_h = image.height() as u32;
+        let _ = saved_toast;
+        self.last_png_export_status = Some((false, format!("PNG {px_w}x{px_h} -> {trimmed}")));
+        Ok((px_w, px_h))
+    }
+
+    /// Exports the active workstation chart & drawings into `exports/sumi_<symbol>_<tf>_<seq>.png` (`2.0x` Retina).
+    pub fn trigger_quick_png_export(
+        &mut self,
+        logical_width: u32,
+        logical_height: u32,
+    ) -> Result<String, String> {
+        self.png_export_seq = self.png_export_seq.saturating_add(1);
+        let clean_sym: String = self
+            .symbol
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+            .collect();
+        let sym_part = if clean_sym.is_empty() {
+            "CHART"
+        } else {
+            clean_sym.as_str()
+        };
+        let path = format!(
+            "exports/sumi_{}_{}_{:03}.png",
+            sym_part.to_ascii_lowercase(),
+            self.active_timeframe.label().to_ascii_lowercase(),
+            self.png_export_seq
+        );
+        let _ = self.export_workstation_png_to_path(&path, logical_width, logical_height)?;
+        Ok(path)
+    }
+
+    /// Executes all 3 Retina (`2.0x`) Metal/`wgpu` verification scenarios for `"r04"`..=`"r19"`
     /// offscreen in one headless GPU session (zero windows, zero Dock icons, zero occlusion stalls).
     pub fn run_offscreen_wgpu_capture_batch(batch_name: &str) -> Result<(), String> {
         if !matches!(
@@ -22853,9 +24671,10 @@ impl SumiWorkstationApp {
                 | "r16"
                 | "r17"
                 | "r18"
+                | "r19"
         ) {
             return Err(format!(
-                "unknown SUMI_CAPTURE_BATCH '{batch_name}' (expected 'r04'..'r18')"
+                "unknown SUMI_CAPTURE_BATCH '{batch_name}' (expected 'r04'..'r19')"
             ));
         }
         std::fs::create_dir_all("docs/evidence")
@@ -22881,6 +24700,7 @@ impl SumiWorkstationApp {
                 "r16" => app.apply_r16_batch_step_state(step),
                 "r17" => app.apply_r17_batch_step_state(step),
                 "r18" => app.apply_r18_batch_step_state(step),
+                "r19" => app.apply_r19_batch_step_state(step),
                 _ => unreachable!(),
             };
             let image = harness.capture_app_frame(&mut app, logical_w, logical_h, 6)?;
@@ -25911,6 +27731,228 @@ impl SumiWorkstationApp {
         }
     }
 
+    fn apply_r19_batch_step_state(
+        &mut self,
+        step: usize,
+    ) -> (u32, u32, &'static str, &'static str) {
+        let builtins = builtin_workspace_templates();
+        match step {
+            0 => {
+                // Step 1 (`C1 + C4`): Hollow Bullish Candlesticks (`#26A69A` 1.25px 4-edge outline),
+                // Multi-line `TextNote` Callout Card, Dual-End Extended `TrendLine` (`-∞..+∞`),
+                // Custom 9-Level ICT `OTE` Fibonacci Retracement & Transactional Drawing Inspector!
+                self.apply_workspace_template(&builtins[0]);
+                self.exit_replay();
+                self.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+                let _ = self.set_timeframe(Timeframe::D1);
+                self.settings.candle_palette = CandlePalettePreset::HollowBullish;
+                self.show_scanner_dock = false;
+                self.show_trading_panel = false;
+                self.show_alerts_panel = false;
+                self.show_strategy_panel = false;
+                self.show_journal_panel = false;
+                self.show_equity_pane = false;
+                self.show_settings_modal = false;
+                self.show_data_audit_modal = false;
+
+                self.indicators = IndicatorConfig {
+                    show_sma: true,
+                    sma_period: 20,
+                    show_ema: true,
+                    ema_period: 50,
+                    show_vwap: false,
+                    show_ichimoku: false,
+                    show_rsi: true,
+                    show_cvd: false,
+                    ..IndicatorConfig::default()
+                };
+                self.viewport.reset_pane_stretches();
+                self.viewport.rsi_stretch = 0.95;
+                self.sync_indicators_and_benchmarks();
+
+                let n = self.candles.len();
+                let i_tl0 = n.saturating_sub(42);
+                let i_tl1 = n.saturating_sub(18);
+                let i_fib0 = n.saturating_sub(34);
+                let i_fib1 = n.saturating_sub(8);
+                let i_note = n.saturating_sub(22);
+
+                let mut r19_drawings = Vec::with_capacity(3);
+                // 1. Dual-extended structural TrendLine (`trend_extend_left` + `trend_extend_right`)
+                if i_tl1 < n {
+                    let mut tl = crate::drawings::Drawing::new(
+                        0,
+                        DrawingPaneTarget::Main,
+                        DrawingGeometry::TrendLine {
+                            start: DrawingAnchor::new(i_tl0 as f64, self.candles[i_tl0].low),
+                            end: DrawingAnchor::new(i_tl1 as f64, self.candles[i_tl1].low),
+                        },
+                        DrawingStyle {
+                            color: DrawingColorPreset::Cyan,
+                            line_width: 1.8,
+                            dash: LineDashStyle::Dashed,
+                            fill_opacity: 0.0,
+                        },
+                    );
+                    tl.trend_extend_left = true;
+                    tl.trend_extend_right = true;
+                    r19_drawings.push(tl);
+                }
+                // 2. Multi-line `TextNote` callout card
+                if i_note < n {
+                    r19_drawings.push(crate::drawings::Drawing::new(
+                        0,
+                        DrawingPaneTarget::Main,
+                        DrawingGeometry::TextNote {
+                            anchor: DrawingAnchor::new(
+                                i_note as f64,
+                                self.candles[i_note].high * 1.015,
+                            ),
+                            text: "FPT Institutional Note\nICT OTE 0.705 Demand + VSD T+2"
+                                .to_owned(),
+                        },
+                        DrawingStyle {
+                            color: DrawingColorPreset::AmberGold,
+                            line_width: 1.6,
+                            dash: LineDashStyle::Solid,
+                            fill_opacity: 0.18,
+                        },
+                    ));
+                }
+                // 3. Selected Custom 9-Level ICT `OTE` Fibonacci Retracement
+                let mut select_idx = None;
+                if i_fib1 < n {
+                    let lo = self.candles[i_fib0..=i_fib1]
+                        .iter()
+                        .map(|c| c.low)
+                        .fold(f64::INFINITY, f64::min);
+                    let hi = self.candles[i_fib0..=i_fib1]
+                        .iter()
+                        .map(|c| c.high)
+                        .fold(f64::NEG_INFINITY, f64::max);
+                    let mut fib = crate::drawings::Drawing::new(
+                        0,
+                        DrawingPaneTarget::Main,
+                        DrawingGeometry::FibonacciRetracement {
+                            start: DrawingAnchor::new(i_fib0 as f64, lo),
+                            end: DrawingAnchor::new(i_fib1 as f64, hi),
+                            direction: FibDirection::StartToEnd,
+                            extend_right: true,
+                        },
+                        DrawingStyle {
+                            color: DrawingColorPreset::Emerald,
+                            line_width: 1.75,
+                            dash: LineDashStyle::Solid,
+                            fill_opacity: 0.11,
+                        },
+                    );
+                    fib.custom_fib_levels = Some(FIBONACCI_OTE_EXT_RATIOS.to_vec());
+                    select_idx = Some(r19_drawings.len());
+                    r19_drawings.push(fib);
+                }
+                let _ = self.drawings.replace_all(r19_drawings, select_idx);
+                self.drawings.refresh_materialized_anchor_timestamps(
+                    0,
+                    &self.candles,
+                    self.active_timeframe,
+                );
+
+                self.show_drawing_inspector = true;
+                self.sync_drawing_inspector_draft();
+                self.viewport.time_scale.set_width(940.0);
+                self.viewport.time_scale.set_bar_spacing(13.5);
+                self.viewport.time_scale.set_right_offset(12.0);
+                self.viewport.main_price_scale.reset_auto_scale();
+                self.viewport.reset_all_oscillator_auto_scales();
+
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r19_step1_hollow_candles_textnote_custom_fib_and_inspector.png",
+                    "docs/evidence/r19_step1_hollow_candles_textnote_custom_fib_and_inspector.json",
+                )
+            }
+            1 => {
+                // Step 2 (`C1 + C2`): Okabe-Ito Colorblind-Safe Palette (`#009ADE` / `#FF8C00`),
+                // Causal Bar Replay + VSD `T+2` (`13:00 ICT`) FIFO Holding Lots (`SELLABLE` + `LOCKED T+2`)
+                // & Pre-Trade Unsettled Sell Lock Guard on `FPT` (`HOSE`)!
+                self.apply_workspace_template(&builtins[0]);
+                self.exit_replay();
+                self.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+                let _ = self.set_timeframe(Timeframe::D1);
+                self.settings.candle_palette = CandlePalettePreset::ColorblindOkabeIto;
+                self.settings.enforce_vn_t2_lot_lock = true;
+                self.settings.default_initial_capital = 500_000.0;
+                self.apply_settings_defaults_to_active_sessions();
+
+                self.show_drawing_inspector = false;
+                self.show_settings_modal = false;
+                self.show_data_audit_modal = false;
+                self.show_scanner_dock = false;
+                self.show_replay_bar = true;
+                self.show_trading_panel = true;
+                self.show_journal_panel = true;
+                self.right_dock_tab = RightDockTab::Trading;
+                self.trading_view_mode = TemplateTradingViewMode::OrderTicket;
+
+                let start_idx = self.base_candles.len().saturating_sub(35).max(20);
+                let _ = self.start_replay_at_base_index(start_idx);
+
+                // Lot #1: Buy 200 shares at T0, step forward 3 trading days -> SELLABLE!
+                self.ticket_kind = TicketOrderKind::Market;
+                self.ticket_qty_input = "200".to_owned();
+                self.ticket_sl_input.clear();
+                self.ticket_tp_input.clear();
+                let _ = self.submit_ticket_order(OrderSide::Buy);
+                let _ = self.step_replay_forward(3);
+
+                // Lot #2: Buy 300 shares at T+3, step forward 1 trading day -> LOCKED T+2!
+                self.ticket_qty_input = "300".to_owned();
+                let _ = self.submit_ticket_order(OrderSide::Buy);
+                let _ = self.step_replay_forward(1);
+
+                // Attempt to sell 400 shares (exceeds 200 settled shares while 300 remain Locked T+2) -> rejected!
+                self.ticket_qty_input = "400".to_owned();
+                let _ = self.submit_ticket_order(OrderSide::Sell);
+
+                self.viewport.time_scale.set_width(920.0);
+                self.viewport.time_scale.set_bar_spacing(12.0);
+                self.viewport.time_scale.set_right_offset(10.0);
+                self.viewport.main_price_scale.reset_auto_scale();
+
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r19_step2_okabe_ito_palette_and_vn_t2_fifo_lot_lock.png",
+                    "docs/evidence/r19_step2_okabe_ito_palette_and_vn_t2_fifo_lot_lock.json",
+                )
+            }
+            _ => {
+                // Step 3 (`C3 + C1`): `2x1` Daily/Weekly Multi-Chart Desk + Interactive `[Data Audit]` Modal
+                // showcasing 13-feed `UniverseDataReadinessSummary`, `VIETNAM_HOLIDAYS_V1` (`144` dates `2018–2030`)
+                // session coverage, outlier checks, and `CafeF SolieuGD` 4-decimal post-split normalization!
+                self.exit_replay();
+                self.apply_workspace_template(&builtins[2]); // `2x1 FPT 1D + 1W`
+                self.settings.candle_palette = CandlePalettePreset::EmeraldCrimson;
+                self.show_drawing_inspector = false;
+                self.show_trading_panel = false;
+                self.show_journal_panel = false;
+                self.show_scanner_dock = true;
+                self.scanner_tab = ScannerDockTab::Watchlist;
+                self.sync_indicators_and_benchmarks();
+                self.sync_secondary_slots();
+                self.open_data_audit_modal();
+
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r19_step3_data_readiness_vn_holidays_and_cafef_split_audit.png",
+                    "docs/evidence/r19_step3_data_readiness_vn_holidays_and_cafef_split_audit.json",
+                )
+            }
+        }
+    }
+
     fn persist_capture_artifacts(
         &self,
         screenshot_path: &str,
@@ -26025,8 +28067,9 @@ impl SumiWorkstationApp {
                     || "null".to_owned(),
                     |a| format!("\"{:016x}\"", a.manifest.manifest_digest),
                 );
+            let fifo_snap = self.active_fifo_settlement_summary();
             let json = format!(
-                "{{\n  \"symbol\": \"{}\",\n  \"timeframe\": \"{}\",\n  \"base_timeframe\": \"{}\",\n  \"data_source\": \"{}\",\n  \"available_symbols\": [{}],\n  \"base_candles\": {},\n  \"total_candles\": {},\n  \"culled_candles\": {},\n  \"rendered_candles\": {},\n  \"conflation_factor\": {},\n  \"bar_spacing\": {:.6},\n  \"right_offset\": {:.6},\n  \"scale_mode\": \"{}\",\n  \"auto_scale\": {},\n  \"pane_count\": {},\n  \"active_overlay_count\": {},\n  \"drawing_count\": {},\n  \"active_drawing_tool\": \"{}\",\n  \"selected_drawing_id\": {},\n  \"magnet_mode\": \"{}\",\n  \"replay_active\": {},\n  \"replay_status\": \"{}\",\n  \"replay_base_cursor\": {},\n  \"replay_step_unit\": \"{}\",\n  \"show_trading_panel\": {},\n  \"show_scanner_dock\": {},\n  \"show_alerts_panel\": {},\n  \"show_strategy_panel\": {},\n  \"show_journal_panel\": {},\n  \"show_equity_pane\": {},\n  \"equity_pane_source\": \"{}\",\n  \"equity_pane_active\": {},\n  \"show_vwap\": {},\n  \"show_vrvp\": {},\n  \"show_rs\": {},\n  \"show_compare_overlay\": {},\n  \"compare_benchmark\": {},\n  \"vrvp_poc_price\": {},\n  \"active_frvp_count\": {},\n  \"rs_stretch\": {:.3},\n  \"grid_layout\": \"{}\",\n  \"grid_slot_count\": {},\n  \"active_chart_slot\": {},\n  \"sync_crosshair\": {},\n  \"sync_time_range\": {},\n  \"show_ichimoku\": {},\n  \"ichimoku_active\": {},\n  \"show_cvd\": {},\n  \"cvd_reset_mode\": \"{}\",\n  \"cvd_pane_active\": {},\n  \"cvd_stretch\": {:.3},\n  \"saved_template_count\": {},\n  \"vwap_anchor_mode\": \"{}\",\n  \"show_market_profile\": {},\n  \"market_profile_active\": {},\n  \"scanner_tab\": \"{}\",\n  \"breadth_participating_count\": {},\n  \"vn30_participating_count\": {},\n  \"money_flow_buy_pct\": {:.2},\n  \"cvd_axis_format_mode\": \"{}\",\n  \"pinned_crosshair_timestamp\": {},\n  \"active_venue\": \"{}\",\n  \"journal_total_entries\": {},\n  \"journal_visible_entries\": {},\n  \"journal_discipline_pct\": {:.2},\n  \"wfo_verdict\": {},\n  \"wfo_wfe_pct\": {},\n  \"portfolio_return_pct\": {:.4},\n  \"portfolio_dd_reduction_pct\": {:.4},\n  \"show_backtest_trades\": {},\n  \"rendered_backtest_trades\": {},\n  \"backtest_preset\": {},\n  \"backtest_trade_count\": {},\n  \"backtest_return_pct\": {:.4},\n  \"backtest_max_dd_pct\": {:.4},\n  \"backtest_sharpe\": {},\n  \"backtest_robustness\": {},\n  \"command_palette_open\": {},\n  \"alert_rule_count\": {},\n  \"alert_trigger_count\": {},\n  \"active_alert_lines\": {},\n  \"rendered_alert_markers\": {},\n  \"scanner_signal_revealed\": {},\n  \"active_price_lines\": {},\n  \"rendered_fill_markers\": {},\n  \"equity\": {:.2},\n  \"net_pnl\": {:.2},\n  \"fill_count\": {},\n  \"closed_trade_count\": {},\n  \"pending_order_count\": {},\n  \"open_position_side\": {},\n  \"stretches\": [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}],\n  \"base_value\": {:.4},\n  \"screenshot_px\": [{}, {}],\n  \"outer_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"plot_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"price_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"time_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"trading_view_mode\": \"{}\",\n  \"dom_data_fidelity\": \"{}\",\n  \"hotkey_profile\": \"{}\",\n  \"hotkeys_modal_open\": {},\n  \"show_drawing_inspector\": {},\n  \"signal_catalog_modal_open\": {},\n  \"confluence_quality\": \"{}\",\n  \"confluence_score\": {},\n  \"mc_validity\": \"{}\",\n  \"mc_simulations\": {},\n  \"mc_var_95_pct\": {},\n  \"mc_cvar_95_pct\": {},\n  \"mc_prob_profit_pct\": {},\n  \"show_mc_fan_on_equity\": {},\n  \"custom_rule_clause_count\": {},\n  \"alert_cooldown_rules\": {},\n  \"snapshot_named_count\": {},\n  \"snapshot_auto_ring_count\": {},\n  \"snapshot_quarantined\": {},\n  \"session_debrief_modal_open\": {},\n  \"sl_adherence_pct\": {},\n  \"blind_practice_lookback_bars\": {},\n  \"saved_practice_sessions\": {},\n  \"saved_scan_snapshots\": {},\n  \"multi_strategy_curve_count\": {},\n  \"manifest_digest_hex\": {},\n  \"raw_price_min\": {:.2},\n  \"raw_price_max\": {:.2}\n}}\n",
+                "{{\n  \"symbol\": \"{}\",\n  \"timeframe\": \"{}\",\n  \"base_timeframe\": \"{}\",\n  \"data_source\": \"{}\",\n  \"available_symbols\": [{}],\n  \"base_candles\": {},\n  \"total_candles\": {},\n  \"culled_candles\": {},\n  \"rendered_candles\": {},\n  \"conflation_factor\": {},\n  \"bar_spacing\": {:.6},\n  \"right_offset\": {:.6},\n  \"scale_mode\": \"{}\",\n  \"auto_scale\": {},\n  \"pane_count\": {},\n  \"active_overlay_count\": {},\n  \"drawing_count\": {},\n  \"active_drawing_tool\": \"{}\",\n  \"selected_drawing_id\": {},\n  \"magnet_mode\": \"{}\",\n  \"replay_active\": {},\n  \"replay_status\": \"{}\",\n  \"replay_base_cursor\": {},\n  \"replay_step_unit\": \"{}\",\n  \"show_trading_panel\": {},\n  \"show_scanner_dock\": {},\n  \"show_alerts_panel\": {},\n  \"show_strategy_panel\": {},\n  \"show_journal_panel\": {},\n  \"show_equity_pane\": {},\n  \"equity_pane_source\": \"{}\",\n  \"equity_pane_active\": {},\n  \"show_vwap\": {},\n  \"show_vrvp\": {},\n  \"show_rs\": {},\n  \"show_compare_overlay\": {},\n  \"compare_benchmark\": {},\n  \"vrvp_poc_price\": {},\n  \"active_frvp_count\": {},\n  \"rs_stretch\": {:.3},\n  \"grid_layout\": \"{}\",\n  \"grid_slot_count\": {},\n  \"active_chart_slot\": {},\n  \"sync_crosshair\": {},\n  \"sync_time_range\": {},\n  \"show_ichimoku\": {},\n  \"ichimoku_active\": {},\n  \"show_cvd\": {},\n  \"cvd_reset_mode\": \"{}\",\n  \"cvd_pane_active\": {},\n  \"cvd_stretch\": {:.3},\n  \"saved_template_count\": {},\n  \"vwap_anchor_mode\": \"{}\",\n  \"show_market_profile\": {},\n  \"market_profile_active\": {},\n  \"scanner_tab\": \"{}\",\n  \"breadth_participating_count\": {},\n  \"vn30_participating_count\": {},\n  \"money_flow_buy_pct\": {:.2},\n  \"cvd_axis_format_mode\": \"{}\",\n  \"pinned_crosshair_timestamp\": {},\n  \"active_venue\": \"{}\",\n  \"journal_total_entries\": {},\n  \"journal_visible_entries\": {},\n  \"journal_discipline_pct\": {:.2},\n  \"wfo_verdict\": {},\n  \"wfo_wfe_pct\": {},\n  \"portfolio_return_pct\": {:.4},\n  \"portfolio_dd_reduction_pct\": {:.4},\n  \"show_backtest_trades\": {},\n  \"rendered_backtest_trades\": {},\n  \"backtest_preset\": {},\n  \"backtest_trade_count\": {},\n  \"backtest_return_pct\": {:.4},\n  \"backtest_max_dd_pct\": {:.4},\n  \"backtest_sharpe\": {},\n  \"backtest_robustness\": {},\n  \"command_palette_open\": {},\n  \"alert_rule_count\": {},\n  \"alert_trigger_count\": {},\n  \"active_alert_lines\": {},\n  \"rendered_alert_markers\": {},\n  \"scanner_signal_revealed\": {},\n  \"active_price_lines\": {},\n  \"rendered_fill_markers\": {},\n  \"equity\": {:.2},\n  \"net_pnl\": {:.2},\n  \"fill_count\": {},\n  \"closed_trade_count\": {},\n  \"pending_order_count\": {},\n  \"open_position_side\": {},\n  \"stretches\": [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}],\n  \"base_value\": {:.4},\n  \"screenshot_px\": [{}, {}],\n  \"outer_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"plot_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"price_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"time_axis_rect\": [{:.1}, {:.1}, {:.1}, {:.1}],\n  \"trading_view_mode\": \"{}\",\n  \"dom_data_fidelity\": \"{}\",\n  \"hotkey_profile\": \"{}\",\n  \"hotkeys_modal_open\": {},\n  \"show_drawing_inspector\": {},\n  \"signal_catalog_modal_open\": {},\n  \"confluence_quality\": \"{}\",\n  \"confluence_score\": {},\n  \"mc_validity\": \"{}\",\n  \"mc_simulations\": {},\n  \"mc_var_95_pct\": {},\n  \"mc_cvar_95_pct\": {},\n  \"mc_prob_profit_pct\": {},\n  \"show_mc_fan_on_equity\": {},\n  \"custom_rule_clause_count\": {},\n  \"alert_cooldown_rules\": {},\n  \"snapshot_named_count\": {},\n  \"snapshot_auto_ring_count\": {},\n  \"snapshot_quarantined\": {},\n  \"session_debrief_modal_open\": {},\n  \"sl_adherence_pct\": {},\n  \"blind_practice_lookback_bars\": {},\n  \"saved_practice_sessions\": {},\n  \"saved_scan_snapshots\": {},\n  \"multi_strategy_curve_count\": {},\n  \"manifest_digest_hex\": {},\n  \"candle_palette\": \"{}\",\n  \"settings_modal_open\": {},\n  \"data_audit_modal_open\": {},\n  \"enforce_vn_t2_lot_lock\": {},\n  \"fifo_sellable_qty\": {:.4},\n  \"fifo_locked_t2_qty\": {:.4},\n  \"vn_holiday_dates_count\": {},\n  \"raw_price_min\": {:.2},\n  \"raw_price_max\": {:.2}\n}}\n",
                 self.symbol,
                 self.timeframe,
                 self.base_timeframe,
@@ -26189,6 +28232,13 @@ impl SumiWorkstationApp {
                 self.scan_snapshot_store.slots.len(),
                 ms_curve_count,
                 manifest_hex_json,
+                self.settings.candle_palette.as_id(),
+                self.show_settings_modal,
+                self.show_data_audit_modal,
+                self.settings.enforce_vn_t2_lot_lock,
+                fifo_snap.sellable_qty,
+                fifo_snap.locked_t2_qty,
+                VIETNAM_HOLIDAYS_V1.len(),
                 rep.bounds.raw_min,
                 rep.bounds.raw_max,
             );
@@ -30136,5 +32186,454 @@ mod tests {
         );
         out.textures_delta.clear();
         assert!(app.last_report.is_some_and(|r| r.rendered_candle_count > 0));
+    }
+
+    #[test]
+    fn r19_settings_modal_candle_palettes_vn_t2_sell_lock_and_pending_order_guard() {
+        let ctx = egui::Context::default();
+        SumiWorkstationApp::configure_dark_workstation_visuals(&ctx);
+        let mut app = SumiWorkstationApp::new_for_offscreen_capture();
+        app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+        let _ = app.set_timeframe(Timeframe::D1);
+
+        // 1. Open `[Settings]` modal via `Cmd+K` action, configure defaults, apply to sessions, and render UI:
+        app.execute_palette_action(PaletteAction::OpenSettingsModal);
+        assert!(app.show_settings_modal);
+        app.settings.default_initial_capital = 500_000.0;
+        app.settings.default_commission_bps = 12.0;
+        app.settings.default_tax_sell_bps = 10.0;
+        app.settings.default_slippage_bps = 4.0;
+        app.settings.default_risk_per_trade_pct = 1.5;
+        app.settings.enforce_vn_t2_lot_lock = true;
+        app.apply_settings_defaults_to_active_sessions();
+        assert!((app.trading.config.initial_cash - 500_000.0).abs() < 1e-6);
+        assert!((app.backtest_config.initial_cash - 500_000.0).abs() < 1e-6);
+        assert!((app.risk_plan_input.risk_pct - 1.5).abs() < 1e-6);
+
+        let mut out_modal = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out_modal.textures_delta.clear();
+        app.show_settings_modal = false;
+
+        // 2. Cycle through all 4 `CandlePalettePreset`s and verify rendered GPU shapes update geometry & colors:
+        let mut shape_counts = Vec::with_capacity(4);
+        for pal in CandlePalettePreset::ALL {
+            app.execute_palette_action(PaletteAction::SetCandlePalette(pal));
+            assert_eq!(app.settings.candle_palette, pal);
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    ..Default::default()
+                },
+                |ui| app.render_workstation_ui(ui),
+            );
+            out.textures_delta.clear();
+            let rep = app.last_report.expect("palette chart report");
+            assert!(rep.rendered_candle_count > 0);
+            let tess = ctx.tessellate(out.shapes, 1.0);
+            let [br, bg, bb] = pal.bull_rgb();
+            let target_bull = Color32::from_rgb(br, bg, bb);
+            let has_bull_vertex = tess.iter().any(|cp| match &cp.primitive {
+                egui::epaint::Primitive::Mesh(m) => {
+                    m.vertices.iter().any(|v| v.color == target_bull)
+                }
+                egui::epaint::Primitive::Callback(_) => false,
+            });
+            assert!(
+                has_bull_vertex,
+                "{pal:?} must invalidate PlotDataLayerKey and emit bull_rgb={:?} into tessellated mesh",
+                pal.bull_rgb()
+            );
+            let total_vertices: usize = tess
+                .iter()
+                .map(|cp| match &cp.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.vertices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+            shape_counts.push((pal, total_vertices));
+        }
+        // `HollowBullish` draws 4 crisp inner border quads per wide bullish candle -> strictly more vertices than solid `EmeraldCrimson`!
+        assert!(
+            shape_counts[1].1 > shape_counts[0].1,
+            "HollowBullish ({}) must emit more border vertices than solid EmeraldCrimson ({})",
+            shape_counts[1].1,
+            shape_counts[0].1
+        );
+
+        // 3. `enforce_vn_t2_lot_lock = true` on `FPT` (`HOSE`) during Causal Bar Replay:
+        assert!(app.start_replay_at_base_index(120));
+        app.ticket_kind = TicketOrderKind::Market;
+        app.ticket_qty_input = "200".to_owned();
+        app.ticket_sl_input.clear();
+        app.ticket_tp_input.clear();
+        assert!(app.submit_ticket_order(OrderSide::Buy).is_ok());
+
+        // `T+0` immediate sell attempts (`Ticket`, `QuickMarket`, `Flatten`) MUST all fail with `InsufficientSettledShares`!
+        app.ticket_qty_input = "100".to_owned();
+        assert!(matches!(
+            app.submit_ticket_order(OrderSide::Sell),
+            Err(crate::trading::TradingError::InsufficientSettledShares {
+                sellable,
+                locked_t2,
+                ..
+            }) if sellable == 0.0 && (locked_t2 - 200.0).abs() < 1e-6
+        ));
+        assert!(app.submit_quick_market_order(OrderSide::Sell).is_err());
+        assert!(matches!(
+            app.flatten_open_position(),
+            Err(crate::trading::TradingError::InsufficientSettledShares { .. })
+        ));
+
+        // Step 1 trading day (`T+1`): STILL unsettled!
+        let _ = app.step_replay_forward(1);
+        assert!(matches!(
+            app.submit_ticket_order(OrderSide::Sell),
+            Err(crate::trading::TradingError::InsufficientSettledShares { .. })
+        ));
+
+        // Step forward until `sellable_qty == 200` (`T+2` `13:00 ICT` afternoon cleared, skipping any `VIETNAM_HOLIDAYS_V1` dates!):
+        for _ in 0..5 {
+            if app.active_fifo_settlement_summary().sellable_qty >= 200.0 {
+                break;
+            }
+            let _ = app.step_replay_forward(1);
+        }
+        assert!(
+            (app.active_fifo_settlement_summary().sellable_qty - 200.0).abs() < 1e-6,
+            "200 FPT shares must be sellable on T+2"
+        );
+
+        // Stage a working `Pending` Limit Sell for `100` shares above market -> remaining available sellable is `100`!
+        let cur_close = app.candles.last().unwrap().close;
+        app.ticket_kind = TicketOrderKind::Limit;
+        app.ticket_price_input = format!("{:.2}", cur_close * 1.04);
+        app.ticket_qty_input = "100".to_owned();
+        assert!(app.submit_ticket_order(OrderSide::Sell).is_ok());
+        assert_eq!(app.trading.pending_orders().count(), 1);
+
+        // Attempting to Market Sell `200` shares now MUST be blocked by the `100` shares already reserved in pending Limit Sell!
+        app.ticket_kind = TicketOrderKind::Market;
+        app.ticket_qty_input = "200".to_owned();
+        assert!(matches!(
+            app.submit_ticket_order(OrderSide::Sell),
+            Err(crate::trading::TradingError::InsufficientSettledShares { sellable, .. })
+                if (sellable - 100.0).abs() < 1e-6
+        ));
+
+        // Selling the unreserved `100` settled shares succeeds cleanly with ZERO false unsettled violation (`[B1]`):
+        app.ticket_qty_input = "100".to_owned();
+        assert!(app.submit_ticket_order(OrderSide::Sell).is_ok());
+        assert_eq!(
+            app.active_fifo_settlement_summary()
+                .unsettled_sell_violation_qty,
+            0.0,
+            "legal Day T+2 sell on D1 must NEVER record unsettled_sell_violation_qty"
+        );
+
+        // 4. `VN30F1M` (`T+0` derivatives) allows immediate same-bar round-trip sell even with `enforce_vn_t2_lot_lock = true`!
+        app.exit_replay();
+        app.select_watchlist_instrument(DataSourcePreset::IntradayVn30F1m, "VN30F1M");
+        assert!(app.start_replay_at_base_index(200));
+        app.ticket_kind = TicketOrderKind::Market;
+        app.ticket_qty_input = "2".to_owned();
+        assert!(app.submit_ticket_order(OrderSide::Buy).is_ok());
+        app.ticket_qty_input = "1".to_owned();
+        assert!(app.submit_ticket_order(OrderSide::Sell).is_ok());
+    }
+
+    #[test]
+    fn r19_data_audit_causal_modal_textnote_inspector_alert_digest_and_png_export() {
+        use crate::drawings::Drawing;
+
+        let ctx = egui::Context::default();
+        SumiWorkstationApp::configure_dark_workstation_visuals(&ctx);
+        let mut app = SumiWorkstationApp::new_for_offscreen_capture();
+        app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+        let _ = app.set_timeframe(Timeframe::D1);
+
+        // 1. `[Data Audit]` modal & `DEF-001` causal Replay invalidation:
+        let full_bars = app.candles.len();
+        app.execute_palette_action(PaletteAction::OpenDataAuditModal);
+        assert!(app.show_data_audit_modal);
+        assert_eq!(app.ensure_data_audit_synced().0.bar_count, full_bars);
+
+        let mut out_audit = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out_audit.textures_delta.clear();
+        app.show_data_audit_modal = false;
+
+        assert!(app.start_replay_at_base_index(80));
+        let (cut_rep, cut_uni) = app.ensure_data_audit_synced();
+        assert_eq!(cut_rep.bar_count, 81);
+        assert!(cut_uni.total_candles > 0);
+        app.exit_replay();
+        assert_eq!(app.ensure_data_audit_synced().0.bar_count, full_bars);
+
+        // 2. `TextNote` + Custom `OTE` Fibonacci + Dual-End `TrendLine` Inspector & Alert Digest Sync:
+        let n = app.candles.len();
+        let mut tl = Drawing::new(
+            1,
+            DrawingPaneTarget::Main,
+            DrawingGeometry::TrendLine {
+                start: DrawingAnchor::new((n - 45) as f64, app.candles[n - 45].low),
+                end: DrawingAnchor::new((n - 15) as f64, app.candles[n - 15].high),
+            },
+            DrawingStyle::default(),
+        );
+        tl.trend_extend_left = false;
+        tl.trend_extend_right = false;
+        let mut fib = Drawing::new(
+            2,
+            DrawingPaneTarget::Main,
+            DrawingGeometry::FibonacciRetracement {
+                start: DrawingAnchor::new((n - 55) as f64, app.candles[n - 55].low),
+                end: DrawingAnchor::new((n - 10) as f64, app.candles[n - 10].high),
+                direction: FibDirection::StartToEnd,
+                extend_right: true,
+            },
+            DrawingStyle::default(),
+        );
+        fib.custom_fib_levels = Some(crate::drawings::FIBONACCI_OTE_EXT_RATIOS.to_vec());
+        let note = Drawing::new(
+            3,
+            DrawingPaneTarget::Main,
+            DrawingGeometry::TextNote {
+                anchor: DrawingAnchor::new((n - 25) as f64, app.candles[n - 25].high),
+                text: "Điểm chuẩn OTE FPT\nVSD T+2 13:00 ICT".to_owned(),
+            },
+            DrawingStyle::default(),
+        );
+        app.drawings.replace_all(vec![tl, fib, note], Some(2));
+        app.drawings
+            .refresh_materialized_anchor_timestamps(0, &app.candles, app.active_timeframe);
+        app.show_drawing_inspector = true;
+
+        let digest_before = compute_drawings_alert_digest(&app.drawings);
+        app.drawings.drawings[0].trend_extend_right = true;
+        let digest_after = compute_drawings_alert_digest(&app.drawings);
+        assert_ne!(
+            digest_before, digest_after,
+            "toggling trend_extend_right on TrendLine must invalidate compute_drawings_alert_digest"
+        );
+
+        let mut out_draw = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out_draw.textures_delta.clear();
+
+        // 3. Offscreen `2.0x` Retina PNG export (`export_workstation_png_to_path`) + immediate cleanup:
+        let tmp_png =
+            std::env::temp_dir().join(format!("sumi_r19_export_test_{}.png", std::process::id()));
+        let tmp_str = tmp_png.to_string_lossy().into_owned();
+        let (pw, ph) = app
+            .export_workstation_png_to_path(&tmp_str, 1_280, 800)
+            .expect("2.0x Retina offscreen PNG export");
+        assert_eq!((pw, ph), (2_560, 1_600));
+        let bytes = std::fs::read(&tmp_png).expect("read exported PNG");
+        let _ = std::fs::remove_file(&tmp_png);
+        assert!(
+            bytes.len() > 8_192,
+            "exported PNG unexpectedly small: {} B",
+            bytes.len()
+        );
+        assert_eq!(&bytes[0..8], b"\x89PNG\r\n\x1a\n");
+        let ihdr_w = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+        let ihdr_h = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+        assert_eq!((ihdr_w, ihdr_h), (2_560, 1_600));
+    }
+
+    #[test]
+    fn critic_r19_regression_brackets_t2_lock_cafef_multisymbol_builtin_settings_and_audit() {
+        let ctx = egui::Context::default();
+        SumiWorkstationApp::configure_dark_workstation_visuals(&ctx);
+        let mut app = SumiWorkstationApp::new_for_offscreen_capture();
+
+        // 1. `[M1]` + `[B1]`: Protective `StopLoss` / `TakeProfit` brackets MUST NOT liquidate locked `T+2` shares
+        //    on `T+1`, and when `100` shares are settled + `100` shares are locked, a bracket hit exits ONLY the
+        //    `100` settled shares while keeping the `100` locked shares + brackets armed until `T+2`!
+        let bracket_csv = concat!(
+            "symbol,date,open,high,low,close,volume\n",
+            "FPT,2026-10-05,100.0,101.0,99.0,100.0,1000000\n", // idx 0 (Mon): buy 100 @ 100, TP = 102
+            "FPT,2026-10-06,100.5,104.0,100.0,101.0,1000000\n", // idx 1 (Tue, T+1): high=104 crosses TP=102, but Lot 1 is LOCKED! Also buy 100 more @ 101
+            "FPT,2026-10-07,101.0,105.0,100.5,104.0,1000000\n", // idx 2 (Wed, T+2 for Lot 1, T+1 for Lot 2): TP exits ONLY Lot 1 (100 sh)!
+            "FPT,2026-10-08,104.0,106.0,103.0,105.0,1000000\n", // idx 3 (Thu, T+2 for Lot 2): TP exits Lot 2 (100 sh)!
+        );
+        app.load_from_csv_str(bracket_csv, &DataLoadOptions::default())
+            .expect("load bracket FPT CSV");
+        app.settings.enforce_vn_t2_lot_lock = true;
+        app.apply_settings_defaults_to_active_sessions();
+        assert!(app.start_replay_at_base_index(0));
+        app.ticket_kind = TicketOrderKind::Market;
+        app.ticket_qty_input = "100".to_owned();
+        app.ticket_sl_input = "95.0".to_owned();
+        app.ticket_tp_input = "102.0".to_owned();
+        assert!(app.submit_ticket_order(OrderSide::Buy).is_ok());
+
+        // Step to Tue `2026-10-06` (`T+1`): `high = 104.0 >= TP 102.0`, MUST NOT exit locked `100` shares!
+        assert!(app.step_replay_forward(1));
+        assert_eq!(
+            app.trading.open_position().map(|p| p.quantity),
+            Some(100.0),
+            "TP bracket must NOT liquidate unsettled T+1 shares on HOSE"
+        );
+        // `[R1]` Regression: Save `PracticeSessionStore` at Tue `T+1`, round-trip through BOTH RON and JSON,
+        // and verify `restore_saved_practice_session` preserves `AccountConfig` `T+2` lock (`100` shares stay open)!
+        let ps_id = app
+            .save_current_practice_session("FPT T+1 Locked TP", false)
+            .expect("save practice session");
+        for payload in [
+            app.practice_session_store.to_ron_pretty(),
+            app.practice_session_store.to_json_pretty(),
+        ] {
+            app.practice_session_store.slots.clear();
+            assert_eq!(app.import_practice_store_payload(&payload).unwrap(), 1);
+            assert!(app.restore_saved_practice_session(ps_id));
+            assert_eq!(
+                app.trading.open_position().map(|p| p.quantity),
+                Some(100.0),
+                "PracticeSessionStore RON/JSON restore must preserve AccountConfig T+2 lock on T+1"
+            );
+        }
+        // Scale-in another `100` shares on Tue (`T+0` for Lot 2):
+        assert!(app.submit_ticket_order(OrderSide::Buy).is_ok());
+        assert_eq!(app.trading.open_position().map(|p| p.quantity), Some(200.0));
+
+        // Step to Wed `2026-10-07`: Lot 1 (`100` sh) is settled, Lot 2 (`100` sh) is still locked ->
+        // TP bracket (`high = 105.0 >= 102.0`) exits ONLY the `100` settled shares!
+        assert!(app.step_replay_forward(1));
+        assert_eq!(
+            app.trading.open_position().map(|p| p.quantity),
+            Some(100.0),
+            "TP bracket must partially exit 100 settled shares while keeping 100 locked shares open"
+        );
+        assert_eq!(
+            app.active_fifo_settlement_summary()
+                .unsettled_sell_violation_qty,
+            0.0
+        );
+
+        // Step to Thu `2026-10-08`: Lot 2 (`100` sh) unlocks -> TP bracket exits remaining `100` shares!
+        assert!(app.step_replay_forward(1));
+        assert!(app.trading.open_position().is_none());
+        assert_eq!(
+            app.active_fifo_settlement_summary()
+                .unsettled_sell_violation_qty,
+            0.0
+        );
+        app.exit_replay();
+
+        // 2. `[M2]`: Multi-ticker `CafeF SolieuGD` CSV (`AAA` + `FPT` with 4-decimal post-split rounding)
+        //    preserves all peers in `custom_peer_feeds` AND switches `AAA -> FPT` via `select_symbol_in_source`!
+        let multi_cafef = concat!(
+            "<Ticker>,<DTYYYYMMDD>,<Open>,<High>,<Low>,<Close>,<Volume>\n",
+            "AAA,20260428,12.3456,12.3455,12.1000,12.2500,800000\n",
+            "AAA,20260429,12.2500,12.5000,12.2000,12.4000,850000\n",
+            "FPT,20260428,124.6154,124.6153,123.5000,124.1000,1500000\n",
+            "FPT,20260429,124.1000,126.0000,124.0232,124.0231,1750000\n",
+        );
+        app.load_from_csv_str(
+            multi_cafef,
+            &DataLoadOptions {
+                envelope_policy: OhlcEnvelopePolicy::CafeFSplitAware,
+                ..DataLoadOptions::default()
+            },
+        )
+        .expect("load multi-ticker CafeF split CSV");
+        assert!(app.import_cafef_split_aware);
+        assert_eq!(app.custom_peer_feeds.len(), 2);
+        app.select_symbol_in_source("FPT");
+        assert_eq!(app.symbol, "FPT");
+        assert_eq!(app.candles.len(), 2);
+        assert_eq!(app.last_loader_repair_counts.1, 2);
+
+        // 3. `[M3]`: Applying a built-in layout preset (`PaletteAction::ApplyBuiltinTemplate`) MUST preserve
+        //    user's global `WorkstationSettings` (`candle_palette`, `default_initial_capital`, `auto_snapshot_interval_mins`)!
+        app.settings.candle_palette = CandlePalettePreset::ColorblindOkabeIto;
+        app.settings.default_initial_capital = 888_000.0;
+        app.settings.auto_snapshot_interval_mins = 1;
+        app.execute_palette_action(PaletteAction::ApplyBuiltinTemplate(3)); // Quad 2x2 preset
+        assert_eq!(app.grid_layout, MultiChartLayoutKind::Quad2x2);
+        assert_eq!(
+            app.settings.candle_palette,
+            CandlePalettePreset::ColorblindOkabeIto
+        );
+        assert!((app.settings.default_initial_capital - 888_000.0).abs() < 1e-6);
+
+        // 4. `[M5]` + `[m4]` + `[m5]`:
+        //    - Bundled `Vn30Basket` (`FPT`) & `SpyDailyCsv` (`SPY`) report `0` holiday bars & `DataReadinessStatus::Ready`.
+        //    - Unclosed Replay HTF tail bar (`VN30F1M` `15m` at base index `122`) is excluded from `ensure_data_audit_synced`.
+        //    - Wall-clock `auto_snapshot_interval_mins` fires after `60.0s` elapsed `egui` time (NOT during PNG export!),
+        //      and `open_settings_modal()` cancels active viewport kinetic coasting!
+        app.apply_builtin_layout_preset(&builtin_workspace_templates()[0]);
+        app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+        let (fpt_audit, uni_audit) = app.ensure_data_audit_synced();
+        assert_eq!(fpt_audit.holiday_or_weekend_bar_count, 0);
+        assert_eq!(fpt_audit.status, crate::data::DataReadinessStatus::Ready);
+        assert_eq!(uni_audit.symbols_total, 13);
+        assert_eq!(uni_audit.symbols_ready, 11);
+
+        app.select_watchlist_instrument(DataSourcePreset::SpyDailyCsv, "SPY");
+        let (spy_audit, _) = app.ensure_data_audit_synced();
+        assert_eq!(spy_audit.missing_session_count, 0);
+        assert_eq!(spy_audit.status, crate::data::DataReadinessStatus::Ready);
+
+        app.select_watchlist_instrument(DataSourcePreset::IntradayVn30F1m, "VN30F1M");
+        let _ = app.set_timeframe(Timeframe::M15);
+        assert!(app.start_replay_at_base_index(122));
+        assert!(app.is_active_tail_incomplete());
+        let expected_closed_len = app.candles.len() - 1;
+        assert_eq!(
+            app.ensure_data_audit_synced().0.bar_count,
+            expected_closed_len
+        );
+        app.exit_replay();
+
+        app.viewport.kinetic = Some(crate::viewport::KineticAnimation::for_bar_spacing(
+            8.0,
+            crate::viewport::KineticScrollConfig::default(),
+        ));
+        app.open_settings_modal();
+        assert!(app.viewport.kinetic.is_none());
+        app.show_settings_modal = false;
+
+        app.snapshot_store.auto_ring.clear();
+        app.settings.auto_snapshot_interval_mins = 1;
+        app.last_auto_snapshot_time_secs = None;
+        let mut out_t0 = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                time: Some(100.0),
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out_t0.textures_delta.clear();
+        assert_eq!(app.snapshot_store.auto_ring.len(), 0);
+
+        let mut out_t61 = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                time: Some(161.0),
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out_t61.textures_delta.clear();
+        assert_eq!(app.snapshot_store.auto_ring.len(), 1);
     }
 }

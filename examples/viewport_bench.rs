@@ -195,6 +195,12 @@ fn main() {
         );
         return;
     }
+    if std::env::args().any(|a| a == "--r19") {
+        run_r19_settings_holidays_audit_drawings_benchmark(
+            &cpu_brand, mem_bytes, &rustc_ver, profile,
+        );
+        return;
+    }
 
     println!("=== Sumi R03 Viewport & Renderer Benchmark ===");
     println!(
@@ -12255,4 +12261,620 @@ fn format_r18_markdown_report(
         1,
     )
     .replacen("Workstation R17 Frame Budget", "Workstation R18 Frame Budget", 1)
+}
+
+fn run_r19_settings_holidays_audit_drawings_benchmark(
+    cpu_brand: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+) {
+    use sumi_workstation::data::{
+        audit_ohlcv_series_with_venue, evaluate_and_normalize_cafef_split_ohlc,
+        summarize_universe_readiness,
+    };
+    use sumi_workstation::drawings::{
+        Drawing, DrawingColorPreset, DrawingStyle, FIBONACCI_OTE_EXT_RATIOS, LineDashStyle,
+    };
+    use sumi_workstation::journal::{
+        VIETNAM_HOLIDAYS_V1, compute_fifo_holding_lots, compute_settlement_timestamp_for_venue,
+    };
+    use sumi_workstation::viewport::{CandlePalettePreset, WorkstationSettings};
+
+    println!(
+        "=== Sumi R19 Settings, VN Holidays T+2 FIFO, Data Readiness Audit & Drawings Benchmark ==="
+    );
+    println!(
+        "CPU: {cpu_brand} | RAM: {:.1} GiB | {rustc_ver} | profile={profile}",
+        (mem_bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+    );
+
+    let candles_10k = generate_synthetic_ohlcv(10_000);
+    let feeds = load_bundled_watchlist_universe();
+    let mut domain_cases = Vec::new();
+
+    // 1. C1: WorkstationSettings + WorkspaceTemplate RON & JSON serialize/parse roundtrip
+    {
+        let mut tpl = builtin_workspace_templates()[3].clone();
+        tpl.settings = WorkstationSettings {
+            default_venue_override: Some(ExchangeVenue::Hose),
+            default_vn_price_unit: VnPriceUnit::ThousandVnd,
+            default_initial_capital: 500_000.0,
+            default_commission_bps: 12.0,
+            default_tax_sell_bps: 10.0,
+            default_slippage_bps: 4.0,
+            default_risk_per_trade_pct: 1.5,
+            candle_palette: CandlePalettePreset::HollowBullish,
+            auto_snapshot_interval_mins: 5,
+            enforce_vn_t2_lot_lock: true,
+        };
+        let mut samples = Vec::with_capacity(80);
+        for step in 0..90 {
+            let t0 = Instant::now();
+            let ron = tpl.to_ron_pretty();
+            let json = tpl.to_json_pretty();
+            let r_dec = WorkspaceTemplate::from_ron_str(&ron).expect("ron roundtrip");
+            let j_dec = WorkspaceTemplate::from_json_str(&json).expect("json roundtrip");
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            std::hint::black_box((&r_dec, &j_dec));
+            if step >= 10 {
+                samples.push(us);
+            }
+        }
+        domain_cases.push(R09DomainBenchCase {
+            case_id: "c1_workstation_settings_template_ron_json_roundtrip",
+            description:
+                "C1 `WorkstationSettings` + `CandlePalettePreset` RON & JSON full roundtrip",
+            input_units: 4,
+            output_items: 2,
+            stats: TimingStats::from_samples(samples),
+        });
+    }
+
+    // 2. C2: VIETNAM_HOLIDAYS_V1 (144 dates) T+2/T+3 settlement + 500-fill FIFO HoldingLot ledger
+    {
+        let mut synth_session = TradingSession::default();
+        synth_session.config.initial_cash = 50_000_000.0;
+        synth_session.reset_at(&candles_10k, 0);
+        for i in (10..2_500).step_by(5) {
+            let side = if (i / 5) % 3 == 2 {
+                OrderSide::Sell
+            } else {
+                OrderSide::Buy
+            };
+            let _ = synth_session.submit_order(
+                OrderRequest {
+                    side,
+                    kind: OrderKind::Market,
+                    quantity: 100.0,
+                    stop_loss: None,
+                    take_profit: None,
+                },
+                &candles_10k,
+                i,
+            );
+        }
+        let fill_tuples: Vec<_> = synth_session
+            .fills()
+            .iter()
+            .map(|f| {
+                (
+                    f.fill_id,
+                    f.base_index,
+                    f.timestamp,
+                    f.side,
+                    f.quantity,
+                    f.price,
+                )
+            })
+            .collect();
+        let as_of = candles_10k[2_500].timestamp + 86_399;
+        let mut samples = Vec::with_capacity(80);
+        let mut open_lots = 0_usize;
+        for step in 0..90 {
+            let t0 = Instant::now();
+            let mut acc_ts = 0_i64;
+            for c in candles_10k.iter().take(500) {
+                acc_ts = acc_ts.wrapping_add(compute_settlement_timestamp_for_venue(
+                    c.timestamp,
+                    ExchangeVenue::Hose,
+                ));
+            }
+            let fifo = compute_fifo_holding_lots(&fill_tuples, ExchangeVenue::Hose, as_of);
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            open_lots = fifo.lots.len();
+            std::hint::black_box((acc_ts, &fifo));
+            if step >= 10 {
+                samples.push(us);
+            }
+        }
+        domain_cases.push(R09DomainBenchCase {
+            case_id: "c2_vn_holidays_t2_settlement_and_fifo_lots",
+            description:
+                "C2 `500` `VIETNAM_HOLIDAYS_V1` T+2 lookups + `500`-fill FIFO `HoldingLot` ledger",
+            input_units: fill_tuples.len() + VIETNAM_HOLIDAYS_V1.len(),
+            output_items: open_lots,
+            stats: TimingStats::from_samples(samples),
+        });
+    }
+
+    // 3. C3: DataQualityAuditReport (10k D1 bars) + 13-feed UniverseDataReadinessSummary + CafeF Split 5-rule gate
+    {
+        let mut samples = Vec::with_capacity(50);
+        let mut ready_cnt = 0_usize;
+        for step in 0..58 {
+            let t0 = Instant::now();
+            let rep = audit_ohlcv_series_with_venue(
+                "FPT",
+                ExchangeVenue::Hose,
+                Timeframe::D1,
+                &candles_10k,
+                Some((0, 2)),
+            );
+            let uni = summarize_universe_readiness(&feeds, None);
+            let mut norm_cnt = 0_usize;
+            for c in candles_10k.iter().take(1_000) {
+                let res = evaluate_and_normalize_cafef_split_ohlc(
+                    "FPT",
+                    c.open,
+                    c.high - 0.00008,
+                    c.low,
+                    c.open,
+                    c.volume,
+                );
+                if matches!(
+                    res,
+                    sumi_workstation::data::CafeFSplitNormOutcome::NormalizedSplitPrecision { .. }
+                ) {
+                    norm_cnt += 1;
+                }
+            }
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            ready_cnt = uni.symbols_ready + norm_cnt;
+            std::hint::black_box((&rep, &uni));
+            if step >= 8 {
+                samples.push(us);
+            }
+        }
+        domain_cases.push(R09DomainBenchCase {
+            case_id: "c3_data_quality_audit_10k_and_cafef_split_gate",
+            description:
+                "C3 `audit_ohlcv_series` (`10,000` D1 bars) + `13`-feed readiness + `1,000` CafeF split evals",
+            input_units: candles_10k.len() + feeds.len(),
+            output_items: ready_cnt,
+            stats: TimingStats::from_samples(samples),
+        });
+    }
+
+    // 4. C4: TextNote + Dual-End TrendLine + 16-Level Custom Fibonacci Projection & Hit-Test
+    {
+        let mut store = DrawingStore::new();
+        let mut tl = Drawing::new(
+            1,
+            DrawingPaneTarget::Main,
+            DrawingGeometry::TrendLine {
+                start: DrawingAnchor::new(9_940.0, candles_10k[9_940].low),
+                end: DrawingAnchor::new(9_980.0, candles_10k[9_980].high),
+            },
+            DrawingStyle {
+                color: DrawingColorPreset::Cyan,
+                line_width: 1.8,
+                dash: LineDashStyle::Dashed,
+                fill_opacity: 0.0,
+            },
+        );
+        tl.trend_extend_left = true;
+        tl.trend_extend_right = true;
+        let mut fib = Drawing::new(
+            2,
+            DrawingPaneTarget::Main,
+            DrawingGeometry::FibonacciRetracement {
+                start: DrawingAnchor::new(9_930.0, candles_10k[9_930].low),
+                end: DrawingAnchor::new(9_990.0, candles_10k[9_990].high),
+                direction: FibDirection::StartToEnd,
+                extend_right: true,
+            },
+            DrawingStyle::default(),
+        );
+        fib.custom_fib_levels = Some(FIBONACCI_OTE_EXT_RATIOS.to_vec());
+        let note = Drawing::new(
+            3,
+            DrawingPaneTarget::Main,
+            DrawingGeometry::TextNote {
+                anchor: DrawingAnchor::new(9_965.0, candles_10k[9_965].high),
+                text: "Institutional OTE Note\nVSD T+2 13:00 ICT Unlock".to_owned(),
+            },
+            DrawingStyle::default(),
+        );
+        let _ = store.replace_all(vec![tl, fib, note], Some(1));
+
+        let mut ts = TimeScale::new(HorzScaleOptions::default());
+        ts.set_width(1_000.0);
+        ts.set_total_bars(candles_10k.len());
+        let mut ps = PriceScale::new("right", PriceScaleOptions::default());
+        ps.set_height(600.0);
+        ps.autoscale_raw_bounds(900.0, 1_400.0, 1_000.0);
+
+        let mut samples = Vec::with_capacity(100);
+        let mut proj_cnt = 0_usize;
+        for step in 0..115 {
+            let t0 = Instant::now();
+            let proj = PaneDrawingProjection::new(&ts, &ps, 1_000.0, 600.0, 1_000.0)
+                .with_candles(&candles_10k);
+            let projected: Vec<_> = store
+                .drawings
+                .iter()
+                .map(|d| proj.project_drawing(d))
+                .collect();
+            let hit = hit_test_pane_drawings(
+                &store.drawings,
+                DrawingPaneTarget::Main,
+                &proj,
+                LocalPoint::new(520.0, 280.0),
+                store.selected_id,
+            );
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            proj_cnt = projected.len();
+            std::hint::black_box((&projected, hit));
+            if step >= 15 {
+                samples.push(us);
+            }
+        }
+        domain_cases.push(R09DomainBenchCase {
+            case_id: "c4_textnote_dual_trend_custom_fib_projection",
+            description:
+                "C4 `TextNote` + Dual-Extend `TrendLine` + Custom `OTE` Fib projection & hit-test",
+            input_units: 3,
+            output_items: proj_cnt,
+            stats: TimingStats::from_samples(samples),
+        });
+    }
+
+    println!("\n[1] R19 Domain Kernel Throughput");
+    for d in &domain_cases {
+        println!(
+            "  {:<52} | median={:>7.2}us | mean={:>7.2}us | p95={:>7.2}us",
+            d.case_id, d.stats.median_us, d.stats.mean_us, d.stats.p95_us
+        );
+    }
+
+    // Full Workstation Render & Tessellation Frame Budgets (`< 4.0 ms` mean & p99 per `DECISION-RENDERER-002`)
+    let render_specs = [
+        (
+            0_u8,
+            "r19_fpt_hollow_candles_textnote_custom_fib_1280x800",
+            "FPT 1D HollowBullish candles + TextNote + Dual TrendLine + OTE 9-Fib + Drawing Inspector",
+        ),
+        (
+            1_u8,
+            "r19_fpt_okabe_ito_vn_t2_fifo_lots_1280x800",
+            "FPT 1D Okabe-Ito palette + Causal Bar Replay + VSD T+2 (13:00 ICT) FIFO Holding Lots",
+        ),
+        (
+            2_u8,
+            "r19_settings_modal_open_quad_2x2_1280x800",
+            "Quad 2x2 Desk + Global [Settings] Modal (Candle Palettes, Venue, Capital, Fees & T+2 Lock)",
+        ),
+        (
+            3_u8,
+            "r19_data_readiness_audit_modal_1280x800",
+            "2x1 FPT Desk + [Data Audit] Modal (13-Feed Readiness, VIETNAM_HOLIDAYS_V1 & CafeF Split)",
+        ),
+        (
+            4_u8,
+            "r19_100k_conflated_hollow_bullish_1280x800",
+            "100K bars conflated (>=8x) HollowBullish candlesticks + TextNote + Extended TrendLine",
+        ),
+    ];
+
+    println!("\n[2] Workstation R19 Frame Budget (1280x800 @ 2.0x Retina — Budget < 4.0 ms)");
+    let mut render_results = Vec::with_capacity(render_specs.len());
+    let mut p99_ms_list = Vec::with_capacity(render_specs.len());
+    for &(mode, wid, desc) in &render_specs {
+        let (res, p99_ms) = bench_full_app_r19_workload(mode, wid, desc, 20, 120);
+        println!(
+            "  {:<52} | confl={:>2}x | drawn={:>4} | verts={:>6} | mean={:>5.3}ms | p95={:>5.3}ms | p99={:>5.3}ms",
+            res.workload_id,
+            res.conflation_factor,
+            res.rendered_candles,
+            res.total_vertices,
+            res.total_cpu_frame_stats.mean_us / 1_000.0,
+            res.total_cpu_frame_stats.p95_us / 1_000.0,
+            p99_ms,
+        );
+        render_results.push(res);
+        p99_ms_list.push(p99_ms);
+    }
+
+    let json_doc = format_r19_json_report(
+        cpu_brand,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        &domain_cases,
+        &render_results,
+        &p99_ms_list,
+    );
+    let md_doc = format_r19_markdown_report(
+        cpu_brand,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        &domain_cases,
+        &render_results,
+        &p99_ms_list,
+    );
+    std::fs::create_dir_all("docs/evidence").expect("create docs/evidence");
+    std::fs::write(
+        "docs/evidence/r19_settings_holidays_audit_drawings_bench.json",
+        json_doc,
+    )
+    .expect("write r19 bench json");
+    std::fs::write(
+        "docs/evidence/r19_settings_holidays_audit_drawings_bench.md",
+        md_doc,
+    )
+    .expect("write r19 bench md");
+    println!("Wrote docs/evidence/r19_settings_holidays_audit_drawings_bench.{{json,md}}");
+}
+
+fn bench_full_app_r19_workload(
+    mode: u8,
+    workload_id: &'static str,
+    description: &'static str,
+    warmup_iters: usize,
+    sample_iters: usize,
+) -> (RenderCaseResult, f64) {
+    use sumi_workstation::drawings::{
+        Drawing, DrawingColorPreset, DrawingStyle, FIBONACCI_OTE_EXT_RATIOS, LineDashStyle,
+    };
+    use sumi_workstation::viewport::CandlePalettePreset;
+
+    let ctx = egui::Context::default();
+    SumiWorkstationApp::configure_dark_workstation_visuals(&ctx);
+    ctx.set_pixels_per_point(2.0);
+    let mut app = SumiWorkstationApp::default();
+
+    match mode {
+        0 => {
+            app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+            let _ = app.set_timeframe(Timeframe::D1);
+            app.settings.candle_palette = CandlePalettePreset::HollowBullish;
+            let n = app.candles.len();
+            let mut tl = Drawing::new(
+                0,
+                DrawingPaneTarget::Main,
+                DrawingGeometry::TrendLine {
+                    start: DrawingAnchor::new((n - 40) as f64, app.candles[n - 40].low),
+                    end: DrawingAnchor::new((n - 15) as f64, app.candles[n - 15].low),
+                },
+                DrawingStyle {
+                    color: DrawingColorPreset::Cyan,
+                    line_width: 1.8,
+                    dash: LineDashStyle::Dashed,
+                    fill_opacity: 0.0,
+                },
+            );
+            tl.trend_extend_left = true;
+            tl.trend_extend_right = true;
+            let mut fib = Drawing::new(
+                0,
+                DrawingPaneTarget::Main,
+                DrawingGeometry::FibonacciRetracement {
+                    start: DrawingAnchor::new((n - 32) as f64, app.candles[n - 32].low),
+                    end: DrawingAnchor::new((n - 6) as f64, app.candles[n - 6].high),
+                    direction: FibDirection::StartToEnd,
+                    extend_right: true,
+                },
+                DrawingStyle::default(),
+            );
+            fib.custom_fib_levels = Some(FIBONACCI_OTE_EXT_RATIOS.to_vec());
+            let note = Drawing::new(
+                0,
+                DrawingPaneTarget::Main,
+                DrawingGeometry::TextNote {
+                    anchor: DrawingAnchor::new((n - 20) as f64, app.candles[n - 20].high * 1.01),
+                    text: "FPT OTE 0.705 Demand\nVSD T+2 Afternoon Unlock".to_owned(),
+                },
+                DrawingStyle::default(),
+            );
+            let _ = app.drawings.replace_all(vec![tl, note, fib], Some(2));
+            app.show_drawing_inspector = true;
+            app.viewport.time_scale.set_bar_spacing(13.0);
+        }
+        1 => {
+            app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+            let _ = app.set_timeframe(Timeframe::D1);
+            app.settings.candle_palette = CandlePalettePreset::ColorblindOkabeIto;
+            app.settings.enforce_vn_t2_lot_lock = true;
+            let _ = app.start_replay_at_base_index(app.base_candles.len().saturating_sub(30));
+            app.ticket_qty_input = "200".to_owned();
+            let _ = app.submit_ticket_order(OrderSide::Buy);
+            let _ = app.step_replay_forward(3);
+            app.ticket_qty_input = "300".to_owned();
+            let _ = app.submit_ticket_order(OrderSide::Buy);
+            let _ = app.step_replay_forward(1);
+            app.show_trading_panel = true;
+            app.show_replay_bar = true;
+            app.right_dock_tab = RightDockTab::Trading;
+        }
+        2 => {
+            app.set_grid_layout(MultiChartLayoutKind::Quad2x2);
+            app.settings.candle_palette = CandlePalettePreset::ClassicMonochrome;
+            app.open_settings_modal();
+        }
+        3 => {
+            app.apply_workspace_template(&builtin_workspace_templates()[2]);
+            app.open_data_audit_modal();
+        }
+        _ => {
+            app.dataset_bar_count = 100_000;
+            app.select_data_source(DataSourcePreset::SyntheticVnindex);
+            app.settings.candle_palette = CandlePalettePreset::HollowBullish;
+            app.viewport.time_scale.set_width(1_180.0);
+            app.viewport.fit_all();
+        }
+    }
+
+    let screen_rect = Some(egui::Rect::from_min_size(
+        egui::Pos2::ZERO,
+        egui::Vec2::new(1280.0, 800.0),
+    ));
+    let mut ui_samples = Vec::with_capacity(sample_iters);
+    let mut tess_samples = Vec::with_capacity(sample_iters);
+    let mut total_samples = Vec::with_capacity(sample_iters);
+    let mut paint_shapes = 0_usize;
+    let mut clipped_primitives = 0_usize;
+    let mut total_vertices = 0_usize;
+    let mut total_indices = 0_usize;
+
+    let total_passes = warmup_iters + sample_iters;
+    for pass in 0..total_passes {
+        let raw_input = egui::RawInput {
+            screen_rect,
+            time: Some((pass as f64) * (1.0 / 120.0)),
+            ..Default::default()
+        };
+        let t_ui = Instant::now();
+        let full_out = ctx.run_ui(raw_input, |ui| {
+            app.render_workstation_ui(ui);
+        });
+        let ui_us = t_ui.elapsed().as_secs_f64() * 1_000_000.0;
+        paint_shapes = full_out.shapes.len();
+
+        let t_tess = Instant::now();
+        let clipped = ctx.tessellate(full_out.shapes, full_out.pixels_per_point);
+        let tess_us = t_tess.elapsed().as_secs_f64() * 1_000_000.0;
+
+        clipped_primitives = clipped.len();
+        let mut v_cnt = 0_usize;
+        let mut i_cnt = 0_usize;
+        for prim in &clipped {
+            if let egui::epaint::Primitive::Mesh(mesh) = &prim.primitive {
+                v_cnt += mesh.vertices.len();
+                i_cnt += mesh.indices.len();
+            }
+        }
+        total_vertices = v_cnt;
+        total_indices = i_cnt;
+        std::hint::black_box(clipped);
+
+        if pass >= warmup_iters {
+            ui_samples.push(ui_us);
+            tess_samples.push(tess_us);
+            total_samples.push(ui_us + tess_us);
+        }
+    }
+
+    let mut sorted_tot = total_samples.clone();
+    sorted_tot.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let p99_idx =
+        ((sorted_tot.len() as f64 * 0.99).floor() as usize).min(sorted_tot.len().saturating_sub(1));
+    let p99_ms = sorted_tot.get(p99_idx).copied().unwrap_or(0.0) / 1_000.0;
+
+    let rep = app.last_report.expect("full app r19 report");
+    assert!(rep.rendered_candle_count > 0);
+    if mode == 4 {
+        assert_eq!(app.candles.len(), 100_000);
+        assert!(rep.conflation_factor >= 8);
+    }
+
+    let sec_limit = if mode == 2 {
+        3
+    } else if mode == 3 {
+        1
+    } else {
+        0
+    };
+    let mut total_rendered_candles = rep.rendered_candle_count;
+    let mut total_culled_bars = rep.culled_bar_count;
+    let mut reported_bars = app.candles.len();
+    for slot in &app.secondary_slots[..sec_limit] {
+        if let Some(sr) = slot.last_report {
+            total_rendered_candles += sr.rendered_candle_count;
+            total_culled_bars += sr.culled_bar_count;
+        }
+        reported_bars += slot.candles.len();
+    }
+
+    (
+        RenderCaseResult {
+            dataset_bars: reported_bars,
+            workload_id,
+            description,
+            scale_mode: app.viewport.main_price_scale.mode().label(),
+            conflation_enabled: true,
+            bar_spacing: rep.bar_spacing,
+            conflation_factor: rep.conflation_factor,
+            culled_bars: total_culled_bars,
+            rendered_candles: total_rendered_candles,
+            paint_shapes,
+            clipped_primitives,
+            total_vertices,
+            total_indices,
+            ui_build_stats: TimingStats::from_samples(ui_samples),
+            tessellate_stats: TimingStats::from_samples(tess_samples),
+            total_cpu_frame_stats: TimingStats::from_samples(total_samples),
+        },
+        p99_ms,
+    )
+}
+
+fn format_r19_json_report(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+    domain: &[R09DomainBenchCase],
+    render: &[RenderCaseResult],
+    p99_ms_list: &[f64],
+) -> String {
+    format_r17_json_report(
+        cpu,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        domain,
+        render,
+        p99_ms_list,
+    )
+    .replacen("\"milestone\": \"R17\"", "\"milestone\": \"R19\"", 1)
+    .replacen("\"r17_domain_throughput\"", "\"r19_domain_throughput\"", 1)
+    .replacen(
+        "\"workstation_r17_workloads\"",
+        "\"workstation_r19_workloads\"",
+        1,
+    )
+}
+
+fn format_r19_markdown_report(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+    domain: &[R09DomainBenchCase],
+    render: &[RenderCaseResult],
+    p99_ms_list: &[f64],
+) -> String {
+    format_r17_markdown_report(
+        cpu,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        domain,
+        render,
+        p99_ms_list,
+    )
+    .replacen(
+        "# Milestone R17 — Practice Scoreboard, Session Debrief Coaching, 1-Click Scanner->Replay, Multi-Strategy `0%` Overlay & Advanced Analytics Benchmark Evidence",
+        "# Milestone R19 — Global `[Settings]` Modal, `VIETNAM_HOLIDAYS_V1` `T+2` FIFO Ledger, Data Readiness Audit & Drawings Benchmark Evidence",
+        1,
+    )
+    .replacen("-- --r17", "-- --r19", 1)
+    .replacen(
+        "## 1. Practice Coaching, Multi-Strategy `0%` Overlay & Advanced Analytics Kernel Throughput",
+        "## 1. Workstation Settings, `VIETNAM_HOLIDAYS_V1` `T+2` FIFO Lots, Data Audit & Drawings Kernel Throughput",
+        1,
+    )
+    .replacen("Workstation R17 Frame Budget", "Workstation R19 Frame Budget", 1)
 }

@@ -483,13 +483,38 @@ cargo test app::tests::critic_r18_
 
 ---
 
-## Wave 18 (`Milestone R19`) — Remaining Master Anti-Miss Parity Roadmap
+## Wave 18 — Global `WorkstationSettings` & Candle Palettes, Official `VIETNAM_HOLIDAYS_V1` (`2018–2030`) & VSD `T+2` (`13:00 ICT`) FIFO Lots, Data Readiness & `CafeF SolieuGD` Post-Split Audit, & `TextNote` / Custom Fibs / Dual-End `TrendLine` / `[Export PNG]` (`COMPLETE — SESSION R19`)
 
-All remaining features and sub-branches across `ARCHIVE/` (`208` frontend + `474` backend items) are systematically tracked in [`docs/FEATURE_BACKLOG_AND_PARITY_LEDGER.md`](../FEATURE_BACKLOG_AND_PARITY_LEDGER.md) (`A1..A5` shipped in `R17`; `B1..B4` shipped in `R18`):
+### Completed Research & Audit Gates (`VERIFIED`)
+- [x] Executed `10` live REA MCP JS/TS operations (`REA-R19-01`..`10` across `ARCHIVE/frontend` `SettingsModal.tsx`/`DashboardPage.tsx`/`ImportPage.tsx`/`drawingDomain.ts`/`SumiPrimitiveDrawingProvider.ts`/`DrawingInspector.tsx`/`DrawingToolbar.tsx` & `LWC v5.2.0` `candlesticks-renderer.ts`/`candlestick-series.ts`/`candlesticks-pane-view.ts`/`series-markers-text.ts`/`text-watermark/pane-renderer.ts`/`text-width-cache.ts`/`chart-api.ts`) plus `2` post-build binary REA ops (`REA-R19-11`..`12` on final R19 release Mach-O `427d4f7a92a4b919aec40e01c725b8e85f212dd3074649267f90ba61095ca696`, UUID `5A893952-AF29-3BF2-AD66-EC2843AB4E61`) -> [`docs/research/SETTINGS_VN_HOLIDAYS_DATA_AUDIT_AND_DRAWINGS_SPEC.md`](SETTINGS_VN_HOLIDAYS_DATA_AUDIT_AND_DRAWINGS_SPEC.md).
 
-| Wave / Milestone | Ledger Items | Key Scope (Awaiting Product Owner Authorization) |
-|---|---|---|
-| **Wave 18 (`Milestone R19`)** | `C1..C4` | Interactive Global `[Settings]` Modal & Candle Palettes, Official Vietnam Exchange Holiday Calendar (`VIETNAM_HOLIDAYS_V1`) + FIFO `T+2` Lot Release, Data Readiness & Gap/Split Audit Panel, & `TextNote` Drawing + Custom Fib Levels + Toolbar `[Export PNG]` |
+### Shipped Deliverables & Verification (`cargo test r19_`, `cargo test critic_r19_`, `--r19`, `SUMI_CAPTURE_BATCH=r19`)
+| Component | Research Source | Rust Target | Status |
+|---|---|---|---|
+| Interactive Global `WorkstationSettings` & `4` `CandlePalettePreset`s (`EmeraldCrimson`, LWC `HollowBullish` 4-edge inner frame + non-intruding wicks, `ColorblindOkabeIto`, `ClassicMonochrome`, `PlotDataLayerKey` invalidation, wall-clock `auto_snapshot_interval_mins`, RON/JSON persistence & built-in layout preservation) | `ARCHIVE/frontend/src/components/settings/SettingsModal.tsx` + `LWC v5.2.0` `candlesticks-renderer.ts` + `SETTINGS_VN_HOLIDAYS_DATA_AUDIT_AND_DRAWINGS_SPEC.md` | `src/viewport/workspace_template.rs`, `src/chart.rs`, `src/app.rs` | Shipped & Critic-Hardened (`189.58 µs` RON/JSON roundtrip, `CRITIC_PASS`) |
+| Official `VIETNAM_HOLIDAYS_V1` (`[i32; 151]` `2018–2030` incl. `24/11` Culture Day + `< 2018`/`> 2030` statutory fallback), pre-`2022-08-29` `T+3` (`09:00 ICT`) vs VSD `T+2` (`13:00 ICT = 06:00 UTC`), coarse-bar `compute_fifo_holding_lots_with_bar_secs`, & `enforce_vn_t2_lot_lock` across Order Ticket, DOM Ladder, `SL`/`TP` brackets & `PracticeSessionStore` | `ARCHIVE/backend/app/domain/market/{calendar,settlement}.py` + `SETTINGS_VN_HOLIDAYS_DATA_AUDIT_AND_DRAWINGS_SPEC.md` | `src/journal/market_rules.rs`, `src/trading/{portfolio,coaching}.rs`, `src/app.rs` | Shipped & Critic-Hardened (`95.21 µs` `500` T+2 + `500`-fill FIFO, `CRITIC_PASS`) |
+| `DataQualityAuditReport` & `UniverseDataReadinessSummary` (`13`-feed `UniverseFeedAuditRow` matrix), `VIETNAM_HOLIDAYS_V1` (`VN`) & 10-holiday + Computus Good Friday + historical `is_us_nyse_holiday_ymd` (`SPY`) `D1` gap detectors, ISO-week `1W` continuity, outlier range/band/10x-RVOL checks, & 5-rule `OhlcEnvelopePolicy::CafeFSplitAware` `<= 6 bps` & `<= 25 VND` post-split gate | `ARCHIVE/backend/app/services/{data_quality_service,readiness_service,cafef_importer}.py` + `SETTINGS_VN_HOLIDAYS_DATA_AUDIT_AND_DRAWINGS_SPEC.md` | `src/data/audit.rs`, `src/data/mod.rs`, `src/data/presets.rs`, `src/app.rs` | Shipped & Critic-Hardened (`3,557.29 µs` `10k` audit + `13` feeds + `1k` split evals, `CRITIC_PASS`) |
+| `DrawingTool::TextNote` (`<= 280` UTF-8 scalar chars, word-boundary wrap, `0.0`-dist interior hit-test + `6 px` halo, `DEF-001` Replay masking, multiline Inspector editor), `1..=16` `custom_fib_levels` (`Std 7`, `ICT OTE 9`, `Full 13`), `[-∞, +∞]` `trend_extend_left/right` synced with `AlertEngine`, & 1-click `[Export PNG]` (`OffscreenWgpuHarness` `2.0x` Retina) | `ARCHIVE/frontend/src/{features/drawings/drawingDomain.ts,components/chart/DrawingInspector.tsx}` + `LWC v5.2.0` `chart-api.ts` | `src/drawings/{mod,geometry,hit_test,controller}.rs`, `src/alerts/engine.rs`, `src/chart.rs`, `src/app.rs` | Shipped & Critic-Hardened (`266/266` tests + `wasm32` Clippy, `--r19` `0.253–0.372 ms` mean / `p99 <= 0.592 ms < 4.0 ms`) |
+
+### Verified Acceptance Tests (`cargo test` — 266/266 PASS)
+```bash
+cargo test viewport::tests::r19_
+cargo test journal::tests::r19_
+cargo test journal::tests::critic_r19_
+cargo test trading::tests::critic_r19_
+cargo test data::tests::r19_
+cargo test data::tests::critic_r19_
+cargo test drawings::tests::r19_
+cargo test chart::tests::r19_
+cargo test app::tests::r19_
+cargo test app::tests::critic_r19_
+```
+
+---
+
+## Core Parity Roadmap Completion Status (`Waves 1–18 / Milestones R01–R19 — 100% COMPLETE`)
+
+Every planned core subsystem and anti-miss parity item across `ARCHIVE/` (`208` frontend + `474` backend items) in [`docs/FEATURE_BACKLOG_AND_PARITY_LEDGER.md`](../FEATURE_BACKLOG_AND_PARITY_LEDGER.md) (`S-01..S-10`, `R16-1..R16-3`, `A1..A5`, `B1..B4`, `C1..C4`) is now shipped and verified in pure Rust (`266/266` automated tests, `0` `wasm32` Clippy warnings, `< 4.0 ms` Retina frame budget). Only Group D (`D1` live network data fetchers & `D2` legacy SQLite/REST multi-page shell) remains intentionally outside the offline-first core crate by architectural design (`DEC-001..004`).
 
 ---
 

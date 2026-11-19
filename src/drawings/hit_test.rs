@@ -307,6 +307,57 @@ pub fn hit_test_projected_drawing(
             }
             None
         }
+        ProjectedDrawingShape::TextNote {
+            anchor_local,
+            box_rect,
+            ..
+        } => {
+            let mut min_dist = cursor.distance(*anchor_local);
+            if let Some(rect) = box_rect {
+                if rect.contains(cursor) {
+                    return Some(HitMatch {
+                        drawing_id: projected.id,
+                        locked: projected.locked,
+                        target: HitTarget::Body,
+                        priority: HitPriority::Stroke,
+                        distance: 0.0,
+                        z_order,
+                    });
+                }
+                let edges = [
+                    LocalSegment::new(
+                        LocalPoint::new(rect.left, rect.top),
+                        LocalPoint::new(rect.right, rect.top),
+                    ),
+                    LocalSegment::new(
+                        LocalPoint::new(rect.right, rect.top),
+                        LocalPoint::new(rect.right, rect.bottom),
+                    ),
+                    LocalSegment::new(
+                        LocalPoint::new(rect.right, rect.bottom),
+                        LocalPoint::new(rect.left, rect.bottom),
+                    ),
+                    LocalSegment::new(
+                        LocalPoint::new(rect.left, rect.bottom),
+                        LocalPoint::new(rect.left, rect.top),
+                    ),
+                ];
+                for e in edges {
+                    min_dist = min_dist.min(distance_to_segment(cursor, e));
+                }
+                if min_dist <= STROKE_HIT_TOLERANCE_PX {
+                    return Some(HitMatch {
+                        drawing_id: projected.id,
+                        locked: projected.locked,
+                        target: HitTarget::Body,
+                        priority: HitPriority::Stroke,
+                        distance: min_dist,
+                        z_order,
+                    });
+                }
+            }
+            None
+        }
     }
 }
 
