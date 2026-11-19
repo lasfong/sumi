@@ -9,7 +9,9 @@ use crate::indicators::{
     compute_ema_slices, compute_macd_slices, compute_rsi_slices, compute_sma_slices,
 };
 use crate::model::Candle;
-use crate::scanner::PrecomputedCatalogMatrix;
+use crate::scanner::{
+    PrecomputedCatalogMatrix, SessionDate, UniverseDefinition, UniverseMode, UniverseResolver,
+};
 use crate::trading::{
     MAX_ORDER_NOTIONAL, MAX_ORDER_PRICE, MAX_ORDER_QUANTITY, MIN_ORDER_QUANTITY, OrderSide,
     PositionSide, apply_slippage, compute_commission,
@@ -118,6 +120,14 @@ pub struct MultiSymbolBattleReport {
     pub rows: Vec<SymbolBattleRow>,
     pub profitable_symbols: usize,
     pub average_return_pct: f64,
+    /// Optional identifier of the [`UniverseDefinition`] gating constituent eligibility (`Milestone R18 / B4`).
+    pub universe_id: Option<String>,
+    /// Effective [`UniverseMode`] applied (`PointInTime` vs `RetrospectiveFixed`).
+    pub universe_mode: Option<UniverseMode>,
+    /// `true` iff constituent eligibility respected historical `PointInTime` `[effective_from, effective_to]` bounds.
+    pub is_point_in_time: bool,
+    /// Explicit caveat banner whenever `is_point_in_time == false` (`RetrospectiveFixed` or ungated watchlist).
+    pub survivor_bias_caveat: Option<String>,
 }
 
 /// Single preset row comparing all 6 [`StrategyPresetKind`] strategies on the active symbol.
@@ -871,8 +881,389 @@ pub fn run_multi_symbol_battle_with_close_cutoff(
     ranking_metric: SweepRankingMetric,
     replay_causal_close_timestamp: Option<i64>,
 ) -> MultiSymbolBattleReport {
+    run_multi_symbol_battle_with_universe(
+        feeds,
+        preferred_timeframe,
+        config,
+        ranking_metric,
+        replay_causal_close_timestamp,
+        None,
+        None,
+    )
+}
+
+/// Runs a single-symbol backtest gated by `universe` (`PointInTime` vs `RetrospectiveFixed`, `Milestone R18 / B4`):
+/// - Pre-inclusion exchange bars warm up `PrecomputedFeatures` (`SMA`, `EMA`, `RSI`, `ATR`, `PrecomputedCatalogMatrix`)
+///   causally with zero future leakage, while trade simulation executes strictly on active membership episodes.
+/// - If an active `PointInTime` episode terminates at `ep_end < causal_candles.len()`, any open position is settled
+///   on the final active bar close (`ep_end - 1`) with [`BacktestExitReason::UniverseRemoval`] so phantom exposure
+///   never leaks into inactive / post-delisting periods.
+#[must_use]
+pub fn run_pit_episodes_backtest(
+    symbol: impl Into<String>,
+    timeframe: Timeframe,
+    candles: &[Candle],
+    config: &BacktestConfig,
+    options: BacktestRunOptions,
+    universe: &UniverseDefinition,
+    mode_override: Option<UniverseMode>,
+) -> BacktestRunResult {
+    let symbol = symbol.into();
     let mut clean_cfg = config.clone();
     clean_cfg.sanitize();
+    let causal_candles =
+        slice_causal_series_for_symbol_and_options(Some(&symbol), candles, timeframe, options);
+    let eval_mode = mode_override.unwrap_or(universe.default_mode);
+
+    let make_empty = |sym: String, cfg: BacktestConfig| -> BacktestRunResult {
+        let empty_sheet =
+            compute_tearsheet(cfg.initial_cash, cfg.initial_cash, timeframe, &[], &[], 0.0);
+        BacktestRunResult {
+            symbol: sym,
+            timeframe,
+            config: cfg,
+            bar_count: 0,
+            first_timestamp: None,
+            last_timestamp: None,
+            equity_curve: Vec::new(),
+            equity_values: Vec::new(),
+            equity_idx: SeriesBlockIndex::default(),
+            underwater_values: Vec::new(),
+            underwater_idx: SeriesBlockIndex::default(),
+            trades: Vec::new(),
+            open_position: None,
+            unexecuted_signals: Vec::new(),
+            tearsheet: empty_sheet,
+            split_bar_index: None,
+            in_sample_tearsheet: None,
+            out_of_sample_tearsheet: None,
+            robustness: None,
+        }
+    };
+
+    if causal_candles.is_empty() {
+        return make_empty(symbol, clean_cfg);
+    }
+
+    if eval_mode == UniverseMode::RetrospectiveFixed {
+        let eligible = UniverseResolver::is_symbol_active_on(
+            universe,
+            &symbol,
+            SessionDate::from_utc_timestamp(0),
+            Some(UniverseMode::RetrospectiveFixed),
+        );
+        if !eligible {
+            return make_empty(symbol, clean_cfg);
+        }
+        return run_backtest_with_options(
+            symbol,
+            timeframe,
+            causal_candles,
+            &clean_cfg,
+            BacktestRunOptions {
+                replay_cutoff_timestamp: None,
+                incomplete_tail_bar: options.incomplete_tail_bar,
+            },
+        );
+    }
+
+    // `UniverseMode::PointInTime`: identify maximal contiguous active index episodes `[ep_start..ep_end)`.
+    let mut episodes: Vec<(usize, usize)> = Vec::new();
+    let mut cur_start: Option<usize> = None;
+    for (idx, c) in causal_candles.iter().enumerate() {
+        let d = SessionDate::from_utc_timestamp(c.timestamp);
+        let active = UniverseResolver::is_symbol_active_on(
+            universe,
+            &symbol,
+            d,
+            Some(UniverseMode::PointInTime),
+        );
+        match (cur_start, active) {
+            (None, true) => cur_start = Some(idx),
+            (Some(s), false) => {
+                episodes.push((s, idx));
+                cur_start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(s) = cur_start {
+        episodes.push((s, causal_candles.len()));
+    }
+
+    if episodes.is_empty() {
+        return make_empty(symbol, clean_cfg);
+    }
+    if episodes.len() == 1 && episodes[0] == (0, causal_candles.len()) {
+        return run_backtest_with_options(
+            symbol,
+            timeframe,
+            causal_candles,
+            &clean_cfg,
+            BacktestRunOptions {
+                replay_cutoff_timestamp: None,
+                incomplete_tail_bar: options.incomplete_tail_bar,
+            },
+        );
+    }
+
+    let features = PrecomputedFeatures::build_with_shared_catalog(causal_candles, &clean_cfg, None);
+    let mut carry = SimulationCarryState::new(clean_cfg.initial_cash);
+    let mut all_equity_curve: Vec<BacktestEquityPoint> = Vec::with_capacity(causal_candles.len());
+    let mut all_trades: Vec<BacktestTrade> = Vec::new();
+    let mut all_unexecuted: Vec<UnexecutedSignal> = Vec::new();
+    let mut final_open_position: Option<OpenBacktestPosition> = None;
+    let mut active_bar_count = 0_usize;
+    let mut emit_cursor = 0_usize;
+
+    let push_inactive_flat_bars =
+        |from: usize,
+         to: usize,
+         carry_state: &SimulationCarryState,
+         out_curve: &mut Vec<BacktestEquityPoint>| {
+            let eq = carry_state.cash.max(0.0);
+            let dd_abs = (carry_state.peak_equity - eq).max(0.0);
+            let uw_pct = if carry_state.peak_equity > 0.0 && eq < carry_state.peak_equity {
+                ((eq - carry_state.peak_equity) / carry_state.peak_equity) * 100.0
+            } else {
+                0.0
+            };
+            for (idx, bar) in causal_candles
+                .iter()
+                .enumerate()
+                .take(to.min(causal_candles.len()))
+                .skip(from)
+            {
+                out_curve.push(BacktestEquityPoint {
+                    bar_index: idx,
+                    timestamp: bar.timestamp,
+                    equity: eq,
+                    cash: eq,
+                    drawdown_abs: dd_abs,
+                    underwater_pct: uw_pct,
+                    position_qty: 0.0,
+                });
+            }
+        };
+
+    let ep_count = episodes.len();
+    for (ep_idx, &(ep_start, ep_end)) in episodes.iter().enumerate() {
+        if emit_cursor < ep_start {
+            push_inactive_flat_bars(emit_cursor, ep_start, &carry, &mut all_equity_curve);
+        }
+        let ep_incomplete_tail = options.incomplete_tail_bar && ep_end == causal_candles.len();
+        let (mut sim_out, mut carry_out) = simulate_window_with_carry(
+            causal_candles,
+            ep_start,
+            ep_end,
+            timeframe,
+            &clean_cfg,
+            &features,
+            ep_incomplete_tail,
+            Some(carry),
+            false,
+            true,
+        );
+        active_bar_count += ep_end.saturating_sub(ep_start);
+        carry_out.pending_order = None;
+
+        // If the constituent leaves the PIT universe before the end of `causal_candles`, settle any open position
+        // on its final active bar close (`ep_end - 1`) with `UniverseRemoval` so no phantom exposure crosses gaps.
+        if ep_end < causal_candles.len()
+            && let Some(mut pos) = carry_out.active_pos.take()
+        {
+            let last_active_idx = ep_end.saturating_sub(1);
+            let last_candle = &causal_candles[last_active_idx];
+            let exit_side = pos.side.exit_order_side();
+            let exec_price = apply_slippage(last_candle.close, exit_side, clean_cfg.slippage_bps);
+            pos.observe_price(last_candle.close);
+            pos.observe_price(exec_price);
+            close_position_into_trade(
+                pos,
+                last_active_idx,
+                last_active_idx,
+                true,
+                last_candle.timestamp,
+                exec_price,
+                BacktestExitReason::UniverseRemoval,
+                &clean_cfg,
+                &mut carry_out.cash,
+                &mut carry_out.next_trade_id,
+                &mut sim_out.trades,
+            );
+            carry_out.cash = carry_out.cash.max(0.0);
+            if carry_out.cash > carry_out.peak_equity {
+                carry_out.peak_equity = carry_out.cash;
+            }
+            if let Some(last_pt) = sim_out.equity_curve.last_mut() {
+                last_pt.equity = carry_out.cash;
+                last_pt.cash = carry_out.cash;
+                last_pt.position_qty = 0.0;
+                last_pt.drawdown_abs = (carry_out.peak_equity - carry_out.cash).max(0.0);
+                last_pt.underwater_pct =
+                    if carry_out.peak_equity > 0.0 && carry_out.cash < carry_out.peak_equity {
+                        ((carry_out.cash - carry_out.peak_equity) / carry_out.peak_equity) * 100.0
+                    } else {
+                        0.0
+                    };
+            }
+            sim_out.open_position = None;
+        }
+
+        if ep_idx + 1 == ep_count {
+            final_open_position = sim_out.open_position;
+        }
+        all_equity_curve.extend(sim_out.equity_curve);
+        all_trades.extend(sim_out.trades);
+        all_unexecuted.extend(sim_out.unexecuted_signals);
+        emit_cursor = ep_end;
+        carry = carry_out;
+    }
+    if emit_cursor < causal_candles.len() {
+        push_inactive_flat_bars(
+            emit_cursor,
+            causal_candles.len(),
+            &carry,
+            &mut all_equity_curve,
+        );
+    }
+    debug_assert_eq!(all_equity_curve.len(), causal_candles.len());
+
+    let open_entry_fee = final_open_position
+        .as_ref()
+        .map_or(0.0, |pos| pos.entry_fee);
+    let tearsheet = compute_tearsheet(
+        clean_cfg.initial_cash,
+        carry.cash,
+        timeframe,
+        &all_equity_curve,
+        &all_trades,
+        open_entry_fee,
+    );
+
+    let mut equity_values = Vec::with_capacity(all_equity_curve.len());
+    let mut underwater_values = Vec::with_capacity(all_equity_curve.len());
+    for pt in &all_equity_curve {
+        equity_values.push(Some(pt.equity));
+        underwater_values.push(Some(pt.underwater_pct));
+    }
+    let equity_idx = SeriesBlockIndex::build(&equity_values);
+    let underwater_idx = SeriesBlockIndex::build(&underwater_values);
+
+    let (split_bar_index, in_sample_tearsheet, out_of_sample_tearsheet, robustness) =
+        if let Some(split_pct) = clean_cfg
+            .in_sample_split_pct
+            .filter(|_| all_equity_curve.len() >= 10)
+        {
+            let split_pos = ((all_equity_curve.len() as f64 * split_pct).round() as usize)
+                .clamp(4, all_equity_curve.len() - 4);
+            let split_abs_idx = all_equity_curve[split_pos].bar_index;
+            let is_curve = &all_equity_curve[..split_pos];
+            let oos_curve = &all_equity_curve[split_pos..];
+            let is_final_eq = is_curve
+                .last()
+                .map_or(clean_cfg.initial_cash, |pt| pt.equity);
+            let is_final_cash = is_curve.last().map_or(clean_cfg.initial_cash, |pt| pt.cash);
+            let trade_split_pos = all_trades.partition_point(|t| t.exit_bar_index < split_abs_idx);
+            let is_trades = &all_trades[..trade_split_pos];
+            let oos_trades = &all_trades[trade_split_pos..];
+            let (is_open_fee, oos_open_fee) = match final_open_position.as_ref() {
+                Some(pos) if pos.entry_bar_index < split_abs_idx => (pos.entry_fee, 0.0),
+                Some(pos) => (0.0, pos.entry_fee),
+                None => (0.0, 0.0),
+            };
+            let is_sheet = compute_tearsheet(
+                clean_cfg.initial_cash,
+                is_final_cash,
+                timeframe,
+                is_curve,
+                is_trades,
+                is_open_fee,
+            );
+            let oos_sheet = compute_tearsheet(
+                is_final_eq,
+                carry.cash,
+                timeframe,
+                oos_curve,
+                oos_trades,
+                oos_open_fee,
+            );
+            let verdict = evaluate_robustness(&is_sheet, &oos_sheet);
+            (
+                Some(split_abs_idx),
+                Some(is_sheet),
+                Some(oos_sheet),
+                Some(verdict),
+            )
+        } else {
+            (None, None, None, None)
+        };
+
+    BacktestRunResult {
+        symbol,
+        timeframe,
+        config: clean_cfg,
+        bar_count: active_bar_count,
+        first_timestamp: all_equity_curve.first().map(|pt| pt.timestamp),
+        last_timestamp: all_equity_curve.last().map(|pt| pt.timestamp),
+        equity_curve: all_equity_curve,
+        equity_values,
+        equity_idx,
+        underwater_values,
+        underwater_idx,
+        trades: all_trades,
+        open_position: final_open_position,
+        unexecuted_signals: all_unexecuted,
+        tearsheet,
+        split_bar_index,
+        in_sample_tearsheet,
+        out_of_sample_tearsheet,
+        robustness,
+    }
+}
+
+/// Runs `config` causally across `feeds`, optionally gated by a versioned [`UniverseDefinition`]
+/// (`PointInTime` vs `RetrospectiveFixed`, `Milestone R18 / B4`).
+#[must_use]
+pub fn run_multi_symbol_battle_with_universe(
+    feeds: &[WatchlistFeedEntry],
+    preferred_timeframe: Timeframe,
+    config: &BacktestConfig,
+    ranking_metric: SweepRankingMetric,
+    replay_causal_close_timestamp: Option<i64>,
+    universe: Option<&UniverseDefinition>,
+    mode_override: Option<UniverseMode>,
+) -> MultiSymbolBattleReport {
+    let mut clean_cfg = config.clone();
+    clean_cfg.sanitize();
+
+    let (universe_id, universe_mode, is_point_in_time, survivor_bias_caveat) = match universe {
+        Some(u) => {
+            let eff_mode = mode_override.unwrap_or(u.default_mode);
+            let is_pit = eff_mode == UniverseMode::PointInTime;
+            let caveat = if is_pit {
+                None
+            } else {
+                let eff_lbl = u
+                    .effective_from
+                    .map_or_else(|| "curated".to_owned(), |d| d.to_iso_string());
+                Some(format!(
+                    "RETROSPECTIVE_FIXED MODE ({} @ {}): Fixed constituent snapshot (effective {eff_lbl}) carries survivorship bias.",
+                    u.universe_id, u.version
+                ))
+            };
+            (Some(u.universe_id.clone()), Some(eff_mode), is_pit, caveat)
+        }
+        None => (
+            None,
+            None,
+            false,
+            Some(
+                "UNIVERSE_UNGATED: Evaluated across active Watchlist feeds without Point-In-Time (PIT) membership schedule."
+                    .to_owned(),
+            ),
+        ),
+    };
 
     let mut rows = Vec::with_capacity(feeds.len());
     for feed in feeds {
@@ -935,16 +1326,31 @@ pub fn run_multi_symbol_battle_with_close_cutoff(
         };
 
         let feed_cfg = normalize_config_for_universe_feed(&clean_cfg, feed.preset, effective_tf);
-        let res = run_backtest_with_options(
-            feed.symbol.clone(),
-            effective_tf,
-            series_ref,
-            &feed_cfg,
-            BacktestRunOptions {
-                replay_cutoff_timestamp: None,
-                incomplete_tail_bar: incomplete_tail,
-            },
-        );
+        let run_opts = BacktestRunOptions {
+            replay_cutoff_timestamp: None,
+            incomplete_tail_bar: incomplete_tail,
+        };
+        let res = match universe {
+            Some(u) => run_pit_episodes_backtest(
+                feed.symbol.clone(),
+                effective_tf,
+                series_ref,
+                &feed_cfg,
+                run_opts,
+                u,
+                mode_override,
+            ),
+            None => run_backtest_with_options(
+                feed.symbol.clone(),
+                effective_tf,
+                series_ref,
+                &feed_cfg,
+                run_opts,
+            ),
+        };
+        if universe.is_some() && res.bar_count == 0 {
+            continue;
+        }
         rows.push(SymbolBattleRow {
             rank: 0,
             instrument_id: feed.instrument_id.clone(),
@@ -984,6 +1390,10 @@ pub fn run_multi_symbol_battle_with_close_cutoff(
         rows,
         profitable_symbols,
         average_return_pct,
+        universe_id,
+        universe_mode,
+        is_point_in_time,
+        survivor_bias_caveat,
     }
 }
 
@@ -1097,9 +1507,14 @@ pub(crate) fn simulate_window_with_carry(
                         );
                     }
                     if config.direction_mode.allows_side(new_side) {
+                        let sig_out = if use_absolute_indices {
+                            signal_bar
+                        } else {
+                            signal_bar.saturating_sub(start)
+                        };
                         try_open_position_at_open(
                             new_side,
-                            signal_bar.saturating_sub(start),
+                            sig_out,
                             i,
                             start,
                             candle,
@@ -1113,9 +1528,14 @@ pub(crate) fn simulate_window_with_carry(
                 }
                 PendingStrategyOrder::Entry { side, signal_bar } => {
                     if active_pos.is_none() && config.direction_mode.allows_side(side) {
+                        let sig_out = if use_absolute_indices {
+                            signal_bar
+                        } else {
+                            signal_bar.saturating_sub(start)
+                        };
                         try_open_position_at_open(
                             side,
-                            signal_bar.saturating_sub(start),
+                            sig_out,
                             i,
                             start,
                             candle,

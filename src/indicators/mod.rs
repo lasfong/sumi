@@ -6,10 +6,13 @@
 
 pub mod bands;
 pub mod cvd;
+pub mod extended;
 pub mod ichimoku;
 pub mod market_profile;
 pub mod moving_averages;
 pub mod oscillators;
+pub mod patterns;
+pub mod proxy_bb;
 pub mod relative_strength;
 pub mod volume_profile;
 pub mod vwap;
@@ -31,6 +34,14 @@ pub use bands::{
 pub use cvd::{
     CVD_REFERENCE_LEVELS, CvdConfig, CvdOutput, CvdResetMode, compute_bar_volume_delta, compute_cvd,
 };
+pub use extended::{
+    ADX_FIXED_BOUNDS_HINT, ADX_REFERENCE_LEVELS, AdxIndicator, AdxOutput, CCI_REFERENCE_LEVELS,
+    CciIndicator, KeltnerIndicator, KeltnerOutput, MFI_FIXED_BOUNDS_HINT, MFI_REFERENCE_LEVELS,
+    MfiIndicator, PsarIndicator, PsarOutput, STOCH_FIXED_BOUNDS_HINT, STOCH_REFERENCE_LEVELS,
+    StochasticIndicator, StochasticOutput, SuperTrendIndicator, SuperTrendOutput,
+    VolumeSmaIndicator, compute_adx, compute_cci, compute_keltner_channels, compute_mfi,
+    compute_psar, compute_stochastic, compute_supertrend, compute_volume_sma,
+};
 pub use ichimoku::{
     IchimokuConfig, IchimokuIndicator, IchimokuOutput, MAX_ICHIMOKU_DISPLACEMENT, compute_ichimoku,
     donchian_midpoint_series,
@@ -48,6 +59,15 @@ pub use oscillators::{
     AtrIndicator, MACD_REFERENCE_LEVELS, MacdIndicator, MacdOutput, RSI_FIXED_BOUNDS_HINT,
     RSI_REFERENCE_LEVELS, RsiIndicator, compute_atr, compute_macd, compute_macd_slices,
     compute_rsi, compute_rsi_slices, true_range,
+};
+pub use patterns::{
+    CandleGeometry, CandlePatternBarSummary, CandlestickPatternKind,
+    compute_candlestick_patterns_and_scores,
+};
+pub use proxy_bb::{
+    BBDirection, BBHorizon, BBRegime, DecomposedBarFlow, PROXY_BB_FIXED_BOUNDS_HINT,
+    PROXY_BB_METHODOLOGY_VERSION, PROXY_BB_REFERENCE_LEVELS, ProxyBBBarPoint, ProxyBBHorizonPoint,
+    ProxyBBSeriesOutput, compute_proxy_bb_series, decompose_bar_ohlcv_proxy,
 };
 pub use relative_strength::{
     MAX_BENCHMARK_CARRY_SECONDS, RS_REFERENCE_LEVELS, RelativeStrengthOutput,
@@ -123,6 +143,11 @@ pub enum OscillatorPaneId {
     Equity,
     RelativeStrength,
     Cvd,
+    Adx,
+    Stochastic,
+    Cci,
+    Mfi,
+    ProxyBb,
 }
 
 impl OscillatorPaneId {
@@ -135,6 +160,11 @@ impl OscillatorPaneId {
             Self::Equity => "osc-equity",
             Self::RelativeStrength => "osc-rs",
             Self::Cvd => "osc-cvd",
+            Self::Adx => "osc-adx",
+            Self::Stochastic => "osc-stoch",
+            Self::Cci => "osc-cci",
+            Self::Mfi => "osc-mfi",
+            Self::ProxyBb => "osc-proxy-bb",
         }
     }
 
@@ -147,6 +177,11 @@ impl OscillatorPaneId {
             Self::Equity => "EQUITY",
             Self::RelativeStrength => "RS",
             Self::Cvd => "CVD",
+            Self::Adx => "ADX",
+            Self::Stochastic => "STOCH",
+            Self::Cci => "CCI",
+            Self::Mfi => "MFI",
+            Self::ProxyBb => "PROXY-BB",
         }
     }
 }
@@ -181,6 +216,20 @@ pub struct IndicatorConfig {
     pub ichimoku_senkou_b: usize,
     pub ichimoku_displacement: usize,
     pub show_ichimoku_chikou: bool,
+    pub show_supertrend: bool,
+    pub supertrend_period: usize,
+    pub supertrend_multiplier: f64,
+    pub show_psar: bool,
+    pub psar_af_start: f64,
+    pub psar_af_step: f64,
+    pub psar_af_max: f64,
+    pub show_keltner: bool,
+    pub keltner_ema_period: usize,
+    pub keltner_atr_period: usize,
+    pub keltner_multiplier: f64,
+    pub show_volume_sma: bool,
+    pub volume_sma_period: usize,
+    pub show_candle_patterns: bool,
 
     // Stacked oscillator sub-panes
     pub show_rsi: bool,
@@ -196,6 +245,17 @@ pub struct IndicatorConfig {
     pub show_cvd: bool,
     pub cvd_reset_mode: CvdResetMode,
     pub cvd_sma_period: usize,
+    pub show_adx: bool,
+    pub adx_period: usize,
+    pub show_stochastic: bool,
+    pub stoch_k_period: usize,
+    pub stoch_k_smooth: usize,
+    pub stoch_d_period: usize,
+    pub show_cci: bool,
+    pub cci_period: usize,
+    pub show_mfi: bool,
+    pub mfi_period: usize,
+    pub show_proxy_bb: bool,
 }
 
 impl Default for IndicatorConfig {
@@ -226,6 +286,20 @@ impl Default for IndicatorConfig {
             ichimoku_senkou_b: 52,
             ichimoku_displacement: 26,
             show_ichimoku_chikou: true,
+            show_supertrend: false,
+            supertrend_period: 10,
+            supertrend_multiplier: 3.0,
+            show_psar: false,
+            psar_af_start: 0.02,
+            psar_af_step: 0.02,
+            psar_af_max: 0.20,
+            show_keltner: false,
+            keltner_ema_period: 20,
+            keltner_atr_period: 10,
+            keltner_multiplier: 2.0,
+            show_volume_sma: false,
+            volume_sma_period: 20,
+            show_candle_patterns: false,
             show_rsi: true,
             rsi_period: 14,
             show_macd: false,
@@ -239,6 +313,17 @@ impl Default for IndicatorConfig {
             show_cvd: false,
             cvd_reset_mode: CvdResetMode::Session,
             cvd_sma_period: 9,
+            show_adx: false,
+            adx_period: 14,
+            show_stochastic: false,
+            stoch_k_period: 14,
+            stoch_k_smooth: 3,
+            stoch_d_period: 3,
+            show_cci: false,
+            cci_period: 20,
+            show_mfi: false,
+            mfi_period: 14,
+            show_proxy_bb: false,
         }
     }
 }
@@ -283,6 +368,35 @@ impl IndicatorConfig {
         self.ichimoku_kijun = self.ichimoku_kijun.clamp(1, 500);
         self.ichimoku_senkou_b = self.ichimoku_senkou_b.clamp(1, 500);
         self.ichimoku_displacement = self.ichimoku_displacement.min(MAX_ICHIMOKU_DISPLACEMENT);
+        self.supertrend_period = self.supertrend_period.clamp(1, 500);
+        if !self.supertrend_multiplier.is_finite() {
+            self.supertrend_multiplier = 3.0;
+        } else {
+            self.supertrend_multiplier = self.supertrend_multiplier.clamp(0.1, 20.0);
+        }
+        if !self.psar_af_max.is_finite() {
+            self.psar_af_max = 0.20;
+        } else {
+            self.psar_af_max = self.psar_af_max.clamp(0.001, 1.0);
+        }
+        if !self.psar_af_start.is_finite() {
+            self.psar_af_start = 0.02_f64.min(self.psar_af_max);
+        } else {
+            self.psar_af_start = self.psar_af_start.clamp(0.001, self.psar_af_max);
+        }
+        if !self.psar_af_step.is_finite() {
+            self.psar_af_step = 0.02_f64.min(self.psar_af_max);
+        } else {
+            self.psar_af_step = self.psar_af_step.clamp(0.001, self.psar_af_max);
+        }
+        self.keltner_ema_period = self.keltner_ema_period.clamp(1, 5_000);
+        self.keltner_atr_period = self.keltner_atr_period.clamp(1, 5_000);
+        if !self.keltner_multiplier.is_finite() {
+            self.keltner_multiplier = 2.0;
+        } else {
+            self.keltner_multiplier = self.keltner_multiplier.clamp(0.1, 20.0);
+        }
+        self.volume_sma_period = self.volume_sma_period.clamp(1, 5_000);
         self.rsi_period = self.rsi_period.clamp(2, 5_000);
         self.macd_fast = self.macd_fast.clamp(2, 5_000);
         self.macd_slow = self.macd_slow.clamp(2, 5_000);
@@ -293,12 +407,18 @@ impl IndicatorConfig {
         self.atr_period = self.atr_period.clamp(1, 5_000);
         self.rs_sma_period = self.rs_sma_period.clamp(1, 5_000);
         self.cvd_sma_period = self.cvd_sma_period.clamp(1, 500);
+        self.adx_period = self.adx_period.clamp(1, 500);
+        self.stoch_k_period = self.stoch_k_period.clamp(1, 500);
+        self.stoch_k_smooth = self.stoch_k_smooth.clamp(1, 100);
+        self.stoch_d_period = self.stoch_d_period.clamp(1, 100);
+        self.cci_period = self.cci_period.clamp(1, 500);
+        self.mfi_period = self.mfi_period.clamp(1, 500);
     }
 
     /// Returns the ordered list of active oscillator sub-panes below the main price pane.
     #[must_use]
     pub fn active_oscillator_panes(&self) -> Vec<OscillatorPaneId> {
-        let mut panes = Vec::with_capacity(5);
+        let mut panes = Vec::with_capacity(10);
         if self.show_rsi {
             panes.push(OscillatorPaneId::Rsi);
         }
@@ -307,6 +427,21 @@ impl IndicatorConfig {
         }
         if self.show_atr {
             panes.push(OscillatorPaneId::Atr);
+        }
+        if self.show_adx {
+            panes.push(OscillatorPaneId::Adx);
+        }
+        if self.show_stochastic {
+            panes.push(OscillatorPaneId::Stochastic);
+        }
+        if self.show_cci {
+            panes.push(OscillatorPaneId::Cci);
+        }
+        if self.show_mfi {
+            panes.push(OscillatorPaneId::Mfi);
+        }
+        if self.show_proxy_bb {
+            panes.push(OscillatorPaneId::ProxyBb);
         }
         if self.show_cvd {
             panes.push(OscillatorPaneId::Cvd);
@@ -326,6 +461,11 @@ impl IndicatorConfig {
             || self.show_vrvp
             || self.show_market_profile
             || self.show_ichimoku
+            || self.show_supertrend
+            || self.show_psar
+            || self.show_keltner
+            || self.show_volume_sma
+            || self.show_candle_patterns
     }
 }
 
@@ -784,6 +924,32 @@ pub struct IndicatorCache {
     pub rs_line_idx: SeriesBlockIndex,
     pub rs_sma_idx: SeriesBlockIndex,
     rs_cache_key: Option<RsCacheKey>,
+    pub supertrend: SuperTrendOutput,
+    pub supertrend_idx: SeriesBlockIndex,
+    pub psar: PsarOutput,
+    pub psar_idx: SeriesBlockIndex,
+    pub keltner: KeltnerOutput,
+    pub kc_upper_idx: SeriesBlockIndex,
+    pub kc_middle_idx: SeriesBlockIndex,
+    pub kc_lower_idx: SeriesBlockIndex,
+    pub volume_sma: Vec<Option<f64>>,
+    pub volume_sma_idx: SeriesBlockIndex,
+    pub candle_patterns: Vec<CandlePatternBarSummary>,
+    pub adx: AdxOutput,
+    pub adx_line_idx: SeriesBlockIndex,
+    pub plus_di_idx: SeriesBlockIndex,
+    pub minus_di_idx: SeriesBlockIndex,
+    pub stochastic: StochasticOutput,
+    pub stoch_k_idx: SeriesBlockIndex,
+    pub stoch_d_idx: SeriesBlockIndex,
+    pub cci: Vec<Option<f64>>,
+    pub cci_idx: SeriesBlockIndex,
+    pub mfi: Vec<Option<f64>>,
+    pub mfi_idx: SeriesBlockIndex,
+    pub proxy_bb: ProxyBBSeriesOutput,
+    pub proxy_bb_t05_idx: SeriesBlockIndex,
+    pub proxy_bb_t20_idx: SeriesBlockIndex,
+    pub proxy_bb_t50_idx: SeriesBlockIndex,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -889,6 +1055,32 @@ impl IndicatorCache {
             self.rs_line_idx.clear();
             self.rs_sma_idx.clear();
             self.rs_cache_key = None;
+            self.supertrend = SuperTrendOutput::default();
+            self.supertrend_idx.clear();
+            self.psar = PsarOutput::default();
+            self.psar_idx.clear();
+            self.keltner = KeltnerOutput::default();
+            self.kc_upper_idx.clear();
+            self.kc_middle_idx.clear();
+            self.kc_lower_idx.clear();
+            self.volume_sma.clear();
+            self.volume_sma_idx.clear();
+            self.candle_patterns.clear();
+            self.adx = AdxOutput::default();
+            self.adx_line_idx.clear();
+            self.plus_di_idx.clear();
+            self.minus_di_idx.clear();
+            self.stochastic = StochasticOutput::default();
+            self.stoch_k_idx.clear();
+            self.stoch_d_idx.clear();
+            self.cci.clear();
+            self.cci_idx.clear();
+            self.mfi.clear();
+            self.mfi_idx.clear();
+            self.proxy_bb = ProxyBBSeriesOutput::default();
+            self.proxy_bb_t05_idx.clear();
+            self.proxy_bb_t20_idx.clear();
+            self.proxy_bb_t50_idx.clear();
             None
         } else {
             self.applied_config.as_ref()
@@ -1032,6 +1224,132 @@ impl IndicatorCache {
             self.cvd_line_idx = SeriesBlockIndex::build(&self.cvd.cvd);
             self.cvd_sma_idx = SeriesBlockIndex::build(&self.cvd.cvd_sma);
             self.cvd_computed_cfg = Some(target_cvd_cfg);
+        }
+
+        let need_supertrend = clean_cfg.show_supertrend
+            && (self.supertrend.trend.len() != candles.len()
+                || prev_cfg.is_none_or(|p| {
+                    p.supertrend_period != clean_cfg.supertrend_period
+                        || (p.supertrend_multiplier - clean_cfg.supertrend_multiplier).abs() > 1e-12
+                }));
+        if need_supertrend {
+            self.supertrend = compute_supertrend(
+                candles,
+                clean_cfg.supertrend_period,
+                clean_cfg.supertrend_multiplier,
+            );
+            self.supertrend_idx = SeriesBlockIndex::build(&self.supertrend.trend);
+        }
+
+        let need_psar = clean_cfg.show_psar
+            && (self.psar.sar.len() != candles.len()
+                || prev_cfg.is_none_or(|p| {
+                    (p.psar_af_start - clean_cfg.psar_af_start).abs() > 1e-12
+                        || (p.psar_af_step - clean_cfg.psar_af_step).abs() > 1e-12
+                        || (p.psar_af_max - clean_cfg.psar_af_max).abs() > 1e-12
+                }));
+        if need_psar {
+            self.psar = compute_psar(
+                candles,
+                clean_cfg.psar_af_start,
+                clean_cfg.psar_af_step,
+                clean_cfg.psar_af_max,
+            );
+            self.psar_idx = SeriesBlockIndex::build(&self.psar.sar);
+        }
+
+        let need_keltner = clean_cfg.show_keltner
+            && (self.keltner.middle.len() != candles.len()
+                || prev_cfg.is_none_or(|p| {
+                    p.keltner_ema_period != clean_cfg.keltner_ema_period
+                        || p.keltner_atr_period != clean_cfg.keltner_atr_period
+                        || (p.keltner_multiplier - clean_cfg.keltner_multiplier).abs() > 1e-12
+                }));
+        if need_keltner {
+            self.keltner = compute_keltner_channels(
+                candles,
+                clean_cfg.keltner_ema_period,
+                clean_cfg.keltner_atr_period,
+                clean_cfg.keltner_multiplier,
+            );
+            self.kc_upper_idx = SeriesBlockIndex::build(&self.keltner.upper);
+            self.kc_middle_idx = SeriesBlockIndex::build(&self.keltner.middle);
+            self.kc_lower_idx = SeriesBlockIndex::build(&self.keltner.lower);
+        }
+
+        let need_vol_sma = clean_cfg.show_volume_sma
+            && (self.volume_sma.len() != candles.len()
+                || prev_cfg.is_none_or(|p| p.volume_sma_period != clean_cfg.volume_sma_period));
+        if need_vol_sma {
+            self.volume_sma = compute_volume_sma(candles, clean_cfg.volume_sma_period);
+            self.volume_sma_idx = SeriesBlockIndex::build(&self.volume_sma);
+        }
+
+        let need_candle_patterns =
+            clean_cfg.show_candle_patterns && self.candle_patterns.len() != candles.len();
+        if need_candle_patterns {
+            let atr14_cow: Vec<Option<f64>>;
+            let atr14_ref: &[Option<f64>] =
+                if clean_cfg.atr_period == 14 && self.atr.len() == candles.len() {
+                    &self.atr
+                } else {
+                    atr14_cow = compute_atr(candles, 14);
+                    &atr14_cow
+                };
+            let (_, summaries) = compute_candlestick_patterns_and_scores(candles, atr14_ref);
+            self.candle_patterns = summaries;
+        }
+
+        let need_adx = clean_cfg.show_adx
+            && (self.adx.plus_di.len() != candles.len()
+                || prev_cfg.is_none_or(|p| p.adx_period != clean_cfg.adx_period));
+        if need_adx {
+            self.adx = compute_adx(candles, clean_cfg.adx_period);
+            self.adx_line_idx = SeriesBlockIndex::build(&self.adx.adx);
+            self.plus_di_idx = SeriesBlockIndex::build(&self.adx.plus_di);
+            self.minus_di_idx = SeriesBlockIndex::build(&self.adx.minus_di);
+        }
+
+        let need_stoch = clean_cfg.show_stochastic
+            && (self.stochastic.slow_k.len() != candles.len()
+                || prev_cfg.is_none_or(|p| {
+                    p.stoch_k_period != clean_cfg.stoch_k_period
+                        || p.stoch_k_smooth != clean_cfg.stoch_k_smooth
+                        || p.stoch_d_period != clean_cfg.stoch_d_period
+                }));
+        if need_stoch {
+            self.stochastic = compute_stochastic(
+                candles,
+                clean_cfg.stoch_k_period,
+                clean_cfg.stoch_k_smooth,
+                clean_cfg.stoch_d_period,
+            );
+            self.stoch_k_idx = SeriesBlockIndex::build(&self.stochastic.slow_k);
+            self.stoch_d_idx = SeriesBlockIndex::build(&self.stochastic.slow_d);
+        }
+
+        let need_cci = clean_cfg.show_cci
+            && (self.cci.len() != candles.len()
+                || prev_cfg.is_none_or(|p| p.cci_period != clean_cfg.cci_period));
+        if need_cci {
+            self.cci = compute_cci(candles, clean_cfg.cci_period);
+            self.cci_idx = SeriesBlockIndex::build(&self.cci);
+        }
+
+        let need_mfi = clean_cfg.show_mfi
+            && (self.mfi.len() != candles.len()
+                || prev_cfg.is_none_or(|p| p.mfi_period != clean_cfg.mfi_period));
+        if need_mfi {
+            self.mfi = compute_mfi(candles, clean_cfg.mfi_period);
+            self.mfi_idx = SeriesBlockIndex::build(&self.mfi);
+        }
+
+        let need_proxy_bb = clean_cfg.show_proxy_bb && self.proxy_bb.points.len() != candles.len();
+        if need_proxy_bb {
+            self.proxy_bb = compute_proxy_bb_series(candles);
+            self.proxy_bb_t05_idx = SeriesBlockIndex::build(&self.proxy_bb.t05_values);
+            self.proxy_bb_t20_idx = SeriesBlockIndex::build(&self.proxy_bb.t20_values);
+            self.proxy_bb_t50_idx = SeriesBlockIndex::build(&self.proxy_bb.t50_values);
         }
 
         self.dataset_generation = dataset_generation;

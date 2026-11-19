@@ -9,8 +9,10 @@
 pub mod breadth;
 pub mod catalog;
 pub mod engine;
+pub mod proxy_bb;
 #[cfg(test)]
 mod tests;
+pub mod universe;
 
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +38,18 @@ pub use engine::{
     compute_causal_rvol, compute_regime_series, evaluate_symbol_scan,
     evaluate_symbol_scan_and_signals, filter_and_sort_watchlist, filter_historical_signals,
     scan_historical_signals,
+};
+pub use proxy_bb::{
+    BBDirection, BBHorizon, BBRegime, FlowBreadthHorizonPoint, MARKET_BB_METHODOLOGY_VERSION,
+    MarketBBAggregator, MarketBBFeedInput, MarketBBHorizonPoint, MarketBBSeriesResult,
+    MarketBBSessionPoint, MarketPublicationStatus, PROXY_BB_FIXED_BOUNDS_HINT,
+    PROXY_BB_METHODOLOGY_VERSION, PROXY_BB_REFERENCE_LEVELS, ProxyBBBarPoint, ProxyBBHorizonPoint,
+    ProxyBBSeriesOutput, compute_proxy_bb_series, decompose_bar_ohlcv_proxy,
+};
+pub use universe::{
+    CoverageStatus, MemberStatus, SessionDate, UniverseCoverageReport, UniverseDefinition,
+    UniverseError, UniverseMember, UniverseMode, UniverseResolution, UniverseResolver,
+    UniverseStatus,
 };
 
 /// Causal market regime classification aligned with `SIG-REG-001..005` (`ARCHIVE/backend/app/domain/signals/regimes.py`).

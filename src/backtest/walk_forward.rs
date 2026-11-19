@@ -3,12 +3,13 @@ use serde::{Deserialize, Serialize};
 use crate::data::{DataSourcePreset, Timeframe, WatchlistFeedEntry, aggregate_ohlcv};
 use crate::indicators::SeriesBlockIndex;
 use crate::model::Candle;
+use crate::scanner::{SessionDate, UniverseDefinition, UniverseMode, UniverseResolver};
 
 use super::engine::{
     BacktestRunOptions, PrecomputedFeatures, SimulationCarryState, compare_tearsheets_desc,
     is_bucket_incomplete_at_close_for_symbol, normalize_config_for_universe_feed,
-    run_backtest_with_options, simulate_window_with_carry, simulate_window_with_features,
-    slice_causal_series_for_symbol_and_options,
+    run_backtest_with_options, run_pit_episodes_backtest, simulate_window_with_carry,
+    simulate_window_with_features, slice_causal_series_for_symbol_and_options,
 };
 use super::metrics::{BacktestEquityPoint, BacktestTearsheet, BacktestTrade, compute_tearsheet};
 use super::strategy::{
@@ -530,6 +531,14 @@ pub struct PortfolioBacktestReport {
     /// Relative max-drawdown reduction vs average standalone constituent (`((avg_dd - port_dd) / avg_dd) * 100%`).
     pub diversification_dd_reduction_pct: f64,
     pub constituents: Vec<PortfolioConstituentAttribution>,
+    /// Optional identifier of the [`UniverseDefinition`] gating constituent eligibility (`Milestone R18 / B4`).
+    pub universe_id: Option<String>,
+    /// Effective [`UniverseMode`] applied (`PointInTime` vs `RetrospectiveFixed`).
+    pub universe_mode: Option<UniverseMode>,
+    /// `true` iff constituent eligibility respected historical `PointInTime` `[effective_from, effective_to]` bounds.
+    pub is_point_in_time: bool,
+    /// Explicit caveat banner whenever `is_point_in_time == false` (`RetrospectiveFixed` or ungated watchlist).
+    pub survivor_bias_caveat: Option<String>,
 }
 
 #[inline]
@@ -554,8 +563,10 @@ struct PreparedConstituent {
     /// Strictly increasing causal bar-close instants (`bar_open_ts + tf.seconds() - 1`, clamped to `replay_causal_close_timestamp`).
     timestamps: Vec<i64>,
     wealth: Vec<f64>,
-    /// Genuine constituent-frequency bar-to-bar returns (`1:1` with `timestamps`, zero-dilution-free).
-    obs_returns: Vec<f64>,
+    /// Underlying closed-candle causal bar-close instants & close-to-close returns for `CausalInverseVolatility`
+    /// (`[CRITIC-R18-MAJOR-01]`: prevents flat-cash `50x` weight spikes and preserves pre-inclusion price vol).
+    vol_timestamps: Vec<i64>,
+    vol_returns: Vec<f64>,
     annualization_root: f64,
     standalone_return_pct: f64,
     standalone_max_dd_pct: f64,
@@ -574,9 +585,63 @@ pub fn run_portfolio_backtest(
     weighting: PortfolioWeightingMode,
     replay_causal_close_timestamp: Option<i64>,
 ) -> PortfolioBacktestReport {
+    run_portfolio_backtest_with_universe(
+        feeds,
+        preferred_timeframe,
+        config,
+        universe_filter,
+        weighting,
+        replay_causal_close_timestamp,
+        None,
+        None,
+    )
+}
+
+/// Simulates a combined multi-asset portfolio across `feeds`, optionally gated by a versioned
+/// [`UniverseDefinition`] (`PointInTime` vs `RetrospectiveFixed`, `Milestone R18 / B4`).
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn run_portfolio_backtest_with_universe(
+    feeds: &[WatchlistFeedEntry],
+    preferred_timeframe: Timeframe,
+    config: &BacktestConfig,
+    universe_filter: PortfolioUniverseFilter,
+    weighting: PortfolioWeightingMode,
+    replay_causal_close_timestamp: Option<i64>,
+    universe: Option<&UniverseDefinition>,
+    mode_override: Option<UniverseMode>,
+) -> PortfolioBacktestReport {
     let mut clean_cfg = config.clone();
     clean_cfg.sanitize();
     let initial_capital = clean_cfg.initial_cash;
+
+    let (universe_id, universe_mode, is_point_in_time, survivor_bias_caveat) = match universe {
+        Some(u) => {
+            let eff_mode = mode_override.unwrap_or(u.default_mode);
+            let is_pit = eff_mode == UniverseMode::PointInTime;
+            let caveat = if is_pit {
+                None
+            } else {
+                let eff_lbl = u
+                    .effective_from
+                    .map_or_else(|| "curated".to_owned(), |d| d.to_iso_string());
+                Some(format!(
+                    "RETROSPECTIVE_FIXED MODE ({} @ {}): Fixed constituent snapshot (effective {eff_lbl}) carries survivorship bias.",
+                    u.universe_id, u.version
+                ))
+            };
+            (Some(u.universe_id.clone()), Some(eff_mode), is_pit, caveat)
+        }
+        None => (
+            None,
+            None,
+            false,
+            Some(
+                "UNIVERSE_UNGATED: Evaluated across active Watchlist feeds without Point-In-Time (PIT) membership schedule."
+                    .to_owned(),
+            ),
+        ),
+    };
 
     let mut prepared = Vec::new();
     let mut all_timestamps = Vec::new();
@@ -622,6 +687,21 @@ pub fn run_portfolio_backtest(
             continue;
         }
 
+        let bar_span = effective_tf.seconds().max(1).saturating_sub(1);
+        if let Some(u) = universe
+            && u.members
+                .iter()
+                .any(|m| m.symbol.trim().eq_ignore_ascii_case(feed.symbol.trim()))
+        {
+            for c in series_ref {
+                let mut close_ts = c.timestamp.saturating_add(bar_span);
+                if let Some(cut) = replay_causal_close_timestamp {
+                    close_ts = close_ts.min(cut);
+                }
+                all_timestamps.push(close_ts);
+            }
+        }
+
         let incomplete_tail = match (replay_causal_close_timestamp, series_ref.last()) {
             (Some(close_cut), Some(last_bar)) => {
                 let last_feed_close_ts = closed_base_slice
@@ -645,21 +725,32 @@ pub fn run_portfolio_backtest(
         };
 
         let feed_cfg = normalize_config_for_universe_feed(&clean_cfg, feed.preset, effective_tf);
-        let res = run_backtest_with_options(
-            feed.symbol.clone(),
-            effective_tf,
-            series_ref,
-            &feed_cfg,
-            BacktestRunOptions {
-                replay_cutoff_timestamp: None,
-                incomplete_tail_bar: incomplete_tail,
-            },
-        );
+        let run_opts = BacktestRunOptions {
+            replay_cutoff_timestamp: None,
+            incomplete_tail_bar: incomplete_tail,
+        };
+        let res = match universe {
+            Some(u) => run_pit_episodes_backtest(
+                feed.symbol.clone(),
+                effective_tf,
+                series_ref,
+                &feed_cfg,
+                run_opts,
+                u,
+                universe_mode,
+            ),
+            None => run_backtest_with_options(
+                feed.symbol.clone(),
+                effective_tf,
+                series_ref,
+                &feed_cfg,
+                run_opts,
+            ),
+        };
         if res.equity_curve.is_empty() {
             continue;
         }
         let c0 = feed_cfg.initial_cash.max(1.0);
-        let bar_span = effective_tf.seconds().max(1).saturating_sub(1);
         let mut ts_vec: Vec<i64> = Vec::with_capacity(res.equity_curve.len());
         let mut w_vec: Vec<f64> = Vec::with_capacity(res.equity_curve.len());
         for pt in &res.equity_curve {
@@ -681,16 +772,41 @@ pub fn run_portfolio_backtest(
         if ts_vec.is_empty() {
             continue;
         }
-        let mut obs_returns = Vec::with_capacity(w_vec.len());
-        let mut prev_obs_w = 1.0_f64;
-        for &cur_obs_w in &w_vec {
-            let r = if prev_obs_w > 1.0e-12 {
-                (cur_obs_w / prev_obs_w) - 1.0
-            } else {
-                0.0
+        let closed_series_len = if incomplete_tail {
+            series_ref.len().saturating_sub(1)
+        } else {
+            series_ref.len()
+        };
+        let closed_series = &series_ref[..closed_series_len];
+        let mut vol_timestamps: Vec<i64> = Vec::with_capacity(closed_series.len());
+        let mut vol_returns: Vec<f64> = Vec::with_capacity(closed_series.len());
+        let mut prev_close_px: Option<f64> = None;
+        for c_bar in closed_series {
+            let mut close_ts = c_bar.timestamp.saturating_add(bar_span);
+            if let Some(cut) = replay_causal_close_timestamp {
+                close_ts = close_ts.min(cut);
+            }
+            let r_raw = match prev_close_px {
+                Some(prev_c) if prev_c > 1.0e-12 && c_bar.close.is_finite() => {
+                    (c_bar.close / prev_c) - 1.0
+                }
+                _ if c_bar.open.is_finite() && c_bar.open > 1.0e-12 && c_bar.close.is_finite() => {
+                    (c_bar.close / c_bar.open) - 1.0
+                }
+                _ => 0.0,
             };
-            obs_returns.push(if r.is_finite() { r } else { 0.0 });
-            prev_obs_w = cur_obs_w;
+            let r_clean = if r_raw.is_finite() { r_raw } else { 0.0 };
+            if c_bar.close.is_finite() && c_bar.close > 1.0e-12 {
+                prev_close_px = Some(c_bar.close);
+            }
+            if vol_timestamps.last() == Some(&close_ts) {
+                if let Some(last_r) = vol_returns.last_mut() {
+                    *last_r = r_clean;
+                }
+            } else {
+                vol_timestamps.push(close_ts);
+                vol_returns.push(r_clean);
+            }
         }
 
         prepared.push(PreparedConstituent {
@@ -700,7 +816,8 @@ pub fn run_portfolio_backtest(
             first_ts: ts_vec[0],
             timestamps: ts_vec,
             wealth: w_vec,
-            obs_returns,
+            vol_timestamps,
+            vol_returns,
             annualization_root: constituent_annualization_root(effective_tf),
             standalone_return_pct: res.tearsheet.total_return_pct,
             standalone_max_dd_pct: res.tearsheet.max_drawdown_pct,
@@ -712,11 +829,23 @@ pub fn run_portfolio_backtest(
     all_timestamps.dedup();
 
     if prepared.is_empty() || all_timestamps.is_empty() {
+        let mut flat_curve = Vec::with_capacity(all_timestamps.len());
+        for (m, &t_m) in all_timestamps.iter().enumerate() {
+            flat_curve.push(BacktestEquityPoint {
+                bar_index: m,
+                timestamp: t_m,
+                equity: initial_capital,
+                cash: initial_capital,
+                drawdown_abs: 0.0,
+                underwater_pct: 0.0,
+                position_qty: 0.0,
+            });
+        }
         let empty_sheet = compute_tearsheet(
             initial_capital,
             initial_capital,
             preferred_timeframe,
-            &[],
+            &flat_curve,
             &[],
             0.0,
         );
@@ -726,11 +855,15 @@ pub fn run_portfolio_backtest(
             weighting,
             timeframe: preferred_timeframe,
             initial_capital,
-            portfolio_equity_curve: Vec::new(),
+            portfolio_equity_curve: flat_curve,
             portfolio_tearsheet: empty_sheet,
             avg_constituent_max_dd_pct: 0.0,
             diversification_dd_reduction_pct: 0.0,
             constituents: Vec::new(),
+            universe_id,
+            universe_mode,
+            is_point_in_time,
+            survivor_bias_caveat,
         };
     }
 
@@ -775,69 +908,104 @@ pub fn run_portfolio_backtest(
     let mut weights_buf = vec![0.0_f64; s_cnt];
 
     for (m, &t_m) in all_timestamps.iter().enumerate() {
-        // Constituent `j` is eligible for allocation at step `m` iff its first bar closed by `t_{m-1}` (or `t_0` at `m == 0`).
+        // Constituent `j` is eligible for allocation at step `m` iff its first bar closed by `t_{m-1}` (or `t_0` at `m == 0`)
+        // AND, when `universe` is active, `UniverseResolver::is_symbol_active_on` holds on `step_date`.
         let elig_ts = if m == 0 { t_m } else { all_timestamps[m - 1] };
+        let step_date = SessionDate::from_utc_timestamp(t_m);
         weights_buf.fill(0.0);
 
         let mut active_indices = Vec::with_capacity(s_cnt);
         for (j, c) in prepared.iter().enumerate() {
-            if c.first_ts <= elig_ts {
+            let ts_ok = c.first_ts <= elig_ts || (universe.is_some() && c.first_ts <= t_m);
+            let u_ok = match universe {
+                Some(u) => {
+                    UniverseResolver::is_symbol_active_on(u, &c.symbol, step_date, universe_mode)
+                }
+                None => true,
+            };
+            if ts_ok && u_ok {
                 active_indices.push(j);
             }
         }
-        if active_indices.is_empty() {
+        if active_indices.is_empty() && universe.is_none() {
             for j in 0..s_cnt {
                 active_indices.push(j);
             }
         }
 
-        match weighting {
-            PortfolioWeightingMode::EqualWeight => {
-                let w = 1.0 / (active_indices.len() as f64);
-                for &j in &active_indices {
-                    weights_buf[j] = w;
-                }
-            }
-            PortfolioWeightingMode::CausalInverseVolatility { lookback_bars } => {
-                let lb = lookback_bars.clamp(5, 252);
-                // Evaluate strictly on genuine past bar-close observations `obs_ts <= elig_ts` (`< t_m` for `m >= 1`),
-                // annualized by `c.annualization_root` so mixed-frequency (`1m`/`15m`/`1D`) volatilities never suffer zero-padding dilution (`C-01`).
-                let mut inv_vol_sum = 0.0_f64;
-                let mut all_have_min_obs = m >= 1;
-                if all_have_min_obs {
-                    for &j in &active_indices {
-                        let c = &prepared[j];
-                        let obs_end = c.timestamps.partition_point(|&ts| ts <= elig_ts);
-                        let obs_start = obs_end.saturating_sub(lb);
-                        let slice = &c.obs_returns[obs_start..obs_end];
-                        if slice.len() < 5 {
-                            all_have_min_obs = false;
-                            break;
-                        }
-                        let mean = slice.iter().sum::<f64>() / (slice.len() as f64);
-                        let var = slice
-                            .iter()
-                            .map(|r| {
-                                let d = *r - mean;
-                                d * d
-                            })
-                            .sum::<f64>()
-                            / ((slice.len() - 1).max(1) as f64);
-                        let ann_vol = (var.sqrt() * c.annualization_root).max(0.02);
-                        let raw_w = 1.0 / ann_vol;
-                        weights_buf[j] = raw_w;
-                        inv_vol_sum += raw_w;
-                    }
-                }
-                if all_have_min_obs && inv_vol_sum > 1.0e-12 {
-                    for &j in &active_indices {
-                        weights_buf[j] /= inv_vol_sum;
-                    }
-                } else {
-                    weights_buf.fill(0.0);
+        if !active_indices.is_empty() {
+            match weighting {
+                PortfolioWeightingMode::EqualWeight => {
                     let w = 1.0 / (active_indices.len() as f64);
                     for &j in &active_indices {
                         weights_buf[j] = w;
+                    }
+                }
+                PortfolioWeightingMode::CausalInverseVolatility { lookback_bars } => {
+                    let lb = lookback_bars.clamp(5, 252);
+                    // Evaluate strictly on genuine past underlying candle-close returns `vol_ts <= elig_ts` (`< t_m` for `m >= 1`),
+                    // annualized by `c.annualization_root` (`C-01` & `[CRITIC-R18-MAJOR-01]`).
+                    // Any brand-new IPO constituent with `< 5` causal price bars receives the cross-sectional median
+                    // volatility of seasoned active constituents instead of resetting seasoned weights to `1/N`.
+                    let mut per_active_vol: Vec<Option<f64>> =
+                        Vec::with_capacity(active_indices.len());
+                    let mut valid_vols: Vec<f64> = Vec::with_capacity(active_indices.len());
+                    if m >= 1 {
+                        for &j in &active_indices {
+                            let c = &prepared[j];
+                            let obs_end = c.vol_timestamps.partition_point(|&ts| ts <= elig_ts);
+                            let obs_start = obs_end.saturating_sub(lb);
+                            let slice = &c.vol_returns[obs_start..obs_end];
+                            if slice.len() < 5 {
+                                per_active_vol.push(None);
+                            } else {
+                                let mean = slice.iter().sum::<f64>() / (slice.len() as f64);
+                                let var = slice
+                                    .iter()
+                                    .map(|r| {
+                                        let d = *r - mean;
+                                        d * d
+                                    })
+                                    .sum::<f64>()
+                                    / ((slice.len() - 1).max(1) as f64);
+                                let ann_vol = (var.sqrt() * c.annualization_root).max(0.02);
+                                per_active_vol.push(Some(ann_vol));
+                                valid_vols.push(ann_vol);
+                            }
+                        }
+                    }
+
+                    if !valid_vols.is_empty() {
+                        valid_vols.sort_by(|a, b| a.total_cmp(b));
+                        let mid = valid_vols.len() / 2;
+                        let median_vol = if valid_vols.len().is_multiple_of(2) {
+                            0.5 * (valid_vols[mid - 1] + valid_vols[mid])
+                        } else {
+                            valid_vols[mid]
+                        };
+                        let mut inv_vol_sum = 0.0_f64;
+                        for (&j, &opt_vol) in active_indices.iter().zip(per_active_vol.iter()) {
+                            let raw_w = 1.0 / opt_vol.unwrap_or(median_vol).max(0.02);
+                            weights_buf[j] = raw_w;
+                            inv_vol_sum += raw_w;
+                        }
+                        if inv_vol_sum > 1.0e-12 {
+                            for &j in &active_indices {
+                                weights_buf[j] /= inv_vol_sum;
+                            }
+                        } else {
+                            weights_buf.fill(0.0);
+                            let w = 1.0 / (active_indices.len() as f64);
+                            for &j in &active_indices {
+                                weights_buf[j] = w;
+                            }
+                        }
+                    } else {
+                        weights_buf.fill(0.0);
+                        let w = 1.0 / (active_indices.len() as f64);
+                        for &j in &active_indices {
+                            weights_buf[j] = w;
+                        }
                     }
                 }
             }
@@ -932,6 +1100,10 @@ pub fn run_portfolio_backtest(
         avg_constituent_max_dd_pct,
         diversification_dd_reduction_pct,
         constituents,
+        universe_id,
+        universe_mode,
+        is_point_in_time,
+        survivor_bias_caveat,
     }
 }
 

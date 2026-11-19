@@ -231,6 +231,29 @@ fn non_finite_bars_recover_cleanly_and_polymorphic_trait_works() {
         Box::new(RsiIndicator::new(3)),
         Box::new(MacdIndicator::new(2, 3, 2)),
         Box::new(AtrIndicator::new(3)),
+        Box::new(AdxIndicator { period: 2 }),
+        Box::new(StochasticIndicator {
+            k_period: 2,
+            k_smooth: 2,
+            d_period: 2,
+        }),
+        Box::new(SuperTrendIndicator {
+            period: 2,
+            multiplier: 3.0,
+        }),
+        Box::new(PsarIndicator {
+            af_start: 0.02,
+            af_step: 0.02,
+            af_max: 0.20,
+        }),
+        Box::new(KeltnerIndicator {
+            ema_period: 2,
+            atr_period: 2,
+            multiplier: 2.0,
+        }),
+        Box::new(CciIndicator { period: 3 }),
+        Box::new(MfiIndicator { period: 3 }),
+        Box::new(VolumeSmaIndicator { period: 3 }),
     ];
 
     for ind in &indicators {
@@ -1705,5 +1728,351 @@ fn critic_r13_regression_negative_utc_vwap_tpo_valid_ib_and_older_naked_poc() {
     assert_eq!(
         mp_old.historical_naked_pocs[0].naked_poc_end_index,
         multi_days.len() - 1
+    );
+}
+
+#[test]
+fn r18_b1_candle_geometry_microprice_invariance_14_patterns_and_candle_score() {
+    use super::patterns::{
+        CandleGeometry, CandlestickPatternKind, compute_candlestick_patterns_and_scores,
+    };
+
+    let mk = |ts: i64, o: f64, h: f64, l: f64, c: f64, v: f64| Candle {
+        timestamp: ts,
+        date_label: format!("t{ts}"),
+        open: o,
+        high: h,
+        low: l,
+        close: c,
+        volume: v,
+    };
+
+    // 1. Scale-relative invariance: SHIB-scale (`1e-8`) vs BTC-scale (`1e5`) produce identical ratios & structure_score!
+    let macro_bar = mk(1, 100_000.0, 102_000.0, 99_000.0, 101_500.0, 10.0);
+    let micro_bar = mk(
+        1,
+        1.0e-8 * 100.0,
+        1.0e-8 * 102.0,
+        1.0e-8 * 99.0,
+        1.0e-8 * 101.5,
+        10.0,
+    );
+    let g_macro = CandleGeometry::from_candle(&macro_bar);
+    let g_micro = CandleGeometry::from_candle(&micro_bar);
+    assert!(
+        !g_micro.is_flat_range,
+        "micro-price candle must NOT collapse as flat range"
+    );
+    assert!((g_macro.body_ratio - g_micro.body_ratio).abs() < 1e-12);
+    assert!((g_macro.close_location - g_micro.close_location).abs() < 1e-12);
+    assert!(
+        (g_macro.structure_score(0.45, 0.35, 0.20).unwrap()
+            - g_micro.structure_score(0.45, 0.35, 0.20).unwrap())
+        .abs()
+            < 1e-10
+    );
+
+    // Flat & invalid OHLC guards
+    let flat_bar = mk(2, 50.0, 50.0, 50.0, 50.0, 100.0);
+    let g_flat = CandleGeometry::from_candle(&flat_bar);
+    assert!(g_flat.is_flat_range);
+    assert_eq!(g_flat.structure_score(0.45, 0.35, 0.20), Some(0.0));
+    let inv_bar = mk(3, 50.0, 48.0, 52.0, 50.0, 100.0);
+    assert_eq!(
+        CandleGeometry::from_candle(&inv_bar).structure_score(0.45, 0.35, 0.20),
+        None
+    );
+
+    // 2. Construct a deterministic sequence triggering all 12 atomic `CandlestickPatternKind`s + `any_bullish` / `any_bearish`:
+    let mut seq = Vec::with_capacity(40);
+    // Warmup 15 bars (`0..15`) with ATR ~ 2.0
+    for i in 0..15 {
+        let b = 100.0 + (i % 2) as f64 * 0.5;
+        seq.push(mk(i as i64, b, b + 1.0, b - 1.0, b + 0.2, 1000.0));
+    }
+    // Hammer (`15`): open=99.6, close=99.9, high=100.0, low=98.0 (range=2.0, body=0.3, lower_wick=1.6)
+    seq.push(mk(15, 99.6, 100.0, 98.0, 99.9, 1000.0));
+    // ShootingStar (`16`): open=100.4, close=100.1, high=102.0, low=100.0
+    seq.push(mk(16, 100.4, 102.0, 100.0, 100.1, 1000.0));
+    // BullishEngulfing (`17..=18`): bearish 101->100, then bullish 99.8->101.5 (high=101.6, low=99.7)
+    seq.push(mk(17, 101.0, 101.2, 99.9, 100.0, 1000.0));
+    seq.push(mk(18, 99.8, 101.6, 99.7, 101.5, 1200.0));
+    // BearishEngulfing (`19..=20`): bullish 100->101, then bearish 101.2->99.5 (high=101.3, low=99.4)
+    seq.push(mk(19, 100.0, 101.1, 99.9, 101.0, 1000.0));
+    seq.push(mk(20, 101.2, 101.3, 99.4, 99.5, 1200.0));
+    // PiercingLine (`21..=22`): bearish 102->100 (mid=101), then bullish 99.8->101.3 (<102, close_loc>=0.60)
+    seq.push(mk(21, 102.0, 102.2, 99.9, 100.0, 1000.0));
+    seq.push(mk(22, 99.8, 101.5, 99.7, 101.3, 1100.0));
+    // DarkCloudCover (`23..=24`): bullish 100->102 (mid=101), then bearish 102.2->100.7 (>100, close_loc<=0.40)
+    seq.push(mk(23, 100.0, 102.1, 99.9, 102.0, 1000.0));
+    seq.push(mk(24, 102.2, 102.3, 100.5, 100.7, 1100.0));
+    // MorningStar (`25..=27`): strong bear 103->100, small star 100.1->99.9, strong bull 100.0->102.2
+    seq.push(mk(25, 103.0, 103.2, 99.8, 100.0, 1000.0));
+    seq.push(mk(26, 100.1, 100.3, 99.7, 99.9, 800.0));
+    seq.push(mk(27, 100.0, 102.4, 99.9, 102.2, 1300.0));
+    // EveningStar (`28..=30`): strong bull 100->103, small star 102.9->103.1, strong bear 103.0->100.8
+    seq.push(mk(28, 100.0, 103.2, 99.8, 103.0, 1000.0));
+    seq.push(mk(29, 102.9, 103.3, 102.7, 103.1, 800.0));
+    seq.push(mk(30, 103.0, 103.1, 100.6, 100.8, 1300.0));
+    // TweezerBottom (`31..=32`): bear low=98.00, bull low=98.02 (within 0.15*ATR)
+    seq.push(mk(31, 100.0, 100.2, 98.00, 98.4, 1000.0));
+    seq.push(mk(32, 98.5, 100.0, 98.02, 99.8, 1000.0));
+    // TweezerTop (`33..=34`): bull high=102.00, bear high=101.98
+    seq.push(mk(33, 100.0, 102.00, 99.8, 101.6, 1000.0));
+    seq.push(mk(34, 101.5, 101.98, 100.0, 100.2, 1000.0));
+    // InsideBarBreakoutUp (`35..=37`): mother [99..102], inside [99.6..101.4], breakout close=102.6
+    seq.push(mk(35, 99.5, 102.0, 99.0, 101.5, 1000.0));
+    seq.push(mk(36, 100.2, 101.4, 99.6, 100.8, 800.0));
+    seq.push(mk(37, 100.9, 102.8, 100.7, 102.6, 1500.0));
+    // InsideBarBreakoutDown (`38..=40`): mother [99..102], inside [99.6..101.4], breakdown close=98.4
+    seq.push(mk(38, 101.5, 102.0, 99.0, 99.5, 1000.0));
+    seq.push(mk(39, 100.5, 101.4, 99.6, 100.1, 800.0));
+    seq.push(mk(40, 100.0, 100.2, 98.2, 98.4, 1500.0));
+
+    let atr14 = compute_atr(&seq, 14);
+    let (_, summaries) = compute_candlestick_patterns_and_scores(&seq, &atr14);
+
+    let expected = [
+        (15, CandlestickPatternKind::Hammer, true),
+        (16, CandlestickPatternKind::ShootingStar, false),
+        (18, CandlestickPatternKind::BullishEngulfing, true),
+        (20, CandlestickPatternKind::BearishEngulfing, false),
+        (22, CandlestickPatternKind::PiercingLine, true),
+        (24, CandlestickPatternKind::DarkCloudCover, false),
+        (27, CandlestickPatternKind::MorningStar, true),
+        (30, CandlestickPatternKind::EveningStar, false),
+        (32, CandlestickPatternKind::TweezerBottom, true),
+        (34, CandlestickPatternKind::TweezerTop, false),
+        (37, CandlestickPatternKind::InsideBarBreakoutUp, true),
+        (40, CandlestickPatternKind::InsideBarBreakoutDown, false),
+    ];
+    for (idx, kind, is_bull) in expected {
+        assert_eq!(
+            summaries[idx].pattern_result(kind),
+            Some(true),
+            "expected {kind:?} at index {idx}"
+        );
+        if is_bull {
+            assert_eq!(summaries[idx].any_bullish(), Some(true));
+        } else {
+            assert_eq!(summaries[idx].any_bearish(), Some(true));
+        }
+    }
+}
+
+#[test]
+fn r18_b2_extended_indicators_adx_stoch_supertrend_psar_keltner_cci_mfi_volsma() {
+    let mk = |ts: i64, o: f64, h: f64, l: f64, c: f64, v: f64| Candle {
+        timestamp: ts,
+        date_label: format!("t{ts}"),
+        open: o,
+        high: h,
+        low: l,
+        close: c,
+        volume: v,
+    };
+
+    // Build 120 bars: strong uptrend (0..60) then sharp reversal downtrend (60..120)
+    let mut bars = Vec::with_capacity(120);
+    for i in 0..120 {
+        let base = if i < 60 {
+            100.0 + (i as f64) * 1.2
+        } else {
+            172.0 - ((i - 60) as f64) * 1.4
+        };
+        let wob = ((i % 5) as f64 - 2.0) * 0.25;
+        let c = base + wob;
+        let o = c - if i < 60 { 0.6 } else { -0.6 };
+        bars.push(mk(
+            i as i64 * 86_400,
+            o,
+            o.max(c) + 0.9,
+            o.min(c) - 0.8,
+            c,
+            1_000.0 + (i as f64) * 25.0,
+        ));
+    }
+
+    // 1. ADX(14): warmup None before 14 (+DI/-DI) and before 27 (ADX); uptrend +DI > -DI, downtrend -DI > +DI
+    let adx = compute_adx(&bars, 14);
+    assert!(adx.plus_di[..14].iter().all(Option::is_none));
+    assert!(adx.adx[..27].iter().all(Option::is_none));
+    assert!(adx.plus_di[55].unwrap() > adx.minus_di[55].unwrap());
+    assert!(adx.adx[55].unwrap() > 25.0);
+    assert!(adx.minus_di[115].unwrap() > adx.plus_di[115].unwrap());
+    // Flat zero-TR series must emit 0.0 (never NaN/Inf)
+    let flat_bars: Vec<Candle> = (0..40)
+        .map(|i| mk(i, 50.0, 50.0, 50.0, 50.0, 0.0))
+        .collect();
+    let adx_flat = compute_adx(&flat_bars, 14);
+    assert_eq!(adx_flat.plus_di[20], Some(0.0));
+    assert_eq!(adx_flat.adx[35], Some(0.0));
+
+    // 2. Stochastic(14, 3, 3): O(N) monotonic deque exact parity vs naive O(N*K) scan
+    let st = compute_stochastic(&bars, 14, 3, 3);
+    for i in 13..bars.len() {
+        let hh = bars[i + 1 - 14..=i]
+            .iter()
+            .map(|b| b.high)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let ll = bars[i + 1 - 14..=i]
+            .iter()
+            .map(|b| b.low)
+            .fold(f64::INFINITY, f64::min);
+        let expected_fk = if hh > ll {
+            100.0 * (bars[i].close - ll) / (hh - ll)
+        } else {
+            50.0
+        };
+        assert!((st.fast_k[i].unwrap() - expected_fk).abs() < 1e-11);
+    }
+    assert!(st.slow_k[55].unwrap() > 70.0);
+    assert!(st.slow_d[115].unwrap() < 30.0);
+
+    // 3. SuperTrend(10, 3.0) & Parabolic SAR(0.02, 0.02, 0.20) flip bull -> bear across bar 60
+    let sup = compute_supertrend(&bars, 10, 3.0);
+    assert_eq!(sup.direction[55], Some(1));
+    assert!(sup.trend[55].unwrap() < bars[55].close);
+    assert_eq!(sup.direction[115], Some(-1));
+    assert!(sup.trend[115].unwrap() > bars[115].close);
+
+    let psar = compute_psar(&bars, 0.02, 0.02, 0.20);
+    assert_eq!(psar.is_long[55], Some(true));
+    assert!(psar.sar[55].unwrap() <= bars[55].low);
+    assert_eq!(psar.is_long[115], Some(false));
+    assert!(psar.sar[115].unwrap() >= bars[115].high);
+
+    // 4. Keltner Channels(20, 10, 2.0): strict `upper > middle > lower`
+    let kc = compute_keltner_channels(&bars, 20, 10, 2.0);
+    assert!(kc.middle[..19].iter().all(Option::is_none));
+    for i in 20..bars.len() {
+        let (u, m, l) = (
+            kc.upper[i].unwrap(),
+            kc.middle[i].unwrap(),
+            kc.lower[i].unwrap(),
+        );
+        assert!(u > m && m > l);
+    }
+
+    // 5. CCI(20): flat-series guard emits exact `0.0` (never 1e15 spike), micro-price scale invariant
+    let cci = compute_cci(&bars, 20);
+    assert!(cci[55].unwrap() > 50.0);
+    assert!(cci[115].unwrap() < -50.0);
+    let cci_flat = compute_cci(&flat_bars, 20);
+    assert_eq!(cci_flat[25], Some(0.0));
+
+    // 6. MFI(14) & Volume SMA(20): zero-flow emits `50.0`; negative volume rejected in Volume SMA
+    let mfi = compute_mfi(&bars, 14);
+    assert!(mfi[..14].iter().all(Option::is_none));
+    assert!(mfi[55].unwrap() > 60.0);
+    assert!(mfi[115].unwrap() < 40.0);
+    let mfi_flat = compute_mfi(&flat_bars, 14);
+    assert_eq!(mfi_flat[20], Some(50.0));
+
+    let vsma = compute_volume_sma(&bars, 20);
+    assert!(vsma[..19].iter().all(Option::is_none));
+    let manual_vsma: f64 = bars[30..50].iter().map(|b| b.volume).sum::<f64>() / 20.0;
+    assert!((vsma[49].unwrap() - manual_vsma).abs() < 1e-9);
+    let mut bad_vol = bars.clone();
+    bad_vol[25].volume = -1.0;
+    let vsma_bad = compute_volume_sma(&bad_vol, 20);
+    assert_eq!(vsma_bad[25], None);
+}
+
+#[test]
+fn critic_r18_regression_adx_psar_prefix_causality_nan_recovery_and_warmup_bars() {
+    use super::proxy_bb::{BBDirection, BBHorizon, compute_proxy_bb_series};
+
+    let base = generate_synthetic_ohlcv(220);
+    let clean_200 = &base[..200];
+
+    // 1. `[Blocker-01]` DEF-001 Prefix Causality: appending a future `NaN` or `high < low` candle
+    //    at `t = 200` MUST NEVER retroactively erase or mutate `ADX` or `PSAR` on `0..200`!
+    let adx_clean = compute_adx(clean_200, 14);
+    let psar_clean = compute_psar(clean_200, 0.02, 0.02, 0.20);
+    assert!(adx_clean.adx[199].is_some());
+    assert!(psar_clean.sar[199].is_some());
+
+    let mut with_nan_tail = clean_200.to_vec();
+    let mut bad_nan = base[200].clone();
+    bad_nan.high = f64::NAN;
+    with_nan_tail.push(bad_nan);
+
+    let adx_nan_tail = compute_adx(&with_nan_tail, 14);
+    let psar_nan_tail = compute_psar(&with_nan_tail, 0.02, 0.02, 0.20);
+    assert_eq!(&adx_nan_tail.adx[..200], &adx_clean.adx[..200]);
+    assert_eq!(&adx_nan_tail.plus_di[..200], &adx_clean.plus_di[..200]);
+    assert_eq!(&adx_nan_tail.minus_di[..200], &adx_clean.minus_di[..200]);
+    assert_eq!(adx_nan_tail.adx[200], None);
+    assert_eq!(&psar_nan_tail.sar[..200], &psar_clean.sar[..200]);
+    assert_eq!(&psar_nan_tail.is_long[..200], &psar_clean.is_long[..200]);
+    assert_eq!(psar_nan_tail.sar[200], None);
+
+    let mut with_inv_tail = clean_200.to_vec();
+    let mut bad_inv = base[200].clone();
+    bad_inv.high = 90.0;
+    bad_inv.low = 110.0;
+    with_inv_tail.push(bad_inv);
+    let adx_inv_tail = compute_adx(&with_inv_tail, 14);
+    let psar_inv_tail = compute_psar(&with_inv_tail, 0.02, 0.02, 0.20);
+    assert_eq!(&adx_inv_tail.adx[..200], &adx_clean.adx[..200]);
+    assert_eq!(adx_inv_tail.adx[200], None);
+    assert_eq!(&psar_inv_tail.sar[..200], &psar_clean.sar[..200]);
+    assert_eq!(psar_inv_tail.sar[200], None);
+
+    // 2. `[Blocker-01]` Early `NaN` recovery on default `ADX(14)` and `PSAR(0.02, 0.02, 0.20)`!
+    let mut early_nan = base.clone();
+    early_nan[3].high = f64::NAN;
+    let adx_rec = compute_adx(&early_nan, 14);
+    let psar_rec = compute_psar(&early_nan, 0.02, 0.02, 0.20);
+    assert_eq!(adx_rec.adx[3], None);
+    assert!(adx_rec.adx[60].is_some_and(f64::is_finite));
+    assert_eq!(psar_rec.sar[3], None);
+    assert!(psar_rec.sar[6].is_some_and(f64::is_finite));
+
+    // 3. `[Minor-01]` Exact `warmup_bars` contract on `SuperTrendIndicator` and `KeltnerIndicator`!
+    let st_ind = SuperTrendIndicator {
+        period: 10,
+        multiplier: 3.0,
+    };
+    let st_out = st_ind.evaluate(&base[..30]);
+    let st_first = st_out.series[0]
+        .values
+        .iter()
+        .position(Option::is_some)
+        .unwrap();
+    assert_eq!(st_ind.warmup_bars(), st_first);
+
+    let kc_10_10 = KeltnerIndicator {
+        ema_period: 10,
+        atr_period: 10,
+        multiplier: 2.0,
+    };
+    let kc_out = kc_10_10.evaluate(&base[..30]);
+    let kc_upper_first = kc_out.series[0]
+        .values
+        .iter()
+        .position(Option::is_some)
+        .unwrap();
+    assert_eq!(kc_10_10.warmup_bars(), kc_upper_first);
+
+    // 4. `[Minor-04]` `ProxyBBCalculator` emits `BBDirection::Unknown` on zero-activity `AT05`
+    //    AND on the initial valid bar after warmup / after an `AT05` zero-liquidity gap!
+    let mut bb_bars = base[..25].to_vec();
+    for b in &mut bb_bars[6..10] {
+        b.volume = 0.0;
+    }
+    let pbb = compute_proxy_bb_series(&bb_bars);
+    assert_eq!(
+        pbb.points[2].horizon(BBHorizon::T03).direction,
+        BBDirection::Unknown
+    );
+    assert_eq!(
+        pbb.points[9].horizon(BBHorizon::T03).direction,
+        BBDirection::Unknown
+    );
+    assert_eq!(
+        pbb.points[10].horizon(BBHorizon::T03).direction,
+        BBDirection::Unknown
     );
 }

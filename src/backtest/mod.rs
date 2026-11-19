@@ -28,7 +28,8 @@ pub use engine::{
     ParameterSweepReport, PresetBattleRow, SweepVariantRow, SymbolBattleRow,
     is_bucket_incomplete_at_close, is_bucket_incomplete_at_close_for_symbol,
     run_all_presets_battle, run_backtest, run_backtest_with_options, run_multi_symbol_battle,
-    run_multi_symbol_battle_with_close_cutoff, run_parameter_sweep,
+    run_multi_symbol_battle_with_close_cutoff, run_multi_symbol_battle_with_universe,
+    run_parameter_sweep, run_pit_episodes_backtest,
 };
 pub use metrics::{
     BacktestEquityPoint, BacktestExitReason, BacktestTearsheet, BacktestTrade,
@@ -55,5 +56,6 @@ pub use walk_forward::{
     MIN_IS_BARS_PER_FOLD, MIN_OOS_BARS_PER_FOLD, PortfolioBacktestReport,
     PortfolioConstituentAttribution, PortfolioUniverseFilter, PortfolioWeightingMode,
     WalkForwardConfig, WalkForwardFoldResult, WalkForwardReport, WalkForwardVerdict,
-    map_equity_curve_to_candles, run_portfolio_backtest, run_walk_forward_validation,
+    map_equity_curve_to_candles, run_portfolio_backtest, run_portfolio_backtest_with_universe,
+    run_walk_forward_validation,
 };

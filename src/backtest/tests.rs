@@ -2659,3 +2659,548 @@ fn critic_r17_regression_multistrategy_midbar_cutoff_and_session_close_parity() 
     assert_eq!(adv_atc.manifest.bar_count, 80);
     assert_eq!(adv_atc.multi_phase.phases.last().unwrap().end_bar, 80);
 }
+
+#[test]
+fn r18_b4_pit_vs_retrospective_survivorship_bias_proof_battle_and_portfolio() {
+    use crate::backtest::{
+        BacktestExitReason, PortfolioUniverseFilter, PortfolioWeightingMode, SweepRankingMetric,
+        run_multi_symbol_battle_with_universe, run_pit_episodes_backtest,
+        run_portfolio_backtest_with_universe,
+    };
+    use crate::data::WatchlistFeedEntry;
+    use crate::scanner::{SessionDate, UniverseDefinition, UniverseMode};
+
+    // Build 120 daily bars starting at 2025-01-02 (`1_735_776_000` UTC):
+    // - Bars `0..70` (`2025-01-02..2025-03-12`): `LATE_WIN` surges +180% BEFORE its PIT inclusion on bar 75 (`2025-03-18`),
+    //   then drifts sideways-down after inclusion!
+    // - `EARLY_DELIST` rallies then is removed from the PIT universe at bar 65 (`2025-03-07`) while holding a Long position,
+    //   then crashes -70% in bars `66..120` AFTER removal!
+    let t0 = 1_735_776_000_i64; // 2025-01-02 00:00:00 UTC
+    let mut late_candles = Vec::with_capacity(120);
+    let mut delist_candles = Vec::with_capacity(120);
+    for i in 0..120_usize {
+        let ts = t0 + (i as i64) * 86_400;
+        let late_px = if i < 20 {
+            100.0 - (i as f64) * 0.2 // dip so SMA(10) crosses above EMA(20) around bar 24!
+        } else if i < 72 {
+            96.0 + ((i - 20) as f64) * 3.4 // massive pre-inclusion rally!
+        } else {
+            272.0 - ((i - 72) as f64) * 0.15 // flat/slight drift after PIT inclusion!
+        };
+        late_candles.push(Candle {
+            timestamp: ts,
+            date_label: format!("d{i}"),
+            open: late_px - 0.4,
+            high: late_px + 1.0,
+            low: late_px - 0.9,
+            close: late_px,
+            volume: 50_000.0,
+        });
+
+        let del_px = if i < 18 {
+            100.0 - (i as f64) * 0.2
+        } else if i <= 65 {
+            96.4 + ((i - 18) as f64) * 1.1 // uptrend while active -> holds open Long at bar 65!
+        } else {
+            (148.0 - ((i - 65) as f64) * 2.1).max(15.0) // post-removal collapse!
+        };
+        delist_candles.push(Candle {
+            timestamp: ts,
+            date_label: format!("d{i}"),
+            open: del_px - 0.3,
+            high: del_px + 0.8,
+            low: del_px - 0.8,
+            close: del_px,
+            volume: 40_000.0,
+        });
+    }
+
+    let d_inc = SessionDate::from_utc_timestamp(late_candles[75].timestamp).to_iso_string();
+    let d_rem = SessionDate::from_utc_timestamp(delist_candles[65].timestamp).to_iso_string();
+    let d_u_from = SessionDate::from_utc_timestamp(late_candles[10].timestamp).to_iso_string();
+
+    let u_json = format!(
+        r#"{{
+          "universe_id": "SURVIVOR-PROOF",
+          "version": "v1",
+          "name": "Survivorship Bias Proof Universe",
+          "status": "APPROVED",
+          "default_mode": "POINT_IN_TIME",
+          "effective_from": "{d_u_from}",
+          "members": [
+            {{
+              "symbol": "LATE_WIN",
+              "exchange": "HOSE",
+              "effective_from": "{d_inc}",
+              "status": "ACTIVE"
+            }},
+            {{
+              "symbol": "EARLY_DELIST",
+              "exchange": "HOSE",
+              "effective_from": "{d_u_from}",
+              "effective_to": "{d_rem}",
+              "status": "ACTIVE"
+            }}
+          ]
+        }}"#
+    );
+    let u_def = UniverseDefinition::from_auto_str(&u_json).expect("valid proof universe");
+
+    let mut cfg = BacktestConfig {
+        preset: StrategyPresetKind::SmaEmaTrendCross,
+        commission_bps: 5.0,
+        slippage_bps: 2.0,
+        ..BacktestConfig::default()
+    };
+    cfg.params.fast_sma = 8;
+    cfg.params.slow_ema = 21;
+    cfg.risk.take_profit_pct = None;
+    cfg.risk.stop_loss_pct = None;
+
+    // 1. Single-symbol `EARLY_DELIST` in `PointInTime` MUST settle its open Long on bar 65 via `UniverseRemoval`!
+    let delist_pit = run_pit_episodes_backtest(
+        "EARLY_DELIST",
+        Timeframe::D1,
+        &delist_candles,
+        &cfg,
+        BacktestRunOptions::default(),
+        &u_def,
+        Some(UniverseMode::PointInTime),
+    );
+    assert!(
+        delist_pit
+            .trades
+            .iter()
+            .any(|t| t.exit_reason == BacktestExitReason::UniverseRemoval && t.exit_bar_index == 65),
+        "open position at PIT removal boundary must close with UniverseRemoval at bar 65: {:?}",
+        delist_pit.trades
+    );
+    assert!(delist_pit.open_position.is_none());
+
+    // 2. `LATE_WIN`: `RetrospectiveFixed` captures the pre-inclusion +180% surge (`total_return_pct > 80%`),
+    //    whereas `PointInTime` strictly excludes bars `0..75` from trading (`total_return_pct <= 5%`)!
+    let late_retro = run_pit_episodes_backtest(
+        "LATE_WIN",
+        Timeframe::D1,
+        &late_candles,
+        &cfg,
+        BacktestRunOptions::default(),
+        &u_def,
+        Some(UniverseMode::RetrospectiveFixed),
+    );
+    let late_pit = run_pit_episodes_backtest(
+        "LATE_WIN",
+        Timeframe::D1,
+        &late_candles,
+        &cfg,
+        BacktestRunOptions::default(),
+        &u_def,
+        Some(UniverseMode::PointInTime),
+    );
+    assert!(
+        late_retro.tearsheet.total_return_pct > late_pit.tearsheet.total_return_pct + 50.0,
+        "RetrospectiveFixed ({:.2}%) must show inflated survivorship-bias return vs PIT ({:.2}%)",
+        late_retro.tearsheet.total_return_pct,
+        late_pit.tearsheet.total_return_pct
+    );
+
+    // 3. Portfolio & Battle:
+    //    - Pre-effective bars `0..10` (`< d_u_from`) hold 100% cash (`equity == initial_capital`, zero NaN)!
+    //    - `PointInTime` marks `is_point_in_time == true` & `survivor_bias_caveat == None`;
+    //      `RetrospectiveFixed` marks `is_point_in_time == false` & `survivor_bias_caveat.is_some()`.
+    let feeds = vec![
+        WatchlistFeedEntry {
+            instrument_id: "Test:LATE_WIN".to_owned(),
+            preset: DataSourcePreset::Vn30Basket,
+            symbol: "LATE_WIN".to_owned(),
+            base_timeframe: Timeframe::D1,
+            candles: late_candles,
+        },
+        WatchlistFeedEntry {
+            instrument_id: "Test:EARLY_DELIST".to_owned(),
+            preset: DataSourcePreset::Vn30Basket,
+            symbol: "EARLY_DELIST".to_owned(),
+            base_timeframe: Timeframe::D1,
+            candles: delist_candles,
+        },
+    ];
+    let port_pit = run_portfolio_backtest_with_universe(
+        &feeds,
+        Timeframe::D1,
+        &cfg,
+        PortfolioUniverseFilter::Vn30EquitiesOnly,
+        PortfolioWeightingMode::EqualWeight,
+        None,
+        Some(&u_def),
+        Some(UniverseMode::PointInTime),
+    );
+    let port_retro = run_portfolio_backtest_with_universe(
+        &feeds,
+        Timeframe::D1,
+        &cfg,
+        PortfolioUniverseFilter::Vn30EquitiesOnly,
+        PortfolioWeightingMode::EqualWeight,
+        None,
+        Some(&u_def),
+        Some(UniverseMode::RetrospectiveFixed),
+    );
+    assert!(port_pit.is_point_in_time && port_pit.survivor_bias_caveat.is_none());
+    assert!(!port_retro.is_point_in_time && port_retro.survivor_bias_caveat.is_some());
+    for pt in &port_pit.portfolio_equity_curve[..10] {
+        assert!(
+            (pt.equity - cfg.initial_cash).abs() < 1e-9,
+            "pre-effective PIT portfolio bar must hold 100% cash without NaN, got {}",
+            pt.equity
+        );
+    }
+    assert_ne!(
+        port_pit.portfolio_tearsheet.total_return_pct,
+        port_retro.portfolio_tearsheet.total_return_pct
+    );
+
+    let battle_pit = run_multi_symbol_battle_with_universe(
+        &feeds,
+        Timeframe::D1,
+        &cfg,
+        SweepRankingMetric::TotalReturnPct,
+        None,
+        Some(&u_def),
+        Some(UniverseMode::PointInTime),
+    );
+    let battle_retro = run_multi_symbol_battle_with_universe(
+        &feeds,
+        Timeframe::D1,
+        &cfg,
+        SweepRankingMetric::TotalReturnPct,
+        None,
+        Some(&u_def),
+        Some(UniverseMode::RetrospectiveFixed),
+    );
+    assert!(battle_pit.is_point_in_time && battle_pit.survivor_bias_caveat.is_none());
+    assert!(!battle_retro.is_point_in_time && battle_retro.survivor_bias_caveat.is_some());
+    assert_ne!(
+        battle_pit.average_return_pct,
+        battle_retro.average_return_pct
+    );
+}
+
+#[test]
+fn critic_r18_regression_pit_episodes_alignment_inverse_vol_newcomer_and_rvol_clause() {
+    use crate::backtest::strategy::{FloatCmpOp, SignalClause, SignalClauseGroup, SignalPredicate};
+    use crate::data::WatchlistFeedEntry;
+    use crate::scanner::SignalDirection;
+    use crate::scanner::universe::{
+        MemberStatus, SessionDate, UniverseDefinition, UniverseMember, UniverseMode, UniverseStatus,
+    };
+
+    let base_ts = 1_704_153_600_i64; // 2024-01-02 UTC
+    let d_of = |idx: usize| SessionDate::from_utc_timestamp(base_ts + (idx as i64) * 86_400);
+
+    // 1. `[Major-02]` Disjoint 2-episode PIT constituent (`[10..40)` and `[85..120)`):
+    //    `equity_curve.len() == equity_values.len() == candles.len() == 120`, exact `pt.bar_index == idx`,
+    //    and `unexecuted_signals[..].signal_bar_index` uses absolute candle indices!
+    let mut multi_ep_candles: Vec<Candle> = (0..120)
+        .map(|i| {
+            let px = 100.0 + (i as f64) * 0.4 + ((i as f64) * 0.35).sin() * 2.0;
+            Candle {
+                timestamp: base_ts + (i as i64) * 86_400,
+                date_label: format!("d{i}"),
+                open: px - 0.2,
+                high: px + 0.8,
+                low: px - 0.8,
+                close: px + 0.3,
+                volume: 50_000.0,
+            }
+        })
+        .collect();
+    // Force an invalid open price on bar 96 inside the second episode so any entry signal at bar 95
+    // records an absolute `signal_bar_index == 95` (NOT episode-local `95 - 85 = 10`!).
+    multi_ep_candles[96].open = -1.0;
+
+    let u_multi = UniverseDefinition {
+        universe_id: "MULTI_EP".to_owned(),
+        version: "v1".to_owned(),
+        name: "Multi Episode PIT".to_owned(),
+        status: UniverseStatus::Approved,
+        default_mode: UniverseMode::PointInTime,
+        effective_from: None,
+        effective_to: None,
+        selection_purpose: "test".to_owned(),
+        source_evidence: "unit".to_owned(),
+        members: vec![
+            UniverseMember {
+                symbol: "REENTRY".to_owned(),
+                company_name: None,
+                exchange: "HOSE".to_owned(),
+                effective_from: Some(d_of(10)),
+                effective_to: Some(d_of(39)),
+                status: MemberStatus::Active,
+                sector: None,
+                inclusion_reason: "ep1".to_owned(),
+                weight: 1.0,
+            },
+            UniverseMember {
+                symbol: "REENTRY".to_owned(),
+                company_name: None,
+                exchange: "HOSE".to_owned(),
+                effective_from: Some(d_of(85)),
+                effective_to: None,
+                status: MemberStatus::Active,
+                sector: None,
+                inclusion_reason: "ep2".to_owned(),
+                weight: 1.0,
+            },
+        ],
+    };
+
+    let mut rule_cfg = BacktestConfig {
+        preset: StrategyPresetKind::CustomSignalRules,
+        ..BacktestConfig::default()
+    };
+    rule_cfg.custom_rules.long_entry.groups = vec![SignalClauseGroup {
+        clauses: vec![SignalClause {
+            catalog_id: "structure.candle_score".to_owned(),
+            predicate: SignalPredicate::FloatCmp {
+                op: FloatCmpOp::Gte,
+                threshold: -100.0,
+            },
+            direction_filter: None,
+        }],
+        ..SignalClauseGroup::default()
+    }];
+    rule_cfg.risk.take_profit_pct = None;
+    rule_cfg.risk.stop_loss_pct = None;
+
+    let ep_res = run_pit_episodes_backtest(
+        "REENTRY",
+        Timeframe::D1,
+        &multi_ep_candles,
+        &rule_cfg,
+        BacktestRunOptions::default(),
+        &u_multi,
+        Some(UniverseMode::PointInTime),
+    );
+    assert_eq!(ep_res.equity_curve.len(), multi_ep_candles.len());
+    assert_eq!(ep_res.equity_values.len(), multi_ep_candles.len());
+    assert_eq!(ep_res.underwater_values.len(), multi_ep_candles.len());
+    for (idx, pt) in ep_res.equity_curve.iter().enumerate() {
+        assert_eq!(pt.bar_index, idx);
+    }
+    // Inactive gap bars `40..85` carry constant settled cash with `0.0` exposure!
+    let settled_at_39 = ep_res.equity_curve[39].equity;
+    for pt in &ep_res.equity_curve[40..85] {
+        assert!((pt.equity - settled_at_39).abs() < 1e-9);
+        assert_eq!(pt.position_qty, 0.0);
+    }
+
+    // Also verify `unexecuted_signals` in episode 2 (`[85..120)`) uses absolute `signal_bar_index >= 85`!
+    let mut unexec_candles = multi_ep_candles.clone();
+    for b in &mut unexec_candles[86..120] {
+        b.open = -1.0;
+    }
+    let ep_unexec = run_pit_episodes_backtest(
+        "REENTRY",
+        Timeframe::D1,
+        &unexec_candles,
+        &rule_cfg,
+        BacktestRunOptions::default(),
+        &u_multi,
+        Some(UniverseMode::PointInTime),
+    );
+    assert!(
+        ep_unexec
+            .unexecuted_signals
+            .iter()
+            .any(|u| u.signal_bar_index >= 85),
+        "episode-2 unexecuted signals must carry absolute bar indices >= 85: {:?}",
+        ep_unexec.unexecuted_signals
+    );
+    assert!(
+        ep_unexec
+            .unexecuted_signals
+            .iter()
+            .all(|u| !(40..85).contains(&u.signal_bar_index))
+    );
+
+    // 2. `[Major-01]` `CausalInverseVolatility` with a late PIT entrant sitting in cash (`0` strategy trades):
+    //    Seasoned `LOW_VOL` (~0.4% daily) MUST receive higher weight than `HIGH_VOL` (~4.5% daily),
+    //    and late newcomer `NEW_CASH` (~2.0% daily price vol, 0 trades) MUST NOT reset seasoned weights
+    //    to `33.33%` NOR receive a `50x` (`> 50%`) flat-equity spike!
+    let low_vol_bars: Vec<Candle> = (0..90)
+        .map(|i| {
+            let p: f64 = 100.0 * (1.0 + 0.004 * if i % 2 == 0 { 1.0 } else { -0.95 });
+            Candle {
+                timestamp: base_ts + (i as i64) * 86_400,
+                date_label: format!("d{i}"),
+                open: 100.0,
+                high: p.max(100.0) + 0.1,
+                low: p.min(100.0) - 0.1,
+                close: p,
+                volume: 20_000.0,
+            }
+        })
+        .collect();
+    let high_vol_bars: Vec<Candle> = (0..90)
+        .map(|i| {
+            let p: f64 = 100.0 * (1.0 + 0.045 * if i % 2 == 0 { 1.0 } else { -0.95 });
+            Candle {
+                timestamp: base_ts + (i as i64) * 86_400,
+                date_label: format!("d{i}"),
+                open: 100.0,
+                high: p.max(100.0) + 0.5,
+                low: p.min(100.0) - 0.5,
+                close: p,
+                volume: 20_000.0,
+            }
+        })
+        .collect();
+    let newcomer_bars: Vec<Candle> = (0..90)
+        .map(|i| {
+            let p: f64 = 100.0 * (1.0 + 0.020 * if i % 2 == 0 { 1.0 } else { -0.95 });
+            Candle {
+                timestamp: base_ts + (i as i64) * 86_400,
+                date_label: format!("d{i}"),
+                open: 100.0,
+                high: p.max(100.0) + 0.2,
+                low: p.min(100.0) - 0.2,
+                close: p,
+                volume: 20_000.0,
+            }
+        })
+        .collect();
+
+    let u_iv = UniverseDefinition {
+        universe_id: "IV_PIT".to_owned(),
+        version: "v1".to_owned(),
+        name: "InvVol PIT".to_owned(),
+        status: UniverseStatus::Approved,
+        default_mode: UniverseMode::PointInTime,
+        effective_from: None,
+        effective_to: None,
+        selection_purpose: "test".to_owned(),
+        source_evidence: "unit".to_owned(),
+        members: vec![
+            UniverseMember {
+                symbol: "LOW_VOL".to_owned(),
+                company_name: None,
+                exchange: "HOSE".to_owned(),
+                effective_from: None,
+                effective_to: None,
+                status: MemberStatus::Active,
+                sector: None,
+                inclusion_reason: "core".to_owned(),
+                weight: 1.0,
+            },
+            UniverseMember {
+                symbol: "HIGH_VOL".to_owned(),
+                company_name: None,
+                exchange: "HOSE".to_owned(),
+                effective_from: None,
+                effective_to: None,
+                status: MemberStatus::Active,
+                sector: None,
+                inclusion_reason: "core".to_owned(),
+                weight: 1.0,
+            },
+            UniverseMember {
+                symbol: "NEW_CASH".to_owned(),
+                company_name: None,
+                exchange: "HOSE".to_owned(),
+                effective_from: Some(d_of(87)), // Joins 3 bars before end!
+                effective_to: None,
+                status: MemberStatus::Active,
+                sector: None,
+                inclusion_reason: "late_add".to_owned(),
+                weight: 1.0,
+            },
+        ],
+    };
+
+    // Strategy that never trades so all 3 constituents sit in flat cash (`equity == 100_000`)!
+    let mut no_trade_cfg = BacktestConfig {
+        preset: StrategyPresetKind::CustomSignalRules,
+        ..BacktestConfig::default()
+    };
+    no_trade_cfg.custom_rules.long_entry.groups = vec![SignalClauseGroup {
+        clauses: vec![SignalClause {
+            catalog_id: "structure.candle_score".to_owned(),
+            predicate: SignalPredicate::FloatCmp {
+                op: FloatCmpOp::Gte,
+                threshold: 999.0,
+            },
+            direction_filter: None,
+        }],
+        ..SignalClauseGroup::default()
+    }];
+
+    let iv_feeds = vec![
+        WatchlistFeedEntry {
+            instrument_id: "T:LOW_VOL".to_owned(),
+            preset: DataSourcePreset::Vn30Basket,
+            symbol: "LOW_VOL".to_owned(),
+            base_timeframe: Timeframe::D1,
+            candles: low_vol_bars,
+        },
+        WatchlistFeedEntry {
+            instrument_id: "T:HIGH_VOL".to_owned(),
+            preset: DataSourcePreset::Vn30Basket,
+            symbol: "HIGH_VOL".to_owned(),
+            base_timeframe: Timeframe::D1,
+            candles: high_vol_bars,
+        },
+        WatchlistFeedEntry {
+            instrument_id: "T:NEW_CASH".to_owned(),
+            preset: DataSourcePreset::Vn30Basket,
+            symbol: "NEW_CASH".to_owned(),
+            base_timeframe: Timeframe::D1,
+            candles: newcomer_bars,
+        },
+    ];
+    let iv_rep = run_portfolio_backtest_with_universe(
+        &iv_feeds,
+        Timeframe::D1,
+        &no_trade_cfg,
+        PortfolioUniverseFilter::Vn30EquitiesOnly,
+        PortfolioWeightingMode::CausalInverseVolatility { lookback_bars: 20 },
+        None,
+        Some(&u_iv),
+        Some(UniverseMode::PointInTime),
+    );
+    let w_low = iv_rep
+        .constituents
+        .iter()
+        .find(|c| c.symbol == "LOW_VOL")
+        .unwrap()
+        .final_weight_pct;
+    let w_new = iv_rep
+        .constituents
+        .iter()
+        .find(|c| c.symbol == "NEW_CASH")
+        .unwrap()
+        .final_weight_pct;
+    let w_high = iv_rep
+        .constituents
+        .iter()
+        .find(|c| c.symbol == "HIGH_VOL")
+        .unwrap()
+        .final_weight_pct;
+    assert!(
+        w_low > w_new && w_new > w_high,
+        "CausalInverseVolatility must rank LOW_VOL ({w_low:.2}%) > NEW_CASH ({w_new:.2}%) > HIGH_VOL ({w_high:.2}%)"
+    );
+    assert!(
+        w_new < 45.0,
+        "late newcomer in cash must not spike > 45%: got {w_new:.2}%"
+    );
+
+    // 3. `[Minor-03]` `SignalClause::default_for_catalog("volume.relative_volume", Bearish)` -> `Gte 2.0`!
+    let rvol_bear =
+        SignalClause::default_for_catalog("volume.relative_volume", Some(SignalDirection::Bearish));
+    assert_eq!(
+        rvol_bear.predicate,
+        SignalPredicate::FloatCmp {
+            op: FloatCmpOp::Gte,
+            threshold: 2.0,
+        }
+    );
+}

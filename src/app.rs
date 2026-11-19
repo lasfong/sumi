@@ -22,8 +22,8 @@ use crate::backtest::{
     count_custom_rule_matches, is_bucket_incomplete_at_close_for_symbol,
     map_equity_curve_to_candles, run_all_presets_battle, run_backtest_with_options,
     run_monte_carlo_bootstrap, run_monte_carlo_portfolio_mapped, run_multi_strategy_comparison,
-    run_multi_symbol_battle_with_close_cutoff, run_parameter_sweep, run_portfolio_backtest,
-    run_walk_forward_validation,
+    run_multi_symbol_battle_with_universe, run_parameter_sweep,
+    run_portfolio_backtest_with_universe, run_walk_forward_validation,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::backtest::{StopTakeConfig, StrategyParams};
@@ -45,8 +45,8 @@ use crate::drawings::{
 };
 use crate::indicators::OscillatorPaneId;
 use crate::indicators::{
-    CvdResetMode, IndicatorCache, IndicatorConfig, SeriesBlockIndex,
-    compute_rebased_comparison_series,
+    BBHorizon, BBRegime, CvdResetMode, IndicatorCache, IndicatorConfig, ProxyBBSeriesOutput,
+    SeriesBlockIndex, compute_proxy_bb_series, compute_rebased_comparison_series,
 };
 use crate::journal::{
     ChecklistState, DailyPriceBand, ExchangeVenue, JournalEntrySource, JournalEntryStatus,
@@ -59,11 +59,13 @@ use crate::replay::{
 };
 use crate::scanner::{
     BreadthFeedInput, CONFLUENCE_DATA_FIDELITY_PROXY, CausalConfluenceReport, ConfluenceBias,
-    ConfluenceWeightProfile, DEFAULT_BLIND_PRACTICE_LOOKBACK_BARS, HistoricalSignalHit,
-    INSTITUTIONAL_BLIND_PRACTICE_PRE_ROLL_BARS, MarketBreadthSnapshot, MarketRegime,
-    PrecomputedCatalogMatrix, RrgQuadrant, SIGNAL_CATALOG, ScanSignalKind, ScannerFilter,
-    ScannerReplayIntent, ScannerSignalContext, SignalCategory, SignalDirection, SignalEvaluation,
-    SignalOutputType, SignalStatus, SymbolBreadthRotation, SymbolScanRow, WatchlistSortColumn,
+    ConfluenceWeightProfile, CoverageStatus, DEFAULT_BLIND_PRACTICE_LOOKBACK_BARS,
+    HistoricalSignalHit, INSTITUTIONAL_BLIND_PRACTICE_PRE_ROLL_BARS, MarketBBAggregator,
+    MarketBBFeedInput, MarketBBSeriesResult, MarketBreadthSnapshot, MarketPublicationStatus,
+    MarketRegime, PrecomputedCatalogMatrix, RrgQuadrant, SIGNAL_CATALOG, ScanSignalKind,
+    ScannerFilter, ScannerReplayIntent, ScannerSignalContext, SignalCategory, SignalDirection,
+    SignalEvaluation, SignalOutputType, SignalStatus, SymbolBreadthRotation, SymbolScanRow,
+    UniverseDefinition, UniverseMode, UniverseResolver, WatchlistSortColumn,
     compute_market_breadth_and_rrg, evaluate_causal_confluence, evaluate_symbol_scan_and_signals,
     explain_historical_signal, filter_and_sort_watchlist, filter_historical_signals,
     filter_signal_catalog, find_catalog_entry, find_catalog_entry_for_scan_kind,
@@ -402,7 +404,17 @@ pub struct CommandPaletteState {
 
 type BacktestSyncKey = (u64, usize, Option<i64>, Option<i64>, bool, u64);
 type SweepSyncKey = (u64, Option<i64>, bool, u64, SweepRankingMetric);
-type BattleSyncKey = (String, u64, Timeframe, Option<i64>, u64, SweepRankingMetric);
+type BattleSyncKey = (
+    String,
+    u64,
+    Timeframe,
+    Option<i64>,
+    u64,
+    SweepRankingMetric,
+    bool,
+    UniverseMode,
+    u64,
+);
 type WalkForwardSyncKey = (u64, usize, Option<i64>, Option<i64>, bool, u64, u64);
 type PortfolioSyncKey = (
     String,
@@ -412,6 +424,9 @@ type PortfolioSyncKey = (
     u64,
     PortfolioUniverseFilter,
     PortfolioWeightingMode,
+    bool,
+    UniverseMode,
+    u64,
 );
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MonteCarloSyncKey {
@@ -426,6 +441,9 @@ struct MonteCarloSyncKey {
     equity_pane_source: EquityPaneSource,
     portfolio_universe_filter: PortfolioUniverseFilter,
     portfolio_weighting: PortfolioWeightingMode,
+    pit_universe_enabled: bool,
+    pit_universe_mode: UniverseMode,
+    pit_universe_digest: u64,
     simulations: usize,
     seed: u64,
     ruin_bits: u64,
@@ -490,6 +508,14 @@ fn default_alert_catalog_id_r16() -> String {
 
 const fn default_blind_lookback_r17() -> usize {
     INSTITUTIONAL_BLIND_PRACTICE_PRE_ROLL_BARS
+}
+
+fn default_pit_universe_def_r18() -> UniverseDefinition {
+    UniverseDefinition::bundled_vn30_pit()
+}
+
+fn hash_universe_digest_u64(u: &UniverseDefinition) -> u64 {
+    u64::from_str_radix(&u.content_hash_hex(), 16).unwrap_or(0)
 }
 
 type MultiStrategySyncKey = (
@@ -570,7 +596,7 @@ pub struct SecondaryChartSlot {
     #[serde(skip)]
     pub drawings: DrawingStore,
     #[serde(skip)]
-    pub indicator_cache: IndicatorCache,
+    pub indicator_cache: Box<IndicatorCache>,
     #[serde(skip)]
     compare_series_cached: Vec<Option<f64>>,
     #[serde(skip)]
@@ -646,7 +672,7 @@ impl SecondaryChartSlot {
             loaded_source_key: None,
             candles: Vec::new(),
             drawings: DrawingStore::new(),
-            indicator_cache: IndicatorCache::new(),
+            indicator_cache: Box::new(IndicatorCache::new()),
             compare_series_cached: Vec::new(),
             compare_series_idx: SeriesBlockIndex::default(),
             active_benchmark_label: String::new(),
@@ -693,12 +719,12 @@ impl SecondaryChartSlot {
     }
 }
 
-fn default_secondary_slots() -> [SecondaryChartSlot; 3] {
-    [
+fn default_secondary_slots() -> Box<[SecondaryChartSlot; 3]> {
+    Box::new([
         SecondaryChartSlot::default_for_slot(1),
         SecondaryChartSlot::default_for_slot(2),
         SecondaryChartSlot::default_for_slot(3),
-    ]
+    ])
 }
 
 /// Primary application state for the Sumi Rust Trading Workstation (`Milestone R09`).
@@ -779,7 +805,7 @@ pub struct SumiWorkstationApp {
     #[serde(default)]
     pub active_chart_slot: usize,
     #[serde(default = "default_secondary_slots")]
-    pub secondary_slots: [SecondaryChartSlot; 3],
+    pub secondary_slots: Box<[SecondaryChartSlot; 3]>,
     #[serde(default)]
     pub saved_workspace_templates: Vec<WorkspaceTemplate>,
     pub trading_view_mode: TemplateTradingViewMode,
@@ -822,6 +848,12 @@ pub struct SumiWorkstationApp {
     pub scan_snapshot_store: ScanSnapshotStore,
     #[serde(default)]
     pub multi_phase_mode: MultiPhaseSplitMode,
+    #[serde(default)]
+    pub pit_universe_enabled: bool,
+    #[serde(default)]
+    pub pit_universe_mode: UniverseMode,
+    #[serde(default = "default_pit_universe_def_r18")]
+    pub pit_universe_def: UniverseDefinition,
 
     #[serde(skip)]
     pub base_candles: Vec<Candle>,
@@ -892,7 +924,7 @@ pub struct SumiWorkstationApp {
     #[serde(skip)]
     viewport_focus_lock: Option<(f64, f64, f64)>,
     #[serde(skip)]
-    pub indicator_cache: IndicatorCache,
+    pub indicator_cache: Box<IndicatorCache>,
     #[serde(skip)]
     dataset_generation: u64,
     #[serde(skip)]
@@ -1021,6 +1053,18 @@ pub struct SumiWorkstationApp {
     pub show_scan_import_box: bool,
     #[serde(skip)]
     pub last_scan_warning: Option<String>,
+    #[serde(skip)]
+    pub market_bb_cache: Option<MarketBBSeriesResult>,
+    #[serde(skip)]
+    market_bb_synced_key: Option<(u64, Option<i64>, u64, UniverseMode)>,
+    #[serde(skip)]
+    pub symbol_proxy_bb_cache: Option<(u64, usize, Option<i64>, ProxyBBSeriesOutput)>,
+    #[serde(skip)]
+    pub universe_import_buffer: String,
+    #[serde(skip)]
+    pub show_universe_import_box: bool,
+    #[serde(skip)]
+    pub last_universe_status: Option<(bool, String)>,
 }
 
 impl Default for SumiWorkstationApp {
@@ -1031,7 +1075,7 @@ impl Default for SumiWorkstationApp {
         let mut viewport = ChartViewportState::new();
         viewport.time_scale.set_total_bars(candles.len());
         let indicators = IndicatorConfig::default();
-        let mut indicator_cache = IndicatorCache::new();
+        let mut indicator_cache = Box::new(IndicatorCache::new());
         indicator_cache.sync(&candles, 1, &indicators);
 
         Self {
@@ -1125,6 +1169,9 @@ impl Default for SumiWorkstationApp {
             practice_session_store: PracticeSessionStore::new(),
             scan_snapshot_store: ScanSnapshotStore::new(),
             multi_phase_mode: MultiPhaseSplitMode::Tertiles,
+            pit_universe_enabled: false,
+            pit_universe_mode: UniverseMode::PointInTime,
+            pit_universe_def: UniverseDefinition::bundled_vn30_pit(),
             base_candles,
             candles,
             available_symbols: vec!["VNINDEX".to_owned()],
@@ -1224,6 +1271,12 @@ impl Default for SumiWorkstationApp {
             show_practice_import_box: false,
             show_scan_import_box: false,
             last_scan_warning: None,
+            market_bb_cache: None,
+            market_bb_synced_key: None,
+            symbol_proxy_bb_cache: None,
+            universe_import_buffer: String::new(),
+            show_universe_import_box: false,
+            last_universe_status: None,
         }
     }
 }
@@ -1377,7 +1430,7 @@ impl SumiWorkstationApp {
         self.active_chart_slot = self
             .active_chart_slot
             .min(self.grid_layout.slot_count().saturating_sub(1));
-        for slot in &mut self.secondary_slots {
+        for slot in self.secondary_slots.iter_mut() {
             slot.sanitize_deserialized();
         }
         while self.saved_workspace_templates.len() > 32 {
@@ -1421,6 +1474,14 @@ impl SumiWorkstationApp {
         self.wf_synced_key = None;
         self.portfolio_synced_key = None;
         self.portfolio_mapped_curve = None;
+        self.market_bb_cache = None;
+        self.market_bb_synced_key = None;
+        self.symbol_proxy_bb_cache = None;
+        self.show_universe_import_box = false;
+        self.last_universe_status = None;
+        if UniverseResolver::validate_definition(&self.pit_universe_def).is_err() {
+            self.pit_universe_def = UniverseDefinition::bundled_vn30_pit();
+        }
 
         let persisted_tf = Timeframe::parse_label(&self.timeframe).unwrap_or(self.active_timeframe);
         let (report, reset_to_clean_fallback) = if self.data_source == DataSourcePreset::CustomFile
@@ -1565,7 +1626,7 @@ impl SumiWorkstationApp {
         if reset_to_clean_fallback {
             self.viewport.reset_to_default();
         } else if self.data_source == DataSourcePreset::CustomFile {
-            self.viewport.cvd_price_scale.reset_auto_scale();
+            self.viewport.reset_all_oscillator_auto_scales();
         }
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
         self.sync_indicators_and_benchmarks();
@@ -1918,12 +1979,7 @@ impl SumiWorkstationApp {
         if self.viewport.main_price_scale.is_auto_scale() {
             self.viewport.main_price_scale.reset_auto_scale();
         }
-        self.viewport.rsi_price_scale.reset_auto_scale();
-        self.viewport.macd_price_scale.reset_auto_scale();
-        self.viewport.atr_price_scale.reset_auto_scale();
-        self.viewport.rs_price_scale.reset_auto_scale();
-        self.viewport.cvd_price_scale.reset_auto_scale();
-        self.viewport.equity_price_scale.reset_auto_scale();
+        self.viewport.reset_all_oscillator_auto_scales();
         self.focused_backtest_trade_id = None;
 
         self.active_timeframe = target_tf;
@@ -2177,9 +2233,7 @@ impl SumiWorkstationApp {
         self.compare_cache_key = None;
         self.focused_backtest_trade_id = None;
         self.synced_rr_drawing_signature = None;
-        self.viewport.rs_price_scale.reset_auto_scale();
-        self.viewport.cvd_price_scale.reset_auto_scale();
-        self.viewport.equity_price_scale.reset_auto_scale();
+        self.viewport.reset_all_oscillator_auto_scales();
         self.viewport.time_scale.set_total_bars(self.candles.len());
         if reset_viewport {
             self.viewport.reset_to_default();
@@ -2672,12 +2726,7 @@ impl SumiWorkstationApp {
             self.viewport.main_price_scale.reset_auto_scale();
         }
         self.viewport.volume_price_scale.reset_auto_scale();
-        self.viewport.rsi_price_scale.reset_auto_scale();
-        self.viewport.macd_price_scale.reset_auto_scale();
-        self.viewport.atr_price_scale.reset_auto_scale();
-        self.viewport.rs_price_scale.reset_auto_scale();
-        self.viewport.cvd_price_scale.reset_auto_scale();
-        self.viewport.equity_price_scale.reset_auto_scale();
+        self.viewport.reset_all_oscillator_auto_scales();
         self.focused_backtest_trade_id = None;
 
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
@@ -2779,12 +2828,7 @@ impl SumiWorkstationApp {
             self.viewport.main_price_scale.reset_auto_scale();
         }
         self.viewport.volume_price_scale.reset_auto_scale();
-        self.viewport.rsi_price_scale.reset_auto_scale();
-        self.viewport.macd_price_scale.reset_auto_scale();
-        self.viewport.atr_price_scale.reset_auto_scale();
-        self.viewport.rs_price_scale.reset_auto_scale();
-        self.viewport.cvd_price_scale.reset_auto_scale();
-        self.viewport.equity_price_scale.reset_auto_scale();
+        self.viewport.reset_all_oscillator_auto_scales();
 
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
         self.sync_indicators_and_benchmarks();
@@ -2880,12 +2924,7 @@ impl SumiWorkstationApp {
             self.viewport.main_price_scale.reset_auto_scale();
         }
         self.viewport.volume_price_scale.reset_auto_scale();
-        self.viewport.rsi_price_scale.reset_auto_scale();
-        self.viewport.macd_price_scale.reset_auto_scale();
-        self.viewport.atr_price_scale.reset_auto_scale();
-        self.viewport.rs_price_scale.reset_auto_scale();
-        self.viewport.cvd_price_scale.reset_auto_scale();
-        self.viewport.equity_price_scale.reset_auto_scale();
+        self.viewport.reset_all_oscillator_auto_scales();
 
         self.dataset_generation = self.dataset_generation.wrapping_add(1).max(1);
         self.sync_indicators_and_benchmarks();
@@ -4599,7 +4638,18 @@ impl SumiWorkstationApp {
         )
     }
 
+    fn invalidate_or_sync_market_bb_after_mutation(&mut self) {
+        if self.show_scanner_dock && self.scanner_tab == ScannerDockTab::Breadth {
+            self.sync_market_bb_and_symbol_proxy_bb();
+        } else {
+            self.market_bb_cache = None;
+            self.market_bb_synced_key = None;
+            self.symbol_proxy_bb_cache = None;
+        }
+    }
+
     fn invalidate_or_sync_backtest_after_mutation(&mut self) {
+        self.invalidate_or_sync_market_bb_after_mutation();
         if self.show_strategy_panel || self.show_equity_pane || self.show_backtest_trades {
             self.sync_backtest_causal();
         } else {
@@ -4694,6 +4744,7 @@ impl SumiWorkstationApp {
             }
         }
 
+        let pit_digest = hash_universe_digest_u64(&self.pit_universe_def);
         let battle_key = (
             self.current_instrument_key(),
             self.dataset_generation,
@@ -4701,6 +4752,9 @@ impl SumiWorkstationApp {
             replay_close_cutoff,
             cfg_digest,
             self.sweep_ranking,
+            self.pit_universe_enabled,
+            self.pit_universe_mode,
+            pit_digest,
         );
         if self.battle_synced_key.as_ref() != Some(&battle_key) {
             if self.show_strategy_panel
@@ -4746,6 +4800,9 @@ impl SumiWorkstationApp {
             cfg_digest,
             self.portfolio_universe_filter,
             self.portfolio_weighting,
+            self.pit_universe_enabled,
+            self.pit_universe_mode,
+            pit_digest,
         );
         let port_needed = (self.show_strategy_panel
             && self.right_dock_tab == RightDockTab::StrategyLab
@@ -4782,6 +4839,9 @@ impl SumiWorkstationApp {
             equity_pane_source: self.equity_pane_source,
             portfolio_universe_filter: self.portfolio_universe_filter,
             portfolio_weighting: self.portfolio_weighting,
+            pit_universe_enabled: self.pit_universe_enabled,
+            pit_universe_mode: self.pit_universe_mode,
+            pit_universe_digest: pit_digest,
             simulations: self.mc_config.simulations,
             seed: self.mc_config.seed,
             ruin_bits: self.mc_config.ruin_drawdown_pct.to_bits(),
@@ -5025,12 +5085,15 @@ impl SumiWorkstationApp {
             list
         };
 
-        self.battle_report = Some(run_multi_symbol_battle_with_close_cutoff(
+        let pit_digest = hash_universe_digest_u64(&self.pit_universe_def);
+        self.battle_report = Some(run_multi_symbol_battle_with_universe(
             &feeds,
             self.active_timeframe,
             &self.backtest_config,
             self.sweep_ranking,
             replay_close_cutoff,
+            self.pit_universe_enabled.then_some(&self.pit_universe_def),
+            self.pit_universe_enabled.then_some(self.pit_universe_mode),
         ));
         self.battle_synced_key = Some((
             self.current_instrument_key(),
@@ -5039,6 +5102,9 @@ impl SumiWorkstationApp {
             replay_close_cutoff,
             cfg_digest,
             self.sweep_ranking,
+            self.pit_universe_enabled,
+            self.pit_universe_mode,
+            pit_digest,
         ));
     }
 
@@ -5428,20 +5494,12 @@ impl SumiWorkstationApp {
         let target_cfg = self.active_slot_indicators().clone();
         self.indicators = target_cfg.clone();
         self.viewport.main_price_scale.reset_auto_scale();
-        self.viewport.rsi_price_scale.reset_auto_scale();
-        self.viewport.macd_price_scale.reset_auto_scale();
-        self.viewport.atr_price_scale.reset_auto_scale();
-        self.viewport.rs_price_scale.reset_auto_scale();
-        self.viewport.cvd_price_scale.reset_auto_scale();
+        self.viewport.reset_all_oscillator_auto_scales();
 
-        for slot in &mut self.secondary_slots {
+        for slot in self.secondary_slots.iter_mut() {
             slot.indicators = target_cfg.clone();
             slot.viewport.main_price_scale.reset_auto_scale();
-            slot.viewport.rsi_price_scale.reset_auto_scale();
-            slot.viewport.macd_price_scale.reset_auto_scale();
-            slot.viewport.atr_price_scale.reset_auto_scale();
-            slot.viewport.rs_price_scale.reset_auto_scale();
-            slot.viewport.cvd_price_scale.reset_auto_scale();
+            slot.viewport.reset_all_oscillator_auto_scales();
             slot.rs_cmp_synced_key = None;
         }
         self.sync_indicators_and_benchmarks();
@@ -5640,6 +5698,11 @@ impl SumiWorkstationApp {
                 rs: self.viewport.rs_stretch,
                 cvd: self.viewport.cvd_stretch,
                 equity: self.viewport.equity_stretch,
+                adx: self.viewport.adx_stretch,
+                stochastic: self.viewport.stoch_stretch,
+                cci: self.viewport.cci_stretch,
+                mfi: self.viewport.mfi_stretch,
+                proxy_bb: self.viewport.proxy_bb_stretch,
             },
         });
         for (i, sec) in self.secondary_slots.iter().enumerate() {
@@ -5662,6 +5725,11 @@ impl SumiWorkstationApp {
                     rs: sec.viewport.rs_stretch,
                     cvd: sec.viewport.cvd_stretch,
                     equity: sec.viewport.equity_stretch,
+                    adx: sec.viewport.adx_stretch,
+                    stochastic: sec.viewport.stoch_stretch,
+                    cci: sec.viewport.cci_stretch,
+                    mfi: sec.viewport.mfi_stretch,
+                    proxy_bb: sec.viewport.proxy_bb_stretch,
                 },
             });
         }
@@ -5756,8 +5824,13 @@ impl SumiWorkstationApp {
             self.viewport.rs_stretch = s0.pane_stretches.rs;
             self.viewport.cvd_stretch = s0.pane_stretches.cvd;
             self.viewport.equity_stretch = s0.pane_stretches.equity;
+            self.viewport.adx_stretch = s0.pane_stretches.adx;
+            self.viewport.stoch_stretch = s0.pane_stretches.stochastic;
+            self.viewport.cci_stretch = s0.pane_stretches.cci;
+            self.viewport.mfi_stretch = s0.pane_stretches.mfi;
+            self.viewport.proxy_bb_stretch = s0.pane_stretches.proxy_bb;
             self.viewport.main_price_scale.reset_auto_scale();
-            self.viewport.cvd_price_scale.reset_auto_scale();
+            self.viewport.reset_all_oscillator_auto_scales();
         }
 
         for i in 0..3 {
@@ -5778,10 +5851,15 @@ impl SumiWorkstationApp {
                 dst.viewport.rs_stretch = st.pane_stretches.rs;
                 dst.viewport.cvd_stretch = st.pane_stretches.cvd;
                 dst.viewport.equity_stretch = st.pane_stretches.equity;
+                dst.viewport.adx_stretch = st.pane_stretches.adx;
+                dst.viewport.stoch_stretch = st.pane_stretches.stochastic;
+                dst.viewport.cci_stretch = st.pane_stretches.cci;
+                dst.viewport.mfi_stretch = st.pane_stretches.mfi;
+                dst.viewport.proxy_bb_stretch = st.pane_stretches.proxy_bb;
                 dst.loaded_source_key = None;
                 dst.materialized_key = None;
                 dst.viewport.main_price_scale.reset_auto_scale();
-                dst.viewport.cvd_price_scale.reset_auto_scale();
+                dst.viewport.reset_all_oscillator_auto_scales();
             }
         }
 
@@ -7019,13 +7097,16 @@ impl SumiWorkstationApp {
             self.portfolio_universe_filter
         };
 
-        let rep = run_portfolio_backtest(
+        let pit_digest = hash_universe_digest_u64(&self.pit_universe_def);
+        let rep = run_portfolio_backtest_with_universe(
             &feeds,
             self.active_timeframe,
             &self.backtest_config,
             effective_filter,
             self.portfolio_weighting,
             replay_close_cutoff,
+            self.pit_universe_enabled.then_some(&self.pit_universe_def),
+            self.pit_universe_enabled.then_some(self.pit_universe_mode),
         );
         self.portfolio_report = Some(rep);
         self.portfolio_synced_key = Some((
@@ -7036,6 +7117,9 @@ impl SumiWorkstationApp {
             cfg_digest,
             self.portfolio_universe_filter,
             self.portfolio_weighting,
+            self.pit_universe_enabled,
+            self.pit_universe_mode,
+            pit_digest,
         ));
         self.portfolio_mapped_curve = None;
         self.refresh_portfolio_mapped_curve();
@@ -7363,7 +7447,7 @@ impl SumiWorkstationApp {
         self.rebinding_hotkey_action = None;
         self.drawings.cancel_active_gesture();
         self.viewport.cancel_active_interactions();
-        for slot in &mut self.secondary_slots {
+        for slot in self.secondary_slots.iter_mut() {
             slot.drawings.cancel_active_gesture();
             slot.viewport.cancel_active_interactions();
         }
@@ -7387,7 +7471,7 @@ impl SumiWorkstationApp {
         self.rebinding_hotkey_action = None;
         self.drawings.cancel_active_gesture();
         self.viewport.cancel_active_interactions();
-        for slot in &mut self.secondary_slots {
+        for slot in self.secondary_slots.iter_mut() {
             slot.drawings.cancel_active_gesture();
             slot.viewport.cancel_active_interactions();
         }
@@ -7567,6 +7651,52 @@ impl SumiWorkstationApp {
                 "Cumulative Volume Delta (CVD + SMA 9) Sub-Pane",
                 slot_ind.show_cvd,
             ),
+            (
+                "SUPERTREND",
+                "SuperTrend(10, 3.0) Directional Overlay",
+                slot_ind.show_supertrend,
+            ),
+            (
+                "PSAR",
+                "Parabolic SAR(0.02, 0.20) Overlay",
+                slot_ind.show_psar,
+            ),
+            (
+                "KELTNER",
+                "Keltner Channels(20, 10, 2.0) Overlay",
+                slot_ind.show_keltner,
+            ),
+            (
+                "VOLSMA",
+                "Volume SMA(20) Histogram Overlay",
+                slot_ind.show_volume_sma,
+            ),
+            (
+                "PATTERNS",
+                "Causal Candlestick Pattern Badges (14 Patterns)",
+                slot_ind.show_candle_patterns,
+            ),
+            ("ADX", "ADX(14) +DI/-DI Sub-Pane", slot_ind.show_adx),
+            (
+                "STOCH",
+                "Stochastic(14, 3, 3) Sub-Pane",
+                slot_ind.show_stochastic,
+            ),
+            (
+                "CCI",
+                "CCI(20) Commodity Channel Index Sub-Pane",
+                slot_ind.show_cci,
+            ),
+            (
+                "MFI",
+                "MFI(14) Money Flow Index Sub-Pane",
+                slot_ind.show_mfi,
+            ),
+            (
+                "PROXYBB",
+                "ProxyBB(T05/T20/T50) Multi-Horizon Money Flow Sub-Pane",
+                slot_ind.show_proxy_bb,
+            ),
         ] {
             push_scored(
                 PaletteCategory::Indicator,
@@ -7669,9 +7799,13 @@ impl SumiWorkstationApp {
         );
         push_scored(
             PaletteCategory::Indicator,
-            "Open Explainable Signal Catalog & Confluence Schema (R15)".to_owned(),
-            "Browse 17 causal definitions across 12 categories (EN/VI + OHLCV_PROXY)".to_owned(),
-            "signal catalog confluence health vsa divergence ichimoku explain".to_owned(),
+            "Open Explainable Signal Catalog & Confluence Schema (R18)".to_owned(),
+            format!(
+                "Browse {} causal definitions across 12 categories (EN/VI + OHLCV_PROXY)",
+                SIGNAL_CATALOG.len()
+            ),
+            "signal catalog confluence health vsa divergence ichimoku patterns proxybb explain"
+                .to_owned(),
             PaletteAction::OpenSignalCatalogModal,
         );
         push_scored(
@@ -8179,6 +8313,91 @@ impl SumiWorkstationApp {
                         if ind.show_cvd {
                             self.active_slot_viewport_mut()
                                 .cvd_price_scale
+                                .reset_auto_scale();
+                        }
+                    }
+                    "SUPERTREND" => {
+                        let ind = self.active_slot_indicators_mut();
+                        ind.show_supertrend = !ind.show_supertrend;
+                        if ind.show_supertrend {
+                            self.active_slot_viewport_mut()
+                                .main_price_scale
+                                .reset_auto_scale();
+                        }
+                    }
+                    "PSAR" => {
+                        let ind = self.active_slot_indicators_mut();
+                        ind.show_psar = !ind.show_psar;
+                        if ind.show_psar {
+                            self.active_slot_viewport_mut()
+                                .main_price_scale
+                                .reset_auto_scale();
+                        }
+                    }
+                    "KELTNER" => {
+                        let ind = self.active_slot_indicators_mut();
+                        ind.show_keltner = !ind.show_keltner;
+                        if ind.show_keltner {
+                            self.active_slot_viewport_mut()
+                                .main_price_scale
+                                .reset_auto_scale();
+                        }
+                    }
+                    "VOLSMA" => {
+                        let ind = self.active_slot_indicators_mut();
+                        ind.show_volume_sma = !ind.show_volume_sma;
+                        if ind.show_volume_sma {
+                            self.active_slot_viewport_mut()
+                                .volume_price_scale
+                                .reset_auto_scale();
+                        }
+                    }
+                    "PATTERNS" => {
+                        let ind = self.active_slot_indicators_mut();
+                        ind.show_candle_patterns = !ind.show_candle_patterns;
+                    }
+                    "ADX" => {
+                        let ind = self.active_slot_indicators_mut();
+                        ind.show_adx = !ind.show_adx;
+                        if ind.show_adx {
+                            self.active_slot_viewport_mut()
+                                .oscillator_price_scale_mut(OscillatorPaneId::Adx)
+                                .reset_auto_scale();
+                        }
+                    }
+                    "STOCH" => {
+                        let ind = self.active_slot_indicators_mut();
+                        ind.show_stochastic = !ind.show_stochastic;
+                        if ind.show_stochastic {
+                            self.active_slot_viewport_mut()
+                                .oscillator_price_scale_mut(OscillatorPaneId::Stochastic)
+                                .reset_auto_scale();
+                        }
+                    }
+                    "CCI" => {
+                        let ind = self.active_slot_indicators_mut();
+                        ind.show_cci = !ind.show_cci;
+                        if ind.show_cci {
+                            self.active_slot_viewport_mut()
+                                .oscillator_price_scale_mut(OscillatorPaneId::Cci)
+                                .reset_auto_scale();
+                        }
+                    }
+                    "MFI" => {
+                        let ind = self.active_slot_indicators_mut();
+                        ind.show_mfi = !ind.show_mfi;
+                        if ind.show_mfi {
+                            self.active_slot_viewport_mut()
+                                .oscillator_price_scale_mut(OscillatorPaneId::Mfi)
+                                .reset_auto_scale();
+                        }
+                    }
+                    "PROXYBB" => {
+                        let ind = self.active_slot_indicators_mut();
+                        ind.show_proxy_bb = !ind.show_proxy_bb;
+                        if ind.show_proxy_bb {
+                            self.active_slot_viewport_mut()
+                                .oscillator_price_scale_mut(OscillatorPaneId::ProxyBb)
                                 .reset_auto_scale();
                         }
                     }
@@ -9133,7 +9352,7 @@ fn sync_one_secondary_slot(
             .set_replay_cutoff_timestamp(replay_open_cut, slot.candles.len());
         slot.viewport.time_scale.set_total_bars(slot.candles.len());
         slot.viewport.main_price_scale.reset_auto_scale();
-        slot.viewport.cvd_price_scale.reset_auto_scale();
+        slot.viewport.reset_all_oscillator_auto_scales();
         slot.dataset_generation = slot.dataset_generation.wrapping_add(1).max(1);
         slot.materialized_key = Some((
             slot.dataset_generation,
@@ -9990,6 +10209,7 @@ impl SumiWorkstationApp {
                     {
                         self.viewport.equity_price_scale.reset_auto_scale();
                     }
+                    self.render_extended_indicators_toolbar_controls(ui);
                     let cmp_lbl = format!("Cmp:{}", self.active_slot_benchmark_symbol());
                     let mut cmp_on = if slot_idx == 0 {
                         self.show_compare_overlay
@@ -10358,7 +10578,7 @@ impl SumiWorkstationApp {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(format!(
-                                    "R17 [{grid_badge}]  |  {} ({}->{})  |  RPL: {replay_tag}  |  ALT: {armed_alerts}A/{trig_events}T  |  EQ: ${:.0} ({:+.0}){bt_tag}  |  {}P/{}D  |  BARS: {}/{} ({first_date}..{last_date}) {}x  |  {scale_mode}({auto_tag})  |  {:.0}×{:.0}",
+                                    "R18 [{grid_badge}]  |  {} ({}->{})  |  RPL: {replay_tag}  |  ALT: {armed_alerts}A/{trig_events}T  |  EQ: ${:.0} ({:+.0}){bt_tag}  |  {}P/{}D  |  BARS: {}/{} ({first_date}..{last_date}) {}x  |  {scale_mode}({auto_tag})  |  {:.0}×{:.0}",
                                     self.data_source.short_label(),
                                     self.base_timeframe,
                                     self.active_timeframe,
@@ -10382,7 +10602,7 @@ impl SumiWorkstationApp {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(format!(
-                                    "R17 [{grid_badge}]  |  RPL: {replay_tag}  |  ALT: {armed_alerts} armed{bt_tag}  |  BARS: {} ({first_date}..{last_date})",
+                                    "R18 [{grid_badge}]  |  RPL: {replay_tag}  |  ALT: {armed_alerts} armed{bt_tag}  |  BARS: {} ({first_date}..{last_date})",
                                     self.candles.len()
                                 ))
                                 .monospace()
@@ -13247,6 +13467,7 @@ impl SumiWorkstationApp {
     }
 
     fn render_market_breadth_tab(&mut self, ui: &mut egui::Ui) {
+        self.sync_market_bb_and_symbol_proxy_bb();
         let snap = self.breadth_snapshot_cache.clone();
         let mut clicked_target: Option<(DataSourcePreset, String)> = None;
 
@@ -13363,6 +13584,9 @@ impl SumiWorkstationApp {
                             .color(palette::TEXT_MUTED),
                         );
                     });
+
+                // A2. Multi-Horizon ProxyBB (`T03..T200`) & MarketBBAggregator (`PIT` vs `RetrospectiveFixed`)
+                self.render_proxy_bb_and_market_bb_cards(ui);
 
                 // B. Interactive 2D 4-Quadrant RRG Canvas
                 let canvas_w = ui.available_width().max(180.0);
@@ -15063,6 +15287,7 @@ impl SumiWorkstationApp {
                                 force_battle = true;
                             }
                         });
+                        self.render_pit_universe_mode_strip(ui, "battle");
 
                         if let Some(ref battle) = self.battle_report {
                             Frame::new()
@@ -15083,6 +15308,24 @@ impl SumiWorkstationApp {
                                         .size(9.6)
                                         .color(palette::EQUITY_ABOVE_LINE),
                                     );
+                                    if let Some(ref caveat) = battle.survivor_bias_caveat {
+                                        ui.label(
+                                            RichText::new(caveat)
+                                                .monospace()
+                                                .size(8.6)
+                                                .color(palette::ALERT_ARMED_AMBER),
+                                        );
+                                    } else if battle.is_point_in_time {
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "PIT VERIFIED · {}",
+                                                battle.universe_id.as_deref().unwrap_or("PIT")
+                                            ))
+                                            .monospace()
+                                            .size(8.7)
+                                            .color(palette::BULLISH),
+                                        );
+                                    }
                                     egui::Grid::new("universe_battle_grid")
                                         .num_columns(5)
                                         .spacing([6.0, 2.5])
@@ -15506,8 +15749,27 @@ impl SumiWorkstationApp {
                                             };
                                     }
                                 });
+                                self.render_pit_universe_mode_strip(ui, "portfolio");
 
                                 if let Some(ref port) = self.portfolio_report {
+                                    if let Some(ref caveat) = port.survivor_bias_caveat {
+                                        ui.label(
+                                            RichText::new(caveat)
+                                                .monospace()
+                                                .size(8.6)
+                                                .color(palette::ALERT_ARMED_AMBER),
+                                        );
+                                    } else if port.is_point_in_time {
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "PIT VERIFIED · {}",
+                                                port.universe_id.as_deref().unwrap_or("PIT")
+                                            ))
+                                            .monospace()
+                                            .size(8.7)
+                                            .color(palette::BULLISH),
+                                        );
+                                    }
                                     let pts = &port.portfolio_tearsheet;
                                     let p_col = if pts.total_return_pct >= 0.0 {
                                         palette::EQUITY_ABOVE_LINE
@@ -17097,9 +17359,10 @@ impl SumiWorkstationApp {
                                         .size(8.9)
                                         .color(palette::TEXT_MUTED),
                                 );
+                                let max_sig_cap = SIGNAL_CATALOG.len().min(u8::MAX as usize) as u8;
                                 ui.add(
                                     egui::DragValue::new(&mut gate.min_bullish_signals)
-                                        .range(0..=17),
+                                        .range(0..=max_sig_cap),
                                 );
                                 ui.add_space(6.0);
                                 ui.label(
@@ -17110,7 +17373,7 @@ impl SumiWorkstationApp {
                                 );
                                 ui.add(
                                     egui::DragValue::new(&mut gate.min_bearish_signals)
-                                        .range(0..=17),
+                                        .range(0..=max_sig_cap),
                                 );
                             });
                         }
@@ -17188,7 +17451,13 @@ impl SumiWorkstationApp {
                                             })
                                         && self.alert_value_input.trim().is_empty()
                                     {
-                                        self.alert_value_input = "15.0".to_owned();
+                                        self.alert_value_input = if self.alert_signal_catalog_id
+                                            == "volume.relative_volume"
+                                        {
+                                            "2.0".to_owned()
+                                        } else {
+                                            "15.0".to_owned()
+                                        };
                                     }
                                 }
                             }
@@ -17333,7 +17602,13 @@ impl SumiWorkstationApp {
                                                     if entry.output_type == SignalOutputType::Float
                                                         && self.alert_value_input.trim().is_empty()
                                                     {
-                                                        self.alert_value_input = "15.0".to_owned();
+                                                        self.alert_value_input = if entry.id
+                                                            == "volume.relative_volume"
+                                                        {
+                                                            "2.0".to_owned()
+                                                        } else {
+                                                            "15.0".to_owned()
+                                                        };
                                                     }
                                                 }
                                             }
@@ -21544,6 +21819,686 @@ fn format_scanner_price(price: f64) -> String {
     }
 }
 
+impl SumiWorkstationApp {
+    fn render_extended_indicators_toolbar_controls(&mut self, ui: &mut egui::Ui) {
+        let mut changed_main = false;
+        let mut changed_vol = false;
+        let mut changed_osc: Option<OscillatorPaneId> = None;
+
+        // Show active pills inline when toggled ON so active studies are visible at a glance:
+        if self.active_slot_indicators().show_supertrend
+            && indicator_toggle_pill(
+                ui,
+                &mut self.active_slot_indicators_mut().show_supertrend,
+                "ST",
+                palette::IND_SUPERTREND_BULL,
+            )
+        {
+            changed_main = true;
+        }
+        if self.active_slot_indicators().show_psar
+            && indicator_toggle_pill(
+                ui,
+                &mut self.active_slot_indicators_mut().show_psar,
+                "PSAR",
+                palette::IND_PSAR_BULL,
+            )
+        {
+            changed_main = true;
+        }
+        if self.active_slot_indicators().show_keltner
+            && indicator_toggle_pill(
+                ui,
+                &mut self.active_slot_indicators_mut().show_keltner,
+                "KC",
+                palette::IND_KELTNER_BORDER,
+            )
+        {
+            changed_main = true;
+        }
+        if self.active_slot_indicators().show_volume_sma
+            && indicator_toggle_pill(
+                ui,
+                &mut self.active_slot_indicators_mut().show_volume_sma,
+                "VSMA",
+                palette::IND_VOLUME_SMA,
+            )
+        {
+            changed_vol = true;
+        }
+        if self.active_slot_indicators().show_candle_patterns {
+            let _ = indicator_toggle_pill(
+                ui,
+                &mut self.active_slot_indicators_mut().show_candle_patterns,
+                "PAT",
+                palette::IND_SMA,
+            );
+        }
+        if self.active_slot_indicators().show_adx
+            && indicator_toggle_pill(
+                ui,
+                &mut self.active_slot_indicators_mut().show_adx,
+                "ADX",
+                palette::IND_ADX_LINE,
+            )
+        {
+            changed_osc = Some(OscillatorPaneId::Adx);
+        }
+        if self.active_slot_indicators().show_stochastic
+            && indicator_toggle_pill(
+                ui,
+                &mut self.active_slot_indicators_mut().show_stochastic,
+                "STOCH",
+                palette::IND_STOCH_K,
+            )
+        {
+            changed_osc = Some(OscillatorPaneId::Stochastic);
+        }
+        if self.active_slot_indicators().show_cci
+            && indicator_toggle_pill(
+                ui,
+                &mut self.active_slot_indicators_mut().show_cci,
+                "CCI",
+                palette::IND_CCI,
+            )
+        {
+            changed_osc = Some(OscillatorPaneId::Cci);
+        }
+        if self.active_slot_indicators().show_mfi
+            && indicator_toggle_pill(
+                ui,
+                &mut self.active_slot_indicators_mut().show_mfi,
+                "MFI",
+                palette::IND_MFI,
+            )
+        {
+            changed_osc = Some(OscillatorPaneId::Mfi);
+        }
+        if self.active_slot_indicators().show_proxy_bb
+            && indicator_toggle_pill(
+                ui,
+                &mut self.active_slot_indicators_mut().show_proxy_bb,
+                "PBB",
+                palette::IND_PROXY_BB_T20,
+            )
+        {
+            changed_osc = Some(OscillatorPaneId::ProxyBb);
+        }
+
+        ui.menu_button(
+            RichText::new("Ind+ ▾")
+                .monospace()
+                .size(10.0)
+                .color(palette::TEXT_PRIMARY),
+            |ui| {
+                ui.set_min_width(210.0);
+                ui.label(
+                    RichText::new("EXTENDED OVERLAYS & PATTERNS")
+                        .monospace()
+                        .strong()
+                        .size(9.2)
+                        .color(palette::TEXT_MUTED),
+                );
+                {
+                    let ind = self.active_slot_indicators_mut();
+                    if ui
+                        .checkbox(&mut ind.show_supertrend, "SuperTrend (10, 3.0)")
+                        .changed()
+                    {
+                        changed_main = true;
+                    }
+                    if ui
+                        .checkbox(&mut ind.show_psar, "Parabolic SAR (0.02, 0.20)")
+                        .changed()
+                    {
+                        changed_main = true;
+                    }
+                    if ui
+                        .checkbox(&mut ind.show_keltner, "Keltner Channels (20, 10, 2.0)")
+                        .changed()
+                    {
+                        changed_main = true;
+                    }
+                    if ui
+                        .checkbox(&mut ind.show_volume_sma, "Volume SMA (20)")
+                        .changed()
+                    {
+                        changed_vol = true;
+                    }
+                    let _ = ui.checkbox(
+                        &mut ind.show_candle_patterns,
+                        "Candlestick Pattern Badges (14)",
+                    );
+                }
+                ui.separator();
+                ui.label(
+                    RichText::new("EXTENDED SUB-PANES")
+                        .monospace()
+                        .strong()
+                        .size(9.2)
+                        .color(palette::TEXT_MUTED),
+                );
+                {
+                    let ind = self.active_slot_indicators_mut();
+                    if ui
+                        .checkbox(&mut ind.show_adx, "ADX (14) +DI / -DI")
+                        .changed()
+                        && ind.show_adx
+                    {
+                        changed_osc = Some(OscillatorPaneId::Adx);
+                    }
+                    if ui
+                        .checkbox(&mut ind.show_stochastic, "Stochastic (14, 3, 3)")
+                        .changed()
+                        && ind.show_stochastic
+                    {
+                        changed_osc = Some(OscillatorPaneId::Stochastic);
+                    }
+                    if ui.checkbox(&mut ind.show_cci, "CCI (20)").changed() && ind.show_cci {
+                        changed_osc = Some(OscillatorPaneId::Cci);
+                    }
+                    if ui
+                        .checkbox(&mut ind.show_mfi, "MFI (14) Money Flow Index")
+                        .changed()
+                        && ind.show_mfi
+                    {
+                        changed_osc = Some(OscillatorPaneId::Mfi);
+                    }
+                    if ui
+                        .checkbox(&mut ind.show_proxy_bb, "ProxyBB (T05 / T20 / T50)")
+                        .changed()
+                        && ind.show_proxy_bb
+                    {
+                        changed_osc = Some(OscillatorPaneId::ProxyBb);
+                    }
+                }
+            },
+        );
+
+        if changed_main {
+            self.active_slot_viewport_mut()
+                .main_price_scale
+                .reset_auto_scale();
+        }
+        if changed_vol {
+            self.active_slot_viewport_mut()
+                .volume_price_scale
+                .reset_auto_scale();
+        }
+        if let Some(osc_id) = changed_osc {
+            self.active_slot_viewport_mut()
+                .oscillator_price_scale_mut(osc_id)
+                .reset_auto_scale();
+        }
+    }
+
+    /// Synchronizes causal single-symbol `ProxyBB` (`T03..T200`) and whole-market `MarketBBAggregator`
+    /// caches strictly up to `replay_causal_close_timestamp` (`DEF-001`).
+    pub fn sync_market_bb_and_symbol_proxy_bb(&mut self) {
+        if self.watchlist_universe.is_empty() {
+            self.watchlist_universe = load_bundled_watchlist_universe();
+        }
+        let replay_close_cutoff = self.replay_causal_close_timestamp();
+        let incomplete_tail = self.is_active_tail_incomplete();
+        let closed_len = if incomplete_tail {
+            self.candles.len().saturating_sub(1)
+        } else {
+            self.candles.len()
+        };
+        let closed_candles = &self.candles[..closed_len];
+        let last_ts = closed_candles.last().map(|c| c.timestamp);
+        let sym_key_ok = self
+            .symbol_proxy_bb_cache
+            .as_ref()
+            .is_some_and(|(dgen, len, ts, _)| {
+                *dgen == self.dataset_generation && *len == closed_len && *ts == last_ts
+            });
+        if !sym_key_ok {
+            let out = compute_proxy_bb_series(closed_candles);
+            self.symbol_proxy_bb_cache = Some((self.dataset_generation, closed_len, last_ts, out));
+        }
+
+        let pit_digest = hash_universe_digest_u64(&self.pit_universe_def);
+        let mkt_key = (
+            self.dataset_generation,
+            replay_close_cutoff,
+            pit_digest,
+            self.pit_universe_mode,
+        );
+        if self.market_bb_synced_key != Some(mkt_key) {
+            let feed_refs: Vec<MarketBBFeedInput<'_>> = if self.data_source
+                == DataSourcePreset::CustomFile
+                && !self.custom_peer_feeds.is_empty()
+            {
+                self.custom_peer_feeds
+                    .iter()
+                    .map(|e| MarketBBFeedInput {
+                        symbol: &e.symbol,
+                        timeframe: e.base_timeframe,
+                        candles: &e.candles,
+                    })
+                    .collect()
+            } else {
+                self.watchlist_universe
+                    .iter()
+                    .map(|e| MarketBBFeedInput {
+                        symbol: &e.symbol,
+                        timeframe: e.base_timeframe,
+                        candles: &e.candles,
+                    })
+                    .collect()
+            };
+            let res = MarketBBAggregator::calculate_market_bb(
+                &self.pit_universe_def,
+                &feed_refs,
+                Some(self.pit_universe_mode),
+                replay_close_cutoff,
+                0.0,
+                0.80,
+            );
+            self.market_bb_cache = Some(res);
+            self.market_bb_synced_key = Some(mkt_key);
+        }
+    }
+
+    /// Imports a custom `UniverseDefinition` from RFC-8259 JSON or RON (`pit_test_universe.json` / `sumi420_v1_candidate.json`).
+    pub fn import_universe_definition_str(&mut self, text: &str) -> Result<(), String> {
+        match UniverseDefinition::from_auto_str(text) {
+            Ok(def) => {
+                let summary = format!(
+                    "Loaded '{}' ({}) · {} members",
+                    def.universe_id,
+                    def.version,
+                    def.members.len()
+                );
+                self.pit_universe_mode = def.default_mode;
+                self.pit_universe_def = def;
+                self.pit_universe_enabled = true;
+                self.market_bb_synced_key = None;
+                self.battle_synced_key = None;
+                self.portfolio_synced_key = None;
+                self.invalidate_or_sync_backtest_after_mutation();
+                self.last_universe_status = Some((true, summary));
+                Ok(())
+            }
+            Err(err) => {
+                let msg = err.to_string();
+                self.last_universe_status = Some((false, msg.clone()));
+                Err(msg)
+            }
+        }
+    }
+
+    fn render_pit_universe_mode_strip(&mut self, ui: &mut egui::Ui, id_salt: &str) {
+        let _ = id_salt;
+        let mut changed = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(4.0, 3.0);
+            if ui
+                .selectable_label(
+                    self.pit_universe_enabled,
+                    RichText::new(format!("Univ:{}", self.pit_universe_def.universe_id))
+                        .monospace()
+                        .size(9.0),
+                )
+                .on_hover_text(
+                    "Gate constituents using versioned UniverseResolver schedule (Point-in-Time vs Retrospective-Fixed)",
+                )
+                .clicked()
+            {
+                self.pit_universe_enabled = !self.pit_universe_enabled;
+                changed = true;
+            }
+            if self.pit_universe_enabled {
+                for (m, lbl) in [
+                    (UniverseMode::PointInTime, "PIT"),
+                    (UniverseMode::RetrospectiveFixed, "Retro-Fixed"),
+                ] {
+                    if ui
+                        .selectable_label(
+                            self.pit_universe_mode == m,
+                            RichText::new(lbl).monospace().size(9.0),
+                        )
+                        .clicked()
+                        && self.pit_universe_mode != m
+                    {
+                        self.pit_universe_mode = m;
+                        changed = true;
+                    }
+                }
+            }
+        });
+        if changed {
+            self.invalidate_or_sync_backtest_after_mutation();
+        }
+    }
+
+    fn render_proxy_bb_and_market_bb_cards(&mut self, ui: &mut egui::Ui) {
+        // 1. Active Symbol Multi-Horizon ProxyBB (`T03..T200`) Card
+        Frame::new()
+            .fill(Color32::from_rgb(17, 22, 32))
+            .corner_radius(CornerRadius::same(4))
+            .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+            .inner_margin(Margin::symmetric(8, 6))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("PROXY-BB (T03..T200) · {}", self.symbol))
+                            .monospace()
+                            .strong()
+                            .size(9.8)
+                            .color(palette::IND_PROXY_BB_T20),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let pane_on = self.active_slot_indicators().show_proxy_bb;
+                        if ui
+                            .selectable_label(pane_on, RichText::new("Pane").monospace().size(8.9))
+                            .on_hover_text("Toggle ProxyBB (T05/T20/T50) chart sub-pane")
+                            .clicked()
+                        {
+                            let ind = self.active_slot_indicators_mut();
+                            ind.show_proxy_bb = !ind.show_proxy_bb;
+                            if ind.show_proxy_bb {
+                                self.active_slot_viewport_mut()
+                                    .oscillator_price_scale_mut(OscillatorPaneId::ProxyBb)
+                                    .reset_auto_scale();
+                            }
+                        }
+                    });
+                });
+
+                if let Some((_, _, _, ref series)) = self.symbol_proxy_bb_cache
+                    && let Some(last_pt) = series.points.last()
+                {
+                    egui::Grid::new("sumi_symbol_proxy_bb_grid")
+                        .num_columns(5)
+                        .spacing([6.0, 2.0])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for hdr in ["Hzn", "BB%", "OIB", "Regime", "Run"] {
+                                ui.label(
+                                    RichText::new(hdr)
+                                        .monospace()
+                                        .strong()
+                                        .size(8.6)
+                                        .color(palette::TEXT_MUTED),
+                                );
+                            }
+                            ui.end_row();
+                            for h in BBHorizon::ALL {
+                                let hp = last_pt.horizon(h);
+                                ui.label(
+                                    RichText::new(h.code())
+                                        .monospace()
+                                        .strong()
+                                        .size(8.9)
+                                        .color(palette::TEXT_PRIMARY),
+                                );
+                                match (hp.bb_value, hp.oib_raw) {
+                                    (Some(bb), Some(oib)) => {
+                                        let col = match hp.regime {
+                                            BBRegime::Positive => palette::BULLISH,
+                                            BBRegime::Negative => palette::BEARISH,
+                                            BBRegime::Neutral | BBRegime::Unknown => {
+                                                palette::TEXT_MUTED
+                                            }
+                                        };
+                                        ui.label(
+                                            RichText::new(format!("{bb:.1}"))
+                                                .monospace()
+                                                .size(8.9)
+                                                .color(col),
+                                        );
+                                        ui.label(
+                                            RichText::new(format!("{oib:+.2}"))
+                                                .monospace()
+                                                .size(8.8)
+                                                .color(col),
+                                        );
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{} {}",
+                                                hp.regime.code(),
+                                                hp.direction.code()
+                                            ))
+                                            .monospace()
+                                            .size(8.6)
+                                            .color(col),
+                                        );
+                                        ui.label(
+                                            RichText::new(format!("{}", hp.regime_run_length))
+                                                .monospace()
+                                                .size(8.8)
+                                                .color(palette::TEXT_MUTED),
+                                        );
+                                    }
+                                    _ => {
+                                        let status_lbl =
+                                            if hp.is_warmup { "WARMUP" } else { "NO-LIQ" };
+                                        ui.label(
+                                            RichText::new("—")
+                                                .monospace()
+                                                .size(8.8)
+                                                .color(palette::TEXT_MUTED),
+                                        );
+                                        ui.label(
+                                            RichText::new("—")
+                                                .monospace()
+                                                .size(8.8)
+                                                .color(palette::TEXT_MUTED),
+                                        );
+                                        ui.label(
+                                            RichText::new(status_lbl)
+                                                .monospace()
+                                                .size(8.5)
+                                                .color(palette::TEXT_MUTED),
+                                        );
+                                        ui.label(
+                                            RichText::new("0")
+                                                .monospace()
+                                                .size(8.8)
+                                                .color(palette::TEXT_MUTED),
+                                        );
+                                    }
+                                }
+                                ui.end_row();
+                            }
+                        });
+                }
+            });
+
+        // 2. MarketBBAggregator & Point-in-Time Universe Card (`AT09`, `AT11`, `AT17`)
+        Frame::new()
+            .fill(Color32::from_rgb(17, 22, 32))
+            .corner_radius(CornerRadius::same(4))
+            .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
+            .inner_margin(Margin::symmetric(8, 6))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(4.0, 3.0);
+                    ui.label(
+                        RichText::new(format!("MARKET-BB · {}", self.pit_universe_def.universe_id))
+                            .monospace()
+                            .strong()
+                            .size(9.6)
+                            .color(palette::TEXT_PRIMARY),
+                    );
+                    for (m, lbl) in [
+                        (UniverseMode::PointInTime, "PIT"),
+                        (UniverseMode::RetrospectiveFixed, "Retro"),
+                    ] {
+                        if ui
+                            .selectable_label(
+                                self.pit_universe_mode == m,
+                                RichText::new(lbl).monospace().size(8.8),
+                            )
+                            .clicked()
+                        {
+                            self.pit_universe_mode = m;
+                            self.pit_universe_enabled = true;
+                        }
+                    }
+                    if ui
+                        .small_button(RichText::new("JSON").monospace().size(8.6))
+                        .on_hover_text(
+                            "Import custom Point-in-Time UniverseDefinition (JSON / RON)",
+                        )
+                        .clicked()
+                    {
+                        self.show_universe_import_box = !self.show_universe_import_box;
+                    }
+                    if self.pit_universe_def.universe_id != "VN30-PIT"
+                        && ui
+                            .small_button(RichText::new("VN30").monospace().size(8.6))
+                            .clicked()
+                    {
+                        self.pit_universe_def = UniverseDefinition::bundled_vn30_pit();
+                        self.market_bb_synced_key = None;
+                    }
+                });
+
+                if self.show_universe_import_box {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.universe_import_buffer)
+                            .desired_rows(3)
+                            .font(egui::TextStyle::Monospace)
+                            .hint_text("Paste pit_test_universe.json / UniverseDefinition..."),
+                    );
+                    if ui.small_button("Load Universe").clicked() {
+                        let buf = self.universe_import_buffer.clone();
+                        if self.import_universe_definition_str(&buf).is_ok() {
+                            self.show_universe_import_box = false;
+                        }
+                    }
+                    if let Some((ok, ref msg)) = self.last_universe_status {
+                        ui.label(RichText::new(msg).monospace().size(8.5).color(if ok {
+                            palette::BULLISH
+                        } else {
+                            palette::BEARISH
+                        }));
+                    }
+                }
+
+                if let Some(ref mbb) = self.market_bb_cache {
+                    let (pub_lbl, pub_col) = match mbb.publication_status {
+                        MarketPublicationStatus::CanonicalPublished => {
+                            ("CANONICAL PIT", palette::BULLISH)
+                        }
+                        MarketPublicationStatus::ResearchRetrospective => {
+                            ("RETROSPECTIVE", palette::ALERT_ARMED_AMBER)
+                        }
+                        MarketPublicationStatus::UnavailableDegraded => {
+                            ("DEGRADED", palette::BEARISH)
+                        }
+                    };
+                    if let Some(last_s) = mbb.points.last() {
+                        let cov_col = match last_s.coverage_status {
+                            CoverageStatus::Satisfied => palette::BULLISH,
+                            CoverageStatus::Degraded => palette::ALERT_ARMED_AMBER,
+                            CoverageStatus::Failed => palette::BEARISH,
+                        };
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(pub_lbl)
+                                    .monospace()
+                                    .strong()
+                                    .size(8.8)
+                                    .color(pub_col),
+                            );
+                            ui.label(
+                                RichText::new(format!(
+                                    "Cov {}/{} ({:.0}%) · {}",
+                                    last_s.reporting_symbols_count,
+                                    last_s.total_target_count,
+                                    last_s.symbol_coverage * 100.0,
+                                    last_s.date
+                                ))
+                                .monospace()
+                                .size(8.7)
+                                .color(cov_col),
+                            );
+                        });
+                        if let Some(ref caveat) = mbb.survivor_bias_caveat {
+                            ui.label(
+                                RichText::new(caveat)
+                                    .monospace()
+                                    .size(8.3)
+                                    .color(palette::ALERT_ARMED_AMBER),
+                            );
+                        }
+                        egui::Grid::new("sumi_market_bb_horizons_grid")
+                            .num_columns(4)
+                            .spacing([6.0, 2.0])
+                            .striped(true)
+                            .show(ui, |ui| {
+                                for hdr in ["Hzn", "MktBB", "Cnt+% ", "Val+%"] {
+                                    ui.label(
+                                        RichText::new(hdr)
+                                            .monospace()
+                                            .strong()
+                                            .size(8.6)
+                                            .color(palette::TEXT_MUTED),
+                                    );
+                                }
+                                ui.end_row();
+                                for h in [BBHorizon::T05, BBHorizon::T20, BBHorizon::T50] {
+                                    let mh = last_s.horizon(h);
+                                    let fb = last_s.breadth_at(h);
+                                    ui.label(
+                                        RichText::new(h.code())
+                                            .monospace()
+                                            .strong()
+                                            .size(8.8)
+                                            .color(palette::TEXT_PRIMARY),
+                                    );
+                                    let m_str = mh
+                                        .market_bb_value
+                                        .map_or_else(|| "—".to_owned(), |v| format!("{v:.1}%"));
+                                    let m_col = match mh.regime {
+                                        BBRegime::Positive => palette::BULLISH,
+                                        BBRegime::Negative => palette::BEARISH,
+                                        BBRegime::Neutral | BBRegime::Unknown => {
+                                            palette::TEXT_MUTED
+                                        }
+                                    };
+                                    ui.label(
+                                        RichText::new(m_str).monospace().size(8.8).color(m_col),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{:.0}% ({}/{})",
+                                            fb.positive_count_ratio * 100.0,
+                                            fb.positive_count,
+                                            fb.total_count
+                                        ))
+                                        .monospace()
+                                        .size(8.7)
+                                        .color(palette::TEXT_PRIMARY),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{:.0}%",
+                                            fb.positive_value_ratio * 100.0
+                                        ))
+                                        .monospace()
+                                        .size(8.7)
+                                        .color(
+                                            if fb.positive_value_ratio >= 0.5 {
+                                                palette::BULLISH
+                                            } else {
+                                                palette::BEARISH
+                                            },
+                                        ),
+                                    );
+                                    ui.end_row();
+                                }
+                            });
+                    }
+                }
+            });
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 struct ThreadWaker(std::thread::Thread);
 
@@ -21897,9 +22852,10 @@ impl SumiWorkstationApp {
                 | "r15"
                 | "r16"
                 | "r17"
+                | "r18"
         ) {
             return Err(format!(
-                "unknown SUMI_CAPTURE_BATCH '{batch_name}' (expected 'r04'..'r17')"
+                "unknown SUMI_CAPTURE_BATCH '{batch_name}' (expected 'r04'..'r18')"
             ));
         }
         std::fs::create_dir_all("docs/evidence")
@@ -21914,8 +22870,8 @@ impl SumiWorkstationApp {
                 "r05" => app.apply_r05_batch_step_state(step),
                 "r06" => app.apply_r06_batch_step_state(step),
                 "r07" => app.apply_r07_batch_step_state(step),
-                "r08" => app.apply_r08_batch_step_state(step),
                 "r09" => app.apply_r09_batch_step_state(step),
+                "r08" => app.apply_r08_batch_step_state(step),
                 "r10" => app.apply_r10_batch_step_state(step),
                 "r11" => app.apply_r11_batch_step_state(step),
                 "r12" => app.apply_r12_batch_step_state(step),
@@ -21924,6 +22880,7 @@ impl SumiWorkstationApp {
                 "r15" => app.apply_r15_batch_step_state(step),
                 "r16" => app.apply_r16_batch_step_state(step),
                 "r17" => app.apply_r17_batch_step_state(step),
+                "r18" => app.apply_r18_batch_step_state(step),
                 _ => unreachable!(),
             };
             let image = harness.capture_app_frame(&mut app, logical_w, logical_h, 6)?;
@@ -23564,7 +24521,7 @@ impl SumiWorkstationApp {
                 self.viewport.time_scale.set_width(540.0);
                 self.viewport.time_scale.set_bar_spacing(7.5);
                 self.viewport.time_scale.set_right_offset(28.0);
-                for slot in &mut self.secondary_slots {
+                for slot in self.secondary_slots.iter_mut() {
                     slot.indicators.show_ichimoku = true;
                     slot.indicators.show_cvd = true;
                     slot.indicators.show_rsi = false;
@@ -23767,7 +24724,7 @@ impl SumiWorkstationApp {
 
                 self.secondary_slots[2].indicators.show_market_profile = true;
                 self.secondary_slots[2].indicators.show_vwap = true;
-                for slot in &mut self.secondary_slots {
+                for slot in self.secondary_slots.iter_mut() {
                     slot.indicators.show_cvd = true;
                     slot.viewport.reset_pane_stretches();
                     slot.viewport.cvd_stretch = 0.78;
@@ -23949,7 +24906,7 @@ impl SumiWorkstationApp {
                 self.viewport.time_scale.set_bar_spacing(7.5);
                 self.viewport.time_scale.set_right_offset(18.0);
 
-                for slot in &mut self.secondary_slots {
+                for slot in self.secondary_slots.iter_mut() {
                     slot.indicators.show_cvd = true;
                     slot.viewport.reset_pane_stretches();
                     slot.viewport.cvd_stretch = 0.78;
@@ -24805,6 +25762,150 @@ impl SumiWorkstationApp {
                     800,
                     "docs/evidence/r17_step3_scanner_1click_120b_and_saved_sessions_vn30f.png",
                     "docs/evidence/r17_step3_scanner_1click_120b_and_saved_sessions_vn30f.json",
+                )
+            }
+        }
+    }
+
+    fn apply_r18_batch_step_state(
+        &mut self,
+        step: usize,
+    ) -> (u32, u32, &'static str, &'static str) {
+        let builtins = crate::viewport::builtin_workspace_templates();
+        match step {
+            0 => {
+                // Scenario 0 (`1280x800` @ `2.0x` -> `2560x1600`): `B1 + B2` Extended Technical Suite
+                // on `FPT 1D` (`Vn30Basket`): Main-pane `SuperTrend(10,3.0)`, `Parabolic SAR`,
+                // `Keltner Channels(20,10,2.0)`, `Volume SMA(20)`, and `Candlestick Pattern Badges` (`PAT`)
+                // stacked over `ADX(14)` (`+DI/-DI`), `Stochastic(14,3,3)`, and `MFI(14)` sub-panes.
+                self.apply_workspace_template(&builtins[0]);
+                self.exit_replay();
+                self.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+                let _ = self.set_timeframe(Timeframe::D1);
+                self.show_scanner_dock = false;
+                self.show_trading_panel = false;
+                self.show_alerts_panel = false;
+                self.show_strategy_panel = false;
+                self.show_journal_panel = false;
+                self.show_equity_pane = false;
+                self.indicators = IndicatorConfig {
+                    show_sma: false,
+                    show_ema: false,
+                    show_bbands: false,
+                    show_keltner: true,
+                    show_supertrend: true,
+                    show_psar: true,
+                    show_volume_sma: true,
+                    show_candle_patterns: true,
+                    show_rsi: false,
+                    show_adx: true,
+                    show_stochastic: true,
+                    show_mfi: true,
+                    ..IndicatorConfig::default()
+                };
+                self.viewport.reset_pane_stretches();
+                self.viewport.main_stretch = 3.8;
+                self.viewport.adx_stretch = 0.95;
+                self.viewport.stoch_stretch = 0.95;
+                self.viewport.mfi_stretch = 0.95;
+                self.sync_indicators_and_benchmarks();
+                self.viewport.time_scale.set_width(1180.0);
+                self.viewport.time_scale.set_bar_spacing(11.5);
+                self.viewport.time_scale.set_right_offset(6.0);
+                self.viewport.main_price_scale.reset_auto_scale();
+                self.viewport.volume_price_scale.reset_auto_scale();
+                self.viewport.reset_all_oscillator_auto_scales();
+
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r18_step1_extended_indicators_and_patterns_fpt_1d.png",
+                    "docs/evidence/r18_step1_extended_indicators_and_patterns_fpt_1d.json",
+                )
+            }
+            1 => {
+                // Scenario 1 (`1280x800` @ `2.0x` -> `2560x1600`): `B3` 101-Entry `SIGNAL_CATALOG`
+                // & Confirmed `right_bars = 3` 4-Way Divergences (`RSI` / `MACD` / `Stoch`) on `VN30F1M 15m`
+                // with `CCI(20)` + `RSI(14)` + `MACD(12,26,9)` sub-panes and Signal Catalog Modal open.
+                self.apply_workspace_template(&builtins[0]);
+                self.exit_replay();
+                self.select_watchlist_instrument(DataSourcePreset::IntradayVn30F1m, "VN30F1M");
+                let _ = self.set_timeframe(Timeframe::M15);
+                self.indicators = IndicatorConfig {
+                    show_sma: true,
+                    show_ema: true,
+                    show_rsi: true,
+                    show_macd: true,
+                    show_cci: true,
+                    ..IndicatorConfig::default()
+                };
+                self.viewport.reset_pane_stretches();
+                self.viewport.rsi_stretch = 0.95;
+                self.viewport.macd_stretch = 0.95;
+                self.viewport.cci_stretch = 0.95;
+                self.show_scanner_dock = false;
+                self.open_strategy_lab();
+                self.backtest_config.preset = StrategyPresetKind::CustomSignalRules;
+                self.show_signal_catalog_modal = true;
+                self.signal_catalog_category = SignalCategory::Divergence;
+                self.signal_catalog_search.clear();
+                self.sync_indicators_and_benchmarks();
+                self.sync_backtest_causal();
+                self.viewport.reset_all_oscillator_auto_scales();
+
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r18_step2_signal_catalog_101_and_divergences_vn30f_15m.png",
+                    "docs/evidence/r18_step2_signal_catalog_101_and_divergences_vn30f_15m.json",
+                )
+            }
+            _ => {
+                // Scenario 2 (`1280x800` @ `2.0x` -> `2560x1600`): `B4` Multi-Horizon `ProxyBB` (`T03..T200`),
+                // `MarketBBAggregator` (`CANONICAL PIT`, `AT09` + `AT17` `FlowBreadth`), and Survivorship-Bias-Free
+                // `PointInTime` Portfolio Backtest (`VN30-PIT`) on `SSI 1D`.
+                self.apply_workspace_template(&builtins[0]);
+                self.show_signal_catalog_modal = false;
+                self.exit_replay();
+                self.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "SSI");
+                let _ = self.set_timeframe(Timeframe::D1);
+                self.pit_universe_def = UniverseDefinition::bundled_vn30_pit();
+                self.pit_universe_enabled = true;
+                self.pit_universe_mode = UniverseMode::PointInTime;
+                self.portfolio_universe_filter = PortfolioUniverseFilter::Vn30EquitiesOnly;
+                self.portfolio_weighting = PortfolioWeightingMode::EqualWeight;
+
+                self.indicators = IndicatorConfig {
+                    show_sma: true,
+                    show_ema: true,
+                    show_rsi: false,
+                    show_proxy_bb: true,
+                    ..IndicatorConfig::default()
+                };
+                self.viewport.reset_pane_stretches();
+                self.viewport.proxy_bb_stretch = 1.15;
+                self.viewport.equity_stretch = 1.25;
+
+                self.show_scanner_dock = true;
+                self.scanner_tab = ScannerDockTab::Breadth;
+                self.open_strategy_lab();
+                self.strategy_lab_tab = StrategyLabSubTab::WalkForward;
+                self.show_equity_pane = true;
+                self.equity_pane_source = EquityPaneSource::MultiAssetPortfolio;
+
+                self.sync_indicators_and_benchmarks();
+                self.sync_scanner_caches();
+                self.sync_market_bb_and_symbol_proxy_bb();
+                self.sync_backtest_causal();
+                self.viewport.time_scale.set_width(640.0);
+                self.viewport.fit_all();
+                self.viewport.reset_all_oscillator_auto_scales();
+
+                (
+                    1280,
+                    800,
+                    "docs/evidence/r18_step3_proxybb_multihorizon_marketbb_and_pit_portfolio.png",
+                    "docs/evidence/r18_step3_proxybb_multihorizon_marketbb_and_pit_portfolio.json",
                 )
             }
         }
@@ -27154,7 +28255,7 @@ mod tests {
         let mut app = SumiWorkstationApp::default();
         app.set_grid_layout(MultiChartLayoutKind::Quad2x2);
         app.grid_sync.sync_time_range = true;
-        let [s0, s1, s2] = &mut app.secondary_slots;
+        let [s0, s1, s2] = &mut *app.secondary_slots;
         for vp in [
             &mut app.viewport,
             &mut s0.viewport,
@@ -28870,5 +29971,170 @@ mod tests {
             app.scanner_context.as_ref().and_then(|c| c.pre_roll_bars()),
             Some(120)
         );
+    }
+
+    #[test]
+    fn r18_workstation_extended_indicators_101_catalog_proxybb_and_pit_portfolio_e2e() {
+        let ctx = egui::Context::default();
+        SumiWorkstationApp::configure_dark_workstation_visuals(&ctx);
+        let mut app = SumiWorkstationApp::default();
+
+        // 1. Toggle all 10 new R18 indicators via Command Palette actions and render full 1280x800 UI frame!
+        app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+        for key in [
+            "SUPERTREND",
+            "PSAR",
+            "KELTNER",
+            "VOLSMA",
+            "PATTERNS",
+            "ADX",
+            "STOCH",
+            "CCI",
+            "MFI",
+            "PROXYBB",
+        ] {
+            app.execute_palette_action(PaletteAction::ToggleIndicator(key));
+        }
+        assert!(app.indicators.show_supertrend);
+        assert!(app.indicators.show_psar);
+        assert!(app.indicators.show_keltner);
+        assert!(app.indicators.show_volume_sma);
+        assert!(app.indicators.show_candle_patterns);
+        assert!(app.indicators.show_adx);
+        assert!(app.indicators.show_stochastic);
+        assert!(app.indicators.show_cci);
+        assert!(app.indicators.show_mfi);
+        assert!(app.indicators.show_proxy_bb);
+
+        // WorkspaceTemplate JSON & RON round-trip preserves all 10 R18 indicator toggles & 5 new stretches!
+        app.viewport.adx_stretch = 1.15;
+        app.viewport.proxy_bb_stretch = 1.35;
+        let tpl = app.capture_workspace_template("R18 Full Desk");
+        let tpl_json = tpl.to_json_pretty();
+        let tpl_ron = tpl.to_ron_pretty();
+        let dec_json = WorkspaceTemplate::from_json_str(&tpl_json).expect("R18 template json");
+        let dec_ron = WorkspaceTemplate::from_ron_str(&tpl_ron).expect("R18 template ron");
+        assert_eq!(dec_json, dec_ron);
+        assert!(dec_json.slots[0].indicators.show_supertrend);
+        assert!(dec_json.slots[0].indicators.show_proxy_bb);
+        assert!((dec_json.slots[0].pane_stretches.proxy_bb - 1.35).abs() < 1e-5);
+
+        // 2. Render full UI frame with Breadth (`Multi-Horizon ProxyBB` + `MarketBB`) & PIT Portfolio active!
+        app.pit_universe_enabled = true;
+        app.pit_universe_mode = UniverseMode::PointInTime;
+        app.show_scanner_dock = true;
+        app.scanner_tab = ScannerDockTab::Breadth;
+        app.open_strategy_lab();
+        app.strategy_lab_tab = StrategyLabSubTab::WalkForward;
+        app.show_equity_pane = true;
+        app.equity_pane_source = EquityPaneSource::MultiAssetPortfolio;
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out.textures_delta.clear();
+
+        let rep = app.last_report.expect("R18 chart report");
+        assert!(rep.rendered_candle_count > 0);
+        assert!(rep.pane_count >= 6);
+        let mbb_full = app.market_bb_cache.clone().expect("MarketBB cache");
+        assert_eq!(
+            mbb_full.publication_status,
+            MarketPublicationStatus::CanonicalPublished
+        );
+        let port_pit = app.portfolio_report.clone().expect("PIT portfolio report");
+        assert!(port_pit.is_point_in_time);
+        assert!(port_pit.survivor_bias_caveat.is_none());
+
+        // Switching to RetrospectiveFixed invalidates & recomputes with survivor_bias_caveat!
+        app.pit_universe_mode = UniverseMode::RetrospectiveFixed;
+        app.sync_market_bb_and_symbol_proxy_bb();
+        app.sync_backtest_causal();
+        let mbb_retro = app.market_bb_cache.as_ref().unwrap();
+        assert_eq!(
+            mbb_retro.publication_status,
+            MarketPublicationStatus::ResearchRetrospective
+        );
+        assert!(mbb_retro.survivor_bias_caveat.is_some());
+        let port_retro = app.portfolio_report.as_ref().unwrap();
+        assert!(!port_retro.is_point_in_time);
+        assert!(port_retro.survivor_bias_caveat.is_some());
+        assert_ne!(
+            port_pit.portfolio_tearsheet.total_return_pct,
+            port_retro.portfolio_tearsheet.total_return_pct,
+            "bundled VN30-PIT (SSI Q1 addition / VIC Apr removal) must differ from RetrospectiveFixed"
+        );
+
+        // 3. `DEF-001` Bar Replay causal gating on `MarketBBAggregator`: cutting at bar 90 withholds future dates!
+        app.pit_universe_mode = UniverseMode::PointInTime;
+        assert!(app.start_replay_at_base_index(90));
+        app.sync_market_bb_and_symbol_proxy_bb();
+        let mbb_cut = app.market_bb_cache.as_ref().unwrap();
+        assert!(mbb_cut.points.len() < mbb_full.points.len());
+    }
+
+    #[test]
+    fn critic_r18_regression_market_bb_cache_invalidation_htf_tail_and_inverted_pattern_badges() {
+        let ctx = egui::Context::default();
+        let mut app = SumiWorkstationApp::new_for_offscreen_capture();
+        app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+        let _ = app.set_timeframe(Timeframe::D1);
+
+        // 1. `[Major-03]` Populate `market_bb_cache` & `symbol_proxy_bb_cache` on `Scanner -> Breadth`,
+        //    then switch to `Scanner -> Watchlist` and enter Bar Replay (`start_replay_at_base_index(90)`):
+        //    both `pub` caches MUST be cleared (`None`) so zero post-cutoff future sessions linger!
+        app.show_scanner_dock = true;
+        app.scanner_tab = ScannerDockTab::Breadth;
+        app.sync_market_bb_and_symbol_proxy_bb();
+        assert!(app.market_bb_cache.is_some());
+        assert!(app.symbol_proxy_bb_cache.is_some());
+
+        app.scanner_tab = ScannerDockTab::Watchlist;
+        assert!(app.start_replay_at_base_index(90));
+        assert!(
+            app.market_bb_cache.is_none(),
+            "stale full-history market_bb_cache leaked into Bar Replay while Breadth tab was inactive"
+        );
+        assert!(
+            app.symbol_proxy_bb_cache.is_none(),
+            "stale full-history symbol_proxy_bb_cache leaked into Bar Replay while Breadth tab was inactive"
+        );
+
+        // 2. `[Major-03]` Unclosed HTF tail bar exclusion in `symbol_proxy_bb_cache`:
+        //    On `VN30F1M` `1m` base viewed on `15m` at a mid-bucket replay cursor (`is_active_tail_incomplete() == true`),
+        //    `symbol_proxy_bb_cache` MUST evaluate strictly `&candles[..candles.len() - 1]`!
+        app.exit_replay();
+        app.select_watchlist_instrument(DataSourcePreset::IntradayVn30F1m, "VN30F1M");
+        let _ = app.set_timeframe(Timeframe::M15);
+        assert!(app.start_replay_at_base_index(122)); // mid-15m bucket!
+        assert!(app.is_active_tail_incomplete());
+        app.scanner_tab = ScannerDockTab::Breadth;
+        app.sync_market_bb_and_symbol_proxy_bb();
+        let (_, cached_len, _, cached_pbb) = app
+            .symbol_proxy_bb_cache
+            .as_ref()
+            .expect("synced closed-prefix ProxyBB");
+        assert_eq!(*cached_len, app.candles.len() - 1);
+        assert_eq!(cached_pbb.points.len(), app.candles.len() - 1);
+
+        // 3. `[Minor-04]` Inverted `PriceScale` with `show_candle_patterns = true` renders cleanly!
+        app.exit_replay();
+        app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+        let _ = app.set_timeframe(Timeframe::D1);
+        app.indicators.show_candle_patterns = true;
+        app.viewport.main_price_scale.set_inverted(true);
+        app.sync_indicators_and_benchmarks();
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out.textures_delta.clear();
+        assert!(app.last_report.is_some_and(|r| r.rendered_candle_count > 0));
     }
 }

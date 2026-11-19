@@ -189,6 +189,12 @@ fn main() {
         );
         return;
     }
+    if std::env::args().any(|a| a == "--r18") {
+        run_r18_signals_indicators_proxybb_pit_benchmark(
+            &cpu_brand, mem_bytes, &rustc_ver, profile,
+        );
+        return;
+    }
 
     println!("=== Sumi R03 Viewport & Renderer Benchmark ===");
     println!(
@@ -1610,7 +1616,12 @@ fn run_r05_drawing_engine_benchmark(
                         OscillatorPaneId::Atr
                         | OscillatorPaneId::Cvd
                         | OscillatorPaneId::RelativeStrength
-                        | OscillatorPaneId::Equity,
+                        | OscillatorPaneId::Equity
+                        | OscillatorPaneId::Adx
+                        | OscillatorPaneId::Stochastic
+                        | OscillatorPaneId::Cci
+                        | OscillatorPaneId::Mfi
+                        | OscillatorPaneId::ProxyBb,
                     ) => atr_proj.project_drawing(d),
                 };
                 if p.is_some() {
@@ -7260,7 +7271,7 @@ fn bench_r12_full_workstation_ui(
                 show_atr: false,
                 ..IndicatorConfig::default()
             };
-            for slot in &mut app.secondary_slots {
+            for slot in app.secondary_slots.iter_mut() {
                 slot.data_source = DataSourcePreset::SyntheticVnindex;
                 slot.symbol = "VNINDEX".to_owned();
                 slot.base_timeframe = Timeframe::D1;
@@ -7352,7 +7363,7 @@ fn bench_r12_full_workstation_ui(
                 show_atr: false,
                 ..IndicatorConfig::default()
             };
-            for slot in &mut app.secondary_slots {
+            for slot in app.secondary_slots.iter_mut() {
                 slot.base_timeframe = Timeframe::M1;
                 slot.active_timeframe = Timeframe::M1;
                 slot.indicators = app.indicators.clone();
@@ -8101,7 +8112,7 @@ fn bench_r13_full_workstation_ui(
                 show_atr: false,
                 ..IndicatorConfig::default()
             };
-            for slot in &mut app.secondary_slots {
+            for slot in app.secondary_slots.iter_mut() {
                 slot.data_source = DataSourcePreset::SyntheticVnindex;
                 slot.symbol = "VNINDEX".to_owned();
                 slot.base_timeframe = Timeframe::D1;
@@ -8839,7 +8850,7 @@ fn bench_r14_full_workstation_ui(
             app.viewport.time_scale.set_width(420.0);
             app.viewport.time_scale.set_bar_spacing(7.5);
             app.viewport.time_scale.set_right_offset(18.0);
-            for slot in &mut app.secondary_slots {
+            for slot in app.secondary_slots.iter_mut() {
                 slot.indicators.show_cvd = true;
                 slot.viewport.reset_pane_stretches();
                 slot.viewport.cvd_stretch = 0.78;
@@ -8893,7 +8904,7 @@ fn bench_r14_full_workstation_ui(
                 show_atr: false,
                 ..IndicatorConfig::default()
             };
-            for slot in &mut app.secondary_slots {
+            for slot in app.secondary_slots.iter_mut() {
                 slot.data_source = DataSourcePreset::SyntheticVnindex;
                 slot.symbol = "VNINDEX".to_owned();
                 slot.base_timeframe = Timeframe::D1;
@@ -8909,7 +8920,7 @@ fn bench_r14_full_workstation_ui(
             app.viewport.cvd_stretch = 0.78;
             app.viewport.time_scale.set_width(420.0);
             app.viewport.fit_all();
-            for slot in &mut app.secondary_slots {
+            for slot in app.secondary_slots.iter_mut() {
                 slot.viewport.fit_all();
             }
             app.propagate_time_window_from_slot(0);
@@ -9663,7 +9674,7 @@ fn bench_r15_full_workstation_ui(
                 show_atr: false,
                 ..IndicatorConfig::default()
             };
-            for slot in &mut app.secondary_slots {
+            for slot in app.secondary_slots.iter_mut() {
                 slot.data_source = DataSourcePreset::SyntheticVnindex;
                 slot.symbol = "VNINDEX".to_owned();
                 slot.base_timeframe = Timeframe::D1;
@@ -9679,7 +9690,7 @@ fn bench_r15_full_workstation_ui(
             app.viewport.cvd_stretch = 0.78;
             app.viewport.time_scale.set_width(420.0);
             app.viewport.fit_all();
-            for slot in &mut app.secondary_slots {
+            for slot in app.secondary_slots.iter_mut() {
                 slot.viewport.fit_all();
             }
             app.propagate_time_window_from_slot(0);
@@ -10483,7 +10494,7 @@ fn bench_r16_full_workstation_ui(
                 show_atr: false,
                 ..IndicatorConfig::default()
             };
-            for slot in &mut app.secondary_slots {
+            for slot in app.secondary_slots.iter_mut() {
                 slot.data_source = DataSourcePreset::SyntheticVnindex;
                 slot.symbol = "VNINDEX".to_owned();
                 slot.base_timeframe = Timeframe::D1;
@@ -10499,7 +10510,7 @@ fn bench_r16_full_workstation_ui(
             app.viewport.cvd_stretch = 0.78;
             app.viewport.time_scale.set_width(420.0);
             app.viewport.fit_all();
-            for slot in &mut app.secondary_slots {
+            for slot in app.secondary_slots.iter_mut() {
                 slot.viewport.fit_all();
             }
             app.propagate_time_window_from_slot(0);
@@ -11366,7 +11377,7 @@ fn bench_r17_full_workstation_ui(
                 show_atr: false,
                 ..IndicatorConfig::default()
             };
-            for slot in &mut app.secondary_slots {
+            for slot in app.secondary_slots.iter_mut() {
                 slot.data_source = DataSourcePreset::SyntheticVnindex;
                 slot.symbol = "VNINDEX".to_owned();
                 slot.base_timeframe = Timeframe::D1;
@@ -11382,7 +11393,7 @@ fn bench_r17_full_workstation_ui(
             app.viewport.cvd_stretch = 0.78;
             app.viewport.time_scale.set_width(420.0);
             app.viewport.fit_all();
-            for slot in &mut app.secondary_slots {
+            for slot in app.secondary_slots.iter_mut() {
                 slot.viewport.fit_all();
             }
             app.propagate_time_window_from_slot(0);
@@ -11706,4 +11717,542 @@ fn format_r17_markdown_report(
         );
     }
     s
+}
+
+// ============================================================================
+// Milestone R18 — 101-Signal Catalog, Extended Indicators, ProxyBB & PIT Universe Benchmark
+// ============================================================================
+
+fn run_r18_signals_indicators_proxybb_pit_benchmark(
+    cpu_brand: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+) {
+    use sumi_workstation::backtest::run_portfolio_backtest_with_universe;
+    use sumi_workstation::indicators::{
+        compute_adx, compute_atr, compute_candlestick_patterns_and_scores, compute_cci,
+        compute_keltner_channels, compute_mfi, compute_proxy_bb_series, compute_psar,
+        compute_stochastic, compute_supertrend, compute_volume_sma,
+    };
+    use sumi_workstation::scanner::{
+        MarketBBAggregator, MarketBBFeedInput, PrecomputedCatalogMatrix, SIGNAL_CATALOG,
+        UniverseDefinition, UniverseMode,
+    };
+
+    println!(
+        "=== Sumi R18 Signals (101), Extended Indicators, ProxyBB & PIT Universe Benchmark ==="
+    );
+    println!(
+        "CPU: {cpu_brand} | RAM: {:.1} GiB | {rustc_ver} | profile={profile}",
+        (mem_bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+    );
+
+    let candles_10k = generate_synthetic_ohlcv(10_000);
+    let candles_2500 = generate_synthetic_ohlcv(2_500);
+    let feeds = sumi_workstation::data::load_bundled_watchlist_universe();
+    let pit_univ = UniverseDefinition::bundled_vn30_pit();
+
+    let mut domain_cases = Vec::new();
+
+    // 1. B1: CandleGeometry + 14 Candlestick Patterns + structure.candle_score (`10,000` bars)
+    {
+        let atr14 = compute_atr(&candles_10k, 14);
+        let mut samples = Vec::with_capacity(60);
+        let mut active_cnt = 0_usize;
+        for step in 0..70 {
+            let t0 = Instant::now();
+            let (_, summaries) = compute_candlestick_patterns_and_scores(&candles_10k, &atr14);
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            active_cnt = summaries
+                .iter()
+                .filter(|s| s.primary_badge.is_some())
+                .count();
+            std::hint::black_box(&summaries);
+            if step >= 10 {
+                samples.push(us);
+            }
+        }
+        domain_cases.push(R09DomainBenchCase {
+            case_id: "b1_candlestick_patterns_and_scores_10k",
+            description: "B1 `CandleGeometry` + `14` patterns + `candle_score` (`10,000` bars)",
+            input_units: candles_10k.len(),
+            output_items: active_cnt,
+            stats: TimingStats::from_samples(samples),
+        });
+    }
+
+    // 2. B2: All 8 Extended Technical Indicators (`ADX`, `Stoch`, `SuperTrend`, `PSAR`, `Keltner`, `CCI`, `MFI`, `VolSMA`) on `10,000` bars
+    {
+        let mut samples = Vec::with_capacity(40);
+        for step in 0..48 {
+            let t0 = Instant::now();
+            let adx = compute_adx(&candles_10k, 14);
+            let st = compute_stochastic(&candles_10k, 14, 3, 3);
+            let sup = compute_supertrend(&candles_10k, 10, 3.0);
+            let psar = compute_psar(&candles_10k, 0.02, 0.02, 0.20);
+            let kc = compute_keltner_channels(&candles_10k, 20, 10, 2.0);
+            let cci = compute_cci(&candles_10k, 20);
+            let mfi = compute_mfi(&candles_10k, 14);
+            let vsma = compute_volume_sma(&candles_10k, 20);
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            std::hint::black_box((&adx, &st, &sup, &psar, &kc, &cci, &mfi, &vsma));
+            if step >= 8 {
+                samples.push(us);
+            }
+        }
+        domain_cases.push(R09DomainBenchCase {
+            case_id: "b2_all_8_extended_indicators_10k",
+            description: "B2 `ADX+Stoch+SuperTrend+PSAR+Keltner+CCI+MFI+VolSMA` (`10,000` bars)",
+            input_units: candles_10k.len(),
+            output_items: 8,
+            stats: TimingStats::from_samples(samples),
+        });
+    }
+
+    // 3. B3: Complete 101-Entry `PrecomputedCatalogMatrix` (`right_bars = 3` 4-Way Divergences + VSA + Ichimoku + ProxyBB) on `2,500` bars
+    {
+        let mut samples = Vec::with_capacity(24);
+        for step in 0..28 {
+            let t0 = Instant::now();
+            let mat = PrecomputedCatalogMatrix::compute(&candles_2500);
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            std::hint::black_box(&mat);
+            if step >= 4 {
+                samples.push(us);
+            }
+        }
+        domain_cases.push(R09DomainBenchCase {
+            case_id: "b3_precomputed_catalog_101_signals_2500b",
+            description: "B3 `PrecomputedCatalogMatrix` (`101` signals + `12` confirmed divergences, `2,500` bars)",
+            input_units: candles_2500.len(),
+            output_items: SIGNAL_CATALOG.len(),
+            stats: TimingStats::from_samples(samples),
+        });
+    }
+
+    // 4. B4a: Multi-Horizon `ProxyBBCalculator` (`T03..T200`, `O(N)` prefix windows) on `10,000` bars
+    {
+        let mut samples = Vec::with_capacity(60);
+        for step in 0..70 {
+            let t0 = Instant::now();
+            let pbb = compute_proxy_bb_series(&candles_10k);
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            std::hint::black_box(&pbb);
+            if step >= 10 {
+                samples.push(us);
+            }
+        }
+        domain_cases.push(R09DomainBenchCase {
+            case_id: "b4_proxy_bb_6_horizons_10k",
+            description: "B4 `compute_proxy_bb_series` (`T03..T200` 6 horizons, `10,000` bars)",
+            input_units: candles_10k.len(),
+            output_items: 6,
+            stats: TimingStats::from_samples(samples),
+        });
+    }
+
+    // 5. B4b: `MarketBBAggregator` (`PIT` `VN30-PIT` + `AT17` `FlowBreadth`) + `PIT` Portfolio Simulation
+    {
+        let feed_inputs: Vec<MarketBBFeedInput<'_>> = feeds
+            .iter()
+            .map(|f| MarketBBFeedInput {
+                symbol: &f.symbol,
+                timeframe: f.base_timeframe,
+                candles: &f.candles,
+            })
+            .collect();
+        let bt_cfg = BacktestConfig::default();
+        let mut samples = Vec::with_capacity(40);
+        let mut session_pts = 0_usize;
+        for step in 0..46 {
+            let t0 = Instant::now();
+            let mbb = MarketBBAggregator::calculate_market_bb(
+                &pit_univ,
+                &feed_inputs,
+                Some(UniverseMode::PointInTime),
+                None,
+                0.0,
+                0.80,
+            );
+            let port = run_portfolio_backtest_with_universe(
+                &feeds,
+                Timeframe::D1,
+                &bt_cfg,
+                sumi_workstation::backtest::PortfolioUniverseFilter::Vn30EquitiesOnly,
+                sumi_workstation::backtest::PortfolioWeightingMode::EqualWeight,
+                None,
+                Some(&pit_univ),
+                Some(UniverseMode::PointInTime),
+            );
+            let us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+            session_pts = mbb.points.len();
+            std::hint::black_box((&mbb, &port));
+            if step >= 6 {
+                samples.push(us);
+            }
+        }
+        domain_cases.push(R09DomainBenchCase {
+            case_id: "b4_market_bb_and_pit_portfolio_vn30",
+            description: "B4 `MarketBBAggregator` (`PIT`) + `run_portfolio_backtest_with_universe` (`VN30-PIT`)",
+            input_units: feeds.len(),
+            output_items: session_pts,
+            stats: TimingStats::from_samples(samples),
+        });
+    }
+
+    let workloads = [
+        (
+            0_u8,
+            "r18_b1_b2_overlays_patterns_3osc_fpt",
+            "FPT 1D + SuperTrend + PSAR + Keltner + VolSMA + Patterns + ADX + Stoch + MFI",
+        ),
+        (
+            1_u8,
+            "r18_b3_catalog_101_modal_cci_rsi_macd",
+            "VN30F1M 15m + 101-Signal Catalog Modal (Divergence) + CCI + RSI + MACD + Strategy Lab",
+        ),
+        (
+            2_u8,
+            "r18_b4_proxybb_marketbb_pit_portfolio",
+            "SSI 1D + ProxyBB Sub-Pane + Equity (PIT Portfolio) + Breadth (Multi-Horizon ProxyBB & MarketBB)",
+        ),
+        (
+            3_u8,
+            "r18_100k_bars_all_extended_panes_conflated",
+            "100,000 Bars Conflated + SuperTrend + PSAR + Keltner + ADX + Stoch + MFI + ProxyBB",
+        ),
+        (
+            4_u8,
+            "r18_2x2_grid_extended_indicators_and_proxybb",
+            "2x2 Synchronized Grid + Extended Overlays + ProxyBB + PIT Breadth Dock",
+        ),
+    ];
+
+    let mut render_results = Vec::with_capacity(workloads.len());
+    let mut p99_ms_list = Vec::with_capacity(workloads.len());
+    for &(mode, wid, desc) in &workloads {
+        let (res, p99_ms) = bench_full_app_r18_workload(mode, wid, desc, 16, 80);
+        println!(
+            "  [{wid}] bars={} cf={}x mean={:.3}ms median={:.3}ms p99={:.3}ms",
+            res.dataset_bars,
+            res.conflation_factor,
+            res.total_cpu_frame_stats.mean_us / 1_000.0,
+            res.total_cpu_frame_stats.median_us / 1_000.0,
+            p99_ms,
+        );
+        assert!(
+            res.total_cpu_frame_stats.mean_us / 1_000.0 < 4.0 && p99_ms < 4.0,
+            "R18 frame budget gate exceeded on {wid}: mean={:.3}ms p99={p99_ms:.3}ms",
+            res.total_cpu_frame_stats.mean_us / 1_000.0
+        );
+        render_results.push(res);
+        p99_ms_list.push(p99_ms);
+    }
+
+    let json_doc = format_r18_json_report(
+        cpu_brand,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        &domain_cases,
+        &render_results,
+        &p99_ms_list,
+    );
+    let md_doc = format_r18_markdown_report(
+        cpu_brand,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        &domain_cases,
+        &render_results,
+        &p99_ms_list,
+    );
+    std::fs::create_dir_all("docs/evidence").expect("create docs/evidence");
+    std::fs::write(
+        "docs/evidence/r18_signals_indicators_proxybb_pit_bench.json",
+        json_doc,
+    )
+    .expect("write r18 bench json");
+    std::fs::write(
+        "docs/evidence/r18_signals_indicators_proxybb_pit_bench.md",
+        md_doc,
+    )
+    .expect("write r18 bench md");
+    println!("Wrote docs/evidence/r18_signals_indicators_proxybb_pit_bench.{{json,md}}");
+}
+
+fn bench_full_app_r18_workload(
+    mode: u8,
+    workload_id: &'static str,
+    description: &'static str,
+    warmup_iters: usize,
+    sample_iters: usize,
+) -> (RenderCaseResult, f64) {
+    use sumi_workstation::app::{
+        EquityPaneSource, RightDockTab, ScannerDockTab, StrategyLabSubTab, SumiWorkstationApp,
+    };
+    use sumi_workstation::scanner::{SignalCategory, UniverseDefinition, UniverseMode};
+    use sumi_workstation::viewport::MultiChartLayoutKind;
+
+    let ctx = egui::Context::default();
+    SumiWorkstationApp::configure_dark_workstation_visuals(&ctx);
+    ctx.set_pixels_per_point(2.0);
+    let mut app = SumiWorkstationApp::default();
+
+    match mode {
+        0 => {
+            app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+            let _ = app.set_timeframe(Timeframe::D1);
+            app.show_scanner_dock = false;
+            app.indicators = IndicatorConfig {
+                show_sma: false,
+                show_ema: false,
+                show_keltner: true,
+                show_supertrend: true,
+                show_psar: true,
+                show_volume_sma: true,
+                show_candle_patterns: true,
+                show_rsi: false,
+                show_adx: true,
+                show_stochastic: true,
+                show_mfi: true,
+                ..IndicatorConfig::default()
+            };
+            app.sync_indicators_and_benchmarks();
+        }
+        1 => {
+            app.select_watchlist_instrument(DataSourcePreset::IntradayVn30F1m, "VN30F1M");
+            let _ = app.set_timeframe(Timeframe::M15);
+            app.show_scanner_dock = false;
+            app.indicators = IndicatorConfig {
+                show_sma: true,
+                show_ema: true,
+                show_rsi: true,
+                show_macd: true,
+                show_cci: true,
+                ..IndicatorConfig::default()
+            };
+            app.show_strategy_panel = true;
+            app.right_dock_tab = RightDockTab::StrategyLab;
+            app.show_signal_catalog_modal = true;
+            app.signal_catalog_category = SignalCategory::Divergence;
+            app.sync_indicators_and_benchmarks();
+        }
+        2 => {
+            app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "SSI");
+            let _ = app.set_timeframe(Timeframe::D1);
+            app.pit_universe_def = UniverseDefinition::bundled_vn30_pit();
+            app.pit_universe_enabled = true;
+            app.pit_universe_mode = UniverseMode::PointInTime;
+            app.indicators = IndicatorConfig {
+                show_sma: true,
+                show_ema: true,
+                show_rsi: false,
+                show_proxy_bb: true,
+                ..IndicatorConfig::default()
+            };
+            app.show_scanner_dock = true;
+            app.scanner_tab = ScannerDockTab::Breadth;
+            app.show_strategy_panel = true;
+            app.right_dock_tab = RightDockTab::StrategyLab;
+            app.strategy_lab_tab = StrategyLabSubTab::WalkForward;
+            app.show_equity_pane = true;
+            app.equity_pane_source = EquityPaneSource::MultiAssetPortfolio;
+            app.sync_indicators_and_benchmarks();
+            app.sync_market_bb_and_symbol_proxy_bb();
+        }
+        3 => {
+            app.dataset_bar_count = 100_000;
+            app.select_data_source(DataSourcePreset::SyntheticVnindex);
+            app.show_scanner_dock = false;
+            app.indicators = IndicatorConfig {
+                show_sma: true,
+                show_keltner: true,
+                show_supertrend: true,
+                show_psar: true,
+                show_volume_sma: true,
+                show_rsi: false,
+                show_adx: true,
+                show_stochastic: true,
+                show_mfi: true,
+                show_proxy_bb: true,
+                ..IndicatorConfig::default()
+            };
+            app.sync_indicators_and_benchmarks();
+            app.viewport.time_scale.set_width(1180.0);
+            app.viewport.fit_all();
+        }
+        _ => {
+            app.select_watchlist_instrument(DataSourcePreset::Vn30Basket, "FPT");
+            app.set_grid_layout(MultiChartLayoutKind::Quad2x2);
+            app.indicators = IndicatorConfig {
+                show_sma: true,
+                show_supertrend: true,
+                show_rsi: false,
+                show_proxy_bb: true,
+                ..IndicatorConfig::default()
+            };
+            app.sync_active_slot_indicators_to_all_slots();
+            app.show_scanner_dock = true;
+            app.scanner_tab = ScannerDockTab::Breadth;
+            app.sync_market_bb_and_symbol_proxy_bb();
+        }
+    }
+
+    let screen_rect = Some(egui::Rect::from_min_size(
+        egui::Pos2::ZERO,
+        egui::Vec2::new(1280.0, 800.0),
+    ));
+    let mut ui_samples = Vec::with_capacity(sample_iters);
+    let mut tess_samples = Vec::with_capacity(sample_iters);
+    let mut total_samples = Vec::with_capacity(sample_iters);
+    let mut paint_shapes = 0_usize;
+    let mut clipped_primitives = 0_usize;
+    let mut total_vertices = 0_usize;
+    let mut total_indices = 0_usize;
+
+    let total_passes = warmup_iters + sample_iters;
+    for pass in 0..total_passes {
+        let raw_input = egui::RawInput {
+            screen_rect,
+            time: Some((pass as f64) * (1.0 / 120.0)),
+            ..Default::default()
+        };
+        let t_ui = Instant::now();
+        let full_out = ctx.run_ui(raw_input, |ui| {
+            app.render_workstation_ui(ui);
+        });
+        let ui_us = t_ui.elapsed().as_secs_f64() * 1_000_000.0;
+        paint_shapes = full_out.shapes.len();
+
+        let t_tess = Instant::now();
+        let clipped = ctx.tessellate(full_out.shapes, full_out.pixels_per_point);
+        let tess_us = t_tess.elapsed().as_secs_f64() * 1_000_000.0;
+
+        clipped_primitives = clipped.len();
+        let mut v_cnt = 0_usize;
+        let mut i_cnt = 0_usize;
+        for prim in &clipped {
+            if let egui::epaint::Primitive::Mesh(mesh) = &prim.primitive {
+                v_cnt += mesh.vertices.len();
+                i_cnt += mesh.indices.len();
+            }
+        }
+        total_vertices = v_cnt;
+        total_indices = i_cnt;
+        std::hint::black_box(clipped);
+
+        if pass >= warmup_iters {
+            ui_samples.push(ui_us);
+            tess_samples.push(tess_us);
+            total_samples.push(ui_us + tess_us);
+        }
+    }
+
+    let mut sorted_tot = total_samples.clone();
+    sorted_tot.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let p99_idx =
+        ((sorted_tot.len() as f64 * 0.99).floor() as usize).min(sorted_tot.len().saturating_sub(1));
+    let p99_ms = sorted_tot.get(p99_idx).copied().unwrap_or(0.0) / 1_000.0;
+
+    let rep = app.last_report.expect("full app r18 report");
+    assert!(rep.rendered_candle_count > 0);
+    if mode == 3 {
+        assert_eq!(app.candles.len(), 100_000);
+        assert!(rep.conflation_factor >= 8);
+    }
+
+    let sec_limit = if mode == 4 { 3 } else { 0 };
+    let mut total_rendered_candles = rep.rendered_candle_count;
+    let mut total_culled_bars = rep.culled_bar_count;
+    let mut reported_bars = app.candles.len();
+    for slot in &app.secondary_slots[..sec_limit] {
+        if let Some(sr) = slot.last_report {
+            total_rendered_candles += sr.rendered_candle_count;
+            total_culled_bars += sr.culled_bar_count;
+        }
+        reported_bars += slot.candles.len();
+    }
+
+    (
+        RenderCaseResult {
+            dataset_bars: reported_bars,
+            workload_id,
+            description,
+            scale_mode: app.viewport.main_price_scale.mode().label(),
+            conflation_enabled: true,
+            bar_spacing: rep.bar_spacing,
+            conflation_factor: rep.conflation_factor,
+            culled_bars: total_culled_bars,
+            rendered_candles: total_rendered_candles,
+            paint_shapes,
+            clipped_primitives,
+            total_vertices,
+            total_indices,
+            ui_build_stats: TimingStats::from_samples(ui_samples),
+            tessellate_stats: TimingStats::from_samples(tess_samples),
+            total_cpu_frame_stats: TimingStats::from_samples(total_samples),
+        },
+        p99_ms,
+    )
+}
+
+fn format_r18_json_report(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+    domain: &[R09DomainBenchCase],
+    render: &[RenderCaseResult],
+    p99_ms_list: &[f64],
+) -> String {
+    format_r17_json_report(
+        cpu,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        domain,
+        render,
+        p99_ms_list,
+    )
+    .replacen("\"milestone\": \"R17\"", "\"milestone\": \"R18\"", 1)
+    .replacen("\"r17_domain_throughput\"", "\"r18_domain_throughput\"", 1)
+    .replacen(
+        "\"workstation_r17_workloads\"",
+        "\"workstation_r18_workloads\"",
+        1,
+    )
+}
+
+fn format_r18_markdown_report(
+    cpu: &str,
+    mem_bytes: u64,
+    rustc_ver: &str,
+    profile: &str,
+    domain: &[R09DomainBenchCase],
+    render: &[RenderCaseResult],
+    p99_ms_list: &[f64],
+) -> String {
+    format_r17_markdown_report(
+        cpu,
+        mem_bytes,
+        rustc_ver,
+        profile,
+        domain,
+        render,
+        p99_ms_list,
+    )
+    .replacen(
+        "# Milestone R17 — Practice Scoreboard, Session Debrief Coaching, 1-Click Scanner->Replay, Multi-Strategy `0%` Overlay & Advanced Analytics Benchmark Evidence",
+        "# Milestone R18 — 101-Signal Catalog, Extended Indicators, Multi-Horizon ProxyBB & Point-in-Time Universe Benchmark Evidence",
+        1,
+    )
+    .replacen("-- --r17", "-- --r18", 1)
+    .replacen(
+        "## 1. Practice Coaching, Multi-Strategy `0%` Overlay & Advanced Analytics Kernel Throughput",
+        "## 1. Candlestick Geometry, Extended Indicators, 101-Signal Matrix, Multi-Horizon ProxyBB & PIT Universe Throughput",
+        1,
+    )
+    .replacen("Workstation R17 Frame Budget", "Workstation R18 Frame Budget", 1)
 }

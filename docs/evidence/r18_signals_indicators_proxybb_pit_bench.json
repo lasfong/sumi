@@ -1,0 +1,28 @@
+{
+  "milestone": "R18",
+  "overall_pass": true,
+  "environment": {
+    "cpu": "Apple M1",
+    "os": "macos",
+    "arch": "aarch64",
+    "ram_bytes": 17179869184,
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "profile": "release",
+    "viewport_logical_px": [1280, 800],
+    "pixels_per_point": 2.0
+  },
+  "r18_domain_throughput": [
+    { "case_id": "b1_candlestick_patterns_and_scores_10k", "description": "B1 `CandleGeometry` + `14` patterns + `candle_score` (`10,000` bars)", "input_units": 10000, "output_items": 1461, "median_us": 292.167, "median_ms": 0.2922, "p95_us": 317.541, "max_us": 427.250 },
+    { "case_id": "b2_all_8_extended_indicators_10k", "description": "B2 `ADX+Stoch+SuperTrend+PSAR+Keltner+CCI+MFI+VolSMA` (`10,000` bars)", "input_units": 10000, "output_items": 8, "median_us": 934.667, "median_ms": 0.9347, "p95_us": 1058.125, "max_us": 1107.333 },
+    { "case_id": "b3_precomputed_catalog_101_signals_2500b", "description": "B3 `PrecomputedCatalogMatrix` (`101` signals + `12` confirmed divergences, `2,500` bars)", "input_units": 2500, "output_items": 101, "median_us": 5991.958, "median_ms": 5.9920, "p95_us": 6135.375, "max_us": 6153.375 },
+    { "case_id": "b4_proxy_bb_6_horizons_10k", "description": "B4 `compute_proxy_bb_series` (`T03..T200` 6 horizons, `10,000` bars)", "input_units": 10000, "output_items": 6, "median_us": 1036.875, "median_ms": 1.0369, "p95_us": 1136.959, "max_us": 1170.917 },
+    { "case_id": "b4_market_bb_and_pit_portfolio_vn30", "description": "B4 `MarketBBAggregator` (`PIT`) + `run_portfolio_backtest_with_universe` (`VN30-PIT`)", "input_units": 13, "output_items": 180, "median_us": 2096.083, "median_ms": 2.0961, "p95_us": 2234.250, "max_us": 2268.500 }
+  ],
+  "workstation_r18_workloads": [
+    { "dataset_bars": 180, "workload_id": "r18_b1_b2_overlays_patterns_3osc_fpt", "scale_mode": "Linear", "bar_spacing": 8.00000, "conflation_factor": 1, "culled_bars": 137, "rendered_candles": 136, "paint_shapes": 482, "clipped_primitives": 45, "total_vertices": 20134, "total_indices": 71517, "ui_median_ms": 0.1337, "tessellate_median_ms": 0.0929, "total_cpu_mean_ms": 0.2310, "total_cpu_median_ms": 0.2266, "total_cpu_p95_ms": 0.2525, "total_cpu_p99_ms": 0.3598 },
+    { "dataset_bars": 360, "workload_id": "r18_b3_catalog_101_modal_cci_rsi_macd", "scale_mode": "Linear", "bar_spacing": 8.00000, "conflation_factor": 1, "culled_bars": 96, "rendered_candles": 95, "paint_shapes": 493, "clipped_primitives": 57, "total_vertices": 24894, "total_indices": 76743, "ui_median_ms": 0.2393, "tessellate_median_ms": 0.1133, "total_cpu_mean_ms": 0.3566, "total_cpu_median_ms": 0.3528, "total_cpu_p95_ms": 0.3730, "total_cpu_p99_ms": 0.5019 },
+    { "dataset_bars": 180, "workload_id": "r18_b4_proxybb_marketbb_pit_portfolio", "scale_mode": "Linear", "bar_spacing": 8.00000, "conflation_factor": 1, "culled_bars": 54, "rendered_candles": 52, "paint_shapes": 664, "clipped_primitives": 58, "total_vertices": 22926, "total_indices": 74721, "ui_median_ms": 0.3008, "tessellate_median_ms": 0.1220, "total_cpu_mean_ms": 0.4295, "total_cpu_median_ms": 0.4226, "total_cpu_p95_ms": 0.4571, "total_cpu_p99_ms": 0.6072 },
+    { "dataset_bars": 100000, "workload_id": "r18_100k_bars_all_extended_panes_conflated", "scale_mode": "Linear", "bar_spacing": 0.01180, "conflation_factor": 32, "culled_bars": 99832, "rendered_candles": 3118, "paint_shapes": 1438, "clipped_primitives": 49, "total_vertices": 189662, "total_indices": 515172, "ui_median_ms": 0.5016, "tessellate_median_ms": 0.4224, "total_cpu_mean_ms": 0.9549, "total_cpu_median_ms": 0.9254, "total_cpu_p95_ms": 1.2306, "total_cpu_p99_ms": 1.3396 },
+    { "dataset_bars": 2899, "workload_id": "r18_2x2_grid_extended_indicators_and_proxybb", "scale_mode": "Linear", "bar_spacing": 8.00000, "conflation_factor": 1, "culled_bars": 151, "rendered_candles": 146, "paint_shapes": 632, "clipped_primitives": 94, "total_vertices": 22304, "total_indices": 74802, "ui_median_ms": 0.2293, "tessellate_median_ms": 0.1182, "total_cpu_mean_ms": 0.3558, "total_cpu_median_ms": 0.3474, "total_cpu_p95_ms": 0.3943, "total_cpu_p99_ms": 0.5375 }
+  ]
+}

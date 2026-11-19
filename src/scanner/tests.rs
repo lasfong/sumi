@@ -511,7 +511,7 @@ fn r15_signal_catalog_schema_quality_gate_and_bb_absent_neutral() {
         find_catalog_entry_for_scan_kind,
     };
 
-    assert_eq!(SIGNAL_CATALOG.len(), 17);
+    assert_eq!(SIGNAL_CATALOG.len(), 101);
     for cat in SignalCategory::ALL_TABS {
         if cat != SignalCategory::All {
             let matches = filter_signal_catalog(cat, "");
@@ -966,4 +966,651 @@ fn r16_market_regime_bitmask_catalog_entry_index_and_bidirectional_bool_flags() 
     ));
     assert!(!is_bidirectional_bool_signal("technical.macd_bull_cross"));
     assert!(!is_bidirectional_bool_signal("volume.spike_2x"));
+}
+
+#[test]
+fn r18_b3_signal_catalog_72_legacy_superset_causal_pivots_and_12_divergences() {
+    use super::SignalDirection;
+    use super::catalog::{
+        ConfluenceWeightProfile, PrecomputedCatalogMatrix, SIGNAL_CATALOG, catalog_entry_index,
+        evaluate_causal_confluence, find_catalog_entry,
+    };
+
+    // 1. Exact 100% superset proof against all 72 canonical IDs from `ARCHIVE/backend/app/domain/signals/registry.py`!
+    const LEGACY_72_IDS: [&str; 72] = [
+        "volume.relative_volume",
+        "volume.spike",
+        "volume.climax_up",
+        "volume.climax_down",
+        "pattern.bullish_engulfing",
+        "pattern.bearish_engulfing",
+        "pattern.hammer",
+        "pattern.shooting_star",
+        "pattern.morning_star",
+        "pattern.evening_star",
+        "pattern.piercing_line",
+        "pattern.dark_cloud_cover",
+        "pattern.tweezer_bottom",
+        "pattern.tweezer_top",
+        "pattern.inside_bar_breakout_up",
+        "pattern.inside_bar_breakout_down",
+        "pattern.any_bullish",
+        "pattern.any_bearish",
+        "tech.macd_signal_cross",
+        "tech.macd_zero_cross",
+        "tech.rsi_level_cross",
+        "tech.ema_cross",
+        "tech.swing_break",
+        "tech.composite",
+        "regime.uptrend",
+        "regime.downtrend",
+        "regime.sideways",
+        "regime.pullback",
+        "regime.recovery",
+        "regime.new_high",
+        "regime.new_low",
+        "sr.near_support",
+        "sr.near_resistance",
+        "structure.candle_score",
+        "vsa.strong_demand",
+        "vsa.weak_demand",
+        "vsa.upthrust",
+        "vsa.spring",
+        "vsa.strong_demand_at_support",
+        "vsa.strong_supply_at_resistance",
+        "ichimoku.score",
+        "ichimoku.bullish",
+        "ichimoku.bearish",
+        "ichimoku.tk_cross_bullish",
+        "ichimoku.tk_cross_bearish",
+        "ichimoku.kumo_breakout_bullish",
+        "ichimoku.kumo_breakout_bearish",
+        "divergence.confirmed_pivot_high",
+        "divergence.confirmed_pivot_low",
+        "divergence.rsi_regular_bullish",
+        "divergence.rsi_regular_bearish",
+        "divergence.rsi_hidden_bullish",
+        "divergence.rsi_hidden_bearish",
+        "divergence.macd_regular_bullish",
+        "divergence.macd_regular_bearish",
+        "divergence.macd_hidden_bullish",
+        "divergence.macd_hidden_bearish",
+        "divergence.stoch_regular_bullish",
+        "divergence.stoch_regular_bearish",
+        "divergence.stoch_hidden_bullish",
+        "divergence.stoch_hidden_bearish",
+        "health.score",
+        "health.favorable",
+        "health.unfavorable",
+        "bb.direction_rising",
+        "bb.direction_falling",
+        "bb.regime_positive",
+        "bb.regime_negative",
+        "bb.confluence_bullish",
+        "bb.confluence_bearish",
+        "bb.turn_up",
+        "bb.turn_down",
+    ];
+    assert_eq!(SIGNAL_CATALOG.len(), 101);
+    for id in LEGACY_72_IDS {
+        let entry = find_catalog_entry(id);
+        assert!(entry.is_some(), "missing legacy SignalRegistry ID: {id}");
+        if id.starts_with("divergence.") {
+            assert_eq!(entry.unwrap().causal_delay_bars, 3);
+        }
+    }
+
+    // 2. `TEST-CAUSAL-001` (future-append invariance) & `TEST-CAUSAL-002` (`available_at_index == t`, zero double-delay!)
+    //    Plus `PrecomputedCatalogMatrix` exact parity across ALL 101 entries!
+    let mut bars: Vec<Candle> = (0..110)
+        .map(|i| {
+            let phase = i as f64;
+            let wave = (phase * 0.42).sin() * 4.5 + (phase * 0.11).cos() * 2.0;
+            let base = 100.0 + phase * 0.15 + wave;
+            make_bar(
+                i,
+                base - 0.5,
+                base + 1.4,
+                base - 1.3,
+                base + 0.4,
+                1_200.0 + (i % 9) as f64 * 250.0,
+            )
+        })
+        .collect();
+
+    let mat_prefix = PrecomputedCatalogMatrix::compute(&bars[..90]);
+    let rep_89_clean =
+        evaluate_causal_confluence(&bars[..90], None, false, ConfluenceWeightProfile::Balanced);
+    assert_eq!(rep_89_clean.evaluations.len(), 101);
+    for (e_idx, ev) in rep_89_clean.evaluations.iter().enumerate() {
+        assert_eq!(
+            ev.available_at_index, 89,
+            "TEST-CAUSAL-002 violated for {}: available_at_index={} != 89",
+            ev.catalog_id, ev.available_at_index
+        );
+        let pt = mat_prefix.point_at(e_idx, 89).expect("matrix point");
+        assert_eq!(
+            pt.bool_value, ev.bool_value,
+            "bool mismatch on {}",
+            ev.catalog_id
+        );
+        assert_eq!(
+            pt.direction, ev.direction,
+            "dir mismatch on {}",
+            ev.catalog_id
+        );
+    }
+
+    // Poison future bars `[90..110)` with extreme prices & volumes -> bar `89` MUST remain 100% bit-identical!
+    for b in &mut bars[90..] {
+        b.high = 999_999.0;
+        b.close = 999_999.0;
+        b.low = 0.01;
+        b.volume = 999_999_999.0;
+    }
+    let mat_poisoned = PrecomputedCatalogMatrix::compute(&bars);
+    for (e_idx, entry) in SIGNAL_CATALOG.iter().enumerate() {
+        assert_eq!(
+            mat_prefix.point_at(e_idx, 89),
+            mat_poisoned.point_at(e_idx, 89),
+            "TEST-CAUSAL-001 future lookahead detected on {}",
+            entry.id
+        );
+    }
+
+    // 3. Directional `sr.near_support` vs `sr.near_resistance` EMA non-contradiction
+    //    (rectifying legacy `support_resistance.py:98-100` where `|close - EMA| <= 0.5*ATR` fired BOTH!):
+    //    With `EMA20 ~ 100.0`, `ATR ~ 2.0`, `prior_low = 90.0`, `prior_high = 110.0`:
+    //    - Bar 25 (`close = 100.3 > EMA20`, within `0.5*ATR` from ABOVE): `sr.near_support == true` (`Bullish`) AND `sr.near_resistance == false`!
+    //    - Bar 26 (`close = 99.7 < EMA20`, within `0.5*ATR` from BELOW): `sr.near_resistance == true` (`Bearish`) AND `sr.near_support == false`!
+    let mut sr_bars: Vec<Candle> = (0..25)
+        .map(|i| {
+            let (hi, lo) = if i == 10 {
+                (110.0, 90.0)
+            } else {
+                (101.0, 99.0)
+            };
+            make_bar(i, 100.0, hi, lo, 100.0, 1_000.0)
+        })
+        .collect();
+    sr_bars.push(make_bar(25, 100.4, 100.8, 100.1, 100.3, 1_200.0)); // testing EMA20 from ABOVE -> support ONLY!
+    sr_bars.push(make_bar(26, 99.6, 99.9, 99.2, 99.7, 1_200.0)); // testing EMA20 from BELOW -> resistance ONLY!
+    let sr_mat = PrecomputedCatalogMatrix::compute(&sr_bars);
+    let sup_idx = catalog_entry_index("sr.near_support").unwrap();
+    let res_idx = catalog_entry_index("sr.near_resistance").unwrap();
+    assert_eq!(sr_mat.point_at(sup_idx, 25).unwrap().bool_value, Some(true));
+    assert_eq!(
+        sr_mat.point_at(sup_idx, 25).unwrap().direction,
+        Some(SignalDirection::Bullish)
+    );
+    assert_eq!(
+        sr_mat.point_at(res_idx, 25).unwrap().bool_value,
+        Some(false)
+    );
+    assert_eq!(sr_mat.point_at(res_idx, 26).unwrap().bool_value, Some(true));
+    assert_eq!(
+        sr_mat.point_at(res_idx, 26).unwrap().direction,
+        Some(SignalDirection::Bearish)
+    );
+    assert_eq!(
+        sr_mat.point_at(sup_idx, 26).unwrap().bool_value,
+        Some(false)
+    );
+
+    // 4. Synthetic confirmed `right_bars = 3` Regular Bullish Divergence:
+    //    First low `p1 = 30` (`L = 85.0`, deeply oversold crash), recovery, second lower low `p2 = 42` (`L = 83.5`, shallower momentum -> higher Stoch/RSI),
+    //    confirmed strictly at `t = p2 + 3 = 45` (NOT at `t = 42`!).
+    let mut div_bars = Vec::with_capacity(55);
+    for i in 0..55 {
+        let px = match i {
+            0..=24 => 110.0,
+            25 => 104.0,
+            26 => 98.0,
+            27 => 93.0,
+            28 => 89.0,
+            29 => 86.5,
+            30 => 85.0, // p1 sharp capitulation low
+            31 => 89.0,
+            32 => 93.0,
+            33..=38 => 96.0,
+            39 => 93.0,
+            40 => 90.0,
+            41 => 88.0,
+            42 => 84.0, // p2 lower price low, gentler 3-bar drift -> higher RSI(14) & MACD hist!
+            43 => 88.5,
+            44 => 91.0,
+            45 => 93.5, // confirmation bar t = p2 + 3 = 45!
+            _ => 95.0,
+        };
+        div_bars.push(make_bar(i, px + 0.5, px + 1.2, px - 1.0, px, 1_500.0));
+    }
+    div_bars[30].low = 83.0;
+    div_bars[42].low = 81.5; // strictly lower pivot low at p2=42, while close=84 vs p1's deeper 6-bar crash!
+    let div_mat = PrecomputedCatalogMatrix::compute(&div_bars);
+    let rsi_bull_idx = catalog_entry_index("divergence.rsi_regular_bullish").unwrap();
+    let stoch_bull_idx = catalog_entry_index("divergence.stoch_regular_bullish").unwrap();
+    assert_eq!(
+        div_mat.point_at(rsi_bull_idx, 42).unwrap().bool_value,
+        Some(false),
+        "must NOT fire unconfirmed pivot at p2=42 without right_bars=3!"
+    );
+    assert!(
+        div_mat.point_at(rsi_bull_idx, 45).unwrap().bool_value == Some(true)
+            || div_mat.point_at(stoch_bull_idx, 45).unwrap().bool_value == Some(true),
+        "confirmed bullish divergence must fire at t = p2 + 3 = 45!"
+    );
+}
+
+#[test]
+fn r18_b4_proxy_bb_multihorizon_market_bb_at09_at17_and_pit_universe_resolver() {
+    use super::catalog::{ConfluenceWeightProfile, evaluate_causal_confluence};
+    use super::proxy_bb::{MarketBBAggregator, MarketBBFeedInput, MarketPublicationStatus};
+    use super::universe::{
+        CoverageStatus, SessionDate, UniverseDefinition, UniverseError, UniverseMode,
+        UniverseResolver,
+    };
+    use crate::data::Timeframe;
+    use crate::indicators::{BBDirection, BBHorizon, BBRegime, compute_proxy_bb_series};
+
+    // 1. `ProxyBBCalculator` (`AT01` [0,100], `AT05` zero-liquidity `None`, `AT08` warmup, `AT18` prefix causality)
+    let mut bars: Vec<Candle> = (0..65)
+        .map(|i| {
+            let p = 100.0 + (i as f64) * 0.5;
+            make_bar(i, p - 0.3, p + 0.5, p - 0.5, p + 0.4, 2_000.0)
+        })
+        .collect();
+    let pbb = compute_proxy_bb_series(&bars);
+    // Warmup (`AT08`): `T03` is `None` on bars `0..2` and `Some` at bar `2`; `T200` is `None` on all 65 bars!
+    assert!(pbb.points[1].horizon(BBHorizon::T03).is_warmup);
+    assert!(pbb.points[1].horizon(BBHorizon::T03).bb_value.is_none());
+    assert!(pbb.points[2].horizon(BBHorizon::T03).bb_value.is_some());
+    assert!(pbb.points[64].horizon(BBHorizon::T200).is_warmup);
+    let t20_64 = pbb.points[64].horizon(BBHorizon::T20);
+    let bb64 = t20_64.bb_value.expect("valid T20");
+    assert!((0.0..=100.0).contains(&bb64) && bb64 > 55.0);
+    assert_eq!(t20_64.regime, BBRegime::Positive);
+    assert_ne!(t20_64.direction, BBDirection::Unknown);
+
+    // Upgraded Family 4 Participation: `bb_flow_absent_neutral == false` when volume > 0!
+    let conf_pos =
+        evaluate_causal_confluence(&bars, None, false, ConfluenceWeightProfile::Balanced);
+    let h_pos = conf_pos.health.expect("valid health");
+    assert!(!h_pos.bb_flow_absent_neutral);
+    assert!(h_pos.participation_score > 0.0);
+
+    // `AT05`: Zero-liquidity window (`20` consecutive zero-volume bars) MUST emit `bb_value = None` (NEVER `50.0`!)
+    for b in &mut bars[30..50] {
+        b.volume = 0.0;
+    }
+    let pbb_zero = compute_proxy_bb_series(&bars);
+    let z_pt = pbb_zero.points[49].horizon(BBHorizon::T20);
+    assert!(!z_pt.is_warmup);
+    assert!(z_pt.is_zero_activity);
+    assert_eq!(
+        z_pt.bb_value, None,
+        "AT05 violated: zero liquidity must return None, not 50.0"
+    );
+
+    // 2. `MarketBBAggregator` (`AT09` aggregate-before-ratio != naive mean, `AT17` count vs value breadth)
+    let d0 = SessionDate::new(2025, 1, 2).unwrap();
+    let d_ts = |off: i64| (1_735_776_000_i64) + off * 86_400; // 2025-01-02 UTC + off days
+    // Heavyweight `MEGA` (val ~ 100M, bearish close at low -> BB ~ 0%) vs 2 tiny `SMALL1`, `SMALL2` (val ~ 100k, bullish close at high -> BB ~ 100%)
+    let mega: Vec<Candle> = (0..6)
+        .map(|i| Candle {
+            timestamp: d_ts(i),
+            date_label: format!("d{i}"),
+            open: 100.0,
+            high: 102.0,
+            low: 98.0,
+            close: 98.0, // P = -1.0 -> 0% buy!
+            volume: 1_000_000.0,
+        })
+        .collect();
+    let small: Vec<Candle> = (0..6)
+        .map(|i| Candle {
+            timestamp: d_ts(i),
+            date_label: format!("d{i}"),
+            open: 10.0,
+            high: 11.0,
+            low: 9.0,
+            close: 11.0, // P = +1.0 -> 100% buy!
+            volume: 100.0,
+        })
+        .collect();
+    let custom_u = UniverseDefinition::from_auto_str(
+        r#"{
+          "universe_id": "AT09-TEST",
+          "version": "v1",
+          "name": "AT09 Weighting Proof",
+          "status": "APPROVED",
+          "default_mode": "POINT_IN_TIME",
+          "effective_from": "2025-01-01",
+          "members": [
+            {"symbol": "MEGA", "exchange": "HOSE", "status": "ACTIVE"},
+            {"symbol": "SMALL1", "exchange": "HOSE", "status": "ACTIVE"},
+            {"symbol": "SMALL2", "exchange": "HOSE", "status": "ACTIVE"}
+          ]
+        }"#,
+    )
+    .expect("parse custom universe");
+    assert_eq!(d0.year, 2025);
+    let mbb = MarketBBAggregator::calculate_market_bb(
+        &custom_u,
+        &[
+            MarketBBFeedInput {
+                symbol: "MEGA",
+                timeframe: Timeframe::D1,
+                candles: &mega,
+            },
+            MarketBBFeedInput {
+                symbol: "SMALL1",
+                timeframe: Timeframe::D1,
+                candles: &small,
+            },
+            MarketBBFeedInput {
+                symbol: "SMALL2",
+                timeframe: Timeframe::D1,
+                candles: &small,
+            },
+        ],
+        Some(UniverseMode::PointInTime),
+        None,
+        0.0,
+        0.80,
+    );
+    assert_eq!(
+        mbb.publication_status,
+        MarketPublicationStatus::CanonicalPublished
+    );
+    let last_m = mbb.points.last().unwrap();
+    let t05_m = last_m.horizon(BBHorizon::T05).market_bb_value.unwrap();
+    // Naive average of [0%, 100%, 100%] would be 66.7% (Bullish!), whereas AT09 value-aggregated MarketBB is < 1.0% (Bearish!)
+    assert!(
+        t05_m < 1.0,
+        "AT09 violated: expected value-weighted MarketBB < 1.0%, got {t05_m}"
+    );
+    let fb05 = last_m.breadth_at(BBHorizon::T05);
+    assert_eq!(fb05.positive_count, 2);
+    assert_eq!(fb05.negative_count, 1);
+    assert!((fb05.positive_count_ratio - (2.0 / 3.0)).abs() < 1e-9);
+    assert!(
+        fb05.positive_value_ratio < 0.01,
+        "AT17 value breadth must reflect MEGA's >99.9% value share"
+    );
+
+    // 3. `UniverseResolver` on the exact `pit_test_universe.json` fixture!
+    let fixture_json = include_str!(
+        "../../ARCHIVE/backend/app/domain/universe/definitions/fixtures/pit_test_universe.json"
+    );
+    let pit_fix =
+        UniverseDefinition::from_auto_str(fixture_json).expect("load pit_test_universe.json");
+    assert_eq!(pit_fix.universe_id, "TEST-PIT");
+    // Before universe effective_from (2023-12-31): 0 active in PIT!
+    let r_pre = UniverseResolver::resolve(
+        &pit_fix,
+        SessionDate::parse_iso("2023-12-31").unwrap(),
+        Some(UniverseMode::PointInTime),
+    )
+    .unwrap();
+    assert!(r_pre.active_symbols.is_empty() && r_pre.is_point_in_time);
+    // 2024-03-15: AAA & CCC active; BBB not yet listed (`2024-06-01`); DDD suspended; EEE reserve
+    let r_2024_q1 = UniverseResolver::resolve(
+        &pit_fix,
+        SessionDate::parse_iso("2024-03-15").unwrap(),
+        Some(UniverseMode::PointInTime),
+    )
+    .unwrap();
+    assert_eq!(r_2024_q1.active_symbols, vec!["AAA", "CCC"]);
+    // 2024-07-01: AAA, BBB, CCC all active
+    let r_2024_q3 = UniverseResolver::resolve(
+        &pit_fix,
+        SessionDate::parse_iso("2024-07-01").unwrap(),
+        Some(UniverseMode::PointInTime),
+    )
+    .unwrap();
+    assert_eq!(r_2024_q3.active_symbols, vec!["AAA", "BBB", "CCC"]);
+    // 2025-07-01: CCC delisted after 2025-06-30 -> only AAA, BBB active!
+    let r_2025_q3 = UniverseResolver::resolve(
+        &pit_fix,
+        SessionDate::parse_iso("2025-07-01").unwrap(),
+        Some(UniverseMode::PointInTime),
+    )
+    .unwrap();
+    assert_eq!(r_2025_q3.active_symbols, vec!["AAA", "BBB"]);
+    // RetrospectiveFixed on 2024-03-15: includes BBB (future survivor!) and emits survivor_bias_caveat!
+    let r_retro = UniverseResolver::resolve(
+        &pit_fix,
+        SessionDate::parse_iso("2024-03-15").unwrap(),
+        Some(UniverseMode::RetrospectiveFixed),
+    )
+    .unwrap();
+    assert!(!r_retro.is_point_in_time);
+    assert!(r_retro.survivor_bias_caveat.is_some());
+    assert_eq!(r_retro.active_symbols, vec!["AAA", "BBB", "CCC"]);
+
+    // Coverage check: 2/3 = 66.7% -> Degraded vs 0.80 threshold
+    let avail = ["AAA", "BBB"];
+    let cov = UniverseResolver::check_coverage(&r_2024_q3, &avail, 0.80).unwrap();
+    assert_eq!(cov.status, CoverageStatus::Degraded);
+
+    // Overlapping episode rejection
+    let overlap_res = UniverseDefinition::from_auto_str(
+        r#"{
+          "universe_id": "BAD",
+          "version": "v1",
+          "members": [
+            {"symbol": "AAA", "effective_from": "2024-01-01", "effective_to": "2024-06-30", "status": "ACTIVE"},
+            {"symbol": "AAA", "effective_from": "2024-06-01", "effective_to": "2024-12-31", "status": "ACTIVE"}
+          ]
+        }"#,
+    );
+    assert!(matches!(
+        overlap_res,
+        Err(UniverseError::OverlappingMemberEpisodes { .. })
+    ));
+}
+
+#[test]
+fn critic_r18_regression_market_bb_intraday_rollup_venue_close_and_universe_validation() {
+    use crate::data::timeframe::{Timeframe, aggregate_ohlcv};
+    use crate::indicators::proxy_bb::{BBDirection, BBHorizon, compute_proxy_bb_series};
+    use crate::scanner::catalog::{
+        ConfluenceWeightProfile, PrecomputedCatalogMatrix, find_catalog_entry,
+    };
+    use crate::scanner::proxy_bb::{MarketBBAggregator, MarketBBFeedInput};
+    use crate::scanner::universe::{
+        MemberStatus, SessionDate, UniverseDefinition, UniverseError, UniverseMember, UniverseMode,
+        UniverseResolver, UniverseStatus,
+    };
+
+    // 1. `[Blocker-02]` Intraday (`M15`) constituent feed MUST aggregate to `D1` before `MarketBB`
+    //    and `FlowBreadth` (`AT09` + `AT17`: zero same-date overwrite, exact parity with `D1` feed)!
+    let base_day_ts = 1_735_776_000_i64; // 2025-01-02 00:00:00 UTC
+    let mut m15_bars = Vec::new();
+    for day in 0..24_i64 {
+        let day_start = base_day_ts + day * 86_400 + 2 * 3_600; // 09:00 ICT
+        for slot in 0..16_i64 {
+            let p = 50.0 + (day as f64) * 0.6 + (slot as f64) * 0.12;
+            m15_bars.push(Candle {
+                timestamp: day_start + slot * 900,
+                date_label: format!("d{day}_s{slot}"),
+                open: p - 0.05,
+                high: p + 0.15,
+                low: p - 0.10,
+                close: p + 0.10,
+                volume: 1_000.0 + (slot as f64) * 50.0,
+            });
+        }
+    }
+    let d1_bars = aggregate_ohlcv(&m15_bars, Timeframe::M15, Timeframe::D1).expect("D1 rollup");
+    assert_eq!(d1_bars.len(), 24);
+
+    let u_fpt = UniverseDefinition {
+        universe_id: "FPT_UNIV".to_owned(),
+        version: "v1".to_owned(),
+        name: "FPT Test".to_owned(),
+        status: UniverseStatus::Approved,
+        default_mode: UniverseMode::PointInTime,
+        effective_from: None,
+        effective_to: None,
+        selection_purpose: "test".to_owned(),
+        source_evidence: "unit".to_owned(),
+        members: vec![UniverseMember {
+            symbol: "FPT".to_owned(),
+            company_name: None,
+            exchange: "HOSE".to_owned(),
+            effective_from: None,
+            effective_to: None,
+            status: MemberStatus::Active,
+            sector: None,
+            inclusion_reason: "core".to_owned(),
+            weight: 1.0,
+        }],
+    };
+
+    let mbb_from_m15 = MarketBBAggregator::calculate_market_bb(
+        &u_fpt,
+        &[MarketBBFeedInput {
+            symbol: "FPT",
+            timeframe: Timeframe::M15,
+            candles: &m15_bars,
+        }],
+        Some(UniverseMode::PointInTime),
+        None,
+        0.0,
+        0.80,
+    );
+    let mbb_from_d1 = MarketBBAggregator::calculate_market_bb(
+        &u_fpt,
+        &[MarketBBFeedInput {
+            symbol: "FPT",
+            timeframe: Timeframe::D1,
+            candles: &d1_bars,
+        }],
+        Some(UniverseMode::PointInTime),
+        None,
+        0.0,
+        0.80,
+    );
+    assert_eq!(mbb_from_m15.points.len(), 24);
+    assert_eq!(mbb_from_m15.points.len(), mbb_from_d1.points.len());
+    let last_m15 = mbb_from_m15.points.last().unwrap();
+    let last_d1 = mbb_from_d1.points.last().unwrap();
+    assert!(
+        (last_m15.horizon(BBHorizon::T20).market_total_value
+            - last_d1.horizon(BBHorizon::T20).market_total_value)
+            .abs()
+            < 1e-6,
+        "intraday MarketBB lost same-date session traded value: {} vs {}",
+        last_m15.horizon(BBHorizon::T20).market_total_value,
+        last_d1.horizon(BBHorizon::T20).market_total_value
+    );
+    assert!(
+        (last_m15.horizon(BBHorizon::T20).market_bb_value.unwrap()
+            - last_d1.horizon(BBHorizon::T20).market_bb_value.unwrap())
+        .abs()
+            < 1e-9
+    );
+    assert_eq!(
+        last_m15.breadth_at(BBHorizon::T20).positive_count,
+        last_d1.breadth_at(BBHorizon::T20).positive_count
+    );
+
+    // 2. `[Blocker-02]` Venue session-close cutoff on `VN30` `D1` vs intraday `M15`:
+    //    At `14:00 ICT` (`07:00:00 UTC`) on day 23, day 23 is still open -> withheld (`23` sessions)!
+    //    At `14:45 ICT` (`07:44:59 UTC`) on day 23, HOSE ATC closed -> included (`24` sessions)!
+    let day23_mid_cut = base_day_ts + 23 * 86_400 + 7 * 3_600;
+    let day23_atc_cut = base_day_ts + 23 * 86_400 + 7 * 3_600 + 44 * 60 + 59;
+    let mbb_d1_mid = MarketBBAggregator::calculate_market_bb(
+        &u_fpt,
+        &[MarketBBFeedInput {
+            symbol: "FPT",
+            timeframe: Timeframe::D1,
+            candles: &d1_bars,
+        }],
+        Some(UniverseMode::PointInTime),
+        Some(day23_mid_cut),
+        0.0,
+        0.80,
+    );
+    let mbb_d1_atc = MarketBBAggregator::calculate_market_bb(
+        &u_fpt,
+        &[MarketBBFeedInput {
+            symbol: "FPT",
+            timeframe: Timeframe::D1,
+            candles: &d1_bars,
+        }],
+        Some(UniverseMode::PointInTime),
+        Some(day23_atc_cut),
+        0.0,
+        0.80,
+    );
+    let mbb_m15_mid = MarketBBAggregator::calculate_market_bb(
+        &u_fpt,
+        &[MarketBBFeedInput {
+            symbol: "FPT",
+            timeframe: Timeframe::M15,
+            candles: &m15_bars,
+        }],
+        Some(UniverseMode::PointInTime),
+        Some(day23_mid_cut),
+        0.0,
+        0.80,
+    );
+    assert_eq!(mbb_d1_mid.points.len(), 23);
+    assert_eq!(mbb_m15_mid.points.len(), 23);
+    assert_eq!(mbb_d1_atc.points.len(), 24);
+
+    // 3. `[Blocker-01]` `PrecomputedCatalogMatrix` prefix causality when appending a trailing `NaN` bar!
+    let mat_clean = PrecomputedCatalogMatrix::compute(&d1_bars);
+    let mut d1_with_nan = d1_bars.clone();
+    let mut nan_bar = d1_bars.last().unwrap().clone();
+    nan_bar.timestamp += 86_400;
+    nan_bar.high = f64::NAN;
+    d1_with_nan.push(nan_bar);
+    let mat_nan = PrecomputedCatalogMatrix::compute(&d1_with_nan);
+    for cat_idx in 0..crate::scanner::SIGNAL_CATALOG.len() {
+        for t in 0..d1_bars.len() {
+            let p_a =
+                mat_clean.point_at_with_profile(cat_idx, t, ConfluenceWeightProfile::Balanced);
+            let p_b = mat_nan.point_at_with_profile(cat_idx, t, ConfluenceWeightProfile::Balanced);
+            assert_eq!(p_a, p_b, "cat {cat_idx} bar {t} mutated by trailing NaN");
+        }
+    }
+
+    // 4. `[Minor-02]` `UniverseResolver::validate_definition` catches bad weights & inverted top-level bounds!
+    let mut bad_w = u_fpt.clone();
+    bad_w.members[0].weight = f64::NAN;
+    assert!(matches!(
+        UniverseResolver::validate_definition(&bad_w),
+        Err(UniverseError::InvalidMemberWeight { .. })
+    ));
+    bad_w.members[0].weight = 0.0;
+    assert!(matches!(
+        UniverseResolver::validate_definition(&bad_w),
+        Err(UniverseError::InvalidMemberWeight { .. })
+    ));
+    let mut bad_top = u_fpt.clone();
+    bad_top.effective_from = SessionDate::new(2026, 6, 1);
+    bad_top.effective_to = SessionDate::new(2026, 1, 1);
+    assert!(matches!(
+        UniverseResolver::validate_definition(&bad_top),
+        Err(UniverseError::InvertedUniverseInterval { .. })
+    ));
+
+    // 5. `[Minor-01]` & `[Minor-04]` `SuperTrend(10, 3.0)` catalog params & post-warmup `BBDirection::Unknown` parity!
+    let st_entry = find_catalog_entry("technical.supertrend_flip_bull").unwrap();
+    assert_eq!(st_entry.params.len(), 2);
+    assert!((st_entry.params[0].default_value - 10.0).abs() < 1e-9);
+    assert!((st_entry.params[1].default_value - 3.0).abs() < 1e-9);
+
+    let sym_pbb = compute_proxy_bb_series(&d1_bars);
+    assert_eq!(
+        sym_pbb.points[2].horizon(BBHorizon::T03).direction,
+        BBDirection::Unknown
+    );
+    assert_eq!(
+        mbb_from_d1.points[2].horizon(BBHorizon::T03).direction,
+        BBDirection::Unknown
+    );
 }

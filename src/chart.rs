@@ -21,11 +21,12 @@ use crate::drawings::{
     MagnetMode, PaneDrawingProjection, PointerCaptureOutcome, ProjectedDrawingShape,
 };
 use crate::indicators::{
-    BucketLineEnvelope, CVD_REFERENCE_LEVELS, CandleBlockIndex, CvdResetMode, IndicatorCache,
-    IndicatorConfig, MACD_REFERENCE_LEVELS, OscillatorPaneId, RS_REFERENCE_LEVELS,
-    RSI_REFERENCE_LEVELS, SeriesBlockIndex, VolumeProfileConfig, VolumeProfileResult,
-    VwapBandsOutput, bucket_line_envelope_indexed, compute_anchored_vwap, compute_volume_profile,
-    visit_conflated_histogram_bars_indexed,
+    ADX_REFERENCE_LEVELS, BBHorizon, BucketLineEnvelope, CCI_REFERENCE_LEVELS,
+    CVD_REFERENCE_LEVELS, CandleBlockIndex, CvdResetMode, IndicatorCache, IndicatorConfig,
+    MACD_REFERENCE_LEVELS, MFI_REFERENCE_LEVELS, OscillatorPaneId, PROXY_BB_REFERENCE_LEVELS,
+    RS_REFERENCE_LEVELS, RSI_REFERENCE_LEVELS, STOCH_REFERENCE_LEVELS, SeriesBlockIndex,
+    VolumeProfileConfig, VolumeProfileResult, VwapBandsOutput, bucket_line_envelope_indexed,
+    compute_anchored_vwap, compute_volume_profile, visit_conflated_histogram_bars_indexed,
 };
 use crate::model::{Candle, PriceBounds};
 use crate::trading::{ExecutionFill, OrderSide, PositionSide, TradingSession};
@@ -132,6 +133,26 @@ pub mod palette {
     pub const MP_NAKED_POC_LINE: Color32 = Color32::from_rgba_premultiplied(175, 114, 26, 180);
     pub const MP_IB_BRACKET: Color32 = Color32::from_rgba_premultiplied(28, 144, 160, 190);
     pub const MP_VA_BORDER: Color32 = Color32::from_rgba_premultiplied(60, 108, 148, 145);
+
+    // Milestone R18 — Extended Technical Overlays, Candlestick Badges & ProxyBB Flow Sub-Pane
+    pub const IND_SUPERTREND_BULL: Color32 = Color32::from_rgb(0, 230, 118); // #00E676 Emerald
+    pub const IND_SUPERTREND_BEAR: Color32 = Color32::from_rgb(255, 82, 82); // #FF5252 Crimson
+    pub const IND_PSAR_BULL: Color32 = Color32::from_rgb(38, 198, 218); // #26C6DA Cyan-Teal
+    pub const IND_PSAR_BEAR: Color32 = Color32::from_rgb(255, 171, 64); // #FFAB40 Warm Amber
+    pub const IND_KELTNER_BORDER: Color32 = Color32::from_rgb(129, 199, 132); // #81C784 Sage-Teal
+    pub const IND_KELTNER_MIDDLE: Color32 = Color32::from_rgb(102, 187, 106); // #66BB6A
+    pub const IND_KELTNER_FILL: Color32 = Color32::from_rgba_premultiplied(9, 21, 14, 24);
+    pub const IND_VOLUME_SMA: Color32 = Color32::from_rgb(255, 213, 79); // #FFD54F Crisp Gold
+    pub const IND_ADX_LINE: Color32 = Color32::from_rgb(255, 202, 40); // #FFCA28 Gold
+    pub const IND_PLUS_DI: Color32 = Color32::from_rgb(38, 166, 154); // #26A69A Emerald
+    pub const IND_MINUS_DI: Color32 = Color32::from_rgb(239, 83, 80); // #EF5350 Crimson
+    pub const IND_STOCH_K: Color32 = Color32::from_rgb(41, 182, 246); // #29B6F6 Sky Blue
+    pub const IND_STOCH_D: Color32 = Color32::from_rgb(255, 138, 0); // #FF8A00 Orange
+    pub const IND_CCI: Color32 = Color32::from_rgb(38, 198, 218); // #26C6DA Cyan
+    pub const IND_MFI: Color32 = Color32::from_rgb(240, 98, 146); // #F06292 Rose-Pink
+    pub const IND_PROXY_BB_T05: Color32 = Color32::from_rgb(128, 222, 234); // #80DEEA Fast T05
+    pub const IND_PROXY_BB_T20: Color32 = Color32::from_rgb(38, 166, 154); // #26A69A Baseline T20
+    pub const IND_PROXY_BB_T50: Color32 = Color32::from_rgb(255, 183, 77); // #FFB74D Structural T50
 }
 
 /// Layout regions computed dynamically from the available chart area on every frame (single-pane view).
@@ -417,6 +438,54 @@ fn default_rs_price_scale() -> PriceScale {
 
 fn default_cvd_price_scale() -> PriceScale {
     PriceScale::new("cvd-right", PriceScaleOptions::sumi_cvd_oscillator())
+}
+
+fn default_adx_price_scale() -> PriceScale {
+    PriceScale::new("adx-right", PriceScaleOptions::sumi_oscillator())
+}
+
+fn default_stoch_price_scale() -> PriceScale {
+    PriceScale::new("stoch-right", PriceScaleOptions::sumi_oscillator())
+}
+
+fn default_cci_price_scale() -> PriceScale {
+    PriceScale::new("cci-right", PriceScaleOptions::sumi_oscillator())
+}
+
+fn default_mfi_price_scale() -> PriceScale {
+    PriceScale::new("mfi-right", PriceScaleOptions::sumi_oscillator())
+}
+
+fn default_proxy_bb_price_scale() -> PriceScale {
+    PriceScale::new("proxy-bb-right", PriceScaleOptions::sumi_oscillator())
+}
+
+/// Heap-boxed `PriceScale` bundle for Milestone R18 oscillator sub-panes (`ADX`, `Stochastic`,
+/// `CCI`, `MFI`, `ProxyBB`) keeping [`ChartViewportState`] stack frames compact during `serde` restore.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtendedOscillatorScales {
+    #[serde(default = "default_adx_price_scale")]
+    pub adx_price_scale: PriceScale,
+    #[serde(default = "default_stoch_price_scale")]
+    pub stoch_price_scale: PriceScale,
+    #[serde(default = "default_cci_price_scale")]
+    pub cci_price_scale: PriceScale,
+    #[serde(default = "default_mfi_price_scale")]
+    pub mfi_price_scale: PriceScale,
+    #[serde(default = "default_proxy_bb_price_scale")]
+    pub proxy_bb_price_scale: PriceScale,
+}
+
+impl Default for ExtendedOscillatorScales {
+    fn default() -> Self {
+        Self {
+            adx_price_scale: default_adx_price_scale(),
+            stoch_price_scale: default_stoch_price_scale(),
+            cci_price_scale: default_cci_price_scale(),
+            mfi_price_scale: default_mfi_price_scale(),
+            proxy_bb_price_scale: default_proxy_bb_price_scale(),
+        }
+    }
 }
 
 const fn default_main_stretch() -> f32 {
@@ -825,6 +894,8 @@ pub struct ChartViewportState {
     pub cvd_price_scale: PriceScale,
     #[serde(default = "default_equity_price_scale")]
     pub equity_price_scale: PriceScale,
+    #[serde(default)]
+    pub ext_scales: Box<ExtendedOscillatorScales>,
 
     #[serde(default = "default_main_stretch")]
     pub main_stretch: f32,
@@ -840,6 +911,16 @@ pub struct ChartViewportState {
     pub cvd_stretch: f32,
     #[serde(default = "default_equity_stretch")]
     pub equity_stretch: f32,
+    #[serde(default = "default_sub_stretch")]
+    pub adx_stretch: f32,
+    #[serde(default = "default_sub_stretch")]
+    pub stoch_stretch: f32,
+    #[serde(default = "default_sub_stretch")]
+    pub cci_stretch: f32,
+    #[serde(default = "default_sub_stretch")]
+    pub mfi_stretch: f32,
+    #[serde(default = "default_sub_stretch")]
+    pub proxy_bb_stretch: f32,
 
     #[serde(skip)]
     pub kinetic: Option<KineticAnimation>,
@@ -871,6 +952,7 @@ impl ChartViewportState {
             rs_price_scale: default_rs_price_scale(),
             cvd_price_scale: default_cvd_price_scale(),
             equity_price_scale: default_equity_price_scale(),
+            ext_scales: Box::default(),
             main_stretch: default_main_stretch(),
             rsi_stretch: default_sub_stretch(),
             macd_stretch: default_sub_stretch(),
@@ -878,6 +960,11 @@ impl ChartViewportState {
             rs_stretch: default_sub_stretch(),
             cvd_stretch: default_sub_stretch(),
             equity_stretch: default_equity_stretch(),
+            adx_stretch: default_sub_stretch(),
+            stoch_stretch: default_sub_stretch(),
+            cci_stretch: default_sub_stretch(),
+            mfi_stretch: default_sub_stretch(),
+            proxy_bb_stretch: default_sub_stretch(),
             kinetic: None,
             separator_drag: None,
             r11_memo: R11RenderMemo::default(),
@@ -898,7 +985,12 @@ impl ChartViewportState {
         self.rs_price_scale.sanitize_deserialized();
         self.cvd_price_scale.sanitize_deserialized();
         self.equity_price_scale.sanitize_deserialized();
-        // Oscillator / Equity sub-panes always operate in Linear vertical space (`RSI`, `MACD`, `ATR`, `RS`, `Equity`).
+        self.ext_scales.adx_price_scale.sanitize_deserialized();
+        self.ext_scales.stoch_price_scale.sanitize_deserialized();
+        self.ext_scales.cci_price_scale.sanitize_deserialized();
+        self.ext_scales.mfi_price_scale.sanitize_deserialized();
+        self.ext_scales.proxy_bb_price_scale.sanitize_deserialized();
+        // Oscillator / Equity sub-panes always operate in Linear vertical space.
         self.rsi_price_scale
             .set_mode(crate::viewport::PriceScaleMode::Normal);
         self.macd_price_scale
@@ -913,6 +1005,21 @@ impl ChartViewportState {
             .set_format_mode(crate::viewport::PriceAxisFormatMode::CompactVolume);
         self.equity_price_scale
             .set_mode(crate::viewport::PriceScaleMode::Normal);
+        self.ext_scales
+            .adx_price_scale
+            .set_mode(crate::viewport::PriceScaleMode::Normal);
+        self.ext_scales
+            .stoch_price_scale
+            .set_mode(crate::viewport::PriceScaleMode::Normal);
+        self.ext_scales
+            .cci_price_scale
+            .set_mode(crate::viewport::PriceScaleMode::Normal);
+        self.ext_scales
+            .mfi_price_scale
+            .set_mode(crate::viewport::PriceScaleMode::Normal);
+        self.ext_scales
+            .proxy_bb_price_scale
+            .set_mode(crate::viewport::PriceScaleMode::Normal);
         self.main_stretch = sanitize_stretch(self.main_stretch, default_main_stretch());
         self.rsi_stretch = sanitize_stretch(self.rsi_stretch, default_sub_stretch());
         self.macd_stretch = sanitize_stretch(self.macd_stretch, default_sub_stretch());
@@ -920,10 +1027,15 @@ impl ChartViewportState {
         self.rs_stretch = sanitize_stretch(self.rs_stretch, default_sub_stretch());
         self.cvd_stretch = sanitize_stretch(self.cvd_stretch, default_sub_stretch());
         self.equity_stretch = sanitize_stretch(self.equity_stretch, default_equity_stretch());
+        self.adx_stretch = sanitize_stretch(self.adx_stretch, default_sub_stretch());
+        self.stoch_stretch = sanitize_stretch(self.stoch_stretch, default_sub_stretch());
+        self.cci_stretch = sanitize_stretch(self.cci_stretch, default_sub_stretch());
+        self.mfi_stretch = sanitize_stretch(self.mfi_stretch, default_sub_stretch());
+        self.proxy_bb_stretch = sanitize_stretch(self.proxy_bb_stretch, default_sub_stretch());
     }
 
     #[must_use]
-    pub const fn oscillator_price_scale(&self, id: OscillatorPaneId) -> &PriceScale {
+    pub fn oscillator_price_scale(&self, id: OscillatorPaneId) -> &PriceScale {
         match id {
             OscillatorPaneId::Rsi => &self.rsi_price_scale,
             OscillatorPaneId::Macd => &self.macd_price_scale,
@@ -931,6 +1043,11 @@ impl ChartViewportState {
             OscillatorPaneId::Cvd => &self.cvd_price_scale,
             OscillatorPaneId::RelativeStrength => &self.rs_price_scale,
             OscillatorPaneId::Equity => &self.equity_price_scale,
+            OscillatorPaneId::Adx => &self.ext_scales.adx_price_scale,
+            OscillatorPaneId::Stochastic => &self.ext_scales.stoch_price_scale,
+            OscillatorPaneId::Cci => &self.ext_scales.cci_price_scale,
+            OscillatorPaneId::Mfi => &self.ext_scales.mfi_price_scale,
+            OscillatorPaneId::ProxyBb => &self.ext_scales.proxy_bb_price_scale,
         }
     }
 
@@ -942,6 +1059,11 @@ impl ChartViewportState {
             OscillatorPaneId::Cvd => &mut self.cvd_price_scale,
             OscillatorPaneId::RelativeStrength => &mut self.rs_price_scale,
             OscillatorPaneId::Equity => &mut self.equity_price_scale,
+            OscillatorPaneId::Adx => &mut self.ext_scales.adx_price_scale,
+            OscillatorPaneId::Stochastic => &mut self.ext_scales.stoch_price_scale,
+            OscillatorPaneId::Cci => &mut self.ext_scales.cci_price_scale,
+            OscillatorPaneId::Mfi => &mut self.ext_scales.mfi_price_scale,
+            OscillatorPaneId::ProxyBb => &mut self.ext_scales.proxy_bb_price_scale,
         }
     }
 
@@ -954,6 +1076,11 @@ impl ChartViewportState {
             OscillatorPaneId::Cvd => self.cvd_stretch,
             OscillatorPaneId::RelativeStrength => self.rs_stretch,
             OscillatorPaneId::Equity => self.equity_stretch,
+            OscillatorPaneId::Adx => self.adx_stretch,
+            OscillatorPaneId::Stochastic => self.stoch_stretch,
+            OscillatorPaneId::Cci => self.cci_stretch,
+            OscillatorPaneId::Mfi => self.mfi_stretch,
+            OscillatorPaneId::ProxyBb => self.proxy_bb_stretch,
         }
     }
 
@@ -966,7 +1093,27 @@ impl ChartViewportState {
             OscillatorPaneId::Cvd => self.cvd_stretch = s,
             OscillatorPaneId::RelativeStrength => self.rs_stretch = s,
             OscillatorPaneId::Equity => self.equity_stretch = s,
+            OscillatorPaneId::Adx => self.adx_stretch = s,
+            OscillatorPaneId::Stochastic => self.stoch_stretch = s,
+            OscillatorPaneId::Cci => self.cci_stretch = s,
+            OscillatorPaneId::Mfi => self.mfi_stretch = s,
+            OscillatorPaneId::ProxyBb => self.proxy_bb_stretch = s,
         }
+    }
+
+    /// Resets `auto_scale` across every oscillator / equity sub-pane `PriceScale`.
+    pub fn reset_all_oscillator_auto_scales(&mut self) {
+        self.rsi_price_scale.reset_auto_scale();
+        self.macd_price_scale.reset_auto_scale();
+        self.atr_price_scale.reset_auto_scale();
+        self.rs_price_scale.reset_auto_scale();
+        self.cvd_price_scale.reset_auto_scale();
+        self.equity_price_scale.reset_auto_scale();
+        self.ext_scales.adx_price_scale.reset_auto_scale();
+        self.ext_scales.stoch_price_scale.reset_auto_scale();
+        self.ext_scales.cci_price_scale.reset_auto_scale();
+        self.ext_scales.mfi_price_scale.reset_auto_scale();
+        self.ext_scales.proxy_bb_price_scale.reset_auto_scale();
     }
 
     #[must_use]
@@ -994,6 +1141,11 @@ impl ChartViewportState {
         self.rs_stretch = default_sub_stretch();
         self.cvd_stretch = default_sub_stretch();
         self.equity_stretch = default_equity_stretch();
+        self.adx_stretch = default_sub_stretch();
+        self.stoch_stretch = default_sub_stretch();
+        self.cci_stretch = default_sub_stretch();
+        self.mfi_stretch = default_sub_stretch();
+        self.proxy_bb_stretch = default_sub_stretch();
     }
 
     /// Applies an exact LWC-style adjacent-pair stretch transfer (`pane-separator.ts:181–220`)
@@ -1033,12 +1185,7 @@ impl ChartViewportState {
         self.time_scale.fit_content();
         self.main_price_scale.reset_auto_scale();
         self.volume_price_scale.reset_auto_scale();
-        self.rsi_price_scale.reset_auto_scale();
-        self.macd_price_scale.reset_auto_scale();
-        self.atr_price_scale.reset_auto_scale();
-        self.rs_price_scale.reset_auto_scale();
-        self.cvd_price_scale.reset_auto_scale();
-        self.equity_price_scale.reset_auto_scale();
+        self.reset_all_oscillator_auto_scales();
     }
 
     /// Restores default `bar_spacing` (`8.0`), default future `right_offset` (`12.0`), and all price autoscales.
@@ -1049,12 +1196,7 @@ impl ChartViewportState {
         self.time_scale.restore_default();
         self.main_price_scale.reset_auto_scale();
         self.volume_price_scale.reset_auto_scale();
-        self.rsi_price_scale.reset_auto_scale();
-        self.macd_price_scale.reset_auto_scale();
-        self.atr_price_scale.reset_auto_scale();
-        self.rs_price_scale.reset_auto_scale();
-        self.cvd_price_scale.reset_auto_scale();
-        self.equity_price_scale.reset_auto_scale();
+        self.reset_all_oscillator_auto_scales();
     }
 
     /// Cancels transient kinetic scrolling and pane-splitter drag gestures (e.g. when a modal opens).
@@ -1855,6 +1997,7 @@ fn render_workstation_chart_inner(
                     cvd_price_scale,
                     rs_price_scale,
                     equity_price_scale,
+                    ext_scales,
                     ..
                 } = viewport;
                 let osc_ps = match osc_id {
@@ -1864,6 +2007,11 @@ fn render_workstation_chart_inner(
                     OscillatorPaneId::Cvd => cvd_price_scale,
                     OscillatorPaneId::RelativeStrength => rs_price_scale,
                     OscillatorPaneId::Equity => equity_price_scale,
+                    OscillatorPaneId::Adx => &mut ext_scales.adx_price_scale,
+                    OscillatorPaneId::Stochastic => &mut ext_scales.stoch_price_scale,
+                    OscillatorPaneId::Cci => &mut ext_scales.cci_price_scale,
+                    OscillatorPaneId::Mfi => &mut ext_scales.mfi_price_scale,
+                    OscillatorPaneId::ProxyBb => &mut ext_scales.proxy_bb_price_scale,
                 };
                 handle_plot_interactions(
                     ui,
@@ -2048,7 +2196,12 @@ fn render_workstation_chart_inner(
                     OscillatorPaneId::Rsi
                     | OscillatorPaneId::Macd
                     | OscillatorPaneId::Atr
-                    | OscillatorPaneId::Cvd => 1.0,
+                    | OscillatorPaneId::Cvd
+                    | OscillatorPaneId::Adx
+                    | OscillatorPaneId::Stochastic
+                    | OscillatorPaneId::Cci
+                    | OscillatorPaneId::Mfi
+                    | OscillatorPaneId::ProxyBb => 1.0,
                 };
                 let osc_vp = PaneViewport::new(
                     &viewport.time_scale,
@@ -2419,6 +2572,61 @@ fn render_workstation_chart_inner(
                     &main_vp,
                 );
             }
+            if indicators.show_keltner {
+                active_overlay_count += 1;
+                paint_keltner_channels(
+                    &main_plot_painter,
+                    indicator_cache,
+                    culling_range.clone(),
+                    conflation_factor,
+                    &main_vp,
+                );
+            }
+            if indicators.show_supertrend {
+                active_overlay_count += 1;
+                paint_supertrend_overlay(
+                    &main_plot_painter,
+                    indicator_cache,
+                    culling_range.clone(),
+                    ov_step,
+                    &main_vp,
+                );
+            }
+            if indicators.show_psar {
+                active_overlay_count += 1;
+                paint_psar_overlay(
+                    &main_plot_painter,
+                    indicator_cache,
+                    culling_range.clone(),
+                    ov_step,
+                    &main_vp,
+                    bar_metrics,
+                );
+            }
+            if config.show_volume && indicators.show_volume_sma {
+                active_overlay_count += 1;
+                paint_conflated_line_series(
+                    &main_plot_painter,
+                    &indicator_cache.volume_sma,
+                    Some(&indicator_cache.volume_sma_idx),
+                    culling_range.clone(),
+                    ov_step,
+                    &vol_vp,
+                    Stroke::new(1.35, palette::IND_VOLUME_SMA),
+                );
+            }
+            if indicators.show_candle_patterns {
+                active_overlay_count += 1;
+                paint_candlestick_pattern_badges(
+                    &main_plot_painter,
+                    multi_layout.main_plot_rect,
+                    candles,
+                    indicator_cache,
+                    culling_range.clone(),
+                    conflation_factor,
+                    &main_vp,
+                );
+            }
             if indicators.show_sma {
                 active_overlay_count += 1;
                 paint_conflated_line_series(
@@ -2650,7 +2858,12 @@ fn render_workstation_chart_inner(
             OscillatorPaneId::Rsi
             | OscillatorPaneId::Macd
             | OscillatorPaneId::Atr
-            | OscillatorPaneId::Cvd => 1.0,
+            | OscillatorPaneId::Cvd
+            | OscillatorPaneId::Adx
+            | OscillatorPaneId::Stochastic
+            | OscillatorPaneId::Cci
+            | OscillatorPaneId::Mfi
+            | OscillatorPaneId::ProxyBb => 1.0,
         };
         let osc_vp = PaneViewport::new(&viewport.time_scale, osc_ps, osc_plot_f64, osc_bv);
 
@@ -2866,6 +3079,56 @@ fn render_workstation_chart_inner(
                         &osc_vp,
                     );
                 }
+                OscillatorPaneId::Adx => {
+                    paint_adx_pane(
+                        &osc_painter,
+                        osc.plot_rect,
+                        indicator_cache,
+                        culling_range.clone(),
+                        conflation_factor,
+                        &osc_vp,
+                    );
+                }
+                OscillatorPaneId::Stochastic => {
+                    paint_stochastic_pane(
+                        &osc_painter,
+                        osc.plot_rect,
+                        indicator_cache,
+                        culling_range.clone(),
+                        conflation_factor,
+                        &osc_vp,
+                    );
+                }
+                OscillatorPaneId::Cci => {
+                    paint_cci_pane(
+                        &osc_painter,
+                        osc.plot_rect,
+                        indicator_cache,
+                        culling_range.clone(),
+                        conflation_factor,
+                        &osc_vp,
+                    );
+                }
+                OscillatorPaneId::Mfi => {
+                    paint_mfi_pane(
+                        &osc_painter,
+                        osc.plot_rect,
+                        indicator_cache,
+                        culling_range.clone(),
+                        conflation_factor,
+                        &osc_vp,
+                    );
+                }
+                OscillatorPaneId::ProxyBb => {
+                    paint_proxy_bb_pane(
+                        &osc_painter,
+                        osc.plot_rect,
+                        indicator_cache,
+                        culling_range.clone(),
+                        conflation_factor,
+                        &osc_vp,
+                    );
+                }
                 OscillatorPaneId::Equity => {}
             }
             if plot_memo_key.is_some() {
@@ -2971,7 +3234,12 @@ fn render_workstation_chart_inner(
                         OscillatorPaneId::Rsi
                         | OscillatorPaneId::Macd
                         | OscillatorPaneId::Atr
-                        | OscillatorPaneId::Cvd => 1.0,
+                        | OscillatorPaneId::Cvd
+                        | OscillatorPaneId::Adx
+                        | OscillatorPaneId::Stochastic
+                        | OscillatorPaneId::Cci
+                        | OscillatorPaneId::Mfi
+                        | OscillatorPaneId::ProxyBb => 1.0,
                     };
                     paint_axis_cursor_pill(
                         &painter,
@@ -4354,6 +4622,301 @@ fn paint_bollinger_bands(
         vp,
         edge_stroke,
     );
+}
+
+fn paint_keltner_channels(
+    painter: &egui::Painter,
+    cache: &IndicatorCache,
+    culling_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    vp: &PaneViewport<'_>,
+) {
+    let kc = &cache.keltner;
+    let step = conflation_factor.max(1);
+    let total = kc.middle.len();
+    let clamped_start = culling_range.start.min(total);
+    let clamped_end = culling_range.end.min(total);
+    if clamped_start < clamped_end {
+        let mut mesh = Mesh::default();
+        let mut prev_exit: Option<(f32, f32, f32)> = None;
+        let aligned_start = (clamped_start / step) * step;
+        let aligned_end = clamped_end.div_ceil(step).saturating_mul(step).min(total);
+        let mut b_start = aligned_start;
+
+        while b_start < aligned_end {
+            let b_end = (b_start + step).min(total);
+            let u_env_opt =
+                bucket_line_envelope_indexed(&kc.upper, Some(&cache.kc_upper_idx), b_start, b_end);
+            let l_env_opt =
+                bucket_line_envelope_indexed(&kc.lower, Some(&cache.kc_lower_idx), b_start, b_end);
+
+            if let (Some(u_env), Some(l_env)) = (u_env_opt, l_env_opt)
+                && let (Some(sx), Some((u_in, u_out, _)), Some((l_in, l_out, _))) = (
+                    vp.float_index_to_screen_x(u_env.center_logical_index),
+                    resolve_bucket_screen_ys(&u_env, vp),
+                    resolve_bucket_screen_ys(&l_env, vp),
+                )
+            {
+                let x = sx as f32;
+                if u_env.has_leading_gap || l_env.has_leading_gap {
+                    prev_exit = None;
+                }
+                if let Some((px, pu_out, pl_out)) = prev_exit {
+                    let tl = pu_out.min(pl_out);
+                    let bl = pu_out.max(pl_out);
+                    let tr = u_in.min(l_in);
+                    let br = u_in.max(l_in);
+                    let base_v = mesh.vertices.len() as u32;
+                    mesh.colored_vertex(Pos2::new(px, tl), palette::IND_KELTNER_FILL);
+                    mesh.colored_vertex(Pos2::new(px, bl), palette::IND_KELTNER_FILL);
+                    mesh.colored_vertex(Pos2::new(x, tr), palette::IND_KELTNER_FILL);
+                    mesh.colored_vertex(Pos2::new(x, br), palette::IND_KELTNER_FILL);
+                    mesh.add_triangle(base_v, base_v + 1, base_v + 2);
+                    mesh.add_triangle(base_v + 1, base_v + 3, base_v + 2);
+                }
+                if u_env.has_trailing_gap || l_env.has_trailing_gap {
+                    prev_exit = None;
+                } else {
+                    prev_exit = Some((x, u_out, l_out));
+                }
+            } else {
+                prev_exit = None;
+            }
+            b_start = b_end;
+        }
+
+        if !mesh.indices.is_empty() {
+            painter.add(Shape::mesh(mesh));
+        }
+    }
+
+    let edge_stroke = Stroke::new(1.2, palette::IND_KELTNER_BORDER);
+    let mid_stroke = Stroke::new(1.2, palette::IND_KELTNER_MIDDLE);
+    paint_conflated_line_series(
+        painter,
+        &kc.upper,
+        Some(&cache.kc_upper_idx),
+        culling_range.clone(),
+        conflation_factor,
+        vp,
+        edge_stroke,
+    );
+    paint_conflated_line_series(
+        painter,
+        &kc.middle,
+        Some(&cache.kc_middle_idx),
+        culling_range.clone(),
+        conflation_factor,
+        vp,
+        mid_stroke,
+    );
+    paint_conflated_line_series(
+        painter,
+        &kc.lower,
+        Some(&cache.kc_lower_idx),
+        culling_range,
+        conflation_factor,
+        vp,
+        edge_stroke,
+    );
+}
+
+fn paint_supertrend_overlay(
+    painter: &egui::Painter,
+    cache: &IndicatorCache,
+    culling_range: std::ops::Range<usize>,
+    ov_step: usize,
+    vp: &PaneViewport<'_>,
+) {
+    let st = &cache.supertrend;
+    let total = st.trend.len().min(st.direction.len());
+    let start = culling_range.start.min(total);
+    let end = culling_range.end.min(total);
+    if start >= end {
+        return;
+    }
+    let step = ov_step.max(1);
+    let mut run_dir: Option<i8> = None;
+    let mut run_pts: Vec<Pos2> = Vec::new();
+    let flush_run = |painter: &egui::Painter, dir: Option<i8>, pts: &mut Vec<Pos2>| {
+        if let Some(d) = dir {
+            let col = if d >= 0 {
+                palette::IND_SUPERTREND_BULL
+            } else {
+                palette::IND_SUPERTREND_BEAR
+            };
+            if pts.len() >= 2 {
+                painter.add(Shape::line(std::mem::take(pts), Stroke::new(1.8, col)));
+            } else if let Some(&p0) = pts.first() {
+                painter.circle_filled(p0, 2.0, col);
+                pts.clear();
+            }
+        } else {
+            pts.clear();
+        }
+    };
+
+    let mut i = start;
+    while i < end {
+        match (st.trend[i], st.direction[i]) {
+            (Some(px), Some(dir)) if px.is_finite() => {
+                if let (Some(sx), Some(sy)) =
+                    (vp.index_to_screen_x(i as i64), vp.price_to_screen_y(px))
+                {
+                    let pt = Pos2::new(sx as f32, sy as f32);
+                    if run_dir != Some(dir) {
+                        flush_run(painter, run_dir, &mut run_pts);
+                        run_dir = Some(dir);
+                    }
+                    run_pts.push(pt);
+                } else {
+                    flush_run(painter, run_dir, &mut run_pts);
+                    run_dir = None;
+                }
+            }
+            _ => {
+                flush_run(painter, run_dir, &mut run_pts);
+                run_dir = None;
+            }
+        }
+        i = i.saturating_add(step);
+    }
+    flush_run(painter, run_dir, &mut run_pts);
+}
+
+fn paint_psar_overlay(
+    painter: &egui::Painter,
+    cache: &IndicatorCache,
+    culling_range: std::ops::Range<usize>,
+    ov_step: usize,
+    vp: &PaneViewport<'_>,
+    bar_metrics: CandlestickBarMetrics,
+) {
+    let psar = &cache.psar;
+    let total = psar.sar.len().min(psar.is_long.len());
+    let start = culling_range.start.min(total);
+    let end = culling_range.end.min(total);
+    if start >= end {
+        return;
+    }
+    let step = ov_step.max(1);
+    let radius = ((bar_metrics.body_width_logical as f32) * 0.28).clamp(1.6, 3.4);
+    let mut i = start;
+    while i < end {
+        if let (Some(px), Some(is_long)) = (psar.sar[i], psar.is_long[i])
+            && px.is_finite()
+            && let (Some(sx), Some(sy)) = (vp.index_to_screen_x(i as i64), vp.price_to_screen_y(px))
+        {
+            let col = if is_long {
+                palette::IND_PSAR_BULL
+            } else {
+                palette::IND_PSAR_BEAR
+            };
+            painter.circle_filled(Pos2::new(sx as f32, sy as f32), radius, col);
+        }
+        i = i.saturating_add(step);
+    }
+}
+
+fn paint_candlestick_pattern_badges(
+    painter: &egui::Painter,
+    plot_rect: Rect,
+    candles: &[Candle],
+    cache: &IndicatorCache,
+    culling_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    vp: &PaneViewport<'_>,
+) {
+    if conflation_factor > 4 || cache.candle_patterns.is_empty() {
+        return;
+    }
+    let total = candles.len().min(cache.candle_patterns.len());
+    let start = culling_range.start.min(total);
+    let end = culling_range.end.min(total);
+    if start >= end {
+        return;
+    }
+
+    let font = FontId::monospace(8.8);
+    let mut last_top_x = f32::NEG_INFINITY;
+    let mut last_bot_x = f32::NEG_INFINITY;
+
+    for (i, (candle, &summary)) in candles
+        .iter()
+        .zip(cache.candle_patterns.iter())
+        .enumerate()
+        .take(end)
+        .skip(start)
+    {
+        let Some(kind) = summary.primary_badge else {
+            continue;
+        };
+        let Some(sx) = vp.index_to_screen_x(i as i64) else {
+            continue;
+        };
+        let cx = sx as f32;
+        if cx < plot_rect.left() + 10.0 || cx > plot_rect.right() - 10.0 {
+            continue;
+        }
+        let is_bull = kind.is_bullish();
+        let is_bear = kind.is_bearish();
+        let out_sign = if vp.price_scale.is_inverted() {
+            -1.0_f32
+        } else {
+            1.0_f32
+        };
+        if is_bull {
+            if cx - last_bot_x < 24.0 {
+                continue;
+            }
+            let Some(sy_low) = vp.price_to_screen_y(candle.low) else {
+                continue;
+            };
+            let cy = (sy_low as f32 + 11.0 * out_sign)
+                .clamp(plot_rect.top() + 9.0, plot_rect.bottom() - 9.0);
+            let pill = Rect::from_center_size(Pos2::new(cx, cy), Vec2::new(22.0, 13.0));
+            painter.rect_filled(pill, 2.5, palette::BG_FLOATING_HUD);
+            painter.rect_stroke(
+                pill,
+                2.5,
+                Stroke::new(1.0, palette::BULLISH),
+                StrokeKind::Inside,
+            );
+            painter.text(
+                pill.center(),
+                Align2::CENTER_CENTER,
+                kind.short_badge(),
+                font.clone(),
+                palette::BULLISH,
+            );
+            last_bot_x = cx;
+        } else {
+            if cx - last_top_x < 24.0 {
+                continue;
+            }
+            let Some(sy_high) = vp.price_to_screen_y(candle.high) else {
+                continue;
+            };
+            let accent = if is_bear {
+                palette::BEARISH
+            } else {
+                palette::IND_SMA
+            };
+            let cy = (sy_high as f32 - 11.0 * out_sign)
+                .clamp(plot_rect.top() + 9.0, plot_rect.bottom() - 9.0);
+            let pill = Rect::from_center_size(Pos2::new(cx, cy), Vec2::new(22.0, 13.0));
+            painter.rect_filled(pill, 2.5, palette::BG_FLOATING_HUD);
+            painter.rect_stroke(pill, 2.5, Stroke::new(1.0, accent), StrokeKind::Inside);
+            painter.text(
+                pill.center(),
+                Align2::CENTER_CENTER,
+                kind.short_badge(),
+                font.clone(),
+                accent,
+            );
+            last_top_x = cx;
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6239,6 +6802,299 @@ fn paint_rsi_pane(
     );
 }
 
+fn paint_adx_pane(
+    painter: &egui::Painter,
+    plot_rect: Rect,
+    cache: &IndicatorCache,
+    culling_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    vp: &PaneViewport<'_>,
+) {
+    for (lvl, alpha) in [
+        (ADX_REFERENCE_LEVELS[0].value, 0.30),
+        (ADX_REFERENCE_LEVELS[1].value, 0.55),
+        (40.0, 0.35),
+    ] {
+        if let Some(sy) = vp.price_to_screen_y(lvl) {
+            let y = sy as f32;
+            if y >= plot_rect.top() && y <= plot_rect.bottom() {
+                painter.line_segment(
+                    [
+                        Pos2::new(plot_rect.left(), y),
+                        Pos2::new(plot_rect.right(), y),
+                    ],
+                    Stroke::new(1.0, palette::IND_ADX_LINE.gamma_multiply(alpha)),
+                );
+            }
+        }
+    }
+    paint_conflated_line_series(
+        painter,
+        &cache.adx.plus_di,
+        Some(&cache.plus_di_idx),
+        culling_range.clone(),
+        conflation_factor,
+        vp,
+        Stroke::new(1.25, palette::IND_PLUS_DI),
+    );
+    paint_conflated_line_series(
+        painter,
+        &cache.adx.minus_di,
+        Some(&cache.minus_di_idx),
+        culling_range.clone(),
+        conflation_factor,
+        vp,
+        Stroke::new(1.25, palette::IND_MINUS_DI),
+    );
+    paint_conflated_line_series(
+        painter,
+        &cache.adx.adx,
+        Some(&cache.adx_line_idx),
+        culling_range,
+        conflation_factor,
+        vp,
+        Stroke::new(1.65, palette::IND_ADX_LINE),
+    );
+}
+
+fn paint_stochastic_pane(
+    painter: &egui::Painter,
+    plot_rect: Rect,
+    cache: &IndicatorCache,
+    culling_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    vp: &PaneViewport<'_>,
+) {
+    let lower_ref = STOCH_REFERENCE_LEVELS[0].value;
+    let mid_ref = STOCH_REFERENCE_LEVELS[1].value;
+    let upper_ref = STOCH_REFERENCE_LEVELS[2].value;
+
+    if let (Some(y_hi), Some(y_lo)) = (
+        vp.price_to_screen_y(upper_ref),
+        vp.price_to_screen_y(lower_ref),
+    ) {
+        let top_y = (y_hi as f32)
+            .min(y_lo as f32)
+            .clamp(plot_rect.top(), plot_rect.bottom());
+        let bot_y = (y_hi as f32)
+            .max(y_lo as f32)
+            .clamp(plot_rect.top(), plot_rect.bottom());
+        if bot_y > top_y {
+            painter.rect_filled(
+                Rect::from_min_max(
+                    Pos2::new(plot_rect.left(), top_y),
+                    Pos2::new(plot_rect.right(), bot_y),
+                ),
+                0.0,
+                palette::IND_RSI_BAND_FILL,
+            );
+        }
+    }
+    for (lvl, alpha) in [(upper_ref, 0.50), (mid_ref, 0.25), (lower_ref, 0.50)] {
+        if let Some(sy) = vp.price_to_screen_y(lvl) {
+            let y = sy as f32;
+            if y >= plot_rect.top() && y <= plot_rect.bottom() {
+                painter.line_segment(
+                    [
+                        Pos2::new(plot_rect.left(), y),
+                        Pos2::new(plot_rect.right(), y),
+                    ],
+                    Stroke::new(1.0, palette::IND_STOCH_K.gamma_multiply(alpha)),
+                );
+            }
+        }
+    }
+    paint_conflated_line_series(
+        painter,
+        &cache.stochastic.slow_d,
+        Some(&cache.stoch_d_idx),
+        culling_range.clone(),
+        conflation_factor,
+        vp,
+        Stroke::new(1.3, palette::IND_STOCH_D),
+    );
+    paint_conflated_line_series(
+        painter,
+        &cache.stochastic.slow_k,
+        Some(&cache.stoch_k_idx),
+        culling_range,
+        conflation_factor,
+        vp,
+        Stroke::new(1.55, palette::IND_STOCH_K),
+    );
+}
+
+fn paint_cci_pane(
+    painter: &egui::Painter,
+    plot_rect: Rect,
+    cache: &IndicatorCache,
+    culling_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    vp: &PaneViewport<'_>,
+) {
+    let lower_ref = CCI_REFERENCE_LEVELS[0].value;
+    let mid_ref = CCI_REFERENCE_LEVELS[1].value;
+    let upper_ref = CCI_REFERENCE_LEVELS[2].value;
+
+    if let (Some(y_hi), Some(y_lo)) = (
+        vp.price_to_screen_y(upper_ref),
+        vp.price_to_screen_y(lower_ref),
+    ) {
+        let top_y = (y_hi as f32)
+            .min(y_lo as f32)
+            .clamp(plot_rect.top(), plot_rect.bottom());
+        let bot_y = (y_hi as f32)
+            .max(y_lo as f32)
+            .clamp(plot_rect.top(), plot_rect.bottom());
+        if bot_y > top_y {
+            painter.rect_filled(
+                Rect::from_min_max(
+                    Pos2::new(plot_rect.left(), top_y),
+                    Pos2::new(plot_rect.right(), bot_y),
+                ),
+                0.0,
+                palette::IND_RSI_BAND_FILL,
+            );
+        }
+    }
+    for (lvl, alpha) in [(upper_ref, 0.50), (mid_ref, 0.30), (lower_ref, 0.50)] {
+        if let Some(sy) = vp.price_to_screen_y(lvl) {
+            let y = sy as f32;
+            if y >= plot_rect.top() && y <= plot_rect.bottom() {
+                painter.line_segment(
+                    [
+                        Pos2::new(plot_rect.left(), y),
+                        Pos2::new(plot_rect.right(), y),
+                    ],
+                    Stroke::new(1.0, palette::IND_CCI.gamma_multiply(alpha)),
+                );
+            }
+        }
+    }
+    paint_conflated_line_series(
+        painter,
+        &cache.cci,
+        Some(&cache.cci_idx),
+        culling_range,
+        conflation_factor,
+        vp,
+        Stroke::new(1.5, palette::IND_CCI),
+    );
+}
+
+fn paint_mfi_pane(
+    painter: &egui::Painter,
+    plot_rect: Rect,
+    cache: &IndicatorCache,
+    culling_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    vp: &PaneViewport<'_>,
+) {
+    let lower_ref = MFI_REFERENCE_LEVELS[0].value;
+    let mid_ref = MFI_REFERENCE_LEVELS[1].value;
+    let upper_ref = MFI_REFERENCE_LEVELS[2].value;
+
+    if let (Some(y_hi), Some(y_lo)) = (
+        vp.price_to_screen_y(upper_ref),
+        vp.price_to_screen_y(lower_ref),
+    ) {
+        let top_y = (y_hi as f32)
+            .min(y_lo as f32)
+            .clamp(plot_rect.top(), plot_rect.bottom());
+        let bot_y = (y_hi as f32)
+            .max(y_lo as f32)
+            .clamp(plot_rect.top(), plot_rect.bottom());
+        if bot_y > top_y {
+            painter.rect_filled(
+                Rect::from_min_max(
+                    Pos2::new(plot_rect.left(), top_y),
+                    Pos2::new(plot_rect.right(), bot_y),
+                ),
+                0.0,
+                palette::IND_RSI_BAND_FILL,
+            );
+        }
+    }
+    for (lvl, alpha) in [(upper_ref, 0.50), (mid_ref, 0.25), (lower_ref, 0.50)] {
+        if let Some(sy) = vp.price_to_screen_y(lvl) {
+            let y = sy as f32;
+            if y >= plot_rect.top() && y <= plot_rect.bottom() {
+                painter.line_segment(
+                    [
+                        Pos2::new(plot_rect.left(), y),
+                        Pos2::new(plot_rect.right(), y),
+                    ],
+                    Stroke::new(1.0, palette::IND_MFI.gamma_multiply(alpha)),
+                );
+            }
+        }
+    }
+    paint_conflated_line_series(
+        painter,
+        &cache.mfi,
+        Some(&cache.mfi_idx),
+        culling_range,
+        conflation_factor,
+        vp,
+        Stroke::new(1.5, palette::IND_MFI),
+    );
+}
+
+fn paint_proxy_bb_pane(
+    painter: &egui::Painter,
+    plot_rect: Rect,
+    cache: &IndicatorCache,
+    culling_range: std::ops::Range<usize>,
+    conflation_factor: usize,
+    vp: &PaneViewport<'_>,
+) {
+    for (lvl, alpha, stroke_w) in [
+        (PROXY_BB_REFERENCE_LEVELS[0].value, 0.35, 1.0),
+        (PROXY_BB_REFERENCE_LEVELS[1].value, 0.65, 1.15),
+        (PROXY_BB_REFERENCE_LEVELS[2].value, 0.35, 1.0),
+    ] {
+        if let Some(sy) = vp.price_to_screen_y(lvl) {
+            let y = sy as f32;
+            if y >= plot_rect.top() && y <= plot_rect.bottom() {
+                painter.line_segment(
+                    [
+                        Pos2::new(plot_rect.left(), y),
+                        Pos2::new(plot_rect.right(), y),
+                    ],
+                    Stroke::new(stroke_w, palette::TEXT_MUTED.gamma_multiply(alpha)),
+                );
+            }
+        }
+    }
+    paint_conflated_line_series(
+        painter,
+        &cache.proxy_bb.t50_values,
+        Some(&cache.proxy_bb_t50_idx),
+        culling_range.clone(),
+        conflation_factor,
+        vp,
+        Stroke::new(1.25, palette::IND_PROXY_BB_T50),
+    );
+    paint_conflated_line_series(
+        painter,
+        &cache.proxy_bb.t05_values,
+        Some(&cache.proxy_bb_t05_idx),
+        culling_range.clone(),
+        conflation_factor,
+        vp,
+        Stroke::new(1.20, palette::IND_PROXY_BB_T05),
+    );
+    paint_conflated_line_series(
+        painter,
+        &cache.proxy_bb.t20_values,
+        Some(&cache.proxy_bb_t20_idx),
+        culling_range,
+        conflation_factor,
+        vp,
+        Stroke::new(1.75, palette::IND_PROXY_BB_T20),
+    );
+}
+
 #[inline]
 fn resolve_macd_histogram_bar_ys(
     zero_y: f32,
@@ -7894,6 +8750,125 @@ fn paint_main_overlay_hud(
             },
         );
     }
+    if indicators.show_keltner {
+        append_sep(&mut job, &mut has_item);
+        let fmt_opt = |s: &[Option<f64>]| {
+            s.get(idx).copied().flatten().map_or_else(
+                || "—".to_owned(),
+                |v| price_scale.format_price(v, base_value),
+            )
+        };
+        job.append(
+            &format!(
+                "KC({},{},{:.1}) {} / {} / {}",
+                indicators.keltner_ema_period,
+                indicators.keltner_atr_period,
+                indicators.keltner_multiplier,
+                fmt_opt(&cache.keltner.upper),
+                fmt_opt(&cache.keltner.middle),
+                fmt_opt(&cache.keltner.lower),
+            ),
+            0.0,
+            TextFormat {
+                font_id: font.clone(),
+                color: palette::IND_KELTNER_BORDER,
+                ..Default::default()
+            },
+        );
+    }
+    if indicators.show_supertrend {
+        append_sep(&mut job, &mut has_item);
+        let st_px = cache.supertrend.trend.get(idx).copied().flatten();
+        let st_dir = cache.supertrend.direction.get(idx).copied().flatten();
+        let px_str = st_px.map_or_else(
+            || "—".to_owned(),
+            |v| price_scale.format_price(v, base_value),
+        );
+        let (dir_lbl, col) = match st_dir {
+            Some(d) if d >= 0 => ("BULL", palette::IND_SUPERTREND_BULL),
+            Some(_) => ("BEAR", palette::IND_SUPERTREND_BEAR),
+            None => ("—", palette::TEXT_MUTED),
+        };
+        job.append(
+            &format!(
+                "ST({},{:.1}) {px_str} [{dir_lbl}]",
+                indicators.supertrend_period, indicators.supertrend_multiplier
+            ),
+            0.0,
+            TextFormat {
+                font_id: font.clone(),
+                color: col,
+                ..Default::default()
+            },
+        );
+    }
+    if indicators.show_psar {
+        append_sep(&mut job, &mut has_item);
+        let sar_px = cache.psar.sar.get(idx).copied().flatten();
+        let is_long = cache.psar.is_long.get(idx).copied().flatten();
+        let px_str = sar_px.map_or_else(
+            || "—".to_owned(),
+            |v| price_scale.format_price(v, base_value),
+        );
+        let col = match is_long {
+            Some(true) => palette::IND_PSAR_BULL,
+            Some(false) => palette::IND_PSAR_BEAR,
+            None => palette::TEXT_MUTED,
+        };
+        job.append(
+            &format!(
+                "PSAR({:.2},{:.2}) {px_str}",
+                indicators.psar_af_start, indicators.psar_af_max
+            ),
+            0.0,
+            TextFormat {
+                font_id: font.clone(),
+                color: col,
+                ..Default::default()
+            },
+        );
+    }
+    if indicators.show_volume_sma {
+        append_sep(&mut job, &mut has_item);
+        let vs_str = cache
+            .volume_sma
+            .get(idx)
+            .copied()
+            .flatten()
+            .map_or_else(|| "—".to_owned(), format_compact_signed);
+        job.append(
+            &format!("VolSMA({}) {vs_str}", indicators.volume_sma_period),
+            0.0,
+            TextFormat {
+                font_id: font.clone(),
+                color: palette::IND_VOLUME_SMA,
+                ..Default::default()
+            },
+        );
+    }
+    if indicators.show_candle_patterns
+        && let Some(pat) = cache.candle_patterns.get(idx)
+    {
+        append_sep(&mut job, &mut has_item);
+        let badge_txt = pat.primary_badge.map_or("None", |k| k.short_badge());
+        let col = match pat.primary_badge {
+            Some(k) if k.is_bullish() => palette::BULLISH,
+            Some(k) if k.is_bearish() => palette::BEARISH,
+            _ => palette::TEXT_MUTED,
+        };
+        let score_str = pat
+            .candle_score
+            .map_or_else(|| "—".to_owned(), |s| format!("{s:+.2}"));
+        job.append(
+            &format!("PAT {badge_txt} ({score_str})"),
+            0.0,
+            TextFormat {
+                font_id: font.clone(),
+                color: col,
+                ..Default::default()
+            },
+        );
+    }
     if let Some((bench_sym, cmp_series, cmp_scale)) = compare_info {
         append_sep(&mut job, &mut has_item);
         let val = cmp_series
@@ -8117,6 +9092,186 @@ fn paint_oscillator_hud(
                         } else {
                             palette::BEARISH
                         },
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+        OscillatorPaneId::Adx => {
+            let fmt_v = |s: &[Option<f64>]| {
+                s.get(idx)
+                    .copied()
+                    .flatten()
+                    .map_or_else(|| "—".to_owned(), |v| format!("{v:.2}"))
+            };
+            job.append(
+                &format!(
+                    "ADX({}) {}   ",
+                    indicators.adx_period,
+                    fmt_v(&cache.adx.adx)
+                ),
+                0.0,
+                TextFormat {
+                    font_id: font.clone(),
+                    color: palette::IND_ADX_LINE,
+                    ..Default::default()
+                },
+            );
+            job.append(
+                &format!("+DI {}   ", fmt_v(&cache.adx.plus_di)),
+                0.0,
+                TextFormat {
+                    font_id: font.clone(),
+                    color: palette::IND_PLUS_DI,
+                    ..Default::default()
+                },
+            );
+            job.append(
+                &format!("-DI {}", fmt_v(&cache.adx.minus_di)),
+                0.0,
+                TextFormat {
+                    font_id: font,
+                    color: palette::IND_MINUS_DI,
+                    ..Default::default()
+                },
+            );
+        }
+        OscillatorPaneId::Stochastic => {
+            let fmt_v = |s: &[Option<f64>]| {
+                s.get(idx)
+                    .copied()
+                    .flatten()
+                    .map_or_else(|| "—".to_owned(), |v| format!("{v:.2}"))
+            };
+            job.append(
+                &format!(
+                    "STOCH({},{},{})  ",
+                    indicators.stoch_k_period, indicators.stoch_k_smooth, indicators.stoch_d_period
+                ),
+                0.0,
+                TextFormat {
+                    font_id: font.clone(),
+                    color: palette::TEXT_PRIMARY,
+                    ..Default::default()
+                },
+            );
+            job.append(
+                &format!("%K {}   ", fmt_v(&cache.stochastic.slow_k)),
+                0.0,
+                TextFormat {
+                    font_id: font.clone(),
+                    color: palette::IND_STOCH_K,
+                    ..Default::default()
+                },
+            );
+            job.append(
+                &format!("%D {}", fmt_v(&cache.stochastic.slow_d)),
+                0.0,
+                TextFormat {
+                    font_id: font,
+                    color: palette::IND_STOCH_D,
+                    ..Default::default()
+                },
+            );
+        }
+        OscillatorPaneId::Cci => {
+            let val = cache
+                .cci
+                .get(idx)
+                .copied()
+                .flatten()
+                .map_or_else(|| "—".to_owned(), |v| format!("{v:+.2}"));
+            job.append(
+                &format!("CCI({})  {val}", indicators.cci_period),
+                0.0,
+                TextFormat {
+                    font_id: font,
+                    color: palette::IND_CCI,
+                    ..Default::default()
+                },
+            );
+        }
+        OscillatorPaneId::Mfi => {
+            let val = cache
+                .mfi
+                .get(idx)
+                .copied()
+                .flatten()
+                .map_or_else(|| "—".to_owned(), |v| format!("{v:.2}"));
+            job.append(
+                &format!("MFI({})  {val}", indicators.mfi_period),
+                0.0,
+                TextFormat {
+                    font_id: font,
+                    color: palette::IND_MFI,
+                    ..Default::default()
+                },
+            );
+        }
+        OscillatorPaneId::ProxyBb => {
+            let bar_pt = cache.proxy_bb.points.get(idx);
+            let fmt_h = |h: BBHorizon| {
+                bar_pt
+                    .and_then(|p| p.horizon(h).bb_value)
+                    .map_or_else(|| "—".to_owned(), |v| format!("{v:.2}"))
+            };
+            job.append(
+                "PROXY-BB [OHLCV]  ",
+                0.0,
+                TextFormat {
+                    font_id: font.clone(),
+                    color: palette::TEXT_PRIMARY,
+                    ..Default::default()
+                },
+            );
+            job.append(
+                &format!("T05 {}   ", fmt_h(BBHorizon::T05)),
+                0.0,
+                TextFormat {
+                    font_id: font.clone(),
+                    color: palette::IND_PROXY_BB_T05,
+                    ..Default::default()
+                },
+            );
+            job.append(
+                &format!("T20 {}   ", fmt_h(BBHorizon::T20)),
+                0.0,
+                TextFormat {
+                    font_id: font.clone(),
+                    color: palette::IND_PROXY_BB_T20,
+                    ..Default::default()
+                },
+            );
+            job.append(
+                &format!("T50 {}", fmt_h(BBHorizon::T50)),
+                0.0,
+                TextFormat {
+                    font_id: font.clone(),
+                    color: palette::IND_PROXY_BB_T50,
+                    ..Default::default()
+                },
+            );
+            if let Some(t20) = bar_pt.map(|p| p.horizon(BBHorizon::T20))
+                && t20.bb_value.is_some()
+            {
+                let reg_col = match t20.regime {
+                    crate::indicators::BBRegime::Positive => palette::BULLISH,
+                    crate::indicators::BBRegime::Negative => palette::BEARISH,
+                    crate::indicators::BBRegime::Neutral | crate::indicators::BBRegime::Unknown => {
+                        palette::TEXT_MUTED
+                    }
+                };
+                job.append(
+                    &format!(
+                        "   [{} · {} · run {}]",
+                        t20.regime.code(),
+                        t20.direction.code(),
+                        t20.regime_run_length
+                    ),
+                    0.0,
+                    TextFormat {
+                        font_id: font,
+                        color: reg_col,
                         ..Default::default()
                     },
                 );
@@ -8618,7 +9773,7 @@ fn refresh_main_pane_autoscale_and_bounds(
         .first()
         .map_or_else(|| candles[0].close, |c| c.close);
 
-    let (mut raw_min, mut raw_max, max_vol) = if let Some((_, cache)) = overlays {
+    let (mut raw_min, mut raw_max, mut max_vol) = if let Some((_, cache)) = overlays {
         cache
             .candle_idx
             .autoscale_bounds(candles, strict_range.clone(), conflation_factor)
@@ -8639,6 +9794,16 @@ fn refresh_main_pane_autoscale_and_bounds(
         }
         (r_min, r_max, m_vol)
     };
+    if show_volume
+        && let Some((cfg, cache)) = overlays
+        && cfg.show_volume_sma
+        && let Some((_, vs_max)) = cache
+            .volume_sma_idx
+            .range_bounds(&cache.volume_sma, strict_range.clone())
+        && vs_max.is_finite()
+    {
+        max_vol = max_vol.max(vs_max);
+    }
 
     // Include visible main-pane overlays (`SMA`, `EMA`, `BollingerBands`, `Session VWAP`, `Compare`) in `main_price_scale` autoscale!
     if main_price_scale.is_auto_scale() {
@@ -8734,6 +9899,32 @@ fn refresh_main_pane_autoscale_and_bounds(
                             .range_bounds(&cache.ichimoku.senkou_b, kumo_range),
                     );
                 }
+            }
+            if cfg.show_keltner {
+                merge_ov(
+                    cache
+                        .kc_upper_idx
+                        .range_bounds(&cache.keltner.upper, strict_range.clone()),
+                );
+                merge_ov(
+                    cache
+                        .kc_lower_idx
+                        .range_bounds(&cache.keltner.lower, strict_range.clone()),
+                );
+            }
+            if cfg.show_supertrend {
+                merge_ov(
+                    cache
+                        .supertrend_idx
+                        .range_bounds(&cache.supertrend.trend, strict_range.clone()),
+                );
+            }
+            if cfg.show_psar {
+                merge_ov(
+                    cache
+                        .psar_idx
+                        .range_bounds(&cache.psar.sar, strict_range.clone()),
+                );
             }
         }
         if let Some((_, cmp_series, cmp_idx)) = compare_overlay {
@@ -8862,6 +10053,83 @@ fn refresh_oscillator_autoscale(
                 max_v = 105.0;
             }
             price_scale.autoscale_raw_bounds(min_v.min(99.5), max_v.max(100.5), 100.0);
+        }
+        OscillatorPaneId::Adx => {
+            let mut min_v = 0.0_f64;
+            let mut max_v = 50.0_f64;
+            for (lo, hi) in [
+                cache
+                    .adx_line_idx
+                    .range_bounds(&cache.adx.adx, strict_range.clone()),
+                cache
+                    .plus_di_idx
+                    .range_bounds(&cache.adx.plus_di, strict_range.clone()),
+                cache
+                    .minus_di_idx
+                    .range_bounds(&cache.adx.minus_di, strict_range),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                min_v = min_v.min(lo);
+                max_v = max_v.max(hi);
+            }
+            price_scale.autoscale_raw_bounds(min_v.min(0.0), max_v.max(50.0), 25.0);
+        }
+        OscillatorPaneId::Stochastic => {
+            let mut min_v = 0.0_f64;
+            let mut max_v = 100.0_f64;
+            for (lo, hi) in [
+                cache
+                    .stoch_k_idx
+                    .range_bounds(&cache.stochastic.slow_k, strict_range.clone()),
+                cache
+                    .stoch_d_idx
+                    .range_bounds(&cache.stochastic.slow_d, strict_range),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                min_v = min_v.min(lo);
+                max_v = max_v.max(hi);
+            }
+            price_scale.autoscale_raw_bounds(min_v.min(0.0), max_v.max(100.0), 50.0);
+        }
+        OscillatorPaneId::Cci => {
+            let (min_v, max_v) = cache
+                .cci_idx
+                .range_bounds(&cache.cci, strict_range)
+                .unwrap_or((-120.0, 120.0));
+            price_scale.autoscale_raw_bounds(min_v.min(-110.0), max_v.max(110.0), 1.0);
+        }
+        OscillatorPaneId::Mfi => {
+            let (min_v, max_v) = cache
+                .mfi_idx
+                .range_bounds(&cache.mfi, strict_range)
+                .unwrap_or((0.0, 100.0));
+            price_scale.autoscale_raw_bounds(min_v.min(0.0), max_v.max(100.0), 50.0);
+        }
+        OscillatorPaneId::ProxyBb => {
+            let mut min_v = 0.0_f64;
+            let mut max_v = 100.0_f64;
+            for (lo, hi) in [
+                cache
+                    .proxy_bb_t05_idx
+                    .range_bounds(&cache.proxy_bb.t05_values, strict_range.clone()),
+                cache
+                    .proxy_bb_t20_idx
+                    .range_bounds(&cache.proxy_bb.t20_values, strict_range.clone()),
+                cache
+                    .proxy_bb_t50_idx
+                    .range_bounds(&cache.proxy_bb.t50_values, strict_range),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                min_v = min_v.min(lo);
+                max_v = max_v.max(hi);
+            }
+            price_scale.autoscale_raw_bounds(min_v.min(0.0), max_v.max(100.0), 50.0);
         }
         OscillatorPaneId::Equity => {
             if let Some(ms) = multi_strategy_overlay {

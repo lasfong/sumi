@@ -55,6 +55,11 @@ pub struct WorkspacePaneStretches {
     pub rs: f32,
     pub cvd: f32,
     pub equity: f32,
+    pub adx: f32,
+    pub stochastic: f32,
+    pub cci: f32,
+    pub mfi: f32,
+    pub proxy_bb: f32,
 }
 
 impl Default for WorkspacePaneStretches {
@@ -67,6 +72,11 @@ impl Default for WorkspacePaneStretches {
             rs: 1.0,
             cvd: 1.0,
             equity: 1.25,
+            adx: 1.0,
+            stochastic: 1.0,
+            cci: 1.0,
+            mfi: 1.0,
+            proxy_bb: 1.0,
         }
     }
 }
@@ -80,6 +90,11 @@ impl WorkspacePaneStretches {
         self.rs = sanitize_stretch_f32(self.rs, 1.0);
         self.cvd = sanitize_stretch_f32(self.cvd, 1.0);
         self.equity = sanitize_stretch_f32(self.equity, 1.25);
+        self.adx = sanitize_stretch_f32(self.adx, 1.0);
+        self.stochastic = sanitize_stretch_f32(self.stochastic, 1.0);
+        self.cci = sanitize_stretch_f32(self.cci, 1.0);
+        self.mfi = sanitize_stretch_f32(self.mfi, 1.0);
+        self.proxy_bb = sanitize_stretch_f32(self.proxy_bb, 1.0);
     }
 }
 
@@ -1062,7 +1077,72 @@ fn encode_json_indicators(out: &mut String, ind: &IndicatorConfig) {
         "        \"cvd_reset_mode\": \"{:?}\",",
         ind.cvd_reset_mode
     );
-    let _ = writeln!(out, "        \"cvd_sma_period\": {}", ind.cvd_sma_period);
+    let _ = writeln!(out, "        \"cvd_sma_period\": {},", ind.cvd_sma_period);
+    let _ = writeln!(out, "        \"show_supertrend\": {},", ind.show_supertrend);
+    let _ = writeln!(
+        out,
+        "        \"supertrend_period\": {},",
+        ind.supertrend_period
+    );
+    let _ = writeln!(
+        out,
+        "        \"supertrend_multiplier\": {},",
+        fmt_f64(ind.supertrend_multiplier)
+    );
+    let _ = writeln!(out, "        \"show_psar\": {},", ind.show_psar);
+    let _ = writeln!(
+        out,
+        "        \"psar_af_start\": {},",
+        fmt_f64(ind.psar_af_start)
+    );
+    let _ = writeln!(
+        out,
+        "        \"psar_af_step\": {},",
+        fmt_f64(ind.psar_af_step)
+    );
+    let _ = writeln!(
+        out,
+        "        \"psar_af_max\": {},",
+        fmt_f64(ind.psar_af_max)
+    );
+    let _ = writeln!(out, "        \"show_keltner\": {},", ind.show_keltner);
+    let _ = writeln!(
+        out,
+        "        \"keltner_ema_period\": {},",
+        ind.keltner_ema_period
+    );
+    let _ = writeln!(
+        out,
+        "        \"keltner_atr_period\": {},",
+        ind.keltner_atr_period
+    );
+    let _ = writeln!(
+        out,
+        "        \"keltner_multiplier\": {},",
+        fmt_f64(ind.keltner_multiplier)
+    );
+    let _ = writeln!(out, "        \"show_volume_sma\": {},", ind.show_volume_sma);
+    let _ = writeln!(
+        out,
+        "        \"volume_sma_period\": {},",
+        ind.volume_sma_period
+    );
+    let _ = writeln!(
+        out,
+        "        \"show_candle_patterns\": {},",
+        ind.show_candle_patterns
+    );
+    let _ = writeln!(out, "        \"show_adx\": {},", ind.show_adx);
+    let _ = writeln!(out, "        \"adx_period\": {},", ind.adx_period);
+    let _ = writeln!(out, "        \"show_stochastic\": {},", ind.show_stochastic);
+    let _ = writeln!(out, "        \"stoch_k_period\": {},", ind.stoch_k_period);
+    let _ = writeln!(out, "        \"stoch_k_smooth\": {},", ind.stoch_k_smooth);
+    let _ = writeln!(out, "        \"stoch_d_period\": {},", ind.stoch_d_period);
+    let _ = writeln!(out, "        \"show_cci\": {},", ind.show_cci);
+    let _ = writeln!(out, "        \"cci_period\": {},", ind.cci_period);
+    let _ = writeln!(out, "        \"show_mfi\": {},", ind.show_mfi);
+    let _ = writeln!(out, "        \"mfi_period\": {},", ind.mfi_period);
+    let _ = writeln!(out, "        \"show_proxy_bb\": {}", ind.show_proxy_bb);
     out.push_str("      }");
 }
 
@@ -1074,7 +1154,12 @@ fn encode_json_stretches(out: &mut String, st: &WorkspacePaneStretches) {
     let _ = writeln!(out, "        \"atr\": {},", fmt_f32(st.atr));
     let _ = writeln!(out, "        \"rs\": {},", fmt_f32(st.rs));
     let _ = writeln!(out, "        \"cvd\": {},", fmt_f32(st.cvd));
-    let _ = writeln!(out, "        \"equity\": {}", fmt_f32(st.equity));
+    let _ = writeln!(out, "        \"equity\": {},", fmt_f32(st.equity));
+    let _ = writeln!(out, "        \"adx\": {},", fmt_f32(st.adx));
+    let _ = writeln!(out, "        \"stochastic\": {},", fmt_f32(st.stochastic));
+    let _ = writeln!(out, "        \"cci\": {},", fmt_f32(st.cci));
+    let _ = writeln!(out, "        \"mfi\": {},", fmt_f32(st.mfi));
+    let _ = writeln!(out, "        \"proxy_bb\": {}", fmt_f32(st.proxy_bb));
     out.push_str("      }");
 }
 
@@ -1303,6 +1388,95 @@ fn encode_ron_indicators(out: &mut String, ind: &IndicatorConfig) {
         "                cvd_sma_period: {},",
         ind.cvd_sma_period
     );
+    let _ = writeln!(
+        out,
+        "                show_supertrend: {},",
+        ind.show_supertrend
+    );
+    let _ = writeln!(
+        out,
+        "                supertrend_period: {},",
+        ind.supertrend_period
+    );
+    let _ = writeln!(
+        out,
+        "                supertrend_multiplier: {},",
+        fmt_f64(ind.supertrend_multiplier)
+    );
+    let _ = writeln!(out, "                show_psar: {},", ind.show_psar);
+    let _ = writeln!(
+        out,
+        "                psar_af_start: {},",
+        fmt_f64(ind.psar_af_start)
+    );
+    let _ = writeln!(
+        out,
+        "                psar_af_step: {},",
+        fmt_f64(ind.psar_af_step)
+    );
+    let _ = writeln!(
+        out,
+        "                psar_af_max: {},",
+        fmt_f64(ind.psar_af_max)
+    );
+    let _ = writeln!(out, "                show_keltner: {},", ind.show_keltner);
+    let _ = writeln!(
+        out,
+        "                keltner_ema_period: {},",
+        ind.keltner_ema_period
+    );
+    let _ = writeln!(
+        out,
+        "                keltner_atr_period: {},",
+        ind.keltner_atr_period
+    );
+    let _ = writeln!(
+        out,
+        "                keltner_multiplier: {},",
+        fmt_f64(ind.keltner_multiplier)
+    );
+    let _ = writeln!(
+        out,
+        "                show_volume_sma: {},",
+        ind.show_volume_sma
+    );
+    let _ = writeln!(
+        out,
+        "                volume_sma_period: {},",
+        ind.volume_sma_period
+    );
+    let _ = writeln!(
+        out,
+        "                show_candle_patterns: {},",
+        ind.show_candle_patterns
+    );
+    let _ = writeln!(out, "                show_adx: {},", ind.show_adx);
+    let _ = writeln!(out, "                adx_period: {},", ind.adx_period);
+    let _ = writeln!(
+        out,
+        "                show_stochastic: {},",
+        ind.show_stochastic
+    );
+    let _ = writeln!(
+        out,
+        "                stoch_k_period: {},",
+        ind.stoch_k_period
+    );
+    let _ = writeln!(
+        out,
+        "                stoch_k_smooth: {},",
+        ind.stoch_k_smooth
+    );
+    let _ = writeln!(
+        out,
+        "                stoch_d_period: {},",
+        ind.stoch_d_period
+    );
+    let _ = writeln!(out, "                show_cci: {},", ind.show_cci);
+    let _ = writeln!(out, "                cci_period: {},", ind.cci_period);
+    let _ = writeln!(out, "                show_mfi: {},", ind.show_mfi);
+    let _ = writeln!(out, "                mfi_period: {},", ind.mfi_period);
+    let _ = writeln!(out, "                show_proxy_bb: {},", ind.show_proxy_bb);
     out.push_str("            ),\n");
 }
 
@@ -1315,6 +1489,15 @@ fn encode_ron_stretches(out: &mut String, st: &WorkspacePaneStretches) {
     let _ = writeln!(out, "                rs: {},", fmt_f32(st.rs));
     let _ = writeln!(out, "                cvd: {},", fmt_f32(st.cvd));
     let _ = writeln!(out, "                equity: {},", fmt_f32(st.equity));
+    let _ = writeln!(out, "                adx: {},", fmt_f32(st.adx));
+    let _ = writeln!(
+        out,
+        "                stochastic: {},",
+        fmt_f32(st.stochastic)
+    );
+    let _ = writeln!(out, "                cci: {},", fmt_f32(st.cci));
+    let _ = writeln!(out, "                mfi: {},", fmt_f32(st.mfi));
+    let _ = writeln!(out, "                proxy_bb: {},", fmt_f32(st.proxy_bb));
     out.push_str("            ),\n");
 }
 
@@ -2254,6 +2437,31 @@ fn decode_indicators(val: &DocValue) -> Result<IndicatorConfig, WorkspaceTemplat
             "show_cvd",
             "cvd_reset_mode",
             "cvd_sma_period",
+            "show_supertrend",
+            "supertrend_period",
+            "supertrend_multiplier",
+            "show_psar",
+            "psar_af_start",
+            "psar_af_step",
+            "psar_af_max",
+            "show_keltner",
+            "keltner_ema_period",
+            "keltner_atr_period",
+            "keltner_multiplier",
+            "show_volume_sma",
+            "volume_sma_period",
+            "show_candle_patterns",
+            "show_adx",
+            "adx_period",
+            "show_stochastic",
+            "stoch_k_period",
+            "stoch_k_smooth",
+            "stoch_d_period",
+            "show_cci",
+            "cci_period",
+            "show_mfi",
+            "mfi_period",
+            "show_proxy_bb",
         ],
     )?;
     let mut c = IndicatorConfig::default();
@@ -2387,6 +2595,81 @@ fn decode_indicators(val: &DocValue) -> Result<IndicatorConfig, WorkspaceTemplat
     if let Some(v) = find_field(f, "cvd_sma_period") {
         c.cvd_sma_period = expect_usize(v, "indicators.cvd_sma_period")?;
     }
+    if let Some(v) = find_field(f, "show_supertrend") {
+        c.show_supertrend = expect_bool(v, "indicators.show_supertrend")?;
+    }
+    if let Some(v) = find_field(f, "supertrend_period") {
+        c.supertrend_period = expect_usize(v, "indicators.supertrend_period")?;
+    }
+    if let Some(v) = find_field(f, "supertrend_multiplier") {
+        c.supertrend_multiplier = expect_f64(v, "indicators.supertrend_multiplier")?;
+    }
+    if let Some(v) = find_field(f, "show_psar") {
+        c.show_psar = expect_bool(v, "indicators.show_psar")?;
+    }
+    if let Some(v) = find_field(f, "psar_af_start") {
+        c.psar_af_start = expect_f64(v, "indicators.psar_af_start")?;
+    }
+    if let Some(v) = find_field(f, "psar_af_step") {
+        c.psar_af_step = expect_f64(v, "indicators.psar_af_step")?;
+    }
+    if let Some(v) = find_field(f, "psar_af_max") {
+        c.psar_af_max = expect_f64(v, "indicators.psar_af_max")?;
+    }
+    if let Some(v) = find_field(f, "show_keltner") {
+        c.show_keltner = expect_bool(v, "indicators.show_keltner")?;
+    }
+    if let Some(v) = find_field(f, "keltner_ema_period") {
+        c.keltner_ema_period = expect_usize(v, "indicators.keltner_ema_period")?;
+    }
+    if let Some(v) = find_field(f, "keltner_atr_period") {
+        c.keltner_atr_period = expect_usize(v, "indicators.keltner_atr_period")?;
+    }
+    if let Some(v) = find_field(f, "keltner_multiplier") {
+        c.keltner_multiplier = expect_f64(v, "indicators.keltner_multiplier")?;
+    }
+    if let Some(v) = find_field(f, "show_volume_sma") {
+        c.show_volume_sma = expect_bool(v, "indicators.show_volume_sma")?;
+    }
+    if let Some(v) = find_field(f, "volume_sma_period") {
+        c.volume_sma_period = expect_usize(v, "indicators.volume_sma_period")?;
+    }
+    if let Some(v) = find_field(f, "show_candle_patterns") {
+        c.show_candle_patterns = expect_bool(v, "indicators.show_candle_patterns")?;
+    }
+    if let Some(v) = find_field(f, "show_adx") {
+        c.show_adx = expect_bool(v, "indicators.show_adx")?;
+    }
+    if let Some(v) = find_field(f, "adx_period") {
+        c.adx_period = expect_usize(v, "indicators.adx_period")?;
+    }
+    if let Some(v) = find_field(f, "show_stochastic") {
+        c.show_stochastic = expect_bool(v, "indicators.show_stochastic")?;
+    }
+    if let Some(v) = find_field(f, "stoch_k_period") {
+        c.stoch_k_period = expect_usize(v, "indicators.stoch_k_period")?;
+    }
+    if let Some(v) = find_field(f, "stoch_k_smooth") {
+        c.stoch_k_smooth = expect_usize(v, "indicators.stoch_k_smooth")?;
+    }
+    if let Some(v) = find_field(f, "stoch_d_period") {
+        c.stoch_d_period = expect_usize(v, "indicators.stoch_d_period")?;
+    }
+    if let Some(v) = find_field(f, "show_cci") {
+        c.show_cci = expect_bool(v, "indicators.show_cci")?;
+    }
+    if let Some(v) = find_field(f, "cci_period") {
+        c.cci_period = expect_usize(v, "indicators.cci_period")?;
+    }
+    if let Some(v) = find_field(f, "show_mfi") {
+        c.show_mfi = expect_bool(v, "indicators.show_mfi")?;
+    }
+    if let Some(v) = find_field(f, "mfi_period") {
+        c.mfi_period = expect_usize(v, "indicators.mfi_period")?;
+    }
+    if let Some(v) = find_field(f, "show_proxy_bb") {
+        c.show_proxy_bb = expect_bool(v, "indicators.show_proxy_bb")?;
+    }
     Ok(c)
 }
 
@@ -2395,7 +2678,20 @@ fn decode_stretches(val: &DocValue) -> Result<WorkspacePaneStretches, WorkspaceT
     validate_struct_fields(
         f,
         "pane_stretches",
-        &["main", "rsi", "macd", "atr", "rs", "cvd", "equity"],
+        &[
+            "main",
+            "rsi",
+            "macd",
+            "atr",
+            "rs",
+            "cvd",
+            "equity",
+            "adx",
+            "stochastic",
+            "cci",
+            "mfi",
+            "proxy_bb",
+        ],
     )?;
     let mut st = WorkspacePaneStretches::default();
     if let Some(v) = find_field(f, "main") {
@@ -2418,6 +2714,21 @@ fn decode_stretches(val: &DocValue) -> Result<WorkspacePaneStretches, WorkspaceT
     }
     if let Some(v) = find_field(f, "equity") {
         st.equity = expect_f32(v, "pane_stretches.equity")?;
+    }
+    if let Some(v) = find_field(f, "adx") {
+        st.adx = expect_f32(v, "pane_stretches.adx")?;
+    }
+    if let Some(v) = find_field(f, "stochastic") {
+        st.stochastic = expect_f32(v, "pane_stretches.stochastic")?;
+    }
+    if let Some(v) = find_field(f, "cci") {
+        st.cci = expect_f32(v, "pane_stretches.cci")?;
+    }
+    if let Some(v) = find_field(f, "mfi") {
+        st.mfi = expect_f32(v, "pane_stretches.mfi")?;
+    }
+    if let Some(v) = find_field(f, "proxy_bb") {
+        st.proxy_bb = expect_f32(v, "pane_stretches.proxy_bb")?;
     }
     st.sanitize();
     Ok(st)
@@ -2791,11 +3102,21 @@ fn count_indicator_toggle_deltas(a: &IndicatorConfig, b: &IndicatorConfig) -> us
         (a.show_vrvp, b.show_vrvp),
         (a.show_market_profile, b.show_market_profile),
         (a.show_ichimoku, b.show_ichimoku),
+        (a.show_supertrend, b.show_supertrend),
+        (a.show_psar, b.show_psar),
+        (a.show_keltner, b.show_keltner),
+        (a.show_volume_sma, b.show_volume_sma),
+        (a.show_candle_patterns, b.show_candle_patterns),
         (a.show_rsi, b.show_rsi),
         (a.show_macd, b.show_macd),
         (a.show_atr, b.show_atr),
         (a.show_rs, b.show_rs),
         (a.show_cvd, b.show_cvd),
+        (a.show_adx, b.show_adx),
+        (a.show_stochastic, b.show_stochastic),
+        (a.show_cci, b.show_cci),
+        (a.show_mfi, b.show_mfi),
+        (a.show_proxy_bb, b.show_proxy_bb),
     ];
     pairs.iter().filter(|&&(x, y)| x != y).count()
 }
@@ -2861,6 +3182,16 @@ pub fn compute_workspace_diff(
                 a_norm.show_atr = sb.indicators.show_atr;
                 a_norm.show_rs = sb.indicators.show_rs;
                 a_norm.show_cvd = sb.indicators.show_cvd;
+                a_norm.show_supertrend = sb.indicators.show_supertrend;
+                a_norm.show_psar = sb.indicators.show_psar;
+                a_norm.show_keltner = sb.indicators.show_keltner;
+                a_norm.show_volume_sma = sb.indicators.show_volume_sma;
+                a_norm.show_candle_patterns = sb.indicators.show_candle_patterns;
+                a_norm.show_adx = sb.indicators.show_adx;
+                a_norm.show_stochastic = sb.indicators.show_stochastic;
+                a_norm.show_cci = sb.indicators.show_cci;
+                a_norm.show_mfi = sb.indicators.show_mfi;
+                a_norm.show_proxy_bb = sb.indicators.show_proxy_bb;
                 a_norm != sb.indicators
             });
         let overlay_display_changed = sa.show_volume != sb.show_volume

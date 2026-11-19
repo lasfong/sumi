@@ -67,6 +67,11 @@ impl DrawingPaneTarget {
             Self::Oscillator(OscillatorPaneId::Equity) => "equity",
             Self::Oscillator(OscillatorPaneId::RelativeStrength) => "rs",
             Self::Oscillator(OscillatorPaneId::Cvd) => "cvd",
+            Self::Oscillator(OscillatorPaneId::Adx) => "adx",
+            Self::Oscillator(OscillatorPaneId::Stochastic) => "stoch",
+            Self::Oscillator(OscillatorPaneId::Cci) => "cci",
+            Self::Oscillator(OscillatorPaneId::Mfi) => "mfi",
+            Self::Oscillator(OscillatorPaneId::ProxyBb) => "proxy-bb",
         }
     }
 
@@ -81,6 +86,11 @@ impl DrawingPaneTarget {
             Self::Oscillator(OscillatorPaneId::Equity) => "EQUITY",
             Self::Oscillator(OscillatorPaneId::RelativeStrength) => "RS",
             Self::Oscillator(OscillatorPaneId::Cvd) => "CVD",
+            Self::Oscillator(OscillatorPaneId::Adx) => "ADX",
+            Self::Oscillator(OscillatorPaneId::Stochastic) => "STOCH",
+            Self::Oscillator(OscillatorPaneId::Cci) => "CCI",
+            Self::Oscillator(OscillatorPaneId::Mfi) => "MFI",
+            Self::Oscillator(OscillatorPaneId::ProxyBb) => "PROXY-BB",
         }
     }
 }

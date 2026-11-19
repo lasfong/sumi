@@ -456,13 +456,39 @@ cargo test app::tests::critic_r17_
 
 ---
 
-## Waves 17–18 (`Milestones R18–R19`) — Remaining Master Anti-Miss Parity Roadmap
+## Wave 17 — Complete `101`-Entry Signal Ecosystem (`14` Causal Candlestick Patterns + Confirmed-Pivot Divergences), `8` Extended Technical Indicators, Multi-Horizon Money Flow `ProxyBB` (`T03..T200`) & `Point-in-Time` Universe (`COMPLETE — SESSION R18`)
 
-All remaining features and sub-branches across `ARCHIVE/` (`208` frontend + `474` backend items) are systematically tracked in [`docs/FEATURE_BACKLOG_AND_PARITY_LEDGER.md`](../FEATURE_BACKLOG_AND_PARITY_LEDGER.md) (`A1..A5` shipped in `R17`):
+### Completed Research & Audit Gates (`VERIFIED`)
+- [x] Executed `10` live REA MCP JS/TS operations (`REA-R18-01`..`10` across `ARCHIVE/frontend` `TechnicalFlowBBViewer.tsx`/`IndicatorSelector.tsx`/`IndicatorManager.tsx`/`IndicatorRenderRegistry.ts`/`SignalCatalog.tsx`/`SignalInspector.tsx`/`SignalExplanationInspector.tsx`/`StrategyLabPage.tsx` & `LWC v5.2.0` `histogram-series.ts`/`histogram-pane-view.ts`/`histogram-renderer.ts`/`draw-series-point-markers.ts`/`marks-renderer.ts`/`series-bar-colorer.ts`/`candlesticks-pane-view.ts`) plus `2` post-build binary REA ops (`REA-R18-11`..`12` on final R18 release Mach-O `6fef1e5140f285f53c39501d10e1330a858658deacf0db91d2a79c926d273ced`, UUID `E2216528-5E0F-3223-ABFA-350E8000E9F7`) -> [`docs/research/SIGNALS_72_INDICATORS_PROXYBB_AND_PIT_UNIVERSE_SPEC.md`](SIGNALS_72_INDICATORS_PROXYBB_AND_PIT_UNIVERSE_SPEC.md).
+
+### Shipped Deliverables & Verification (`cargo test r18_`, `cargo test critic_r18_`, `--r18`, `SUMI_CAPTURE_BATCH=r18`)
+| Component | Research Source | Rust Target | Status |
+|---|---|---|---|
+| Pure `f64` WASM-safe `CandleGeometry` (scale-relative flat-range guard), `14` causal candlestick patterns (`pattern.*`), `structure.candle_score`, inverted-scale-aware main-pane pattern badges (`PAT`), & `8` Extended Indicators (`ADX(14)` `+DI/-DI`, $O(N)$ `Stochastic(14,3,3)`, `SuperTrend(10,3.0)`, `Parabolic SAR`, `Keltner Channels(20,10,2.0)`, `CCI(20)`, `MFI(14)`, `Volume SMA(20)`, segment-causal `NaN` recovery, boxed `ExtendedOscillatorScales`) | `ARCHIVE/backend/app/domain/{signals/patterns.py,engine/indicator_engine.py}` + `TA-Lib` (`ta_ADX.c`, `ta_STOCH.c`, `ta_SAR.c`, `ta_CCI.c`, `ta_MFI.c`) + `SIGNALS_72_INDICATORS_PROXYBB_AND_PIT_UNIVERSE_SPEC.md` | `src/indicators/patterns.rs`, `src/indicators/extended.rs`, `src/indicators/mod.rs`, `src/chart.rs`, `src/app.rs` | Shipped & Critic-Hardened (`292.17 µs` `10k` patterns, `934.67 µs` `10k` all 8 indicators, `CRITIC_PASS`) |
+| `101`-Entry `SIGNAL_CATALOG` (`17` R15/R16 + `72` legacy `SignalRegistry` IDs + `12` `B2` triggers), causal `confirmed_pivot_high/low` (`p = t - 3`, `available_at_index = t`, zero lookahead), `12` four-way `Regular`/`Hidden` `RSI`/`MACD`/`Stochastic` divergences, directional EMA `sr.*`, full `vsa.*`/`ichimoku.*`/`regime.*`/`tech.*`, & vectorized `PrecomputedCatalogMatrix` | `ARCHIVE/backend/app/domain/signals/{registry,divergence,vsa,support_resistance}.py` + `SIGNALS_72_INDICATORS_PROXYBB_AND_PIT_UNIVERSE_SPEC.md` | `src/scanner/catalog.rs`, `src/backtest/strategy.rs`, `src/app.rs` | Shipped & Critic-Hardened (`5,991.96 µs` `101 x 2,500` matrix, `CRITIC_PASS`) |
+| Multi-Horizon Money Flow `ProxyBB` (`T03, T05, T10, T20, T50, T200`, `AT05` zero-liquidity `None`, upgraded Family 4 Participation, `OscillatorPaneId::ProxyBb`), Intraday-to-`D1` Venue-Aware `MarketBBAggregator` (`AT09` + `AT17` `FlowBreadth`), & `Point-in-Time` `UniverseResolver` (`BacktestExitReason::UniverseRemoval`, 1-to-1 `run_pit_episodes_backtest`, underlying-return `CausalInverseVolatility` `run_portfolio_backtest_with_universe`) | `ARCHIVE/backend/app/domain/{bb/calculator.py,bb/market_aggregator.py,universe/resolver.py}` + `TechnicalFlowBBViewer.tsx` + `SIGNALS_72_INDICATORS_PROXYBB_AND_PIT_UNIVERSE_SPEC.md` | `src/indicators/proxy_bb.rs`, `src/scanner/proxy_bb.rs`, `src/scanner/universe.rs`, `src/backtest/{engine,walk_forward,metrics}.rs`, `src/app.rs` | Shipped & Critic-Hardened (`255/255` tests + `wasm32` Clippy, `--r18` `0.231–0.955 ms` mean / `p99 <= 1.340 ms < 4.0 ms`) |
+
+### Verified Acceptance Tests (`cargo test` — 255/255 PASS)
+```bash
+cargo test indicators::tests::r18_
+cargo test indicators::tests::critic_r18_
+cargo test indicators::tests::non_finite_bars_recover_cleanly_and_polymorphic_trait_works
+cargo test scanner::tests::r18_
+cargo test scanner::tests::critic_r18_
+cargo test backtest::tests::r18_
+cargo test backtest::tests::critic_r18_
+cargo test app::tests::r18_
+cargo test app::tests::critic_r18_
+```
+
+---
+
+## Wave 18 (`Milestone R19`) — Remaining Master Anti-Miss Parity Roadmap
+
+All remaining features and sub-branches across `ARCHIVE/` (`208` frontend + `474` backend items) are systematically tracked in [`docs/FEATURE_BACKLOG_AND_PARITY_LEDGER.md`](../FEATURE_BACKLOG_AND_PARITY_LEDGER.md) (`A1..A5` shipped in `R17`; `B1..B4` shipped in `R18`):
 
 | Wave / Milestone | Ledger Items | Key Scope (Awaiting Product Owner Authorization) |
 |---|---|---|
-| **Wave 17 (`Milestone R18`)** | `B1..B4` | `14` Causal Candlestick Patterns (`CandleGeometry`), `8` Remaining Legacy Indicators (`ADX`, `Stochastic`, `SuperTrend`, `PSAR`, `Keltner`, `CCI`, `MFI`, `Volume SMA`), Confirmed-Pivot Divergences (`right_bars = 3`) + Full `VSA`/`SR`/`Ichimoku` Signals (`72+` Catalog Entries), & Multi-Horizon `ProxyBB` (`T03..T200`) + `Point-in-Time` Universe |
 | **Wave 18 (`Milestone R19`)** | `C1..C4` | Interactive Global `[Settings]` Modal & Candle Palettes, Official Vietnam Exchange Holiday Calendar (`VIETNAM_HOLIDAYS_V1`) + FIFO `T+2` Lot Release, Data Readiness & Gap/Split Audit Panel, & `TextNote` Drawing + Custom Fib Levels + Toolbar `[Export PNG]` |
 
 ---

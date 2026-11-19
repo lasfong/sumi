@@ -510,7 +510,9 @@ impl SignalClause {
                     (SignalPredicate::BoolIs(true), df)
                 }
                 SignalOutputType::Float => {
-                    let (op, threshold) = if is_bear {
+                    let (op, threshold) = if entry.id == "volume.relative_volume" {
+                        (FloatCmpOp::Gte, 2.0)
+                    } else if is_bear {
                         (FloatCmpOp::Lte, -15.0)
                     } else {
                         (FloatCmpOp::Gte, 15.0)

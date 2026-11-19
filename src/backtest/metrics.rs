@@ -29,6 +29,8 @@ pub enum BacktestExitReason {
     TrailingStop,
     MaxBarsExit,
     MarginLiquidation,
+    /// Point-in-time (`PIT`) constituent exit / delisting settlement on final active bar close.
+    UniverseRemoval,
 }
 
 impl BacktestExitReason {
@@ -43,6 +45,7 @@ impl BacktestExitReason {
             Self::TrailingStop => "Trail",
             Self::MaxBarsExit => "MaxBars",
             Self::MarginLiquidation => "Liq",
+            Self::UniverseRemoval => "PITExit",
         }
     }
 }
