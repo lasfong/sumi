@@ -220,7 +220,9 @@ pub fn evaluate_and_normalize_cafef_split_ohlc(
         return CafeFSplitNormOutcome::RejectedGenuineViolation;
     }
 
-    // Rule 5: Discrepancy must remain strictly `< 0.5 * min_positive_intraday_step` when positive steps exist.
+    // Rule 5: Discrepancy must remain strictly `< 0.5 * min_positive_intraday_step` when positive
+    // intraday steps exist (`cafef_importer.py:141-144` parity; flat post-split sessions with
+    // `O == H == L` already satisfy Rules 1–4 `<= 6 bps & <= 25 VND` and must NOT be dropped, `BUG-005`).
     let mut min_step: Option<f64> = None;
     let candidate_steps: &[f64] = if delta_open_vnd > 0.0 {
         &[h_vnd - l_vnd]
@@ -232,14 +234,10 @@ pub fn evaluate_and_normalize_cafef_split_ohlc(
             min_step = Some(min_step.map_or(s, |prev| prev.min(s)));
         }
     }
-    match min_step {
-        Some(step) if delta_max_vnd >= 0.5 * step => {
-            return CafeFSplitNormOutcome::RejectedGenuineViolation;
-        }
-        None if delta_max_vnd > CAFEF_SINGLE_ULP_TOL_VND => {
-            return CafeFSplitNormOutcome::RejectedGenuineViolation;
-        }
-        _ => {}
+    if let Some(step) = min_step
+        && delta_max_vnd >= 0.5 * step
+    {
+        return CafeFSplitNormOutcome::RejectedGenuineViolation;
     }
 
     let new_high = high.max(body_max);
@@ -505,7 +503,6 @@ pub fn audit_ohlcv_series_with_venue(
             | ExchangeVenue::VnIndexBenchmark
     );
 
-    let mut vol_win_sum = 0.0_f64;
     for (i, c) in candles.iter().enumerate() {
         if i > 0 {
             if c.timestamp < candles[i - 1].timestamp {
@@ -527,10 +524,20 @@ pub fn audit_ohlcv_series_with_venue(
             zero_volume_count += 1;
         }
 
-        // Prior-20-bar causal RVOL >= 10x spike check
+        // Exact prior-20-bar causal RVOL >= 10x spike check (no floating-point running-sum drift, `BUG-031`):
         if i >= 20 {
-            let mean_vol = vol_win_sum / 20.0;
-            if mean_vol > 1.0e-9 && c.volume >= 10.0 * mean_vol {
+            let win_sum: f64 = candles[i - 20..i]
+                .iter()
+                .map(|b| {
+                    if b.volume.is_finite() {
+                        b.volume.max(0.0)
+                    } else {
+                        0.0
+                    }
+                })
+                .sum();
+            let mean_vol = win_sum / 20.0;
+            if mean_vol > 1.0e-9 && c.volume.is_finite() && c.volume >= 10.0 * mean_vol {
                 volume_spike_10x_count += 1;
                 if anomalies.len() < MAX_AUDIT_ANOMALY_SAMPLES {
                     anomalies.push(DataAuditAnomaly {
@@ -541,16 +548,21 @@ pub fn audit_ohlcv_series_with_venue(
                     });
                 }
             }
-            vol_win_sum -= candles[i - 20].volume.max(0.0);
         }
-        vol_win_sum += c.volume.max(0.0);
 
+        // Venue- & timeframe-aware extreme range threshold (`BUG-021`):
+        // Legal UPCOM `±15%` ceiling-to-floor swing is `(1.15 - 0.85)/0.85 = 35.29%`, and W1 bars span 5 sessions.
         if c.low > 0.0 && c.high >= c.low {
             let range_pct = ((c.high - c.low) / c.low) * 100.0;
-            let extreme_thresh = if venue == ExchangeVenue::CryptoSpotPerp {
-                45.0
+            let extreme_thresh = if timeframe == Timeframe::W1 {
+                65.0
             } else {
-                25.0
+                match venue {
+                    ExchangeVenue::CryptoSpotPerp => 45.0,
+                    ExchangeVenue::Upcom => 40.0,
+                    ExchangeVenue::Hnx => 28.0,
+                    _ => 25.0,
+                }
             };
             if range_pct > extreme_thresh {
                 extreme_range_bar_count += 1;
@@ -591,8 +603,8 @@ pub fn audit_ohlcv_series_with_venue(
             }
         }
 
-        // Holiday / weekend bar check on `D1` VN & US calendars (`BUG-DQ-04` fix):
-        if timeframe == Timeframe::D1 && venue != ExchangeVenue::CryptoSpotPerp {
+        // Holiday / weekend bar check on `D1` and intraday (`1m..4h`) VN & US calendars (`BUG-025`):
+        if timeframe != Timeframe::W1 && venue != ExchangeVenue::CryptoSpotPerp {
             if is_vn_calendar {
                 let ict_day = c.timestamp.saturating_add(7 * 3_600).div_euclid(86_400);
                 if !is_vn_exchange_trading_day_days(ict_day) {
@@ -619,8 +631,8 @@ pub fn audit_ohlcv_series_with_venue(
         }
     }
 
-    // Calendar-aware missing-session gap detection (`BUG-DQ-02` & `BUG-DQ-06` fixed:
-    // daily `TradingCalendar` loop runs ONLY on `Timeframe::D1`; `W1` checks ISO-week continuity!).
+    // Calendar-aware missing-session gap detection (`BUG-031`: bounded span cap prevents runaway loops on pathological dates).
+    const MAX_AUDIT_CALENDAR_SPAN_DAYS: i64 = 40_000;
     let mut missing_session_count = 0_usize;
     let mut missing_session_samples: Vec<String> = Vec::new();
     let expected_sessions: usize;
@@ -634,7 +646,8 @@ pub fn audit_ohlcv_series_with_venue(
                     seen_days.insert(c.timestamp.saturating_add(7 * 3_600).div_euclid(86_400));
                 }
                 let first_d = *seen_days.first().unwrap_or(&0);
-                let last_d = *seen_days.last().unwrap_or(&0);
+                let raw_last_d = *seen_days.last().unwrap_or(&0);
+                let last_d = raw_last_d.min(first_d.saturating_add(MAX_AUDIT_CALENDAR_SPAN_DAYS));
                 let mut exp = 0_usize;
                 let mut obs_valid = 0_usize;
                 for d in first_d..=last_d {
@@ -658,7 +671,8 @@ pub fn audit_ohlcv_series_with_venue(
                     seen_days.insert(c.timestamp.div_euclid(86_400));
                 }
                 let first_d = *seen_days.first().unwrap_or(&0);
-                let last_d = *seen_days.last().unwrap_or(&0);
+                let last_d = (*seen_days.last().unwrap_or(&0))
+                    .min(first_d.saturating_add(MAX_AUDIT_CALENDAR_SPAN_DAYS));
                 let mut exp = 0_usize;
                 for d in first_d..=last_d {
                     exp += 1;
@@ -677,7 +691,8 @@ pub fn audit_ohlcv_series_with_venue(
                     seen_days.insert(c.timestamp.div_euclid(86_400));
                 }
                 let first_d = *seen_days.first().unwrap_or(&0);
-                let last_d = *seen_days.last().unwrap_or(&0);
+                let last_d = (*seen_days.last().unwrap_or(&0))
+                    .min(first_d.saturating_add(MAX_AUDIT_CALENDAR_SPAN_DAYS));
                 let mut exp = 0_usize;
                 let mut obs_valid = 0_usize;
                 for d in first_d..=last_d {
@@ -705,7 +720,8 @@ pub fn audit_ohlcv_series_with_venue(
                 seen_weeks.insert(Timeframe::W1.bucket_start_timestamp(c.timestamp));
             }
             let first_w = *seen_weeks.first().unwrap_or(&0);
-            let last_w = *seen_weeks.last().unwrap_or(&0);
+            let last_w = (*seen_weeks.last().unwrap_or(&0))
+                .min(first_w.saturating_add(MAX_AUDIT_CALENDAR_SPAN_DAYS.saturating_mul(86_400)));
             let mut exp = 0_usize;
             let mut obs_valid = 0_usize;
             let mut cur_w = first_w;
@@ -761,7 +777,8 @@ pub fn audit_ohlcv_series_with_venue(
                     seen_days.insert(d);
                 }
                 let first_d = *seen_days.first().unwrap_or(&0);
-                let last_d = *seen_days.last().unwrap_or(&0);
+                let last_d = (*seen_days.last().unwrap_or(&0))
+                    .min(first_d.saturating_add(MAX_AUDIT_CALENDAR_SPAN_DAYS));
                 let mut exp_d = 0_usize;
                 let mut obs_d = 0_usize;
                 for d in first_d..=last_d {
@@ -793,6 +810,7 @@ pub fn audit_ohlcv_series_with_venue(
         (((observed_sessions as f64) / (expected_sessions as f64)) * 100.0).clamp(0.0, 100.0);
     let status = if missing_session_count > 0
         || non_monotonic_count > 0
+        || duplicate_timestamp_count > 0
         || holiday_or_weekend_bar_count > 0
         || extreme_range_bar_count > 0
     {

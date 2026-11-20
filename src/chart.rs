@@ -29,6 +29,7 @@ use crate::indicators::{
     VolumeProfileConfig, VolumeProfileResult, VwapBandsOutput, bucket_line_envelope_indexed,
     compute_anchored_vwap, compute_volume_profile, visit_conflated_histogram_bars_indexed,
 };
+use crate::journal::{DailyPriceBand, ExchangeVenue, ResolvedVnPriceUnit, snap_to_nearest_tick};
 use crate::model::{Candle, PriceBounds};
 use crate::trading::{ExecutionFill, OrderSide, PositionSide, TradingSession};
 use crate::viewport::{
@@ -1402,6 +1403,33 @@ pub struct EquityCurveOverlay<'a> {
     pub trades: Option<&'a [BacktestTrade]>,
 }
 
+/// Target of an active vertical chart-direct trading drag (`v1.1 / Wave 3`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChartTradingDragTarget {
+    PositionStopLoss,
+    PositionTakeProfit,
+    PendingOrder { order_id: u64 },
+}
+
+/// Active chart-direct drag preview state owned by `SumiWorkstationApp` (`v1.1 / Wave 3`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChartTradingDragState {
+    pub target: ChartTradingDragTarget,
+    pub preview_price: f64,
+}
+
+/// User chart-direct trading command emitted by `render_workstation_chart_full` (`v1.1 / Wave 3`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ChartTradingAction {
+    UpdateDragPreview(ChartTradingDragState),
+    CommitPositionStopLoss(f64),
+    CommitPositionTakeProfit(f64),
+    CommitPendingOrderPrice { order_id: u64, new_price: f64 },
+    CancelDrag,
+    CancelPendingOrder(u64),
+    FlattenPosition,
+}
+
 /// Optional Bar Replay, Paper Trading, Alert & Strategy Backtest Lab visual overlay state passed to [`render_workstation_chart_full`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ChartReplayTradingOverlay<'a> {
@@ -1409,6 +1437,8 @@ pub struct ChartReplayTradingOverlay<'a> {
     pub selecting_cut_bar: bool,
     pub replay_status_label: Option<&'a str>,
     pub trading_session: Option<&'a TradingSession>,
+    pub trading_drag: Option<ChartTradingDragState>,
+    pub trading_venue: Option<(ExchangeVenue, ResolvedVnPriceUnit, Option<DailyPriceBand>)>,
     pub alert_engine: Option<&'a AlertEngine>,
     pub backtest_result: Option<&'a BacktestRunResult>,
     pub equity_override: Option<EquityCurveOverlay<'a>>,
@@ -1423,6 +1453,9 @@ pub struct ChartReplayTradingOverlay<'a> {
     pub compare_overlay: Option<(&'a str, &'a [Option<f64>], &'a SeriesBlockIndex)>,
     pub rs_benchmark_label: Option<&'a str>,
     pub external_crosshair_timestamp: Option<i64>,
+    /// Projected future-whitespace UTC timestamp broadcast from a hovered peer slot (`BUG-022`),
+    /// rendering a vertical linked hairline without pinning to the last historical bar.
+    pub external_whitespace_timestamp: Option<i64>,
     pub modal_open: bool,
     pub candle_palette: CandlePalettePreset,
 }
@@ -1461,9 +1494,12 @@ pub struct ChartRenderReport {
     pub vrvp_poc_price: Option<f64>,
     pub active_frvp_count: usize,
     pub hovered_bar_timestamp: Option<i64>,
+    /// Projected future-whitespace timestamp when hovering right of the final candle (`BUG-022`).
+    pub hovered_whitespace_timestamp: Option<i64>,
     pub ichimoku_active: bool,
     pub market_profile_active: bool,
     pub cvd_pane_active: bool,
+    pub chart_trading_action: Option<ChartTradingAction>,
 }
 
 /// Renders the native candlestick chart, volume histogram, price/time axes, crosshair, and OHLCV overlay
@@ -1833,9 +1869,12 @@ fn render_workstation_chart_inner(
             Some((indicators, indicator_cache)),
             replay_trading.compare_overlay,
         )
-        .map_or_else(|| candles[init_strict.start].close, |(bv, _)| bv)
+        .map_or_else(
+            || resolve_scale_base_value(&candles[init_strict.clone()], candles),
+            |(bv, _)| bv,
+        )
     } else {
-        candles[init_strict.start].close
+        resolve_scale_base_value(&candles[init_strict.clone()], candles)
     };
     for osc in &multi_layout.oscillators {
         let ps = viewport.oscillator_price_scale_mut(osc.id);
@@ -1864,17 +1903,74 @@ fn render_workstation_chart_inner(
         }
     }
 
-    // 4b. Process Drawing Engine keyboard shortcuts & per-pane pointer arbitrage (`Milestone R05`)
+    // 4a. Chart-Direct Trading pointer arbitrage (`SL`/`TP`/Pending order drag + `[×]` cancel/flatten, `v1.1 / Wave 3`)
     let separator_busy = separator_active_idx.is_some_and(|idx| {
         sep_responses[idx].dragged() || sep_responses[idx].is_pointer_button_down_on()
     });
     let mut suppress_main_drag_pan = false;
     let mut suppress_osc_drag_pan = vec![false; osc_responses.len()];
     let mut drawing_blocked_double_click = false;
+    let mut chart_trading_action: Option<ChartTradingAction> = None;
+    let mut active_trading_drag_for_paint = replay_trading.trading_drag;
+    let mut chart_trading_claimed_main = false;
 
+    let drawing_idle_select = drawings.as_deref().is_none_or(|st| {
+        st.active_tool == DrawingTool::Select && matches!(st.phase(), DrawingInteractionPhase::Idle)
+    });
+    if !separator_busy
+        && !replay_trading.modal_open
+        && !replay_trading.selecting_cut_bar
+        && drawing_idle_select
+        && let Some(session) = replay_trading.trading_session
+    {
+        let pre_main_vp = PaneViewport::new(
+            &viewport.time_scale,
+            &viewport.main_price_scale,
+            main_plot_f64,
+            pre_base_value,
+        );
+        let (act, claimed) = drive_chart_direct_trading_input(
+            ui,
+            multi_layout.main_plot_rect,
+            candles,
+            &pre_main_vp,
+            session,
+            replay_trading.trading_drag,
+            replay_trading.trading_venue,
+        );
+        if let Some(a) = act {
+            match a {
+                ChartTradingAction::UpdateDragPreview(st) => {
+                    active_trading_drag_for_paint = Some(st);
+                }
+                ChartTradingAction::CancelDrag
+                | ChartTradingAction::CommitPositionStopLoss(_)
+                | ChartTradingAction::CommitPositionTakeProfit(_)
+                | ChartTradingAction::CommitPendingOrderPrice { .. } => {
+                    active_trading_drag_for_paint = None;
+                }
+                ChartTradingAction::CancelPendingOrder(_) | ChartTradingAction::FlattenPosition => {
+                }
+            }
+            chart_trading_action = Some(a);
+        }
+        if claimed {
+            chart_trading_claimed_main = true;
+            suppress_main_drag_pan = true;
+            drawing_blocked_double_click = true;
+            viewport.kinetic = None;
+            viewport.time_scale.end_scroll();
+            viewport.main_price_scale.end_scroll();
+        }
+    }
+
+    // 4b. Process Drawing Engine keyboard shortcuts & per-pane pointer arbitrage (`Milestone R05`)
     if let Some(store) = drawings.as_deref_mut() {
         sanitize_hidden_oscillator_drawing_state(store, &active_osc_ids);
-        if replay_trading.selecting_cut_bar || replay_trading.modal_open {
+        if replay_trading.selecting_cut_bar
+            || replay_trading.modal_open
+            || chart_trading_claimed_main
+        {
             store.clear_hover_for_pane(DrawingPaneTarget::Main);
             for &id in &active_osc_ids {
                 store.clear_hover_for_pane(DrawingPaneTarget::Oscillator(id));
@@ -1888,6 +1984,47 @@ fn render_workstation_chart_inner(
                 || !matches!(store.phase(), DrawingInteractionPhase::Idle);
 
             if !separator_busy {
+                // Pre-populate memoized `AnchoredVwap` series once per frame via `R11RenderMemo`
+                // so hit-testing & hover never recompute 100K-bar Welford sums (`BUG-015`).
+                let mut precomputed_avwaps: Vec<(usize, std::sync::Arc<VwapBandsOutput>)> =
+                    Vec::new();
+                let mut avwap_fp: Option<u64> = None;
+                if !candles.is_empty() {
+                    let mut collect_avwap_anchor = |geom: &DrawingGeometry| {
+                        if let DrawingGeometry::AnchoredVwap { anchor, .. } = geom
+                            && anchor.bar_index >= -0.5
+                        {
+                            let a_idx = anchor.bar_index.round().max(0.0) as usize;
+                            if a_idx < candles.len()
+                                && !precomputed_avwaps.iter().any(|(k, _)| *k == a_idx)
+                            {
+                                let fp = *avwap_fp.get_or_insert_with(|| {
+                                    candles_fast_fingerprint(candles)
+                                        ^ indicator_cache.dataset_generation().rotate_left(17)
+                                });
+                                let out = viewport.r11_memo.get_or_compute_avwap(
+                                    candles,
+                                    fp,
+                                    a_idx,
+                                    candles.len(),
+                                    1.0,
+                                    2.0,
+                                );
+                                precomputed_avwaps.push((a_idx, out));
+                            }
+                        }
+                    };
+                    for d in &store.drawings {
+                        if d.visible && d.pane == DrawingPaneTarget::Main {
+                            collect_avwap_anchor(&d.geometry);
+                        }
+                    }
+                    if let Some(preview) = store.preview_drawing()
+                        && preview.pane == DrawingPaneTarget::Main
+                    {
+                        collect_avwap_anchor(&preview.geometry);
+                    }
+                }
                 let main_proj = PaneDrawingProjection::new(
                     &viewport.time_scale,
                     &viewport.main_price_scale,
@@ -1895,7 +2032,8 @@ fn render_workstation_chart_inner(
                     main_plot_f64.height,
                     pre_base_value,
                 )
-                .with_candles(candles);
+                .with_candles(candles)
+                .with_precomputed_avwaps(&precomputed_avwaps);
                 suppress_main_drag_pan = drive_pane_drawing_input(
                     store,
                     DrawingPaneTarget::Main,
@@ -2171,6 +2309,22 @@ fn render_workstation_chart_inner(
         && let Some(ext_ts) = replay_trading.external_crosshair_timestamp
     {
         resolve_linked_crosshair_bar(candles, tf_secs, ext_ts, replay_trading.causal_close_cap)
+    } else {
+        None
+    };
+    let linked_ws_slot: Option<i64> = if hovered_pane.is_none()
+        && config.show_crosshair
+        && linked_bar_idx.is_none()
+        && replay_trading.causal_close_cap.is_none()
+        && let Some(ws_ts) = replay_trading.external_whitespace_timestamp
+        && let Some(last_bar) = candles.last()
+        && ws_ts > last_bar.timestamp
+    {
+        let step_s = tf_secs.max(1) as f64;
+        let offset = (((ws_ts - last_bar.timestamp) as f64) / step_s)
+            .round()
+            .clamp(1.0, 500.0) as i64;
+        Some((candles.len() as i64 - 1).saturating_add(offset))
     } else {
         None
     };
@@ -2698,6 +2852,10 @@ fn render_workstation_chart_inner(
             count
         };
 
+    let mut shared_axis_pills: Vec<f32> = Vec::with_capacity(main_seed_slice.len() + 16);
+    shared_axis_pills.extend_from_slice(main_seed_slice);
+    let mut shared_plot_badges: Vec<Rect> = Vec::with_capacity(12);
+
     paint_latest_close_line_and_pill(
         &painter,
         &main_plot_painter,
@@ -2710,34 +2868,8 @@ fn render_workstation_chart_inner(
         replay_trading.candle_palette,
     );
 
-    if let Some(store) = drawings.as_deref() {
-        let main_draw_proj = PaneDrawingProjection::new(
-            &viewport.time_scale,
-            &viewport.main_price_scale,
-            main_plot_f64.width,
-            main_plot_f64.height,
-            base_value,
-        )
-        .with_candles(candles);
-        paint_pane_drawings(
-            &painter.with_clip_rect(multi_layout.main_price_axis_rect),
-            &main_plot_painter,
-            multi_layout.main_plot_rect,
-            multi_layout.main_price_axis_rect,
-            DrawingPaneTarget::Main,
-            store,
-            &main_draw_proj,
-            &viewport.main_price_scale,
-            base_value,
-            candles,
-            culling_range.clone(),
-            conflation_factor,
-            &main_vp,
-            Some(&mut viewport.r11_memo),
-            candles_fp,
-        );
-    }
-
+    // Paint trading overlays first so `Entry`/`SL`/`TP`/`Working` own top right-axis priority
+    // alongside `Last Close`, populating `shared_axis_pills` & `shared_plot_badges` (`BUG-018`).
     let (rendered_fill_marker_count, active_price_line_count) =
         if let Some(session) = replay_trading.trading_session {
             paint_trading_overlays(
@@ -2752,12 +2884,17 @@ fn render_workstation_chart_inner(
                 &main_vp,
                 base_value,
                 session,
-                main_seed_slice,
+                active_trading_drag_for_paint,
+                replay_trading.trading_venue.map(|(v, _, _)| v),
+                ui.input(|i| i.pointer.hover_pos()),
+                &mut shared_axis_pills,
+                &mut shared_plot_badges,
             )
         } else {
             (0, 0)
         };
 
+    // Paint alerts through the SAME shared right-axis anti-collision list & plot badge keepout (`BUG-018`).
     let (active_alert_line_count, rendered_alert_marker_count) =
         if let Some(alerts) = replay_trading.alert_engine {
             paint_alert_overlays(
@@ -2775,10 +2912,44 @@ fn render_workstation_chart_inner(
                 drawings.as_deref(),
                 replay_trading.replay_cutoff_timestamp,
                 replay_trading.frontier_base_timestamp,
+                &mut shared_axis_pills,
+                &shared_plot_badges,
             )
         } else {
             (0, 0)
         };
+
+    // Paint user drawings using the shared right-axis anti-collision list so selected H-Line/RR/FRVP/AVWAP
+    // badges never collide with Last/Entry/SL/TP/Alert axis pills (`BUG-018`).
+    if let Some(store) = drawings.as_deref() {
+        let main_draw_proj = PaneDrawingProjection::new(
+            &viewport.time_scale,
+            &viewport.main_price_scale,
+            main_plot_f64.width,
+            main_plot_f64.height,
+            base_value,
+        )
+        .with_candles(candles)
+        .with_skip_avwap_tail_segments(true);
+        paint_pane_drawings(
+            &painter.with_clip_rect(multi_layout.main_price_axis_rect),
+            &main_plot_painter,
+            multi_layout.main_plot_rect,
+            multi_layout.main_price_axis_rect,
+            DrawingPaneTarget::Main,
+            store,
+            &main_draw_proj,
+            &viewport.main_price_scale,
+            base_value,
+            candles,
+            culling_range.clone(),
+            conflation_factor,
+            &main_vp,
+            Some(&mut viewport.r11_memo),
+            candles_fp,
+            &mut shared_axis_pills,
+        );
+    }
 
     if equity_pane_active
         && let Some(eq_ov) = replay_trading.equity_override
@@ -3154,6 +3325,7 @@ fn render_workstation_chart_inner(
                 osc_bv,
             )
             .with_candles(candles);
+            let mut osc_axis_pills = Vec::new();
             paint_pane_drawings(
                 &painter.with_clip_rect(osc.price_axis_rect),
                 &osc_painter,
@@ -3170,6 +3342,7 @@ fn render_workstation_chart_inner(
                 &osc_vp,
                 None,
                 candles_fp,
+                &mut osc_axis_pills,
             );
         }
     }
@@ -3282,6 +3455,42 @@ fn render_workstation_chart_inner(
             conflation_factor,
             l_idx,
         );
+    } else if config.show_crosshair
+        && let Some(ws_slot) = linked_ws_slot
+        && let Some(sx) = main_vp.index_to_screen_x(ws_slot)
+    {
+        // Linked vertical crosshair projected cleanly into future whitespace (`BUG-022`)
+        // without pinning any horizontal close price onto the last historical candle!
+        let cross_x = sx as f32;
+        if cross_x >= multi_layout.main_plot_rect.left()
+            && cross_x <= multi_layout.main_plot_rect.right()
+        {
+            let ws_stroke = Stroke::new(1.0, palette::CROSSHAIR.gamma_multiply(0.85));
+            main_plot_painter.line_segment(
+                [
+                    Pos2::new(cross_x, multi_layout.main_plot_rect.top()),
+                    Pos2::new(cross_x, multi_layout.main_plot_rect.bottom()),
+                ],
+                ws_stroke,
+            );
+            for osc in &multi_layout.oscillators {
+                painter.with_clip_rect(osc.plot_rect).line_segment(
+                    [
+                        Pos2::new(cross_x, osc.plot_rect.top()),
+                        Pos2::new(cross_x, osc.plot_rect.bottom()),
+                    ],
+                    ws_stroke,
+                );
+            }
+            paint_time_axis_cursor_pill(
+                &painter,
+                multi_layout.time_axis_rect,
+                candles,
+                config.timeframe,
+                ws_slot,
+                cross_x,
+            );
+        }
     }
 
     // 11b. Interactive Bar Replay Cut Scrubber (`selecting_cut_bar == true`)
@@ -3493,9 +3702,19 @@ fn render_workstation_chart_inner(
         hovered_bar_timestamp: hovered_slot_index
             .filter(|&bi| bi >= 0 && (bi as usize) < candles.len())
             .map(|bi| candles[bi as usize].timestamp),
+        hovered_whitespace_timestamp: hovered_slot_index
+            .filter(|&bi| bi >= candles.len() as i64)
+            .and_then(|bi| {
+                candles.last().map(|last| {
+                    let delta = bi.saturating_sub(candles.len() as i64 - 1);
+                    last.timestamp
+                        .saturating_add(delta.saturating_mul(tf_secs.max(1)))
+                })
+            }),
         ichimoku_active,
         market_profile_active,
         cvd_pane_active: active_osc_ids.contains(&OscillatorPaneId::Cvd),
+        chart_trading_action,
     })
 }
 
@@ -3851,9 +4070,11 @@ pub fn render_shared_pane_candlestick_chart(
             .is_some()
             .then(|| candles.get(inspected_data_index).map(|c| c.timestamp))
             .flatten(),
+        hovered_whitespace_timestamp: None,
         ichimoku_active: false,
         market_profile_active: false,
         cvd_pane_active: false,
+        chart_trading_action: None,
     })
 }
 
@@ -4650,7 +4871,12 @@ fn paint_bollinger_bands(
                     mesh.add_triangle(base_v, base_v + 1, base_v + 2);
                     mesh.add_triangle(base_v + 1, base_v + 3, base_v + 2);
                 }
-                if u_env.has_trailing_gap || l_env.has_trailing_gap {
+                // Break ribbon across internal `None` gaps as well as trailing gaps (`BUG-027`).
+                if u_env.has_trailing_gap
+                    || l_env.has_trailing_gap
+                    || u_env.has_internal_gap
+                    || l_env.has_internal_gap
+                {
                     prev_exit = None;
                 } else {
                     prev_exit = Some((x, u_out, l_out));
@@ -4748,7 +4974,11 @@ fn paint_keltner_channels(
                     mesh.add_triangle(base_v, base_v + 1, base_v + 2);
                     mesh.add_triangle(base_v + 1, base_v + 3, base_v + 2);
                 }
-                if u_env.has_trailing_gap || l_env.has_trailing_gap {
+                if u_env.has_trailing_gap
+                    || l_env.has_trailing_gap
+                    || u_env.has_internal_gap
+                    || l_env.has_internal_gap
+                {
                     prev_exit = None;
                 } else {
                     prev_exit = Some((x, u_out, l_out));
@@ -4830,7 +5060,8 @@ fn paint_supertrend_overlay(
         }
     };
 
-    let mut i = start;
+    // Anchor conflation sampling phase to multiples of `step` to prevent 1-bar pan shimmer (`BUG-027`).
+    let mut i = (start / step) * step;
     while i < end {
         match (st.trend[i], st.direction[i]) {
             (Some(px), Some(dir)) if px.is_finite() => {
@@ -4875,7 +5106,8 @@ fn paint_psar_overlay(
     }
     let step = ov_step.max(1);
     let radius = ((bar_metrics.body_width_logical as f32) * 0.28).clamp(1.6, 3.4);
-    let mut i = start;
+    // Anchor conflation sampling phase to multiples of `step` to prevent 1-bar pan shimmer (`BUG-027`).
+    let mut i = (start / step) * step;
     while i < end {
         if let (Some(px), Some(is_long)) = (psar.sar[i], psar.is_long[i])
             && px.is_finite()
@@ -4947,7 +5179,7 @@ fn paint_candlestick_pattern_badges(
                 continue;
             };
             let cy = (sy_low as f32 + 11.0 * out_sign)
-                .clamp(plot_rect.top() + 9.0, plot_rect.bottom() - 9.0);
+                .clamp(plot_rect.top() + 18.0, plot_rect.bottom() - 10.0);
             let pill = Rect::from_center_size(Pos2::new(cx, cy), Vec2::new(22.0, 13.0));
             painter.rect_filled(pill, 2.5, palette::BG_FLOATING_HUD);
             painter.rect_stroke(
@@ -4977,7 +5209,7 @@ fn paint_candlestick_pattern_badges(
                 palette::IND_SMA
             };
             let cy = (sy_high as f32 - 11.0 * out_sign)
-                .clamp(plot_rect.top() + 9.0, plot_rect.bottom() - 9.0);
+                .clamp(plot_rect.top() + 18.0, plot_rect.bottom() - 10.0);
             let pill = Rect::from_center_size(Pos2::new(cx, cy), Vec2::new(22.0, 13.0));
             painter.rect_filled(pill, 2.5, palette::BG_FLOATING_HUD);
             painter.rect_stroke(pill, 2.5, Stroke::new(1.0, accent), StrokeKind::Inside);
@@ -5132,7 +5364,10 @@ fn append_band_ribbon_into_mesh(
                 l_in,
                 l_out,
                 u_env.has_leading_gap || l_env.has_leading_gap,
-                u_env.has_trailing_gap || l_env.has_trailing_gap,
+                u_env.has_trailing_gap
+                    || l_env.has_trailing_gap
+                    || u_env.has_internal_gap
+                    || l_env.has_internal_gap,
             );
         } else {
             prev_exit = None;
@@ -6031,7 +6266,14 @@ fn paint_volume_profile_bars(
             {
                 let galley =
                     painter.layout_no_wrap(lbl.to_owned(), FontId::monospace(10.0), poc_color);
-                let pill_pos = Pos2::new(x0 + 5.0, y - galley.size().y - 4.0);
+                let plot_top = vp.plot_rect.top as f32;
+                let plot_bot = vp.plot_rect.bottom() as f32;
+                let pill_y = safe_clamp_f32(
+                    y - galley.size().y - 4.0,
+                    plot_top + 3.0,
+                    (plot_bot - galley.size().y - 3.0).max(plot_top + 3.0),
+                );
+                let pill_pos = Pos2::new(x0 + 5.0, pill_y);
                 let bg_rect =
                     Rect::from_min_size(pill_pos, galley.size()).expand2(Vec2::new(4.0, 2.0));
                 painter.rect_filled(
@@ -6055,8 +6297,13 @@ fn timeframe_str_to_seconds(tf_label: &str) -> i64 {
 
 #[inline]
 fn format_compact_signed(v: f64) -> String {
+    if !v.is_finite() {
+        return "—".to_owned();
+    }
     let av = v.abs();
-    if av >= 1_000_000_000.0 {
+    if av >= 1_000_000_000_000.0 {
+        format!("{:+.2}T", v / 1_000_000_000_000.0)
+    } else if av >= 1_000_000_000.0 {
         format!("{:+.2}B", v / 1_000_000_000.0)
     } else if av >= 1_000_000.0 {
         format!("{:+.2}M", v / 1_000_000.0)
@@ -6064,6 +6311,24 @@ fn format_compact_signed(v: f64) -> String {
         format!("{:+.1}K", v / 1_000.0)
     } else {
         format!("{v:+.0}")
+    }
+}
+
+#[inline]
+pub(crate) fn format_compact_unsigned_volume(v: f64) -> String {
+    if !v.is_finite() || v <= 0.0 {
+        return "0".to_owned();
+    }
+    if v >= 1_000_000_000_000.0 {
+        format!("{:.2}T", v / 1_000_000_000_000.0)
+    } else if v >= 1_000_000_000.0 {
+        format!("{:.2}B", v / 1_000_000_000.0)
+    } else if v >= 1_000_000.0 {
+        format!("{:.2}M", v / 1_000_000.0)
+    } else if v >= 1_000.0 {
+        format!("{:.1}K", v / 1_000.0)
+    } else {
+        format!("{v:.0}")
     }
 }
 
@@ -8521,21 +8786,26 @@ fn paint_main_ohlcv_hud(
                 volume: c.volume,
             }
         });
-    let sign = if inspected_bucket.change() >= 0.0 {
-        "+"
+    // `BUG-023`: compute HUD net change & `%Chg` against prior bar close (`candles[start - 1].close`)
+    // so Top Toolbar, Watchlist, and Chart OHLCV HUD stay 100% consistent with TradingView.
+    let prev_close = inspected_bucket
+        .start_index
+        .checked_sub(1)
+        .and_then(|i| candles.get(i))
+        .map_or(inspected_bucket.open, |p| p.close);
+    let hud_change = inspected_bucket.close - prev_close;
+    let hud_change_pct = if prev_close.abs() > 1.0e-12 {
+        (hud_change / prev_close) * 100.0
     } else {
-        ""
+        0.0
     };
+    let sign = if hud_change >= 0.0 { "+" } else { "" };
     let confl_badge = if conflation_factor > 1 {
         format!(" [{conflation_factor}x]")
     } else {
         String::new()
     };
-    let vol_str = if inspected_bucket.volume >= 1_000_000.0 {
-        format!("{:.2}M", inspected_bucket.volume / 1_000_000.0)
-    } else {
-        format!("{:.0}K", inspected_bucket.volume / 1_000.0)
-    };
+    let vol_str = format_compact_unsigned_volume(inspected_bucket.volume);
     let is_compact_hud = plot_rect.width() < 660.0;
     let compact_date = if is_compact_hud && inspected_bucket.date_label.len() > 12 {
         inspected_bucket
@@ -8548,7 +8818,7 @@ fn paint_main_ohlcv_hud(
     let (hud_text, hud_font_size) = if is_compact_hud {
         (
             format!(
-                "{}·{}{confl_badge} {}  O{:.2} H{:.2} L{:.2} C{:.2} ({sign}{:.2}%) V{vol_str}",
+                "{}·{}{confl_badge} {}  O{:.2} H{:.2} L{:.2} C{:.2} ({sign}{hud_change_pct:.2}%) V{vol_str}",
                 config.symbol,
                 config.timeframe,
                 compact_date,
@@ -8556,14 +8826,13 @@ fn paint_main_ohlcv_hud(
                 inspected_bucket.high,
                 inspected_bucket.low,
                 inspected_bucket.close,
-                inspected_bucket.change_pct(),
             ),
             10.5_f32,
         )
     } else {
         (
             format!(
-                "{} · {}{confl_badge} · {}   O {:.2}   H {:.2}   L {:.2}   C {:.2}   {sign}{:.2} ({sign}{:.2}%)   Vol {vol_str}",
+                "{} · {}{confl_badge} · {}   O {:.2}   H {:.2}   L {:.2}   C {:.2}   {sign}{hud_change:.2} ({sign}{hud_change_pct:.2}%)   Vol {vol_str}",
                 config.symbol,
                 config.timeframe,
                 inspected_bucket.date_label,
@@ -8571,14 +8840,12 @@ fn paint_main_ohlcv_hud(
                 inspected_bucket.high,
                 inspected_bucket.low,
                 inspected_bucket.close,
-                inspected_bucket.change(),
-                inspected_bucket.change_pct(),
             ),
             11.5_f32,
         )
     };
     let (bull_col, bear_col, _, _) = candle_palette_colors(candle_palette);
-    let value_color = if inspected_bucket.is_bullish() {
+    let value_color = if hud_change >= 0.0 {
         bull_col
     } else {
         bear_col
@@ -8983,7 +9250,7 @@ fn paint_main_overlay_hud(
         painter,
         Pos2::new(plot_rect.left() + 12.0, plot_rect.top() + 38.0),
         (plot_rect.width() - 24.0).max(100.0),
-        22.0,
+        40.0,
         job,
     );
 }
@@ -9603,11 +9870,16 @@ fn paint_oscillator_hud(
         }
     }
 
+    let hud_max_h = if id == OscillatorPaneId::Equity && multi_strategy_overlay.is_some() {
+        38.0
+    } else {
+        21.0
+    };
     paint_layout_job_hud(
         painter,
         Pos2::new(plot_rect.left() + 10.0, plot_rect.top() + 6.0),
         (plot_rect.width() - 20.0).max(90.0),
-        21.0,
+        hud_max_h,
         job,
     );
 }
@@ -9619,15 +9891,22 @@ fn paint_layout_job_hud(
     height: f32,
     mut job: LayoutJob,
 ) {
+    // Allow up to 2 wrapped rows when `height >= 36.0` so ICH & Multi-Strategy legends never truncate (`BUG-032`).
+    let max_rows = if height >= 36.0 { 2 } else { 1 };
     job.wrap = egui::text::TextWrapping {
         max_width: (max_width - 18.0).max(40.0),
-        max_rows: 1,
+        max_rows,
         break_anywhere: false,
         overflow_character: Some('…'),
     };
     let galley = painter.layout_job(job);
     let desired_w = (galley.size().x + 18.0).clamp(90.0, max_width);
-    let hud_rect = Rect::from_min_size(pos, Vec2::new(desired_w, height));
+    let desired_h = if max_rows > 1 {
+        (galley.size().y + 8.0).clamp(21.0, height)
+    } else {
+        height
+    };
+    let hud_rect = Rect::from_min_size(pos, Vec2::new(desired_w, desired_h));
     painter.rect_filled(hud_rect, 4.0, palette::BG_FLOATING_HUD);
     painter.rect_stroke(
         hud_rect,
@@ -9841,6 +10120,15 @@ fn compute_compare_viewport_scale(
     1.0
 }
 
+#[inline]
+fn resolve_scale_base_value(visible: &[Candle], all: &[Candle]) -> f64 {
+    visible
+        .iter()
+        .chain(all.iter())
+        .find_map(|c| (c.close.is_finite() && c.close > 0.0).then_some(c.close))
+        .unwrap_or(1.0)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn refresh_main_pane_autoscale_and_bounds(
     candles: &[Candle],
@@ -9855,9 +10143,7 @@ fn refresh_main_pane_autoscale_and_bounds(
     let strict_range =
         non_empty_candle_range(time_scale.strict_visible_data_range(), candles.len());
     let visible_slice = &candles[strict_range.clone()];
-    let base_value = visible_slice
-        .first()
-        .map_or_else(|| candles[0].close, |c| c.close);
+    let base_value = resolve_scale_base_value(visible_slice, candles);
 
     let (mut raw_min, mut raw_max, mut max_vol) = if let Some((_, cache)) = overlays {
         cache
@@ -10368,6 +10654,7 @@ struct DrawingPointerInput {
     press_origin: Option<Pos2>,
     latest_pos: Option<Pos2>,
     snap_modifier: bool,
+    shift_modifier: bool,
 }
 
 fn sample_drawing_pointer_input(ui: &Ui) -> DrawingPointerInput {
@@ -10378,6 +10665,10 @@ fn sample_drawing_pointer_input(ui: &Ui) -> DrawingPointerInput {
         press_origin: i.pointer.press_origin(),
         latest_pos: i.pointer.latest_pos().or_else(|| i.pointer.interact_pos()),
         snap_modifier: i.modifiers.command || i.modifiers.ctrl,
+        shift_modifier: i.modifiers.shift
+            && !i.modifiers.command
+            && !i.modifiers.ctrl
+            && !i.modifiers.alt,
     })
 }
 
@@ -10393,6 +10684,7 @@ fn sanitize_hidden_oscillator_drawing_state(
         DrawingInteractionPhase::Idle => false,
         DrawingInteractionPhase::PlacingSingle { pane, .. }
         | DrawingInteractionPhase::PlacingTwoAnchor { pane, .. }
+        | DrawingInteractionPhase::PlacingChannelOffset { pane, .. }
         | DrawingInteractionPhase::DraggingHandle { pane, .. }
         | DrawingInteractionPhase::DraggingBody { pane, .. } => !pane_is_active(*pane),
     };
@@ -10462,6 +10754,13 @@ fn drive_pane_drawing_input(
         && let Some(pp) = ptr.press_origin.or(ptr.latest_pos)
         && plot_rect.contains(pp)
     {
+        // TradingView `Shift+Click` quick ruler measure from Cursor mode (`v1.1 / Wave 2`)
+        if ptr.shift_modifier
+            && store.active_tool == DrawingTool::Select
+            && matches!(store.phase(), DrawingInteractionPhase::Idle)
+        {
+            store.set_tool(DrawingTool::PriceDateRange);
+        }
         pressed_pos_this_frame = Some(pp);
         let outcome = store.pointer_down(pane, to_local(pp), ptr.snap_modifier, proj, candles);
         claimed_press = outcome == PointerCaptureOutcome::CapturedByDrawing;
@@ -10471,6 +10770,7 @@ fn drive_pane_drawing_input(
         DrawingInteractionPhase::Idle => false,
         DrawingInteractionPhase::PlacingSingle { pane: p, .. }
         | DrawingInteractionPhase::PlacingTwoAnchor { pane: p, .. }
+        | DrawingInteractionPhase::PlacingChannelOffset { pane: p, .. }
         | DrawingInteractionPhase::DraggingHandle { pane: p, .. }
         | DrawingInteractionPhase::DraggingBody { pane: p, .. } => *p == pane,
     };
@@ -10503,6 +10803,12 @@ fn drive_pane_drawing_input(
             second_press_active,
             ..
         } => *p == pane && (!*wait_for_second_press || *second_press_active),
+        DrawingInteractionPhase::PlacingChannelOffset {
+            pane: p,
+            wait_for_third_press,
+            third_press_active,
+            ..
+        } => *p == pane && (!*wait_for_third_press || *third_press_active),
         DrawingInteractionPhase::Idle => false,
     };
 
@@ -10544,7 +10850,8 @@ fn drive_pane_drawing_input(
 fn apply_drawing_cursor_feedback(ui: &Ui, store: &DrawingStore) {
     match store.phase() {
         DrawingInteractionPhase::PlacingSingle { .. }
-        | DrawingInteractionPhase::PlacingTwoAnchor { .. } => {
+        | DrawingInteractionPhase::PlacingTwoAnchor { .. }
+        | DrawingInteractionPhase::PlacingChannelOffset { .. } => {
             ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
         }
         DrawingInteractionPhase::DraggingHandle { .. }
@@ -10900,11 +11207,417 @@ fn append_horizontal_styled_line_mesh(
     }
 }
 
+const TRADING_BADGE_CLOSE_W: f32 = 17.0;
+
+#[inline]
+fn snap_chart_trading_price(
+    raw_price: f64,
+    target: ChartTradingDragTarget,
+    trading_venue: Option<(ExchangeVenue, ResolvedVnPriceUnit, Option<DailyPriceBand>)>,
+) -> f64 {
+    if !raw_price.is_finite() || raw_price <= 0.0 {
+        return raw_price;
+    }
+    let Some((venue, unit, band)) = trading_venue else {
+        return (raw_price * 10_000.0).round() / 10_000.0;
+    };
+    let mut snapped = snap_to_nearest_tick(raw_price, venue, unit);
+    if matches!(target, ChartTradingDragTarget::PendingOrder { .. })
+        && let Some(b) = band
+    {
+        snapped = snapped.clamp(b.floor_price, b.ceiling_price);
+        snapped = snap_to_nearest_tick(snapped, venue, unit);
+    }
+    snapped
+}
+
+fn format_chart_pnl_with_venue(pnl: f64, venue: Option<ExchangeVenue>) -> String {
+    let is_vn = venue.is_some_and(|v| {
+        matches!(
+            v,
+            ExchangeVenue::Hose
+                | ExchangeVenue::Hnx
+                | ExchangeVenue::Upcom
+                | ExchangeVenue::Vn30Futures
+        )
+    });
+    if is_vn {
+        if pnl.abs() >= 100.0 {
+            format!("{pnl:+.0} kVND")
+        } else {
+            format!("{pnl:+.2} kVND")
+        }
+    } else if pnl < 0.0 {
+        format!("-${:.2}", pnl.abs())
+    } else {
+        format!("+${pnl:.2}")
+    }
+}
+
+fn format_sl_tp_badge_label(
+    prefix: &str,
+    price: f64,
+    pos: &crate::trading::Position,
+    venue: Option<ExchangeVenue>,
+    show_price: bool,
+) -> String {
+    let pnl = pos.unrealized_pnl(price);
+    let pnl_str = format_chart_pnl_with_venue(pnl, venue);
+    let r_suffix = pos
+        .initial_risk_amount
+        .filter(|&r| r.is_finite() && r > 1e-9)
+        .map(|r| format!(" ({:+.2}R)", pnl / r))
+        .unwrap_or_default();
+    if show_price {
+        format!("{prefix} {price:.2} · {pnl_str}{r_suffix}")
+    } else {
+        format!("{prefix}  {pnl_str}{r_suffix}")
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TradingOverlayHitItem {
+    y: f32,
+    badge_rect: Option<Rect>,
+    close_rect: Option<Rect>,
+    drag_target: Option<ChartTradingDragTarget>,
+    close_action: Option<ChartTradingAction>,
+    current_price: f64,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_trading_overlay_hit_items(
+    painter: &egui::Painter,
+    plot_rect: Rect,
+    candles: &[Candle],
+    main_vp: &PaneViewport<'_>,
+    session: &TradingSession,
+    active_drag: Option<ChartTradingDragState>,
+    venue: Option<ExchangeVenue>,
+) -> Vec<TradingOverlayHitItem> {
+    let mut items = Vec::with_capacity(8);
+    let mut placed_badges: Vec<Rect> = Vec::with_capacity(8);
+    let font = FontId::monospace(10.0);
+    let pad = Vec2::new(5.5, 2.5);
+
+    let mut push_item = |price: f64,
+                         badge_text: &str,
+                         has_close: bool,
+                         drag_target: Option<ChartTradingDragTarget>,
+                         close_action: Option<ChartTradingAction>| {
+        let Some(sy) = main_vp.price_to_screen_y(price) else {
+            return;
+        };
+        let y = sy as f32;
+        if !y.is_finite() || y < plot_rect.top() || y > plot_rect.bottom() {
+            return;
+        }
+        let (badge_rect, close_rect) = if !badge_text.is_empty() && plot_rect.width() > 160.0 {
+            let galley =
+                painter.layout_no_wrap(badge_text.to_owned(), font.clone(), Color32::WHITE);
+            let close_extra = if has_close {
+                TRADING_BADGE_CLOSE_W
+            } else {
+                0.0
+            };
+            let badge_w = galley.size().x + pad.x * 2.0 + close_extra;
+            let badge_h = galley.size().y + pad.y * 2.0;
+            let br = place_non_overlapping_order_badge(
+                plot_rect,
+                y,
+                Vec2::new(badge_w, badge_h),
+                &mut placed_badges,
+            );
+            let cr = has_close.then(|| {
+                Rect::from_min_max(
+                    Pos2::new(
+                        (br.right() - TRADING_BADGE_CLOSE_W).max(br.left()),
+                        br.top(),
+                    ),
+                    br.max,
+                )
+            });
+            (Some(br), cr)
+        } else {
+            (None, None)
+        };
+        items.push(TradingOverlayHitItem {
+            y,
+            badge_rect,
+            close_rect,
+            drag_target,
+            close_action,
+            current_price: price,
+        });
+    };
+
+    for order in session.pending_orders() {
+        if let Some(base_trig) = order.kind.trigger_price() {
+            let is_drag = active_drag.is_some_and(|d| {
+                d.target == ChartTradingDragTarget::PendingOrder { order_id: order.id }
+            });
+            let price = if is_drag {
+                active_drag.unwrap().preview_price
+            } else {
+                base_trig
+            };
+            let badge = if is_drag {
+                format!(
+                    "{} {} {} @ {price:.2}",
+                    order.side.short_label(),
+                    order.kind.short_label(),
+                    format_compact_qty(order.quantity)
+                )
+            } else {
+                format!(
+                    "{} {} {}",
+                    order.side.short_label(),
+                    order.kind.short_label(),
+                    format_compact_qty(order.quantity)
+                )
+            };
+            push_item(
+                price,
+                &badge,
+                true,
+                Some(ChartTradingDragTarget::PendingOrder { order_id: order.id }),
+                Some(ChartTradingAction::CancelPendingOrder(order.id)),
+            );
+        }
+    }
+
+    if let Some(pos) = session.open_position() {
+        let mark_price = candles.last().map_or(pos.avg_entry_price, |c| c.close);
+        let unreal_pnl = pos.unrealized_pnl(mark_price);
+        let unreal_pct = pos.unrealized_return_pct(mark_price);
+        let side_tag = match pos.side {
+            PositionSide::Long => "LONG",
+            PositionSide::Short => "SHORT",
+        };
+        let entry_badge = format!(
+            "{} {}  {:+.2} ({:+.2}%)",
+            side_tag,
+            format_compact_qty(pos.quantity),
+            unreal_pnl,
+            unreal_pct
+        );
+        push_item(
+            pos.avg_entry_price,
+            &entry_badge,
+            true,
+            None,
+            Some(ChartTradingAction::FlattenPosition),
+        );
+
+        if let Some(base_sl) = pos.stop_loss {
+            let is_drag =
+                active_drag.is_some_and(|d| d.target == ChartTradingDragTarget::PositionStopLoss);
+            let sl_px = if is_drag {
+                active_drag.unwrap().preview_price
+            } else {
+                base_sl
+            };
+            let sl_badge = format_sl_tp_badge_label("SL", sl_px, pos, venue, is_drag);
+            push_item(
+                sl_px,
+                &sl_badge,
+                false,
+                Some(ChartTradingDragTarget::PositionStopLoss),
+                None,
+            );
+        }
+
+        if let Some(base_tp) = pos.take_profit {
+            let is_drag =
+                active_drag.is_some_and(|d| d.target == ChartTradingDragTarget::PositionTakeProfit);
+            let tp_px = if is_drag {
+                active_drag.unwrap().preview_price
+            } else {
+                base_tp
+            };
+            let tp_badge = format_sl_tp_badge_label("TP", tp_px, pos, venue, is_drag);
+            push_item(
+                tp_px,
+                &tp_badge,
+                false,
+                Some(ChartTradingDragTarget::PositionTakeProfit),
+                None,
+            );
+        }
+    }
+
+    items
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drive_chart_direct_trading_input(
+    ui: &Ui,
+    plot_rect: Rect,
+    candles: &[Candle],
+    main_vp: &PaneViewport<'_>,
+    session: &TradingSession,
+    active_drag: Option<ChartTradingDragState>,
+    trading_venue: Option<(ExchangeVenue, ResolvedVnPriceUnit, Option<DailyPriceBand>)>,
+) -> (Option<ChartTradingAction>, bool) {
+    let wants_kb = ui.ctx().egui_wants_keyboard_input();
+    let (primary_pressed, primary_down, primary_released, press_origin, latest_pos, esc_pressed) =
+        ui.input(|i| {
+            (
+                i.pointer.primary_pressed(),
+                i.pointer.primary_down(),
+                i.pointer.primary_released(),
+                i.pointer.press_origin(),
+                i.pointer.latest_pos().or_else(|| i.pointer.interact_pos()),
+                !wants_kb && i.key_pressed(Key::Escape),
+            )
+        });
+
+    // 1. Continue or commit an active vertical drag (`SL` / `TP` / Pending Order)
+    if let Some(drag) = active_drag {
+        ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical);
+        if esc_pressed {
+            return (Some(ChartTradingAction::CancelDrag), true);
+        }
+        let next_price = latest_pos
+            .and_then(|pos| {
+                let clamped_y = pos.y.clamp(plot_rect.top() + 2.0, plot_rect.bottom() - 2.0);
+                main_vp.screen_y_to_price(f64::from(clamped_y))
+            })
+            .filter(|p| p.is_finite() && *p > 0.0)
+            .map_or(drag.preview_price, |raw| {
+                snap_chart_trading_price(raw, drag.target, trading_venue)
+            });
+
+        if primary_released || !primary_down {
+            let commit = match drag.target {
+                ChartTradingDragTarget::PositionStopLoss => {
+                    ChartTradingAction::CommitPositionStopLoss(next_price)
+                }
+                ChartTradingDragTarget::PositionTakeProfit => {
+                    ChartTradingAction::CommitPositionTakeProfit(next_price)
+                }
+                ChartTradingDragTarget::PendingOrder { order_id } => {
+                    ChartTradingAction::CommitPendingOrderPrice {
+                        order_id,
+                        new_price: next_price,
+                    }
+                }
+            };
+            return (Some(commit), true);
+        }
+        return (
+            Some(ChartTradingAction::UpdateDragPreview(
+                ChartTradingDragState {
+                    target: drag.target,
+                    preview_price: next_price,
+                },
+            )),
+            true,
+        );
+    }
+
+    // 2. Idle hit-testing over `[×]` close buttons, trading badges, and horizontal order/bracket lines
+    let probe_pos = if primary_pressed {
+        press_origin.or(latest_pos)
+    } else {
+        latest_pos
+    };
+    let Some(pos) = probe_pos else {
+        return (None, false);
+    };
+    if !plot_rect.contains(pos) {
+        return (None, false);
+    }
+
+    let items = collect_trading_overlay_hit_items(
+        ui.painter(),
+        plot_rect,
+        candles,
+        main_vp,
+        session,
+        None,
+        trading_venue.map(|(v, _, _)| v),
+    );
+    if items.is_empty() {
+        return (None, false);
+    }
+
+    // Pass A: `[×]` quick cancel/flatten buttons have top precedence inside badges.
+    for item in &items {
+        if let (Some(cr), Some(close_act)) = (item.close_rect, item.close_action)
+            && cr.expand(1.5).contains(pos)
+        {
+            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+            if primary_pressed {
+                return (Some(close_act), true);
+            }
+            return (None, false);
+        }
+    }
+
+    // Pass B: Badge body hit for draggable targets (`SL`, `TP`, Pending Order).
+    for item in &items {
+        if let (Some(br), Some(target)) = (item.badge_rect, item.drag_target)
+            && br.contains(pos)
+        {
+            ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical);
+            if primary_pressed {
+                return (
+                    Some(ChartTradingAction::UpdateDragPreview(
+                        ChartTradingDragState {
+                            target,
+                            preview_price: item.current_price,
+                        },
+                    )),
+                    true,
+                );
+            }
+            return (None, false);
+        }
+    }
+
+    // Pass C: Horizontal line hit (`±5.0 px` vertically) for draggable targets.
+    let mut best_line: Option<(f32, ChartTradingDragTarget, f64)> = None;
+    for item in &items {
+        if let Some(target) = item.drag_target {
+            let dy = (pos.y - item.y).abs();
+            if dy <= 5.0 && best_line.is_none_or(|(prev_dy, _, _)| dy < prev_dy) {
+                best_line = Some((dy, target, item.current_price));
+            }
+        }
+    }
+    if let Some((_, target, cur_price)) = best_line {
+        ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical);
+        if primary_pressed {
+            return (
+                Some(ChartTradingAction::UpdateDragPreview(
+                    ChartTradingDragState {
+                        target,
+                        preview_price: cur_price,
+                    },
+                )),
+                true,
+            );
+        }
+    }
+
+    (None, false)
+}
+
+struct PendingTradingBadge {
+    badge_rect: Rect,
+    pad: Vec2,
+    galley: std::sync::Arc<egui::Galley>,
+    color: Color32,
+    has_close_btn: bool,
+    is_dragging: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_trading_price_line_and_pill(
     axis_painter: &egui::Painter,
-    plot_painter: &egui::Painter,
     line_mesh: &mut Mesh,
+    pending_badges: &mut Vec<PendingTradingBadge>,
     placed_badges: &mut Vec<Rect>,
     placed_axis_pills: &mut Vec<f32>,
     plot_rect: Rect,
@@ -10914,6 +11627,8 @@ fn paint_trading_price_line_and_pill(
     dash: LineDashStyle,
     stroke_width: f32,
     inline_badge: &str,
+    has_close_btn: bool,
+    is_dragging: bool,
     price_scale: &PriceScale,
     main_vp: &PaneViewport<'_>,
     base_value: f64,
@@ -10926,21 +11641,39 @@ fn paint_trading_price_line_and_pill(
         return false;
     }
 
+    let eff_stroke = if is_dragging {
+        (stroke_width + 0.85).max(2.0)
+    } else {
+        stroke_width
+    };
     append_horizontal_styled_line_mesh(
         line_mesh,
         plot_rect.left(),
         plot_rect.right(),
         y,
-        stroke_width,
-        color.gamma_multiply(0.90),
-        dash,
+        eff_stroke,
+        if is_dragging {
+            color
+        } else {
+            color.gamma_multiply(0.90)
+        },
+        if is_dragging {
+            LineDashStyle::Solid
+        } else {
+            dash
+        },
     );
 
     if !inline_badge.is_empty() && plot_rect.width() > 160.0 {
         let font = FontId::monospace(10.0);
         let galley = axis_painter.layout_no_wrap(inline_badge.to_owned(), font, Color32::WHITE);
         let pad = Vec2::new(5.5, 2.5);
-        let badge_w = galley.size().x + pad.x * 2.0;
+        let close_extra = if has_close_btn {
+            TRADING_BADGE_CLOSE_W
+        } else {
+            0.0
+        };
+        let badge_w = galley.size().x + pad.x * 2.0 + close_extra;
         let badge_h = galley.size().y + pad.y * 2.0;
         let badge_rect = place_non_overlapping_order_badge(
             plot_rect,
@@ -10948,18 +11681,14 @@ fn paint_trading_price_line_and_pill(
             Vec2::new(badge_w, badge_h),
             placed_badges,
         );
-        plot_painter.rect_filled(
+        pending_badges.push(PendingTradingBadge {
             badge_rect,
-            3.0,
-            Color32::from_rgba_unmultiplied(15, 19, 28, 232),
-        );
-        plot_painter.rect_stroke(
-            badge_rect,
-            3.0,
-            Stroke::new(1.0, color.gamma_multiply(0.85)),
-            StrokeKind::Inside,
-        );
-        plot_painter.galley(badge_rect.min + pad, galley, Color32::WHITE);
+            pad,
+            galley,
+            color,
+            has_close_btn,
+            is_dragging,
+        });
     }
 
     if let Some(pill_y) =
@@ -11291,12 +12020,8 @@ pub(crate) fn append_alert_axis_pill_ys(
     let mut push_price = |price: f64| {
         if let Some(sy) = main_vp.price_to_screen_y(price) {
             let y = sy as f32;
-            if y.is_finite()
-                && y >= plot_rect.top()
-                && y <= plot_rect.bottom()
-                && let Some(pill_y) = clamp_axis_pill_center_y(y, price_axis_rect, 9.5)
-            {
-                occluding_ys.push(pill_y);
+            if y.is_finite() && y >= plot_rect.top() && y <= plot_rect.bottom() {
+                let _ = resolve_non_overlapping_axis_pill_y(y, price_axis_rect, 9.5, occluding_ys);
             }
         }
     };
@@ -11338,33 +12063,52 @@ fn paint_trading_overlays(
     main_vp: &PaneViewport<'_>,
     base_value: f64,
     session: &TradingSession,
-    seed_axis_pills: &[f32],
+    active_drag: Option<ChartTradingDragState>,
+    venue: Option<ExchangeVenue>,
+    hover_pos: Option<Pos2>,
+    placed_axis_pills: &mut Vec<f32>,
+    placed_badges: &mut Vec<Rect>,
 ) -> (usize, usize) {
     let mut price_lines = 0_usize;
     let mut line_mesh = Mesh::with_texture(egui::TextureId::default());
-    let mut placed_badges: Vec<Rect> = Vec::with_capacity(8);
-    let mut placed_axis_pills: Vec<f32> = Vec::with_capacity(seed_axis_pills.len() + 8);
-    placed_axis_pills.extend_from_slice(seed_axis_pills);
+    let mut pending_badges: Vec<PendingTradingBadge> = Vec::new();
 
-    // 1. Working (`Pending`) Limit & Stop orders
+    // 1. Working (`Pending`) Limit & Stop orders (draggable + `[×]` cancel button)
     for order in session.pending_orders() {
-        if let Some(trig_price) = order.kind.trigger_price() {
+        if let Some(base_trig) = order.kind.trigger_price() {
+            let is_drag = active_drag.is_some_and(|d| {
+                d.target == ChartTradingDragTarget::PendingOrder { order_id: order.id }
+            });
+            let trig_price = if is_drag {
+                active_drag.unwrap().preview_price
+            } else {
+                base_trig
+            };
             let color = match order.side {
                 OrderSide::Buy => palette::BULLISH,
                 OrderSide::Sell => palette::BEARISH,
             };
-            let badge = format!(
-                "{} {} {}",
-                order.side.short_label(),
-                order.kind.short_label(),
-                format_compact_qty(order.quantity)
-            );
+            let badge = if is_drag {
+                format!(
+                    "{} {} {} @ {trig_price:.2}",
+                    order.side.short_label(),
+                    order.kind.short_label(),
+                    format_compact_qty(order.quantity)
+                )
+            } else {
+                format!(
+                    "{} {} {}",
+                    order.side.short_label(),
+                    order.kind.short_label(),
+                    format_compact_qty(order.quantity)
+                )
+            };
             if paint_trading_price_line_and_pill(
                 axis_painter,
-                plot_painter,
                 &mut line_mesh,
-                &mut placed_badges,
-                &mut placed_axis_pills,
+                &mut pending_badges,
+                placed_badges,
+                placed_axis_pills,
                 plot_rect,
                 price_axis_rect,
                 trig_price,
@@ -11372,6 +12116,8 @@ fn paint_trading_overlays(
                 LineDashStyle::Dotted,
                 1.2,
                 &badge,
+                true,
+                is_drag,
                 price_scale,
                 main_vp,
                 base_value,
@@ -11381,7 +12127,7 @@ fn paint_trading_overlays(
         }
     }
 
-    // 2. Active Position Entry, Stop Loss, and Take Profit lines
+    // 2. Active Position Entry (`[×]` flatten), Stop Loss (draggable), and Take Profit (draggable)
     if let Some(pos) = session.open_position() {
         let mark_price = candles.last().map_or(pos.avg_entry_price, |c| c.close);
         let unreal_pnl = pos.unrealized_pnl(mark_price);
@@ -11399,10 +12145,10 @@ fn paint_trading_overlays(
         );
         if paint_trading_price_line_and_pill(
             axis_painter,
-            plot_painter,
             &mut line_mesh,
-            &mut placed_badges,
-            &mut placed_axis_pills,
+            &mut pending_badges,
+            placed_badges,
+            placed_axis_pills,
             plot_rect,
             price_axis_rect,
             pos.avg_entry_price,
@@ -11410,6 +12156,8 @@ fn paint_trading_overlays(
             LineDashStyle::Dashed,
             1.55,
             &entry_badge,
+            true,
+            false,
             price_scale,
             main_vp,
             base_value,
@@ -11417,15 +12165,21 @@ fn paint_trading_overlays(
             price_lines += 1;
         }
 
-        if let Some(sl) = pos.stop_loss {
-            let sl_pnl = pos.unrealized_pnl(sl);
-            let sl_badge = format!("SL  {:+.2}", sl_pnl);
+        if let Some(base_sl) = pos.stop_loss {
+            let is_drag =
+                active_drag.is_some_and(|d| d.target == ChartTradingDragTarget::PositionStopLoss);
+            let sl = if is_drag {
+                active_drag.unwrap().preview_price
+            } else {
+                base_sl
+            };
+            let sl_badge = format_sl_tp_badge_label("SL", sl, pos, venue, is_drag);
             if paint_trading_price_line_and_pill(
                 axis_painter,
-                plot_painter,
                 &mut line_mesh,
-                &mut placed_badges,
-                &mut placed_axis_pills,
+                &mut pending_badges,
+                placed_badges,
+                placed_axis_pills,
                 plot_rect,
                 price_axis_rect,
                 sl,
@@ -11433,6 +12187,8 @@ fn paint_trading_overlays(
                 LineDashStyle::Dashed,
                 1.35,
                 &sl_badge,
+                false,
+                is_drag,
                 price_scale,
                 main_vp,
                 base_value,
@@ -11441,15 +12197,21 @@ fn paint_trading_overlays(
             }
         }
 
-        if let Some(tp) = pos.take_profit {
-            let tp_pnl = pos.unrealized_pnl(tp);
-            let tp_badge = format!("TP  {:+.2}", tp_pnl);
+        if let Some(base_tp) = pos.take_profit {
+            let is_drag =
+                active_drag.is_some_and(|d| d.target == ChartTradingDragTarget::PositionTakeProfit);
+            let tp = if is_drag {
+                active_drag.unwrap().preview_price
+            } else {
+                base_tp
+            };
+            let tp_badge = format_sl_tp_badge_label("TP", tp, pos, venue, is_drag);
             if paint_trading_price_line_and_pill(
                 axis_painter,
-                plot_painter,
                 &mut line_mesh,
-                &mut placed_badges,
-                &mut placed_axis_pills,
+                &mut pending_badges,
+                placed_badges,
+                placed_axis_pills,
                 plot_rect,
                 price_axis_rect,
                 tp,
@@ -11457,6 +12219,8 @@ fn paint_trading_overlays(
                 LineDashStyle::Dashed,
                 1.35,
                 &tp_badge,
+                false,
+                is_drag,
                 price_scale,
                 main_vp,
                 base_value,
@@ -11466,8 +12230,73 @@ fn paint_trading_overlays(
         }
     }
 
+    // Flush horizontal price lines FIRST so inline badges & `[×]` buttons render crisply on top.
     if !line_mesh.is_empty() {
         plot_painter.add(Shape::mesh(line_mesh));
+    }
+
+    for badge in pending_badges {
+        let badge_rect = badge.badge_rect;
+        let color = badge.color;
+        let is_dragging = badge.is_dragging;
+        plot_painter.rect_filled(
+            badge_rect,
+            3.0,
+            if is_dragging {
+                Color32::from_rgba_unmultiplied(24, 32, 48, 250)
+            } else {
+                Color32::from_rgba_unmultiplied(15, 19, 28, 240)
+            },
+        );
+        plot_painter.rect_stroke(
+            badge_rect,
+            3.0,
+            Stroke::new(
+                if is_dragging { 1.6 } else { 1.0 },
+                if is_dragging {
+                    color
+                } else {
+                    color.gamma_multiply(0.85)
+                },
+            ),
+            StrokeKind::Inside,
+        );
+        plot_painter.galley(badge_rect.min + badge.pad, badge.galley, Color32::WHITE);
+
+        if badge.has_close_btn {
+            let sep_x = (badge_rect.right() - TRADING_BADGE_CLOSE_W).max(badge_rect.left());
+            let close_rect = Rect::from_min_max(Pos2::new(sep_x, badge_rect.top()), badge_rect.max);
+            let close_hovered = hover_pos.is_some_and(|hp| close_rect.expand(1.5).contains(hp));
+            if close_hovered {
+                plot_painter.rect_filled(
+                    close_rect.shrink(1.0),
+                    2.0,
+                    palette::BEARISH.gamma_multiply(0.45),
+                );
+            }
+            plot_painter.line_segment(
+                [
+                    Pos2::new(sep_x, badge_rect.top() + 2.0),
+                    Pos2::new(sep_x, badge_rect.bottom() - 2.0),
+                ],
+                Stroke::new(1.0, color.gamma_multiply(0.45)),
+            );
+            let cx = close_rect.center().x;
+            let cy = close_rect.center().y;
+            let x_col = if close_hovered {
+                Color32::WHITE
+            } else {
+                Color32::from_rgb(200, 206, 220)
+            };
+            plot_painter.line_segment(
+                [Pos2::new(cx - 3.0, cy - 3.0), Pos2::new(cx + 3.0, cy + 3.0)],
+                Stroke::new(1.3, x_col),
+            );
+            plot_painter.line_segment(
+                [Pos2::new(cx - 3.0, cy + 3.0), Pos2::new(cx + 3.0, cy - 3.0)],
+                Stroke::new(1.3, x_col),
+            );
+        }
     }
 
     // 3. Execution Fill Markers (`arrowUp` / `arrowDown`)
@@ -11491,6 +12320,8 @@ fn paint_alert_price_line_and_pill(
     axis_painter: &egui::Painter,
     line_mesh: &mut Mesh,
     pending_badges: &mut Vec<(Rect, Vec2, std::sync::Arc<egui::Galley>, Color32)>,
+    placed_axis_pills: &mut Vec<f32>,
+    trading_badges: &[Rect],
     hud_keepout: Rect,
     toast_keepout: Option<Rect>,
     plot_rect: Rect,
@@ -11531,42 +12362,54 @@ fn paint_alert_price_line_and_pill(
         let pad = Vec2::new(5.5, 2.0);
         let badge_w = galley.size().x + pad.x * 2.0;
         let badge_h = galley.size().y + pad.y * 2.0;
-        let badge_y = safe_clamp_f32(
-            y - badge_h * 0.5,
-            plot_rect.top() + 2.0,
-            (plot_rect.bottom() - badge_h - 2.0).max(plot_rect.top() + 2.0),
-        );
-        let cand_left = Rect::from_min_size(
-            Pos2::new(plot_rect.left() + 10.0, badge_y),
-            Vec2::new(badge_w, badge_h),
-        );
-        let cand_right = Rect::from_min_size(
-            Pos2::new(
-                (plot_rect.right() - badge_w - 10.0).max(plot_rect.left() + 10.0),
-                badge_y,
-            ),
-            Vec2::new(badge_w, badge_h),
-        );
-        let clear_of_hud = |r: Rect| {
+        let min_y = plot_rect.top() + 2.0;
+        let max_y = (plot_rect.bottom() - badge_h - 2.0).max(min_y);
+        let base_y = safe_clamp_f32(y - badge_h * 0.5, min_y, max_y);
+        let clear_of_all = |r: Rect| {
             !r.intersects(hud_keepout)
                 && toast_keepout.is_none_or(|tk| !r.intersects(tk.expand(3.0)))
+                && trading_badges
+                    .iter()
+                    .all(|tb| !r.intersects(tb.expand(2.5)))
                 && pending_badges
                     .iter()
                     .all(|(existing, _, _, _)| !r.intersects(existing.expand(2.0)))
         };
-        let chosen = if clear_of_hud(cand_left) {
-            Some(cand_left)
-        } else if clear_of_hud(cand_right) {
-            Some(cand_right)
-        } else {
-            None
-        };
+        // Search left/right slots and up to 3 vertical nudge tiers so alert badges NEVER collide
+        // with `LONG`/`TP`/`SL` PnL tags or other alert badges (`BUG-018`).
+        let step_y = badge_h + 3.0;
+        let y_offsets = [0.0, -step_y, step_y, -2.0 * step_y, 2.0 * step_y];
+        let mut chosen: Option<Rect> = None;
+        for &dy in &y_offsets {
+            let cy = safe_clamp_f32(base_y + dy, min_y, max_y);
+            let cand_left = Rect::from_min_size(
+                Pos2::new(plot_rect.left() + 10.0, cy),
+                Vec2::new(badge_w, badge_h),
+            );
+            if clear_of_all(cand_left) {
+                chosen = Some(cand_left);
+                break;
+            }
+            let cand_right = Rect::from_min_size(
+                Pos2::new(
+                    (plot_rect.right() - badge_w - 10.0).max(plot_rect.left() + 10.0),
+                    cy,
+                ),
+                Vec2::new(badge_w, badge_h),
+            );
+            if clear_of_all(cand_right) {
+                chosen = Some(cand_right);
+                break;
+            }
+        }
         if let Some(badge_rect) = chosen {
             pending_badges.push((badge_rect, pad, galley, color));
         }
     }
 
-    if let Some(pill_y) = clamp_axis_pill_center_y(y, price_axis_rect, 9.5) {
+    if let Some(pill_y) =
+        resolve_non_overlapping_axis_pill_y(y, price_axis_rect, 9.5, placed_axis_pills)
+    {
         let pill_rect = Rect::from_min_max(
             Pos2::new(price_axis_rect.left() + 2.0, pill_y - 9.0),
             Pos2::new(price_axis_rect.right() - 4.0, pill_y + 9.0),
@@ -11619,13 +12462,7 @@ fn paint_alert_trigger_markers(
         return 0;
     }
 
-    let event_ts = |ev: &AlertTriggerEvent| -> i64 {
-        if ev.eval_base_timestamp != 0 {
-            ev.eval_base_timestamp
-        } else {
-            ev.bar_timestamp
-        }
-    };
+    let event_ts = |ev: &AlertTriggerEvent| -> i64 { ev.effective_eval_base_timestamp() };
 
     let min_ts = candles[aligned_start].timestamp.max(candles[0].timestamp);
     let max_excl_ts = (aligned_end < candles.len()).then(|| candles[aligned_end].timestamp);
@@ -11776,18 +12613,14 @@ fn paint_alert_overlays(
     drawings: Option<&DrawingStore>,
     cutoff_timestamp: Option<i64>,
     frontier_base_timestamp: Option<i64>,
+    placed_axis_pills: &mut Vec<f32>,
+    trading_badges: &[Rect],
 ) -> (usize, usize) {
     let mut alert_lines = 0_usize;
     let mut line_mesh = Mesh::with_texture(egui::TextureId::default());
     let mut pending_badges: Vec<(Rect, Vec2, std::sync::Arc<egui::Galley>, Color32)> = Vec::new();
     let hud_keepout = Rect::from_min_size(plot_rect.min, Vec2::new(505.0, 62.0));
-    let event_ts = |ev: &AlertTriggerEvent| -> i64 {
-        if ev.eval_base_timestamp != 0 {
-            ev.eval_base_timestamp
-        } else {
-            ev.bar_timestamp
-        }
-    };
+    let event_ts = |ev: &AlertTriggerEvent| -> i64 { ev.effective_eval_base_timestamp() };
 
     // Pre-layout optional frontier toast pill below the top OHLCV / Indicator HUD so inline alert badges never collide
     let frontier_toast = if let Some(last_bar) = candles.last()
@@ -11858,6 +12691,8 @@ fn paint_alert_overlays(
                     axis_painter,
                     &mut line_mesh,
                     &mut pending_badges,
+                    placed_axis_pills,
+                    trading_badges,
                     hud_keepout,
                     toast_keepout,
                     plot_rect,
@@ -11891,6 +12726,8 @@ fn paint_alert_overlays(
                         axis_painter,
                         &mut line_mesh,
                         &mut pending_badges,
+                        placed_axis_pills,
+                        trading_badges,
                         hud_keepout,
                         toast_keepout,
                         plot_rect,
@@ -11978,6 +12815,7 @@ fn paint_pane_drawings(
     pane_vp: &PaneViewport<'_>,
     mut r11_memo: Option<&mut R11RenderMemo>,
     candles_fp: u64,
+    placed_axis_pills: &mut Vec<f32>,
 ) {
     let cutoff = store.replay_cutoff_timestamp();
     for drawing in &store.drawings {
@@ -12006,6 +12844,7 @@ fn paint_pane_drawings(
             false,
             r11_memo.as_deref_mut(),
             candles_fp,
+            placed_axis_pills,
         );
     }
 
@@ -12030,6 +12869,7 @@ fn paint_pane_drawings(
             true,
             None,
             candles_fp,
+            placed_axis_pills,
         );
     }
 }
@@ -12053,6 +12893,7 @@ fn paint_single_drawing(
     is_preview: bool,
     r11_memo: Option<&mut R11RenderMemo>,
     candles_fp: u64,
+    placed_axis_pills: &mut Vec<f32>,
 ) {
     let Some(projected) = proj.project_drawing(drawing) else {
         return;
@@ -12123,10 +12964,11 @@ fn paint_single_drawing(
                 );
 
                 if is_selected
-                    && let Some(sy) = clamp_axis_pill_center_y(
+                    && let Some(sy) = resolve_non_overlapping_axis_pill_y(
                         plot_rect.top() + (*y as f32),
                         price_axis_rect,
                         9.5,
+                        placed_axis_pills,
                     )
                 {
                     let badge_rect = Rect::from_min_max(
@@ -12187,6 +13029,210 @@ fn paint_single_drawing(
                     }
                 }
             }
+        }
+        ProjectedDrawingShape::ParallelChannel {
+            base_line,
+            parallel_line,
+            mid_line,
+            fill_polygon,
+        } => {
+            if fill_polygon.len() >= 3 {
+                let fill_alpha = if is_preview {
+                    drawing.style.fill_opacity * 0.85
+                } else {
+                    drawing.style.fill_opacity
+                };
+                if fill_alpha > 0.001 {
+                    let screen_pts: Vec<Pos2> = fill_polygon
+                        .iter()
+                        .map(|&pt| local_to_screen_pos(plot_rect, pt))
+                        .collect();
+                    plot_painter.add(egui::Shape::convex_polygon(
+                        screen_pts,
+                        drawing_premultiplied_fill(drawing.style.color, fill_alpha),
+                        Stroke::NONE,
+                    ));
+                }
+            }
+            for seg in [base_line, parallel_line].into_iter().flatten() {
+                let s0 = local_to_screen_pos(plot_rect, seg.start);
+                let s1 = local_to_screen_pos(plot_rect, seg.end);
+                if let Some(glow) = highlight_glow {
+                    paint_styled_segment_phased(plot_painter, s0, s1, s0, glow, drawing.style.dash);
+                }
+                paint_styled_segment_phased(
+                    plot_painter,
+                    s0,
+                    s1,
+                    s0,
+                    primary_stroke,
+                    drawing.style.dash,
+                );
+            }
+            if let Some(seg) = mid_line {
+                let s0 = local_to_screen_pos(plot_rect, seg.start);
+                let s1 = local_to_screen_pos(plot_rect, seg.end);
+                let mid_stroke =
+                    Stroke::new((stroke_w * 0.78).max(1.0), base_color.gamma_multiply(0.72));
+                paint_styled_segment_phased(
+                    plot_painter,
+                    s0,
+                    s1,
+                    s0,
+                    mid_stroke,
+                    LineDashStyle::Dashed,
+                );
+            }
+        }
+        ProjectedDrawingShape::PriceDateRange {
+            clipped_fill,
+            clipped_edges,
+            start_local,
+            end_local,
+            metrics,
+            ..
+        } => {
+            let tone = if metrics.is_bullish {
+                palette::BULLISH
+            } else {
+                palette::BEARISH
+            };
+            let fill_alpha = if is_preview {
+                0.16
+            } else {
+                drawing.style.fill_opacity.clamp(0.10, 0.35)
+            };
+            let fill_c = Color32::from_rgba_unmultiplied(
+                tone.r(),
+                tone.g(),
+                tone.b(),
+                (fill_alpha * 255.0).round() as u8,
+            );
+            if let Some(fill) = clipped_fill {
+                let srect = Rect::from_min_max(
+                    local_to_screen_pos(plot_rect, LocalPoint::new(fill.left, fill.top)),
+                    local_to_screen_pos(plot_rect, LocalPoint::new(fill.right, fill.bottom)),
+                );
+                plot_painter.rect_filled(srect, 0.0, fill_c);
+                // Centered dual-arrow crosshairs (TradingView Price/Date Measure style)
+                let mid_x = srect.center().x;
+                let mid_y = srect.center().y;
+                let arrow_stroke = Stroke::new(1.2, tone.gamma_multiply(0.92));
+                if srect.width() >= 10.0 {
+                    let h0 = Pos2::new(srect.left() + 2.0, mid_y);
+                    let h1 = Pos2::new(srect.right() - 2.0, mid_y);
+                    plot_painter.line_segment([h0, h1], arrow_stroke);
+                    let tip = if end_local.x >= start_local.x { h1 } else { h0 };
+                    let dir = if end_local.x >= start_local.x {
+                        -1.0_f32
+                    } else {
+                        1.0_f32
+                    };
+                    plot_painter.line_segment(
+                        [tip, Pos2::new(tip.x + dir * 5.0, tip.y - 3.5)],
+                        arrow_stroke,
+                    );
+                    plot_painter.line_segment(
+                        [tip, Pos2::new(tip.x + dir * 5.0, tip.y + 3.5)],
+                        arrow_stroke,
+                    );
+                }
+                if srect.height() >= 10.0 {
+                    let v0 = Pos2::new(mid_x, srect.top() + 2.0);
+                    let v1 = Pos2::new(mid_x, srect.bottom() - 2.0);
+                    plot_painter.line_segment([v0, v1], arrow_stroke);
+                    let tip = if end_local.y <= start_local.y { v0 } else { v1 };
+                    let dir = if end_local.y <= start_local.y {
+                        1.0_f32
+                    } else {
+                        -1.0_f32
+                    };
+                    plot_painter.line_segment(
+                        [tip, Pos2::new(tip.x - 3.5, tip.y + dir * 5.0)],
+                        arrow_stroke,
+                    );
+                    plot_painter.line_segment(
+                        [tip, Pos2::new(tip.x + 3.5, tip.y + dir * 5.0)],
+                        arrow_stroke,
+                    );
+                }
+            }
+            let edge_stroke = Stroke::new(
+                1.2,
+                tone.gamma_multiply(if is_selected { 1.0 } else { 0.85 }),
+            );
+            for edge in clipped_edges.iter().flatten() {
+                let s0 = local_to_screen_pos(plot_rect, edge.start);
+                let s1 = local_to_screen_pos(plot_rect, edge.end);
+                if let Some(glow) = highlight_glow {
+                    plot_painter.line_segment([s0, s1], glow);
+                }
+                plot_painter.line_segment([s0, s1], edge_stroke);
+            }
+
+            // Floating measurement card strictly clamped inside `plot_rect`
+            let delta_str = if metrics.price_delta.abs() >= 1.0 || metrics.price_delta == 0.0 {
+                format!("{:+.2}", metrics.price_delta)
+            } else {
+                format!("{:+.4}", metrics.price_delta)
+            };
+            let line1 = match metrics.price_pct {
+                Some(pct) => format!("{delta_str} ({pct:+.2}%)"),
+                None => delta_str,
+            };
+            let mut line2 = if metrics.bar_count == 1 {
+                "1 bar".to_owned()
+            } else {
+                format!("{} bars", metrics.bar_count)
+            };
+            if let Some(secs) = metrics.elapsed_secs {
+                let dur = crate::drawings::format_measure_duration(secs);
+                line2.push_str(&format!(", {dur}"));
+            }
+            if let Some(vol) = metrics.total_volume {
+                let vol_str = format_compact_unsigned_volume(vol);
+                line2.push_str(&format!(" · Vol {vol_str}"));
+            }
+            let card_text = format!("{line1}\n{line2}");
+            let galley =
+                plot_painter.layout_no_wrap(card_text, FontId::monospace(10.0), Color32::WHITE);
+            let card_w = (galley.size().x + 14.0).min((plot_rect.width() - 8.0).max(40.0));
+            let card_h = (galley.size().y + 10.0).min((plot_rect.height() - 8.0).max(24.0));
+            let anchor_ref = clipped_fill.map_or_else(
+                || local_to_screen_pos(plot_rect, *end_local),
+                |f| {
+                    let srect = Rect::from_min_max(
+                        local_to_screen_pos(plot_rect, LocalPoint::new(f.left, f.top)),
+                        local_to_screen_pos(plot_rect, LocalPoint::new(f.right, f.bottom)),
+                    );
+                    if metrics.is_bullish {
+                        Pos2::new(srect.center().x, srect.top() - card_h - 6.0)
+                    } else {
+                        Pos2::new(srect.center().x, srect.bottom() + 6.0)
+                    }
+                },
+            );
+            let card_left = (anchor_ref.x - card_w * 0.5).clamp(
+                plot_rect.left() + 4.0,
+                (plot_rect.right() - card_w - 4.0).max(plot_rect.left() + 4.0),
+            );
+            let card_top = anchor_ref.y.clamp(
+                plot_rect.top() + 4.0,
+                (plot_rect.bottom() - card_h - 4.0).max(plot_rect.top() + 4.0),
+            );
+            let card_rect =
+                Rect::from_min_size(Pos2::new(card_left, card_top), Vec2::new(card_w, card_h));
+            plot_painter.rect_filled(
+                card_rect,
+                4.0,
+                Color32::from_rgba_unmultiplied(14, 19, 29, 242),
+            );
+            plot_painter.rect_stroke(card_rect, 4.0, Stroke::new(1.2, tone), StrokeKind::Inside);
+            plot_painter.galley(
+                Pos2::new(card_rect.left() + 7.0, card_rect.top() + 5.0),
+                galley,
+                Color32::WHITE,
+            );
         }
         ProjectedDrawingShape::Rectangle {
             raw_rect,
@@ -12341,12 +13387,14 @@ fn paint_single_drawing(
                 }
                 let ty = safe_clamp_f32(
                     lp0.y - 2.0,
-                    plot_rect.top() + 9.0,
-                    (plot_rect.bottom() - 2.0).max(plot_rect.top() + 9.0),
+                    plot_rect.top() + 12.0,
+                    (plot_rect.bottom() - 2.0).max(plot_rect.top() + 12.0),
                 );
+                // Enforce `>= 14.5 px` vertical anti-collision spacing so dense Custom Fib presets
+                // (`ICT OTE 9`, `Full 13`) never overlap (`BUG-026`).
                 if drawn_label_ys[..drawn_count]
                     .iter()
-                    .any(|&py| (ty - py).abs() < 11.5)
+                    .any(|&py| (ty - py).abs() < 14.5)
                 {
                     continue;
                 }
@@ -12365,13 +13413,16 @@ fn paint_single_drawing(
                     "{ratio_str} ({})",
                     price_scale.format_price(lvl.value, base_value)
                 );
-                plot_painter.text(
-                    Pos2::new(lp0.x + 5.0, ty),
-                    Align2::LEFT_BOTTOM,
-                    txt,
-                    FontId::monospace(10.0),
-                    base_color,
+                let galley = plot_painter.layout_no_wrap(txt, FontId::monospace(10.0), base_color);
+                let text_pos = Pos2::new(lp0.x + 5.0, ty - galley.size().y);
+                let pill_rect =
+                    Rect::from_min_size(text_pos, galley.size()).expand2(Vec2::new(3.0, 1.0));
+                plot_painter.rect_filled(
+                    pill_rect,
+                    2.0,
+                    Color32::from_rgba_unmultiplied(11, 15, 23, 198),
                 );
+                plot_painter.galley(text_pos, galley, Color32::WHITE);
             }
         }
         ProjectedDrawingShape::RiskReward {
@@ -12496,10 +13547,11 @@ fn paint_single_drawing(
                     (*entry_price, base_color),
                 ] {
                     if let Some(ly) = price_scale.price_to_local_y(val, base_value)
-                        && let Some(sy) = clamp_axis_pill_center_y(
+                        && let Some(sy) = resolve_non_overlapping_axis_pill_y(
                             plot_rect.top() + (ly as f32),
                             price_axis_rect,
                             9.5,
+                            placed_axis_pills,
                         )
                     {
                         let badge_rect = Rect::from_min_max(
@@ -12606,10 +13658,11 @@ fn paint_single_drawing(
                         if is_selected
                             && let Some(ly) =
                                 price_scale.price_to_local_y(profile.poc_price, base_value)
-                            && let Some(sy) = clamp_axis_pill_center_y(
+                            && let Some(sy) = resolve_non_overlapping_axis_pill_y(
                                 plot_rect.top() + (ly as f32),
                                 price_axis_rect,
                                 9.5,
+                                placed_axis_pills,
                             )
                         {
                             let badge_rect = Rect::from_min_max(
@@ -12686,10 +13739,11 @@ fn paint_single_drawing(
                     if is_selected
                         && let Some(last_v) = vwap_out.vwap.last().copied().flatten()
                         && let Some(ly) = price_scale.price_to_local_y(last_v, base_value)
-                        && let Some(sy) = clamp_axis_pill_center_y(
+                        && let Some(sy) = resolve_non_overlapping_axis_pill_y(
                             plot_rect.top() + (ly as f32),
                             price_axis_rect,
                             9.5,
+                            placed_axis_pills,
                         )
                     {
                         let badge_rect = Rect::from_min_max(
@@ -12715,10 +13769,43 @@ fn paint_single_drawing(
         } => {
             let ap = local_to_screen_pos(plot_rect, *anchor_local);
             if let Some(brect) = box_rect {
-                let srect = Rect::from_min_max(
+                // Measure real pixel-width layout via `egui::Painter::layout` on the full sanitized
+                // note so all 280 UTF-8 Vietnamese/CJK/emoji chars wrap cleanly without truncation (`BUG-026`).
+                let raw_note_text = match &drawing.geometry {
+                    DrawingGeometry::TextNote { text, .. } => {
+                        let cleaned = crate::drawings::sanitize_text_note_content(text);
+                        if cleaned.is_empty() {
+                            "Note".to_owned()
+                        } else {
+                            cleaned
+                        }
+                    }
+                    _ => lines.join("\n"),
+                };
+                let max_wrap_w = (plot_rect.width() * 0.44).clamp(160.0, 320.0);
+                let galley = plot_painter.layout(
+                    raw_note_text,
+                    FontId::monospace(10.5),
+                    palette::TEXT_PRIMARY,
+                    max_wrap_w,
+                );
+                let gsz = galley.size();
+                let real_w = (gsz.x + 18.0).clamp(52.0, (plot_rect.width() - 8.0).max(52.0));
+                let real_h = (gsz.y + 12.0).clamp(24.0, (plot_rect.height() - 8.0).max(24.0));
+                let base_srect = Rect::from_min_max(
                     local_to_screen_pos(plot_rect, LocalPoint::new(brect.left, brect.top)),
                     local_to_screen_pos(plot_rect, LocalPoint::new(brect.right, brect.bottom)),
                 );
+                let left = base_srect.left().clamp(
+                    plot_rect.left() + 2.0,
+                    (plot_rect.right() - real_w - 2.0).max(plot_rect.left() + 2.0),
+                );
+                let top = base_srect.top().clamp(
+                    plot_rect.top() + 2.0,
+                    (plot_rect.bottom() - real_h - 2.0).max(plot_rect.top() + 2.0),
+                );
+                let srect = Rect::from_min_size(Pos2::new(left, top), Vec2::new(real_w, real_h));
+
                 let attach = Pos2::new(
                     ap.x.clamp(srect.left(), srect.right()),
                     ap.y.clamp(srect.top(), srect.bottom()),
@@ -12739,7 +13826,7 @@ fn paint_single_drawing(
                 plot_painter.rect_filled(
                     srect,
                     4.0,
-                    Color32::from_rgba_unmultiplied(15, 20, 30, 234),
+                    Color32::from_rgba_unmultiplied(15, 20, 30, 238),
                 );
                 let accent_bar = Rect::from_min_max(
                     srect.min,
@@ -12758,19 +13845,11 @@ fn paint_single_drawing(
                 let text_clip = srect.shrink2(Vec2::new(4.0, 2.0)).intersect(plot_rect);
                 if text_clip.width() > 4.0 && text_clip.height() > 4.0 {
                     let note_painter = plot_painter.with_clip_rect(text_clip);
-                    for (idx, line) in lines.iter().enumerate() {
-                        let ty = srect.top() + 5.0 + (idx as f32) * 14.0;
-                        if ty > srect.bottom() - 4.0 {
-                            break;
-                        }
-                        note_painter.text(
-                            Pos2::new(srect.left() + 8.0, ty),
-                            Align2::LEFT_TOP,
-                            line,
-                            FontId::monospace(10.5),
-                            palette::TEXT_PRIMARY,
-                        );
-                    }
+                    note_painter.galley(
+                        Pos2::new(srect.left() + 8.0, srect.top() + 6.0),
+                        galley,
+                        Color32::WHITE,
+                    );
                 }
             } else if plot_rect.expand(6.0).contains(ap) {
                 plot_painter.circle_filled(ap, 3.8, base_color);
@@ -12801,7 +13880,10 @@ fn paint_single_drawing(
                         plot_painter.circle_filled(hp, 1.8, Color32::WHITE);
                     }
                 }
-                HandlePart::RectCorner(_) | HandlePart::RrTarget | HandlePart::RrStop => {
+                HandlePart::RectCorner(_)
+                | HandlePart::RrTarget
+                | HandlePart::RrStop
+                | HandlePart::ChannelOffset => {
                     let col = match handle.part {
                         HandlePart::RrTarget => Color32::from_rgb(38, 198, 164),
                         HandlePart::RrStop => Color32::from_rgb(255, 92, 92),
@@ -15502,14 +16584,14 @@ mod tests {
             MonteCarloConfig::default(),
         );
 
-        // 1. Verify PriceScale::format_price_for_tick_density(baseline, vp.base_value, ...) outputs +0.00% and 100.00
+        // 1. Verify PriceScale::format_price_for_tick_density(baseline, vp.base_value, ...) outputs 0.00% (BUG-033) and 100.00
         let mut eq_ps = PriceScale::new("eq", PriceScaleOptions::default());
         eq_ps.set_height(180.0);
         eq_ps.autoscale_raw_bounds(92_000.0, 118_000.0, 100_000.0);
         eq_ps.set_mode(PriceScaleMode::Percentage);
         assert_eq!(
             eq_ps.format_price_for_tick_density(100_000.0, 100_000.0, 24.0, 3, 6),
-            "+0.00%"
+            "0.00%"
         );
         eq_ps.set_mode(PriceScaleMode::IndexedTo100);
         assert_eq!(
@@ -15769,7 +16851,7 @@ mod tests {
                 symbol: "VNINDEX".to_owned(),
                 timeframe: Timeframe::D1,
                 bar_timestamp: same_bar_ts,
-                eval_base_timestamp: same_bar_ts,
+                eval_base_timestamp: Some(same_bar_ts),
                 direction: CrossDirection::CrossAbove,
                 threshold_value: 1.0,
                 observed_value: 1.0,
@@ -15782,7 +16864,7 @@ mod tests {
                 symbol: "VNINDEX".to_owned(),
                 timeframe: Timeframe::D1,
                 bar_timestamp: same_bar_ts,
-                eval_base_timestamp: same_bar_ts,
+                eval_base_timestamp: Some(same_bar_ts),
                 direction: CrossDirection::CrossBelow,
                 threshold_value: 15.0,
                 observed_value: -8.0,
@@ -15795,7 +16877,7 @@ mod tests {
                 symbol: "VNINDEX".to_owned(),
                 timeframe: Timeframe::D1,
                 bar_timestamp: same_bar_ts,
-                eval_base_timestamp: same_bar_ts,
+                eval_base_timestamp: Some(same_bar_ts),
                 direction: CrossDirection::CrossAbove,
                 threshold_value: 1.0,
                 observed_value: 1.0,
@@ -16071,5 +17153,221 @@ mod tests {
             PriceAxisFormatMode::SignedPercentage
         );
         out_linked.textures_delta.clear();
+    }
+
+    #[test]
+    fn wave4_regression_indicator_cache_avwap_memo_numeric_stability_textnote_and_formatting() {
+        use crate::data::generate_synthetic_ohlcv;
+        use crate::drawings::{DrawingAnchor, DrawingGeometry, DrawingPaneTarget, DrawingStore};
+        use crate::indicators::{
+            CandleBlockIndex, IndicatorCache, IndicatorConfig, compute_cci,
+            compute_keltner_channels, compute_mfi, compute_supertrend, compute_volume_sma,
+        };
+        use crate::viewport::{PriceScale, PriceScaleMode, PriceScaleOptions, WorkspaceTemplate};
+
+        // 1. `BUG-014`: Editing `sma_period` (20 -> 50) while `show_sma == false` and re-enabling
+        //    MUST recompute `SMA(50)` immediately instead of returning stale `SMA(20)`.
+        let linear_bars: Vec<Candle> = (0..80_usize)
+            .map(|i| {
+                let p = 100.0 + (i as f64);
+                Candle {
+                    timestamp: 1_700_000_000 + (i as i64) * 86_400,
+                    date_label: format!("2024-01-{:02}", (i % 28) + 1),
+                    open: p,
+                    high: p + 1.0,
+                    low: p - 1.0,
+                    close: p,
+                    volume: 1_000.0,
+                }
+            })
+            .collect();
+        let mut cache = IndicatorCache::new();
+        let mut cfg = IndicatorConfig {
+            show_sma: true,
+            sma_period: 20,
+            ..IndicatorConfig::default()
+        };
+        cache.sync(&linear_bars, 1, &cfg);
+        let sma20_last = cache.sma.last().copied().flatten().unwrap();
+        assert!((sma20_last - 169.5).abs() < 1e-9);
+        // Disable, edit period to 50, sync while disabled, then re-enable:
+        cfg.show_sma = false;
+        cfg.sma_period = 50;
+        cache.sync(&linear_bars, 1, &cfg);
+        cfg.show_sma = true;
+        cache.sync(&linear_bars, 1, &cfg);
+        let sma50_last = cache.sma.last().copied().flatten().unwrap();
+        assert!(
+            (sma50_last - 154.5).abs() < 1e-9,
+            "BUG-014: expected SMA(50)=154.50 after edit-while-disabled, got {sma50_last:.2}"
+        );
+
+        // 2. `BUG-027`: Extreme `1e308` values and `NaN` volume NEVER leak `NaN`/`Inf` into
+        //    MFI/CCI/SuperTrend/Keltner/VolumeSMA or poison `CandleBlockIndex`.
+        let mut ext_bars = linear_bars.clone();
+        ext_bars[10].volume = f64::NAN;
+        ext_bars[30].high = 1.0e308;
+        ext_bars[30].low = 1.0e308;
+        ext_bars[30].close = 1.0e308;
+        ext_bars[30].open = 1.0e308;
+        ext_bars[30].volume = 1.0e308;
+        let st = compute_supertrend(&ext_bars, 10, 3.0);
+        assert!(st.trend.iter().flatten().all(|v| v.is_finite()));
+        let kc = compute_keltner_channels(&ext_bars, 10, 10, 2.0);
+        assert!(kc.upper.iter().flatten().all(|v| v.is_finite()));
+        assert!(kc.lower.iter().flatten().all(|v| v.is_finite()));
+        let cci = compute_cci(&ext_bars, 14);
+        assert!(cci.iter().flatten().all(|v| v.is_finite()));
+        let mfi = compute_mfi(&ext_bars, 14);
+        assert!(mfi.iter().flatten().all(|v| v.is_finite()));
+        let vsma = compute_volume_sma(&ext_bars, 10);
+        assert!(vsma.iter().flatten().all(|v| v.is_finite()));
+
+        let blk_idx = CandleBlockIndex::build(&ext_bars);
+        let (_, _, max_vol) = blk_idx.autoscale_bounds(&ext_bars, 0..20, 4);
+        assert!(
+            max_vol.is_finite() && max_vol > 0.0,
+            "BUG-027: single NaN volume must not poison CandleBlockIndex"
+        );
+
+        // `%`/`Idx100` base value skips leading `close == 0.0` / `NaN` bars:
+        let mut zero_head = linear_bars[..5].to_vec();
+        zero_head[0].close = 0.0;
+        zero_head[1].close = f64::NAN;
+        let bv = resolve_scale_base_value(&zero_head, &zero_head);
+        assert!(
+            (bv - 102.0).abs() < 1e-9,
+            "BUG-027: expected base_value=102.0, got {bv}"
+        );
+
+        // 3. `BUG-033`: Compact volume (`<1000`, `K`, `M`, `B`, `T`), `0.00%` without `+`,
+        //    and `WorkspaceSlotTemplate::invert_scale` JSON/RON roundtrip + backcompat digest.
+        assert_eq!(format_compact_unsigned_volume(500.0), "500");
+        assert_eq!(format_compact_unsigned_volume(1_500_000_000.0), "1.50B");
+        assert_eq!(format_compact_unsigned_volume(2_500_000_000_000.0), "2.50T");
+        assert_eq!(format_compact_signed(2_500_000_000_000.0), "+2.50T");
+        let mut ps_pct = PriceScale::new("pct", PriceScaleOptions::default());
+        ps_pct.set_mode(PriceScaleMode::Percentage);
+        assert_eq!(ps_pct.format_price(100.0, 100.0), "0.00%");
+
+        let mut tpl = WorkspaceTemplate::default();
+        let digest_default = tpl.canonical_digest();
+        tpl.slots[0].invert_scale = true;
+        assert_ne!(tpl.canonical_digest(), digest_default);
+        let ron_doc = tpl.to_ron_pretty();
+        let dec_ron = WorkspaceTemplate::from_auto_str(&ron_doc).expect("decode RON invert_scale");
+        assert!(dec_ron.slots[0].invert_scale);
+        let json_doc = tpl.to_json_pretty();
+        let dec_json =
+            WorkspaceTemplate::from_auto_str(&json_doc).expect("decode JSON invert_scale");
+        assert!(dec_json.slots[0].invert_scale);
+
+        // 4. `BUG-026`: 280-char Vietnamese `TextNote` keeps 100% of characters (no 272-char truncation!).
+        let vn_note_280: String =
+            "Kịch bản giao dịch FPT breakout vùng đỉnh lịch sử khối lượng lớn — "
+                .chars()
+                .cycle()
+                .take(280)
+                .collect();
+        assert_eq!(vn_note_280.chars().count(), 280);
+        let mut vp = ChartViewportState::new();
+        vp.time_scale.set_total_bars(linear_bars.len());
+        vp.time_scale.set_width(900.0);
+        vp.main_price_scale.set_height(500.0);
+        vp.main_price_scale.autoscale_raw_bounds(90.0, 190.0, 100.0);
+        vp.fit_all();
+        let proj =
+            PaneDrawingProjection::new(&vp.time_scale, &vp.main_price_scale, 900.0, 500.0, 100.0);
+        let mut ds = DrawingStore::new();
+        let note_id = ds
+            .add_drawing(
+                DrawingPaneTarget::Main,
+                DrawingGeometry::TextNote {
+                    anchor: DrawingAnchor::new(40.0, 140.0),
+                    text: vn_note_280.clone(),
+                },
+                None,
+            )
+            .unwrap();
+        let note_d = ds.drawings.iter().find(|d| d.id == note_id).unwrap();
+        let projected = proj.project_drawing(note_d).expect("project TextNote");
+        if let crate::drawings::ProjectedDrawingShape::TextNote { lines, .. } = projected.shape {
+            let joined_no_ws: String = lines
+                .concat()
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            let orig_no_ws: String = vn_note_280.chars().filter(|c| !c.is_whitespace()).collect();
+            assert_eq!(
+                joined_no_ws, orig_no_ws,
+                "BUG-026: 280-char Vietnamese TextNote must NOT truncate at 272 chars!"
+            );
+        } else {
+            panic!("expected TextNote");
+        }
+
+        // 5. `BUG-015`: `25K` candles + `2 AVWAP` drawings memoized via `R11RenderMemo` stays fast!
+        let big = generate_synthetic_ohlcv(25_000);
+        let mut big_vp = ChartViewportState::new();
+        big_vp.time_scale.set_total_bars(big.len());
+        big_vp.time_scale.set_width(1200.0);
+        big_vp.fit_all();
+        let big_ind = IndicatorConfig::default();
+        let mut big_cache = IndicatorCache::new();
+        big_cache.sync(&big, 1, &big_ind);
+        let mut big_draw = DrawingStore::new();
+        big_draw
+            .add_drawing(
+                DrawingPaneTarget::Main,
+                DrawingGeometry::AnchoredVwap {
+                    anchor: DrawingAnchor::new(10.0, big[10].close),
+                    show_bands: true,
+                },
+                None,
+            )
+            .unwrap();
+        big_draw
+            .add_drawing(
+                DrawingPaneTarget::Main,
+                DrawingGeometry::AnchoredVwap {
+                    anchor: DrawingAnchor::new(500.0, big[500].close),
+                    show_bands: true,
+                },
+                None,
+            )
+            .unwrap();
+        let ctx = egui::Context::default();
+        // Warm-up frame populates `R11RenderMemo`:
+        let mut w_out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                events: vec![egui::Event::PointerMoved(Pos2::new(600.0, 400.0))],
+                ..Default::default()
+            },
+            |ui| {
+                let _ = render_workstation_chart_full(
+                    ui,
+                    &big,
+                    &mut big_vp,
+                    ChartDisplayConfig {
+                        symbol: "VNINDEX",
+                        timeframe: "1D",
+                        show_grid: true,
+                        show_crosshair: true,
+                        show_volume: true,
+                    },
+                    &big_ind,
+                    &big_cache,
+                    &mut big_draw,
+                    ChartReplayTradingOverlay::default(),
+                );
+            },
+        );
+        w_out.textures_delta.clear();
+        assert_eq!(
+            big_vp.r11_memo.avwap.len(),
+            2,
+            "BUG-015: both AVWAP series must be cached in R11RenderMemo"
+        );
     }
 }

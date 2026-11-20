@@ -424,6 +424,22 @@ pub fn run_backtest_with_options(
     run_backtest_with_shared_catalog(symbol, timeframe, candles, config, options, None)
 }
 
+/// Returns `false` when `symbol` maps to a Vietnamese spot equity venue (`HOSE`, `HNX`, `UPCOM`)
+/// where short selling is prohibited by regulation (`BUG-008`).
+#[inline]
+#[must_use]
+pub(crate) fn venue_allows_short_for_symbol(symbol: &str) -> bool {
+    let trimmed = symbol.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    crate::journal::ExchangeVenue::infer_from_symbol_and_preset(
+        trimmed,
+        DataSourcePreset::CustomFile,
+    )
+    .allows_short()
+}
+
 fn run_backtest_with_shared_catalog(
     symbol: impl Into<String>,
     timeframe: Timeframe,
@@ -435,6 +451,7 @@ fn run_backtest_with_shared_catalog(
     let symbol = symbol.into();
     let mut clean_cfg = config.clone();
     clean_cfg.sanitize();
+    let venue_allows_short = venue_allows_short_for_symbol(&symbol);
 
     let causal_candles =
         slice_causal_series_for_symbol_and_options(Some(&symbol), candles, timeframe, options);
@@ -472,6 +489,7 @@ fn run_backtest_with_shared_catalog(
         &clean_cfg,
         &features,
         options.incomplete_tail_bar,
+        venue_allows_short,
     );
 
     let open_entry_fee = full_sim
@@ -751,10 +769,31 @@ pub fn is_bucket_incomplete_at_close_for_symbol(
         && venue != Some(ExchangeVenue::CryptoSpotPerp)
     {
         // Use `last_base_open_ts` (NOT `causal_close_ts`) so non-midnight `D1` feeds like `SPY` (`14:30:00` UTC)
-        // evaluate Thursday (`dow_mon0 == 3`) as `incomplete = true` and Friday (`dow_mon0 == 4`) as `false`.
+        // evaluate mid-week days as `incomplete = true` and the week's final open trading session (Friday, or
+        // Thursday when Friday is an official VN/NYSE public holiday) as `incomplete = false` (`BUG-010`).
         let days_since_epoch = last_base_open_ts.div_euclid(86_400);
         let dow_mon0 = (days_since_epoch + 3).rem_euclid(7);
-        return dow_mon0 < 4;
+        if dow_mon0 >= 4 {
+            return false;
+        }
+        let has_later_open_day_this_week = ((dow_mon0 + 1)..=4).any(|rem_dow| {
+            let candidate_day = days_since_epoch + (rem_dow - dow_mon0);
+            match venue {
+                Some(
+                    ExchangeVenue::Hose
+                    | ExchangeVenue::Hnx
+                    | ExchangeVenue::Upcom
+                    | ExchangeVenue::Vn30Futures
+                    | ExchangeVenue::VnIndexBenchmark,
+                ) => crate::journal::is_vn_exchange_trading_day_days(candidate_day),
+                Some(ExchangeVenue::UsEquities) => {
+                    let (y, m, d) = crate::data::civil_from_days(candidate_day);
+                    !crate::data::is_us_nyse_holiday_ymd(y, m, d)
+                }
+                _ => true,
+            }
+        });
+        return has_later_open_day_this_week;
     }
 
     if base_tf.seconds() < 86_400 {
@@ -765,7 +804,6 @@ pub fn is_bucket_incomplete_at_close_for_symbol(
         let bar_day = bar_open_ts.div_euclid(86_400);
         let close_day = causal_close_ts.div_euclid(86_400);
         let bar_tod = bar_open_ts.rem_euclid(86_400);
-        let last_base_tod = last_base_open_ts.rem_euclid(86_400);
         let tod_close = causal_close_ts.rem_euclid(86_400);
 
         let is_vn_session = matches!(
@@ -778,24 +816,24 @@ pub fn is_bucket_incomplete_at_close_for_symbol(
         );
         if is_vn_session {
             const VN_MORNING_CLOSE_TOD_UTC: i64 = 4 * 3_600 + 29 * 60 + 59; // 04:29:59 UTC (11:30 ICT)
-            const VN_AFTERNOON_OPEN_TOD_UTC: i64 = 6 * 3_600; // 06:00:00 UTC (13:00 ICT)
             const VN_AFTERNOON_CLOSE_TOD_UTC: i64 = 7 * 3_600 + 44 * 60 + 59; // 07:44:59 UTC (14:45 ICT)
-            const VN_AFTERNOON_CLOSE_END_TOD_UTC: i64 = 8 * 3_600; // 08:00:00 UTC (15:00 ICT)
 
-            // Morning 1h (`04:00..04:29:59` UTC) has zero trading bars during 11:30..13:00 ICT lunch break:
+            // Morning 1h (`04:00..04:29:59` UTC) has zero trading bars during 11:30..13:00 ICT lunch break;
+            // monotonically stays closed once `tod_close >= 04:29:59 UTC` (`BUG-010`).
             if active_tf == Timeframe::H1
-                && close_day == bar_day
                 && bar_tod == 4 * 3_600
-                && (VN_MORNING_CLOSE_TOD_UTC..VN_AFTERNOON_OPEN_TOD_UTC).contains(&tod_close)
+                && (close_day > bar_day
+                    || (close_day == bar_day && tod_close >= VN_MORNING_CLOSE_TOD_UTC))
             {
                 return false;
             }
 
-            // Afternoon session close bounded strictly to `07:44:59..08:00:00` UTC (`14:45..15:00` ICT)
-            // on buckets opened at or before `07:44:59` UTC (never leaking mid-bucket bars after `08:00` UTC!):
-            if close_day == bar_day
-                && bar_tod <= VN_AFTERNOON_CLOSE_TOD_UTC
-                && (VN_AFTERNOON_CLOSE_TOD_UTC..VN_AFTERNOON_CLOSE_END_TOD_UTC).contains(&tod_close)
+            // Afternoon session close: monotonically closed for any `causal_close_ts` at or past `07:44:59 UTC`
+            // (`14:45 ICT`) on buckets opened at or before `07:44:59 UTC` — never dropping a bar at `08:00:00 UTC`
+            // (`BUG-010`) while still guarding synthetic buckets opened after `07:45 UTC`.
+            if bar_tod <= VN_AFTERNOON_CLOSE_TOD_UTC
+                && (close_day > bar_day
+                    || (close_day == bar_day && tod_close >= VN_AFTERNOON_CLOSE_TOD_UTC))
                 && matches!(active_tf, Timeframe::H1 | Timeframe::H4 | Timeframe::D1)
             {
                 return false;
@@ -804,22 +842,25 @@ pub fn is_bucket_incomplete_at_close_for_symbol(
                 && Timeframe::W1.bucket_start_timestamp(causal_close_ts)
                     == Timeframe::W1.bucket_start_timestamp(bar_open_ts)
             {
-                let dow_mon0 = (last_base_open_ts.div_euclid(86_400) + 3).rem_euclid(7);
-                if dow_mon0 == 4
-                    && last_base_tod <= VN_AFTERNOON_CLOSE_TOD_UTC
-                    && (VN_AFTERNOON_CLOSE_TOD_UTC..VN_AFTERNOON_CLOSE_END_TOD_UTC)
-                        .contains(&tod_close)
+                let close_dow_mon0 = (close_day + 3).rem_euclid(7);
+                let has_later_open_day = ((close_dow_mon0 + 1)..=4).any(|rem_dow| {
+                    let cand_day = close_day + (rem_dow - close_dow_mon0);
+                    crate::journal::is_vn_exchange_trading_day_days(cand_day)
+                });
+                if !has_later_open_day
+                    && (close_dow_mon0 >= 5 || tod_close >= VN_AFTERNOON_CLOSE_TOD_UTC)
                 {
                     return false;
                 }
             }
         } else if venue == ExchangeVenue::UsEquities {
-            const US_REGULAR_CLOSE_TOD_UTC: i64 = 20 * 3_600 + 59 * 60 + 59; // 20:59:59 UTC (16:00 EST)
-            const US_REGULAR_CLOSE_END_TOD_UTC: i64 = 21 * 3_600; // 21:00:00 UTC
+            // DST-aware NYSE/NASDAQ regular session close (`19:59:59 UTC` EDT / `20:59:59 UTC` EST),
+            // monotonically closed once `tod_close >= us_close_tod` so stepping past `20:00`/`21:00 UTC`
+            // never drops a bar (`BUG-010`).
+            let us_close_tod = crate::journal::us_nyse_regular_close_tod_utc(close_day);
 
-            if close_day == bar_day
-                && bar_tod <= US_REGULAR_CLOSE_TOD_UTC
-                && (US_REGULAR_CLOSE_TOD_UTC..US_REGULAR_CLOSE_END_TOD_UTC).contains(&tod_close)
+            if bar_tod <= us_close_tod
+                && (close_day > bar_day || (close_day == bar_day && tod_close >= us_close_tod))
                 && matches!(active_tf, Timeframe::H1 | Timeframe::H4 | Timeframe::D1)
             {
                 return false;
@@ -828,11 +869,13 @@ pub fn is_bucket_incomplete_at_close_for_symbol(
                 && Timeframe::W1.bucket_start_timestamp(causal_close_ts)
                     == Timeframe::W1.bucket_start_timestamp(bar_open_ts)
             {
-                let dow_mon0 = (last_base_open_ts.div_euclid(86_400) + 3).rem_euclid(7);
-                if dow_mon0 == 4
-                    && last_base_tod <= US_REGULAR_CLOSE_TOD_UTC
-                    && (US_REGULAR_CLOSE_TOD_UTC..US_REGULAR_CLOSE_END_TOD_UTC).contains(&tod_close)
-                {
+                let close_dow_mon0 = (close_day + 3).rem_euclid(7);
+                let has_later_open_day = ((close_dow_mon0 + 1)..=4).any(|rem_dow| {
+                    let cand_day = close_day + (rem_dow - close_dow_mon0);
+                    let (y, m, d) = crate::data::civil_from_days(cand_day);
+                    !crate::data::is_us_nyse_holiday_ymd(y, m, d)
+                });
+                if !has_later_open_day && (close_dow_mon0 >= 5 || tod_close >= us_close_tod) {
                     return false;
                 }
             }
@@ -1047,10 +1090,12 @@ pub fn run_pit_episodes_backtest(
         };
 
     let ep_count = episodes.len();
+    let venue_allows_short = venue_allows_short_for_symbol(&symbol);
     for (ep_idx, &(ep_start, ep_end)) in episodes.iter().enumerate() {
         if emit_cursor < ep_start {
             push_inactive_flat_bars(emit_cursor, ep_start, &carry, &mut all_equity_curve);
         }
+        let peak_before_ep = carry.peak_equity;
         let ep_incomplete_tail = options.incomplete_tail_bar && ep_end == causal_candles.len();
         let (mut sim_out, mut carry_out) = simulate_window_with_carry(
             causal_candles,
@@ -1063,6 +1108,7 @@ pub fn run_pit_episodes_backtest(
             Some(carry),
             false,
             true,
+            venue_allows_short,
         );
         active_bar_count += ep_end.saturating_sub(ep_start);
         carry_out.pending_order = None;
@@ -1075,8 +1121,15 @@ pub fn run_pit_episodes_backtest(
             let last_active_idx = ep_end.saturating_sub(1);
             let last_candle = &causal_candles[last_active_idx];
             let exit_side = pos.side.exit_order_side();
-            let exec_price = apply_slippage(last_candle.close, exit_side, clean_cfg.slippage_bps);
-            pos.observe_price(last_candle.close);
+            let raw_px = if last_candle.close.is_finite() && last_candle.close > 0.0 {
+                last_candle.close
+            } else if last_candle.open.is_finite() && last_candle.open > 0.0 {
+                last_candle.open
+            } else {
+                pos.entry_price
+            };
+            let exec_price = apply_slippage(raw_px, exit_side, clean_cfg.slippage_bps);
+            pos.observe_price(raw_px);
             pos.observe_price(exec_price);
             close_position_into_trade(
                 pos,
@@ -1092,9 +1145,14 @@ pub fn run_pit_episodes_backtest(
                 &mut sim_out.trades,
             );
             carry_out.cash = carry_out.cash.max(0.0);
-            if carry_out.cash > carry_out.peak_equity {
-                carry_out.peak_equity = carry_out.cash;
-            }
+            // Recompute peak strictly excluding any pre-liquidation mark-to-market spike on the final bar
+            // (`BUG-034`: eliminates phantom peak equity & spurious drawdown from `UniverseRemoval` friction).
+            let prior_len = sim_out.equity_curve.len().saturating_sub(1);
+            let prior_ep_peak = sim_out.equity_curve[..prior_len]
+                .iter()
+                .map(|pt| pt.equity)
+                .fold(peak_before_ep, f64::max);
+            carry_out.peak_equity = prior_ep_peak.max(carry_out.cash);
             if let Some(last_pt) = sim_out.equity_curve.last_mut() {
                 last_pt.equity = carry_out.cash;
                 last_pt.cash = carry_out.cash;
@@ -1397,6 +1455,7 @@ pub fn run_multi_symbol_battle_with_universe(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_window_with_features(
     candles: &[Candle],
     start_idx: usize,
@@ -1405,6 +1464,7 @@ pub(crate) fn simulate_window_with_features(
     config: &BacktestConfig,
     features: &PrecomputedFeatures,
     incomplete_tail_bar: bool,
+    venue_allows_short: bool,
 ) -> WindowSimulationOutput {
     let (out, _) = simulate_window_with_carry(
         candles,
@@ -1417,6 +1477,7 @@ pub(crate) fn simulate_window_with_features(
         None,
         false,
         false,
+        venue_allows_short,
     );
     out
 }
@@ -1433,6 +1494,7 @@ pub(crate) fn simulate_window_with_carry(
     carry_in: Option<SimulationCarryState>,
     allow_handoff_at_end: bool,
     use_absolute_indices: bool,
+    venue_allows_short: bool,
 ) -> (WindowSimulationOutput, SimulationCarryState) {
     let end = end_idx.min(candles.len());
     let start = start_idx.min(end);
@@ -1453,6 +1515,8 @@ pub(crate) fn simulate_window_with_carry(
     for i in start..end {
         let candle = &candles[i];
         let out_bar_idx = if use_absolute_indices { i } else { i - start };
+        let valid_open = candle.open.is_finite() && candle.open > 0.0;
+        let valid_close = candle.close.is_finite() && candle.close > 0.0;
 
         // STEP A: Execute pending close-of-bar signal from `i - 1` at `Open[i]` (`BT-TIME-001`).
         if let Some(order) = pending_order.take() {
@@ -1463,9 +1527,15 @@ pub(crate) fn simulate_window_with_carry(
                 } => {
                     if let Some(mut pos) = active_pos.take() {
                         let exit_side = pos.side.exit_order_side();
-                        let exec_price =
-                            apply_slippage(candle.open, exit_side, config.slippage_bps);
-                        pos.observe_price(candle.open);
+                        let raw_px = if valid_open {
+                            candle.open
+                        } else if valid_close {
+                            candle.close
+                        } else {
+                            pos.entry_price
+                        };
+                        let exec_price = apply_slippage(raw_px, exit_side, config.slippage_bps);
+                        pos.observe_price(raw_px);
                         pos.observe_price(exec_price);
                         close_position_into_trade(
                             pos,
@@ -1488,9 +1558,15 @@ pub(crate) fn simulate_window_with_carry(
                 } => {
                     if let Some(mut pos) = active_pos.take() {
                         let exit_side = pos.side.exit_order_side();
-                        let exec_price =
-                            apply_slippage(candle.open, exit_side, config.slippage_bps);
-                        pos.observe_price(candle.open);
+                        let raw_px = if valid_open {
+                            candle.open
+                        } else if valid_close {
+                            candle.close
+                        } else {
+                            pos.entry_price
+                        };
+                        let exec_price = apply_slippage(raw_px, exit_side, config.slippage_bps);
+                        pos.observe_price(raw_px);
                         pos.observe_price(exec_price);
                         close_position_into_trade(
                             pos,
@@ -1506,7 +1582,9 @@ pub(crate) fn simulate_window_with_carry(
                             &mut trades,
                         );
                     }
-                    if config.direction_mode.allows_side(new_side) {
+                    let side_permitted = config.direction_mode.allows_side(new_side)
+                        && (venue_allows_short || new_side == PositionSide::Long);
+                    if side_permitted {
                         let sig_out = if use_absolute_indices {
                             signal_bar
                         } else {
@@ -1527,7 +1605,9 @@ pub(crate) fn simulate_window_with_carry(
                     }
                 }
                 PendingStrategyOrder::Entry { side, signal_bar } => {
-                    if active_pos.is_none() && config.direction_mode.allows_side(side) {
+                    let side_permitted = config.direction_mode.allows_side(side)
+                        && (venue_allows_short || side == PositionSide::Long);
+                    if active_pos.is_none() && side_permitted {
                         let sig_out = if use_absolute_indices {
                             signal_bar
                         } else {
@@ -1592,8 +1672,9 @@ pub(crate) fn simulate_window_with_carry(
                     (None, None) => None,
                 };
 
-            // 1. Gap-Open check at `Open[i]` (only when `i > pos.entry_bar_abs`; at `i == entry_bar_abs`, `Open[i]` was the entry fill!).
-            let gap_trigger: Option<(f64, BacktestExitReason)> = if is_after_entry_bar {
+            // 1. Gap-Open check at `Open[i]` (only when `i > pos.entry_bar_abs` and `Open[i]` is valid finite > 0).
+            let gap_trigger: Option<(f64, BacktestExitReason)> = if is_after_entry_bar && valid_open
+            {
                 let open_exec = apply_slippage(candle.open, exit_side, config.slippage_bps);
                 let open_insolvent = net_equity_after_exit(&pos, cash, open_exec, config) <= 0.0;
                 match pos.side {
@@ -1728,10 +1809,16 @@ pub(crate) fn simulate_window_with_carry(
 
         // STEP C: Record bar-aligned mark-to-market `BacktestEquityPoint` at `Close[i]`.
         let (unrealized, pos_signed_qty) = match active_pos.as_ref() {
-            Some(pos) => (
-                pos.unrealized_pnl(candle.close),
-                pos.side.sign() * pos.quantity,
-            ),
+            Some(pos) => {
+                let mtm_px = if valid_close {
+                    candle.close
+                } else if valid_open {
+                    candle.open
+                } else {
+                    pos.entry_price
+                };
+                (pos.unrealized_pnl(mtm_px), pos.side.sign() * pos.quantity)
+            }
             None => (0.0, 0.0),
         };
         let equity = (cash + unrealized).max(0.0);
@@ -1768,6 +1855,7 @@ pub(crate) fn simulate_window_with_carry(
             config,
             features,
             active_pos.as_ref(),
+            venue_allows_short,
         );
         if let Some(order) = desired_order {
             if is_last_bar_in_window && !allow_handoff_at_end {
@@ -2149,6 +2237,11 @@ fn close_position_into_trade(
     next_trade_id: &mut u64,
     trades: &mut Vec<BacktestTrade>,
 ) {
+    let exec_price = if exec_price.is_finite() && exec_price > 0.0 {
+        exec_price
+    } else {
+        pos.entry_price
+    };
     let exit_side = pos.side.exit_order_side();
     let exit_fee = compute_commission(exec_price, pos.quantity, config.commission_bps);
     let close_sell_tax = if exit_side == OrderSide::Sell {
@@ -2221,6 +2314,7 @@ fn evaluate_close_of_bar_order(
     config: &BacktestConfig,
     features: &PrecomputedFeatures,
     active_pos: Option<&ActivePositionState>,
+    venue_allows_short: bool,
 ) -> Option<PendingStrategyOrder> {
     let (bull_entry, bear_entry, long_exit, short_exit) =
         evaluate_preset_signals_at_bar(i, candles, config, features);
@@ -2232,7 +2326,7 @@ fn evaluate_close_of_bar_order(
             return None;
         }
 
-        // 1. Check opposite reversal signal first when `LongShort` is active.
+        // 1. Check opposite reversal signal first when `LongShort` is active AND venue permits the new side (`BUG-008`).
         let opposite_entry = match pos.side {
             PositionSide::Long => bear_entry,
             PositionSide::Short => bull_entry,
@@ -2241,7 +2335,11 @@ fn evaluate_close_of_bar_order(
             PositionSide::Long => PositionSide::Short,
             PositionSide::Short => PositionSide::Long,
         };
-        if opposite_entry && config.direction_mode == StrategyDirectionMode::LongShort {
+        let opposite_side_permitted = venue_allows_short || opposite_side == PositionSide::Long;
+        if opposite_entry
+            && config.direction_mode == StrategyDirectionMode::LongShort
+            && opposite_side_permitted
+        {
             return Some(PendingStrategyOrder::Reverse {
                 new_side: opposite_side,
                 signal_bar: i,
@@ -2286,7 +2384,10 @@ fn evaluate_close_of_bar_order(
                 signal_bar: i,
             });
         }
-        if bear_entry && config.direction_mode.allows_side(PositionSide::Short) {
+        if bear_entry
+            && venue_allows_short
+            && config.direction_mode.allows_side(PositionSide::Short)
+        {
             return Some(PendingStrategyOrder::Entry {
                 side: PositionSide::Short,
                 signal_bar: i,

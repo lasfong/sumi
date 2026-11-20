@@ -623,7 +623,7 @@ fn r19_vietnam_holidays_v1_sorted_unique_weekdays_2018_2030_and_statutory_fallba
     };
     use crate::data::{civil_from_days, weekday_from_days};
 
-    assert_eq!(VIETNAM_HOLIDAYS_V1.len(), 151);
+    assert_eq!(VIETNAM_HOLIDAYS_V1.len(), 171);
 
     for (idx, &ymd) in VIETNAM_HOLIDAYS_V1.iter().enumerate() {
         if idx > 0 {
@@ -637,7 +637,7 @@ fn r19_vietnam_holidays_v1_sorted_unique_weekdays_2018_2030_and_statutory_fallba
         let year = ymd / 10_000;
         let month = ((ymd / 100) % 100) as u32;
         let day = (ymd % 100) as u32;
-        assert!((2018..=2030).contains(&year));
+        assert!((2016..=2030).contains(&year));
         let epoch_days = days_from_civil(year, month, day);
         assert_eq!(civil_from_days(epoch_days), (year, month, day));
         assert!(
@@ -649,14 +649,22 @@ fn r19_vietnam_holidays_v1_sorted_unique_weekdays_2018_2030_and_statutory_fallba
         assert!(!is_vn_exchange_trading_day_days(epoch_days));
     }
 
-    // Out-of-range statutory fallback (`< 2018` & `> 2030`):
-    // 2017-01-01 is Sunday -> Monday 2017-01-02 is compensatory New Year holiday!
+    // Verified 2016–2017 CafeF historical holidays (`BUG-021`): Tết 2016 (`08..12/02`), Giỗ Tổ (`18/04/2016`),
+    // Tết 2017 (`26/01..01/02`), Giỗ Tổ (`06/04/2017`), plus post-2030 Fri National Day 2nd day (`2033-09-01` & `02`, `BUG-034`):
+    assert!(is_vn_exchange_holiday_ymd(2016, 2, 8));
+    assert!(is_vn_exchange_holiday_ymd(2016, 2, 12));
+    assert!(is_vn_exchange_holiday_ymd(2016, 4, 18));
     assert!(is_vn_exchange_holiday_ymd(2017, 1, 2));
+    assert!(is_vn_exchange_holiday_ymd(2017, 1, 26));
+    assert!(is_vn_exchange_holiday_ymd(2017, 2, 1));
     assert!(!is_vn_exchange_holiday_ymd(2017, 1, 3));
     assert!(is_vn_exchange_holiday_ymd(2031, 1, 1));
     assert!(is_vn_exchange_holiday_ymd(2031, 4, 30));
     assert!(is_vn_exchange_holiday_ymd(2031, 5, 1));
     assert!(is_vn_exchange_holiday_ymd(2031, 9, 2));
+    // 2033-09-02 is Friday -> Thu 2033-09-01 + Fri 2033-09-02 are BOTH weekday holidays!
+    assert!(is_vn_exchange_holiday_ymd(2033, 9, 1));
+    assert!(is_vn_exchange_holiday_ymd(2033, 9, 2));
     // `[M5]`: Official 2026-01-02 swap + 24/11 Culture Day (2026..=2030 + >2030 statutory fallback):
     assert!(is_vn_exchange_holiday_ymd(2026, 1, 2));
     assert!(is_vn_exchange_holiday_ymd(2026, 11, 24));

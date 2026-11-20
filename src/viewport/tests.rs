@@ -1699,6 +1699,7 @@ fn r19_workstation_settings_and_candle_palette_ron_json_roundtrip_and_digest_bac
             candle_palette: palette,
             auto_snapshot_interval_mins: 15,
             enforce_vn_t2_lot_lock: false,
+            show_drawing_rail: false,
         };
         assert_ne!(
             custom.canonical_digest(),
@@ -1729,6 +1730,7 @@ fn r19_workstation_settings_and_candle_palette_ron_json_roundtrip_and_digest_bac
         candle_palette: CandlePalettePreset::HollowBullish,
         auto_snapshot_interval_mins: 7,
         enforce_vn_t2_lot_lock: true,
+        show_drawing_rail: true,
     };
     dirty.sanitize();
     assert!((dirty.default_initial_capital - 1_000.0).abs() < 1e-9);

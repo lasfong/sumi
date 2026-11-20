@@ -621,8 +621,22 @@ fn critic_r09_regression_cross_timeframe_cutoff_prevents_intraday_daily_lookahea
         "CRITICAL-01: unclosed 09:00..09:15 M15 bar must be excluded at 09:03:59 UTC"
     );
 
-    // Direct `run_backtest_with_options` with intraday cutoff on coarse `D1` array must ALSO exclude `day_2026_10_15`!
-    let direct_fpt = run_backtest_with_options(
+    // Direct `run_backtest_with_options` with intraday cutoff during active VN morning session (`02:03 UTC = 09:03 ICT`)
+    // must exclude the unclosed `2026-10-15` D1 bar (`39`), whereas after HOSE afternoon close (`07:45 UTC = 14:45 ICT`,
+    // including `09:03 UTC = 16:03 ICT`) the session is closed and monotonically yields `40` bars (`BUG-010`)!
+    let slot_0200 = day_2026_10_15 + 2 * 3_600;
+    let direct_fpt_morning = run_backtest_with_options(
+        "FPT",
+        Timeframe::D1,
+        &fpt_d1,
+        &cfg,
+        BacktestRunOptions {
+            replay_cutoff_timestamp: Some(slot_0200 + 3 * 60),
+            incomplete_tail_bar: false,
+        },
+    );
+    assert_eq!(direct_fpt_morning.bar_count, 39);
+    let direct_fpt_post_close = run_backtest_with_options(
         "FPT",
         Timeframe::D1,
         &fpt_d1,
@@ -632,7 +646,7 @@ fn critic_r09_regression_cross_timeframe_cutoff_prevents_intraday_daily_lookahea
             incomplete_tail_bar: false,
         },
     );
-    assert_eq!(direct_fpt.bar_count, 39);
+    assert_eq!(direct_fpt_post_close.bar_count, 40);
 
     // Pure prefix `is_bucket_incomplete_at_close` check (`MAJOR-04`):
     assert!(is_bucket_incomplete_at_close(
@@ -2055,8 +2069,9 @@ fn critic_r16_regression_spy_thursday_w1_vn30f_session_close_longonly_exit_isola
             );
         }
     }
-    // (c) US equities (`"SPY"`): regular close `20:59:59 UTC` on Friday closes `H1`/`D1`/`W1` (`false`),
-    //     whereas extended-hours `21:05:59 UTC` (`5` mins into `21:00` `1h` bar) stays `incomplete == true`!
+    // (c) US equities (`"SPY"`): regular close `20:59:59 UTC` on Friday (EST `2024-03-08`) closes `H1`/`D1`/`W1` (`false`);
+    //     at extended-hours `21:05:59 UTC` (`5` mins into `21:00` `1h` bar), the NEW `21:00` `H1` bucket stays
+    //     `incomplete == true`, while the already-closed `D1`/`W1` regular session monotonically stays closed (`false`, `BUG-010`)!
     let spy_fri_reg_close = fri_mid_utc + 20 * 3_600 + 59 * 60 + 59;
     let spy_fri_ah_2105_close = fri_mid_utc + 21 * 3_600 + 5 * 60 + 59;
     for tf in [Timeframe::H1, Timeframe::D1, Timeframe::W1] {
@@ -2070,15 +2085,27 @@ fn critic_r16_regression_spy_thursday_w1_vn30f_session_close_longonly_exit_isola
             ),
             "SPY regular close 20:59:59 UTC on Friday must close {tf:?}"
         );
+    }
+    assert!(
+        is_bucket_incomplete_at_close_for_symbol(
+            "SPY",
+            Timeframe::H1.bucket_start_timestamp(spy_fri_ah_2105_close),
+            spy_fri_ah_2105_close,
+            Timeframe::M1,
+            Timeframe::H1,
+        ),
+        "SPY extended-hours 21:05:59 UTC must remain incomplete on new 21:00 H1 bucket"
+    );
+    for tf in [Timeframe::D1, Timeframe::W1] {
         assert!(
-            is_bucket_incomplete_at_close_for_symbol(
+            !is_bucket_incomplete_at_close_for_symbol(
                 "SPY",
                 tf.bucket_start_timestamp(spy_fri_ah_2105_close),
                 spy_fri_ah_2105_close,
                 Timeframe::M1,
                 tf,
             ),
-            "SPY extended-hours 21:05:59 UTC must remain incomplete on {tf:?}"
+            "SPY {tf:?} must stay monotonically closed after 20:59:59 UTC (BUG-010)"
         );
     }
 
@@ -3203,4 +3230,389 @@ fn critic_r18_regression_pit_episodes_alignment_inverse_vol_newcomer_and_rvol_cl
             threshold: 2.0,
         }
     );
+}
+
+#[test]
+fn wave3_regression_monotonic_cutoff_no_vn_short_outlier_yearly_breadth_pit_and_catalog() {
+    use crate::data::{WatchlistFeedEntry, days_from_civil};
+    use crate::journal::{
+        ExchangeVenue, JournalEntry, JournalEntrySource, JournalEntryStatus, SetupTag,
+        TradeJournalStore,
+    };
+    use crate::scanner::{
+        BreadthFeedInput, MemberStatus, SIGNAL_CATALOG, SessionDate, UniverseDefinition,
+        UniverseMember, UniverseMode, UniverseStatus, compute_market_breadth_and_rrg,
+    };
+    use crate::trading::PositionSide;
+
+    // 1. `BUG-010`: Monotonic VN/US session close cutoff + EDT/EST + non-whitelist US tickers.
+    let fri_nov06_day = days_from_civil(2026, 11, 6);
+    let fri_nov06_ts = fri_nov06_day * 86_400;
+    let fpt_bars: Vec<Candle> = (0..10_i64)
+        .map(|k| {
+            let ts = (fri_nov06_day - 9 + k) * 86_400;
+            mk_candle(
+                ts,
+                100.0 + k as f64,
+                102.0 + k as f64,
+                99.0 + k as f64,
+                101.0 + k as f64,
+                1_000.0,
+            )
+        })
+        .collect();
+    let cfg_def = BacktestConfig::default();
+    let cut_075959 = fri_nov06_ts + 7 * 3_600 + 59 * 60 + 59;
+    let cut_080000 = fri_nov06_ts + 8 * 3_600;
+    let b_before = run_backtest_with_options(
+        "FPT",
+        Timeframe::D1,
+        &fpt_bars,
+        &cfg_def,
+        BacktestRunOptions {
+            replay_cutoff_timestamp: Some(cut_075959),
+            incomplete_tail_bar: false,
+        },
+    )
+    .bar_count;
+    let b_after = run_backtest_with_options(
+        "FPT",
+        Timeframe::D1,
+        &fpt_bars,
+        &cfg_def,
+        BacktestRunOptions {
+            replay_cutoff_timestamp: Some(cut_080000),
+            incomplete_tail_bar: false,
+        },
+    )
+    .bar_count;
+    assert_eq!(b_before, 10);
+    assert_eq!(
+        b_after, 10,
+        "BUG-010: advancing 07:59:59 -> 08:00:00 UTC must NOT drop FPT D1 bar"
+    );
+
+    // US EDT (summer 2024-06-14) closes at 19:59:59 UTC and stays closed at 20:00:00 UTC:
+    let jun14_day = days_from_civil(2024, 6, 14);
+    let jun14_mid = jun14_day * 86_400;
+    assert!(!is_bucket_incomplete_at_close_for_symbol(
+        "GOOG",
+        jun14_mid,
+        jun14_mid + 19 * 3_600 + 59 * 60 + 59,
+        Timeframe::M1,
+        Timeframe::D1,
+    ));
+    assert!(!is_bucket_incomplete_at_close_for_symbol(
+        "GOOG",
+        jun14_mid,
+        jun14_mid + 20 * 3_600,
+        Timeframe::M1,
+        Timeframe::D1,
+    ));
+    // Non-whitelist US tickers map to UsEquities (never HOSE) and stay incomplete at 14:30 UTC:
+    for us_sym in ["GOOG", "AMZN", "META", "CRWD", "BRK.B"] {
+        assert_eq!(
+            ExchangeVenue::infer_from_symbol_and_preset(us_sym, DataSourcePreset::CustomFile),
+            ExchangeVenue::UsEquities
+        );
+        assert!(is_bucket_incomplete_at_close_for_symbol(
+            us_sym,
+            jun14_mid,
+            jun14_mid + 14 * 3_600 + 30 * 60,
+            Timeframe::M1,
+            Timeframe::D1,
+        ));
+    }
+    assert_eq!(
+        ExchangeVenue::infer_from_symbol_and_preset("VNXALL", DataSourcePreset::CustomFile),
+        ExchangeVenue::VnIndexBenchmark
+    );
+
+    // 2. `BUG-008`: VN spot equities (`FPT`, `C69`, `KSV`) MUST NEVER open Short trades in Backtest,
+    //    even if `LongShort` or `ShortOnly` is requested; `VN30F1M` & `BTCUSDT` still allow Short.
+    let mut swing_bars = Vec::with_capacity(120);
+    let t0 = days_from_civil(2025, 1, 2) * 86_400;
+    for i in 0..120_usize {
+        let p = 50.0 + 15.0 * ((i as f64) * 0.18).sin();
+        swing_bars.push(mk_candle(
+            t0 + (i as i64) * 86_400,
+            p,
+            p + 1.0,
+            p - 1.0,
+            p + 0.2,
+            5_000.0,
+        ));
+    }
+    let cfg_ls = BacktestConfig {
+        preset: StrategyPresetKind::SmaEmaTrendCross,
+        params: StrategyParams {
+            fast_sma: 3,
+            slow_ema: 8,
+            ..StrategyParams::default()
+        },
+        direction_mode: StrategyDirectionMode::LongShort,
+        ..BacktestConfig::default()
+    };
+    let fpt_ls = run_backtest("FPT", Timeframe::D1, &swing_bars, &cfg_ls, None);
+    assert!(
+        fpt_ls.trades.iter().all(|t| t.side == PositionSide::Long),
+        "BUG-008: HOSE stock FPT must NEVER execute Short trades in LongShort backtest"
+    );
+    let cfg_so = BacktestConfig {
+        direction_mode: StrategyDirectionMode::ShortOnly,
+        ..cfg_ls.clone()
+    };
+    let fpt_so = run_backtest("FPT", Timeframe::D1, &swing_bars, &cfg_so, None);
+    assert!(
+        fpt_so.trades.is_empty() && fpt_so.open_position.is_none(),
+        "BUG-008: HOSE stock FPT ShortOnly backtest must execute 0 trades"
+    );
+    let fut_ls = run_backtest("VN30F1M", Timeframe::D1, &swing_bars, &cfg_ls, None);
+    assert!(
+        fut_ls.trades.iter().any(|t| t.side == PositionSide::Short),
+        "VN30F1M derivatives must still allow Short trades in LongShort backtest"
+    );
+
+    // 3. `BUG-016`: `OutlierImpactReport::expectancy_ex_top_3_winners` uses `valid_n - removed_winners_count`.
+    let mk_tr = |id: u64, pnl: f64| BacktestTrade {
+        trade_id: id,
+        side: PositionSide::Long,
+        quantity: 100.0,
+        entry_bar_index: id as usize,
+        exit_bar_index: (id as usize) + 1,
+        entry_timestamp: t0 + (id as i64) * 86_400,
+        exit_timestamp: t0 + ((id + 1) as i64) * 86_400,
+        entry_price: 50.0,
+        exit_price: 50.0 + pnl / 100.0,
+        bars_held: 1,
+        gross_pnl: pnl,
+        entry_fee: 0.0,
+        exit_fee: 0.0,
+        exit_tax: 0.0,
+        net_pnl: pnl,
+        return_pct: pnl / 50.0,
+        r_multiple: None,
+        mae_pct: 0.0,
+        mfe_pct: 0.0,
+        exit_reason: BacktestExitReason::SignalExit,
+    };
+    let outlier = compute_outlier_impact(&[
+        mk_tr(1, 50.0),
+        mk_tr(2, -100.0),
+        mk_tr(3, -100.0),
+        mk_tr(4, -100.0),
+    ]);
+    assert!((outlier.net_pnl_ex_top_3_winners - (-300.0)).abs() < 1e-9);
+    assert!(
+        (outlier.expectancy_ex_top_3_winners.unwrap() - (-100.0)).abs() < 1e-9,
+        "BUG-016: expected -100.0, got {:?}",
+        outlier.expectancy_ex_top_3_winners
+    );
+
+    // 4. `BUG-029`: Yearly breakdown after bankruptcy reports 0.0% (NOT fake -100.0%).
+    let y2024_ts = days_from_civil(2024, 6, 1) * 86_400;
+    let y2025_ts = days_from_civil(2025, 6, 1) * 86_400;
+    let bankrupt_curve = vec![
+        BacktestEquityPoint {
+            bar_index: 0,
+            timestamp: y2024_ts,
+            equity: 100_000.0,
+            cash: 100_000.0,
+            drawdown_abs: 0.0,
+            underwater_pct: 0.0,
+            position_qty: 0.0,
+        },
+        BacktestEquityPoint {
+            bar_index: 1,
+            timestamp: y2024_ts + 86_400,
+            equity: 0.0,
+            cash: 0.0,
+            drawdown_abs: 100_000.0,
+            underwater_pct: -100.0,
+            position_qty: 0.0,
+        },
+        BacktestEquityPoint {
+            bar_index: 2,
+            timestamp: y2025_ts,
+            equity: 0.0,
+            cash: 0.0,
+            drawdown_abs: 100_000.0,
+            underwater_pct: -100.0,
+            position_qty: 0.0,
+        },
+    ];
+    let yearly = compute_yearly_breakdown(100_000.0, &bankrupt_curve, &[]);
+    let y2025 = yearly.iter().find(|s| s.year == 2025).unwrap();
+    assert!(
+        y2025.equity_return_pct.abs() < 1e-9,
+        "BUG-029: post-bankruptcy year must report 0.0%, got {:.2}%",
+        y2025.equity_return_pct
+    );
+
+    // 5. `BUG-029`: `compute_market_breadth_and_rrg` does NOT double-drop closed bar with replay cutoff.
+    let b_bars = vec![
+        mk_candle(t0, 100.0, 101.0, 99.0, 100.0, 1_000.0),
+        mk_candle(t0 + 86_400, 100.0, 106.0, 100.0, 105.0, 1_000.0), // +5% advancer
+        mk_candle(t0 + 2 * 86_400, 105.0, 106.0, 95.0, 96.0, 1_000.0), // future bar after cutoff
+    ];
+    let breadth = compute_market_breadth_and_rrg(
+        &[BreadthFeedInput {
+            instrument_id: "Custom:FPT",
+            symbol: "FPT",
+            preset_label: "Custom",
+            candles: &b_bars,
+            timeframe: Timeframe::D1,
+            exclude_incomplete_tail: true,
+        }],
+        &b_bars,
+        Timeframe::D1,
+        "VNINDEX",
+        Some(t0 + 86_400 + 86_399), // closes bar 1 (`+5%`), excludes bar 2
+    );
+    assert_eq!(
+        breadth.advancers, 1,
+        "BUG-029: must evaluate bar 1 (+5%) without double-dropping"
+    );
+    assert_eq!(breadth.evaluated_timestamp, Some(t0 + 86_400));
+
+    // 6. `BUG-029`: `PortfolioUniverseFilter::Vn30EquitiesOnly` filters CustomFile feeds properly,
+    //    and `W1` PIT preserves `UniverseRemoval` closing week return + `BUG-034` no phantom peak.
+    let w1_mon0 = days_from_civil(2025, 1, 6) * 86_400; // Monday
+    let mut w1_bars = Vec::new();
+    for wk in 0..16_i64 {
+        let p = 50.0 + (wk as f64) * 2.0;
+        w1_bars.push(mk_candle(
+            w1_mon0 + wk * 7 * 86_400,
+            p,
+            p + 1.0,
+            p - 0.5,
+            p + 0.8,
+            10_000.0,
+        ));
+    }
+    let pit_u = UniverseDefinition {
+        universe_id: "TEST_W1_PIT".to_owned(),
+        version: "1".to_owned(),
+        name: "Test W1 PIT".to_owned(),
+        status: UniverseStatus::Approved,
+        default_mode: UniverseMode::PointInTime,
+        effective_from: Some(SessionDate::new(2025, 1, 1).unwrap()),
+        effective_to: Some(SessionDate::new(2025, 12, 31).unwrap()),
+        selection_purpose: "regression".to_owned(),
+        source_evidence: "unit".to_owned(),
+        members: vec![UniverseMember {
+            symbol: "FPT".to_owned(),
+            exchange: "HOSE".to_owned(),
+            company_name: None,
+            sector: None,
+            effective_from: Some(SessionDate::new(2025, 1, 1).unwrap()),
+            // Mid-week Wednesday of week 10 (`2025-03-19`): week 10 opens Mon `2025-03-17` (active!)
+            // and closes Sun `2025-03-23` (after `effective_to`)!
+            effective_to: Some(SessionDate::new(2025, 3, 19).unwrap()),
+            status: MemberStatus::Active,
+            inclusion_reason: "test".to_owned(),
+            weight: 1.0,
+        }],
+    };
+    let custom_feeds = vec![
+        WatchlistFeedEntry {
+            instrument_id: "Custom:FPT".to_owned(),
+            preset: DataSourcePreset::CustomFile,
+            symbol: "FPT".to_owned(),
+            base_timeframe: Timeframe::W1,
+            candles: w1_bars.clone(),
+        },
+        WatchlistFeedEntry {
+            instrument_id: "Custom:C69".to_owned(),
+            preset: DataSourcePreset::CustomFile,
+            symbol: "C69".to_owned(),
+            base_timeframe: Timeframe::W1,
+            candles: w1_bars.clone(),
+        },
+    ];
+    let pit_cfg = BacktestConfig {
+        preset: StrategyPresetKind::SmaEmaTrendCross,
+        params: StrategyParams {
+            fast_sma: 2,
+            slow_ema: 3,
+            ..StrategyParams::default()
+        },
+        direction_mode: StrategyDirectionMode::LongOnly,
+        ..BacktestConfig::default()
+    };
+    let port_rep = run_portfolio_backtest_with_universe(
+        &custom_feeds,
+        Timeframe::W1,
+        &pit_cfg,
+        PortfolioUniverseFilter::Vn30EquitiesOnly,
+        PortfolioWeightingMode::EqualWeight,
+        None,
+        Some(&pit_u),
+        Some(UniverseMode::PointInTime),
+    );
+    assert_eq!(
+        port_rep.constituents.len(),
+        1,
+        "BUG-029: Vn30EquitiesOnly on CustomFile must keep FPT and exclude non-VN30 C69"
+    );
+    assert_eq!(port_rep.constituents[0].symbol, "FPT");
+    assert!(
+        (port_rep.portfolio_tearsheet.total_return_pct
+            - port_rep.constituents[0].standalone_return_pct)
+            .abs()
+            < 1e-6,
+        "BUG-029: W1 PIT portfolio return ({:.4}%) must match FPT standalone ({:.4}%) including UniverseRemoval week!",
+        port_rep.portfolio_tearsheet.total_return_pct,
+        port_rep.constituents[0].standalone_return_pct
+    );
+
+    // 7. `BUG-034`: `technical.rsi_overbought_cross` default threshold == 70.0 & `export_markdown` strips `\n` in symbol.
+    let ob_entry = SIGNAL_CATALOG
+        .iter()
+        .find(|e| e.id == "technical.rsi_overbought_cross")
+        .expect("rsi_overbought_cross");
+    let thr_param = ob_entry
+        .params
+        .iter()
+        .find(|p| p.name == "threshold")
+        .expect("threshold param");
+    assert!((thr_param.default_value - 70.0).abs() < 1e-9);
+
+    let mut journal = TradeJournalStore::default();
+    journal.entries.push(JournalEntry {
+        id: 1,
+        source: JournalEntrySource::PlannedSetup {
+            symbol: "FPT".to_owned(),
+        },
+        status: JournalEntryStatus::Planned,
+        symbol: "FPT\nINJECTED".to_owned(),
+        venue: ExchangeVenue::Hose,
+        side: PositionSide::Long,
+        created_at_timestamp: t0,
+        entry_timestamp: t0,
+        exit_timestamp: None,
+        planned_entry: Some(100.0),
+        planned_stop: Some(95.0),
+        planned_target: Some(110.0),
+        planned_quantity: Some(100.0),
+        planned_net_r: Some(2.0),
+        executed_entry: None,
+        executed_exit: None,
+        executed_quantity: None,
+        gross_pnl: 0.0,
+        fees_and_taxes: 0.0,
+        net_pnl: 0.0,
+        realized_r: None,
+        setup: SetupTag::default(),
+        mistake: crate::journal::MistakeTag::None,
+        conviction: 3,
+        checklist: crate::journal::ChecklistState::default(),
+        notes: "line1\r\nline2".to_owned(),
+    });
+    let md = journal.export_markdown(None);
+    assert!(
+        !md.contains("FPT\nINJECTED"),
+        "BUG-034: symbol newlines must be stripped in Markdown table"
+    );
+    assert!(md.contains("FPT INJECTED"));
 }

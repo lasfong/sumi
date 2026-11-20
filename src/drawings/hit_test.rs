@@ -124,7 +124,47 @@ pub fn hit_test_projected_drawing(
                 z_order,
             })
         }
+        ProjectedDrawingShape::ParallelChannel {
+            base_line,
+            parallel_line,
+            mid_line,
+            fill_polygon,
+        } => {
+            let mut min_dist = f64::INFINITY;
+            for seg in [*base_line, *parallel_line, *mid_line]
+                .into_iter()
+                .flatten()
+            {
+                min_dist = min_dist.min(distance_to_segment(cursor, seg));
+            }
+            if min_dist <= STROKE_HIT_TOLERANCE_PX {
+                return Some(HitMatch {
+                    drawing_id: projected.id,
+                    locked: projected.locked,
+                    target: HitTarget::Body,
+                    priority: HitPriority::Stroke,
+                    distance: min_dist,
+                    z_order,
+                });
+            }
+            if is_selected && !projected.locked && point_in_convex_polygon(cursor, fill_polygon) {
+                return Some(HitMatch {
+                    drawing_id: projected.id,
+                    locked: projected.locked,
+                    target: HitTarget::Body,
+                    priority: HitPriority::SelectedBody,
+                    distance: 0.0,
+                    z_order,
+                });
+            }
+            None
+        }
         ProjectedDrawingShape::Rectangle {
+            clipped_fill,
+            clipped_edges,
+            ..
+        }
+        | ProjectedDrawingShape::PriceDateRange {
             clipped_fill,
             clipped_edges,
             ..
@@ -359,6 +399,30 @@ pub fn hit_test_projected_drawing(
             None
         }
     }
+}
+
+/// Exact winding-invariant point-in-convex-polygon test for clipped [`ParallelChannel`] fills.
+#[must_use]
+fn point_in_convex_polygon(pt: LocalPoint, poly: &[LocalPoint]) -> bool {
+    if poly.len() < 3 || !pt.is_finite() {
+        return false;
+    }
+    let mut pos = 0_usize;
+    let mut neg = 0_usize;
+    for i in 0..poly.len() {
+        let a = poly[i];
+        let b = poly[(i + 1) % poly.len()];
+        let cross = (b.x - a.x) * (pt.y - a.y) - (b.y - a.y) * (pt.x - a.x);
+        if cross > 1.0e-9 {
+            pos += 1;
+        } else if cross < -1.0e-9 {
+            neg += 1;
+        }
+        if pos > 0 && neg > 0 {
+            return false;
+        }
+    }
+    pos > 0 || neg > 0
 }
 
 /// Evaluates all visible drawings belonging to `pane` and returns the highest-precedence [`HitMatch`].

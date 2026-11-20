@@ -24,6 +24,14 @@ const fn default_base_timeframe_secs() -> i64 {
     86_400
 }
 
+const fn default_contract_multiplier_one() -> f64 {
+    1.0
+}
+
+const fn default_initial_margin_pct_100() -> f64 {
+    100.0
+}
+
 /// Paper-trading account rules and execution friction parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -32,11 +40,20 @@ pub struct AccountConfig {
     pub initial_cash: f64,
     /// Per-fill commission in basis points (`1 bp = 0.01%`, `default = 5.0` bps = `0.05%`).
     pub commission_bps: f64,
+    /// Statutory securities transfer tax on gross sell proceeds in basis points (`10.0 bps = 0.10%` on VN cash equities; `default = 0.0`).
+    #[serde(default)]
+    pub tax_sell_bps: f64,
     /// Adverse execution slippage in basis points (`default = 2.0` bps = `0.02%`).
     pub slippage_bps: f64,
+    /// Point-to-currency contract multiplier (`100.0 kVND/pt` or `100_000.0 VND/pt` for `VN30F1M`, `1.0` for cash/spot).
+    #[serde(default = "default_contract_multiplier_one")]
+    pub contract_multiplier: f64,
+    /// Initial margin requirement percentage (`17.0%` for VSD/HNX `VN30F1M`, `100.0%` cash-funded).
+    #[serde(default = "default_initial_margin_pct_100")]
+    pub initial_margin_pct: f64,
     /// Maximum notional-to-equity leverage (`default = 1.0` cash-backed).
     pub max_leverage: f64,
-    /// Whether `Short` positions are permitted (`default = true`).
+    /// Whether `Short` positions are permitted (`default = true`; always gated by `venue.allows_short()`).
     pub allow_short: bool,
     /// Whether VSD `T+2` (`13:00 ICT`) / historical `T+3` (`09:00 ICT`) lot lock is enforced on Vietnam cash equities.
     #[serde(default)]
@@ -54,7 +71,10 @@ impl Default for AccountConfig {
         Self {
             initial_cash: 100_000.0,
             commission_bps: 5.0,
+            tax_sell_bps: 0.0,
             slippage_bps: 2.0,
+            contract_multiplier: 1.0,
+            initial_margin_pct: 100.0,
             max_leverage: 1.0,
             allow_short: true,
             enforce_vn_t2_lot_lock: false,
@@ -76,16 +96,93 @@ impl AccountConfig {
         }
         self.commission_bps = self.commission_bps.clamp(0.0, 500.0);
 
+        if !self.tax_sell_bps.is_finite() {
+            self.tax_sell_bps = 0.0;
+        }
+        self.tax_sell_bps = self.tax_sell_bps.clamp(0.0, 500.0);
+
         if !self.slippage_bps.is_finite() {
             self.slippage_bps = 2.0;
         }
         self.slippage_bps = self.slippage_bps.clamp(0.0, 500.0);
+
+        if !self.contract_multiplier.is_finite() || self.contract_multiplier <= 0.0 {
+            self.contract_multiplier = 1.0;
+        }
+        self.contract_multiplier = self.contract_multiplier.clamp(1.0e-6, 1.0e9);
+
+        if !self.initial_margin_pct.is_finite() || self.initial_margin_pct <= 0.0 {
+            self.initial_margin_pct = 100.0;
+        }
+        self.initial_margin_pct = self.initial_margin_pct.clamp(1.0, 100.0);
 
         if !self.max_leverage.is_finite() {
             self.max_leverage = 1.0;
         }
         self.max_leverage = self.max_leverage.clamp(1.0, 100.0);
         self.base_timeframe_secs = self.base_timeframe_secs.clamp(1, 31_536_000);
+    }
+
+    /// Effective contract multiplier (`100.0 kVND/pt` or `100_000.0 VND/pt` for `VN30F1M`, `1.0` for spot/equities).
+    #[inline]
+    #[must_use]
+    pub fn effective_contract_multiplier(&self) -> f64 {
+        if self.venue == crate::journal::ExchangeVenue::Vn30Futures
+            && (self.contract_multiplier - 1.0).abs() < 1.0e-9
+        {
+            self.venue
+                .default_contract_multiplier(crate::journal::VnPriceUnit::Auto, self.initial_cash)
+        } else if self.contract_multiplier.is_finite() && self.contract_multiplier > 0.0 {
+            self.contract_multiplier
+        } else {
+            1.0
+        }
+    }
+
+    /// Effective initial margin percentage (`17.0%` on `VN30F1M` unless explicitly overridden).
+    #[inline]
+    #[must_use]
+    pub fn effective_initial_margin_pct(&self) -> f64 {
+        if self.venue == crate::journal::ExchangeVenue::Vn30Futures
+            && (self.initial_margin_pct - 100.0).abs() < 1.0e-9
+        {
+            self.venue.default_initial_margin_pct()
+        } else if self.initial_margin_pct.is_finite() && self.initial_margin_pct > 0.0 {
+            self.initial_margin_pct.clamp(1.0, 100.0)
+        } else {
+            100.0
+        }
+    }
+
+    /// Short selling is permitted strictly when both account policy and exchange venue allow shorting (`BUG-008`).
+    #[inline]
+    #[must_use]
+    pub const fn effective_allow_short(&self) -> bool {
+        self.allow_short && self.venue.allows_short()
+    }
+
+    /// Computes total execution fee (`commission + sell transfer tax`) respecting `contract_multiplier` (`BUG-001`).
+    #[inline]
+    #[must_use]
+    pub fn compute_fill_fee(&self, price: f64, quantity: f64, side: OrderSide) -> f64 {
+        let mult = self.effective_contract_multiplier();
+        let gross_notional = price * quantity * mult;
+        let comm = gross_notional * (self.commission_bps.clamp(0.0, 500.0) * 1.0e-4);
+        let sell_tax = match side {
+            OrderSide::Sell => gross_notional * (self.tax_sell_bps.clamp(0.0, 500.0) * 1.0e-4),
+            OrderSide::Buy => 0.0,
+        };
+        (comm + sell_tax).max(0.0)
+    }
+
+    /// Computes required margin (`quantity * price * contract_multiplier * (initial_margin_pct / 100) / max_leverage`).
+    #[inline]
+    #[must_use]
+    pub fn required_margin_for(&self, price: f64, quantity: f64) -> f64 {
+        let mult = self.effective_contract_multiplier();
+        let margin_frac =
+            (self.effective_initial_margin_pct() / 100.0) / self.max_leverage.max(1.0);
+        (quantity * price * mult * margin_frac).max(0.0)
     }
 }
 

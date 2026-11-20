@@ -392,25 +392,43 @@ fn typical_row_weight(row_price: f64, row_tick: f64, bar_typ: f64, span: f64) ->
 }
 
 #[inline]
+fn boundary_pair_tol(
+    price_a: f64,
+    price_b: f64,
+    venue: ExchangeVenue,
+    resolved_unit: ResolvedVnPriceUnit,
+    fraction: f64,
+) -> f64 {
+    let tick_a = tick_size_at_price(venue, price_a, resolved_unit);
+    let tick_b = tick_size_at_price(venue, price_b, resolved_unit);
+    (tick_a.min(tick_b) * fraction).max(PRICE_EQ_EPS)
+}
+
+#[inline]
 fn classify_band_state(
     price: f64,
-    tick: f64,
+    venue: ExchangeVenue,
+    resolved_unit: ResolvedVnPriceUnit,
     band: Option<&DailyPriceBand>,
     snapped_ref: Option<f64>,
 ) -> DomPriceBandState {
     let Some(band) = band else {
         return DomPriceBandState::Normal;
     };
-    let tol = (tick * 0.49).max(PRICE_EQ_EPS);
-    if price > band.ceiling_price + tol {
+    let ceil_tol = boundary_pair_tol(price, band.ceiling_price, venue, resolved_unit, 0.49);
+    let floor_tol = boundary_pair_tol(price, band.floor_price, venue, resolved_unit, 0.49);
+    if price > band.ceiling_price + ceil_tol {
         DomPriceBandState::AboveCeiling
-    } else if (price - band.ceiling_price).abs() <= tol {
+    } else if (price - band.ceiling_price).abs() <= ceil_tol {
         DomPriceBandState::Ceiling
-    } else if price < band.floor_price - tol {
+    } else if price < band.floor_price - floor_tol {
         DomPriceBandState::BelowFloor
-    } else if (price - band.floor_price).abs() <= tol {
+    } else if (price - band.floor_price).abs() <= floor_tol {
         DomPriceBandState::Floor
-    } else if snapped_ref.is_some_and(|r| (price - r).abs() <= (tick * 0.49).max(PRICE_EQ_EPS)) {
+    } else if snapped_ref.is_some_and(|r| {
+        let ref_tol = boundary_pair_tol(price, r, venue, resolved_unit, 0.49);
+        (price - r).abs() <= ref_tol
+    }) {
         DomPriceBandState::Reference
     } else {
         DomPriceBandState::Normal
@@ -552,15 +570,25 @@ pub fn compute_causal_dom_ladder(
         .map(|price| {
             let tick_size = tick_size_at_price(config.venue, price, resolved_unit);
             min_tick = min_tick.min(tick_size);
-            let band_state =
-                classify_band_state(price, tick_size, daily_band.as_ref(), snapped_ref);
-            let tol = (tick_size * 0.49).max(PRICE_EQ_EPS);
+            let band_state = classify_band_state(
+                price,
+                config.venue,
+                resolved_unit,
+                daily_band.as_ref(),
+                snapped_ref,
+            );
+            let mark_tol =
+                boundary_pair_tol(price, snapped_mark, config.venue, resolved_unit, 0.49);
+            let is_at_position_entry = snapped_pos_entry.is_some_and(|e| {
+                let entry_tol = boundary_pair_tol(price, e, config.venue, resolved_unit, 0.49);
+                (price - e).abs() <= entry_tol
+            });
             DomLadderRow {
                 price,
                 tick_size,
                 band_state,
-                is_at_mark: (price - snapped_mark).abs() <= tol,
-                is_at_position_entry: snapped_pos_entry.is_some_and(|e| (price - e).abs() <= tol),
+                is_at_mark: (price - snapped_mark).abs() <= mark_tol,
+                is_at_position_entry,
                 synth_bid_depth: 0.0,
                 synth_ask_depth: 0.0,
                 traded_buy_volume: 0.0,
@@ -663,9 +691,11 @@ pub fn compute_causal_dom_ladder(
         };
         let raw_depth = base_depth_pool * proximity_weight * vol_affinity;
         let snapped_depth = floor_to_board_lot(config.venue, raw_depth).max(board_lot);
-        if row.price > snapped_mark + (0.49 * row.tick_size) {
+        let mark_side_tol =
+            boundary_pair_tol(row.price, snapped_mark, config.venue, resolved_unit, 0.49);
+        if row.price > snapped_mark + mark_side_tol {
             row.synth_ask_depth = snapped_depth;
-        } else if row.price < snapped_mark - (0.49 * row.tick_size) {
+        } else if row.price < snapped_mark - mark_side_tol {
             row.synth_bid_depth = snapped_depth;
         }
         max_row_depth = max_row_depth
@@ -686,7 +716,11 @@ pub fn compute_causal_dom_ladder(
         };
         if let Some(best_row) = rows
             .iter_mut()
-            .filter(|r| (r.price - order_price).abs() <= (0.51 * r.tick_size).max(PRICE_EQ_EPS))
+            .filter(|r| {
+                let ord_tol =
+                    boundary_pair_tol(r.price, order_price, config.venue, resolved_unit, 0.51);
+                (r.price - order_price).abs() <= ord_tol
+            })
             .min_by(|a, b| {
                 (a.price - order_price)
                     .abs()
@@ -831,15 +865,16 @@ pub fn stage_ladder_order(input: &LadderStageInput) -> Result<OrderRequest, DomL
         }
     }
 
+    let mut is_pure_reduce_sell = false;
     if input.side == OrderSide::Sell {
         let closable_long = input
             .open_position
             .as_ref()
             .filter(|p| p.side == PositionSide::Long && p.quantity.is_finite() && p.quantity > 0.0)
             .map_or(0.0, |p| p.quantity);
-        if qty > closable_long + PRICE_EQ_EPS
-            && (!input.venue.allows_short() || !input.allow_account_short)
-        {
+        if qty <= closable_long + PRICE_EQ_EPS {
+            is_pure_reduce_sell = true;
+        } else if !input.venue.allows_short() || !input.allow_account_short {
             return Err(DomLadderError::ShortNotAllowedByVenue {
                 venue: input.venue,
                 requested_sell: qty,
@@ -848,8 +883,16 @@ pub fn stage_ladder_order(input: &LadderStageInput) -> Result<OrderRequest, DomL
         }
     }
 
-    let tick_at_entry = tick_size_at_price(input.venue, entry, input.resolved_unit);
-    let tick_tol = 0.25 * tick_at_entry;
+    // Use the minimum tick size across `entry` and `mark_price` so tier-crossing boundaries
+    // (e.g. `HOSE` `10.00` where tick jumps `0.01 -> 0.05`) never misclassify a Buy Stop above mark
+    // as a Limit order (`BUG-024`).
+    let tick_tol = boundary_pair_tol(
+        entry,
+        input.mark_price,
+        input.venue,
+        input.resolved_unit,
+        0.25,
+    );
     let kind = match input.side {
         OrderSide::Buy => {
             if entry <= input.mark_price + tick_tol {
@@ -867,35 +910,56 @@ pub fn stage_ladder_order(input: &LadderStageInput) -> Result<OrderRequest, DomL
         }
     };
 
-    let stop_loss = match input.stop_loss_ticks.filter(|&n| n > 0) {
-        None => None,
-        Some(n) => {
-            let sl = match input.side {
-                OrderSide::Buy => step_n_ticks_below(entry, n, input.venue, input.resolved_unit),
-                OrderSide::Sell => step_n_ticks_above(entry, n, input.venue, input.resolved_unit),
-            };
-            if !sl.is_finite() || sl <= 0.0 {
-                return Err(DomLadderError::InvalidBracketPrice(
-                    "stop-loss ticks stepped to non-positive price",
-                ));
+    // Pure-reduce sells on non-shorting venues (or when shorting is disabled) close an existing Long
+    // and must not attach bogus short-side SL/TP brackets (`BUG-034`).
+    let attach_brackets =
+        !(is_pure_reduce_sell && (!input.venue.allows_short() || !input.allow_account_short));
+
+    let stop_loss = if !attach_brackets {
+        None
+    } else {
+        match input.stop_loss_ticks.filter(|&n| n > 0) {
+            None => None,
+            Some(n) => {
+                let sl = match input.side {
+                    OrderSide::Buy => {
+                        step_n_ticks_below(entry, n, input.venue, input.resolved_unit)
+                    }
+                    OrderSide::Sell => {
+                        step_n_ticks_above(entry, n, input.venue, input.resolved_unit)
+                    }
+                };
+                if !sl.is_finite() || sl <= 0.0 {
+                    return Err(DomLadderError::InvalidBracketPrice(
+                        "stop-loss ticks stepped to non-positive price",
+                    ));
+                }
+                Some(sl)
             }
-            Some(sl)
         }
     };
 
-    let take_profit = match input.take_profit_ticks.filter(|&n| n > 0) {
-        None => None,
-        Some(n) => {
-            let tp = match input.side {
-                OrderSide::Buy => step_n_ticks_above(entry, n, input.venue, input.resolved_unit),
-                OrderSide::Sell => step_n_ticks_below(entry, n, input.venue, input.resolved_unit),
-            };
-            if !tp.is_finite() || tp <= 0.0 {
-                return Err(DomLadderError::InvalidBracketPrice(
-                    "take-profit ticks stepped to non-positive price",
-                ));
+    let take_profit = if !attach_brackets {
+        None
+    } else {
+        match input.take_profit_ticks.filter(|&n| n > 0) {
+            None => None,
+            Some(n) => {
+                let tp = match input.side {
+                    OrderSide::Buy => {
+                        step_n_ticks_above(entry, n, input.venue, input.resolved_unit)
+                    }
+                    OrderSide::Sell => {
+                        step_n_ticks_below(entry, n, input.venue, input.resolved_unit)
+                    }
+                };
+                if !tp.is_finite() || tp <= 0.0 {
+                    return Err(DomLadderError::InvalidBracketPrice(
+                        "take-profit ticks stepped to non-positive price",
+                    ));
+                }
+                Some(tp)
             }
-            Some(tp)
         }
     };
 
@@ -1065,11 +1129,9 @@ pub fn size_ladder_qty_from_risk_budget(
         side: side.to_position_side(),
         account_equity: equity,
         available_cash: equity,
-        leverage: if venue == ExchangeVenue::Vn30Futures {
-            100.0 / venue.default_initial_margin_pct()
-        } else {
-            1.0
-        },
+        // `compute_trade_plan` already divides `initial_margin_pct / 100.0` by `leverage`; passing
+        // `100.0 / 17.0` alongside `initial_margin_pct = 17.0` double-leveraged `VN30F1M` (`BUG-002`).
+        leverage: 1.0,
         contract_multiplier: venue.default_contract_multiplier(explicit_vn_unit, equity),
         initial_margin_pct: venue.default_initial_margin_pct(),
         max_position_pct: 100.0,
@@ -1201,6 +1263,7 @@ mod tests {
             side: PositionSide::Long,
             quantity: 200.0,
             avg_entry_price: 49.50,
+            contract_multiplier: 1.0,
             opened_timestamp: 1_750_000_000,
             opened_base_index: 0,
             stop_loss: None,

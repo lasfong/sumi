@@ -530,9 +530,7 @@ impl TradeJournalStore {
                     setup: SetupTag::Untagged,
                     mistake: MistakeTag::None,
                     conviction: 3,
-                    checklist: ChecklistState::automated_import_default(
-                        tr.had_initial_sl_at_open || tr.r_multiple.is_some(),
-                    ),
+                    checklist: ChecklistState::automated_import_default(tr.had_initial_sl_at_open),
                     notes: String::new(),
                 });
                 self.selected_entry_id = Some(id);
@@ -902,12 +900,13 @@ impl TradeJournalStore {
                 .realized_r
                 .or(e.planned_net_r)
                 .map_or_else(|| "-".to_owned(), |r| format!("{r:+.2}R"));
+            let clean_sym = e.symbol.replace('|', "\\|").replace(['\n', '\r'], " ");
             let clean_note = e.notes.replace('|', "\\|").replace(['\n', '\r'], " ");
             md.push_str(&format!(
                 "| {} | {} | {} | {} | {} | {:+.2} | {} | {} | {} | {} |\n",
                 e.id,
                 e.source.kind_label(),
-                e.symbol.replace('|', "\\|"),
+                clean_sym,
                 e.side.short_label(),
                 format_utc_datetime_hm(e.entry_timestamp),
                 e.net_pnl,

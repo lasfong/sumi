@@ -2179,3 +2179,247 @@ fn r19_custom_fibonacci_levels_and_dual_end_trendline_alert_parity() {
         Err(AlertError::UnsupportedDrawingGeometry)
     );
 }
+
+#[test]
+fn v1_1_wave2_parallel_channel_3_click_handles_extend_tf_replay_and_undo() {
+    let base_ts: i64 = 1_735_689_600; // 2025-01-01 00:00:00 UTC
+    let candles: Vec<Candle> = (0..40)
+        .map(|i| {
+            let p = 100.0 + (i as f64) * 0.5;
+            Candle {
+                timestamp: base_ts + (i as i64) * 86_400,
+                date_label: format!("D{i:02}"),
+                open: p,
+                high: p + 2.0,
+                low: p - 2.0,
+                close: p + 0.4,
+                volume: 100_000.0 + (i as f64) * 1_000.0,
+            }
+        })
+        .collect();
+    let (ts, ps) = setup_pane_scales(
+        candles.len(),
+        800.0,
+        400.0,
+        90.0,
+        130.0,
+        PriceScaleMode::Normal,
+        false,
+    );
+    let proj = PaneDrawingProjection::new(&ts, &ps, 800.0, 400.0, 100.0).with_candles(&candles);
+
+    let mut store = DrawingStore::new();
+    store.set_tool(DrawingTool::ParallelChannel);
+
+    let p0 = proj
+        .anchor_to_local(DrawingAnchor::new(5.0, 102.0))
+        .unwrap();
+    let p1 = proj
+        .anchor_to_local(DrawingAnchor::new(20.0, 110.0))
+        .unwrap();
+    let p2 = proj
+        .anchor_to_local(DrawingAnchor::new(12.5, 114.0))
+        .unwrap();
+
+    // Click 1 -> Click 2 -> Click 3
+    assert_eq!(
+        store.pointer_down(DrawingPaneTarget::Main, p0, false, &proj, &candles),
+        PointerCaptureOutcome::CapturedByDrawing
+    );
+    assert!(!store.pointer_up(DrawingPaneTarget::Main, Some(p0), false, &proj, &candles));
+    store.pointer_move(DrawingPaneTarget::Main, p1, false, &proj, &candles);
+    assert!(store.preview_drawing().is_some());
+    assert_eq!(
+        store.pointer_down(DrawingPaneTarget::Main, p1, false, &proj, &candles),
+        PointerCaptureOutcome::CapturedByDrawing
+    );
+    assert!(!store.pointer_up(DrawingPaneTarget::Main, Some(p1), false, &proj, &candles));
+    assert!(matches!(
+        store.phase(),
+        DrawingInteractionPhase::PlacingChannelOffset { .. }
+    ));
+
+    // Move mouse to set channel width, check live preview, then Click 3 to commit!
+    store.pointer_move(DrawingPaneTarget::Main, p2, false, &proj, &candles);
+    let preview = store
+        .preview_drawing()
+        .expect("live 3-step channel preview");
+    assert!(matches!(
+        preview.geometry,
+        DrawingGeometry::ParallelChannel { channel_offset, .. } if (channel_offset - 8.0).abs() < 0.25
+    ));
+    assert_eq!(
+        store.pointer_down(DrawingPaneTarget::Main, p2, false, &proj, &candles),
+        PointerCaptureOutcome::CapturedByDrawing
+    );
+    assert!(store.pointer_up(DrawingPaneTarget::Main, Some(p2), false, &proj, &candles));
+    assert_eq!(store.active_tool, DrawingTool::Select);
+    assert_eq!(store.drawings.len(), 1);
+    let ch_id = store.drawings[0].id;
+
+    // Projection yields 3 handles (`Anchor(0)`, `Anchor(1)`, `ChannelOffset`), midline & polygon fill.
+    let projected = proj.project_drawing(&store.drawings[0]).unwrap();
+    assert_eq!(projected.handles.len(), 3);
+    assert!(
+        projected
+            .handles
+            .iter()
+            .any(|h| h.part == HandlePart::ChannelOffset)
+    );
+    match &projected.shape {
+        ProjectedDrawingShape::ParallelChannel {
+            base_line,
+            parallel_line,
+            mid_line,
+            fill_polygon,
+        } => {
+            assert!(base_line.is_some());
+            assert!(parallel_line.is_some());
+            assert!(mid_line.is_some());
+            assert!(fill_polygon.len() >= 3);
+        }
+        other => panic!("expected ParallelChannel shape, got {other:?}"),
+    }
+
+    // Hit-test ChannelOffset handle + interior body (when selected).
+    let off_handle = projected
+        .handles
+        .iter()
+        .find(|h| h.part == HandlePart::ChannelOffset)
+        .unwrap()
+        .pos;
+    let hit_h = hit_test_pane_drawings(
+        &store.drawings,
+        DrawingPaneTarget::Main,
+        &proj,
+        off_handle,
+        Some(ch_id),
+    )
+    .expect("hit ChannelOffset handle");
+    assert_eq!(hit_h.target, HitTarget::Handle(HandlePart::ChannelOffset));
+
+    let mid_inside = proj
+        .anchor_to_local(DrawingAnchor::new(12.5, 110.0))
+        .unwrap();
+    let hit_body = hit_test_pane_drawings(
+        &store.drawings,
+        DrawingPaneTarget::Main,
+        &proj,
+        mid_inside,
+        Some(ch_id),
+    )
+    .expect("hit selected ParallelChannel interior/midline");
+    assert_eq!(hit_body.drawing_id, ch_id);
+
+    // Enable Extend Left & Right via DrawingPropertyPatch and verify clipping reaches pane edges.
+    let mut patch = DrawingPropertyPatch::from_drawing(&store.drawings[0]);
+    patch.trend_extend_left = true;
+    patch.trend_extend_right = true;
+    assert_eq!(
+        store.apply_drawing_property_patch(ch_id, patch, &candles, crate::data::Timeframe::D1),
+        Ok(true)
+    );
+    let ext_proj = proj.project_drawing(&store.drawings[0]).unwrap();
+    if let ProjectedDrawingShape::ParallelChannel {
+        base_line: Some(bl),
+        parallel_line: Some(pl),
+        ..
+    } = ext_proj.shape
+    {
+        let on_boundary = |pt: LocalPoint| {
+            pt.x.abs() < 1e-6
+                || (pt.x - 800.0).abs() < 1e-6
+                || pt.y.abs() < 1e-6
+                || (pt.y - 400.0).abs() < 1e-6
+        };
+        assert!(
+            on_boundary(bl.start) && on_boundary(bl.end),
+            "extended baseline must clip cleanly to pane boundaries, got {bl:?}"
+        );
+        assert!(bl.start.x.min(bl.end.x) < p0.x - 10.0);
+        assert!(bl.start.x.max(bl.end.x) > p1.x + 10.0);
+        assert!(
+            on_boundary(pl.start) && on_boundary(pl.end),
+            "extended parallel border must clip cleanly to pane boundaries, got {pl:?}"
+        );
+    } else {
+        panic!("extended ParallelChannel lines must clip cleanly to pane");
+    }
+
+    // `DEF-001` causal replay masking when cutoff is earlier than anchor `end` (bar 20).
+    let early_cutoff = candles[10].timestamp;
+    assert!(!store.drawings[0].is_causally_visible(Some(early_cutoff), 11));
+    assert!(store.drawings[0].is_causally_visible(Some(candles[25].timestamp), 26));
+
+    // `1D -> 1W -> 1D` timeframe roundtrip preserves `channel_offset` exactly.
+    let weekly = crate::data::aggregate_ohlcv(
+        &candles,
+        crate::data::Timeframe::D1,
+        crate::data::Timeframe::W1,
+    )
+    .unwrap();
+    let orig_offset = match store.drawings[0].geometry {
+        DrawingGeometry::ParallelChannel { channel_offset, .. } => channel_offset,
+        _ => unreachable!(),
+    };
+    store.remap_timeframe(
+        &candles,
+        crate::data::Timeframe::D1,
+        &weekly,
+        crate::data::Timeframe::W1,
+    );
+    store.remap_timeframe(
+        &weekly,
+        crate::data::Timeframe::W1,
+        &candles,
+        crate::data::Timeframe::D1,
+    );
+    let rt_offset = match store.drawings[0].geometry {
+        DrawingGeometry::ParallelChannel { channel_offset, .. } => channel_offset,
+        _ => unreachable!(),
+    };
+    assert!((rt_offset - orig_offset).abs() < 1e-9);
+
+    // Undo/Redo restores cleanly.
+    assert!(store.undo());
+    assert!(!store.drawings[0].trend_extend_left);
+    assert!(store.redo());
+    assert!(store.drawings[0].trend_extend_left);
+}
+
+#[test]
+fn v1_1_wave2_price_date_range_measure_metrics_and_nan_resilience() {
+    let base_ts: i64 = 1_735_689_600;
+    let mut candles: Vec<Candle> = (0..10)
+        .map(|i| Candle {
+            timestamp: base_ts + (i as i64) * 86_400,
+            date_label: format!("D{i}"),
+            open: 50.0 + (i as f64),
+            high: 51.0 + (i as f64),
+            low: 49.0 + (i as f64),
+            close: 50.5 + (i as f64),
+            volume: 1_000_000.0,
+        })
+        .collect();
+    // Inject one NaN volume bar and one negative volume bar to prove resilience.
+    candles[3].volume = f64::NAN;
+    candles[4].volume = -500.0;
+
+    let a0 = DrawingAnchor::with_timestamp(1.0, 50.0, candles[1].timestamp as f64);
+    let a1 = DrawingAnchor::with_timestamp(6.0, 62.5, candles[6].timestamp as f64);
+    let m = compute_price_date_range_metrics(a0, a1, Some(&candles));
+    assert!((m.price_delta - 12.5).abs() < 1e-9);
+    assert!((m.price_pct.unwrap() - 25.0).abs() < 1e-9);
+    assert_eq!(m.bar_count, 5);
+    assert_eq!(m.elapsed_secs, Some(5 * 86_400));
+    assert_eq!(format_measure_duration(m.elapsed_secs.unwrap()), "5d");
+    assert_eq!(format_measure_duration(6 * 3600 + 30 * 60), "6h 30m");
+    // Bars 1..=6 = 6 bars, 2 invalid volumes (bars 3 & 4) -> 4 valid bars * 1_000_000 = 4_000_000.
+    assert!((m.total_volume.unwrap() - 4_000_000.0).abs() < 1e-6);
+    assert!(m.is_bullish);
+
+    // Zero start price produces `price_pct == None` (no division-by-zero / Inf).
+    let zero_start = DrawingAnchor::new(0.0, 0.0);
+    let m_zero = compute_price_date_range_metrics(zero_start, a1, Some(&candles));
+    assert!(m_zero.price_pct.is_none());
+}

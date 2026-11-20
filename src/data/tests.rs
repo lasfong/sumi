@@ -45,7 +45,15 @@ fn synthetic_dataset_100k_bars_is_linear_time_and_preserves_120_prefix() {
 
     assert_eq!(large_100k.len(), 100_000);
     assert_eq!(&large_100k[..120], prefix_120.as_slice());
-    assert_eq!(large_100k[0].date_label, "2026-05-01");
+    assert_eq!(large_100k[0].date_label, "2026-05-04");
+    assert_eq!(
+        format_utc_date(large_100k[0].timestamp),
+        large_100k[0].date_label
+    );
+    assert_eq!(
+        format_utc_date(large_100k[119].timestamp),
+        large_100k[119].date_label
+    );
     assert!(large_100k.iter().all(Candle::is_valid));
 }
 
@@ -218,8 +226,15 @@ fn real_archive_cafef_multi_symbol_and_spy_dst_weekly_aggregation_invariants() {
             .windows(2)
             .all(|w| w[0].timestamp < w[1].timestamp)
     );
-    // Verify zero cross-contamination between HNX-INDEX (~100..500) and VNINDEX (~650..1600)
-    assert!(cafef_vn.candles.iter().all(|c| c.close > 500.0));
+    // Verify zero cross-contamination between HNX-INDEX (< 600) and VNINDEX (opened at 100 in 2000; > 500 across 2016..2026)
+    assert!(cafef_vn.candles.last().unwrap().close > 1_000.0);
+    assert!(
+        cafef_vn
+            .candles
+            .iter()
+            .filter(|c| c.timestamp >= days_from_civil(2016, 1, 1) * 86_400)
+            .all(|c| c.close > 500.0)
+    );
     assert!(cafef_hnx.candles.iter().all(|c| c.close < 600.0));
 
     // 2. Real SPY 5-column CSV (`14:30` EST / `13:30` EDT Unix seconds, no volume column)
@@ -356,15 +371,16 @@ fn timeframe_lattice_associativity_downsample_guard_and_def001_causality() {
         })
     );
 
-    // DEF-001 causality guard: mid-week cutoff on Wednesday must NEVER include Friday's high/low/close!
-    let wed_cutoff = days_from_civil(2026, 9, 2) * 86_400 + 8 * 3_600;
-    let causal_w1 = aggregate_ohlcv_up_to(c_1m, Timeframe::M1, Timeframe::W1, wed_cutoff).unwrap();
+    // DEF-001 causality guard: mid-week cutoff on Thursday `2026-09-03` (first legal trading day after
+    // official `2026-09-01..02` National Day holidays) must NEVER include Friday `2026-09-04`'s high/low/close!
+    let thu_cutoff = days_from_civil(2026, 9, 3) * 86_400 + 8 * 3_600;
+    let causal_w1 = aggregate_ohlcv_up_to(c_1m, Timeframe::M1, Timeframe::W1, thu_cutoff).unwrap();
     assert_eq!(causal_w1.len(), 1);
-    let last_wed_1m = c_1m
+    let last_thu_1m = c_1m
         .iter()
-        .rfind(|c| c.timestamp <= wed_cutoff)
-        .expect("wednesday bar");
-    assert!((causal_w1[0].close - last_wed_1m.close).abs() < 1e-9);
+        .rfind(|c| c.timestamp <= thu_cutoff)
+        .expect("thursday bar");
+    assert!((causal_w1[0].close - last_thu_1m.close).abs() < 1e-9);
     assert!(causal_w1[0].volume < c_1w[0].volume);
 }
 
@@ -1051,6 +1067,228 @@ HNX-INDEX,20250717,241.31,244.10,240.80,243.55,142000000
             assert_eq!(app.available_symbols.len(), 2);
             assert_eq!(app.symbol, "VNINDEX");
             assert!(app.candles.len() > 5_000);
+        }
+    }
+}
+
+#[test]
+fn wave2_regression_cafef_rule5_real_vnindex_restart_cmdk_timestamp_venues_and_quarantine() {
+    use crate::journal::{ExchangeVenue, HNX_LISTED_SYMBOLS, UPCOM_LISTED_SYMBOLS};
+    use crate::replay::ReplayController;
+
+    // 1. BUG-005: CafeFSplitAware Rule 5 accepts valid flat post-split session (`O == H == L`, `Close` within 6 bps & 25 VND):
+    let flat_split = evaluate_and_normalize_cafef_split_ohlc(
+        "RCL", 12.3456, 12.3456, 12.3456, 12.3470, 50_000.0,
+    );
+    assert!(matches!(
+        flat_split,
+        CafeFSplitNormOutcome::NormalizedSplitPrecision { new_high, .. }
+            if (new_high - 12.3470).abs() < 1e-9
+    ));
+
+    // 2. BUG-013: Modern Unix-seconds ending in `000` (`2024-10-04..09`) stay `Seconds`, never `1970`:
+    let sec_csv = "time,open,high,low,close,volume\n1728000000,100,102,99,101,1000\n1728432000,101,103,100,102,1200\n";
+    let sec_rep = load_ohlcv_csv(sec_csv, &DataLoadOptions::default()).unwrap();
+    assert_eq!(sec_rep.candles[0].date_label, "2024-10-04");
+    assert_eq!(sec_rep.candles[1].date_label, "2024-10-09");
+    assert!(
+        matches!(sec_rep.base_timeframe, Timeframe::D1 | Timeframe::W1),
+        "5-day Unix-seconds step must stay daily/weekly (never 1970 M5), got {:?}",
+        sec_rep.base_timeframe
+    );
+
+    // 3. BUG-021: Strictly sorted HNX & UPCOM registries + UPCOM 35.29% legal range not flagged EXTREME_RANGE:
+    for w in HNX_LISTED_SYMBOLS.windows(2) {
+        assert!(
+            w[0] < w[1],
+            "HNX_LISTED_SYMBOLS unsorted: {} >= {}",
+            w[0],
+            w[1]
+        );
+    }
+    for w in UPCOM_LISTED_SYMBOLS.windows(2) {
+        assert!(
+            w[0] < w[1],
+            "UPCOM_LISTED_SYMBOLS unsorted: {} >= {}",
+            w[0],
+            w[1]
+        );
+    }
+    for hnx_sym in ["C69", "NDN", "BVS", "API", "APS", "RCL", "SHS", "PVS"] {
+        assert_eq!(
+            ExchangeVenue::infer_from_symbol_and_preset(hnx_sym, DataSourcePreset::CustomFile),
+            ExchangeVenue::Hnx,
+            "{hnx_sym} must resolve to HNX"
+        );
+    }
+    for upcom_sym in ["KSV", "ABB", "ABI", "ACV", "VGI", "QNS"] {
+        assert_eq!(
+            ExchangeVenue::infer_from_symbol_and_preset(upcom_sym, DataSourcePreset::CustomFile),
+            ExchangeVenue::Upcom,
+            "{upcom_sym} must resolve to UPCOM"
+        );
+    }
+    let upcom_bars = vec![Candle {
+        timestamp: days_from_civil(2026, 5, 4) * 86_400,
+        date_label: "2026-05-04".to_owned(),
+        open: 10.0,
+        high: 11.5,
+        low: 8.5,
+        close: 11.5,
+        volume: 10_000.0,
+    }];
+    let upcom_audit = audit_ohlcv_series_with_venue(
+        "KSV",
+        ExchangeVenue::Upcom,
+        Timeframe::D1,
+        &upcom_bars,
+        None,
+    );
+    assert_eq!(upcom_audit.extreme_range_bar_count, 0);
+
+    // 4. BUG-025: VNINDEX Synth has 0 weekend/holiday bars; VN30F1M 1m skips 2026-09-01..02 holidays:
+    let synth = generate_synthetic_ohlcv(120);
+    let synth_audit = audit_ohlcv_series_with_venue(
+        "VNINDEX",
+        ExchangeVenue::VnIndexBenchmark,
+        Timeframe::D1,
+        &synth,
+        None,
+    );
+    assert_eq!(synth_audit.holiday_or_weekend_bar_count, 0);
+    assert_eq!(synth_audit.missing_session_count, 0);
+    let vn30f = generate_intraday_vn30f_1m_report(600);
+    assert!(
+        vn30f.candles[0].date_label.starts_with("2026-09-03"),
+        "VN30F1M 1m must skip National Day 2026-09-01..02, got {}",
+        vn30f.candles[0].date_label
+    );
+    let vn30f_audit = audit_ohlcv_series_with_venue(
+        "VN30F1M",
+        ExchangeVenue::Vn30Futures,
+        Timeframe::M1,
+        &vn30f.candles,
+        None,
+    );
+    assert_eq!(vn30f_audit.holiday_or_weekend_bar_count, 0);
+
+    // 5. BUG-031: Leading blank lines delimiter detection, single/multi CSV QuarantineRow, JSON QuarantineRow,
+    //    duplicate status downgrade, ReplayController usize::MAX safety:
+    let blank_semi_csv = "\n   \n\t\ndate;open;high;low;close;volume\n2026-05-04;10;12;9;11;500\nSHORT_BAD_ROW\n2026-05-05;11;13;10;12;600\n";
+    let q_opts = DataLoadOptions {
+        invalid_row_policy: InvalidRowPolicy::QuarantineRow,
+        ..DataLoadOptions::default()
+    };
+    let q_rep = load_ohlcv_csv(blank_semi_csv, &q_opts).unwrap();
+    assert_eq!(q_rep.candles.len(), 2);
+    assert_eq!(q_rep.quarantined_row_count, 1);
+    assert!(q_rep.raw_row_count >= q_rep.quarantined_row_count);
+
+    let multi_bad_ts = "symbol,time,open,high,low,close,volume\nAAA,2026-05-04,10,12,9,11,500\nAAA,999999999999999999999,10,12,9,11,500\nAAA,2026-05-05,11,13,10,12,600\n";
+    let m_reps = load_ohlcv_csv_multi_symbol(multi_bad_ts, &q_opts).unwrap();
+    assert_eq!(m_reps.len(), 1);
+    assert_eq!(m_reps[0].candles.len(), 2);
+    assert_eq!(m_reps[0].quarantined_row_count, 1);
+
+    let bad_json = r#"[{"time":1777852800,"open":10,"high":12,"low":9,"close":11,"volume":100},{"time":"not-a-date","open":10,"high":12,"low":9,"close":11,"volume":100},{"time":1777939200,"open":11,"high":13,"low":10,"close":12,"volume":200}]"#;
+    let j_rep = load_ohlcv_json(bad_json, &q_opts).unwrap();
+    assert_eq!(j_rep.candles.len(), 2);
+    assert_eq!(j_rep.quarantined_row_count, 1);
+
+    let dup_bars = vec![synth[0].clone(), synth[0].clone()];
+    let dup_audit = audit_ohlcv_series_with_venue(
+        "VNINDEX",
+        ExchangeVenue::VnIndexBenchmark,
+        Timeframe::D1,
+        &dup_bars,
+        None,
+    );
+    assert_eq!(dup_audit.duplicate_timestamp_count, 1);
+    assert_eq!(dup_audit.status, DataReadinessStatus::PartialWarning);
+
+    let mut rc = ReplayController::new();
+    rc.status = crate::replay::ReplayStatus::Paused;
+    rc.base_cursor_index = usize::MAX;
+    assert!(
+        rc.materialize_candles(&synth[..5], Timeframe::D1, Timeframe::D1)
+            .is_ok()
+    );
+
+    // 6. BUG-003 + BUG-006 + BUG-007 + BUG-012 on real CafeF data (when unpacked):
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let adj_path = "data/raw/cafef/CafeF.SolieuGD.Adjusted.Upto06112026.csv";
+        let idx_path = "data/raw/cafef/CafeF.INDEX.Upto06112026.csv";
+        if std::path::Path::new(adj_path).exists() && std::path::Path::new(idx_path).exists() {
+            let mut app = crate::SumiWorkstationApp::default();
+            app.import_file_from_path(adj_path).unwrap();
+            assert_eq!(app.available_symbols.len(), 471);
+
+            // BUG-005 real check: RCL retains ~1993 bars (no longer drops 798 flat post-split sessions!)
+            app.select_symbol_in_source("RCL");
+            assert!(
+                app.candles.len() > 1_950,
+                "RCL must retain valid post-split flat sessions (>1950 bars), got {}",
+                app.candles.len()
+            );
+
+            // BUG-007: Cmd+K "VCB" ranks CustomFile #1 and does NOT wipe 471 symbols!
+            app.select_symbol_in_source("FPT");
+            app.command_palette.query = "VCB".to_owned();
+            let cands = app.build_command_palette_candidates();
+            assert!(!cands.is_empty());
+            assert!(
+                matches!(
+                    cands[0].action,
+                    crate::app::PaletteAction::SelectWatchlistSymbol {
+                        preset: DataSourcePreset::CustomFile,
+                        ..
+                    }
+                ),
+                "Cmd+K 'VCB' on loaded CafeF CustomFile must rank CustomFile #1, got {:?}",
+                cands[0].title
+            );
+
+            // BUG-006: Real VNINDEX benchmark loaded (not synthetic sine wave ~1294->2508):
+            let uni = load_bundled_watchlist_universe();
+            let (bsym, _, bcandles) = resolve_benchmark_series_for_window(
+                "VNINDEX",
+                app.base_candles.first().unwrap().timestamp,
+                app.base_candles.last().unwrap().timestamp,
+                &uni,
+            )
+            .expect("real VNINDEX benchmark");
+            assert_eq!(bsym, "VNINDEX");
+            assert!(
+                bcandles.last().unwrap().close < 2_200.0 && bcandles.len() > 5_000,
+                "must resolve real CafeF VNINDEX (>5000 bars), got len={} last={}",
+                bcandles.len(),
+                bcandles.last().unwrap().close
+            );
+
+            // BUG-012: Unchecking CafeF Split Norm rejects bad OHLC CSV and preserves FPT:
+            app.import_cafef_split_aware = false;
+            let tmp_bad = std::env::temp_dir().join("sumi_wave2_bad_ohlc_test.csv");
+            let bad_csv = "<Ticker>,<DTYYYYMMDD>,<Open>,<High>,<Low>,<Close>,<Volume>\nC69,20261030,10.0,10.0,10.0,10.5,1000\n";
+            std::fs::write(&tmp_bad, bad_csv).unwrap();
+            let err = app.import_file_from_path(tmp_bad.to_str().unwrap());
+            let _ = std::fs::remove_file(&tmp_bad);
+            assert!(
+                err.is_err(),
+                "unchecked CafeF Split Norm must reject OHLC envelope violation"
+            );
+            assert_eq!(app.symbol, "FPT");
+            assert!(app.candles.len() > 2_000);
+            app.import_cafef_split_aware = true;
+
+            // BUG-003: Restart (`restore_persisted_session`) preserves CustomFile FPT + Replay cursor:
+            assert!(app.start_replay_at_base_index(2_000));
+            app.restore_persisted_session();
+            assert_eq!(app.data_source, DataSourcePreset::CustomFile);
+            assert_eq!(app.symbol, "FPT");
+            assert!(app.replay.is_active());
+            assert_eq!(app.replay.base_cursor_index, 2_000);
+            assert_eq!(app.available_symbols.len(), 471);
         }
     }
 }

@@ -128,6 +128,15 @@ pub enum DrawingInteractionPhase {
         wait_for_second_press: bool,
         second_press_active: bool,
     },
+    /// Step 3 of 3-point [`DrawingTool::ParallelChannel`] placement (`v1.1 / Wave 2`).
+    PlacingChannelOffset {
+        pane: DrawingPaneTarget,
+        start: DrawingAnchor,
+        end: DrawingAnchor,
+        preview_offset: f64,
+        wait_for_third_press: bool,
+        third_press_active: bool,
+    },
     DraggingHandle {
         drawing_id: DrawingId,
         pane: DrawingPaneTarget,
@@ -427,12 +436,14 @@ impl DrawingStore {
                 origin: start,
                 through: end,
             }
+            | DrawingGeometry::ParallelChannel { start, end, .. }
             | DrawingGeometry::Rectangle {
                 corner_a: start,
                 corner_b: end,
             }
             | DrawingGeometry::FibonacciRetracement { start, end, .. }
             | DrawingGeometry::RiskRewardBox { start, end, .. }
+            | DrawingGeometry::PriceDateRange { start, end }
             | DrawingGeometry::FixedRangeVolumeProfile { start, end, .. } => {
                 refresh_anchor(start);
                 refresh_anchor(end);
@@ -485,6 +496,7 @@ impl DrawingStore {
             DrawingInteractionPhase::Idle => false,
             DrawingInteractionPhase::PlacingSingle { pane: p, .. }
             | DrawingInteractionPhase::PlacingTwoAnchor { pane: p, .. }
+            | DrawingInteractionPhase::PlacingChannelOffset { pane: p, .. }
             | DrawingInteractionPhase::DraggingHandle { pane: p, .. }
             | DrawingInteractionPhase::DraggingBody { pane: p, .. } => p == pane,
         }
@@ -914,10 +926,12 @@ impl DrawingStore {
             return Err(DrawingPatchError::InvalidGeometry);
         }
 
-        let next_ext_l =
-            matches!(next_geom, DrawingGeometry::TrendLine { .. }) && patch.trend_extend_left;
-        let next_ext_r =
-            matches!(next_geom, DrawingGeometry::TrendLine { .. }) && patch.trend_extend_right;
+        let supports_ext = matches!(
+            next_geom,
+            DrawingGeometry::TrendLine { .. } | DrawingGeometry::ParallelChannel { .. }
+        );
+        let next_ext_l = supports_ext && patch.trend_extend_left;
+        let next_ext_r = supports_ext && patch.trend_extend_right;
         let next_custom_fib = if matches!(next_geom, DrawingGeometry::FibonacciRetracement { .. }) {
             match patch.custom_fib_levels {
                 None => None,
@@ -1103,6 +1117,27 @@ impl DrawingStore {
                     )
                 })
             }
+            DrawingInteractionPhase::PlacingChannelOffset {
+                pane,
+                start,
+                end,
+                preview_offset,
+                ..
+            } => {
+                let geom = DrawingGeometry::ParallelChannel {
+                    start,
+                    end,
+                    channel_offset: preview_offset,
+                };
+                geom.is_valid().then(|| {
+                    Drawing::new(
+                        PREVIEW_DRAWING_ID,
+                        pane,
+                        geom,
+                        DrawingStyle::default_for_tool(DrawingTool::ParallelChannel),
+                    )
+                })
+            }
             _ => None,
         }
     }
@@ -1122,6 +1157,7 @@ impl DrawingStore {
             DrawingInteractionPhase::Idle => None,
             DrawingInteractionPhase::PlacingSingle { pane: p, .. }
             | DrawingInteractionPhase::PlacingTwoAnchor { pane: p, .. }
+            | DrawingInteractionPhase::PlacingChannelOffset { pane: p, .. }
             | DrawingInteractionPhase::DraggingHandle { pane: p, .. }
             | DrawingInteractionPhase::DraggingBody { pane: p, .. } => Some(p),
         };
@@ -1148,6 +1184,19 @@ impl DrawingStore {
                     resolve_anchor(pane, local_pos, effective_magnet, proj, candles)
                 {
                     *preview_anchor = anchor;
+                }
+                self.hovered_hit = None;
+            }
+            DrawingInteractionPhase::PlacingChannelOffset {
+                start,
+                end,
+                preview_offset,
+                ..
+            } => {
+                if let Some(anchor) =
+                    resolve_anchor(pane, local_pos, effective_magnet, proj, candles)
+                {
+                    *preview_offset = compute_channel_offset(*start, *end, anchor);
                 }
                 self.hovered_hit = None;
             }
@@ -1300,7 +1349,29 @@ impl DrawingStore {
     ) -> PointerCaptureOutcome {
         let effective_magnet = self.effective_magnet(pane, snap_modifier);
 
-        // 1. Continue an active 2-click placement if waiting for the second click!
+        // 1a. Continue step 3 of a 3-point ParallelChannel placement!
+        if let DrawingInteractionPhase::PlacingChannelOffset {
+            pane: placing_pane,
+            start,
+            end,
+            preview_offset,
+            wait_for_third_press,
+            third_press_active,
+        } = &mut self.phase
+        {
+            if *placing_pane == pane && *wait_for_third_press {
+                if let Some(anchor) =
+                    resolve_anchor(pane, local_pos, effective_magnet, proj, candles)
+                {
+                    *preview_offset = compute_channel_offset(*start, *end, anchor);
+                    *third_press_active = true;
+                }
+                return PointerCaptureOutcome::CapturedByDrawing;
+            }
+            self.phase = DrawingInteractionPhase::Idle;
+        }
+
+        // 1b. Continue an active 2-click placement if waiting for the second click!
         if let DrawingInteractionPhase::PlacingTwoAnchor {
             pane: placing_pane,
             preview_anchor,
@@ -1347,9 +1418,11 @@ impl DrawingStore {
             }
             tool @ (DrawingTool::TrendLine
             | DrawingTool::Ray
+            | DrawingTool::ParallelChannel
             | DrawingTool::Rectangle
             | DrawingTool::FibonacciRetracement
             | DrawingTool::RiskRewardBox
+            | DrawingTool::PriceDateRange
             | DrawingTool::FixedRangeVolumeProfile) => {
                 if matches!(
                     tool,
@@ -1530,14 +1603,26 @@ impl DrawingStore {
                     dragged_far_enough
                 };
 
-                if should_try_commit
-                    && has_non_zero_direction(first_anchor, end_anchor)
-                    && let Some(geom) = build_two_anchor_geometry(tool, first_anchor, end_anchor)
-                    && let Some(new_id) = self.add_drawing(pane, geom, None)
-                {
-                    self.selected_id = Some(new_id);
-                    self.active_tool = DrawingTool::Select;
-                    return true;
+                if should_try_commit && has_non_zero_direction(first_anchor, end_anchor) {
+                    if tool == DrawingTool::ParallelChannel {
+                        // Advance cleanly into step 3 (setting parallel border offset).
+                        self.phase = DrawingInteractionPhase::PlacingChannelOffset {
+                            pane: placing_pane,
+                            start: first_anchor,
+                            end: end_anchor,
+                            preview_offset: 0.0,
+                            wait_for_third_press: true,
+                            third_press_active: false,
+                        };
+                        return false;
+                    }
+                    if let Some(geom) = build_two_anchor_geometry(tool, first_anchor, end_anchor)
+                        && let Some(new_id) = self.add_drawing(pane, geom, None)
+                    {
+                        self.selected_id = Some(new_id);
+                        self.active_tool = DrawingTool::Select;
+                        return true;
+                    }
                 }
 
                 // Stay in 2-click placement waiting for the user's second click!
@@ -1550,6 +1635,51 @@ impl DrawingStore {
                     wait_for_second_press: true,
                     second_press_active: false,
                 };
+                false
+            }
+            DrawingInteractionPhase::PlacingChannelOffset {
+                pane: placing_pane,
+                start,
+                end,
+                preview_offset,
+                wait_for_third_press,
+                third_press_active,
+            } => {
+                if placing_pane != pane {
+                    self.phase = DrawingInteractionPhase::PlacingChannelOffset {
+                        pane: placing_pane,
+                        start,
+                        end,
+                        preview_offset,
+                        wait_for_third_press,
+                        third_press_active,
+                    };
+                    return false;
+                }
+                if !third_press_active {
+                    self.phase = DrawingInteractionPhase::PlacingChannelOffset {
+                        pane: placing_pane,
+                        start,
+                        end,
+                        preview_offset,
+                        wait_for_third_press: true,
+                        third_press_active: false,
+                    };
+                    return false;
+                }
+                let final_offset = local_pos
+                    .and_then(|pt| resolve_anchor(pane, pt, effective_magnet, proj, candles))
+                    .map_or(preview_offset, |a| compute_channel_offset(start, end, a));
+                let geom = DrawingGeometry::ParallelChannel {
+                    start,
+                    end,
+                    channel_offset: final_offset,
+                };
+                if let Some(new_id) = self.add_drawing(pane, geom, None) {
+                    self.selected_id = Some(new_id);
+                    self.active_tool = DrawingTool::Select;
+                    return true;
+                }
                 false
             }
             DrawingInteractionPhase::DraggingHandle {
@@ -1724,7 +1854,8 @@ impl DrawingStore {
             }
             DrawingInteractionPhase::Idle
             | DrawingInteractionPhase::PlacingSingle { .. }
-            | DrawingInteractionPhase::PlacingTwoAnchor { .. } => {}
+            | DrawingInteractionPhase::PlacingTwoAnchor { .. }
+            | DrawingInteractionPhase::PlacingChannelOffset { .. } => {}
         }
     }
 }
@@ -1751,6 +1882,28 @@ fn resolve_anchor(
     }
 }
 
+fn compute_channel_offset(
+    start: DrawingAnchor,
+    end: DrawingAnchor,
+    cursor_anchor: DrawingAnchor,
+) -> f64 {
+    let db = end.bar_index - start.bar_index;
+    let base_val = if db.abs() > 1.0e-9 {
+        let t = (cursor_anchor.bar_index - start.bar_index) / db;
+        start.value + t * (end.value - start.value)
+    } else {
+        0.5 * (start.value + end.value)
+    };
+    let raw = cursor_anchor.value - base_val;
+    if raw.is_finite() {
+        let max_off =
+            (super::MAX_ABS_DRAWING_VALUE - start.value.abs().max(end.value.abs())).max(0.0);
+        raw.clamp(-max_off, max_off)
+    } else {
+        0.0
+    }
+}
+
 fn build_two_anchor_geometry(
     tool: DrawingTool,
     a0: DrawingAnchor,
@@ -1760,7 +1913,9 @@ fn build_two_anchor_geometry(
         return None;
     }
     match tool {
-        DrawingTool::TrendLine => Some(DrawingGeometry::TrendLine { start: a0, end: a1 }),
+        DrawingTool::TrendLine | DrawingTool::ParallelChannel => {
+            Some(DrawingGeometry::TrendLine { start: a0, end: a1 })
+        }
         DrawingTool::Ray => has_non_zero_direction(a0, a1).then_some(DrawingGeometry::Ray {
             origin: a0,
             through: a1,
@@ -1769,6 +1924,7 @@ fn build_two_anchor_geometry(
             corner_a: a0,
             corner_b: a1,
         }),
+        DrawingTool::PriceDateRange => Some(DrawingGeometry::PriceDateRange { start: a0, end: a1 }),
         DrawingTool::FibonacciRetracement => Some(DrawingGeometry::FibonacciRetracement {
             start: a0,
             end: a1,
@@ -1844,6 +2000,16 @@ fn apply_handle_drag(
     match (geom, handle) {
         (geom, HandlePart::Anchor(idx)) => {
             let _ = geom.set_anchor(idx, anchor);
+        }
+        (
+            DrawingGeometry::ParallelChannel {
+                start,
+                end,
+                channel_offset,
+            },
+            HandlePart::ChannelOffset,
+        ) => {
+            *channel_offset = compute_channel_offset(*start, *end, anchor);
         }
         (DrawingGeometry::Rectangle { corner_a, corner_b }, HandlePart::RectCorner(corner_idx)) => {
             match corner_idx {
@@ -2001,12 +2167,14 @@ fn sync_patched_geometry_timestamps(
             origin: start,
             through: end,
         }
+        | DrawingGeometry::ParallelChannel { start, end, .. }
         | DrawingGeometry::Rectangle {
             corner_a: start,
             corner_b: end,
         }
         | DrawingGeometry::FibonacciRetracement { start, end, .. }
         | DrawingGeometry::RiskRewardBox { start, end, .. }
+        | DrawingGeometry::PriceDateRange { start, end }
         | DrawingGeometry::FixedRangeVolumeProfile { start, end, .. } => {
             sync_patched_anchor_timestamp(prev_anchors[0], start, candles, tf);
             sync_patched_anchor_timestamp(prev_anchors[1], end, candles, tf);
@@ -2069,12 +2237,14 @@ fn remap_drawing_geometry(
             remap_single_anchor(anchor, old_candles, old_tf, new_candles, new_tf);
         }
         DrawingGeometry::TrendLine { start, end }
+        | DrawingGeometry::ParallelChannel { start, end, .. }
         | DrawingGeometry::Rectangle {
             corner_a: start,
             corner_b: end,
         }
         | DrawingGeometry::FibonacciRetracement { start, end, .. }
         | DrawingGeometry::RiskRewardBox { start, end, .. }
+        | DrawingGeometry::PriceDateRange { start, end }
         | DrawingGeometry::FixedRangeVolumeProfile { start, end, .. } => {
             remap_single_anchor(start, old_candles, old_tf, new_candles, new_tf);
             remap_single_anchor(end, old_candles, old_tf, new_candles, new_tf);
@@ -2221,6 +2391,40 @@ fn translate_geometry_in_local_space(
                 origin: a0,
                 through: a1,
             })
+        }
+        DrawingGeometry::ParallelChannel {
+            start,
+            end,
+            channel_offset,
+        } => {
+            if original_local.len() < 3 {
+                return None;
+            }
+            let a0 = translate_single_anchor_local(start, original_local[0], dx, dy, proj)?;
+            let a1 = translate_single_anchor_local(end, original_local[1], dx, dy, proj)?;
+            let mid_moved = proj.local_to_anchor(LocalPoint::new(
+                original_local[2].x + dx,
+                original_local[2].y + dy,
+            ));
+            let next_offset = mid_moved.map_or(channel_offset, |m| {
+                let mid_base = 0.5 * (a0.value + a1.value);
+                let off = m.value - mid_base;
+                if off.is_finite() { off } else { channel_offset }
+            });
+            let candidate = DrawingGeometry::ParallelChannel {
+                start: a0,
+                end: a1,
+                channel_offset: next_offset,
+            };
+            candidate.is_valid().then_some(candidate)
+        }
+        DrawingGeometry::PriceDateRange { start, end } => {
+            if original_local.len() < 2 {
+                return None;
+            }
+            let a0 = translate_single_anchor_local(start, original_local[0], dx, dy, proj)?;
+            let a1 = translate_single_anchor_local(end, original_local[1], dx, dy, proj)?;
+            Some(DrawingGeometry::PriceDateRange { start: a0, end: a1 })
         }
         DrawingGeometry::Rectangle { corner_a, corner_b } => {
             if original_local.len() < 2 {

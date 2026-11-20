@@ -20,16 +20,17 @@ use crate::backtest::{
     SignalPredicate, StrategyDirectionMode, StrategyPresetKind, SweepRankingMetric,
     WalkForwardConfig, WalkForwardReport, WalkForwardVerdict, compute_advanced_tearsheet_analytics,
     count_custom_rule_matches, is_bucket_incomplete_at_close_for_symbol,
-    map_equity_curve_to_candles, run_all_presets_battle, run_backtest_with_options,
-    run_monte_carlo_bootstrap, run_monte_carlo_portfolio_mapped, run_multi_strategy_comparison,
-    run_multi_symbol_battle_with_universe, run_parameter_sweep,
+    map_equity_curve_to_candles, render_backtest_report_html, run_all_presets_battle,
+    run_backtest_with_options, run_monte_carlo_bootstrap, run_monte_carlo_portfolio_mapped,
+    run_multi_strategy_comparison, run_multi_symbol_battle_with_universe, run_parameter_sweep,
     run_portfolio_backtest_with_universe, run_walk_forward_validation,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::backtest::{StopTakeConfig, StrategyParams};
 use crate::chart::{
-    ChartDisplayConfig, ChartRenderReport, ChartReplayTradingOverlay, ChartViewportState,
-    EquityCurveOverlay, multi_strategy_curve_color, palette, render_workstation_chart_full,
+    ChartDisplayConfig, ChartRenderReport, ChartReplayTradingOverlay, ChartTradingAction,
+    ChartTradingDragState, ChartViewportState, EquityCurveOverlay, multi_strategy_curve_color,
+    palette, render_workstation_chart_full,
 };
 use crate::data::{
     AggregationError, DataFileFormat, DataLoadError, DataLoadOptions, DataLoadReport,
@@ -53,9 +54,9 @@ use crate::indicators::{
 };
 use crate::journal::{
     ChecklistState, DailyPriceBand, ExchangeVenue, FifoSettlementSummary, JournalEntrySource,
-    JournalEntryStatus, MistakeTag, SetupTag, TradeJournalStore, TradePlanComputed, TradePlanInput,
-    VIETNAM_HOLIDAYS_V1, VnPriceUnit, compute_daily_price_band, compute_trade_plan,
-    floor_to_board_lot,
+    JournalEntryStatus, MistakeTag, ResolvedVnPriceUnit, SetupTag, TradeJournalStore,
+    TradePlanComputed, TradePlanInput, VIETNAM_HOLIDAYS_V1, VnPriceUnit, compute_daily_price_band,
+    compute_trade_plan, floor_to_board_lot, snap_to_nearest_tick,
 };
 use crate::model::Candle;
 use crate::replay::{
@@ -274,6 +275,51 @@ impl AlertDraftKind {
     }
 }
 
+/// Display language mode for the `Signal Catalog 101` modal (`BUG-032` / `TC-50`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SignalCatalogLang {
+    #[default]
+    Both,
+    En,
+    Vi,
+}
+
+impl SignalCatalogLang {
+    pub const ALL: [Self; 3] = [Self::Both, Self::En, Self::Vi];
+
+    #[inline]
+    #[must_use]
+    pub const fn short_label(self) -> &'static str {
+        match self {
+            Self::Both => "EN+VI",
+            Self::En => "EN",
+            Self::Vi => "VI",
+        }
+    }
+}
+
+/// Formats an unsigned or signed monetary balance with the active exchange venue's unit
+/// (`kVND` for Vietnam exchanges/indices, `$` for US equities and Crypto — `BUG-023`).
+#[must_use]
+fn format_venue_money(venue: ExchangeVenue, amount: f64, decimals: usize) -> String {
+    if venue.is_vn_cash_equity()
+        || matches!(
+            venue,
+            ExchangeVenue::Vn30Futures | ExchangeVenue::VnIndexBenchmark
+        )
+    {
+        if decimals == 0 {
+            format!("{amount:.0} kVND")
+        } else {
+            format!("{amount:.decimals$} kVND")
+        }
+    } else if decimals == 0 {
+        format!("${amount:.0}")
+    } else {
+        format!("${amount:.decimals$}")
+    }
+}
+
 /// Action category badge displayed in the `Cmd+K` / `Ctrl+K` Command Palette (`Milestone R08`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaletteCategory {
@@ -388,6 +434,9 @@ pub enum PaletteAction {
     SetCandlePalette(CandlePalettePreset),
     OpenDataAuditModal,
     ExportChartPng,
+    ExportBacktestHtmlReport,
+    ToggleDrawingRail,
+    PopulateDemoDrawings,
 }
 
 /// Ranked candidate row inside the `Cmd+K` Command Palette (`Milestone R08`).
@@ -895,6 +944,8 @@ pub struct SumiWorkstationApp {
     #[serde(skip)]
     pub last_trade_status: Option<(bool, String)>,
     #[serde(skip)]
+    pub chart_trading_drag: Option<ChartTradingDragState>,
+    #[serde(skip)]
     pub last_alert_status: Option<(bool, String)>,
     #[serde(skip)]
     pub last_journal_status: Option<(bool, String)>,
@@ -981,15 +1032,21 @@ pub struct SumiWorkstationApp {
     #[serde(skip)]
     pub linked_crosshair_timestamp: Option<i64>,
     #[serde(skip)]
+    pub linked_whitespace_timestamp: Option<i64>,
+    #[serde(skip)]
     pub pinned_crosshair_timestamp: Option<i64>,
     #[serde(skip)]
     pending_grid_time_sync: Option<usize>,
     #[serde(skip)]
     pub dom_center_override: Option<f64>,
     #[serde(skip)]
+    dom_auto_center_pending: bool,
+    #[serde(skip)]
     pub show_hotkeys_modal: bool,
     #[serde(skip)]
     pub rebinding_hotkey_action: Option<HotkeyAction>,
+    #[serde(skip)]
+    pub hotkey_rebind_conflict_notice: Option<String>,
     #[serde(skip)]
     pub(crate) last_templates_modal_rect: Option<egui::Rect>,
     #[serde(skip)]
@@ -1001,11 +1058,25 @@ pub struct SumiWorkstationApp {
     #[serde(skip)]
     pub signal_catalog_category: SignalCategory,
     #[serde(skip)]
+    pub signal_catalog_lang: SignalCatalogLang,
+    #[serde(skip)]
     pub signal_catalog_search: String,
     #[serde(skip)]
     pub show_catalog_advanced_params: bool,
     #[serde(skip)]
     pub(crate) last_signal_catalog_modal_rect: Option<egui::Rect>,
+    #[serde(skip)]
+    scanner_peer_eval_cache: std::collections::HashMap<
+        String,
+        (
+            usize,
+            usize,
+            Option<SymbolScanRow>,
+            Vec<HistoricalSignalHit>,
+        ),
+    >,
+    #[serde(skip)]
+    breadth_synced_key: Option<(u64, String, Option<i64>, usize, bool)>,
     #[serde(skip)]
     pub inspected_signal_key: Option<(String, i64, ScanSignalKind)>,
     #[serde(skip)]
@@ -1112,6 +1183,12 @@ pub struct SumiWorkstationApp {
     pub last_png_export_status: Option<(bool, String)>,
     #[serde(skip)]
     png_export_seq: u64,
+    #[serde(skip)]
+    pub last_html_export_status: Option<(bool, String)>,
+    #[serde(skip)]
+    pub last_exported_html_doc: Option<String>,
+    #[serde(skip)]
+    html_export_seq: u64,
     #[serde(skip)]
     pending_png_export: bool,
     #[serde(skip)]
@@ -1235,6 +1312,7 @@ impl Default for SumiWorkstationApp {
             show_import_bar: false,
             last_load_status: None,
             last_trade_status: None,
+            chart_trading_drag: None,
             last_alert_status: None,
             last_journal_status: None,
             last_exported_journal_doc: None,
@@ -1278,19 +1356,25 @@ impl Default for SumiWorkstationApp {
             template_export_ron: true,
             last_template_status: None,
             linked_crosshair_timestamp: None,
+            linked_whitespace_timestamp: None,
             pinned_crosshair_timestamp: None,
             pending_grid_time_sync: None,
             dom_center_override: None,
+            dom_auto_center_pending: true,
             show_hotkeys_modal: false,
             rebinding_hotkey_action: None,
+            hotkey_rebind_conflict_notice: None,
             last_templates_modal_rect: None,
             pending_clipboard_copy: None,
             last_hotkeys_modal_rect: None,
             show_signal_catalog_modal: false,
             signal_catalog_category: SignalCategory::All,
+            signal_catalog_lang: SignalCatalogLang::Both,
             signal_catalog_search: String::new(),
             show_catalog_advanced_params: false,
             last_signal_catalog_modal_rect: None,
+            scanner_peer_eval_cache: std::collections::HashMap::new(),
+            breadth_synced_key: None,
             inspected_signal_key: None,
             inspected_signal_eval_cache: None,
             filtered_watchlist_cache: None,
@@ -1344,6 +1428,9 @@ impl Default for SumiWorkstationApp {
             fib_custom_ratio_input: String::new(),
             last_png_export_status: None,
             png_export_seq: 0,
+            last_html_export_status: None,
+            last_exported_html_doc: None,
+            html_export_seq: 0,
             pending_png_export: false,
             in_offscreen_png_export: false,
             last_auto_snapshot_time_secs: None,
@@ -1516,12 +1603,15 @@ impl SumiWorkstationApp {
         self.dom_take_profit_ticks = self.dom_take_profit_ticks.min(1_000);
         self.hotkey_profile.sanitize();
         self.dom_center_override = None;
+        self.dom_auto_center_pending = true;
         self.show_templates_modal = false;
         self.show_hotkeys_modal = false;
         self.show_signal_catalog_modal = false;
         self.rebinding_hotkey_action = None;
+        self.hotkey_rebind_conflict_notice = None;
         self.last_template_status = None;
         self.linked_crosshair_timestamp = None;
+        self.linked_whitespace_timestamp = None;
         self.pinned_crosshair_timestamp = None;
         self.pending_grid_time_sync = None;
         self.last_trade_status = None;
@@ -1531,6 +1621,8 @@ impl SumiWorkstationApp {
         self.synced_rr_drawing_signature = None;
         self.command_palette = CommandPaletteState::default();
         self.scanner_synced_key = None;
+        self.scanner_peer_eval_cache.clear();
+        self.breadth_synced_key = None;
         self.alerts_synced_key = None;
         self.backtest_result = None;
         self.sweep_report = None;
@@ -1569,9 +1661,15 @@ impl SumiWorkstationApp {
                     } else {
                         OhlcEnvelopePolicy::RejectRow
                     };
+                    let inv_pol = if self.import_cafef_split_aware {
+                        crate::data::InvalidRowPolicy::QuarantineRow
+                    } else {
+                        crate::data::InvalidRowPolicy::RejectDataset
+                    };
                     let opts_with_sym = DataLoadOptions {
                         symbol_filter: (!saved_sym.is_empty()).then(|| saved_sym.clone()),
                         envelope_policy: env_pol,
+                        invalid_row_policy: inv_pol,
                         ..DataLoadOptions::default()
                     };
                     crate::data::load_ohlcv_file(&custom_path, &opts_with_sym)
@@ -1580,6 +1678,7 @@ impl SumiWorkstationApp {
                                 &custom_path,
                                 &DataLoadOptions {
                                     envelope_policy: env_pol,
+                                    invalid_row_policy: inv_pol,
                                     ..DataLoadOptions::default()
                                 },
                             )
@@ -1728,6 +1827,10 @@ impl SumiWorkstationApp {
                 for candidate in [
                     "/System/Library/Fonts/Supplemental/Courier New.ttf",
                     "/System/Library/Fonts/Supplemental/Arial.ttf",
+                    r"C:\Windows\Fonts\consola.ttf",
+                    r"C:\Windows\Fonts\cour.ttf",
+                    r"C:\Windows\Fonts\segoeui.ttf",
+                    r"C:\Windows\Fonts\arial.ttf",
                     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
                 ] {
                     if let Ok(bytes) = std::fs::read(candidate) {
@@ -1965,6 +2068,177 @@ impl SumiWorkstationApp {
                 self.last_load_status = Some((true, err.to_string()));
                 Err(err)
             }
+        }
+    }
+
+    /// Loads an in-memory multi-symbol `.csv`/`.tsv`/`.txt`/`.json` byte buffer into the workstation
+    /// (`wasm32`-compatible; used by Drag-and-Drop when a platform supplies bytes directly).
+    pub fn import_file_from_bytes(
+        &mut self,
+        file_name: &str,
+        bytes: &[u8],
+    ) -> Result<(), DataLoadError> {
+        let trimmed = file_name.trim();
+        let ext = trimmed
+            .rsplit('.')
+            .next()
+            .filter(|_| trimmed.contains('.'))
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !ext.is_empty() && !matches!(ext.as_str(), "csv" | "tsv" | "txt" | "json") {
+            let err = DataLoadError::InvalidConfiguration(format!(
+                "unsupported file extension '.{ext}' (expected .csv, .tsv, .txt, or .json)"
+            ));
+            self.last_load_status = Some((true, err.to_string()));
+            return Err(err);
+        }
+        let mut load_opts = self.default_import_load_options();
+        if load_opts.default_symbol.is_none() {
+            let base = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed);
+            let stem = base
+                .split('.')
+                .next()
+                .unwrap_or(base)
+                .trim()
+                .to_ascii_uppercase();
+            if !stem.is_empty() {
+                load_opts.default_symbol = Some(stem);
+            }
+        }
+        let fmt = match ext.as_str() {
+            "json" => DataFileFormat::Json,
+            "csv" | "tsv" | "txt" => DataFileFormat::Csv,
+            _ => DataFileFormat::Auto,
+        };
+        let text_for_mem = std::str::from_utf8(bytes).ok();
+        match crate::data::load_ohlcv_multi_symbol_bytes(bytes, fmt, &load_opts) {
+            Ok(mut reports) => {
+                if reports.len() > 1 {
+                    reports.sort_by(|a, b| {
+                        a.symbol
+                            .to_ascii_uppercase()
+                            .cmp(&b.symbol.to_ascii_uppercase())
+                    });
+                    let sorted_syms: Vec<String> =
+                        reports.iter().map(|r| r.symbol.clone()).collect();
+                    for r in &mut reports {
+                        r.available_symbols.clone_from(&sorted_syms);
+                    }
+                }
+                let chosen_idx = ["VNINDEX", "FPT", "VCB", "HPG", "SSI"]
+                    .iter()
+                    .find_map(|pref| {
+                        reports
+                            .iter()
+                            .position(|r| r.symbol.eq_ignore_ascii_case(pref))
+                    })
+                    .unwrap_or(0);
+                let selected_rep = reports[chosen_idx].clone();
+                let total_syms = reports.len();
+                let label = if trimmed.is_empty() {
+                    "Dropped file"
+                } else {
+                    trimmed
+                };
+                let msg = if total_syms > 1 {
+                    format!(
+                        "{} · {total_syms} symbols loaded in memory",
+                        format_load_summary(label, &selected_rep)
+                    )
+                } else {
+                    format_load_summary(label, &selected_rep)
+                };
+
+                self.custom_peer_feeds.clear();
+                self.custom_peer_repair_counts.clear();
+                if reports.len() > 1 {
+                    for rep in reports {
+                        let sym_upper = rep.symbol.trim().to_ascii_uppercase();
+                        self.custom_peer_repair_counts.insert(
+                            sym_upper.clone(),
+                            (
+                                rep.deduplicated_count,
+                                rep.repaired_envelope_count,
+                                rep.quarantined_row_count,
+                            ),
+                        );
+                        self.custom_peer_feeds.push(WatchlistFeedEntry {
+                            instrument_id: format!("Dropped:{label}:{sym_upper}"),
+                            preset: DataSourcePreset::CustomFile,
+                            symbol: rep.symbol,
+                            base_timeframe: rep.base_timeframe,
+                            candles: rep.candles,
+                        });
+                    }
+                }
+
+                let src_update = match text_for_mem {
+                    Some(txt) => CustomSourceUpdate::InMemory(fmt, txt),
+                    None => CustomSourceUpdate::Clear,
+                };
+                self.apply_loaded_report_internal(
+                    selected_rep,
+                    DataSourcePreset::CustomFile,
+                    src_update,
+                    true,
+                );
+                self.last_load_status = Some((false, msg));
+                Ok(())
+            }
+            Err(err) => {
+                self.last_load_status = Some((true, err.to_string()));
+                Err(err)
+            }
+        }
+    }
+
+    /// Processes files dropped onto the workstation window (`.csv`, `.tsv`, `.txt`, `.json`).
+    /// Preserves the currently displayed chart intact if a dropped file is invalid or unsupported.
+    pub fn handle_dropped_files(&mut self, dropped: &[egui::DroppedFileHandle]) -> bool {
+        let Some(first) = dropped.first() else {
+            return false;
+        };
+        let path = first.path();
+        let path_str = path.to_string_lossy();
+        let display_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&path_str);
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !matches!(ext.as_str(), "csv" | "tsv" | "txt" | "json") {
+            self.last_load_status = Some((
+                true,
+                format!("Unsupported drop '{display_name}': expected .csv, .tsv, .txt, or .json"),
+            ));
+            return false;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if path.is_file() {
+                return self.import_file_from_path(&path_str).is_ok();
+            }
+            match first.bytes() {
+                Ok(bytes) => self.import_file_from_bytes(display_name, &bytes).is_ok(),
+                Err(err) => {
+                    self.last_load_status = Some((
+                        true,
+                        format!("Drop read failed for '{display_name}': {err}"),
+                    ));
+                    false
+                }
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.last_load_status = Some((
+                true,
+                format!("Drop '{display_name}': async browser drop requires JS bridge"),
+            ));
+            false
         }
     }
 
@@ -2351,8 +2625,18 @@ impl SumiWorkstationApp {
         self.replay = incoming_replay;
 
         let cursor_idx = self.current_trading_cursor_base_index();
+        let active_venue = self.active_exchange_venue();
         incoming_trading.config.enforce_vn_t2_lot_lock = self.settings.enforce_vn_t2_lot_lock;
-        incoming_trading.config.venue = self.active_exchange_venue();
+        incoming_trading.config.venue = active_venue;
+        incoming_trading.config.allow_short = active_venue.allows_short();
+        incoming_trading.config.tax_sell_bps = if active_venue.is_vn_cash_equity() {
+            self.settings.default_tax_sell_bps
+        } else {
+            active_venue.default_tax_sell_bps()
+        };
+        incoming_trading.config.contract_multiplier = active_venue
+            .default_contract_multiplier(self.dom_vn_unit, incoming_trading.config.initial_cash);
+        incoming_trading.config.initial_margin_pct = active_venue.default_initial_margin_pct();
         incoming_trading.config.base_timeframe_secs = self.base_timeframe.seconds().max(1);
         incoming_trading.sanitize_and_rebuild(&self.base_candles, cursor_idx);
         let has_existing_trades = !incoming_trading.commands.is_empty();
@@ -3154,6 +3438,7 @@ impl SumiWorkstationApp {
                 self.last_trade_status = Some((true, err.to_string()));
             })?;
 
+        self.sync_trading_settlement_rules();
         let cursor_idx = self.current_trading_cursor_base_index();
         if let Err(t2_err) = self.check_vn_t2_sell_lock(side, qty) {
             self.last_trade_status = Some((true, t2_err.to_string()));
@@ -3282,36 +3567,141 @@ impl SumiWorkstationApp {
         }
     }
 
-    /// Closes the entire open position at the current causal bar close (`Flatten`).
+    /// Closes the open position (or the settled `[SELLABLE]` portion when VSD `T+2` lock retains
+    /// unsettled lots) at the current causal bar close (`Flatten`, `BUG-004`).
     pub fn flatten_open_position(&mut self) -> Result<(), crate::trading::TradingError> {
-        if let Some(pos) = self.trading.open_position()
-            && pos.side == PositionSide::Long
-            && let Err(t2_err) = self.check_vn_t2_sell_lock(OrderSide::Sell, pos.quantity)
-        {
-            self.last_trade_status = Some((true, t2_err.to_string()));
-            return Err(t2_err);
-        }
+        self.sync_trading_settlement_rules();
         let cursor_idx = self.current_trading_cursor_base_index();
         match self
             .trading
             .flatten_position(&self.base_candles, cursor_idx)
         {
             Ok(fill) => {
-                self.last_trade_status = Some((
-                    false,
+                let remaining_locked = self
+                    .trading
+                    .open_position()
+                    .map_or(0.0, |p| p.quantity.max(0.0));
+                let msg = if remaining_locked > 1.0e-7 {
+                    format!(
+                        "Flattened {:.0} settled @ {:.2} (PnL {:+.2}; {:.0} still locked T+2)",
+                        fill.quantity,
+                        fill.price,
+                        fill.realized_net_pnl.unwrap_or(0.0),
+                        remaining_locked
+                    )
+                } else {
                     format!(
                         "Flattened {:.4} @ {:.2} (PnL {:+.2})",
                         fill.quantity,
                         fill.price,
                         fill.realized_net_pnl.unwrap_or(0.0)
-                    ),
-                ));
+                    )
+                };
+                self.last_trade_status = Some((false, msg));
                 Ok(())
             }
             Err(err) => {
                 self.last_trade_status = Some((true, err.to_string()));
                 Err(err)
             }
+        }
+    }
+
+    /// Builds a self-contained, offline-first HTML5 + inline SVG Strategy Lab report (`wasm32`-compatible, `v1.1 / Wave 4`).
+    pub fn build_active_backtest_html_report(&mut self) -> Result<String, String> {
+        if self.backtest_result.is_none() {
+            self.sync_backtest_causal();
+        }
+        let Some(ref bt) = self.backtest_result else {
+            return Err("No backtest result available to export".to_owned());
+        };
+        let venue = self.active_exchange_venue();
+        let html = render_backtest_report_html(
+            bt,
+            &self.candles,
+            venue,
+            self.advanced_analytics_report.as_ref(),
+        );
+        self.last_exported_html_doc = Some(html.clone());
+        Ok(html)
+    }
+
+    /// Exports the active Strategy Lab report to `exports/sumi_backtest_<SYM>_<STRAT>_<SEQ>.html`
+    /// (falling back to `~/Desktop` on read-only app bundles; on `wasm32`, stages the HTML in
+    /// `last_exported_html_doc`).
+    pub fn export_backtest_html_report(&mut self) -> Result<String, String> {
+        let html = self
+            .build_active_backtest_html_report()
+            .inspect_err(|err| {
+                self.last_html_export_status = Some((true, err.clone()));
+            })?;
+        self.html_export_seq = self.html_export_seq.saturating_add(1);
+        let clean_sym: String = self
+            .symbol
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+            .collect();
+        let sym_part = if clean_sym.is_empty() {
+            "CHART"
+        } else {
+            clean_sym.as_str()
+        };
+        let strat_part: String = self
+            .backtest_config
+            .preset
+            .short_label()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+            .collect();
+        let file_name = format!(
+            "sumi_backtest_{}_{}_{:03}.html",
+            sym_part.to_ascii_lowercase(),
+            if strat_part.is_empty() {
+                "strat".to_owned()
+            } else {
+                strat_part.to_ascii_lowercase()
+            },
+            self.html_export_seq
+        );
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let rel_path = format!("exports/{file_name}");
+            let write_to = |target: &std::path::Path| -> std::io::Result<()> {
+                if let Some(parent) = target.parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(target, html.as_bytes())
+            };
+            if write_to(std::path::Path::new(&rel_path)).is_ok() {
+                self.last_html_export_status = Some((false, format!("HTML -> {rel_path}")));
+                return Ok(rel_path);
+            }
+            if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE"))
+                && !home.trim().is_empty()
+            {
+                let desktop_path = std::path::PathBuf::from(home)
+                    .join("Desktop")
+                    .join(&file_name);
+                if write_to(&desktop_path).is_ok() {
+                    let s = desktop_path.to_string_lossy().into_owned();
+                    self.last_html_export_status = Some((false, format!("HTML -> {s}")));
+                    return Ok(s);
+                }
+            }
+            let err = format!("Failed to write HTML report '{file_name}'");
+            self.last_html_export_status = Some((true, err.clone()));
+            Err(err)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.last_html_export_status = Some((
+                false,
+                format!("HTML staged in memory ({} bytes)", html.len()),
+            ));
+            Ok(file_name)
         }
     }
 
@@ -3336,10 +3726,140 @@ impl SumiWorkstationApp {
         }
     }
 
+    /// Resolves `(venue, resolved_vn_unit, optional_daily_price_band)` for chart-direct tick snapping.
+    #[must_use]
+    pub fn active_trading_venue_context(
+        &self,
+    ) -> (ExchangeVenue, ResolvedVnPriceUnit, Option<DailyPriceBand>) {
+        let venue = self.active_exchange_venue();
+        let ref_px = self
+            .causal_reference_price()
+            .or_else(|| self.candles.last().map(|c| c.close))
+            .unwrap_or(50.0);
+        let unit = self
+            .settings
+            .default_vn_price_unit
+            .resolve_for_venue(venue, ref_px);
+        let band = self.active_daily_price_band();
+        (venue, unit, band)
+    }
+
+    /// Updates either `SL` (`is_sl = true`) or `TP` (`is_sl = false`) on the active open position
+    /// via chart-direct dragging, snapping strictly to exchange tick increments, synchronizing the
+    /// Order Ticket inputs, and preserving tamper-proof `had_initial_sl_at_open` (`v1.1 / Wave 3`).
+    pub fn update_open_position_bracket_direct(
+        &mut self,
+        is_sl: bool,
+        raw_price: f64,
+    ) -> Result<f64, crate::trading::TradingError> {
+        let Some(pos) = self.trading.open_position() else {
+            let err = crate::trading::TradingError::NoOpenPosition;
+            self.last_trade_status = Some((true, err.to_string()));
+            return Err(err);
+        };
+        let (venue, unit, _) = self.active_trading_venue_context();
+        let snapped = snap_to_nearest_tick(raw_price, venue, unit);
+        let (next_sl, next_tp) = if is_sl {
+            (Some(snapped), pos.take_profit)
+        } else {
+            (pos.stop_loss, Some(snapped))
+        };
+        let cursor_idx = self.current_trading_cursor_base_index();
+        match self.trading.update_position_brackets(
+            next_sl,
+            next_tp,
+            &self.base_candles,
+            cursor_idx,
+        ) {
+            Ok(()) => {
+                if is_sl {
+                    self.ticket_sl_input = format!("{snapped:.2}");
+                    self.last_trade_status =
+                        Some((false, format!("Moved position SL -> {snapped:.2}")));
+                } else {
+                    self.ticket_tp_input = format!("{snapped:.2}");
+                    self.last_trade_status =
+                        Some((false, format!("Moved position TP -> {snapped:.2}")));
+                }
+                Ok(snapped)
+            }
+            Err(err) => {
+                self.last_trade_status = Some((true, err.to_string()));
+                Err(err)
+            }
+        }
+    }
+
+    /// Modifies the trigger price of a pending `Limit` or `Stop` order via chart-direct drag,
+    /// snapping to exchange tick increments and clamping to statutory VN daily floor/ceiling bands
+    /// when applicable (`v1.1 / Wave 3`).
+    pub fn modify_working_order_price(
+        &mut self,
+        order_id: u64,
+        raw_price: f64,
+    ) -> Result<f64, crate::trading::TradingError> {
+        let (venue, unit, band) = self.active_trading_venue_context();
+        let mut snapped = snap_to_nearest_tick(raw_price, venue, unit);
+        if let Some(b) = band {
+            snapped = snapped.clamp(b.floor_price, b.ceiling_price);
+            snapped = snap_to_nearest_tick(snapped, venue, unit);
+        }
+        let cursor_idx = self.current_trading_cursor_base_index();
+        match self
+            .trading
+            .modify_order_price(order_id, snapped, &self.base_candles, cursor_idx)
+        {
+            Ok(()) => {
+                self.last_trade_status =
+                    Some((false, format!("Moved order #{order_id} -> {snapped:.2}")));
+                Ok(snapped)
+            }
+            Err(err) => {
+                self.last_trade_status = Some((true, err.to_string()));
+                Err(err)
+            }
+        }
+    }
+
+    fn apply_chart_trading_action(&mut self, action: ChartTradingAction) {
+        match action {
+            ChartTradingAction::UpdateDragPreview(st) => {
+                self.chart_trading_drag = Some(st);
+            }
+            ChartTradingAction::CancelDrag => {
+                self.chart_trading_drag = None;
+            }
+            ChartTradingAction::CommitPositionStopLoss(px) => {
+                self.chart_trading_drag = None;
+                let _ = self.update_open_position_bracket_direct(true, px);
+            }
+            ChartTradingAction::CommitPositionTakeProfit(px) => {
+                self.chart_trading_drag = None;
+                let _ = self.update_open_position_bracket_direct(false, px);
+            }
+            ChartTradingAction::CommitPendingOrderPrice {
+                order_id,
+                new_price,
+            } => {
+                self.chart_trading_drag = None;
+                let _ = self.modify_working_order_price(order_id, new_price);
+            }
+            ChartTradingAction::CancelPendingOrder(order_id) => {
+                self.chart_trading_drag = None;
+                let _ = self.cancel_working_order(order_id);
+            }
+            ChartTradingAction::FlattenPosition => {
+                self.chart_trading_drag = None;
+                let _ = self.flatten_open_position();
+            }
+        }
+    }
+
     /// Resets the Paper Trading account cleanly at the start of the active replay session (or current bar),
     /// pruning invalidated paper trades for the active symbol from `TradeJournalStore` and clearing session
     /// decision notes while keeping drawings, alerts, scanner context, and Replay cursor intact (`Milestone R17 / A1`).
     pub fn reset_trading_session(&mut self) {
+        self.chart_trading_drag = None;
         let start_idx = if self.replay.is_active() {
             self.replay.start_base_index
         } else {
@@ -3467,6 +3987,13 @@ impl SumiWorkstationApp {
     ) -> Result<u64, WorkspaceTemplateError> {
         self.sync_trading_settlement_rules();
         let cursor_idx = self.current_trading_cursor_base_index();
+        let cutoff = self.replay.cutoff_timestamp(&self.base_candles);
+        let causal_notes = self.practice_decisions.visible_notes(
+            &self.symbol,
+            self.replay.is_active(),
+            cursor_idx,
+            cutoff,
+        );
         let session = SavedPracticeSession {
             slot_id: 0,
             label: label.trim().to_owned(),
@@ -3487,7 +4014,7 @@ impl SumiWorkstationApp {
             account_config: self.trading.config,
             session_start_base_index: self.trading.session_start_base_index,
             commands: self.trading.commands.clone(),
-            decision_notes: self.practice_decisions.entries.clone(),
+            decision_notes: causal_notes,
             session_digest: 0,
         };
         let id = self.practice_session_store.save_session(session)?;
@@ -3547,6 +4074,7 @@ impl SumiWorkstationApp {
         self.blind_practice_lookback_bars = saved.blind_lookback_bars.clamp(1, 500);
         self.scanner_context = saved.scanner_context;
         let effective_cursor = self.current_trading_cursor_base_index();
+        self.settings.enforce_vn_t2_lot_lock = saved.account_config.enforce_vn_t2_lot_lock;
         self.trading.restore_session(
             saved.account_config,
             saved.session_start_base_index.min(effective_cursor),
@@ -3685,11 +4213,13 @@ impl SumiWorkstationApp {
         self.show_trading_panel = true;
         self.right_dock_tab = RightDockTab::Trading;
         self.trading_view_mode = TemplateTradingViewMode::DomLadder;
+        self.dom_auto_center_pending = true;
     }
 
     /// Re-centers the DOM Price Ladder viewport on the active causal mark price.
     pub fn center_dom_on_mark(&mut self) {
         self.dom_center_override = None;
+        self.dom_auto_center_pending = true;
     }
 
     /// Shifts the DOM Price Ladder center by `delta_ticks` dynamic exchange ticks (`+` higher, `-` lower),
@@ -3784,7 +4314,9 @@ impl SumiWorkstationApp {
         self.show_data_audit_modal = true;
     }
 
-    /// Returns the active [`DataLoadOptions`] honoring `self.import_cafef_split_aware` (`Milestone R19 / C3`).
+    /// Returns the active [`DataLoadOptions`] honoring `self.import_cafef_split_aware` (`Milestone R19 / C3`, `BUG-012`).
+    /// When `CafeF Split Norm` is unchecked, enforces strict `RejectRow + RejectDataset` so OHLC envelope
+    /// violations surface a red error and preserve the open chart instead of silently quarantining.
     #[must_use]
     pub fn default_import_load_options(&self) -> DataLoadOptions {
         DataLoadOptions {
@@ -3793,7 +4325,11 @@ impl SumiWorkstationApp {
             } else {
                 OhlcEnvelopePolicy::RejectRow
             },
-            invalid_row_policy: crate::data::InvalidRowPolicy::QuarantineRow,
+            invalid_row_policy: if self.import_cafef_split_aware {
+                crate::data::InvalidRowPolicy::QuarantineRow
+            } else {
+                crate::data::InvalidRowPolicy::RejectDataset
+            },
             ..DataLoadOptions::default()
         }
     }
@@ -3815,7 +4351,7 @@ impl SumiWorkstationApp {
         }
         self.trading.config.commission_bps = st.default_commission_bps;
         self.trading.config.slippage_bps = st.default_slippage_bps;
-        self.trading.config.allow_short = venue.allows_short();
+        self.dom_vn_unit = st.default_vn_price_unit;
         self.sync_trading_settlement_rules();
 
         self.backtest_config.initial_cash = st.default_initial_capital;
@@ -3824,7 +4360,6 @@ impl SumiWorkstationApp {
         self.backtest_config.slippage_bps = st.default_slippage_bps;
         self.backtest_config.lot_step = venue.board_lot();
 
-        self.dom_vn_unit = st.default_vn_price_unit;
         self.risk_plan_input.account_equity = st.default_initial_capital;
         self.risk_plan_input.risk_pct = st.default_risk_per_trade_pct;
         self.risk_plan_input.price_unit = st.default_vn_price_unit;
@@ -3836,12 +4371,23 @@ impl SumiWorkstationApp {
         self.invalidate_or_sync_backtest_after_mutation();
     }
 
-    /// Synchronizes VSD `T+2` / `T+3` settlement lock rules onto `self.trading.config` so bracket exits
-    /// (`StopLoss` / `TakeProfit`), pending working sells, and `fifo_holding_summary` enforce exact causal rules.
+    /// Synchronizes VSD `T+2` / `T+3` settlement lock, venue short-selling policy, `VN30F1M` contract
+    /// multiplier / `17%` margin, and VN cash-equity sell transfer tax (`0.10%`) onto `self.trading.config`
+    /// (`BUG-001`, `BUG-008`, `BUG-030`).
     #[inline]
     pub fn sync_trading_settlement_rules(&mut self) {
+        let venue = self.active_exchange_venue();
         self.trading.config.enforce_vn_t2_lot_lock = self.settings.enforce_vn_t2_lot_lock;
-        self.trading.config.venue = self.active_exchange_venue();
+        self.trading.config.venue = venue;
+        self.trading.config.allow_short = venue.allows_short();
+        self.trading.config.tax_sell_bps = if venue.is_vn_cash_equity() {
+            self.settings.default_tax_sell_bps
+        } else {
+            venue.default_tax_sell_bps()
+        };
+        self.trading.config.contract_multiplier =
+            venue.default_contract_multiplier(self.dom_vn_unit, self.trading.config.initial_cash);
+        self.trading.config.initial_margin_pct = venue.default_initial_margin_pct();
         self.trading.config.base_timeframe_secs = self.base_timeframe.seconds().max(1);
     }
 
@@ -3852,14 +4398,15 @@ impl SumiWorkstationApp {
         self.data_audit_cache = None;
     }
 
-    /// Computes the causal timestamp (`bar_close = bar_start + base_tf_secs - 1`) governing VSD `T+2`
-    /// (`13:00 ICT`) / historical `T+3` (`09:00 ICT`) lot unlock evaluation (`Milestone R19 / C2`).
+    /// Computes the causal timestamp governing VSD `T+2` (`13:00 ICT`) / historical `T+3` (`09:00 ICT`)
+    /// lot unlock evaluation (`Milestone R19 / C2`, `BUG-017`).
     #[must_use]
     pub fn causal_settlement_eval_timestamp(&self) -> i64 {
         let idx = self.current_trading_cursor_base_index();
+        let venue = self.active_exchange_venue();
+        let tf_secs = self.base_timeframe.seconds().max(1);
         self.base_candles.get(idx).map_or(0, |b| {
-            b.timestamp
-                .saturating_add(self.base_timeframe.seconds().saturating_sub(1))
+            crate::journal::causal_settlement_eval_timestamp(b.timestamp, venue, tf_secs)
         })
     }
 
@@ -4197,11 +4744,10 @@ impl SumiWorkstationApp {
         snap: &DomLadderSnapshot,
     ) -> Result<f64, String> {
         if self.dom_use_risk_sizing && self.dom_stop_loss_ticks > 0 {
-            let equity = self
-                .trading
-                .metrics(snap.mark_price)
-                .equity
-                .max(self.trading.config.initial_cash);
+            let equity = self.trading.metrics(snap.mark_price).equity;
+            if !equity.is_finite() || equity <= 0.0 {
+                return Err("Insufficient live equity for DOM risk sizing".to_owned());
+            }
             let qty = size_ladder_qty_from_risk_budget(
                 equity,
                 self.risk_plan_input.risk_pct,
@@ -4585,6 +5131,8 @@ impl SumiWorkstationApp {
     fn rebuild_custom_peer_feeds(&mut self) {
         self.custom_peer_feeds.clear();
         self.custom_peer_repair_counts.clear();
+        self.scanner_peer_eval_cache.clear();
+        self.breadth_synced_key = None;
         if self.data_source != DataSourcePreset::CustomFile || self.available_symbols.len() <= 1 {
             return;
         }
@@ -4665,21 +5213,24 @@ impl SumiWorkstationApp {
             }
         };
 
-        let mut rows =
-            Vec::with_capacity(self.watchlist_universe.len() + self.custom_peer_feeds.len() + 1);
+        let custom_only =
+            self.data_source == DataSourcePreset::CustomFile && !self.custom_peer_feeds.is_empty();
+        let mut rows = Vec::with_capacity(if custom_only {
+            self.custom_peer_feeds.len() + 1
+        } else {
+            self.watchlist_universe.len() + 1
+        });
         let mut hits = Vec::new();
-        let mut breadth_feeds: Vec<BreadthFeedInput<'_>> =
-            Vec::with_capacity(self.watchlist_universe.len() + self.custom_peer_feeds.len() + 1);
 
-        let active_in_universe = self
-            .watchlist_universe
-            .iter()
-            .any(|e| e.instrument_id == active_key)
-            || (self.data_source == DataSourcePreset::CustomFile
-                && self
-                    .custom_peer_feeds
-                    .iter()
-                    .any(|e| e.instrument_id == active_key));
+        let active_in_universe = if custom_only {
+            self.custom_peer_feeds
+                .iter()
+                .any(|e| e.instrument_id == active_key)
+        } else {
+            self.watchlist_universe
+                .iter()
+                .any(|e| e.instrument_id == active_key)
+        };
 
         if !active_in_universe && !self.candles.is_empty() {
             // `self.candles` is already causally materialized to `<= replay_cutoff`!
@@ -4697,70 +5248,18 @@ impl SumiWorkstationApp {
                 rows.push(row);
             }
             hits.extend(entry_hits);
-            breadth_feeds.push(BreadthFeedInput {
-                instrument_id: &active_key,
-                symbol: &self.symbol,
-                preset_label: self.data_source.short_label(),
-                timeframe: self.active_timeframe,
-                candles: &self.candles,
-                exclude_incomplete_tail: incomplete_active_tail,
-            });
         }
 
-        if self.data_source == DataSourcePreset::CustomFile && !self.custom_peer_feeds.is_empty() {
-            for entry in &self.custom_peer_feeds {
-                if entry.instrument_id == active_key {
-                    let (row_opt, entry_hits) = evaluate_symbol_scan_and_signals(
-                        &entry.instrument_id,
-                        &entry.symbol,
-                        entry.preset.short_label(),
-                        self.active_timeframe,
-                        &self.candles,
-                        replay_cutoff,
-                        lookback,
-                        incomplete_active_tail,
-                    );
-                    if let Some(row) = row_opt {
-                        rows.push(row);
-                    }
-                    hits.extend(entry_hits);
-                    breadth_feeds.push(BreadthFeedInput {
-                        instrument_id: &entry.instrument_id,
-                        symbol: &entry.symbol,
-                        preset_label: entry.preset.short_label(),
-                        timeframe: self.active_timeframe,
-                        candles: &self.candles,
-                        exclude_incomplete_tail: incomplete_active_tail,
-                    });
-                } else {
-                    let peer_cutoff = causal_peer_open_cutoff(entry.base_timeframe);
-                    let (row_opt, entry_hits) = evaluate_symbol_scan_and_signals(
-                        &entry.instrument_id,
-                        &entry.symbol,
-                        entry.preset.short_label(),
-                        entry.base_timeframe,
-                        &entry.candles,
-                        peer_cutoff,
-                        lookback,
-                        false,
-                    );
-                    if let Some(row) = row_opt {
-                        rows.push(row);
-                    }
-                    hits.extend(entry_hits);
-                    breadth_feeds.push(BreadthFeedInput {
-                        instrument_id: &entry.instrument_id,
-                        symbol: &entry.symbol,
-                        preset_label: entry.preset.short_label(),
-                        timeframe: entry.base_timeframe,
-                        candles: &entry.candles,
-                        exclude_incomplete_tail: false,
-                    });
-                }
-            }
-        }
+        // `BUG-020`: when a multi-symbol `CustomFile` (e.g. 471 CafeF stocks) is active, scan
+        // strictly its real peer feeds without mixing the 13 bundled synthetic feeds (eliminating
+        // duplicate `FPT`, `VN30(16)`, synthetic `2026-11-13` leak, and fake `+2.52%` heatmap tiles).
+        let active_feeds: &[WatchlistFeedEntry] = if custom_only {
+            &self.custom_peer_feeds
+        } else {
+            &self.watchlist_universe
+        };
 
-        for entry in &self.watchlist_universe {
+        for entry in active_feeds {
             if entry.instrument_id == active_key {
                 let (row_opt, entry_hits) = evaluate_symbol_scan_and_signals(
                     &entry.instrument_id,
@@ -4776,6 +5275,97 @@ impl SumiWorkstationApp {
                     rows.push(row);
                 }
                 hits.extend(entry_hits);
+            } else {
+                // Strict cross-sectional `DEF-001` causal gate: only admit peer bars whose closing
+                // timestamp `<= replay_close_cutoff` so neither future bars nor unclosed same-day
+                // daily peer bars leak during intraday Replay.
+                let peer_cutoff = causal_peer_open_cutoff(entry.base_timeframe);
+                let prefix_len = match peer_cutoff {
+                    Some(cut) => entry.candles.partition_point(|c| c.timestamp <= cut),
+                    None => entry.candles.len(),
+                };
+                let cached_hit = self
+                    .scanner_peer_eval_cache
+                    .get(&entry.instrument_id)
+                    .filter(|(pl, lb, _, _)| *pl == prefix_len && *lb == lookback);
+                if let Some((_, _, row_opt, entry_hits)) = cached_hit {
+                    if let Some(row) = row_opt.clone() {
+                        rows.push(row);
+                    }
+                    hits.extend(entry_hits.iter().cloned());
+                } else {
+                    let (row_opt, entry_hits) = evaluate_symbol_scan_and_signals(
+                        &entry.instrument_id,
+                        &entry.symbol,
+                        entry.preset.short_label(),
+                        entry.base_timeframe,
+                        &entry.candles[..prefix_len],
+                        None,
+                        lookback,
+                        false,
+                    );
+                    if let Some(ref row) = row_opt {
+                        rows.push(row.clone());
+                    }
+                    hits.extend(entry_hits.iter().cloned());
+                    self.scanner_peer_eval_cache.insert(
+                        entry.instrument_id.clone(),
+                        (prefix_len, lookback, row_opt, entry_hits),
+                    );
+                }
+            }
+        }
+
+        self.raw_watchlist_rows_cache = rows;
+        self.raw_historical_hits_cache = hits;
+        self.scanner_synced_key = Some(cache_key);
+        self.breadth_synced_key = None;
+
+        // Compute Breadth & RRG eagerly for small presets (`<= 32` symbols) or when the Breadth
+        // tab is open; defer lazily on large 471-symbol universes while viewing Watchlist/Signals
+        // so Bar Replay `+1` stays >= 60 FPS (`BUG-020`).
+        if !custom_only
+            || self.custom_peer_feeds.len() <= 32
+            || self.scanner_tab == ScannerDockTab::Breadth
+        {
+            self.sync_breadth_cache();
+        }
+    }
+
+    /// Lazily computes causal Market Breadth & 4-Quadrant `RRG` for the active scanner universe.
+    pub fn sync_breadth_cache(&mut self) {
+        let Some(ref scan_key) = self.scanner_synced_key else {
+            return;
+        };
+        if self.breadth_synced_key.as_ref() == Some(scan_key) {
+            return;
+        }
+        let active_key = self.current_instrument_key();
+        let replay_close_cutoff = self.replay_causal_close_timestamp();
+        let incomplete_active_tail = self.is_active_tail_incomplete();
+        let custom_only =
+            self.data_source == DataSourcePreset::CustomFile && !self.custom_peer_feeds.is_empty();
+        let active_feeds: &[WatchlistFeedEntry] = if custom_only {
+            &self.custom_peer_feeds
+        } else {
+            &self.watchlist_universe
+        };
+
+        let mut breadth_feeds: Vec<BreadthFeedInput<'_>> =
+            Vec::with_capacity(active_feeds.len() + 1);
+        let active_in_universe = active_feeds.iter().any(|e| e.instrument_id == active_key);
+        if !active_in_universe && !self.candles.is_empty() {
+            breadth_feeds.push(BreadthFeedInput {
+                instrument_id: &active_key,
+                symbol: &self.symbol,
+                preset_label: self.data_source.short_label(),
+                timeframe: self.active_timeframe,
+                candles: &self.candles,
+                exclude_incomplete_tail: incomplete_active_tail,
+            });
+        }
+        for entry in active_feeds {
+            if entry.instrument_id == active_key {
                 breadth_feeds.push(BreadthFeedInput {
                     instrument_id: &entry.instrument_id,
                     symbol: &entry.symbol,
@@ -4785,24 +5375,6 @@ impl SumiWorkstationApp {
                     exclude_incomplete_tail: incomplete_active_tail,
                 });
             } else {
-                // Strict cross-sectional `DEF-001` causal gate: only admit peer bars whose closing
-                // timestamp `<= replay_close_cutoff` so neither future bars nor unclosed same-day
-                // daily peer bars leak during intraday Replay.
-                let peer_cutoff = causal_peer_open_cutoff(entry.base_timeframe);
-                let (row_opt, entry_hits) = evaluate_symbol_scan_and_signals(
-                    &entry.instrument_id,
-                    &entry.symbol,
-                    entry.preset.short_label(),
-                    entry.base_timeframe,
-                    &entry.candles,
-                    peer_cutoff,
-                    lookback,
-                    false,
-                );
-                if let Some(row) = row_opt {
-                    rows.push(row);
-                }
-                hits.extend(entry_hits);
                 breadth_feeds.push(BreadthFeedInput {
                     instrument_id: &entry.instrument_id,
                     symbol: &entry.symbol,
@@ -4835,16 +5407,14 @@ impl SumiWorkstationApp {
             &bench_sym,
             replay_close_cutoff,
         );
-
-        self.raw_watchlist_rows_cache = rows;
-        self.raw_historical_hits_cache = hits;
-        self.scanner_synced_key = Some(cache_key);
+        self.breadth_synced_key = self.scanner_synced_key.clone();
     }
 
     /// Returns the causal VN30 / Universe Market Breadth & 4-Quadrant `RRG` Snapshot (`Milestone R13`).
     #[must_use]
     pub fn market_breadth_snapshot(&mut self) -> &MarketBreadthSnapshot {
         self.sync_scanner_caches();
+        self.sync_breadth_cache();
         &self.breadth_snapshot_cache
     }
 
@@ -5891,6 +6461,57 @@ impl SumiWorkstationApp {
         self.active_chart_slot = self
             .active_chart_slot
             .min(layout.slot_count().saturating_sub(1));
+        // `BUG-022`: when expanding to multi-chart (`1x2`/`2x1`/`2x2`) while a multi-symbol
+        // `CustomFile` (e.g. 471-stock CafeF file) is active, bind uninitialized default stock
+        // slots (`S3`, and `S4` on daily files) to real peers in `custom_peer_feeds` instead of
+        // falling back to the shorter synthetic `Vn30Basket` that leaves 95% blank black canvas.
+        if layout.slot_count() > 1
+            && self.data_source == DataSourcePreset::CustomFile
+            && !self.custom_peer_feeds.is_empty()
+        {
+            let mut used: Vec<String> = vec![self.symbol.trim().to_ascii_uppercase()];
+            let pick_custom_peer = |prefs: &[&str], used_syms: &[String]| -> Option<String> {
+                for pref in prefs {
+                    if !used_syms.iter().any(|u| u.eq_ignore_ascii_case(pref))
+                        && let Some(found) = self
+                            .custom_peer_feeds
+                            .iter()
+                            .find(|p| p.symbol.eq_ignore_ascii_case(pref))
+                    {
+                        return Some(found.symbol.clone());
+                    }
+                }
+                self.custom_peer_feeds
+                    .iter()
+                    .find(|p| !used_syms.iter().any(|u| u.eq_ignore_ascii_case(&p.symbol)))
+                    .map(|p| p.symbol.clone())
+            };
+            // S2 (`secondary_slots[0]`) stays `CafeFIndexCsv` (`VNINDEX` 2000–2026, clean from Wave 2).
+            // S3 (`secondary_slots[1]`): upgrade default `Vn30Basket` -> real `CustomFile` peer (`VCB`).
+            if self.secondary_slots[1].loaded_source_key.is_none()
+                && self.secondary_slots[1].data_source == DataSourcePreset::Vn30Basket
+                && let Some(sym) = pick_custom_peer(&["VCB", "HPG", "SSI", "FPT", "VNM"], &used)
+            {
+                used.push(sym.to_ascii_uppercase());
+                self.secondary_slots[1].data_source = DataSourcePreset::CustomFile;
+                self.secondary_slots[1].symbol = sym;
+                self.secondary_slots[1].base_timeframe = self.base_timeframe;
+                self.secondary_slots[1].active_timeframe = self.base_timeframe;
+            }
+            // S4 (`secondary_slots[2]`): on daily multi-year `CustomFile`, pair with a second real
+            // peer (`HPG`/`SSI`) so `Sync T` spans the full 2016–2026 history cleanly across 2x2.
+            if layout.slot_count() >= 4
+                && self.base_timeframe == Timeframe::D1
+                && self.secondary_slots[2].loaded_source_key.is_none()
+                && self.secondary_slots[2].data_source == DataSourcePreset::IntradayVn30F1m
+                && let Some(sym) = pick_custom_peer(&["HPG", "SSI", "VHM", "TCB", "MBB"], &used)
+            {
+                self.secondary_slots[2].data_source = DataSourcePreset::CustomFile;
+                self.secondary_slots[2].symbol = sym;
+                self.secondary_slots[2].base_timeframe = self.base_timeframe;
+                self.secondary_slots[2].active_timeframe = self.base_timeframe;
+            }
+        }
         self.sync_secondary_slots();
         self.pending_grid_time_sync =
             (layout.slot_count() > 1 && self.grid_sync.sync_time_range).then_some(0);
@@ -6136,6 +6757,7 @@ impl SumiWorkstationApp {
             symbol: self.symbol.clone(),
             timeframe: self.active_timeframe,
             scale_mode: self.viewport.main_price_scale.mode(),
+            invert_scale: self.viewport.main_price_scale.is_inverted(),
             show_volume: self.show_volume,
             show_grid: self.show_grid,
             compare_benchmark: self.compare_benchmark.clone(),
@@ -6163,6 +6785,7 @@ impl SumiWorkstationApp {
                 symbol: sec.symbol.clone(),
                 timeframe: sec.active_timeframe,
                 scale_mode: sec.viewport.main_price_scale.mode(),
+                invert_scale: sec.viewport.main_price_scale.is_inverted(),
                 show_volume: sec.show_volume,
                 show_grid: self.show_grid,
                 compare_benchmark: sec.compare_benchmark.clone(),
@@ -6276,6 +6899,7 @@ impl SumiWorkstationApp {
                 }
             }
             self.set_scale_mode(s0.scale_mode);
+            self.viewport.main_price_scale.set_inverted(s0.invert_scale);
             self.show_volume = s0.show_volume;
             self.show_grid = s0.show_grid;
             self.set_compare_benchmark(s0.compare_benchmark.clone());
@@ -6308,6 +6932,7 @@ impl SumiWorkstationApp {
                 dst.show_compare_overlay = st.show_compare_overlay;
                 dst.indicators = st.indicators.clone();
                 dst.viewport.main_price_scale.set_mode(st.scale_mode);
+                dst.viewport.main_price_scale.set_inverted(st.invert_scale);
                 dst.viewport.main_stretch = st.pane_stretches.main;
                 dst.viewport.rsi_stretch = st.pane_stretches.rsi;
                 dst.viewport.macd_stretch = st.pane_stretches.macd;
@@ -6606,6 +7231,7 @@ impl SumiWorkstationApp {
         &mut self,
         ui: &mut egui::Ui,
         external_crosshair_ts: Option<i64>,
+        external_whitespace_ts: Option<i64>,
         any_modal_open: bool,
     ) -> Option<usize> {
         let pre_ro = self.viewport.time_scale.right_offset();
@@ -6683,11 +7309,16 @@ impl SumiWorkstationApp {
                     .saturating_sub(self.base_timeframe.seconds()),
             )
         });
+        let trading_venue_ctx = self.active_trading_venue_context();
         let overlay = ChartReplayTradingOverlay {
             replay_active: self.replay.is_active(),
             selecting_cut_bar: self.replay.selecting_cut_bar,
             replay_status_label,
             trading_session: has_trading_visuals.then_some(&self.trading),
+            trading_drag: has_trading_visuals
+                .then_some(self.chart_trading_drag)
+                .flatten(),
+            trading_venue: Some(trading_venue_ctx),
             alert_engine: has_alert_visuals.then_some(&self.alerts),
             backtest_result: has_backtest_visuals
                 .then_some(self.backtest_result.as_ref())
@@ -6718,6 +7349,7 @@ impl SumiWorkstationApp {
             rs_benchmark_label: (!self.active_benchmark_label.is_empty())
                 .then_some(self.active_benchmark_label.as_str()),
             external_crosshair_timestamp: external_crosshair_ts,
+            external_whitespace_timestamp: external_whitespace_ts,
             modal_open: any_modal_open,
             candle_palette: self.settings.candle_palette,
         };
@@ -6738,6 +7370,10 @@ impl SumiWorkstationApp {
             overlay,
         );
         self.auto_sync_planner_if_rr_box_changed();
+        if let Some(action) = self.last_report.and_then(|r| r.chart_trading_action) {
+            self.apply_chart_trading_action(action);
+            ui.ctx().request_repaint();
+        }
         let clicked_cut = self.last_report.and_then(|r| r.clicked_cut_bar_index);
         if compute_drawings_alert_digest(&self.drawings) != pre_draw_digest {
             self.sync_alerts_causal();
@@ -6750,11 +7386,13 @@ impl SumiWorkstationApp {
         clicked_cut
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_secondary_slot_chart(
         &mut self,
         ui: &mut egui::Ui,
         sec_idx: usize,
         external_crosshair_ts: Option<i64>,
+        external_whitespace_ts: Option<i64>,
         replay_cutoff_timestamp: Option<i64>,
         frontier_base_timestamp: Option<i64>,
         any_modal_open: bool,
@@ -6783,6 +7421,8 @@ impl SumiWorkstationApp {
             selecting_cut_bar: false,
             replay_status_label: None,
             trading_session: None,
+            trading_drag: None,
+            trading_venue: None,
             alert_engine: None,
             backtest_result: None,
             equity_override: None,
@@ -6798,6 +7438,7 @@ impl SumiWorkstationApp {
             rs_benchmark_label: (!sec.active_benchmark_label.is_empty())
                 .then_some(sec.active_benchmark_label.as_str()),
             external_crosshair_timestamp: external_crosshair_ts,
+            external_whitespace_timestamp: external_whitespace_ts,
             modal_open: any_modal_open,
             candle_palette: active_candle_palette,
         };
@@ -7558,13 +8199,9 @@ impl SumiWorkstationApp {
             list
         };
 
-        let effective_filter = if self.data_source == DataSourcePreset::CustomFile
-            && !self.custom_peer_feeds.is_empty()
-        {
-            PortfolioUniverseFilter::AllUniverseFeeds
-        } else {
-            self.portfolio_universe_filter
-        };
+        // Respect the user's explicit `VN30 Basket` vs `All Feeds` filter on `CustomFile` as well
+        // (`BUG-029`), matching the VN30 membership list or active PIT universe.
+        let effective_filter = self.portfolio_universe_filter;
 
         let pit_digest = hash_universe_digest_u64(&self.pit_universe_def);
         let rep = run_portfolio_backtest_with_universe(
@@ -7971,7 +8608,14 @@ impl SumiWorkstationApp {
 
     /// Builds and ranks all eligible `Cmd+K` Command Palette candidates for `self.command_palette.query`.
     pub fn build_command_palette_candidates(&mut self) -> Vec<PaletteCandidate> {
-        self.sync_scanner_caches();
+        // `BUG-020`: avoid forcing a full 471-symbol technical indicator rescan on `Cmd+K` open!
+        // For small presets (`<= 32` symbols) sync normally; for large multi-symbol `CustomFile`
+        // universes read cached rows when present or derive causal last close/%Chg in `O(1)`/symbol.
+        let large_custom =
+            self.data_source == DataSourcePreset::CustomFile && self.custom_peer_feeds.len() > 32;
+        if !large_custom {
+            self.sync_scanner_caches();
+        }
         let q = self.command_palette.query.trim().to_owned();
         let mut out = Vec::with_capacity(48);
 
@@ -8002,6 +8646,127 @@ impl SumiWorkstationApp {
             q.as_str()
         };
 
+        // 2. Multi-Asset Watchlist Symbols: when a `CustomFile` (`471` CafeF stocks) is loaded, prioritize
+        //    its real symbols strictly FIRST and omit synthetic `VN30 Basket` duplicates so `Cmd+K` `"VCB"` + Enter
+        //    never wipes the 471-symbol custom file (`BUG-007`).
+        let mut custom_upper_set: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut universe_snapshot: Vec<(String, DataSourcePreset, String, Timeframe, i32)> =
+            Vec::with_capacity(self.watchlist_universe.len() + self.custom_peer_feeds.len() + 1);
+        if self.data_source == DataSourcePreset::CustomFile {
+            for e in &self.custom_peer_feeds {
+                custom_upper_set.insert(e.symbol.trim().to_ascii_uppercase());
+                universe_snapshot.push((
+                    e.instrument_id.clone(),
+                    e.preset,
+                    e.symbol.clone(),
+                    e.base_timeframe,
+                    120,
+                ));
+            }
+            let active_upper = self.symbol.trim().to_ascii_uppercase();
+            if !active_upper.is_empty() && !custom_upper_set.contains(&active_upper) {
+                custom_upper_set.insert(active_upper);
+                universe_snapshot.push((
+                    self.current_instrument_key(),
+                    DataSourcePreset::CustomFile,
+                    self.symbol.clone(),
+                    self.base_timeframe,
+                    120,
+                ));
+            }
+        }
+        for e in &self.watchlist_universe {
+            if self.data_source == DataSourcePreset::CustomFile
+                && e.preset == DataSourcePreset::Vn30Basket
+                && custom_upper_set.contains(&e.symbol.trim().to_ascii_uppercase())
+            {
+                continue;
+            }
+            universe_snapshot.push((
+                e.instrument_id.clone(),
+                e.preset,
+                e.symbol.clone(),
+                e.base_timeframe,
+                0,
+            ));
+        }
+        let row_map: std::collections::HashMap<&str, &SymbolScanRow> = self
+            .raw_watchlist_rows_cache
+            .iter()
+            .map(|r| (r.instrument_id.as_str(), r))
+            .collect();
+        let peer_candles_map: std::collections::HashMap<&str, &[Candle]> = self
+            .custom_peer_feeds
+            .iter()
+            .chain(self.watchlist_universe.iter())
+            .map(|e| (e.instrument_id.as_str(), e.candles.as_slice()))
+            .collect();
+        let active_inst_key = self.current_instrument_key();
+        let replay_close_cap = self.replay_causal_close_timestamp();
+        let peer_quick_info =
+            |inst_id: &str, preset: DataSourcePreset, base_tf: Timeframe| -> String {
+                if let Some(r) = row_map.get(inst_id) {
+                    return format!(
+                        "{} · {:.2} ({:+.2}%) · {}",
+                        preset.short_label(),
+                        r.last_close,
+                        r.change_pct,
+                        r.regime.full_label()
+                    );
+                }
+                let candles_opt = peer_candles_map
+                    .get(inst_id)
+                    .copied()
+                    .or_else(|| (inst_id == active_inst_key).then_some(self.candles.as_slice()));
+                if let Some(cs) = candles_opt {
+                    let end = match replay_close_cap {
+                        Some(cap) => {
+                            let span = base_tf.seconds().max(1).saturating_sub(1);
+                            let open_cap = cap.saturating_sub(span);
+                            cs.partition_point(|c| c.timestamp <= open_cap)
+                        }
+                        None => cs.len(),
+                    };
+                    if let Some(last) = end.checked_sub(1).and_then(|i| cs.get(i)) {
+                        let prev_close = end
+                            .checked_sub(2)
+                            .and_then(|i| cs.get(i))
+                            .map_or(last.open, |p| p.close);
+                        let pct = if prev_close.abs() > 1e-12 {
+                            (last.close - prev_close) / prev_close * 100.0
+                        } else {
+                            0.0
+                        };
+                        return format!(
+                            "{} · {:.2} ({:+.2}%) · {base_tf}",
+                            preset.short_label(),
+                            last.close,
+                            pct
+                        );
+                    }
+                }
+                format!("{} · base {base_tf}", preset.short_label())
+            };
+        for (inst_id, preset, sym, base_tf, priority_boost) in universe_snapshot {
+            let title = format!("{sym} — Switch Symbol");
+            let keywords = format!("symbol ticker switch {} {}", sym, preset.short_label());
+            if let Some(raw_score) = score_palette_match(effective_match_q, &title, &keywords) {
+                let row_info = peer_quick_info(&inst_id, preset, base_tf);
+                out.push(PaletteCandidate {
+                    category: PaletteCategory::Symbol,
+                    title,
+                    subtitle: row_info,
+                    keywords,
+                    score: raw_score.saturating_add(priority_boost),
+                    action: PaletteAction::SelectWatchlistSymbol {
+                        preset,
+                        symbol: sym,
+                    },
+                });
+            }
+        }
+
         let mut push_scored = |category: PaletteCategory,
                                title: String,
                                subtitle: String,
@@ -8018,58 +8783,6 @@ impl SumiWorkstationApp {
                 });
             }
         };
-
-        // 2. Multi-Asset Watchlist Symbols (`13` bundled feeds + any multi-symbol custom feeds)
-        let mut universe_snapshot: Vec<(String, DataSourcePreset, String, Timeframe)> = self
-            .watchlist_universe
-            .iter()
-            .map(|e| {
-                (
-                    e.instrument_id.clone(),
-                    e.preset,
-                    e.symbol.clone(),
-                    e.base_timeframe,
-                )
-            })
-            .collect();
-        if self.data_source == DataSourcePreset::CustomFile {
-            for e in &self.custom_peer_feeds {
-                universe_snapshot.push((
-                    e.instrument_id.clone(),
-                    e.preset,
-                    e.symbol.clone(),
-                    e.base_timeframe,
-                ));
-            }
-        }
-        for (inst_id, preset, sym, base_tf) in universe_snapshot {
-            let row_info = self
-                .raw_watchlist_rows_cache
-                .iter()
-                .find(|r| r.instrument_id == inst_id)
-                .map_or_else(
-                    || format!("{} · base {base_tf}", preset.short_label()),
-                    |r| {
-                        format!(
-                            "{} · {:.2} ({:+.2}%) · {}",
-                            preset.short_label(),
-                            r.last_close,
-                            r.change_pct,
-                            r.regime.full_label()
-                        )
-                    },
-                );
-            push_scored(
-                PaletteCategory::Symbol,
-                format!("{sym} — Switch Symbol"),
-                row_info,
-                format!("symbol ticker switch {} {}", sym, preset.short_label()),
-                PaletteAction::SelectWatchlistSymbol {
-                    preset,
-                    symbol: sym,
-                },
-            );
-        }
 
         // 3. Multi-Timeframe Lattice (`1m..1W` allowed from `self.base_timeframe`)
         for tf in Timeframe::ALL {
@@ -8236,9 +8949,11 @@ impl SumiWorkstationApp {
             DrawingTool::HorizontalLine,
             DrawingTool::TrendLine,
             DrawingTool::Ray,
+            DrawingTool::ParallelChannel,
             DrawingTool::Rectangle,
             DrawingTool::FibonacciRetracement,
             DrawingTool::RiskRewardBox,
+            DrawingTool::PriceDateRange,
             DrawingTool::FixedRangeVolumeProfile,
             DrawingTool::AnchoredVwap,
             DrawingTool::TextNote,
@@ -8551,10 +9266,42 @@ impl SumiWorkstationApp {
         }
         push_scored(
             PaletteCategory::Workspace,
+            "Export Backtest HTML Report (Print-to-PDF)".to_owned(),
+            format!(
+                "Generate self-contained SVG + Tearsheet HTML report for {} ({})",
+                self.symbol,
+                self.backtest_config.preset.short_label()
+            ),
+            "export backtest strategy lab html pdf report tearsheet svg print".to_owned(),
+            PaletteAction::ExportBacktestHtmlReport,
+        );
+        push_scored(
+            PaletteCategory::Workspace,
+            "Toggle Left Vertical Drawing Rail".to_owned(),
+            if self.settings.show_drawing_rail {
+                "Currently visible — click to collapse left drawing toolbar".to_owned()
+            } else {
+                "Currently collapsed — click to show left drawing toolbar".to_owned()
+            },
+            "drawing rail toolbar left sidebar tools toggle".to_owned(),
+            PaletteAction::ToggleDrawingRail,
+        );
+        push_scored(
+            PaletteCategory::Drawing,
+            "Populate Showcase Demo Drawings".to_owned(),
+            "Adds sample TrendLine, Fib, Risk/Reward & Note annotations on current chart"
+                .to_owned(),
+            "demo showcase drawings sample annotations".to_owned(),
+            PaletteAction::PopulateDemoDrawings,
+        );
+        push_scored(
+            PaletteCategory::Workspace,
             "Open Data Readiness, Holiday Gaps & CafeF Split Audit (R19)".to_owned(),
             format!(
-                "Audit {} ({}) against VIETNAM_HOLIDAYS_V1 (144 dates · 2018–2030)",
-                self.symbol, self.timeframe
+                "Audit {} ({}) against VIETNAM_HOLIDAYS_V1 ({} dates · 2016–2030)",
+                self.symbol,
+                self.timeframe,
+                VIETNAM_HOLIDAYS_V1.len()
             ),
             "data audit readiness gap outlier cafef split holiday calendar quality".to_owned(),
             PaletteAction::OpenDataAuditModal,
@@ -9150,6 +9897,17 @@ impl SumiWorkstationApp {
             PaletteAction::ExportChartPng => {
                 self.pending_png_export = true;
             }
+            PaletteAction::ExportBacktestHtmlReport => {
+                let _ = self.export_backtest_html_report();
+            }
+            PaletteAction::ToggleDrawingRail => {
+                self.settings.show_drawing_rail = !self.settings.show_drawing_rail;
+            }
+            PaletteAction::PopulateDemoDrawings => {
+                if self.candles.len() >= 2 {
+                    self.populate_showcase_drawings();
+                }
+            }
         }
     }
 }
@@ -9284,6 +10042,31 @@ fn compute_drawings_alert_digest(store: &DrawingStore) -> u64 {
                 mix(&mut h, through.bar_index.to_bits());
                 mix(&mut h, through.value.to_bits());
                 mix(&mut h, through.timestamp.map_or(u64::MAX, f64::to_bits));
+            }
+            DrawingGeometry::ParallelChannel {
+                start,
+                end,
+                channel_offset,
+            } => {
+                mix(&mut h, 10);
+                mix(&mut h, start.bar_index.to_bits());
+                mix(&mut h, start.value.to_bits());
+                mix(&mut h, start.timestamp.map_or(u64::MAX, f64::to_bits));
+                mix(&mut h, end.bar_index.to_bits());
+                mix(&mut h, end.value.to_bits());
+                mix(&mut h, end.timestamp.map_or(u64::MAX, f64::to_bits));
+                mix(&mut h, channel_offset.to_bits());
+                mix(&mut h, u64::from(d.trend_extend_left));
+                mix(&mut h, u64::from(d.trend_extend_right));
+            }
+            DrawingGeometry::PriceDateRange { start, end } => {
+                mix(&mut h, 11);
+                mix(&mut h, start.bar_index.to_bits());
+                mix(&mut h, start.value.to_bits());
+                mix(&mut h, start.timestamp.map_or(u64::MAX, f64::to_bits));
+                mix(&mut h, end.bar_index.to_bits());
+                mix(&mut h, end.value.to_bits());
+                mix(&mut h, end.timestamp.map_or(u64::MAX, f64::to_bits));
             }
             DrawingGeometry::Rectangle { .. }
             | DrawingGeometry::FibonacciRetracement { .. }
@@ -9739,7 +10522,16 @@ fn parse_ticket_optional_price(raw: &str) -> Result<Option<f64>, crate::trading:
     Ok(Some(price))
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RailActionIcon {
+    Magnet,
+    Undo,
+    Redo,
+    Inspector,
+    Clear,
+    Collapse,
+}
+
 enum CustomSourceUpdate<'a> {
     Clear,
     KeepExisting,
@@ -10047,7 +10839,7 @@ fn indicator_toggle_pill(
     let btn = Button::new(
         RichText::new(label)
             .monospace()
-            .size(11.0)
+            .size(10.2)
             .color(text_color),
     )
     .fill(fill)
@@ -10258,10 +11050,10 @@ impl SumiWorkstationApp {
 
         let was_selecting_cut_bar = self.replay.selecting_cut_bar;
 
-        // 1. Top Workstation Toolbar
+        // 1. Top Workstation Toolbar (`BUG-023`: compact 2-row TradingView parity at 1280×800)
         let top_frame = Frame::new()
             .fill(palette::BG_WORKSTATION)
-            .inner_margin(Margin::symmetric(12, 7))
+            .inner_margin(Margin::symmetric(8, 4))
             .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE));
 
         egui::Panel::top("workstation_top_toolbar")
@@ -10271,19 +11063,20 @@ impl SumiWorkstationApp {
                     ui.visuals_mut().disabled_alpha = 1.0;
                     ui.disable();
                 }
-                // Row 1: Identity, Price Ticker, Data Feeds, Multi-Timeframe Selector (`1m..1W`) & Replay/Trade Toggles
+                ui.spacing_mut().button_padding = Vec2::new(3.2, 2.0);
+                // Row 1: Identity, Price Ticker (`prev_close` %Chg), Data Menu, Symbol, Timeframe, Docks, Grid & Modals
                 ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(5.0, 4.0);
+                    ui.spacing_mut().item_spacing = Vec2::new(2.5, 3.0);
 
                     Frame::new()
                         .fill(palette::ACCENT_BLUE)
                         .corner_radius(CornerRadius::same(4))
-                        .inner_margin(Margin::symmetric(8, 3))
+                        .inner_margin(Margin::symmetric(6, 2))
                         .show(ui, |ui| {
                             ui.label(
-                                RichText::new("SUMI WORKSTATION")
+                                RichText::new("SUMI")
                                     .strong()
-                                    .size(12.0)
+                                    .size(11.0)
                                     .color(Color32::WHITE),
                             );
                         });
@@ -10292,50 +11085,114 @@ impl SumiWorkstationApp {
                         .fill(Color32::from_rgb(26, 31, 44))
                         .corner_radius(CornerRadius::same(4))
                         .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE))
-                        .inner_margin(Margin::symmetric(8, 3))
+                        .inner_margin(Margin::symmetric(6, 2))
                         .show(ui, |ui| {
                             ui.label(
                                 RichText::new(format!("{} · {}", self.symbol, self.timeframe))
                                     .monospace()
                                     .strong()
-                                    .size(12.0)
+                                    .size(11.0)
                                     .color(palette::TEXT_PRIMARY),
                             );
                         });
 
+                    // `BUG-023`: compute top-bar `%Chg` from previous bar close `(close - prev_close) / prev_close`
+                    // matching Watchlist and TradingView standards (fallback to `open` only on 1-bar series).
                     if let Some(last) = self.candles.last() {
-                        let color = if last.is_bullish() {
+                        let prev_close = self
+                            .candles
+                            .len()
+                            .checked_sub(2)
+                            .and_then(|i| self.candles.get(i))
+                            .map_or(last.open, |p| p.close);
+                        let diff = last.close - prev_close;
+                        let pct = if prev_close.abs() > 1.0e-12 {
+                            (diff / prev_close) * 100.0
+                        } else {
+                            0.0
+                        };
+                        let color = if diff >= 0.0 {
                             palette::BULLISH
                         } else {
                             palette::BEARISH
                         };
-                        let sign = if last.change() >= 0.0 { "+" } else { "" };
+                        let sign = if diff >= 0.0 { "+" } else { "" };
                         ui.label(
-                            RichText::new(format!(
-                                "{:.2} ({sign}{:.2}%)",
-                                last.close,
-                                last.change_pct()
-                            ))
-                            .monospace()
-                            .size(12.0)
-                            .color(color),
+                            RichText::new(format!("{:.2} ({sign}{pct:.2}%)", last.close))
+                                .monospace()
+                                .size(11.0)
+                                .color(color),
                         );
                     }
 
                     ui.separator();
 
-                    // Data Feed Presets + CSV/JSON File Import Toggle
+                    // Compact Data Feed Preset Menu (replaces 6 wide buttons to keep 1280×800 strictly <= 2 rows)
                     let mut chosen_preset = None;
-                    for preset in DataSourcePreset::TOOLBAR_PRESETS {
-                        if ui
-                            .selectable_label(self.data_source == preset, preset.short_label())
-                            .clicked()
-                        {
-                            chosen_preset = Some(preset);
-                        }
-                    }
+                    let mut requested_size = None;
+                    let data_short = match self.data_source {
+                        DataSourcePreset::SyntheticVnindex => "Synth",
+                        DataSourcePreset::IntradayVn30F1m => "1m",
+                        DataSourcePreset::CafeFIndexCsv => "CafeF",
+                        DataSourcePreset::Vn30Basket => "VN30",
+                        DataSourcePreset::SpyDailyCsv => "SPY",
+                        DataSourcePreset::BtcUsdt15mJson => "BTC",
+                        DataSourcePreset::CustomFile => "File",
+                    };
+                    let data_menu_lbl = format!("Data:{data_short}▾");
+                    ui.menu_button(
+                        RichText::new(data_menu_lbl)
+                            .monospace()
+                            .size(10.2)
+                            .color(palette::TEXT_PRIMARY),
+                        |ui| {
+                            for preset in DataSourcePreset::TOOLBAR_PRESETS {
+                                if ui
+                                    .selectable_label(
+                                        self.data_source == preset,
+                                        preset.short_label(),
+                                    )
+                                    .clicked()
+                                {
+                                    chosen_preset = Some(preset);
+                                    ui.close();
+                                }
+                            }
+                            if self.data_source == DataSourcePreset::SyntheticVnindex {
+                                ui.separator();
+                                ui.label(
+                                    RichText::new("Synthetic Size:")
+                                        .monospace()
+                                        .size(9.5)
+                                        .color(palette::TEXT_MUTED),
+                                );
+                                ui.horizontal(|ui| {
+                                    for (count, label) in [
+                                        (120_usize, "120B"),
+                                        (10_000_usize, "10K"),
+                                        (50_000_usize, "50K"),
+                                        (100_000_usize, "100K"),
+                                    ] {
+                                        if ui
+                                            .selectable_label(
+                                                self.dataset_bar_count == count,
+                                                label,
+                                            )
+                                            .clicked()
+                                        {
+                                            requested_size = Some(count);
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                            }
+                        },
+                    );
                     if let Some(p) = chosen_preset {
                         self.select_data_source(p);
+                    }
+                    if let Some(new_count) = requested_size {
+                        self.set_dataset_size(new_count);
                     }
 
                     #[cfg(not(target_arch = "wasm32"))]
@@ -10343,116 +11200,83 @@ impl SumiWorkstationApp {
                         let _ = indicator_toggle_pill(
                             ui,
                             &mut self.show_import_bar,
-                            "Import CSV/JSON",
+                            "Import",
                             Color32::from_rgb(38, 198, 164),
                         );
                     }
 
-                    if self.data_source == DataSourcePreset::SyntheticVnindex {
-                        ui.separator();
-                        let mut requested_size = None;
-                        for (count, label) in [
-                            (120_usize, "120B"),
-                            (10_000_usize, "10K"),
-                            (50_000_usize, "50K"),
-                            (100_000_usize, "100K"),
-                        ] {
-                            if ui
-                                .selectable_label(self.dataset_bar_count == count, label)
-                                .clicked()
-                            {
-                                requested_size = Some(count);
-                            }
-                        }
-                        if let Some(new_count) = requested_size {
-                            self.set_dataset_size(new_count);
-                        }
-                    } else if self.available_symbols.len() > 1 {
-                        ui.separator();
+                    if self.available_symbols.len() > 1 {
                         let mut picked_sym: Option<String> = None;
-                        if self.available_symbols.len() <= 6 {
-                            for sym in &self.available_symbols {
-                                if ui
-                                    .selectable_label(self.symbol.eq_ignore_ascii_case(sym), sym)
-                                    .clicked()
-                                {
-                                    picked_sym = Some(sym.clone());
-                                }
-                            }
-                        } else {
-                            egui::ComboBox::from_id_salt("multi_symbol_picker")
-                                .selected_text(RichText::new(&self.symbol).monospace().size(11.0))
-                                .width(116.0)
-                                .height(360.0)
-                                .show_ui(ui, |ui| {
-                                    if self.available_symbols.len() > 16 {
-                                        let filt_resp = ui.add(
-                                            egui::TextEdit::singleline(
-                                                &mut self.symbol_picker_filter,
-                                            )
+                        egui::ComboBox::from_id_salt("multi_symbol_picker")
+                            .selected_text(RichText::new(&self.symbol).monospace().size(10.2))
+                            .width(74.0)
+                            .height(360.0)
+                            .show_ui(ui, |ui| {
+                                if self.available_symbols.len() > 16 {
+                                    let filt_resp = ui.add(
+                                        egui::TextEdit::singleline(&mut self.symbol_picker_filter)
                                             .hint_text("Filter mã...")
                                             .desired_width(108.0)
                                             .font(egui::FontId::monospace(10.5)),
-                                        );
-                                        if filt_resp.lost_focus()
-                                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                                        {
-                                            let q = self
-                                                .symbol_picker_filter
-                                                .trim()
-                                                .to_ascii_uppercase();
-                                            if let Some(exact) = self
-                                                .available_symbols
-                                                .iter()
-                                                .find(|s| s.eq_ignore_ascii_case(&q))
-                                                .or_else(|| {
-                                                    self.available_symbols.iter().find(|s| {
-                                                        s.to_ascii_uppercase().starts_with(&q)
-                                                    })
+                                    );
+                                    if filt_resp.lost_focus()
+                                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                    {
+                                        let q =
+                                            self.symbol_picker_filter.trim().to_ascii_uppercase();
+                                        if let Some(exact) = self
+                                            .available_symbols
+                                            .iter()
+                                            .find(|s| s.eq_ignore_ascii_case(&q))
+                                            .or_else(|| {
+                                                self.available_symbols.iter().find(|s| {
+                                                    s.to_ascii_uppercase().starts_with(&q)
                                                 })
-                                            {
-                                                picked_sym = Some(exact.clone());
-                                                ui.close();
-                                            }
-                                        }
-                                        ui.separator();
-                                    }
-                                    let q_upper =
-                                        self.symbol_picker_filter.trim().to_ascii_uppercase();
-                                    for sym in &self.available_symbols {
-                                        if !q_upper.is_empty()
-                                            && !sym.to_ascii_uppercase().contains(&q_upper)
+                                            })
                                         {
-                                            continue;
-                                        }
-                                        let is_cur = self.symbol.eq_ignore_ascii_case(sym);
-                                        if ui.selectable_label(is_cur, sym).clicked() {
-                                            picked_sym = Some(sym.clone());
+                                            picked_sym = Some(exact.clone());
+                                            ui.close();
                                         }
                                     }
-                                });
-                        }
+                                    ui.separator();
+                                }
+                                let q_upper =
+                                    self.symbol_picker_filter.trim().to_ascii_uppercase();
+                                for sym in &self.available_symbols {
+                                    if !q_upper.is_empty()
+                                        && !sym.to_ascii_uppercase().contains(&q_upper)
+                                    {
+                                        continue;
+                                    }
+                                    let is_cur = self.symbol.eq_ignore_ascii_case(sym);
+                                    if ui.selectable_label(is_cur, sym).clicked() {
+                                        picked_sym = Some(sym.clone());
+                                    }
+                                }
+                            });
                         if let Some(sym) = picked_sym {
+                            // `BUG-023`: clear symbol picker filter immediately after selection.
+                            self.symbol_picker_filter.clear();
                             self.select_symbol_in_source(&sym);
+                            self.dom_auto_center_pending = true;
                         }
                     }
 
                     ui.separator();
 
                     // Multi-Timeframe Selector (`1m`, `5m`, `15m`, `1h`, `4h`, `1D`, `1W`)
-                    ui.label(
-                        RichText::new("TF:")
-                            .monospace()
-                            .strong()
-                            .size(11.0)
-                            .color(palette::TEXT_MUTED),
-                    );
                     let mut requested_tf = None;
                     for tf in Timeframe::ALL {
                         let allowed = self.base_timeframe.can_aggregate_to(tf);
                         let is_cur = self.active_timeframe == tf;
                         if ui
-                            .add_enabled(allowed, Button::selectable(is_cur, tf.label()))
+                            .add_enabled(
+                                allowed,
+                                Button::selectable(
+                                    is_cur,
+                                    RichText::new(tf.label()).monospace().size(10.2),
+                                ),
+                            )
                             .clicked()
                         {
                             requested_tf = Some(tf);
@@ -10467,7 +11291,7 @@ impl SumiWorkstationApp {
                     let _ = indicator_toggle_pill(
                         ui,
                         &mut self.show_scanner_dock,
-                        "Watchlist / Scan",
+                        "Watch",
                         Color32::from_rgb(41, 182, 246),
                     );
 
@@ -10475,7 +11299,7 @@ impl SumiWorkstationApp {
                     if indicator_toggle_pill(
                         ui,
                         &mut replay_dock_open,
-                        "<< Bar Replay",
+                        "Replay",
                         palette::REPLAY_CUT_GOLD,
                     ) {
                         if replay_dock_open {
@@ -10489,7 +11313,7 @@ impl SumiWorkstationApp {
                     if indicator_toggle_pill(
                         ui,
                         &mut self.show_trading_panel,
-                        "Paper Trade",
+                        "Trade",
                         palette::TRADE_ENTRY_BLUE,
                     ) && self.show_trading_panel
                     {
@@ -10502,7 +11326,7 @@ impl SumiWorkstationApp {
                     if indicator_toggle_pill(
                         ui,
                         &mut dom_open,
-                        "DOM Ladder",
+                        "DOM",
                         Color32::from_rgb(38, 166, 154),
                     ) {
                         if dom_open {
@@ -10520,12 +11344,9 @@ impl SumiWorkstationApp {
                         .filter(|r| r.is_causally_visible(tb_cutoff))
                         .count();
                     let alerts_lbl = if vis_rules == 0 {
-                        "Alerts".to_owned()
+                        "Alert".to_owned()
                     } else {
-                        format!(
-                            "Alerts ({}/{vis_rules})",
-                            self.alerts.armed_count(tb_cutoff)
-                        )
+                        format!("Alrt({}/{vis_rules})", self.alerts.armed_count(tb_cutoff))
                     };
                     if indicator_toggle_pill(
                         ui,
@@ -10540,7 +11361,7 @@ impl SumiWorkstationApp {
                     if indicator_toggle_pill(
                         ui,
                         &mut self.show_strategy_panel,
-                        "Strategy Lab",
+                        "Lab",
                         palette::EQUITY_ABOVE_LINE,
                     ) && self.show_strategy_panel
                     {
@@ -10555,9 +11376,9 @@ impl SumiWorkstationApp {
                         .visible_entries(self.replay_causal_close_timestamp())
                         .len();
                     let j_lbl = if j_vis_top == 0 {
-                        "Risk & Journal".to_owned()
+                        "Jrnl".to_owned()
                     } else {
-                        format!("Journal ({j_vis_top})")
+                        format!("Jrnl({j_vis_top})")
                     };
                     if indicator_toggle_pill(
                         ui,
@@ -10574,7 +11395,13 @@ impl SumiWorkstationApp {
                     let mut requested_layout: Option<MultiChartLayoutKind> = None;
                     for layout in MultiChartLayoutKind::ALL {
                         let is_cur = self.grid_layout == layout;
-                        if ui.selectable_label(is_cur, layout.short_label()).clicked() {
+                        if ui
+                            .selectable_label(
+                                is_cur,
+                                RichText::new(layout.short_label()).monospace().size(10.0),
+                            )
+                            .clicked()
+                        {
                             requested_layout = Some(layout);
                         }
                     }
@@ -10586,13 +11413,13 @@ impl SumiWorkstationApp {
                         let _ = indicator_toggle_pill(
                             ui,
                             &mut self.grid_sync.sync_crosshair,
-                            "Sync X",
+                            "X",
                             palette::LINKED_CROSSHAIR_LINE,
                         );
                         if indicator_toggle_pill(
                             ui,
                             &mut self.grid_sync.sync_time_range,
-                            "Sync T",
+                            "T",
                             palette::IND_ICHIMOKU_TENKAN,
                         ) && self.grid_sync.sync_time_range
                         {
@@ -10601,14 +11428,17 @@ impl SumiWorkstationApp {
                         for s_idx in 0..self.grid_layout.slot_count() {
                             let lbl = format!("S{}", s_idx + 1);
                             if ui
-                                .selectable_label(self.active_chart_slot == s_idx, lbl)
+                                .selectable_label(
+                                    self.active_chart_slot == s_idx,
+                                    RichText::new(lbl).monospace().size(9.8),
+                                )
                                 .clicked()
                             {
                                 self.active_chart_slot = s_idx;
                             }
                         }
                         if ui
-                            .small_button("Sync Ind")
+                            .small_button(RichText::new("SyncInd").monospace().size(9.5))
                             .on_hover_text(
                                 "Copy active chart slot's indicators & oscillators to all grid slots",
                             )
@@ -10619,8 +11449,7 @@ impl SumiWorkstationApp {
                     }
 
                     let mut tpl_open = self.show_templates_modal;
-                    if indicator_toggle_pill(ui, &mut tpl_open, "Templates", palette::IND_CVD_LINE)
-                    {
+                    if indicator_toggle_pill(ui, &mut tpl_open, "Tpl", palette::IND_CVD_LINE) {
                         if tpl_open {
                             self.open_templates_modal();
                         } else {
@@ -10636,7 +11465,7 @@ impl SumiWorkstationApp {
                         HotkeyProfileId::ReplayPractice => "Rpl",
                         HotkeyProfileId::Custom => "Cust",
                     };
-                    let keys_label = format!("Keys:{key_badge}");
+                    let keys_label = format!("Key:{key_badge}");
                     if indicator_toggle_pill(
                         ui,
                         &mut keys_open,
@@ -10655,7 +11484,7 @@ impl SumiWorkstationApp {
                     if indicator_toggle_pill(
                         ui,
                         &mut settings_open,
-                        "Settings",
+                        "Set",
                         Color32::from_rgb(129, 199, 132),
                     ) {
                         if settings_open {
@@ -10670,7 +11499,7 @@ impl SumiWorkstationApp {
                     if indicator_toggle_pill(
                         ui,
                         &mut audit_open,
-                        "Data Audit",
+                        "Audit",
                         Color32::from_rgb(79, 195, 247),
                     ) {
                         if audit_open {
@@ -10683,8 +11512,10 @@ impl SumiWorkstationApp {
 
                     #[cfg(not(target_arch = "wasm32"))]
                     if ui
-                        .small_button(RichText::new("Export PNG").monospace().size(10.5))
-                        .on_hover_text("Capture active chart & drawings at 2.0x Retina PNG into exports/")
+                        .small_button(RichText::new("PNG").monospace().size(10.0))
+                        .on_hover_text(
+                            "Capture active chart & drawings at 2.0x Retina PNG into exports/",
+                        )
                         .clicked()
                     {
                         self.pending_png_export = true;
@@ -10769,10 +11600,10 @@ impl SumiWorkstationApp {
                     });
                 }
 
-                // Row 2: Indicators, Scale Modes, Viewport Controls & Drawing Toolbar
-                ui.add_space(4.0);
+                // Row 2: Indicators, Scale Modes, Compact View Controls & Drawing Tool Bar (`<= 2` rows at 1280×800)
+                ui.add_space(3.0);
                 ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(5.0, 4.0);
+                    ui.spacing_mut().item_spacing = Vec2::new(3.5, 3.0);
 
                     let slot_idx = self
                         .active_chart_slot
@@ -10930,7 +11761,7 @@ impl SumiWorkstationApp {
                         self.toggle_compare_overlay_for_active_slot();
                     }
                     if ui
-                        .small_button("v")
+                        .small_button(RichText::new("v").monospace().size(9.5))
                         .on_hover_text("Cycle RS / Compare Benchmark")
                         .clicked()
                     {
@@ -10947,19 +11778,6 @@ impl SumiWorkstationApp {
                             .main_price_scale
                             .mode()
                     };
-                    for mode in [
-                        PriceScaleMode::Normal,
-                        PriceScaleMode::Logarithmic,
-                        PriceScaleMode::Percentage,
-                        PriceScaleMode::IndexedTo100,
-                    ] {
-                        if ui
-                            .selectable_label(active_mode == mode, mode.label())
-                            .clicked()
-                        {
-                            self.set_scale_mode_for_active_slot(mode);
-                        }
-                    }
                     let is_auto = if slot_idx == 0 {
                         self.viewport.main_price_scale.is_auto_scale()
                     } else {
@@ -10968,11 +11786,6 @@ impl SumiWorkstationApp {
                             .main_price_scale
                             .is_auto_scale()
                     };
-                    if ui.selectable_label(is_auto, "Auto").clicked() {
-                        self.active_slot_viewport_mut()
-                            .main_price_scale
-                            .set_auto_scale(!is_auto);
-                    }
                     let is_inv = if slot_idx == 0 {
                         self.viewport.main_price_scale.is_inverted()
                     } else {
@@ -10981,121 +11794,102 @@ impl SumiWorkstationApp {
                             .main_price_scale
                             .is_inverted()
                     };
-                    if ui.selectable_label(is_inv, "Inv").clicked() {
-                        self.active_slot_viewport_mut()
-                            .main_price_scale
-                            .set_inverted(!is_inv);
-                    }
-
-                    ui.separator();
-
-                    if ui.button("Zoom +").clicked() {
+                    ui.menu_button(
+                        RichText::new(format!("Scale:{}▾", active_mode.label()))
+                            .monospace()
+                            .size(10.0)
+                            .color(palette::TEXT_PRIMARY),
+                        |ui| {
+                            for mode in [
+                                PriceScaleMode::Normal,
+                                PriceScaleMode::Logarithmic,
+                                PriceScaleMode::Percentage,
+                                PriceScaleMode::IndexedTo100,
+                            ] {
+                                if ui
+                                    .selectable_label(active_mode == mode, mode.label())
+                                    .clicked()
+                                {
+                                    self.set_scale_mode_for_active_slot(mode);
+                                    ui.close();
+                                }
+                            }
+                            ui.separator();
+                            let mut auto_v = is_auto;
+                            if ui.checkbox(&mut auto_v, "Auto Scale").changed() {
+                                self.active_slot_viewport_mut()
+                                    .main_price_scale
+                                    .set_auto_scale(auto_v);
+                            }
+                            let mut inv_v = is_inv;
+                            if ui.checkbox(&mut inv_v, "Invert Scale").changed() {
+                                self.active_slot_viewport_mut()
+                                    .main_price_scale
+                                    .set_inverted(inv_v);
+                            }
+                            ui.separator();
+                            ui.checkbox(&mut self.show_grid, "Grid");
+                            ui.checkbox(&mut self.show_crosshair, "Crosshair");
+                            let active_vol = if slot_idx == 0 {
+                                &mut self.show_volume
+                            } else {
+                                &mut self.secondary_slots[slot_idx - 1].show_volume
+                            };
+                            ui.checkbox(active_vol, "Volume");
+                        },
+                    );
+                    if ui
+                        .small_button(RichText::new("+").monospace().size(10.2))
+                        .on_hover_text("Zoom In")
+                        .clicked()
+                    {
                         self.zoom_in();
                     }
-                    if ui.button("Zoom −").clicked() {
+                    if ui
+                        .small_button(RichText::new("−").monospace().size(10.2))
+                        .on_hover_text("Zoom Out")
+                        .clicked()
+                    {
                         self.zoom_out();
                     }
-                    if ui.button("Fit").clicked() {
+                    if ui
+                        .small_button(RichText::new("Fit").monospace().size(10.0))
+                        .on_hover_text("Fit Content")
+                        .clicked()
+                    {
                         self.fit_content();
                     }
-                    if ui.button("Reset").clicked() {
+                    if ui
+                        .small_button(RichText::new("Rst").monospace().size(10.0))
+                        .on_hover_text("Reset View")
+                        .clicked()
+                    {
                         self.reset_view();
                     }
 
                     ui.separator();
 
-                    ui.checkbox(&mut self.show_grid, "Grid");
-                    ui.checkbox(&mut self.show_crosshair, "Crosshair");
-                    let active_vol = if slot_idx == 0 {
-                        &mut self.show_volume
+                    // Compact toggle for TradingView-style Left Vertical Drawing Rail (`v1.1 / Wave 1`)
+                    let rail_label = if !self.settings.show_drawing_rail
+                        && self.drawings.active_tool != DrawingTool::Select
+                    {
+                        format!("Rail:{}", self.drawings.active_tool.short_label())
                     } else {
-                        &mut self.secondary_slots[slot_idx - 1].show_volume
+                        "Rail".to_owned()
                     };
-                    ui.checkbox(active_vol, "Volume");
-                });
-
-                ui.add_space(4.0);
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(5.0, 4.0);
-
-                    ui.label(
-                        RichText::new("DRAW:")
-                            .monospace()
-                            .strong()
-                            .size(11.0)
-                            .color(palette::TEXT_MUTED),
-                    );
-
-                    for tool in [
-                        DrawingTool::Select,
-                        DrawingTool::HorizontalLine,
-                        DrawingTool::TrendLine,
-                        DrawingTool::Ray,
-                        DrawingTool::Rectangle,
-                        DrawingTool::FibonacciRetracement,
-                        DrawingTool::RiskRewardBox,
-                        DrawingTool::FixedRangeVolumeProfile,
-                        DrawingTool::AnchoredVwap,
-                        DrawingTool::TextNote,
-                    ] {
-                        let is_active = self.drawings.active_tool == tool;
-                        if ui.selectable_label(is_active, tool.short_label()).clicked() {
-                            if tool != DrawingTool::Select {
-                                self.cancel_replay_cut_selection();
-                            }
-                            self.drawings.set_tool(tool);
-                        }
-                    }
-
-                    ui.separator();
-
-                    let mut magnet_on = self.drawings.magnet_mode == MagnetMode::Ohlc;
-                    if indicator_toggle_pill(
-                        ui,
-                        &mut magnet_on,
-                        "Magnet OHLC",
-                        Color32::from_rgb(255, 193, 7),
-                    ) {
-                        self.drawings.magnet_mode = if magnet_on {
-                            MagnetMode::Ohlc
-                        } else {
-                            MagnetMode::Off
-                        };
-                    }
-
-                    if ui
-                        .add_enabled(self.drawings.can_undo(), Button::new("Undo"))
-                        .clicked()
-                    {
-                        let _ = self.drawings.undo();
-                    }
-                    if ui
-                        .add_enabled(self.drawings.can_redo(), Button::new("Redo"))
-                        .clicked()
-                    {
-                        let _ = self.drawings.redo();
-                    }
-                    if ui
-                        .add_enabled(self.candles.len() >= 2, Button::new("Demo Set"))
-                        .clicked()
-                    {
-                        self.populate_showcase_drawings();
-                    }
-                    if ui
-                        .add_enabled(self.drawings.has_unlocked_drawings(), Button::new("Clear"))
-                        .clicked()
-                    {
-                        let _ = self.drawings.clear_unlocked();
-                    }
                     let _ = indicator_toggle_pill(
                         ui,
-                        &mut self.show_drawing_inspector,
-                        "Inspect",
+                        &mut self.settings.show_drawing_rail,
+                        &rail_label,
                         Color32::from_rgb(255, 193, 7),
                     );
+                });
 
-                    if let Some(sel) = self.drawings.selected_drawing().cloned() {
-                        ui.separator();
+                // Contextual Selected-Drawing Strip (only shown when a drawing is actively selected)
+                if let Some(sel) = self.drawings.selected_drawing().cloned() {
+                    ui.add_space(2.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(4.0, 3.0);
                         let [cr, cg, cb] = sel.style.color.rgb();
                         ui.label(
                             RichText::new(format!(
@@ -11105,13 +11899,14 @@ impl SumiWorkstationApp {
                                 sel.tool_kind().short_label()
                             ))
                             .monospace()
-                            .size(11.0)
+                            .size(10.2)
                             .color(Color32::from_rgb(cr, cg, cb)),
                         );
                         if ui
                             .add_enabled(
                                 !sel.locked,
-                                Button::new(format!("Color: {}", sel.style.color.short_label())),
+                                Button::new(format!("Color: {}", sel.style.color.short_label()))
+                                    .small(),
                             )
                             .clicked()
                         {
@@ -11120,20 +11915,24 @@ impl SumiWorkstationApp {
                         if ui
                             .add_enabled(
                                 !sel.locked,
-                                Button::new(format!("Dash: {}", sel.style.dash.label())),
+                                Button::new(format!("Dash: {}", sel.style.dash.label())).small(),
                             )
                             .clicked()
                         {
                             let _ = self.drawings.cycle_selected_dash();
                         }
-                        if matches!(sel.geometry, DrawingGeometry::TrendLine { .. }) {
+                        if matches!(
+                            sel.geometry,
+                            DrawingGeometry::TrendLine { .. }
+                                | DrawingGeometry::ParallelChannel { .. }
+                        ) {
                             let ext_l_lbl = if sel.trend_extend_left {
                                 "<< Ext L: ON"
                             } else {
                                 "<< Ext L: OFF"
                             };
                             if ui
-                                .add_enabled(!sel.locked, Button::new(ext_l_lbl))
+                                .add_enabled(!sel.locked, Button::new(ext_l_lbl).small())
                                 .clicked()
                             {
                                 let mut patch = DrawingPropertyPatch::from_drawing(&sel);
@@ -11151,7 +11950,7 @@ impl SumiWorkstationApp {
                                 "Ext R >>: OFF"
                             };
                             if ui
-                                .add_enabled(!sel.locked, Button::new(ext_r_lbl))
+                                .add_enabled(!sel.locked, Button::new(ext_r_lbl).small())
                                 .clicked()
                             {
                                 let mut patch = DrawingPropertyPatch::from_drawing(&sel);
@@ -11168,7 +11967,7 @@ impl SumiWorkstationApp {
                             sel.geometry
                         {
                             if ui
-                                .add_enabled(!sel.locked, Button::new("Rev 0↔1"))
+                                .add_enabled(!sel.locked, Button::new("Rev 0↔1").small())
                                 .clicked()
                             {
                                 let _ = self.drawings.reverse_selected_fibonacci();
@@ -11179,7 +11978,7 @@ impl SumiWorkstationApp {
                                 "Ext >>: OFF"
                             };
                             if ui
-                                .add_enabled(!sel.locked, Button::new(ext_label))
+                                .add_enabled(!sel.locked, Button::new(ext_label).small())
                                 .clicked()
                             {
                                 let _ = self.drawings.toggle_selected_fib_extend();
@@ -11195,8 +11994,10 @@ impl SumiWorkstationApp {
                                 Some(lvls) => format!("Fib: Cust({})", lvls.len()),
                             };
                             if ui
-                                .add_enabled(!sel.locked, Button::new(fib_preset_lbl))
-                                .on_hover_text("Cycle Fibonacci Ratios (Std 7 -> ICT OTE 9 -> Full 13)")
+                                .add_enabled(!sel.locked, Button::new(fib_preset_lbl).small())
+                                .on_hover_text(
+                                    "Cycle Fibonacci Ratios (Std 7 -> ICT OTE 9 -> Full 13)",
+                                )
                                 .clicked()
                             {
                                 let mut patch = DrawingPropertyPatch::from_drawing(&sel);
@@ -11216,26 +12017,29 @@ impl SumiWorkstationApp {
                             }
                         }
                         if matches!(sel.geometry, DrawingGeometry::TextNote { .. })
-                            && ui.button("Edit Note...").clicked()
+                            && ui.small_button("Edit Note...").clicked()
                         {
                             self.show_drawing_inspector = true;
                         }
                         if matches!(sel.geometry, DrawingGeometry::RiskRewardBox { .. }) {
                             if ui
-                                .add_enabled(!sel.locked, Button::new("Flip L/S"))
+                                .add_enabled(!sel.locked, Button::new("Flip L/S").small())
                                 .clicked()
                             {
                                 let _ = self.drawings.reverse_selected_risk_reward();
                                 let _ = self.sync_planner_from_selected_rr_box();
                             }
-                            if ui.button("-> Planner").clicked() {
+                            if ui.small_button("-> Planner").clicked() {
                                 self.open_journal_tab();
                             }
                         }
                         if let DrawingGeometry::FixedRangeVolumeProfile { row_count, .. } =
                             sel.geometry
                             && ui
-                                .add_enabled(!sel.locked, Button::new(format!("Rows: {row_count}")))
+                                .add_enabled(
+                                    !sel.locked,
+                                    Button::new(format!("Rows: {row_count}")).small(),
+                                )
                                 .clicked()
                         {
                             let _ = self.drawings.cycle_selected_frvp_rows();
@@ -11247,23 +12051,39 @@ impl SumiWorkstationApp {
                                 "Bands: OFF"
                             };
                             if ui
-                                .add_enabled(!sel.locked, Button::new(bands_lbl))
+                                .add_enabled(!sel.locked, Button::new(bands_lbl).small())
                                 .clicked()
                             {
                                 let _ = self.drawings.toggle_selected_avwap_bands();
                             }
                         }
                         let lock_label = if sel.locked { "Unlock" } else { "Lock" };
-                        if ui.button(lock_label).clicked() {
+                        if ui.small_button(lock_label).clicked() {
                             let _ = self.drawings.toggle_selected_lock();
                         }
-                        if ui.add_enabled(!sel.locked, Button::new("Delete")).clicked() {
+                        if ui
+                            .add_enabled(!sel.locked, Button::new("Delete").small())
+                            .clicked()
+                        {
                             let _ = self.drawings.delete_selected();
                         }
-                        if sel.pane == DrawingPaneTarget::Main
-                            && ui.button("-> Order Ticket").clicked()
-                        {
-                            let _ = self.sync_ticket_from_selected_drawing();
+                        if sel.pane == DrawingPaneTarget::Main {
+                            // `BUG-032` + v1.1: disable `-> Order Ticket` when the drawing has no
+                            // actionable trade price levels (`TextNote`, `ParallelChannel`, `PriceDateRange`).
+                            let can_send_order = !matches!(
+                                sel.geometry,
+                                DrawingGeometry::TextNote { .. }
+                                    | DrawingGeometry::ParallelChannel { .. }
+                                    | DrawingGeometry::PriceDateRange { .. }
+                            ) && extract_ticket_from_drawing(&sel).is_some();
+                            let ticket_btn = ui
+                                .add_enabled(can_send_order, Button::new("-> Order Ticket").small())
+                                .on_disabled_hover_text(
+                                    "Selected annotation/measurement drawing cannot seed Order Ticket Entry/SL/TP prices",
+                                );
+                            if ticket_btn.clicked() {
+                                let _ = self.sync_ticket_from_selected_drawing();
+                            }
                         }
                         if sel.pane == DrawingPaneTarget::Main
                             && matches!(
@@ -11272,12 +12092,12 @@ impl SumiWorkstationApp {
                                     | DrawingGeometry::TrendLine { .. }
                                     | DrawingGeometry::Ray { .. }
                             )
-                            && ui.button("-> Alert").clicked()
+                            && ui.small_button("-> Alert").clicked()
                         {
                             let _ = self.add_alert_on_selected_drawing(self.alert_direction);
                         }
-                    }
-                });
+                    });
+                }
 
                 // Optional Row 4: Compact Causal Bar Replay Transport Dock (`Milestone R07`)
                 if self.show_replay_bar || self.replay.is_active() {
@@ -11361,15 +12181,16 @@ impl SumiWorkstationApp {
                         .last_png_export_status
                         .as_ref()
                         .map_or_else(String::new, |(_, s)| format!("  |  {s}"));
+                    let active_venue = self.active_exchange_venue();
+                    let eq_display = format_venue_money(active_venue, metrics.equity, 0);
                     if let Some(rep) = self.last_report {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(format!(
-                                    "R19 [{grid_badge}]  |  {} ({}->{})  |  RPL: {replay_tag}  |  ALT: {armed_alerts}A/{trig_events}T  |  EQ: ${:.0} ({:+.0}){bt_tag}  |  {}P/{}D  |  BARS: {}/{} ({first_date}..{last_date}) {}x  |  {scale_mode}({auto_tag})  |  {:.0}×{:.0}{png_tag}",
+                                    "R19 [{grid_badge}]  |  {} ({}->{})  |  RPL: {replay_tag}  |  ALT: {armed_alerts}A/{trig_events}T  |  EQ: {eq_display} ({:+.0}){bt_tag}  |  {}P/{}D  |  BARS: {}/{} ({first_date}..{last_date}) {}x  |  {scale_mode}({auto_tag})  |  {:.0}×{:.0}{png_tag}",
                                     self.data_source.short_label(),
                                     self.base_timeframe,
                                     self.active_timeframe,
-                                    metrics.equity,
                                     metrics.net_pnl,
                                     rep.pane_count,
                                     rep.drawing_count,
@@ -11425,6 +12246,26 @@ impl SumiWorkstationApp {
                         ui.disable();
                     }
                     self.render_scanner_dock(ui);
+                });
+        }
+
+        // 2c. TradingView-Style Left Vertical Drawing Rail (`v1.1 / Wave 1`)
+        if self.settings.show_drawing_rail {
+            let rail_frame = Frame::new()
+                .fill(Color32::from_rgb(16, 20, 29))
+                .inner_margin(Margin::symmetric(3, 6))
+                .stroke(Stroke::new(1.0, palette::BORDER_SUBTLE));
+
+            egui::Panel::left("drawing_tools_rail")
+                .resizable(false)
+                .exact_size(38.0)
+                .frame(rail_frame)
+                .show(ui, |ui| {
+                    if any_modal_open {
+                        ui.visuals_mut().disabled_alpha = 1.0;
+                        ui.disable();
+                    }
+                    self.render_left_drawing_rail(ui);
                 });
         }
 
@@ -11538,10 +12379,14 @@ impl SumiWorkstationApp {
                     } else {
                         None
                     };
-                    clicked_cut_idx = self.render_primary_slot_0_chart(ui, ext_ts, any_modal_open);
+                    clicked_cut_idx =
+                        self.render_primary_slot_0_chart(ui, ext_ts, None, any_modal_open);
                     if hover_pos.is_some() {
                         self.linked_crosshair_timestamp =
                             self.last_report.and_then(|r| r.hovered_bar_timestamp);
+                        self.linked_whitespace_timestamp = self
+                            .last_report
+                            .and_then(|r| r.hovered_whitespace_timestamp);
                     }
                 } else {
                     let full_rect = ui.available_rect_before_wrap();
@@ -11579,21 +12424,37 @@ impl SumiWorkstationApp {
                     }
                     let mut hovered_slot: Option<usize> = None;
                     let mut hovered_ts: Option<i64> = None;
+                    let mut hovered_ws_ts: Option<i64> = None;
                     if let Some(pos) = hover_pos {
                         for (i, cr) in cell_rects.iter().take(slot_count).enumerate() {
                             if cr.contains(pos) {
                                 hovered_slot = Some(i);
                                 let (plot_l, plot_r) = self.slot_plot_span(i, *cr);
                                 if pos.x >= plot_l && pos.x <= plot_r {
-                                    let (candles, _tf_s, ts) = self.slot_time_data(i);
+                                    let (candles, tf_s, ts) = self.slot_time_data(i);
                                     if !candles.is_empty()
                                         && !ts.is_empty()
                                         && let Some(bi) =
                                             ts.local_x_to_index(f64::from(pos.x - plot_l))
-                                        && bi >= 0
-                                        && (bi as usize) < candles.len()
                                     {
-                                        hovered_ts = Some(candles[bi as usize].timestamp);
+                                        if bi >= 0 && (bi as usize) < candles.len() {
+                                            hovered_ts = Some(candles[bi as usize].timestamp);
+                                        } else if bi >= candles.len() as i64 {
+                                            let step = tf_s.max(60);
+                                            let extra = bi - (candles.len() as i64 - 1);
+                                            hovered_ws_ts = Some(
+                                                candles[candles.len() - 1]
+                                                    .timestamp
+                                                    .saturating_add(extra.saturating_mul(step)),
+                                            );
+                                        } else {
+                                            let step = tf_s.max(60);
+                                            hovered_ws_ts = Some(
+                                                candles[0]
+                                                    .timestamp
+                                                    .saturating_add(bi.saturating_mul(step)),
+                                            );
+                                        }
                                     }
                                 }
                                 break;
@@ -11605,15 +12466,25 @@ impl SumiWorkstationApp {
                     if self.grid_sync.sync_crosshair {
                         if let Some(ts) = hovered_ts {
                             self.linked_crosshair_timestamp = Some(ts);
+                            self.linked_whitespace_timestamp = None;
+                        } else if let Some(ws_ts) = hovered_ws_ts {
+                            // `BUG-022`: keep `linked_crosshair_timestamp = None` so peer slots never
+                            // falsely pin to the last bar, while still projecting a linked future
+                            // whitespace vertical crosshair via `linked_whitespace_timestamp`.
+                            self.linked_crosshair_timestamp = None;
+                            self.linked_whitespace_timestamp = Some(ws_ts);
                         } else if hover_pos.is_none() {
                             self.linked_crosshair_timestamp = self
                                 .pinned_crosshair_timestamp
                                 .filter(|&ts| causal_cap.is_none_or(|cap| ts <= cap));
+                            self.linked_whitespace_timestamp = None;
                         } else {
                             self.linked_crosshair_timestamp = None;
+                            self.linked_whitespace_timestamp = None;
                         }
                     } else {
                         self.linked_crosshair_timestamp = None;
+                        self.linked_whitespace_timestamp = None;
                     }
 
                     let pointer_interacted = !any_modal_open
@@ -11650,10 +12521,13 @@ impl SumiWorkstationApp {
                         .map(|c| c.timestamp);
 
                     for (i, cr) in cell_rects.iter().take(slot_count).enumerate() {
-                        let ext_ts = if hovered_slot == Some(i) {
-                            None
+                        let (ext_ts, ext_ws_ts) = if hovered_slot == Some(i) {
+                            (None, None)
                         } else {
-                            self.linked_crosshair_timestamp
+                            (
+                                self.linked_crosshair_timestamp,
+                                self.linked_whitespace_timestamp,
+                            )
                         };
                         let inner_rect = cr.shrink(1.5);
                         ui.scope_builder(
@@ -11666,6 +12540,7 @@ impl SumiWorkstationApp {
                                     clicked_cut_idx = self.render_primary_slot_0_chart(
                                         cell_ui,
                                         ext_ts,
+                                        ext_ws_ts,
                                         any_modal_open,
                                     );
                                 } else {
@@ -11673,6 +12548,7 @@ impl SumiWorkstationApp {
                                         cell_ui,
                                         i - 1,
                                         ext_ts,
+                                        ext_ws_ts,
                                         replay_cutoff_timestamp,
                                         frontier_base_timestamp,
                                         any_modal_open,
@@ -11878,6 +12754,16 @@ impl SumiWorkstationApp {
         } else if self.settings.auto_snapshot_interval_mins == 0 {
             self.last_auto_snapshot_time_secs = None;
         }
+        // Handle native / WASM Drag-and-Drop `.csv`/`.json` files (`v1.1 / Wave 1`)
+        let dropped_files = ui.input(|i| i.raw.dropped_files.clone());
+        if !dropped_files.is_empty() && self.handle_dropped_files(&dropped_files) {
+            ui.ctx().request_repaint();
+        }
+        let hovered_files = ui.input(|i| i.raw.hovered_files.clone());
+        if !hovered_files.is_empty() {
+            Self::paint_file_drop_overlay(ui.ctx(), &hovered_files);
+        }
+
         #[cfg(not(target_arch = "wasm32"))]
         if std::mem::take(&mut self.pending_png_export) {
             let vp = ui.ctx().content_rect();
@@ -11885,6 +12771,559 @@ impl SumiWorkstationApp {
             let lh = (vp.height().round() as u32).clamp(420, 2400);
             let _ = self.trigger_quick_png_export(lw, lh);
             ui.ctx().request_repaint();
+        }
+    }
+
+    fn paint_file_drop_overlay(ctx: &egui::Context, hovered: &[egui::HoveredFile]) {
+        let screen = ctx.content_rect();
+        if screen.width() < 40.0 || screen.height() < 40.0 {
+            return;
+        }
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("sumi_file_drop_overlay"),
+        ));
+        painter.rect_filled(
+            screen,
+            0.0,
+            Color32::from_rgba_unmultiplied(10, 14, 22, 188),
+        );
+        let inset = screen.shrink(28.0);
+        painter.rect(
+            inset,
+            CornerRadius::same(12),
+            Color32::from_rgba_unmultiplied(24, 46, 86, 130),
+            Stroke::new(2.5, palette::ACCENT_BLUE),
+            egui::StrokeKind::Inside,
+        );
+        let center = inset.center();
+        painter.text(
+            Pos2::new(center.x, center.y - 12.0),
+            egui::Align2::CENTER_CENTER,
+            "Drop CSV / JSON file to load OHLCV",
+            egui::FontId::proportional(20.0),
+            Color32::WHITE,
+        );
+        let detail = hovered
+            .first()
+            .and_then(|f| {
+                f.path
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .map(ToOwned::to_owned)
+                    .or_else(|| (!f.mime.is_empty()).then(|| f.mime.clone()))
+            })
+            .unwrap_or_else(|| {
+                "Supports CafeF SolieuGD CSV, generic OHLCV CSV/TSV & JSON".to_owned()
+            });
+        painter.text(
+            Pos2::new(center.x, center.y + 18.0),
+            egui::Align2::CENTER_CENTER,
+            detail,
+            egui::FontId::monospace(12.0),
+            Color32::from_rgb(168, 206, 255),
+        );
+    }
+
+    fn render_left_drawing_rail(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing = Vec2::new(0.0, 3.0);
+        egui::ScrollArea::vertical()
+            .id_salt("left_drawing_rail_scroll")
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    let tools = [
+                        (DrawingTool::Select, "Cursor / Select (Esc)"),
+                        (DrawingTool::HorizontalLine, "Horizontal Line (1 click)"),
+                        (DrawingTool::TrendLine, "Trend Line (2 clicks · Extend L/R)"),
+                        (DrawingTool::Ray, "Ray 360° (2 clicks)"),
+                        (
+                            DrawingTool::ParallelChannel,
+                            "Parallel Channel (3 clicks · Extend L/R + 50% Midline)",
+                        ),
+                        (DrawingTool::Rectangle, "Rectangle Zone (2 clicks)"),
+                        (
+                            DrawingTool::FibonacciRetracement,
+                            "Fibonacci Retracement (2 clicks)",
+                        ),
+                        (
+                            DrawingTool::RiskRewardBox,
+                            "Position Risk/Reward Box (2 clicks)",
+                        ),
+                        (
+                            DrawingTool::PriceDateRange,
+                            "Price & Date Range Measure (2 clicks or Shift+Click)",
+                        ),
+                        (
+                            DrawingTool::FixedRangeVolumeProfile,
+                            "Fixed Range Volume Profile — FRVP (2 clicks)",
+                        ),
+                        (DrawingTool::AnchoredVwap, "Anchored VWAP ±1σ/2σ (1 click)"),
+                        (DrawingTool::TextNote, "Text Note Callout (1 click)"),
+                    ];
+                    for (tool, tip) in tools {
+                        let is_active = self.drawings.active_tool == tool;
+                        if Self::rail_icon_button(
+                            ui,
+                            is_active,
+                            true,
+                            palette::ACCENT_BLUE,
+                            tip,
+                            |p, r, c| {
+                                Self::paint_drawing_tool_icon(p, r, tool, c);
+                            },
+                        ) {
+                            if tool != DrawingTool::Select {
+                                self.cancel_replay_cut_selection();
+                            }
+                            self.drawings.set_tool(tool);
+                        }
+                    }
+
+                    ui.add_space(3.0);
+                    let sep_w = ui.available_width().min(22.0);
+                    let (sep_rect, _) =
+                        ui.allocate_exact_size(Vec2::new(sep_w, 2.0), egui::Sense::hover());
+                    ui.painter().line_segment(
+                        [
+                            Pos2::new(sep_rect.left(), sep_rect.center().y),
+                            Pos2::new(sep_rect.right(), sep_rect.center().y),
+                        ],
+                        Stroke::new(1.0, palette::BORDER_SUBTLE),
+                    );
+                    ui.add_space(3.0);
+
+                    // Magnet OHLC toggle
+                    let mag_on = self.drawings.magnet_mode == MagnetMode::Ohlc;
+                    if Self::rail_icon_button(
+                        ui,
+                        mag_on,
+                        true,
+                        Color32::from_rgb(255, 193, 7),
+                        if mag_on {
+                            "OHLC Magnet: ON (Snap to High/Low/Open/Close)"
+                        } else {
+                            "OHLC Magnet: OFF (Click to snap to candle OHLC)"
+                        },
+                        |p, r, c| Self::paint_rail_action_icon(p, r, RailActionIcon::Magnet, c),
+                    ) {
+                        self.drawings.magnet_mode = if mag_on {
+                            MagnetMode::Off
+                        } else {
+                            MagnetMode::Ohlc
+                        };
+                    }
+
+                    // Undo
+                    if Self::rail_icon_button(
+                        ui,
+                        false,
+                        self.drawings.can_undo(),
+                        palette::ACCENT_BLUE,
+                        "Undo Drawing (Cmd+Z)",
+                        |p, r, c| Self::paint_rail_action_icon(p, r, RailActionIcon::Undo, c),
+                    ) {
+                        let _ = self.drawings.undo();
+                    }
+
+                    // Redo
+                    if Self::rail_icon_button(
+                        ui,
+                        false,
+                        self.drawings.can_redo(),
+                        palette::ACCENT_BLUE,
+                        "Redo Drawing (Cmd+Shift+Z)",
+                        |p, r, c| Self::paint_rail_action_icon(p, r, RailActionIcon::Redo, c),
+                    ) {
+                        let _ = self.drawings.redo();
+                    }
+
+                    // Inspector
+                    if Self::rail_icon_button(
+                        ui,
+                        self.show_drawing_inspector,
+                        true,
+                        Color32::from_rgb(255, 193, 7),
+                        "Toggle Drawing Property Inspector",
+                        |p, r, c| Self::paint_rail_action_icon(p, r, RailActionIcon::Inspector, c),
+                    ) {
+                        self.show_drawing_inspector = !self.show_drawing_inspector;
+                    }
+
+                    // Clear unlocked drawings
+                    if Self::rail_icon_button(
+                        ui,
+                        false,
+                        self.drawings.has_unlocked_drawings(),
+                        palette::BEARISH,
+                        "Clear All Unlocked Drawings",
+                        |p, r, c| Self::paint_rail_action_icon(p, r, RailActionIcon::Clear, c),
+                    ) {
+                        let _ = self.drawings.clear_unlocked();
+                    }
+
+                    // Collapse rail
+                    if Self::rail_icon_button(
+                        ui,
+                        false,
+                        true,
+                        palette::TEXT_MUTED,
+                        "Collapse Left Drawing Rail (restore via Top Toolbar 'Rail' or Cmd+K)",
+                        |p, r, c| Self::paint_rail_action_icon(p, r, RailActionIcon::Collapse, c),
+                    ) {
+                        self.settings.show_drawing_rail = false;
+                    }
+                });
+            });
+    }
+
+    fn rail_icon_button(
+        ui: &mut egui::Ui,
+        active: bool,
+        enabled: bool,
+        accent: Color32,
+        tooltip: &str,
+        paint_fn: impl FnOnce(&egui::Painter, Rect, Color32),
+    ) -> bool {
+        let size = Vec2::new(28.0, 26.0);
+        let sense = if enabled {
+            egui::Sense::click()
+        } else {
+            egui::Sense::hover()
+        };
+        let (rect, response) = ui.allocate_exact_size(size, sense);
+        let bg = if active {
+            accent.gamma_multiply(0.24)
+        } else if enabled && response.hovered() {
+            Color32::from_rgb(32, 38, 52)
+        } else {
+            Color32::TRANSPARENT
+        };
+        let stroke = if active {
+            Stroke::new(1.1, accent)
+        } else if enabled && response.hovered() {
+            Stroke::new(1.0, palette::BORDER_SUBTLE)
+        } else {
+            Stroke::NONE
+        };
+        ui.painter().rect(
+            rect,
+            CornerRadius::same(4),
+            bg,
+            stroke,
+            egui::StrokeKind::Inside,
+        );
+
+        let fg = if !enabled {
+            Color32::from_rgb(76, 84, 102)
+        } else if active {
+            Color32::WHITE
+        } else if response.hovered() {
+            palette::TEXT_PRIMARY
+        } else {
+            Color32::from_rgb(168, 178, 198)
+        };
+        let icon_rect = rect.shrink2(Vec2::new(6.0, 5.0));
+        paint_fn(ui.painter(), icon_rect, fg);
+
+        let resp = response.on_hover_text(tooltip);
+        enabled && resp.clicked()
+    }
+
+    fn paint_drawing_tool_icon(
+        painter: &egui::Painter,
+        r: Rect,
+        tool: DrawingTool,
+        color: Color32,
+    ) {
+        let s = Stroke::new(1.4, color);
+        let s_thin = Stroke::new(1.1, color);
+        let c = r.center();
+        match tool {
+            DrawingTool::Select => {
+                // Crisp TradingView crosshair icon
+                let gap = 2.5;
+                painter.line_segment([Pos2::new(r.left(), c.y), Pos2::new(c.x - gap, c.y)], s);
+                painter.line_segment([Pos2::new(c.x + gap, c.y), Pos2::new(r.right(), c.y)], s);
+                painter.line_segment([Pos2::new(c.x, r.top()), Pos2::new(c.x, c.y - gap)], s);
+                painter.line_segment([Pos2::new(c.x, c.y + gap), Pos2::new(c.x, r.bottom())], s);
+                painter.circle_filled(c, 1.4, color);
+            }
+            DrawingTool::HorizontalLine => {
+                painter.line_segment([Pos2::new(r.left(), c.y), Pos2::new(r.right(), c.y)], s);
+                painter.circle_filled(c, 2.2, color);
+            }
+            DrawingTool::TrendLine => {
+                let p0 = Pos2::new(r.left() + 1.0, r.bottom() - 1.5);
+                let p1 = Pos2::new(r.right() - 1.0, r.top() + 1.5);
+                painter.line_segment([p0, p1], s);
+                painter.circle_filled(p0, 2.0, color);
+                painter.circle_filled(p1, 2.0, color);
+            }
+            DrawingTool::Ray => {
+                let p0 = Pos2::new(r.left() + 1.5, r.bottom() - 2.0);
+                let p1 = Pos2::new(r.right() - 1.0, r.top() + 1.5);
+                painter.line_segment([p0, p1], s);
+                painter.circle_filled(p0, 2.0, color);
+                painter.line_segment([p1, Pos2::new(p1.x - 4.5, p1.y + 0.5)], s_thin);
+                painter.line_segment([p1, Pos2::new(p1.x - 0.5, p1.y + 4.5)], s_thin);
+            }
+            DrawingTool::ParallelChannel => {
+                // Two parallel diagonal trendlines + subtle dashed midline
+                let a0 = Pos2::new(r.left() + 1.0, r.bottom() - 5.5);
+                let a1 = Pos2::new(r.right() - 3.5, r.top() + 1.5);
+                let b0 = Pos2::new(r.left() + 3.5, r.bottom() - 1.5);
+                let b1 = Pos2::new(r.right() - 1.0, r.top() + 5.5);
+                painter.line_segment([a0, a1], s);
+                painter.line_segment([b0, b1], s);
+                let m0 = Pos2::new(0.5 * (a0.x + b0.x), 0.5 * (a0.y + b0.y));
+                let m1 = Pos2::new(0.5 * (a1.x + b1.x), 0.5 * (a1.y + b1.y));
+                painter.line_segment([m0, m1], Stroke::new(1.0, color.gamma_multiply(0.55)));
+                painter.circle_filled(a0, 1.5, color);
+                painter.circle_filled(b1, 1.5, color);
+            }
+            DrawingTool::PriceDateRange => {
+                // Crisp ruler icon with graduated ticks
+                let box_r = Rect::from_min_max(
+                    Pos2::new(r.left() + 1.0, r.top() + 3.0),
+                    Pos2::new(r.right() - 1.0, r.bottom() - 3.0),
+                );
+                painter.rect(
+                    box_r,
+                    CornerRadius::same(1),
+                    color.gamma_multiply(0.18),
+                    s_thin,
+                    egui::StrokeKind::Inside,
+                );
+                for (i, frac) in [0.22_f32, 0.41, 0.60, 0.79].iter().enumerate() {
+                    let tx = box_r.left() + box_r.width() * frac;
+                    let len = if i % 2 == 0 { 4.2 } else { 2.6 };
+                    painter.line_segment(
+                        [Pos2::new(tx, box_r.top()), Pos2::new(tx, box_r.top() + len)],
+                        s_thin,
+                    );
+                }
+            }
+            DrawingTool::Rectangle => {
+                let box_r = r.shrink(1.0);
+                painter.rect(
+                    box_r,
+                    CornerRadius::same(1),
+                    color.gamma_multiply(0.18),
+                    s,
+                    egui::StrokeKind::Inside,
+                );
+                painter.circle_filled(box_r.left_top(), 1.7, color);
+                painter.circle_filled(box_r.right_bottom(), 1.7, color);
+            }
+            DrawingTool::FibonacciRetracement => {
+                for (i, frac) in [0.12_f32, 0.38, 0.64, 0.90].iter().enumerate() {
+                    let y = r.top() + r.height() * frac;
+                    let stroke = if i == 1 || i == 2 {
+                        Stroke::new(1.3, color)
+                    } else {
+                        Stroke::new(1.0, color.gamma_multiply(0.75))
+                    };
+                    painter.line_segment([Pos2::new(r.left(), y), Pos2::new(r.right(), y)], stroke);
+                }
+            }
+            DrawingTool::RiskRewardBox => {
+                let mid_y = r.top() + r.height() * 0.52;
+                let top_r = Rect::from_min_max(
+                    Pos2::new(r.left() + 1.0, r.top() + 1.0),
+                    Pos2::new(r.right() - 1.0, mid_y),
+                );
+                let bot_r = Rect::from_min_max(
+                    Pos2::new(r.left() + 1.0, mid_y),
+                    Pos2::new(r.right() - 1.0, r.bottom() - 1.0),
+                );
+                painter.rect_filled(top_r, 0.0, palette::BULLISH.gamma_multiply(0.45));
+                painter.rect_filled(bot_r, 0.0, palette::BEARISH.gamma_multiply(0.45));
+                painter.line_segment(
+                    [Pos2::new(r.left(), mid_y), Pos2::new(r.right(), mid_y)],
+                    Stroke::new(1.4, color),
+                );
+                painter.rect_stroke(
+                    r.shrink(1.0),
+                    0.0,
+                    Stroke::new(1.0, color.gamma_multiply(0.8)),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            DrawingTool::FixedRangeVolumeProfile => {
+                let x0 = r.left() + 1.5;
+                painter.line_segment([Pos2::new(x0, r.top()), Pos2::new(x0, r.bottom())], s_thin);
+                let bars = [0.35_f32, 0.65, 0.95, 0.55, 0.30];
+                let step = r.height() / bars.len() as f32;
+                for (i, w_frac) in bars.iter().enumerate() {
+                    let y = r.top() + (i as f32 + 0.5) * step;
+                    let w = (r.width() - 2.0) * w_frac;
+                    let bar_col = if i == 2 {
+                        Color32::from_rgb(255, 193, 7)
+                    } else {
+                        color
+                    };
+                    painter.line_segment(
+                        [Pos2::new(x0 + 1.0, y), Pos2::new(x0 + 1.0 + w, y)],
+                        Stroke::new(1.9, bar_col),
+                    );
+                }
+            }
+            DrawingTool::AnchoredVwap => {
+                let p0 = Pos2::new(r.left() + 1.5, r.bottom() - 2.0);
+                let p1 = Pos2::new(c.x, c.y + 1.0);
+                let p2 = Pos2::new(r.right() - 1.0, r.top() + 3.0);
+                painter.line_segment([p0, p1], s);
+                painter.line_segment([p1, p2], s);
+                painter.line_segment(
+                    [Pos2::new(p1.x, p1.y - 3.5), Pos2::new(p2.x, p2.y - 2.5)],
+                    Stroke::new(1.0, color.gamma_multiply(0.55)),
+                );
+                painter.circle_filled(p0, 2.2, Color32::from_rgb(255, 193, 7));
+            }
+            DrawingTool::TextNote => {
+                let top_y = r.top() + 2.0;
+                painter.line_segment(
+                    [
+                        Pos2::new(r.left() + 1.5, top_y),
+                        Pos2::new(r.right() - 1.5, top_y),
+                    ],
+                    Stroke::new(1.7, color),
+                );
+                painter.line_segment(
+                    [Pos2::new(c.x, top_y), Pos2::new(c.x, r.bottom() - 1.5)],
+                    Stroke::new(1.7, color),
+                );
+                painter.line_segment(
+                    [
+                        Pos2::new(c.x - 3.0, r.bottom() - 1.5),
+                        Pos2::new(c.x + 3.0, r.bottom() - 1.5),
+                    ],
+                    s_thin,
+                );
+            }
+        }
+    }
+
+    fn paint_rail_action_icon(
+        painter: &egui::Painter,
+        r: Rect,
+        kind: RailActionIcon,
+        color: Color32,
+    ) {
+        let s = Stroke::new(1.4, color);
+        let c = r.center();
+        match kind {
+            RailActionIcon::Magnet => {
+                // Horseshoe magnet U-shape
+                let lx = r.left() + 3.0;
+                let rx = r.right() - 3.0;
+                let top_y = r.top() + 2.0;
+                let bend_y = r.bottom() - 4.5;
+                let bot_y = r.bottom() - 1.5;
+                painter.line_segment([Pos2::new(lx, top_y), Pos2::new(lx, bend_y)], s);
+                painter.line_segment([Pos2::new(rx, top_y), Pos2::new(rx, bend_y)], s);
+                painter.line_segment([Pos2::new(lx, bend_y), Pos2::new(c.x - 2.0, bot_y)], s);
+                painter.line_segment(
+                    [Pos2::new(c.x - 2.0, bot_y), Pos2::new(c.x + 2.0, bot_y)],
+                    s,
+                );
+                painter.line_segment([Pos2::new(c.x + 2.0, bot_y), Pos2::new(rx, bend_y)], s);
+                // Tips
+                painter.line_segment(
+                    [
+                        Pos2::new(lx - 1.5, top_y + 2.5),
+                        Pos2::new(lx + 1.5, top_y + 2.5),
+                    ],
+                    s,
+                );
+                painter.line_segment(
+                    [
+                        Pos2::new(rx - 1.5, top_y + 2.5),
+                        Pos2::new(rx + 1.5, top_y + 2.5),
+                    ],
+                    s,
+                );
+            }
+            RailActionIcon::Undo => {
+                let tip = Pos2::new(r.left() + 1.5, c.y - 1.5);
+                let top_r = Pos2::new(r.right() - 2.0, c.y - 1.5);
+                let bot_r = Pos2::new(r.right() - 2.0, r.bottom() - 2.5);
+                painter.line_segment([tip, top_r], s);
+                painter.line_segment([top_r, bot_r], s);
+                painter.line_segment([bot_r, Pos2::new(c.x - 1.0, bot_r.y)], s);
+                painter.line_segment([tip, Pos2::new(tip.x + 3.5, tip.y - 3.0)], s);
+                painter.line_segment([tip, Pos2::new(tip.x + 3.5, tip.y + 3.0)], s);
+            }
+            RailActionIcon::Redo => {
+                let tip = Pos2::new(r.right() - 1.5, c.y - 1.5);
+                let top_l = Pos2::new(r.left() + 2.0, c.y - 1.5);
+                let bot_l = Pos2::new(r.left() + 2.0, r.bottom() - 2.5);
+                painter.line_segment([tip, top_l], s);
+                painter.line_segment([top_l, bot_l], s);
+                painter.line_segment([bot_l, Pos2::new(c.x + 1.0, bot_l.y)], s);
+                painter.line_segment([tip, Pos2::new(tip.x - 3.5, tip.y - 3.0)], s);
+                painter.line_segment([tip, Pos2::new(tip.x - 3.5, tip.y + 3.0)], s);
+            }
+            RailActionIcon::Inspector => {
+                for (y_frac, knob_frac) in [(0.22_f32, 0.35_f32), (0.52, 0.72), (0.82, 0.45)] {
+                    let y = r.top() + r.height() * y_frac;
+                    painter.line_segment(
+                        [Pos2::new(r.left() + 1.0, y), Pos2::new(r.right() - 1.0, y)],
+                        Stroke::new(1.2, color),
+                    );
+                    let kx = r.left() + r.width() * knob_frac;
+                    painter.circle_filled(Pos2::new(kx, y), 2.1, color);
+                }
+            }
+            RailActionIcon::Clear => {
+                // Clean trash-bin icon
+                let lid_y = r.top() + 3.0;
+                painter.line_segment(
+                    [
+                        Pos2::new(r.left() + 1.5, lid_y),
+                        Pos2::new(r.right() - 1.5, lid_y),
+                    ],
+                    s,
+                );
+                painter.line_segment(
+                    [
+                        Pos2::new(c.x - 2.5, r.top() + 1.0),
+                        Pos2::new(c.x + 2.5, r.top() + 1.0),
+                    ],
+                    s,
+                );
+                let body = Rect::from_min_max(
+                    Pos2::new(r.left() + 3.0, lid_y + 1.0),
+                    Pos2::new(r.right() - 3.0, r.bottom() - 1.5),
+                );
+                painter.rect_stroke(body, 1.0, Stroke::new(1.2, color), egui::StrokeKind::Inside);
+                painter.line_segment(
+                    [
+                        Pos2::new(c.x, body.top() + 2.0),
+                        Pos2::new(c.x, body.bottom() - 2.0),
+                    ],
+                    Stroke::new(1.0, color),
+                );
+            }
+            RailActionIcon::Collapse => {
+                // Double left chevron `<<`
+                for dx in [-2.5_f32, 2.5] {
+                    let x = c.x + dx;
+                    painter.line_segment(
+                        [Pos2::new(x + 2.5, r.top() + 3.0), Pos2::new(x - 1.5, c.y)],
+                        s,
+                    );
+                    painter.line_segment(
+                        [
+                            Pos2::new(x - 1.5, c.y),
+                            Pos2::new(x + 2.5, r.bottom() - 3.0),
+                        ],
+                        s,
+                    );
+                }
+            }
         }
     }
 
@@ -12258,6 +13697,7 @@ impl SumiWorkstationApp {
                         .clicked()
                     {
                         self.trading_view_mode = TemplateTradingViewMode::DomLadder;
+                        self.dom_auto_center_pending = true;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let badge = self
@@ -12288,7 +13728,8 @@ impl SumiWorkstationApp {
                     palette::TEXT_PRIMARY
                 };
 
-                // 1. Account Scoreboard Card
+                // 1. Account Scoreboard Card (`BUG-023`: venue-aware currency display)
+                let active_venue = self.active_exchange_venue();
                 Frame::new()
                     .fill(Color32::from_rgb(19, 24, 35))
                     .corner_radius(CornerRadius::same(4))
@@ -12303,7 +13744,7 @@ impl SumiWorkstationApp {
                                     .color(palette::TEXT_MUTED),
                             );
                             ui.label(
-                                RichText::new(format!("${:.2}", metrics.equity))
+                                RichText::new(format_venue_money(active_venue, metrics.equity, 2))
                                     .monospace()
                                     .strong()
                                     .size(11.5)
@@ -12330,8 +13771,9 @@ impl SumiWorkstationApp {
                         });
                         ui.label(
                             RichText::new(format!(
-                                "Cash ${:.0} · MaxDD {:.2}%",
-                                metrics.cash_balance, metrics.max_drawdown_pct
+                                "Cash {} · MaxDD {:.2}%",
+                                format_venue_money(active_venue, metrics.cash_balance, 0),
+                                metrics.max_drawdown_pct
                             ))
                             .monospace()
                             .size(10.5)
@@ -12451,10 +13893,10 @@ impl SumiWorkstationApp {
                             );
                         });
 
-                        let can_sync = self
-                            .drawings
-                            .selected_drawing()
-                            .is_some_and(|d| d.pane == DrawingPaneTarget::Main);
+                        let can_sync = self.drawings.selected_drawing().is_some_and(|d| {
+                            d.pane == DrawingPaneTarget::Main
+                                && !matches!(d.geometry, DrawingGeometry::TextNote { .. })
+                        });
                         if ui
                             .add_enabled(
                                 can_sync,
@@ -12738,7 +14180,7 @@ impl SumiWorkstationApp {
                         });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
-                            RichText::new(format!("${:.0}", metrics.equity))
+                            RichText::new(format_venue_money(snap.venue, metrics.equity, 0))
                                 .monospace()
                                 .strong()
                                 .size(10.5)
@@ -13014,12 +14456,31 @@ impl SumiWorkstationApp {
             });
 
         // 5. Interactive Single-Painter 21-Row Price Ladder (`Work | Bid | Price | Ask | V×Δ`)
-        let row_h = 15.0_f32;
-        let header_h = 16.0_f32;
+        // `BUG-024`: auto-center scroll on the `Mark` row so Ask, Mark, and Bid are all visible at 1280×800.
+        let row_h = 14.0_f32;
+        let header_h = 15.0_f32;
         let avail_w = ui.available_width().max(220.0);
         let total_h = header_h + (snap.rows.len() as f32) * row_h;
         let (ladder_rect, response) =
             ui.allocate_exact_size(Vec2::new(avail_w, total_h), egui::Sense::click());
+        if self.dom_auto_center_pending {
+            if let Some(mark_idx) = snap.rows.iter().position(|r| r.is_at_mark) {
+                let mark_top = ladder_rect.top() + header_h + (mark_idx as f32) * row_h;
+                let center_span = (row_h * 5.0).max(row_h);
+                let focus_rect = Rect::from_min_max(
+                    Pos2::new(
+                        ladder_rect.left(),
+                        (mark_top - center_span).max(ladder_rect.top()),
+                    ),
+                    Pos2::new(
+                        ladder_rect.right(),
+                        (mark_top + row_h + center_span).min(ladder_rect.bottom()),
+                    ),
+                );
+                ui.scroll_to_rect(focus_rect, Some(egui::Align::Center));
+            }
+            self.dom_auto_center_pending = false;
+        }
         let painter = ui.painter_at(ladder_rect);
 
         // Background & outer border
@@ -13460,7 +14921,11 @@ impl SumiWorkstationApp {
         ui.horizontal(|ui| {
             let sp_x = ui.spacing().item_spacing.x;
             let third_w = ((ui.available_width() - 2.0 * sp_x - 2.0) / 3.0).max(58.0);
-            let breadth_count = self.breadth_snapshot_cache.rotations.len();
+            let breadth_count = if self.breadth_synced_key == self.scanner_synced_key {
+                self.breadth_snapshot_cache.rotations.len()
+            } else {
+                self.raw_watchlist_rows_cache.len()
+            };
             for (tab, lbl) in [
                 (ScannerDockTab::Watchlist, format!("Watch ({rows_len})")),
                 (ScannerDockTab::Signals, format!("Sig ({hits_len})")),
@@ -13796,12 +15261,15 @@ impl SumiWorkstationApp {
                 let mut clicked_instrument: Option<(DataSourcePreset, String)> = None;
                 let mut wl_launch_req: Option<(HistoricalSignalHit, ScannerReplayIntent)> = None;
                 let blind_lb = self.blind_practice_lookback_bars;
+                // `BUG-020`: virtualized Watchlist (`show_rows`) renders only the ~10-14 visible
+                // cards instead of all 471+ symbols every frame (< 0.5 ms/frame at 60 FPS!).
+                const WATCHLIST_ROW_H: f32 = 60.0;
                 egui::ScrollArea::vertical()
                     .id_salt("sumi_watchlist_scroll")
                     .auto_shrink([false, false])
-                    .show(ui, |ui| {
+                    .show_rows(ui, WATCHLIST_ROW_H, rows_slice.len(), |ui, row_range| {
                         ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
-                        for row in rows_slice {
+                        for row in &rows_slice[row_range] {
                             let is_active = row.instrument_id == active_key;
                             let card_fill = if is_active {
                                 Color32::from_rgb(25, 36, 56)
@@ -13818,9 +15286,10 @@ impl SumiWorkstationApp {
                                 .fill(card_fill)
                                 .corner_radius(CornerRadius::same(4))
                                 .stroke(card_stroke)
-                                .inner_margin(Margin::symmetric(7, 5))
+                                .inner_margin(Margin::symmetric(7, 4))
                                 .show(ui, |ui| {
                                     ui.set_min_width(ui.available_width());
+                                    ui.set_min_height(WATCHLIST_ROW_H - 12.0);
                                     ui.horizontal(|ui| {
                                         ui.label(
                                             RichText::new(&row.symbol)
@@ -13968,6 +15437,16 @@ impl SumiWorkstationApp {
                                                 ));
                                             }
                                         });
+                                    } else {
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{} · no recent signal",
+                                                row.source_label
+                                            ))
+                                            .monospace()
+                                            .size(8.8)
+                                            .color(palette::TEXT_MUTED.gamma_multiply(0.75)),
+                                        );
                                     }
                                 });
 
@@ -13981,18 +15460,18 @@ impl SumiWorkstationApp {
                             }
                             if click_resp.clicked() {
                                 if let Some(entry) = self
-                                    .watchlist_universe
-                                    .iter()
-                                    .find(|e| e.instrument_id == row.instrument_id)
-                                {
-                                    clicked_instrument = Some((entry.preset, entry.symbol.clone()));
-                                } else if let Some(entry) = self
                                     .custom_peer_feeds
                                     .iter()
                                     .find(|e| e.instrument_id == row.instrument_id)
                                 {
                                     clicked_instrument =
                                         Some((DataSourcePreset::CustomFile, entry.symbol.clone()));
+                                } else if let Some(entry) = self
+                                    .watchlist_universe
+                                    .iter()
+                                    .find(|e| e.instrument_id == row.instrument_id)
+                                {
+                                    clicked_instrument = Some((entry.preset, entry.symbol.clone()));
                                 } else if row.instrument_id.starts_with("Preset:Synth:") {
                                     clicked_instrument = Some((
                                         DataSourcePreset::SyntheticVnindex,
@@ -14070,7 +15549,19 @@ impl SumiWorkstationApp {
                     .filtered_signals_cache
                     .as_ref()
                     .map_or(&[][..], |c| c.hits.as_slice());
-                let capped_len = hits_slice.len().min(64);
+                let total_hits_len = hits_slice.len();
+                let capped_len = total_hits_len.min(64);
+                if total_hits_len > capped_len {
+                    // `BUG-032`: explicit pagination notice when matching hits exceed the 64-card page cap.
+                    ui.label(
+                        RichText::new(format!(
+                            "Showing {capped_len} / {total_hits_len} hits (newest first · filter to narrow)"
+                        ))
+                        .monospace()
+                        .size(9.2)
+                        .color(palette::ALERT_ARMED_AMBER),
+                    );
+                }
                 if capped_len == 0 {
                     ui.label(
                         RichText::new("No causal signals match current filter.")
@@ -14293,6 +15784,7 @@ impl SumiWorkstationApp {
     }
 
     fn render_market_breadth_tab(&mut self, ui: &mut egui::Ui) {
+        self.sync_breadth_cache();
         self.sync_market_bb_and_symbol_proxy_bb();
         let snap = self.breadth_snapshot_cache.clone();
         let mut clicked_target: Option<(DataSourcePreset, String)> = None;
@@ -14536,34 +16028,81 @@ impl SumiWorkstationApp {
                 ));
                 placed_obstacles.push(egui::Rect::from_center_size(mid_p, Vec2::splat(8.0)));
 
-                // Pass 1: Draw all rotation trails & head markers, registering dot bounding boxes.
-                let mut draw_items: Vec<(&SymbolBreadthRotation, egui::Pos2, Color32, bool)> =
-                    Vec::with_capacity(snap.rotations.len());
-                for rot in &snap.rotations {
+                // Pass 1: Draw rotation trails & head markers (`BUG-020`: on dense >24 universes,
+                // render full trails for top priority/VN30/active/hovered symbols and compact dots
+                // for background peers so the 471-symbol RRG stays crisp and legible).
+                let dense_universe = snap.rotations.len() > 24;
+                let mut draw_items: Vec<(
+                    &SymbolBreadthRotation,
+                    egui::Pos2,
+                    Color32,
+                    bool,
+                    bool,
+                    usize,
+                )> = Vec::with_capacity(snap.rotations.len());
+                for (rank_idx, rot) in snap.rotations.iter().enumerate() {
                     let col = quadrant_color(rot.quadrant);
-                    if rot.trail.len() >= 2 {
+                    let head = map_pt(rot.rs_ratio, rot.rs_momentum);
+                    let is_active_sym = rot.symbol.eq_ignore_ascii_case(&self.symbol);
+                    let is_vn30 = crate::data::VN30_BASKET_SYMBOLS
+                        .iter()
+                        .any(|s| s.eq_ignore_ascii_case(&rot.symbol));
+                    let is_hovered = hover_pos.is_some_and(|hp| hp.distance(head) <= 12.0);
+                    let show_trail = !dense_universe
+                        || is_active_sym
+                        || is_hovered
+                        || (is_vn30 && rank_idx < 30)
+                        || rank_idx < 16;
+                    if show_trail && rot.trail.len() >= 2 {
                         let pts: Vec<egui::Pos2> =
                             rot.trail.iter().map(|&(rx, my)| map_pt(rx, my)).collect();
                         painter.add(egui::Shape::line(
                             pts,
-                            Stroke::new(1.1, col.gamma_multiply(0.55)),
+                            Stroke::new(
+                                if is_active_sym { 1.4 } else { 1.0 },
+                                col.gamma_multiply(if dense_universe { 0.48 } else { 0.55 }),
+                            ),
                         ));
                     }
-                    let head = map_pt(rot.rs_ratio, rot.rs_momentum);
-                    let is_active_sym = rot.symbol.eq_ignore_ascii_case(&self.symbol);
-                    painter.circle_filled(head, if is_active_sym { 4.2 } else { 3.2 }, col);
+                    let dot_r = if is_active_sym {
+                        4.2
+                    } else if is_hovered {
+                        3.8
+                    } else if dense_universe && !is_vn30 && rank_idx >= 16 {
+                        2.1
+                    } else {
+                        3.0
+                    };
+                    let dot_col = if dense_universe
+                        && !is_active_sym
+                        && !is_hovered
+                        && !is_vn30
+                        && rank_idx >= 16
+                    {
+                        col.gamma_multiply(0.55)
+                    } else {
+                        col
+                    };
+                    painter.circle_filled(head, dot_r, dot_col);
                     if is_active_sym {
                         painter.circle_stroke(head, 6.2, Stroke::new(1.2, Color32::WHITE));
                     }
-                    placed_obstacles.push(egui::Rect::from_center_size(
+                    if show_trail {
+                        placed_obstacles.push(egui::Rect::from_center_size(
+                            head,
+                            Vec2::splat(if is_active_sym { 14.0 } else { 9.0 }),
+                        ));
+                    }
+                    draw_items.push((
+                        rot,
                         head,
-                        Vec2::splat(if is_active_sym { 14.0 } else { 10.0 }),
+                        col,
+                        is_active_sym,
+                        is_hovered || is_vn30,
+                        rank_idx,
                     ));
-                    draw_items.push((rot, head, col, is_active_sym));
 
-                    if let Some(hp) = hover_pos
-                        && hp.distance(head) <= 12.0
-                    {
+                    if is_hovered {
                         hovered_rot = Some(rot);
                     }
                     if let Some(cp) = click_pos
@@ -14575,12 +16114,40 @@ impl SumiWorkstationApp {
                     }
                 }
 
-                // Pass 2: Place active symbol label first, then peers in multi-ring candidate search.
-                draw_items.sort_by_key(|item| if item.3 { 0_u8 } else { 1_u8 });
+                // Pass 2: Place labels with strict zero-overlap culling (`BUG-020`): active symbol
+                // and hovered symbol first, then VN30 / top-liquidity leaders up to 14 visible tags.
+                let hovered_sym_upper = hovered_rot.map(|r| r.symbol.to_ascii_uppercase());
+                draw_items.sort_by_key(|(rot, _, _, is_active_sym, is_vn30, rank_idx)| {
+                    let is_hov = hovered_sym_upper
+                        .as_deref()
+                        .is_some_and(|h| rot.symbol.eq_ignore_ascii_case(h));
+                    let tier = if *is_active_sym {
+                        0_u8
+                    } else if is_hov {
+                        1_u8
+                    } else if *is_vn30 {
+                        2_u8
+                    } else {
+                        3_u8
+                    };
+                    (tier, *rank_idx)
+                });
+                let max_labels = if dense_universe {
+                    14_usize
+                } else {
+                    draw_items.len()
+                };
+                let mut placed_label_count = 0_usize;
                 let lbl_font = egui::FontId::monospace(8.6);
                 let pad = Vec2::new(4.5, 3.0);
-                for (rot, head, col, is_active_sym) in draw_items {
-                    let text_col = if is_active_sym {
+                for (rot, head, col, is_active_sym, _, _) in draw_items {
+                    let is_hov = hovered_sym_upper
+                        .as_deref()
+                        .is_some_and(|h| rot.symbol.eq_ignore_ascii_case(h));
+                    if placed_label_count >= max_labels && !is_active_sym && !is_hov {
+                        continue;
+                    }
+                    let text_col = if is_active_sym || is_hov {
                         Color32::WHITE
                     } else {
                         palette::TEXT_PRIMARY
@@ -14614,6 +16181,7 @@ impl SumiWorkstationApp {
                     ];
                     let mut best_pos = head + candidates[0];
                     let mut best_rect = egui::Rect::from_min_size(best_pos, sz);
+                    let mut best_overlap = f32::INFINITY;
                     let mut best_cost = f32::INFINITY;
                     for &offset in &candidates {
                         let mut tl = head + offset;
@@ -14643,11 +16211,17 @@ impl SumiWorkstationApp {
                         let cost = overlap_area * 1000.0 + axis_pen + dist * 0.12;
                         if cost < best_cost {
                             best_cost = cost;
+                            best_overlap = overlap_area;
                             best_pos = tl;
                             best_rect = cand_rect;
                         }
                     }
+                    // Strictly omit overlapping peer labels on dense universes so zero text collides.
+                    if dense_universe && best_overlap > 1.0 && !is_active_sym && !is_hov {
+                        continue;
+                    }
                     placed_obstacles.push(best_rect);
+                    placed_label_count += 1;
                     let nearest_pt = egui::Pos2::new(
                         head.x.clamp(best_rect.left(), best_rect.right()),
                         head.y.clamp(best_rect.top(), best_rect.bottom()),
@@ -14656,6 +16230,15 @@ impl SumiWorkstationApp {
                         painter.line_segment(
                             [head, nearest_pt],
                             Stroke::new(0.7, col.gamma_multiply(0.55)),
+                        );
+                    }
+                    if is_active_sym || is_hov {
+                        let pill_bg =
+                            egui::Rect::from_min_size(best_pos, sz).expand2(Vec2::new(2.5, 1.0));
+                        painter.rect_filled(
+                            pill_bg,
+                            2.0,
+                            Color32::from_rgba_unmultiplied(15, 19, 28, 224),
                         );
                     }
                     painter.galley(best_pos, galley, text_col);
@@ -14674,8 +16257,17 @@ impl SumiWorkstationApp {
                 }
 
                 // C. Clickable VN30 / Universe Liquidity Heatmap Grid (2 fixed symmetric columns)
+                let heatmap_cap = snap.rotations.len().min(40);
+                let heatmap_title = if snap.rotations.len() > heatmap_cap {
+                    format!(
+                        "LIQUIDITY HEATMAP — TOP {heatmap_cap} / {} BY VALUE (CLICK TO LOAD)",
+                        snap.rotations.len()
+                    )
+                } else {
+                    "LIQUIDITY HEATMAP (CLICK TO LOAD)".to_owned()
+                };
                 ui.label(
-                    RichText::new("LIQUIDITY HEATMAP (CLICK TO LOAD)")
+                    RichText::new(heatmap_title)
                         .monospace()
                         .strong()
                         .size(9.5)
@@ -14685,7 +16277,7 @@ impl SumiWorkstationApp {
                 let tile_w = ((ui.available_width() - sp_x - 2.0) * 0.5).max(80.0);
                 let sym_font = egui::FontId::monospace(9.8);
                 let sub_font = egui::FontId::monospace(8.3);
-                for pair in snap.rotations.chunks(2) {
+                for pair in snap.rotations[..heatmap_cap].chunks(2) {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = sp_x;
                         for rot in pair {
@@ -15477,6 +17069,35 @@ impl SumiWorkstationApp {
                         }
 
                         if self.backtest_result.is_some() {
+                            ui.horizontal_wrapped(|ui| {
+                                if ui
+                                    .small_button(
+                                        RichText::new("Export HTML")
+                                            .monospace()
+                                            .strong()
+                                            .size(9.4)
+                                            .color(Color32::from_rgb(138, 210, 255)),
+                                    )
+                                    .on_hover_text(
+                                        "Export self-contained Strategy Lab HTML report with inline SVG charts (Cmd+P -> Save PDF)",
+                                    )
+                                    .clicked()
+                                {
+                                    let _ = self.export_backtest_html_report();
+                                }
+                                if let Some((is_err, ref msg)) = self.last_html_export_status {
+                                    ui.label(
+                                        RichText::new(msg)
+                                            .monospace()
+                                            .size(8.8)
+                                            .color(if is_err {
+                                                palette::BEARISH
+                                            } else {
+                                                palette::BULLISH
+                                            }),
+                                    );
+                                }
+                            });
                             self.render_monte_carlo_tearsheet_card(ui);
                         }
 
@@ -18812,15 +20433,16 @@ impl SumiWorkstationApp {
 
         let vp_rect = ui.input(|i| i.viewport_rect());
 
-        // 1. Translucent dark backdrop scrim (`Order::Middle`)
+        // 1. Translucent dark backdrop scrim (`Order::Middle`, `fade_in(false)` prevents frame-1 transparency — `BUG-019`)
         let scrim_resp = egui::Area::new(egui::Id::new("sumi_cmd_k_scrim"))
             .order(egui::Order::Middle)
+            .fade_in(false)
             .fixed_pos(vp_rect.min)
             .show(ui.ctx(), |ui| {
                 let (rect, resp) =
                     ui.allocate_exact_size(vp_rect.size(), egui::Sense::click_and_drag());
                 ui.painter()
-                    .rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(6, 9, 15, 182));
+                    .rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(6, 9, 15, 192));
                 resp
             })
             .inner;
@@ -18835,6 +20457,7 @@ impl SumiWorkstationApp {
         let mut clicked_action: Option<PaletteAction> = None;
         let modal_area = egui::Area::new(egui::Id::new("sumi_cmd_k_modal"))
             .order(egui::Order::Foreground)
+            .fade_in(false)
             .fixed_pos(modal_pos)
             .show(ui.ctx(), |ui| {
                 Frame::new()
@@ -19031,12 +20654,13 @@ impl SumiWorkstationApp {
         let target_rect = Self::templates_modal_rect(vp_rect);
         let scrim_resp = egui::Area::new(egui::Id::new("sumi_templates_scrim"))
             .order(egui::Order::Middle)
+            .fade_in(false)
             .fixed_pos(vp_rect.min)
             .show(ui.ctx(), |ui| {
                 let (rect, resp) =
                     ui.allocate_exact_size(vp_rect.size(), egui::Sense::click_and_drag());
                 ui.painter()
-                    .rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(6, 9, 15, 182));
+                    .rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(6, 9, 15, 192));
                 resp
             })
             .inner;
@@ -19048,6 +20672,7 @@ impl SumiWorkstationApp {
         let mut close_clicked = false;
         let modal_area = egui::Area::new(egui::Id::new("sumi_templates_modal"))
             .order(egui::Order::Foreground)
+            .fade_in(false)
             .default_size(target_rect.size())
             .fixed_pos(modal_pos)
             .show(ui.ctx(), |ui| {
@@ -19057,7 +20682,9 @@ impl SumiWorkstationApp {
                     .stroke(Stroke::new(1.5, palette::IND_CVD_LINE))
                     .inner_margin(Margin::symmetric(14, 12))
                     .show(ui, |ui| {
-                        ui.set_width((modal_w - 28.0).max(120.0));
+                        let inner_w = (modal_w - 28.0).max(120.0);
+                        ui.set_width(inner_w);
+                        ui.set_max_width(inner_w);
                         ui.set_max_height((target_rect.height() - 24.0).max(120.0));
                         ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
 
@@ -19327,10 +20954,14 @@ impl SumiWorkstationApp {
                                 );
                                 egui::ScrollArea::vertical()
                                     .id_salt("sumi_builtin_tpls_scroll")
-                                    .max_height(126.0)
+                                    .max_height(142.0)
                                     .show(ui, |ui| {
+                                        let row_w = (modal_w - 44.0).max(120.0);
+                                        ui.set_max_width(row_w);
                                         for tpl in builtin_workspace_templates() {
-                                            ui.horizontal(|ui| {
+                                            // `BUG-019`: wrap preset descriptions inside `modal_w` so the card
+                                            // never expands past `736 px` and `Close (Esc)` stays right-aligned.
+                                            ui.horizontal_wrapped(|ui| {
                                                 if ui.small_button("Diff").clicked() {
                                                     let cur =
                                                         self.capture_workspace_template("Current");
@@ -19366,11 +20997,14 @@ impl SumiWorkstationApp {
                                                     .size(10.0)
                                                     .color(palette::TEXT_PRIMARY),
                                                 );
-                                                ui.label(
-                                                    RichText::new(&tpl.description)
-                                                        .monospace()
-                                                        .size(9.2)
-                                                        .color(palette::TEXT_MUTED),
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        RichText::new(&tpl.description)
+                                                            .monospace()
+                                                            .size(9.2)
+                                                            .color(palette::TEXT_MUTED),
+                                                    )
+                                                    .wrap(),
                                                 );
                                             });
                                         }
@@ -19632,6 +21266,7 @@ impl SumiWorkstationApp {
         let mut esc_pressed = false;
         let mut unbind_pressed = false;
         let mut captured_chord = None;
+        let mut reserved_rejected = false;
         let is_rebinding_now = self.rebinding_hotkey_action.is_some();
         ui.input_mut(|i| {
             if is_rebinding_now {
@@ -19674,6 +21309,7 @@ impl SumiWorkstationApp {
                             consume_idx = Some(idx);
                             break;
                         }
+                        reserved_rejected = true;
                         consume_idx = Some(idx);
                         break;
                     }
@@ -19690,14 +21326,35 @@ impl SumiWorkstationApp {
         if let Some(target_action) = self.rebinding_hotkey_action {
             if esc_pressed {
                 self.rebinding_hotkey_action = None;
+                self.hotkey_rebind_conflict_notice = None;
                 ui.ctx().request_repaint();
             } else if unbind_pressed {
                 self.hotkey_profile.rebind(target_action, None);
                 self.rebinding_hotkey_action = None;
+                self.hotkey_rebind_conflict_notice = None;
                 ui.ctx().request_repaint();
             } else if let Some(chord) = captured_chord {
+                // `BUG-032`: surface an explicit conflict banner when reassigning a key owned by another action.
+                let prev_owner = self
+                    .hotkey_profile
+                    .resolve(chord)
+                    .filter(|&a| a != target_action);
                 self.hotkey_profile.rebind(target_action, Some(chord));
                 self.rebinding_hotkey_action = None;
+                self.hotkey_rebind_conflict_notice = prev_owner.map(|prev| {
+                    format!(
+                        "Conflict resolved: [{}] moved from '{}' (now Unbound) to '{}'.",
+                        chord.format_badge(),
+                        prev.label(),
+                        target_action.label()
+                    )
+                });
+                ui.ctx().request_repaint();
+            } else if reserved_rejected {
+                self.hotkey_rebind_conflict_notice = Some(
+                    "Shortcut rejected: Cmd/Ctrl chords and Tab/system keys are reserved."
+                        .to_owned(),
+                );
                 ui.ctx().request_repaint();
             }
         } else if esc_pressed {
@@ -19829,6 +21486,23 @@ impl SumiWorkstationApp {
                                     .color(palette::TEXT_MUTED),
                                 );
                             });
+
+                        if let Some(ref conflict_msg) = self.hotkey_rebind_conflict_notice {
+                            Frame::new()
+                                .fill(palette::ALERT_ARMED_AMBER.gamma_multiply(0.16))
+                                .stroke(Stroke::new(1.0, palette::ALERT_ARMED_AMBER))
+                                .corner_radius(CornerRadius::same(4))
+                                .inner_margin(Margin::symmetric(8, 4))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(conflict_msg)
+                                            .monospace()
+                                            .strong()
+                                            .size(9.8)
+                                            .color(palette::ALERT_ARMED_AMBER),
+                                    );
+                                });
+                        }
 
                         // Scrollable 17-Row Action Bindings Table
                         let scroll_h = (modal_max_h - 134.0).max(180.0);
@@ -20091,7 +21765,7 @@ impl SumiWorkstationApp {
                         });
 
                         ui.horizontal(|ui| {
-                            let search_w = (ui.available_width() - 135.0).max(120.0);
+                            let search_w = (ui.available_width() - 255.0).max(120.0);
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.signal_catalog_search)
                                     .desired_width(search_w)
@@ -20099,6 +21773,18 @@ impl SumiWorkstationApp {
                                     .font(egui::FontId::monospace(10.5)),
                             );
                             truncate_utf8_bytes(&mut self.signal_catalog_search, 64);
+                            // `BUG-032` / `TC-50`: EN / VI / Both language toggle for Signal Catalog 101.
+                            for lang in SignalCatalogLang::ALL {
+                                if ui
+                                    .selectable_label(
+                                        self.signal_catalog_lang == lang,
+                                        RichText::new(lang.short_label()).monospace().size(9.5),
+                                    )
+                                    .clicked()
+                                {
+                                    self.signal_catalog_lang = lang;
+                                }
+                            }
                             let _ = indicator_toggle_pill(
                                 ui,
                                 &mut self.show_catalog_advanced_params,
@@ -20130,6 +21816,7 @@ impl SumiWorkstationApp {
                             58.0
                         };
                         let show_adv = self.show_catalog_advanced_params;
+                        let catalog_lang = self.signal_catalog_lang;
                         let conf_ref = self.confluence_report_cache.as_ref();
                         egui::ScrollArea::vertical()
                             .id_salt("sumi_signal_catalog_scroll")
@@ -20148,18 +21835,31 @@ impl SumiWorkstationApp {
                                         .inner_margin(Margin::symmetric(8, 6))
                                         .show(ui, |ui| {
                                             ui.set_min_width(ui.available_width());
+                                            let title_str = match catalog_lang {
+                                                SignalCatalogLang::Both => format!(
+                                                    "[{}] {} · {}",
+                                                    entry.category.short_label(),
+                                                    entry.label_en,
+                                                    entry.label_vi
+                                                ),
+                                                SignalCatalogLang::En => format!(
+                                                    "[{}] {}",
+                                                    entry.category.short_label(),
+                                                    entry.label_en
+                                                ),
+                                                SignalCatalogLang::Vi => format!(
+                                                    "[{}] {}",
+                                                    entry.category.short_label(),
+                                                    entry.label_vi
+                                                ),
+                                            };
                                             ui.horizontal(|ui| {
                                                 ui.label(
-                                                    RichText::new(format!(
-                                                        "[{}] {} · {}",
-                                                        entry.category.short_label(),
-                                                        entry.label_en,
-                                                        entry.label_vi
-                                                    ))
-                                                    .monospace()
-                                                    .strong()
-                                                    .size(10.4)
-                                                    .color(palette::TEXT_PRIMARY),
+                                                    RichText::new(title_str)
+                                                        .monospace()
+                                                        .strong()
+                                                        .size(10.4)
+                                                        .color(palette::TEXT_PRIMARY),
                                                 );
                                                 ui.with_layout(
                                                     egui::Layout::right_to_left(
@@ -21555,6 +23255,8 @@ impl SumiWorkstationApp {
                                                 .clicked()
                                             {
                                                 self.settings.default_venue_override = None;
+                                                self.risk_venue_override = None;
+                                                self.sync_trading_settlement_rules();
                                                 self.data_audit_cache = None;
                                             }
                                             for v in ExchangeVenue::ALL {
@@ -21567,6 +23269,8 @@ impl SumiWorkstationApp {
                                                     .clicked()
                                                 {
                                                     self.settings.default_venue_override = Some(v);
+                                                    self.risk_venue_override = Some(v);
+                                                    self.sync_trading_settlement_rules();
                                                     self.data_audit_cache = None;
                                                 }
                                             }
@@ -21701,6 +23405,10 @@ impl SumiWorkstationApp {
                                         {
                                             self.sync_trading_settlement_rules();
                                         }
+                                        ui.checkbox(
+                                            &mut self.settings.show_drawing_rail,
+                                            "Show Left Vertical Drawing Rail (TradingView Pro layout)",
+                                        );
                                     });
 
                                 ui.horizontal_wrapped(|ui| {
@@ -21884,7 +23592,7 @@ impl SumiWorkstationApp {
                                             };
                                             ui.label(
                                                 RichText::new(format!(
-                                                    "Total Bars: {} ({u_span}) · Calendar: VIETNAM_HOLIDAYS_V1 ({} dates, 2018–2030)",
+                                                    "Total Bars: {} ({u_span}) · Calendar: VIETNAM_HOLIDAYS_V1 ({} dates, 2016–2030)",
                                                     uni_clone.total_candles,
                                                     VIETNAM_HOLIDAYS_V1.len()
                                                 ))
@@ -22207,6 +23915,7 @@ impl SumiWorkstationApp {
         let mut next_phase_mode: Option<MultiPhaseSplitMode> = None;
         let mut copy_manifest_json: Option<String> = None;
         let mut copy_manifest_ron: Option<String> = None;
+        let mut export_html_req = false;
 
         egui::ScrollArea::vertical()
             .id_salt("sumi_adv_analytics_scroll")
@@ -22245,6 +23954,21 @@ impl SumiWorkstationApp {
                                 .clicked()
                             {
                                 switch_to_ms_overlay = true;
+                            }
+                            if ui
+                                .small_button(
+                                    RichText::new("Export HTML")
+                                        .monospace()
+                                        .strong()
+                                        .size(9.0)
+                                        .color(Color32::from_rgb(138, 210, 255)),
+                                )
+                                .on_hover_text(
+                                    "Export full Tearsheet + Slices + SVG report to HTML (Print-to-PDF ready)",
+                                )
+                                .clicked()
+                            {
+                                export_html_req = true;
                             }
                         });
                         if let Some(ref ms) = self.multi_strategy_report {
@@ -22662,6 +24386,9 @@ impl SumiWorkstationApp {
             self.last_exported_manifest_doc = Some(doc.clone());
             self.pending_clipboard_copy = Some(doc);
         }
+        if export_html_req {
+            let _ = self.export_backtest_html_report();
+        }
     }
 
     fn render_inline_signal_hit_explanation(&self, ui: &mut egui::Ui, hit: &HistoricalSignalHit) {
@@ -23022,6 +24749,67 @@ impl SumiWorkstationApp {
                                                 "Extend Right (+∞)",
                                             );
                                         });
+                                    }
+                                    DrawingGeometry::ParallelChannel {
+                                        start,
+                                        end,
+                                        channel_offset,
+                                    } => {
+                                        render_two_anchor_drag_grid(ui, start, end, max_bar);
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                RichText::new("Offset ΔPrice")
+                                                    .monospace()
+                                                    .size(9.2),
+                                            );
+                                            ui.add(
+                                                egui::DragValue::new(channel_offset)
+                                                    .speed(0.1)
+                                                    .max_decimals(4),
+                                            );
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.checkbox(
+                                                &mut st.draft.trend_extend_left,
+                                                "Extend Left (-∞)",
+                                            );
+                                            ui.checkbox(
+                                                &mut st.draft.trend_extend_right,
+                                                "Extend Right (+∞)",
+                                            );
+                                        });
+                                    }
+                                    DrawingGeometry::PriceDateRange { start, end } => {
+                                        render_two_anchor_drag_grid(ui, start, end, max_bar);
+                                        let m = crate::drawings::compute_price_date_range_metrics(
+                                            *start,
+                                            *end,
+                                            Some(&self.candles),
+                                        );
+                                        let pct_s = m
+                                            .price_pct
+                                            .map_or_else(|| "N/A".to_owned(), |p| format!("{p:+.2}%"));
+                                        let dur_s = m.elapsed_secs.map_or_else(
+                                            || "-".to_owned(),
+                                            crate::drawings::format_measure_duration,
+                                        );
+                                        let vol_s = m.total_volume.map_or_else(
+                                            || "-".to_owned(),
+                                            crate::chart::format_compact_unsigned_volume,
+                                        );
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "Δ{:+.4} ({pct_s}) · {} bars ({dur_s}) · Vol {vol_s}",
+                                                m.price_delta, m.bar_count
+                                            ))
+                                            .monospace()
+                                            .size(9.2)
+                                            .color(if m.is_bullish {
+                                                palette::BULLISH
+                                            } else {
+                                                palette::BEARISH
+                                            }),
+                                        );
                                     }
                                     DrawingGeometry::Ray {
                                         origin: start,
@@ -23703,11 +25491,7 @@ const fn egui_key_to_hotkey_key(key: egui::Key) -> Option<HotkeyKey> {
 
 #[inline]
 fn alert_event_eval_timestamp(ev: &crate::alerts::AlertTriggerEvent) -> i64 {
-    if ev.eval_base_timestamp != 0 {
-        ev.eval_base_timestamp
-    } else {
-        ev.bar_timestamp
-    }
+    ev.effective_eval_base_timestamp()
 }
 
 #[inline]
@@ -24847,10 +26631,13 @@ impl SumiWorkstationApp {
             return Ok(rel_path);
         }
         #[cfg(not(target_arch = "wasm32"))]
-        if let Ok(home) = std::env::var("HOME")
+        if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE"))
             && !home.trim().is_empty()
         {
-            let fallback = format!("{}/Downloads/{file_name}", home.trim_end_matches('/'));
+            let fallback_path = std::path::PathBuf::from(home)
+                .join("Downloads")
+                .join(&file_name);
+            let fallback = fallback_path.to_string_lossy().into_owned();
             let _ =
                 self.export_workstation_png_to_path(&fallback, logical_width, logical_height)?;
             return Ok(fallback);
@@ -28977,9 +30764,16 @@ mod tests {
             .min(vis_hi + vis_span * 0.04)
             .max(mark_0 + vis_span * 0.03);
         app.ticket_kind = TicketOrderKind::Market;
-        app.ticket_qty_input = "10".to_owned();
         app.ticket_sl_input = format!("{sl_test:.2}");
         app.ticket_tp_input = format!("{tp_test:.2}");
+        // Statutory VSD 17% initial margin on VN30F1M (~22.2k kVND/contract) must reject 10 contracts on 100k kVND (`BUG-001`)!
+        app.ticket_qty_input = "10".to_owned();
+        assert!(matches!(
+            app.submit_ticket_order(OrderSide::Buy),
+            Err(crate::trading::TradingError::InsufficientBuyingPower { .. })
+        ));
+        // 2 contracts (~44.5k kVND margin <= 100k kVND) executes cleanly:
+        app.ticket_qty_input = "2".to_owned();
         let ord_id = app.submit_ticket_order(OrderSide::Buy).unwrap();
         assert_eq!(ord_id, 1);
         assert!(app.trading.open_position().is_some());
@@ -29004,12 +30798,12 @@ mod tests {
         assert!(app.trading.open_position().is_none());
         assert_eq!(app.trading.fills().len(), 0);
 
-        // Return to `VN30F1M` -> paused replay at `2_707` and open `LONG 10` position are restored!
+        // Return to `VN30F1M` -> paused replay at `2_707` and open `LONG 2` position are restored!
         app.select_data_source(DataSourcePreset::IntradayVn30F1m);
         app.set_timeframe(Timeframe::M15).unwrap();
         assert!(app.replay.is_active());
         assert_eq!(app.replay.base_cursor_index, 2_707);
-        assert_eq!(app.trading.open_position().unwrap().quantity, 10.0);
+        assert_eq!(app.trading.open_position().unwrap().quantity, 2.0);
 
         // 5. Headless `egui::Context` full workstation UI pass renders Replay Dock + Paper Trading Panel + overlays!
         app.show_replay_bar = true;
@@ -32842,5 +34636,530 @@ mod tests {
         );
         out_t61.textures_delta.clear();
         assert_eq!(app.snapshot_store.auto_ring.len(), 1);
+    }
+
+    #[test]
+    fn wave5_regression_watchlist_dedup_modals_multichart_whitespace_toolbar_currency_and_polish() {
+        let mut app = SumiWorkstationApp::default();
+
+        // 1. `BUG-020`: Multi-symbol `CustomFile` must NOT mix bundled synthetic `watchlist_universe`
+        //    (zero duplicate `FPT`, zero synthetic `SPY`/`BTCUSDT` leakage into Watchlist/Breadth).
+        let mut csv_lines = vec!["symbol,timestamp,open,high,low,close,volume".to_owned()];
+        let base_ts = 1_767_225_600_i64; // 2026-01-01 UTC
+        for i in 0..80_i64 {
+            let ts = base_ts + i * 86_400;
+            for (sym, base_px, vol) in [
+                ("FPT", 95.0_f64, 35_000.0_f64),
+                ("VCB", 88.0_f64, 28_000.0_f64),
+                ("HPG", 28.0_f64, 52_000.0_f64),
+                ("SSI", 31.0_f64, 41_000.0_f64),
+            ] {
+                let px = base_px + (i as f64) * 0.25 + if i % 5 == 0 { -0.9 } else { 0.4 };
+                csv_lines.push(format!(
+                    "{sym},{ts},{:.2},{:.2},{:.2},{:.2},{vol:.0}",
+                    px - 0.3,
+                    px + 0.9,
+                    px - 0.8,
+                    px
+                ));
+            }
+        }
+        app.load_from_csv_str(&csv_lines.join("\n"), &DataLoadOptions::default())
+            .expect("multi-symbol VN CustomFile must load");
+
+        let rows = app.filtered_watchlist_rows();
+        assert_eq!(
+            rows.len(),
+            4,
+            "CustomFile Watchlist must contain strictly the 4 loaded symbols without mixing synthetic feeds"
+        );
+        assert_eq!(
+            rows.iter().filter(|r| r.symbol == "FPT").count(),
+            1,
+            "FPT must appear exactly once"
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|r| r.symbol == "SPY" || r.symbol == "BTCUSDT"),
+            "Bundled synthetic peers must not contaminate CustomFile Watchlist"
+        );
+        let breadth = app.market_breadth_snapshot();
+        assert_eq!(breadth.participating_count, 4);
+        assert_eq!(breadth.vn30_participating_count, 4);
+
+        // 2. `BUG-022`: Switching to `2x2` from multi-symbol daily `CustomFile` binds S3/S4 to real
+        //    peers in `custom_peer_feeds` (`VCB`, `HPG`), and `Sync T` preserves >85% whitespace.
+        app.set_grid_layout(MultiChartLayoutKind::Quad2x2);
+        assert_eq!(
+            app.secondary_slots[0].data_source,
+            DataSourcePreset::CafeFIndexCsv
+        );
+        assert_eq!(
+            app.secondary_slots[1].data_source,
+            DataSourcePreset::CustomFile
+        );
+        assert_eq!(app.secondary_slots[1].symbol, "VCB");
+        assert_eq!(
+            app.secondary_slots[2].data_source,
+            DataSourcePreset::CustomFile
+        );
+        assert_eq!(app.secondary_slots[2].symbol, "HPG");
+
+        // Verify >85% whitespace preservation in `extract_visible_time_window` / `apply_synced_time_window`.
+        app.viewport.time_scale.set_width(800.0);
+        app.viewport.time_scale.set_bar_spacing(10.0);
+        app.viewport.time_scale.set_right_offset(72.0); // 72 / 80 = 90% whitespace
+        let win = crate::viewport::extract_visible_time_window(
+            &app.candles,
+            app.active_timeframe.seconds(),
+            &app.viewport.time_scale,
+        )
+        .expect("visible time window");
+        assert!(
+            win.right_whitespace_bars_frac > 0.87,
+            "90% right whitespace must not be clipped at 0.85, got {}",
+            win.right_whitespace_bars_frac
+        );
+
+        // 3. `BUG-019` + `BUG-023`: Render Templates modal & compact 2-row toolbar at 1280×800.
+        app.set_grid_layout(MultiChartLayoutKind::Single1x1);
+        let ctx = egui::Context::default();
+        let vp_1280 = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0));
+        app.open_templates_modal();
+        let mut out_tpl = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(vp_1280),
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out_tpl.textures_delta.clear();
+        let tpl_rect = app
+            .last_templates_modal_rect
+            .expect("templates modal rect recorded");
+        assert!(
+            tpl_rect.width() <= 748.0,
+            "Templates modal must not expand past target 736px due to unwrapped descriptions, got {}px",
+            tpl_rect.width()
+        );
+        app.show_templates_modal = false;
+
+        // Verify compact toolbar leaves generous chart height at 1280×800 (`plot_rect.top() <= 92px`).
+        let mut out_main = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(vp_1280),
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out_main.textures_delta.clear();
+        let main_rep = app.last_report.expect("main chart render report");
+        assert!(
+            main_rep.layout.plot_rect.top() <= 96.0,
+            "Compact 2-row toolbar at 1280×800 must not spill into 4-5 rows (plot_top={})",
+            main_rep.layout.plot_rect.top()
+        );
+
+        // 4. `BUG-023`: Venue-aware currency formatting (`kVND` for VN vs `$` for US/Crypto).
+        assert_eq!(
+            format_venue_money(ExchangeVenue::Hose, 100_000.0, 0),
+            "100000 kVND"
+        );
+        assert_eq!(
+            format_venue_money(ExchangeVenue::Vn30Futures, 100_000.0, 2),
+            "100000.00 kVND"
+        );
+        assert_eq!(
+            format_venue_money(ExchangeVenue::UsEquities, 100_000.0, 0),
+            "$100000"
+        );
+        assert_eq!(
+            format_venue_money(ExchangeVenue::CryptoSpotPerp, 25_000.5, 2),
+            "$25000.50"
+        );
+
+        // 5. `BUG-024`: DOM Ladder opens with auto-center pending and resolves cleanly at 1280×800.
+        app.open_dom_ladder();
+        assert!(app.dom_auto_center_pending);
+        let mut out_dom = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(vp_1280),
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out_dom.textures_delta.clear();
+        assert!(
+            !app.dom_auto_center_pending,
+            "DOM Ladder must consume auto-center scroll on first frame"
+        );
+
+        // 6. `BUG-032`: Dynamic `VIETNAM_HOLIDAYS_V1.len()` in Cmd+K (never stale `144 dates`),
+        //    `SignalCatalogLang` toggle, and hotkey rebind conflict banner.
+        app.command_palette.query = "Data Readiness".to_owned();
+        let cands = app.build_command_palette_candidates();
+        let audit_cand = cands
+            .iter()
+            .find(|c| matches!(c.action, PaletteAction::OpenDataAuditModal))
+            .expect("Data Audit command palette item");
+        assert!(
+            audit_cand
+                .subtitle
+                .contains(&format!("{} dates · 2016–2030", VIETNAM_HOLIDAYS_V1.len())),
+            "Data Audit subtitle must report dynamic holiday count & 2016–2030, got: {}",
+            audit_cand.subtitle
+        );
+        assert!(!audit_cand.subtitle.contains("144 dates"));
+
+        // Signal Catalog language modes render cleanly
+        app.show_signal_catalog_modal = true;
+        for lang in SignalCatalogLang::ALL {
+            app.signal_catalog_lang = lang;
+            let mut out_cat = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(vp_1280),
+                    ..Default::default()
+                },
+                |ui| app.render_workstation_ui(ui),
+            );
+            out_cat.textures_delta.clear();
+        }
+        app.show_signal_catalog_modal = false;
+
+        // 7. `BUG-018` + `BUG-022`: Hovering right whitespace (`+26` Ichimoku) in `2x2` projects
+        //    `linked_whitespace_timestamp` while preserving `linked_crosshair_timestamp == None`.
+        app.set_grid_layout(MultiChartLayoutKind::Quad2x2);
+        app.viewport.time_scale.set_right_offset(26.0);
+        let mut out_2x2_init = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(vp_1280),
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out_2x2_init.textures_delta.clear();
+        let s0_plot = app.last_report.expect("s0 report").layout.plot_rect;
+        let ws_hover = Pos2::new(s0_plot.right() - 12.0, s0_plot.center().y);
+        let mut out_2x2_ws = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(vp_1280),
+                events: vec![egui::Event::PointerMoved(ws_hover)],
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out_2x2_ws.textures_delta.clear();
+        assert!(
+            app.linked_crosshair_timestamp.is_none(),
+            "Whitespace hover must never falsely pin peer slots to last bar"
+        );
+        assert!(
+            app.linked_whitespace_timestamp.is_some(),
+            "Whitespace hover in 2x2 must broadcast linked_whitespace_timestamp to peer slots"
+        );
+    }
+
+    #[test]
+    fn v1_1_wave1_left_drawing_rail_and_drag_drop_import() {
+        let mut app = SumiWorkstationApp::default();
+        app.restore_persisted_session();
+        assert!(
+            app.settings.show_drawing_rail,
+            "Left Vertical Drawing Rail should default to visible"
+        );
+
+        let ctx = egui::Context::default();
+        let vp_1280 = egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0));
+
+        // 1. Render with Left Vertical Drawing Rail open at 1280x800 and verify clean plot bounds.
+        let mut out_open = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(vp_1280),
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out_open.textures_delta.clear();
+        let rep_open = app.last_report.expect("report with rail open");
+        assert!(
+            rep_open.layout.plot_rect.left() >= 38.0,
+            "Left Vertical Drawing Rail must reserve left margin >= 38px (got {})",
+            rep_open.layout.plot_rect.left()
+        );
+        assert!(
+            rep_open.layout.plot_rect.top() <= 92.0,
+            "Compact Top Toolbar after moving drawings to Rail must stay <= 92px (got {})",
+            rep_open.layout.plot_rect.top()
+        );
+
+        // 2. Collapse rail via Cmd+K action and verify chart expands leftward.
+        app.execute_palette_action(PaletteAction::ToggleDrawingRail);
+        assert!(!app.settings.show_drawing_rail);
+        let mut out_closed = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(vp_1280),
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out_closed.textures_delta.clear();
+        let rep_closed = app.last_report.expect("report with rail collapsed");
+        assert!(
+            rep_closed.layout.plot_rect.left() < rep_open.layout.plot_rect.left() - 20.0,
+            "Collapsing rail should reclaim horizontal chart space ({} vs {})",
+            rep_closed.layout.plot_rect.left(),
+            rep_open.layout.plot_rect.left()
+        );
+
+        // 3. RON & JSON WorkspaceTemplate roundtrip preserves `show_drawing_rail` & legacy omission defaults to `true`.
+        let tpl = app.capture_workspace_template("RailCollapsed");
+        assert!(!tpl.settings.show_drawing_rail);
+        let ron = tpl.to_ron_pretty();
+        let json = tpl.to_json_pretty();
+        let parsed_ron = WorkspaceTemplate::from_ron_str(&ron).expect("parse RON with rail flag");
+        let parsed_json =
+            WorkspaceTemplate::from_json_str(&json).expect("parse JSON with rail flag");
+        assert!(!parsed_ron.settings.show_drawing_rail);
+        assert!(!parsed_json.settings.show_drawing_rail);
+        // Strip the new field to confirm backwards-compatibility with v1.0 templates -> defaults to true.
+        let legacy_json = json.replace(",\n    \"show_drawing_rail\": false", "");
+        let parsed_legacy =
+            WorkspaceTemplate::from_json_str(&legacy_json).expect("legacy v1.0 JSON must parse");
+        assert!(parsed_legacy.settings.show_drawing_rail);
+
+        // 4. Drag-and-Drop valid CSV via handle loads cleanly; invalid drop preserves active chart intact.
+        #[derive(Debug)]
+        struct MockDroppedFile {
+            path: std::path::PathBuf,
+            data: Vec<u8>,
+        }
+        impl egui::DroppedFile for MockDroppedFile {
+            fn path(&self) -> &std::path::Path {
+                &self.path
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            fn bytes(&self) -> Result<Vec<u8>, String> {
+                Ok(self.data.clone())
+            }
+        }
+
+        let sample_csv = b"date,open,high,low,close,volume\n\
+2026-01-02,100.0,104.0,99.0,103.0,120000\n\
+2026-01-05,103.0,107.0,102.0,106.5,145000\n\
+2026-01-06,106.5,109.0,105.0,108.0,160000\n";
+        let dropped_ok: Vec<egui::DroppedFileHandle> = vec![std::sync::Arc::new(MockDroppedFile {
+            path: std::path::PathBuf::from("TESTDROP.csv"),
+            data: sample_csv.to_vec(),
+        })];
+        assert!(app.handle_dropped_files(&dropped_ok));
+        assert_eq!(app.symbol, "TESTDROP");
+        assert_eq!(app.candles.len(), 3);
+        let ok_len = app.candles.len();
+
+        // Drop unsupported binary extension -> must return false and preserve active chart!
+        let dropped_bad_ext: Vec<egui::DroppedFileHandle> =
+            vec![std::sync::Arc::new(MockDroppedFile {
+                path: std::path::PathBuf::from("photo.png"),
+                data: vec![0x89_u8, b'P', b'N', b'G'],
+            })];
+        assert!(!app.handle_dropped_files(&dropped_bad_ext));
+        assert_eq!(app.symbol, "TESTDROP");
+        assert_eq!(app.candles.len(), ok_len);
+        assert!(
+            app.last_load_status
+                .as_ref()
+                .is_some_and(|(is_err, _)| *is_err)
+        );
+
+        // Drop malformed CSV -> must return false and preserve active chart!
+        let dropped_malformed: Vec<egui::DroppedFileHandle> =
+            vec![std::sync::Arc::new(MockDroppedFile {
+                path: std::path::PathBuf::from("broken.csv"),
+                data: b"not,a,valid,ohlcv\nfoo,bar,baz,qux\n".to_vec(),
+            })];
+        assert!(!app.handle_dropped_files(&dropped_malformed));
+        assert_eq!(app.symbol, "TESTDROP");
+        assert_eq!(app.candles.len(), ok_len);
+
+        // Hover overlay paints cleanly without panic.
+        let mut out_hover = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(vp_1280),
+                hovered_files: vec![egui::HoveredFile {
+                    path: Some(std::path::PathBuf::from("/tmp/FPT.csv")),
+                    mime: "text/csv".to_owned(),
+                }],
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out_hover.textures_delta.clear();
+    }
+
+    #[test]
+    fn v1_1_wave3_chart_direct_trading_sl_tp_order_drag_replay_and_t2_flatten() {
+        let mut app = SumiWorkstationApp::default();
+        app.restore_persisted_session();
+        // Load HOSE symbol FPT (price > 50 -> HOSE tick 0.10 kVND)
+        app.select_data_source(DataSourcePreset::Vn30Basket);
+        app.select_symbol_in_source("FPT");
+        app.settings.enforce_vn_t2_lot_lock = true;
+        app.sync_trading_settlement_rules();
+
+        // Enter Bar Replay mid-series so we can verify deterministic rewind after ModifyOrderPrice!
+        let cut_idx = (app.base_candles.len() / 2).max(20);
+        app.start_replay_at_base_index(cut_idx);
+        let mark = app.base_candles[cut_idx].close;
+
+        // 1. Open a LONG position WITHOUT initial SL -> verify `had_initial_sl_at_open == false`.
+        app.ticket_qty_input = "200".to_owned();
+        app.ticket_kind = TicketOrderKind::Market;
+        app.ticket_sl_input.clear();
+        app.ticket_tp_input.clear();
+        app.submit_ticket_order(OrderSide::Buy).unwrap();
+        assert!(!app.trading.open_position().unwrap().had_initial_sl_at_open);
+
+        // Chart-direct SL & TP updates snap cleanly to HOSE tick size, sync ticket inputs, and
+        // NEVER flip `had_initial_sl_at_open` (anti-tamper SL Adherence).
+        let raw_sl = mark * 0.96 + 0.037;
+        let snapped_sl = app
+            .update_open_position_bracket_direct(true, raw_sl)
+            .unwrap();
+        let (venue, unit, _) = app.active_trading_venue_context();
+        assert!(
+            (snapped_sl - snap_to_nearest_tick(raw_sl, venue, unit)).abs() < 1e-9,
+            "SL must snap strictly to active exchange tick grid"
+        );
+        assert_eq!(app.ticket_sl_input, format!("{snapped_sl:.2}"));
+        assert!(
+            !app.trading.open_position().unwrap().had_initial_sl_at_open,
+            "Chart-direct SL drag must never tamper with had_initial_sl_at_open"
+        );
+
+        let raw_tp = mark * 1.05 + 0.043;
+        let snapped_tp = app
+            .update_open_position_bracket_direct(false, raw_tp)
+            .unwrap();
+        assert!((snapped_tp - snap_to_nearest_tick(raw_tp, venue, unit)).abs() < 1e-9);
+        assert_eq!(app.ticket_tp_input, format!("{snapped_tp:.2}"));
+
+        // 2. Submit a working BUY LIMIT order, step forward +1 bar, drag its price -> ModifyOrderPrice,
+        //    then rewind Bar Replay back to cut_idx -> order price MUST revert bit-exact to original!
+        let orig_lmt = snap_to_nearest_tick(mark * 0.95, venue, unit);
+        app.ticket_kind = TicketOrderKind::Limit;
+        app.ticket_price_input = format!("{orig_lmt:.2}");
+        app.ticket_qty_input = "100".to_owned();
+        app.ticket_sl_input.clear();
+        app.ticket_tp_input.clear();
+        let order_id = app.submit_ticket_order(OrderSide::Buy).unwrap();
+        assert!(app.step_replay_forward(1));
+        let band = app.active_daily_price_band().expect("HOSE daily band");
+        // Try dragging way below floor -> must clamp strictly inside [floor, ceiling]!
+        let moved_px = app
+            .modify_working_order_price(order_id, band.floor_price * 0.5)
+            .unwrap();
+        assert!(
+            (moved_px - band.floor_price).abs() < 1e-6,
+            "Pending order drag on HOSE must clamp to statutory floor ({moved_px} vs {})",
+            band.floor_price
+        );
+        assert!(
+            app.trading
+                .pending_orders()
+                .any(|o| o.id == order_id && o.kind.trigger_price() == Some(moved_px))
+        );
+        // Rewind 1 bar -> ModifyOrderPrice at `cut_idx + 1` is pruned; order reverts bit-exact to `orig_lmt`!
+        assert!(app.step_replay_backward(1));
+        assert!(
+            app.trading.pending_orders().any(|o| o.id == order_id
+                && o.kind
+                    .trigger_price()
+                    .is_some_and(|p| (p - orig_lmt).abs() < 1e-6)),
+            "Rewinding Bar Replay must revert ModifyOrderPrice bit-exact"
+        );
+
+        // 3. Chart-direct Cancel (`×`) removes pending order cleanly.
+        app.apply_chart_trading_action(ChartTradingAction::CancelPendingOrder(order_id));
+        assert!(app.trading.pending_orders().next().is_none());
+
+        // 4. Advance +4 trading days so initial 200 shares settle (T+2), buy 100 MORE unsettled shares,
+        //    then trigger Chart-Direct Flatten (`×`): MUST sell ONLY the 200 settled shares and keep 100 locked!
+        assert!(app.step_replay_forward(4));
+        app.ticket_kind = TicketOrderKind::Market;
+        app.ticket_qty_input = "100".to_owned();
+        app.submit_ticket_order(OrderSide::Buy).unwrap();
+        assert!((app.trading.open_position().unwrap().quantity - 300.0).abs() < 1e-6);
+
+        app.apply_chart_trading_action(ChartTradingAction::FlattenPosition);
+        let rem = app
+            .trading
+            .open_position()
+            .expect("100 unsettled T+2 shares must remain locked after chart-direct flatten");
+        assert!(
+            (rem.quantity - 100.0).abs() < 1e-6,
+            "Chart-direct × flatten must sell only 200 settled shares and retain 100 T+2 locked shares, got {}",
+            rem.quantity
+        );
+
+        // 5. Render interactive chart frame with live `ChartTradingDragState` active (zero panic).
+        let ctx = egui::Context::default();
+        let vp_1280 = egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0));
+        app.chart_trading_drag = Some(ChartTradingDragState {
+            target: crate::chart::ChartTradingDragTarget::PositionStopLoss,
+            preview_price: snapped_sl,
+        });
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(vp_1280),
+                ..Default::default()
+            },
+            |ui| app.render_workstation_ui(ui),
+        );
+        out.textures_delta.clear();
+    }
+
+    #[test]
+    fn v1_1_wave4_strategy_lab_html_report_export_and_cmd_k() {
+        let mut app = SumiWorkstationApp::default();
+        app.restore_persisted_session();
+        app.select_data_source(DataSourcePreset::Vn30Basket);
+        app.select_symbol_in_source("FPT");
+        app.show_strategy_panel = true;
+        app.right_dock_tab = RightDockTab::StrategyLab;
+        app.sync_backtest_causal();
+
+        let html = app
+            .build_active_backtest_html_report()
+            .expect("build HTML report for FPT backtest");
+        assert!(html.contains("<!DOCTYPE html>"));
+        assert!(html.contains("FPT"));
+        assert!(html.contains("<svg class=\"chart-svg\""));
+        assert!(html.contains("@media print"));
+
+        // Verify Cmd+K exposes `ExportBacktestHtmlReport`
+        app.command_palette.query = "Export Backtest HTML".to_owned();
+        let cands = app.build_command_palette_candidates();
+        assert!(
+            cands
+                .iter()
+                .any(|c| matches!(c.action, PaletteAction::ExportBacktestHtmlReport)),
+            "Cmd+K must list Export Backtest HTML Report"
+        );
+
+        // Render both Stats and Slices tabs with Export HTML button cleanly
+        let ctx = egui::Context::default();
+        let vp_1280 = egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0));
+        for sub in [StrategyLabSubTab::Tearsheet, StrategyLabSubTab::Analytics] {
+            app.strategy_lab_tab = sub;
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(vp_1280),
+                    ..Default::default()
+                },
+                |ui| app.render_workstation_ui(ui),
+            );
+            out.textures_delta.clear();
+        }
     }
 }

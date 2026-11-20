@@ -419,7 +419,6 @@ impl SessionDebriefReport {
         cutoff_timestamp: Option<i64>,
     ) -> Self {
         let clean_sym = symbol.trim();
-        let m = session.metrics(mark_price);
         let visible_notes = decision_log.visible_notes(
             clean_sym,
             replay_active,
@@ -461,10 +460,116 @@ impl SessionDebriefReport {
             .iter()
             .filter(|tr| !cutoff_timestamp.is_some_and(|cut| tr.exit_timestamp > cut))
             .collect();
-        let open_pos_entry_bar = session
+        let causal_open_pos = session
             .open_position()
-            .filter(|pos| !cutoff_timestamp.is_some_and(|cut| pos.opened_timestamp > cut))
-            .map(|pos| pos.opened_base_index);
+            .filter(|pos| !cutoff_timestamp.is_some_and(|cut| pos.opened_timestamp > cut));
+        let open_pos_entry_bar = causal_open_pos.map(|pos| pos.opened_base_index);
+
+        // Compute headline KPIs strictly over the same `cutoff_timestamp` horizon as `setup_breakdown`
+        // and `mistake_breakdown` so header metrics never leak future trades (`BUG-030`).
+        let m = if let Some(cut) = cutoff_timestamp
+            && (causal_closed_trades.len() < session.closed_trades().len()
+                || (session.open_position().is_some() && causal_open_pos.is_none()))
+        {
+            let mut win_count = 0_usize;
+            let mut loss_count = 0_usize;
+            let mut gross_wins = 0.0_f64;
+            let mut gross_losses = 0.0_f64;
+            let mut realized_net_sum = 0.0_f64;
+            let mut return_pct_sum = 0.0_f64;
+            let mut r_sum = 0.0_f64;
+            let mut r_count = 0_usize;
+            let mut sl_adherent_closed = 0_usize;
+            for tr in &causal_closed_trades {
+                realized_net_sum += tr.net_pnl;
+                if tr.return_pct.is_finite() {
+                    return_pct_sum += tr.return_pct;
+                }
+                if tr.had_initial_sl_at_open {
+                    sl_adherent_closed += 1;
+                }
+                if tr.net_pnl > 1e-9 {
+                    win_count += 1;
+                    gross_wins += tr.net_pnl;
+                } else if tr.net_pnl < -1e-9 {
+                    loss_count += 1;
+                    gross_losses += tr.net_pnl.abs();
+                }
+                if let Some(r) = tr.r_multiple
+                    && r.is_finite()
+                {
+                    r_sum += r;
+                    r_count += 1;
+                }
+            }
+            let closed_trade_count = causal_closed_trades.len();
+            let breakeven_count = closed_trade_count.saturating_sub(win_count + loss_count);
+            let win_rate_pct = if closed_trade_count > 0 {
+                (win_count as f64 / closed_trade_count as f64) * 100.0
+            } else {
+                0.0
+            };
+            let avg_return_pct = if closed_trade_count > 0 {
+                return_pct_sum / closed_trade_count as f64
+            } else {
+                0.0
+            };
+            let unrealized_pnl = causal_open_pos.map_or(0.0, |p| p.unrealized_pnl(mark_price));
+            let net_pnl = realized_net_sum + unrealized_pnl;
+            let initial_cash = session.config.initial_cash;
+            let equity = initial_cash + net_pnl;
+            let return_pct = if initial_cash > 0.0 {
+                (net_pnl / initial_cash) * 100.0
+            } else {
+                0.0
+            };
+            let max_drawdown_pct = session
+                .equity_curve()
+                .iter()
+                .filter(|pt| pt.timestamp <= cut)
+                .map(|pt| pt.drawdown_pct)
+                .fold(0.0_f64, f64::max);
+            let open_count = usize::from(causal_open_pos.is_some());
+            let open_adherent =
+                usize::from(causal_open_pos.is_some_and(|p| p.had_initial_sl_at_open));
+            let total_opened_positions = closed_trade_count + open_count;
+            let sl_adherent_positions = sl_adherent_closed + open_adherent;
+            let sl_adherence_pct = if total_opened_positions > 0 {
+                Some((sl_adherent_positions as f64 / total_opened_positions as f64) * 100.0)
+            } else {
+                None
+            };
+            super::PortfolioMetrics {
+                cash_balance: initial_cash + realized_net_sum,
+                unrealized_pnl,
+                equity,
+                net_pnl,
+                return_pct,
+                max_drawdown_pct,
+                pending_order_count: 0,
+                fill_count: session
+                    .fills()
+                    .iter()
+                    .filter(|f| f.timestamp <= cut)
+                    .count(),
+                closed_trade_count,
+                win_count,
+                loss_count,
+                breakeven_count,
+                win_rate_pct,
+                avg_return_pct,
+                profit_factor: (gross_losses > 1e-9).then_some(gross_wins / gross_losses),
+                net_r_multiple: if r_count > 0 { r_sum } else { 0.0 },
+                avg_r_multiple: (r_count > 0).then_some(r_sum / r_count as f64),
+                expectancy_pnl: (closed_trade_count > 0)
+                    .then_some(realized_net_sum / closed_trade_count as f64),
+                total_opened_positions,
+                sl_adherent_positions,
+                sl_adherence_pct,
+            }
+        } else {
+            session.metrics(mark_price)
+        };
         let mut note_claimed = vec![false; visible_notes.len()];
 
         for tr in &causal_closed_trades {
@@ -635,9 +740,15 @@ impl SessionDebriefReport {
                 let naked = m
                     .total_opened_positions
                     .saturating_sub(m.sl_adherent_positions);
+                // Avoid contradictory `"80% (< 80% Target)"` when `79.5 <= pct < 80.0` (`BUG-034`).
+                let pct_label = if pct >= 79.5 {
+                    format!("{pct:.1}%")
+                } else {
+                    format!("{pct:.0}%")
+                };
                 callouts.push(CoachingCallout {
                     severity: CoachingSeverity::Critical,
-                    title: format!("Initial Stop-Loss Adherence {pct:.0}% (< 80% Target)"),
+                    title: format!("Initial Stop-Loss Adherence {pct_label} (< 80% Target)"),
                     detail: format!(
                         "{naked} of {} opened position(s) entered without an initial protective Stop-Loss. Post-entry bracket edits never mask naked opens.",
                         m.total_opened_positions
@@ -918,7 +1029,8 @@ impl PracticeSessionStore {
         &mut self,
         mut session: SavedPracticeSession,
     ) -> Result<u64, WorkspaceTemplateError> {
-        let clean_label = session.label.trim().to_owned();
+        let mut clean_label = session.label.trim().to_owned();
+        truncate_utf8_bytes(&mut clean_label, 80);
         if let Some(existing) = self
             .slots
             .iter_mut()
@@ -1186,7 +1298,8 @@ impl ScanSnapshotStore {
         &mut self,
         mut snap: SavedScanSnapshot,
     ) -> Result<u64, WorkspaceTemplateError> {
-        let clean_label = snap.label.trim().to_owned();
+        let mut clean_label = snap.label.trim().to_owned();
+        truncate_utf8_bytes(&mut clean_label, 80);
         if let Some(existing) = self
             .slots
             .iter_mut()
@@ -1711,10 +1824,30 @@ fn encode_json_practice_slot(out: &mut String, s: &SavedPracticeSession) {
             out.push_str(" }");
         }
     }
+    let has_non_default_derivatives_or_tax = s.account_config.tax_sell_bps.abs() > 1.0e-9
+        || (s.account_config.contract_multiplier - 1.0).abs() > 1.0e-9
+        || (s.account_config.initial_margin_pct - 100.0).abs() > 1.0e-9;
     let has_non_default_settlement = s.account_config.enforce_vn_t2_lot_lock
         || s.account_config.venue != crate::journal::ExchangeVenue::UsEquities
-        || s.account_config.base_timeframe_secs != 86_400;
-    if has_non_default_settlement {
+        || s.account_config.base_timeframe_secs != 86_400
+        || has_non_default_derivatives_or_tax;
+    if has_non_default_derivatives_or_tax {
+        let _ = writeln!(
+            out,
+            ",\n      \"account_config\": {{ \"initial_cash\": {}, \"commission_bps\": {}, \"tax_sell_bps\": {}, \"slippage_bps\": {}, \"contract_multiplier\": {}, \"initial_margin_pct\": {}, \"allow_short\": {}, \"max_leverage\": {}, \"enforce_vn_t2_lot_lock\": {}, \"venue\": \"{}\", \"base_timeframe_secs\": {} }},",
+            fmt_f64(s.account_config.initial_cash),
+            fmt_f64(s.account_config.commission_bps),
+            fmt_f64(s.account_config.tax_sell_bps),
+            fmt_f64(s.account_config.slippage_bps),
+            fmt_f64(s.account_config.contract_multiplier),
+            fmt_f64(s.account_config.initial_margin_pct),
+            s.account_config.allow_short,
+            fmt_f64(s.account_config.max_leverage),
+            s.account_config.enforce_vn_t2_lot_lock,
+            venue_id(s.account_config.venue),
+            s.account_config.base_timeframe_secs,
+        );
+    } else if has_non_default_settlement {
         let _ = writeln!(
             out,
             ",\n      \"account_config\": {{ \"initial_cash\": {}, \"commission_bps\": {}, \"slippage_bps\": {}, \"allow_short\": {}, \"max_leverage\": {}, \"enforce_vn_t2_lot_lock\": {}, \"venue\": \"{}\", \"base_timeframe_secs\": {} }},",
@@ -1797,6 +1930,16 @@ fn encode_json_command(out: &mut String, cmd: &RecordedCommand) {
             let _ = write!(
                 out,
                 "\"kind\": \"CancelOrder\", \"order_id\": {order_id} }}"
+            );
+        }
+        RecordedCommandKind::ModifyOrderPrice {
+            order_id,
+            new_price,
+        } => {
+            let _ = write!(
+                out,
+                "\"kind\": \"ModifyOrderPrice\", \"order_id\": {order_id}, \"new_price\": {} }}",
+                fmt_f64(*new_price)
             );
         }
         RecordedCommandKind::UpdateBrackets {
@@ -1956,10 +2099,30 @@ fn encode_ron_practice_slot(
             out.push_str("))");
         }
     }
+    let has_non_default_derivatives_or_tax = s.account_config.tax_sell_bps.abs() > 1.0e-9
+        || (s.account_config.contract_multiplier - 1.0).abs() > 1.0e-9
+        || (s.account_config.initial_margin_pct - 100.0).abs() > 1.0e-9;
     let has_non_default_settlement = s.account_config.enforce_vn_t2_lot_lock
         || s.account_config.venue != crate::journal::ExchangeVenue::UsEquities
-        || s.account_config.base_timeframe_secs != 86_400;
-    if has_non_default_settlement {
+        || s.account_config.base_timeframe_secs != 86_400
+        || has_non_default_derivatives_or_tax;
+    if has_non_default_derivatives_or_tax {
+        let _ = writeln!(
+            out,
+            ",\n{inner}account_config: (initial_cash: {}, commission_bps: {}, tax_sell_bps: {}, slippage_bps: {}, contract_multiplier: {}, initial_margin_pct: {}, allow_short: {}, max_leverage: {}, enforce_vn_t2_lot_lock: {}, venue: {}, base_timeframe_secs: {}),",
+            fmt_f64(s.account_config.initial_cash),
+            fmt_f64(s.account_config.commission_bps),
+            fmt_f64(s.account_config.tax_sell_bps),
+            fmt_f64(s.account_config.slippage_bps),
+            fmt_f64(s.account_config.contract_multiplier),
+            fmt_f64(s.account_config.initial_margin_pct),
+            s.account_config.allow_short,
+            fmt_f64(s.account_config.max_leverage),
+            s.account_config.enforce_vn_t2_lot_lock,
+            venue_id(s.account_config.venue),
+            s.account_config.base_timeframe_secs,
+        );
+    } else if has_non_default_settlement {
         let _ = writeln!(
             out,
             ",\n{inner}account_config: (initial_cash: {}, commission_bps: {}, slippage_bps: {}, allow_short: {}, max_leverage: {}, enforce_vn_t2_lot_lock: {}, venue: {}, base_timeframe_secs: {}),",
@@ -2039,6 +2202,16 @@ fn encode_ron_command(out: &mut String, cmd: &RecordedCommand) {
         }
         RecordedCommandKind::CancelOrder { order_id } => {
             let _ = write!(out, "kind: CancelOrder, order_id: {order_id})");
+        }
+        RecordedCommandKind::ModifyOrderPrice {
+            order_id,
+            new_price,
+        } => {
+            let _ = write!(
+                out,
+                "kind: ModifyOrderPrice, order_id: {order_id}, new_price: {})",
+                fmt_f64(*new_price)
+            );
         }
         RecordedCommandKind::UpdateBrackets {
             stop_loss,
@@ -2315,7 +2488,10 @@ fn decode_practice_slot(
         &[
             "initial_cash",
             "commission_bps",
+            "tax_sell_bps",
             "slippage_bps",
+            "contract_multiplier",
+            "initial_margin_pct",
             "allow_short",
             "max_leverage",
             "enforce_vn_t2_lot_lock",
@@ -2331,8 +2507,19 @@ fn decode_practice_slot(
         account_config.commission_bps =
             expect_f64(v, &format!("{ctx}.account_config.commission_bps"))?;
     }
+    if let Some(v) = find_field(ac_fields, "tax_sell_bps") {
+        account_config.tax_sell_bps = expect_f64(v, &format!("{ctx}.account_config.tax_sell_bps"))?;
+    }
     if let Some(v) = find_field(ac_fields, "slippage_bps") {
         account_config.slippage_bps = expect_f64(v, &format!("{ctx}.account_config.slippage_bps"))?;
+    }
+    if let Some(v) = find_field(ac_fields, "contract_multiplier") {
+        account_config.contract_multiplier =
+            expect_f64(v, &format!("{ctx}.account_config.contract_multiplier"))?;
+    }
+    if let Some(v) = find_field(ac_fields, "initial_margin_pct") {
+        account_config.initial_margin_pct =
+            expect_f64(v, &format!("{ctx}.account_config.initial_margin_pct"))?;
     }
     if let Some(v) = find_field(ac_fields, "allow_short") {
         account_config.allow_short = expect_bool(v, &format!("{ctx}.account_config.allow_short"))?;
@@ -2527,6 +2714,7 @@ fn decode_command(val: &DocValue, ctx: &str) -> Result<RecordedCommand, Workspac
             "stop_loss",
             "take_profit",
             "order_id",
+            "new_price",
         ],
     )?;
     let base_index = expect_usize(
@@ -2628,6 +2816,26 @@ fn decode_command(val: &DocValue, ctx: &str) -> Result<RecordedCommand, Workspac
                 &format!("{ctx}.order_id"),
             )?;
             RecordedCommandKind::CancelOrder { order_id }
+        }
+        "ModifyOrderPrice" => {
+            let order_id = expect_u64_safe(
+                find_field(f, "order_id").ok_or_else(|| WorkspaceTemplateError::InvalidField {
+                    field: format!("{ctx}.order_id"),
+                    reason: "missing".to_owned(),
+                })?,
+                &format!("{ctx}.order_id"),
+            )?;
+            let new_price = expect_f64(
+                find_field(f, "new_price").ok_or_else(|| WorkspaceTemplateError::InvalidField {
+                    field: format!("{ctx}.new_price"),
+                    reason: "missing".to_owned(),
+                })?,
+                &format!("{ctx}.new_price"),
+            )?;
+            RecordedCommandKind::ModifyOrderPrice {
+                order_id,
+                new_price,
+            }
         }
         "UpdateBrackets" => {
             let stop_loss = match find_field(f, "stop_loss") {

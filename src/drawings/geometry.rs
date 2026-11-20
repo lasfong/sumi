@@ -1,4 +1,6 @@
-use crate::indicators::compute_anchored_vwap;
+use std::sync::Arc;
+
+use crate::indicators::{VwapBandsOutput, compute_anchored_vwap};
 use crate::model::Candle;
 use crate::viewport::{PriceScale, TimeScale};
 
@@ -136,6 +138,8 @@ pub enum HandlePart {
     RrTarget,
     /// Mid-span stop-loss price handle of a `RiskRewardBox`.
     RrStop,
+    /// Mid-span parallel border offset handle of a `ParallelChannel` (`v1.1 / Wave 2`).
+    ChannelOffset,
 }
 
 /// Projected handle coordinate in pane-local space.
@@ -163,6 +167,17 @@ pub struct ProjectedFibBand {
     pub rect: LocalRect,
 }
 
+/// Causal measurement summary computed for a [`DrawingGeometry::PriceDateRange`] (`v1.1 / Wave 2`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PriceDateRangeMetrics {
+    pub price_delta: f64,
+    pub price_pct: Option<f64>,
+    pub bar_count: usize,
+    pub elapsed_secs: Option<i64>,
+    pub total_volume: Option<f64>,
+    pub is_bullish: bool,
+}
+
 /// Clipped, render-ready and hit-test-ready pane-local geometry for a [`Drawing`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProjectedDrawingShape {
@@ -176,10 +191,24 @@ pub enum ProjectedDrawingShape {
         raw_end: LocalPoint,
         clipped: Option<LocalSegment>,
     },
+    ParallelChannel {
+        base_line: Option<LocalSegment>,
+        parallel_line: Option<LocalSegment>,
+        mid_line: Option<LocalSegment>,
+        fill_polygon: Vec<LocalPoint>,
+    },
     Rectangle {
         raw_rect: LocalRect,
         clipped_fill: Option<LocalRect>,
         clipped_edges: [Option<LocalSegment>; 4],
+    },
+    PriceDateRange {
+        raw_rect: LocalRect,
+        clipped_fill: Option<LocalRect>,
+        clipped_edges: [Option<LocalSegment>; 4],
+        start_local: LocalPoint,
+        end_local: LocalPoint,
+        metrics: PriceDateRangeMetrics,
     },
     Fibonacci {
         control_segment: Option<LocalSegment>,
@@ -243,6 +272,13 @@ pub struct PaneDrawingProjection<'a> {
     pub height: f64,
     pub base_value: f64,
     pub candles: Option<&'a [Candle]>,
+    /// Optional memoized `(anchor_bar_index, Arc<VwapBandsOutput>)` lookup table populated from
+    /// `R11RenderMemo` so `AnchoredVwap` hit-testing & projection never recompute 100K-bar Welford
+    /// series per frame (`BUG-015`).
+    pub precomputed_avwaps: Option<&'a [(usize, Arc<VwapBandsOutput>)]>,
+    /// When `true`, skips building `tail_segments` inside `project_drawing` because the paint pass
+    /// renders the `AnchoredVwap` polyline directly from `R11RenderMemo` (`BUG-015`).
+    pub skip_avwap_tail_segments: bool,
 }
 
 impl<'a> PaneDrawingProjection<'a> {
@@ -262,6 +298,8 @@ impl<'a> PaneDrawingProjection<'a> {
             height,
             base_value,
             candles: None,
+            precomputed_avwaps: None,
+            skip_avwap_tail_segments: false,
         }
     }
 
@@ -269,6 +307,23 @@ impl<'a> PaneDrawingProjection<'a> {
     #[must_use]
     pub const fn with_candles(mut self, candles: &'a [Candle]) -> Self {
         self.candles = Some(candles);
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn with_precomputed_avwaps(
+        mut self,
+        precomputed: &'a [(usize, Arc<VwapBandsOutput>)],
+    ) -> Self {
+        self.precomputed_avwaps = Some(precomputed);
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn with_skip_avwap_tail_segments(mut self, skip: bool) -> Self {
+        self.skip_avwap_tail_segments = skip;
         self
     }
 
@@ -432,6 +487,177 @@ impl<'a> PaneDrawingProjection<'a> {
                         raw_start: p0,
                         raw_end: p1,
                         clipped,
+                    },
+                })
+            }
+            DrawingGeometry::ParallelChannel {
+                start,
+                end,
+                channel_offset,
+            } => {
+                let p0 = self.anchor_to_local(start)?;
+                let p1 = self.anchor_to_local(end)?;
+                let par_start = DrawingAnchor::new(start.bar_index, start.value + channel_offset);
+                let par_end = DrawingAnchor::new(end.bar_index, end.value + channel_offset);
+                let q0 = self.anchor_to_local(par_start)?;
+                let q1 = self.anchor_to_local(par_end)?;
+                let mid_start =
+                    DrawingAnchor::new(start.bar_index, start.value + 0.5 * channel_offset);
+                let mid_end = DrawingAnchor::new(end.bar_index, end.value + 0.5 * channel_offset);
+                let m0 = self.anchor_to_local(mid_start)?;
+                let m1 = self.anchor_to_local(mid_end)?;
+
+                let has_horiz_dir = (p1.x - p0.x).abs() > 1.0e-9;
+                let (t_min, t_max) = if !has_horiz_dir {
+                    (0.0, 1.0)
+                } else if p0.x <= p1.x {
+                    (
+                        if drawing.trend_extend_left {
+                            f64::NEG_INFINITY
+                        } else {
+                            0.0
+                        },
+                        if drawing.trend_extend_right {
+                            f64::INFINITY
+                        } else {
+                            1.0
+                        },
+                    )
+                } else {
+                    (
+                        if drawing.trend_extend_right {
+                            f64::NEG_INFINITY
+                        } else {
+                            0.0
+                        },
+                        if drawing.trend_extend_left {
+                            f64::INFINITY
+                        } else {
+                            1.0
+                        },
+                    )
+                };
+
+                let base_line = clip_parametric_line(p0, p1, t_min, t_max, bounds);
+                let parallel_line = clip_parametric_line(q0, q1, t_min, t_max, bounds);
+                let mid_line = clip_parametric_line(m0, m1, t_min, t_max, bounds);
+
+                let fill_polygon = if has_horiz_dir {
+                    let dx = p1.x - p0.x;
+                    let t_bound_a = ((bounds.left - 4.0) - p0.x) / dx;
+                    let t_bound_b = ((bounds.right + 4.0) - p0.x) / dx;
+                    let (t_lo_bound, t_hi_bound) = if t_bound_a <= t_bound_b {
+                        (t_bound_a, t_bound_b)
+                    } else {
+                        (t_bound_b, t_bound_a)
+                    };
+                    let t_lo = if t_min.is_infinite() {
+                        t_lo_bound.min(0.0)
+                    } else {
+                        t_min
+                    };
+                    let t_hi = if t_max.is_infinite() {
+                        t_hi_bound.max(1.0)
+                    } else {
+                        t_max
+                    };
+                    if t_lo.is_finite() && t_hi.is_finite() && (t_hi - t_lo).abs() > 1.0e-9 {
+                        let lerp = |a: LocalPoint, b: LocalPoint, t: f64| {
+                            LocalPoint::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)
+                        };
+                        let quad = vec![
+                            lerp(p0, p1, t_lo),
+                            lerp(p0, p1, t_hi),
+                            lerp(q0, q1, t_hi),
+                            lerp(q0, q1, t_lo),
+                        ];
+                        clip_polygon_to_rect(quad, bounds)
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                };
+
+                let par_mid = LocalPoint::new(0.5 * (q0.x + q1.x), 0.5 * (q0.y + q1.y));
+                let mut handles = Vec::with_capacity(3);
+                if bounds.contains_with_margin(p0, 8.0) {
+                    handles.push(ProjectedHandle {
+                        part: HandlePart::Anchor(0),
+                        pos: p0,
+                    });
+                }
+                if bounds.contains_with_margin(p1, 8.0) {
+                    handles.push(ProjectedHandle {
+                        part: HandlePart::Anchor(1),
+                        pos: p1,
+                    });
+                }
+                if bounds.contains_with_margin(par_mid, 8.0) {
+                    handles.push(ProjectedHandle {
+                        part: HandlePart::ChannelOffset,
+                        pos: par_mid,
+                    });
+                }
+
+                Some(ProjectedDrawing {
+                    id: drawing.id,
+                    locked: drawing.locked,
+                    anchors_local: vec![p0, p1, par_mid],
+                    handles,
+                    shape: ProjectedDrawingShape::ParallelChannel {
+                        base_line,
+                        parallel_line,
+                        mid_line,
+                        fill_polygon,
+                    },
+                })
+            }
+            DrawingGeometry::PriceDateRange { start, end } => {
+                let p0 = self.anchor_to_local(start)?;
+                let p1 = self.anchor_to_local(end)?;
+                let raw_rect = LocalRect::from_corners(p0, p1);
+                let clipped_fill = raw_rect
+                    .intersect(bounds)
+                    .filter(|r| r.width() > 0.0 && r.height() > 0.0);
+                let corners = [
+                    p0,
+                    LocalPoint::new(p1.x, p0.y),
+                    p1,
+                    LocalPoint::new(p0.x, p1.y),
+                ];
+                let clipped_edges = [
+                    clip_parametric_line(corners[0], corners[1], 0.0, 1.0, bounds),
+                    clip_parametric_line(corners[1], corners[2], 0.0, 1.0, bounds),
+                    clip_parametric_line(corners[2], corners[3], 0.0, 1.0, bounds),
+                    clip_parametric_line(corners[3], corners[0], 0.0, 1.0, bounds),
+                ];
+                let mut handles = Vec::with_capacity(2);
+                if bounds.contains_with_margin(p0, 8.0) {
+                    handles.push(ProjectedHandle {
+                        part: HandlePart::Anchor(0),
+                        pos: p0,
+                    });
+                }
+                if bounds.contains_with_margin(p1, 8.0) {
+                    handles.push(ProjectedHandle {
+                        part: HandlePart::Anchor(1),
+                        pos: p1,
+                    });
+                }
+                let metrics = compute_price_date_range_metrics(start, end, self.candles);
+                Some(ProjectedDrawing {
+                    id: drawing.id,
+                    locked: drawing.locked,
+                    anchors_local: vec![p0, p1],
+                    handles,
+                    shape: ProjectedDrawingShape::PriceDateRange {
+                        raw_rect,
+                        clipped_fill,
+                        clipped_edges,
+                        start_local: p0,
+                        end_local: p1,
+                        metrics,
                     },
                 })
             }
@@ -759,13 +985,23 @@ impl<'a> PaneDrawingProjection<'a> {
                     });
                 }
                 let mut tail_segments = Vec::new();
-                if let Some(candles) = self.candles
+                if !self.skip_avwap_tail_segments
+                    && let Some(candles) = self.candles
                     && !candles.is_empty()
                     && anchor.bar_index >= -0.5
                 {
                     let a_idx = anchor.bar_index.round().max(0.0) as usize;
                     if a_idx < candles.len() {
-                        let vwap_out = compute_anchored_vwap(&candles[a_idx..], 0, 1.0, 2.0);
+                        let owned_vwap;
+                        let vwap_ref: &VwapBandsOutput = if let Some(cached) = self
+                            .precomputed_avwaps
+                            .and_then(|list| list.iter().find(|(idx, _)| *idx == a_idx))
+                        {
+                            cached.1.as_ref()
+                        } else {
+                            owned_vwap = compute_anchored_vwap(&candles[a_idx..], 0, 1.0, 2.0);
+                            &owned_vwap
+                        };
                         let strict = self.time_scale.strict_visible_data_range();
                         let vis_start =
                             strict.start.saturating_sub(2).max(a_idx).min(candles.len());
@@ -776,7 +1012,7 @@ impl<'a> PaneDrawingProjection<'a> {
                             .max(vis_start);
                         let step = ((vis_end - vis_start) / 256).max(1);
                         let map_pt = |idx: usize| -> Option<LocalPoint> {
-                            let val = vwap_out.vwap.get(idx - a_idx).copied().flatten()?;
+                            let val = vwap_ref.vwap.get(idx - a_idx).copied().flatten()?;
                             if !val.is_finite() {
                                 return None;
                             }
@@ -828,17 +1064,32 @@ impl<'a> PaneDrawingProjection<'a> {
             }
             DrawingGeometry::TextNote { anchor, ref text } => {
                 let p0 = self.anchor_to_local(anchor)?;
-                let lines = wrap_text_note_lines(text, 34, 8);
-                let max_chars = lines
+                // Allow up to 14 wrapped lines of 36 chars (`504 >= MAX_TEXT_NOTE_CHARS = 280`) so valid
+                // 280-char Vietnamese/CJK/emoji notes are NEVER truncated at 272 chars (`BUG-026`).
+                let lines = wrap_text_note_lines(text, 36, 14);
+                let max_col_width: f64 = lines
                     .iter()
-                    .map(|l| l.chars().count())
-                    .max()
-                    .unwrap_or(4)
-                    .max(4);
-                let box_w =
-                    ((max_chars as f64) * 6.4 + 14.0).clamp(44.0, (self.width - 8.0).max(44.0));
+                    .map(|l| {
+                        l.chars()
+                            .map(|c| {
+                                let cp = c as u32;
+                                if (0x1100..=0x115F).contains(&cp)
+                                    || (0x2E80..=0xA4CF).contains(&cp)
+                                    || (0xAC00..=0xD7A3).contains(&cp)
+                                    || (0xF900..=0xFAFF).contains(&cp)
+                                    || (0x1F300..=0x1FAFF).contains(&cp)
+                                {
+                                    1.85
+                                } else {
+                                    1.0
+                                }
+                            })
+                            .sum::<f64>()
+                    })
+                    .fold(4.0_f64, f64::max);
+                let box_w = (max_col_width * 6.5 + 18.0).clamp(48.0, (self.width - 8.0).max(48.0));
                 let box_h =
-                    ((lines.len() as f64) * 14.5 + 10.0).clamp(24.0, (self.height - 8.0).max(24.0));
+                    ((lines.len() as f64) * 14.5 + 12.0).clamp(24.0, (self.height - 8.0).max(24.0));
 
                 let visible_near_pane = bounds.contains_with_margin(p0, box_w.max(box_h) + 12.0);
                 let box_rect = visible_near_pane.then(|| {
@@ -1146,6 +1397,201 @@ pub fn clip_parametric_line(
     let start = snap_edge(eval_pt(t_min), min_edge);
     let end = snap_edge(eval_pt(t_max), max_edge);
     (start.is_finite() && end.is_finite()).then_some(LocalSegment::new(start, end))
+}
+
+/// Computes causal `ΔPrice`, `Δ%`, bar count, elapsed duration, and total volume for a
+/// [`DrawingGeometry::PriceDateRange`] across the currently visible candle slice (`v1.1 / Wave 2`).
+#[must_use]
+pub fn compute_price_date_range_metrics(
+    start: DrawingAnchor,
+    end: DrawingAnchor,
+    candles: Option<&[Candle]>,
+) -> PriceDateRangeMetrics {
+    let price_delta = end.value - start.value;
+    let price_pct = if start.value.is_finite() && start.value.abs() > 1.0e-12 {
+        let pct = (price_delta / start.value.abs()) * 100.0;
+        pct.is_finite().then_some(pct)
+    } else {
+        None
+    };
+    let b0 = start.bar_index.round();
+    let b1 = end.bar_index.round();
+    let bar_count = if b0.is_finite() && b1.is_finite() {
+        (b1 - b0).abs().round().min(1.0e9) as usize
+    } else {
+        0
+    };
+
+    let resolve_ts = |a: DrawingAnchor| -> Option<i64> {
+        if let Some(ts) = a.timestamp
+            && ts.is_finite()
+        {
+            return Some(ts.round() as i64);
+        }
+        let cs = candles?;
+        if cs.is_empty() || !a.bar_index.is_finite() {
+            return None;
+        }
+        let idx = a.bar_index.round().clamp(0.0, (cs.len() - 1) as f64) as usize;
+        Some(cs[idx].timestamp)
+    };
+    let elapsed_secs = resolve_ts(start)
+        .zip(resolve_ts(end))
+        .map(|(t0, t1)| (t1.saturating_sub(t0)).abs());
+
+    let total_volume = candles.and_then(|cs| {
+        if cs.is_empty() || !b0.is_finite() || !b1.is_finite() {
+            return None;
+        }
+        let lo_f = b0.min(b1);
+        let hi_f = b0.max(b1);
+        let max_i = (cs.len() - 1) as f64;
+        if hi_f < 0.0 || lo_f > max_i {
+            return None;
+        }
+        let i0 = lo_f.clamp(0.0, max_i) as usize;
+        let i1 = hi_f.clamp(0.0, max_i) as usize;
+        let mut sum = 0.0_f64;
+        let mut any_finite = false;
+        for c in &cs[i0..=i1] {
+            if c.volume.is_finite() && c.volume >= 0.0 {
+                sum += c.volume;
+                any_finite = true;
+            }
+        }
+        (any_finite && sum.is_finite()).then_some(sum)
+    });
+
+    PriceDateRangeMetrics {
+        price_delta: if price_delta.is_finite() {
+            price_delta
+        } else {
+            0.0
+        },
+        price_pct,
+        bar_count,
+        elapsed_secs,
+        total_volume,
+        is_bullish: price_delta >= 0.0,
+    }
+}
+
+/// Formats an elapsed duration in seconds into compact TradingView notation (`61d`, `3d 4h`, `6h 30m`, `45m`).
+#[must_use]
+pub fn format_measure_duration(secs: i64) -> String {
+    let abs = secs.unsigned_abs();
+    if abs < 60 {
+        return format!("{abs}s");
+    }
+    let total_mins = abs / 60;
+    if total_mins < 60 {
+        return format!("{total_mins}m");
+    }
+    let total_hours = total_mins / 60;
+    let rem_mins = total_mins % 60;
+    if total_hours < 24 {
+        if rem_mins == 0 {
+            return format!("{total_hours}h");
+        }
+        return format!("{total_hours}h {rem_mins}m");
+    }
+    let days = total_hours / 24;
+    let rem_hours = total_hours % 24;
+    if rem_hours == 0 {
+        format!("{days}d")
+    } else {
+        format!("{days}d {rem_hours}h")
+    }
+}
+
+/// Exact Sutherland-Hodgman convex polygon clip against an axis-aligned [`LocalRect`].
+#[must_use]
+pub(crate) fn clip_polygon_to_rect(
+    mut poly: Vec<LocalPoint>,
+    bounds: LocalRect,
+) -> Vec<LocalPoint> {
+    if poly.len() < 3 {
+        return Vec::new();
+    }
+    let clip_edge = |pts: Vec<LocalPoint>,
+                     inside: fn(LocalPoint, LocalRect) -> bool,
+                     intersect: fn(LocalPoint, LocalPoint, LocalRect) -> LocalPoint|
+     -> Vec<LocalPoint> {
+        let mut out = Vec::with_capacity(pts.len() + 1);
+        if pts.is_empty() {
+            return out;
+        }
+        let mut prev = *pts.last().unwrap();
+        let mut prev_in = inside(prev, bounds);
+        for &curr in &pts {
+            let curr_in = inside(curr, bounds);
+            if curr_in {
+                if !prev_in {
+                    out.push(intersect(prev, curr, bounds));
+                }
+                out.push(curr);
+            } else if prev_in {
+                out.push(intersect(prev, curr, bounds));
+            }
+            prev = curr;
+            prev_in = curr_in;
+        }
+        out
+    };
+
+    poly = clip_edge(
+        poly,
+        |p, b| p.x >= b.left,
+        |a, c, b| {
+            let t = if (c.x - a.x).abs() > 1e-12 {
+                (b.left - a.x) / (c.x - a.x)
+            } else {
+                0.0
+            };
+            LocalPoint::new(b.left, a.y + t * (c.y - a.y))
+        },
+    );
+    poly = clip_edge(
+        poly,
+        |p, b| p.x <= b.right,
+        |a, c, b| {
+            let t = if (c.x - a.x).abs() > 1e-12 {
+                (b.right - a.x) / (c.x - a.x)
+            } else {
+                0.0
+            };
+            LocalPoint::new(b.right, a.y + t * (c.y - a.y))
+        },
+    );
+    poly = clip_edge(
+        poly,
+        |p, b| p.y >= b.top,
+        |a, c, b| {
+            let t = if (c.y - a.y).abs() > 1e-12 {
+                (b.top - a.y) / (c.y - a.y)
+            } else {
+                0.0
+            };
+            LocalPoint::new(a.x + t * (c.x - a.x), b.top)
+        },
+    );
+    poly = clip_edge(
+        poly,
+        |p, b| p.y <= b.bottom,
+        |a, c, b| {
+            let t = if (c.y - a.y).abs() > 1e-12 {
+                (b.bottom - a.y) / (c.y - a.y)
+            } else {
+                0.0
+            };
+            LocalPoint::new(a.x + t * (c.x - a.x), b.bottom)
+        },
+    );
+    if poly.len() < 3 || !poly.iter().all(|p| p.is_finite()) {
+        Vec::new()
+    } else {
+        poly
+    }
 }
 
 /// Euclidean distance from `point` to finite `segment` (`drawingGeometry.ts:8-13`).

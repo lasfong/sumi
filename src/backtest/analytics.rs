@@ -21,6 +21,7 @@ use crate::viewport::workspace_template::{escape_str_into, fmt_f64, splitmix64_h
 use super::engine::{
     BacktestRunOptions, BacktestRunResult, PrecomputedFeatures, run_backtest_with_options,
     simulate_window_with_features, slice_causal_series_for_symbol_and_options,
+    venue_allows_short_for_symbol,
 };
 use super::metrics::{
     BacktestEquityPoint, BacktestTearsheet, BacktestTrade, PNL_BREAKEVEN_EPS, compute_tearsheet,
@@ -197,6 +198,7 @@ pub fn run_multi_strategy_comparison(
                 &cfg,
                 &feats,
                 incomplete_tail_bar,
+                venue_allows_short_for_symbol(&symbol),
             );
             let open_fee = sim.open_position.as_ref().map_or(0.0, |p| p.entry_fee);
             let ts = compute_tearsheet(
@@ -423,15 +425,17 @@ pub fn compute_outlier_impact(trades: &[BacktestTrade]) -> OutlierImpactReport {
     let valid_n = all_pnls.len();
     let full_expectancy = (valid_n > 0).then_some(total_net_pnl / (valid_n as f64));
 
-    let top_3_winners_pnl: f64 = winners.iter().take(3).sum();
+    let removed_winners_count = winners.len().min(3);
+    let top_3_winners_pnl: f64 = winners.iter().take(removed_winners_count).sum();
     let top_3_winners_share_of_gross_profit_pct = if gross_profit > PNL_BREAKEVEN_EPS {
         Some((top_3_winners_pnl / gross_profit) * 100.0)
     } else {
         None
     };
     let net_pnl_ex_top_3_winners = total_net_pnl - top_3_winners_pnl;
-    let expectancy_ex_top_3_winners = if valid_n > 3 {
-        Some(net_pnl_ex_top_3_winners / ((valid_n - 3) as f64))
+    let remaining_n = valid_n.saturating_sub(removed_winners_count);
+    let expectancy_ex_top_3_winners = if remaining_n > 0 {
+        Some(net_pnl_ex_top_3_winners / (remaining_n as f64))
     } else {
         None
     };
@@ -666,10 +670,14 @@ pub fn compute_yearly_breakdown(
 
     map.into_iter()
         .map(|(year, acc)| {
-            let start_eq = acc.start_equity.unwrap_or(initial_cash).max(1.0e-9);
+            let raw_start = acc.start_equity.unwrap_or(initial_cash);
             let equity_return_pct = if acc.bar_count > 0 {
-                ((acc.end_equity - start_eq) / start_eq) * 100.0
-            } else if initial_cash > 0.0 {
+                if raw_start > 1.0e-9 {
+                    ((acc.end_equity - raw_start) / raw_start) * 100.0
+                } else {
+                    0.0
+                }
+            } else if initial_cash > 1.0e-9 {
                 (acc.net_pnl / initial_cash) * 100.0
             } else {
                 0.0
@@ -968,6 +976,7 @@ pub fn run_multi_phase_batch_for_symbol(
         slice_causal_series_for_symbol_and_options(symbol, candles, timeframe, options);
     let regimes = compute_regime_series(causal_candles);
     run_multi_phase_batch_internal(
+        symbol,
         timeframe,
         causal_candles,
         &regimes,
@@ -978,6 +987,7 @@ pub fn run_multi_phase_batch_for_symbol(
 }
 
 fn run_multi_phase_batch_internal(
+    symbol: Option<&str>,
     timeframe: Timeframe,
     causal_candles: &[Candle],
     regimes: &[MarketRegime],
@@ -1053,6 +1063,7 @@ fn run_multi_phase_batch_internal(
             clean_cfg,
             &features,
             is_tail,
+            symbol.is_none_or(venue_allows_short_for_symbol),
         );
         let open_fee = sim.open_position.as_ref().map_or(0.0, |p| p.entry_fee);
         let tearsheet = compute_tearsheet(
@@ -1372,6 +1383,7 @@ pub fn compute_advanced_tearsheet_analytics(
     let entry_regime_slices =
         compute_entry_regime_breakdown_with_precomputed(&regimes, &result.trades);
     let multi_phase = run_multi_phase_batch_internal(
+        Some(&result.symbol),
         result.timeframe,
         causal_candles,
         &regimes,

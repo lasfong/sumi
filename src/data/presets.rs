@@ -300,11 +300,13 @@ pub fn generate_vn30_basket_report(symbol_override: Option<&str>) -> DataLoadRep
 pub fn generate_intraday_vn30f_1m_report(target_bars: usize) -> DataLoadReport {
     let total = target_bars.max(60);
     let mut candles = Vec::with_capacity(total);
-    let mut day_cursor = days_from_civil(2026, 9, 1); // Tuesday 2026-09-01
+    // Start at `2026-09-01` and skip official `VIETNAM_HOLIDAYS_V1` holidays (`2026-09-01`, `2026-09-02`
+    // National Day) & weekends so intraday VN30F1M opens cleanly on Thursday `2026-09-03` (`BUG-025`).
+    let mut day_cursor = days_from_civil(2026, 9, 1);
     let mut prev_close = 1_285.0_f64;
 
     while candles.len() < total {
-        if weekday_from_days(day_cursor) >= 5 {
+        if !crate::journal::is_vn_exchange_trading_day_days(day_cursor) {
             day_cursor += 1;
             continue;
         }
@@ -366,20 +368,112 @@ pub fn generate_intraday_vn30f_1m_report(target_bars: usize) -> DataLoadReport {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn read_repo_fixture(rel_path: &str) -> Option<String> {
-    if let Ok(text) = std::fs::read_to_string(rel_path) {
-        return Some(text);
+fn workstation_data_roots() -> Vec<std::path::PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(env_dir) = std::env::var("SUMI_DATA_DIR") {
+        let trimmed = env_dir.trim();
+        if !trimmed.is_empty() {
+            roots.push(std::path::PathBuf::from(trimmed));
+        }
     }
-    let manifest_joined = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel_path);
-    std::fs::read_to_string(manifest_joined).ok()
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd);
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(macos_dir) = exe.parent()
+    {
+        if let Some(contents_dir) = macos_dir.parent() {
+            roots.push(contents_dir.join("Resources"));
+        }
+        let mut cursor = Some(macos_dir);
+        while let Some(dir) = cursor {
+            if dir.join("data").is_dir() || dir.join("Cargo.toml").is_file() {
+                roots.push(dir.to_path_buf());
+                break;
+            }
+            cursor = dir.parent();
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        roots.push(
+            std::path::PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("Sumi Workstation"),
+        );
+    }
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let trimmed = appdata.trim();
+        if !trimmed.is_empty() {
+            roots.push(std::path::PathBuf::from(trimmed).join("Sumi Workstation"));
+        }
+    }
+    roots.push(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    roots
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_repo_fixture(rel_path: &str) -> Option<String> {
+    for root in workstation_data_roots() {
+        let candidate = root.join(rel_path);
+        if let Ok(text) = std::fs::read_to_string(&candidate) {
+            return Some(text);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_latest_real_cafef_index_csv() -> Option<String> {
+    // 1. Prefer full official `data/raw/cafef/CafeF.INDEX*.csv` (e.g. `CafeF.INDEX.Upto06112026.csv`,
+    //    `2000–2026`, clean without the `-34.5%` spike in archived `CafeF.INDEX.clean.csv`, `BUG-006`/`BUG-022`).
+    for rel in [
+        "data/raw/cafef/CafeF.INDEX.Upto06112026.csv",
+        "data/raw/cafef/CafeF.INDEX.csv",
+    ] {
+        if let Some(txt) = read_repo_fixture(rel) {
+            return Some(txt);
+        }
+    }
+    for root in workstation_data_roots() {
+        let base = root.join("data/raw/cafef");
+        if let Ok(entries) = std::fs::read_dir(&base) {
+            let mut candidates: Vec<std::path::PathBuf> = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.is_file()
+                        && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                            let up = n.to_ascii_uppercase();
+                            up.contains("CAFEF.INDEX") && up.ends_with(".CSV")
+                        })
+                })
+                .collect();
+            candidates.sort();
+            if let Some(latest) = candidates.pop()
+                && let Ok(txt) = std::fs::read_to_string(latest)
+            {
+                return Some(txt);
+            }
+        }
+    }
+    None
 }
 
 fn load_cafef_preset(symbol_override: Option<&str>) -> DataLoadReport {
     let opts = DataLoadOptions {
         symbol_filter: Some(symbol_override.unwrap_or("VNINDEX").to_owned()),
         default_symbol: Some("VNINDEX".to_owned()),
+        invalid_row_policy: super::InvalidRowPolicy::QuarantineRow,
         ..DataLoadOptions::default()
     };
+
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(csv_text) = read_latest_real_cafef_index_csv()
+        && let Ok(rep) = load_ohlcv_csv(&csv_text, &opts)
+    {
+        return rep;
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(csv_text) = read_repo_fixture("ARCHIVE/test-results/p0b/data/CafeF.INDEX.clean.csv")
@@ -539,22 +633,25 @@ pub fn resolve_benchmark_series_for_window(
         .iter()
         .filter(|e| e.symbol.eq_ignore_ascii_case(target))
         .filter_map(|e| {
-            let reaches_recent_tail = e
-                .candles
-                .last()
-                .is_some_and(|c| c.timestamp >= recent_floor_ts);
-            if !reaches_recent_tail {
-                return None;
-            }
             let overlap_count = e
                 .candles
                 .iter()
                 .filter(|c| c.timestamp >= win_lo && c.timestamp <= win_hi)
                 .count();
-            (overlap_count >= 2).then_some((overlap_count, e))
+            let reaches_recent_tail = e
+                .candles
+                .last()
+                .is_some_and(|c| c.timestamp >= recent_floor_ts);
+            // Prefer real overlapping historical index data (`overlap_count >= 20` or recent tail match)
+            // over silently falling back to a synthetic sine wave (`BUG-006`).
+            (overlap_count >= 2 && (reaches_recent_tail || overlap_count >= 20)).then_some((
+                reaches_recent_tail,
+                overlap_count,
+                e,
+            ))
         })
-        .max_by_key(|(overlap_count, _)| *overlap_count)
-        .map(|(_, e)| e)
+        .max_by_key(|(reaches_tail, overlap_count, _)| (*reaches_tail, *overlap_count))
+        .map(|(_, _, e)| e)
     {
         return Some((
             entry.symbol.clone(),
@@ -565,9 +662,9 @@ pub fn resolve_benchmark_series_for_window(
 
     let upper = target.to_ascii_uppercase();
     let (canonical, base_price, wave_amp, drift_per_bar) = match upper.as_str() {
-        "VNINDEX" | "VN-INDEX" => ("VNINDEX", 1_265.0, 5.8, 0.42),
-        "HNX-INDEX" | "HNXINDEX" => ("HNX-INDEX", 232.0, 1.6, 0.08),
-        "SPY" => ("SPY", 588.0, 2.9, 0.22),
+        "VNINDEX" | "VN-INDEX" => ("VNINDEX [SYNTH]", 1_265.0, 5.8, 0.42),
+        "HNX-INDEX" | "HNXINDEX" => ("HNX-INDEX [SYNTH]", 232.0, 1.6, 0.08),
+        "SPY" => ("SPY [SYNTH]", 588.0, 2.9, 0.22),
         _ => return None,
     };
 

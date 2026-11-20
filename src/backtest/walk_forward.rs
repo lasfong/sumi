@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::data::{DataSourcePreset, Timeframe, WatchlistFeedEntry, aggregate_ohlcv};
+use crate::data::{
+    DataSourcePreset, Timeframe, VN30_BASKET_SYMBOLS, WatchlistFeedEntry, aggregate_ohlcv,
+};
 use crate::indicators::SeriesBlockIndex;
 use crate::model::Candle;
 use crate::scanner::{SessionDate, UniverseDefinition, UniverseMode, UniverseResolver};
@@ -10,6 +12,7 @@ use super::engine::{
     is_bucket_incomplete_at_close_for_symbol, normalize_config_for_universe_feed,
     run_backtest_with_options, run_pit_episodes_backtest, simulate_window_with_carry,
     simulate_window_with_features, slice_causal_series_for_symbol_and_options,
+    venue_allows_short_for_symbol,
 };
 use super::metrics::{BacktestEquityPoint, BacktestTearsheet, BacktestTrade, compute_tearsheet};
 use super::strategy::{
@@ -244,6 +247,7 @@ pub fn run_walk_forward_validation(
                 cfg,
                 feats,
                 false,
+                venue_allows_short_for_symbol(&symbol),
             );
             let open_fee = sim.open_position.as_ref().map_or(0.0, |p| p.entry_fee);
             let sheet = compute_tearsheet(
@@ -334,6 +338,7 @@ pub fn run_walk_forward_validation(
                 Some(carry),
                 !is_final_fold,
                 true,
+                venue_allows_short_for_symbol(&symbol),
             );
             carry = next_carry;
 
@@ -562,6 +567,9 @@ struct PreparedConstituent {
     first_ts: i64,
     /// Strictly increasing causal bar-close instants (`bar_open_ts + tf.seconds() - 1`, clamped to `replay_causal_close_timestamp`).
     timestamps: Vec<i64>,
+    /// Matching bar-open UTC timestamps (`pt.timestamp`) aligned 1:1 with `timestamps` so `W1` PIT
+    /// eligibility matches `run_pit_episodes_backtest` without dropping `UniverseRemoval` weeks (`BUG-029`).
+    open_timestamps: Vec<i64>,
     wealth: Vec<f64>,
     /// Underlying closed-candle causal bar-close instants & close-to-close returns for `CausalInverseVolatility`
     /// (`[CRITIC-R18-MAJOR-01]`: prevents flat-cash `50x` weight spikes and preserves pre-inclusion price vol).
@@ -646,11 +654,36 @@ pub fn run_portfolio_backtest_with_universe(
     let mut prepared = Vec::new();
     let mut all_timestamps = Vec::new();
 
+    let default_vn30_pit = (universe_filter == PortfolioUniverseFilter::Vn30EquitiesOnly
+        && universe.is_none())
+    .then(UniverseDefinition::bundled_vn30_pit);
+
     for feed in feeds {
-        if universe_filter == PortfolioUniverseFilter::Vn30EquitiesOnly
-            && feed.preset != DataSourcePreset::Vn30Basket
-        {
-            continue;
+        if universe_filter == PortfolioUniverseFilter::Vn30EquitiesOnly {
+            let is_vn30_feed = if feed.preset == DataSourcePreset::Vn30Basket {
+                true
+            } else if feed.preset == DataSourcePreset::CustomFile {
+                let in_active_universe = universe.is_some_and(|u| {
+                    u.members
+                        .iter()
+                        .any(|m| m.symbol.eq_ignore_ascii_case(&feed.symbol))
+                });
+                let in_default_vn30 = default_vn30_pit.as_ref().is_some_and(|u| {
+                    u.members
+                        .iter()
+                        .any(|m| m.symbol.eq_ignore_ascii_case(&feed.symbol))
+                });
+                in_active_universe
+                    || in_default_vn30
+                    || VN30_BASKET_SYMBOLS
+                        .iter()
+                        .any(|s| s.eq_ignore_ascii_case(&feed.symbol))
+            } else {
+                false
+            };
+            if !is_vn30_feed {
+                continue;
+            }
         }
         let effective_tf = if feed.base_timeframe.can_aggregate_to(preferred_timeframe) {
             preferred_timeframe
@@ -752,6 +785,7 @@ pub fn run_portfolio_backtest_with_universe(
         }
         let c0 = feed_cfg.initial_cash.max(1.0);
         let mut ts_vec: Vec<i64> = Vec::with_capacity(res.equity_curve.len());
+        let mut open_ts_vec: Vec<i64> = Vec::with_capacity(res.equity_curve.len());
         let mut w_vec: Vec<f64> = Vec::with_capacity(res.equity_curve.len());
         for pt in &res.equity_curve {
             let mut close_ts = pt.timestamp.saturating_add(bar_span);
@@ -763,8 +797,12 @@ pub fn run_portfolio_backtest_with_universe(
                 if let Some(last_w) = w_vec.last_mut() {
                     *last_w = w_val;
                 }
+                if let Some(last_open) = open_ts_vec.last_mut() {
+                    *last_open = pt.timestamp;
+                }
             } else {
                 ts_vec.push(close_ts);
+                open_ts_vec.push(pt.timestamp);
                 w_vec.push(w_val);
                 all_timestamps.push(close_ts);
             }
@@ -815,6 +853,7 @@ pub fn run_portfolio_backtest_with_universe(
             timeframe: effective_tf,
             first_ts: ts_vec[0],
             timestamps: ts_vec,
+            open_timestamps: open_ts_vec,
             wealth: w_vec,
             vol_timestamps,
             vol_returns,
@@ -919,7 +958,14 @@ pub fn run_portfolio_backtest_with_universe(
             let ts_ok = c.first_ts <= elig_ts || (universe.is_some() && c.first_ts <= t_m);
             let u_ok = match universe {
                 Some(u) => {
-                    UniverseResolver::is_symbol_active_on(u, &c.symbol, step_date, universe_mode)
+                    // Align constituent PIT evaluation date to the exact bar-open date (`open_timestamps`)
+                    // matching `run_pit_episodes_backtest`, so `W1` `UniverseRemoval` bars retain their
+                    // closing week P&L instead of being zero-weighted by Sunday `+6d` close_ts (`BUG-029`).
+                    let eval_date = match c.timestamps.binary_search(&t_m) {
+                        Ok(pos) => SessionDate::from_utc_timestamp(c.open_timestamps[pos]),
+                        Err(_) => step_date,
+                    };
+                    UniverseResolver::is_symbol_active_on(u, &c.symbol, eval_date, universe_mode)
                 }
                 None => true,
             };

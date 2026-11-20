@@ -667,7 +667,7 @@ fn critic_r08_regression_intrabucket_coarse_alerts_horizontal_parity_and_causal_
         "15m TrendLine armed mid-bucket must fire intra-bucket on post-arm sub-bars"
     );
     assert_eq!(
-        tl_eng.triggers[0].eval_base_timestamp,
+        tl_eng.triggers[0].effective_eval_base_timestamp(),
         base_1m[bucket_end_idx].timestamp
     );
 
@@ -1275,8 +1275,9 @@ fn critic_r16_regression_vn30f_session_close_alerts_spy_w1_and_htf_intrabucket_c
     );
 
     // 2. `[Critical-01]` `SPY` `14:30:00 UTC` `D1 -> W1` alert suppressed on Thursday, fires on Friday:
-    //    `19_415` = Monday (`(19_415 + 4) % 7 == 1`). Build 58 Mon–Fri weeks at `14:30:00 UTC`!
-    let first_monday = 19_415_i64;
+    //    `19_422` = Monday 2023-03-06 (`(19_422 + 4) % 7 == 1`), so week 56 Friday is 2024-04-05
+    //    (regular open NYSE Friday, avoiding Good Friday 2024-03-29). Build 58 Mon–Fri weeks at `14:30:00 UTC`!
+    let first_monday = 19_422_i64;
     let mut spy_d1 = Vec::with_capacity(58 * 5);
     for w in 0..58_usize {
         for wd in 0..5_i64 {
@@ -1468,4 +1469,244 @@ fn critic_r16_regression_vn30f_session_close_alerts_spy_w1_and_htf_intrabucket_c
         cd0_total, 2,
         "OncePerBarClose with cooldown_bars=0 must fire once in bucket 1 (m=17) and once in bucket 2 (m=34)"
     );
+}
+
+#[test]
+fn wave3_regression_spy_1430_no_retroactive_arm_w1_no_ghost_live_replay_mask_and_epoch0() {
+    use crate::alerts::AlertTriggerEvent;
+    use crate::data::{aggregate_ohlcv_up_to, days_from_civil, format_utc_date};
+
+    // 1. `BUG-011a`: On non-midnight `SPY` D1 bars (`14:30:00 UTC`), arming `RsiThreshold`,
+    //    `MacdHistogramZeroCross`, and `DrawingLine` on a bar that just crossed MUST NOT fire retroactively!
+    let mut spy_bars = Vec::with_capacity(45);
+    let day0 = days_from_civil(2024, 1, 2);
+    for i in 0..45_usize {
+        let ts = (day0 + i as i64) * 86_400 + 14 * 3_600 + 30 * 60;
+        // Sharp drop then sharp bounce on bar 35 to trigger RSI & MACD crosses at bar 35:
+        let c = if i < 20 {
+            100.0 - (i as f64) * 1.5
+        } else if i < 34 {
+            70.0 - ((i - 20) as f64) * 0.8
+        } else if i == 34 {
+            58.0
+        } else {
+            85.0 + ((i - 35) as f64) * 2.0
+        };
+        spy_bars.push(Candle {
+            timestamp: ts,
+            date_label: format_utc_date(ts),
+            open: c - 0.5,
+            high: c + 1.0,
+            low: c - 1.0,
+            close: c,
+            volume: 1_000.0,
+        });
+    }
+    let arm_idx = 35;
+    let mut store = DrawingStore::new();
+    let tl_id = store
+        .add_drawing(
+            DrawingPaneTarget::Main,
+            DrawingGeometry::TrendLine {
+                start: DrawingAnchor::new(0.0, 65.0),
+                end: DrawingAnchor::new(44.0, 65.0),
+            },
+            None,
+        )
+        .unwrap();
+
+    let mut spy_eng = AlertEngine::new();
+    spy_eng
+        .add_alert(
+            "SPY",
+            Timeframe::D1,
+            AlertCondition::RsiThreshold {
+                period: 14,
+                level: 30.0,
+                direction: CrossDirection::CrossAbove,
+            },
+            AlertFrequency::Once,
+            None,
+            &spy_bars,
+            arm_idx,
+            Some(spy_bars[arm_idx].timestamp),
+            None,
+        )
+        .unwrap();
+    spy_eng
+        .add_alert(
+            "SPY",
+            Timeframe::D1,
+            AlertCondition::MacdHistogramZeroCross {
+                fast: 12,
+                slow: 26,
+                signal: 9,
+                direction: CrossDirection::CrossAbove,
+            },
+            AlertFrequency::Once,
+            None,
+            &spy_bars,
+            arm_idx,
+            Some(spy_bars[arm_idx].timestamp),
+            None,
+        )
+        .unwrap();
+    spy_eng
+        .add_alert(
+            "SPY",
+            Timeframe::D1,
+            AlertCondition::DrawingLine {
+                drawing_id: tl_id,
+                direction: CrossDirection::CrossAbove,
+            },
+            AlertFrequency::Once,
+            None,
+            &spy_bars,
+            arm_idx,
+            Some(spy_bars[arm_idx].timestamp),
+            Some(&store),
+        )
+        .unwrap();
+
+    // Evaluate at the arming bar itself AND at bar 36: NO trigger may ever have `bar_timestamp == arm_ts`!
+    spy_eng.evaluate_causal(
+        &spy_bars,
+        Timeframe::D1,
+        &spy_bars[..=arm_idx],
+        Timeframe::D1,
+        arm_idx,
+        Some(spy_bars[arm_idx].timestamp),
+        &store,
+    );
+    assert!(
+        spy_eng.triggers.is_empty(),
+        "BUG-011: SPY 14:30 UTC alerts must NOT fire retroactively on the arming bar"
+    );
+    spy_eng.evaluate_causal(
+        &spy_bars,
+        Timeframe::D1,
+        &spy_bars[..=arm_idx + 1],
+        Timeframe::D1,
+        arm_idx + 1,
+        Some(spy_bars[arm_idx + 1].timestamp),
+        &store,
+    );
+    for ev in &spy_eng.triggers {
+        assert!(
+            ev.bar_timestamp > spy_bars[arm_idx].timestamp,
+            "BUG-011: triggered retroactively at {} <= arm {}",
+            ev.bar_timestamp,
+            spy_bars[arm_idx].timestamp
+        );
+    }
+
+    // 2. `BUG-011b`: Mid-week unclosed `1W` bar on `FPT D1 -> W1` MUST NOT fire ghost RSI/MACD/DrawingLine alerts.
+    let first_mon = days_from_civil(2025, 1, 6); // Monday
+    let mut fpt_d1 = Vec::new();
+    for w in 0..25_i64 {
+        for wd in 0..5_i64 {
+            let ts = (first_mon + w * 7 + wd) * 86_400;
+            // Drop for 20 weeks, then huge Wednesday spike on week 24
+            let c = if w < 24 {
+                100.0 - (w as f64) * 2.0
+            } else {
+                140.0
+            };
+            fpt_d1.push(Candle {
+                timestamp: ts,
+                date_label: format_utc_date(ts),
+                open: c - 0.5,
+                high: c + 1.0,
+                low: c - 1.0,
+                close: c,
+                volume: 10_000.0,
+            });
+        }
+    }
+    let fri_w23 = 23 * 5 + 4;
+    let wed_w24 = 24 * 5 + 2; // Wednesday of week 24 (unclosed W1!)
+    let mut w1_eng = AlertEngine::new();
+    w1_eng
+        .add_alert(
+            "FPT",
+            Timeframe::W1,
+            AlertCondition::RsiThreshold {
+                period: 14,
+                level: 30.0,
+                direction: CrossDirection::CrossAbove,
+            },
+            AlertFrequency::Once,
+            None,
+            &fpt_d1,
+            fri_w23,
+            Some(fpt_d1[fri_w23].timestamp),
+            None,
+        )
+        .unwrap();
+    let w1_wed = aggregate_ohlcv_up_to(
+        &fpt_d1,
+        Timeframe::D1,
+        Timeframe::W1,
+        fpt_d1[wed_w24].timestamp,
+    )
+    .unwrap();
+    w1_eng.evaluate_causal(
+        &fpt_d1,
+        Timeframe::D1,
+        &w1_wed,
+        Timeframe::W1,
+        wed_w24,
+        Some(fpt_d1[wed_w24].timestamp),
+        &DrawingStore::new(),
+    );
+    assert!(
+        w1_eng.triggers.is_empty(),
+        "BUG-011: unclosed mid-week Wednesday W1 bar must NOT emit ghost RSI alert"
+    );
+
+    // 3. `BUG-028`: Live-mode created alert (`replay_cutoff_timestamp = None`) MUST record
+    //    `created_at_timestamp = Some(latest_bar_ts)` and hide when rewound to earlier Replay cutoff.
+    let mut live_eng = AlertEngine::new();
+    let last_idx = fpt_d1.len() - 1;
+    live_eng
+        .add_alert(
+            "FPT",
+            Timeframe::D1,
+            AlertCondition::PriceLevel {
+                price: 150.0,
+                direction: CrossDirection::CrossAbove,
+            },
+            AlertFrequency::Once,
+            None,
+            &fpt_d1,
+            last_idx,
+            None, // Live mode!
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        live_eng.rules[0].created_at_timestamp,
+        Some(fpt_d1[last_idx].timestamp)
+    );
+    assert!(live_eng.rules[0].is_causally_visible(None));
+    assert!(
+        !live_eng.rules[0].is_causally_visible(Some(fpt_d1[10].timestamp)),
+        "BUG-028: Live-created alert must be masked when Bar Replay rewinds into the past"
+    );
+
+    // 4. `BUG-034`: Unix epoch `0` (`1970-01-01T00:00:00Z`) `eval_base_timestamp: Some(0)` is preserved faithfully.
+    let ep0 = AlertTriggerEvent {
+        event_id: 1,
+        alert_id: 1,
+        symbol: "TEST".to_owned(),
+        timeframe: Timeframe::D1,
+        bar_timestamp: -86_400,
+        eval_base_timestamp: Some(0),
+        threshold_value: 100.0,
+        observed_value: 101.0,
+        direction: CrossDirection::CrossAbove,
+        condition_summary: "test".to_owned(),
+        message: "epoch0".to_owned(),
+    };
+    assert_eq!(ep0.effective_eval_base_timestamp(), 0);
 }

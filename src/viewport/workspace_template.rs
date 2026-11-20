@@ -117,6 +117,8 @@ pub struct WorkspaceSlotTemplate {
     pub symbol: String,
     pub timeframe: Timeframe,
     pub scale_mode: PriceScaleMode,
+    #[serde(default)]
+    pub invert_scale: bool,
     pub show_volume: bool,
     pub show_grid: bool,
     pub compare_benchmark: Option<String>,
@@ -133,6 +135,7 @@ impl Default for WorkspaceSlotTemplate {
             symbol: "FPT".to_owned(),
             timeframe: Timeframe::D1,
             scale_mode: PriceScaleMode::Normal,
+            invert_scale: false,
             show_volume: true,
             show_grid: true,
             compare_benchmark: None,
@@ -353,6 +356,7 @@ pub struct WorkstationSettings {
     pub candle_palette: CandlePalettePreset,
     pub auto_snapshot_interval_mins: u16,
     pub enforce_vn_t2_lot_lock: bool,
+    pub show_drawing_rail: bool,
 }
 
 impl Default for WorkstationSettings {
@@ -368,6 +372,7 @@ impl Default for WorkstationSettings {
             candle_palette: CandlePalettePreset::EmeraldCrimson,
             auto_snapshot_interval_mins: 5,
             enforce_vn_t2_lot_lock: true,
+            show_drawing_rail: true,
         }
     }
 }
@@ -1049,6 +1054,9 @@ fn encode_json_template(t: &WorkspaceTemplate) -> String {
         escape_str_into(&mut out, &s.symbol);
         let _ = writeln!(out, ",\n      \"timeframe\": \"{:?}\",", s.timeframe);
         let _ = writeln!(out, "      \"scale_mode\": \"{:?}\",", s.scale_mode);
+        if s.invert_scale {
+            let _ = writeln!(out, "      \"invert_scale\": true,");
+        }
         let _ = writeln!(out, "      \"show_volume\": {},", s.show_volume);
         let _ = writeln!(out, "      \"show_grid\": {},", s.show_grid);
         out.push_str("      \"compare_benchmark\": ");
@@ -1139,9 +1147,10 @@ fn encode_json_settings(out: &mut String, st: &WorkstationSettings) {
     );
     let _ = writeln!(
         out,
-        "    \"enforce_vn_t2_lot_lock\": {}",
+        "    \"enforce_vn_t2_lot_lock\": {},",
         st.enforce_vn_t2_lot_lock
     );
+    let _ = writeln!(out, "    \"show_drawing_rail\": {}", st.show_drawing_rail);
     out.push_str("  }");
 }
 
@@ -1417,6 +1426,9 @@ fn encode_ron_template_inner(t: &WorkspaceTemplate, include_settings: bool) -> S
         escape_str_into(&mut out, &s.symbol);
         let _ = writeln!(out, ",\n            timeframe: {:?},", s.timeframe);
         let _ = writeln!(out, "            scale_mode: {:?},", s.scale_mode);
+        if s.invert_scale {
+            let _ = writeln!(out, "            invert_scale: true,");
+        }
         let _ = writeln!(out, "            show_volume: {},", s.show_volume);
         let _ = writeln!(out, "            show_grid: {},", s.show_grid);
         out.push_str("            compare_benchmark: ");
@@ -1511,6 +1523,7 @@ fn encode_ron_settings(out: &mut String, st: &WorkstationSettings) {
         "        enforce_vn_t2_lot_lock: {},",
         st.enforce_vn_t2_lot_lock
     );
+    let _ = writeln!(out, "        show_drawing_rail: {},", st.show_drawing_rail);
     out.push_str("    ),\n");
 }
 
@@ -2500,6 +2513,7 @@ fn decode_workstation_settings(
             "candle_palette",
             "auto_snapshot_interval_mins",
             "enforce_vn_t2_lot_lock",
+            "show_drawing_rail",
         ],
     )?;
     let mut st = WorkstationSettings::default();
@@ -2574,6 +2588,9 @@ fn decode_workstation_settings(
     }
     if let Some(v) = find_field(f, "enforce_vn_t2_lot_lock") {
         st.enforce_vn_t2_lot_lock = expect_bool(v, "settings.enforce_vn_t2_lot_lock")?;
+    }
+    if let Some(v) = find_field(f, "show_drawing_rail") {
+        st.show_drawing_rail = expect_bool(v, "settings.show_drawing_rail")?;
     }
     st.sanitize();
     Ok(st)
@@ -2738,6 +2755,7 @@ fn decode_slot(
             "symbol",
             "timeframe",
             "scale_mode",
+            "invert_scale",
             "show_volume",
             "show_grid",
             "compare_benchmark",
@@ -2779,6 +2797,9 @@ fn decode_slot(
                 field: "slot.scale_mode".to_owned(),
                 reason: format!("unknown scale_mode '{raw}'"),
             })?;
+    }
+    if let Some(v) = find_field(f, "invert_scale") {
+        s.invert_scale = expect_bool(v, "slot.invert_scale")?;
     }
     if let Some(v) = find_field(f, "show_volume") {
         s.show_volume = expect_bool(v, "slot.show_volume")?;
@@ -3605,6 +3626,7 @@ pub fn compute_workspace_diff(
             });
         let overlay_display_changed = sa.show_volume != sb.show_volume
             || sa.show_grid != sb.show_grid
+            || sa.invert_scale != sb.invert_scale
             || sa.compare_benchmark != sb.compare_benchmark
             || sa.show_compare_overlay != sb.show_compare_overlay;
         let pane_stretch_changed = sa.pane_stretches != sb.pane_stretches;
@@ -3743,6 +3765,9 @@ pub fn compute_workspace_diff(
             st_deltas += 1;
         }
         if sa.enforce_vn_t2_lot_lock != sb.enforce_vn_t2_lot_lock {
+            st_deltas += 1;
+        }
+        if sa.show_drawing_rail != sb.show_drawing_rail {
             st_deltas += 1;
         }
         total_changed_fields += st_deltas.max(1);

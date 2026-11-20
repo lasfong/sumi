@@ -731,13 +731,34 @@ impl CandleBlockIndex {
             let base = blk_i * Self::BLOCK_SIZE;
             let first = &chunk[0];
             let last = &chunk[chunk.len() - 1];
-            let mut high = first.high;
-            let mut low = first.low;
+            let mut high = if first.high.is_finite() {
+                first.high
+            } else {
+                f64::NEG_INFINITY
+            };
+            let mut low = if first.low.is_finite() {
+                first.low
+            } else {
+                f64::INFINITY
+            };
             let mut volume_sum = 0.0_f64;
             for c in chunk {
-                high = high.max(c.high);
-                low = low.min(c.low);
-                volume_sum += c.volume;
+                if c.high.is_finite() {
+                    high = high.max(c.high);
+                }
+                if c.low.is_finite() {
+                    low = low.min(c.low);
+                }
+                // Guard against a single `NaN`/`Inf`/negative volume poisoning the 16-bar block (`BUG-027`).
+                if c.volume.is_finite() && c.volume >= 0.0 {
+                    volume_sum += c.volume;
+                }
+            }
+            if !high.is_finite() {
+                high = first.high;
+            }
+            if !low.is_finite() {
+                low = first.low;
             }
             blocks.push(CandleBlock {
                 open: first.open,
@@ -885,12 +906,15 @@ pub struct IndicatorCache {
     pub candle_idx: CandleBlockIndex,
     pub sma: Vec<Option<f64>>,
     pub sma_idx: SeriesBlockIndex,
+    sma_computed_period: Option<usize>,
     pub ema: Vec<Option<f64>>,
     pub ema_idx: SeriesBlockIndex,
+    ema_computed_period: Option<usize>,
     pub bbands: BollingerOutput,
     pub bb_upper_idx: SeriesBlockIndex,
     pub bb_middle_idx: SeriesBlockIndex,
     pub bb_lower_idx: SeriesBlockIndex,
+    bb_computed_cfg: Option<(usize, u64)>,
     pub vwap: VwapBandsOutput,
     pub vwap_idx: SeriesBlockIndex,
     pub vwap_u1_idx: SeriesBlockIndex,
@@ -898,16 +922,20 @@ pub struct IndicatorCache {
     pub vwap_u2_idx: SeriesBlockIndex,
     pub vwap_l2_idx: SeriesBlockIndex,
     vwap_context: Option<(Timeframe, i64, VwapAnchorMode)>,
+    vwap_computed_bands: Option<(u64, u64)>,
     pub market_profile: MarketProfileOutput,
     mp_computed_cfg: Option<(Timeframe, MarketProfileConfig)>,
     pub rsi: Vec<Option<f64>>,
     pub rsi_idx: SeriesBlockIndex,
+    rsi_computed_period: Option<usize>,
     pub macd: MacdOutput,
     pub macd_line_idx: SeriesBlockIndex,
     pub macd_signal_idx: SeriesBlockIndex,
     pub macd_hist_idx: SeriesBlockIndex,
+    macd_computed_cfg: Option<(usize, usize, usize)>,
     pub atr: Vec<Option<f64>>,
     pub atr_idx: SeriesBlockIndex,
+    atr_computed_period: Option<usize>,
     pub ichimoku: IchimokuOutput,
     pub ichimoku_tenkan_idx: SeriesBlockIndex,
     pub ichimoku_kijun_idx: SeriesBlockIndex,
@@ -926,26 +954,34 @@ pub struct IndicatorCache {
     rs_cache_key: Option<RsCacheKey>,
     pub supertrend: SuperTrendOutput,
     pub supertrend_idx: SeriesBlockIndex,
+    supertrend_computed_cfg: Option<(usize, u64)>,
     pub psar: PsarOutput,
     pub psar_idx: SeriesBlockIndex,
+    psar_computed_cfg: Option<(u64, u64, u64)>,
     pub keltner: KeltnerOutput,
     pub kc_upper_idx: SeriesBlockIndex,
     pub kc_middle_idx: SeriesBlockIndex,
     pub kc_lower_idx: SeriesBlockIndex,
+    keltner_computed_cfg: Option<(usize, usize, u64)>,
     pub volume_sma: Vec<Option<f64>>,
     pub volume_sma_idx: SeriesBlockIndex,
+    volume_sma_computed_period: Option<usize>,
     pub candle_patterns: Vec<CandlePatternBarSummary>,
     pub adx: AdxOutput,
     pub adx_line_idx: SeriesBlockIndex,
     pub plus_di_idx: SeriesBlockIndex,
     pub minus_di_idx: SeriesBlockIndex,
+    adx_computed_period: Option<usize>,
     pub stochastic: StochasticOutput,
     pub stoch_k_idx: SeriesBlockIndex,
     pub stoch_d_idx: SeriesBlockIndex,
+    stoch_computed_cfg: Option<(usize, usize, usize)>,
     pub cci: Vec<Option<f64>>,
     pub cci_idx: SeriesBlockIndex,
+    cci_computed_period: Option<usize>,
     pub mfi: Vec<Option<f64>>,
     pub mfi_idx: SeriesBlockIndex,
+    mfi_computed_period: Option<usize>,
     pub proxy_bb: ProxyBBSeriesOutput,
     pub proxy_bb_t05_idx: SeriesBlockIndex,
     pub proxy_bb_t20_idx: SeriesBlockIndex,
@@ -1013,15 +1049,18 @@ impl IndicatorCache {
             self.candle_idx = CandleBlockIndex::build(candles);
         }
 
-        let prev_cfg = if dataset_changed {
+        if dataset_changed {
             self.sma.clear();
             self.sma_idx.clear();
+            self.sma_computed_period = None;
             self.ema.clear();
             self.ema_idx.clear();
+            self.ema_computed_period = None;
             self.bbands = BollingerOutput::default();
             self.bb_upper_idx.clear();
             self.bb_middle_idx.clear();
             self.bb_lower_idx.clear();
+            self.bb_computed_cfg = None;
             self.vwap = VwapBandsOutput::default();
             self.vwap_idx.clear();
             self.vwap_u1_idx.clear();
@@ -1029,14 +1068,18 @@ impl IndicatorCache {
             self.vwap_u2_idx.clear();
             self.vwap_l2_idx.clear();
             self.vwap_context = None;
+            self.vwap_computed_bands = None;
             self.rsi.clear();
             self.rsi_idx.clear();
+            self.rsi_computed_period = None;
             self.macd = MacdOutput::default();
             self.macd_line_idx.clear();
             self.macd_signal_idx.clear();
             self.macd_hist_idx.clear();
+            self.macd_computed_cfg = None;
             self.atr.clear();
             self.atr_idx.clear();
+            self.atr_computed_period = None;
             self.ichimoku = IchimokuOutput::default();
             self.ichimoku_tenkan_idx.clear();
             self.ichimoku_kijun_idx.clear();
@@ -1057,56 +1100,86 @@ impl IndicatorCache {
             self.rs_cache_key = None;
             self.supertrend = SuperTrendOutput::default();
             self.supertrend_idx.clear();
+            self.supertrend_computed_cfg = None;
             self.psar = PsarOutput::default();
             self.psar_idx.clear();
+            self.psar_computed_cfg = None;
             self.keltner = KeltnerOutput::default();
             self.kc_upper_idx.clear();
             self.kc_middle_idx.clear();
             self.kc_lower_idx.clear();
+            self.keltner_computed_cfg = None;
             self.volume_sma.clear();
             self.volume_sma_idx.clear();
+            self.volume_sma_computed_period = None;
             self.candle_patterns.clear();
             self.adx = AdxOutput::default();
             self.adx_line_idx.clear();
             self.plus_di_idx.clear();
             self.minus_di_idx.clear();
+            self.adx_computed_period = None;
             self.stochastic = StochasticOutput::default();
             self.stoch_k_idx.clear();
             self.stoch_d_idx.clear();
+            self.stoch_computed_cfg = None;
             self.cci.clear();
             self.cci_idx.clear();
+            self.cci_computed_period = None;
             self.mfi.clear();
             self.mfi_idx.clear();
+            self.mfi_computed_period = None;
             self.proxy_bb = ProxyBBSeriesOutput::default();
             self.proxy_bb_t05_idx.clear();
             self.proxy_bb_t20_idx.clear();
             self.proxy_bb_t50_idx.clear();
-            None
-        } else {
-            self.applied_config.as_ref()
-        };
+        }
 
-        // Share a single `closes` extraction only when at least one close-based indicator needs evaluation!
+        // Per-indicator computed-signature tracking (`BUG-014`): editing parameters while an
+        // indicator is disabled and re-enabling it later ALWAYS recomputes with the new parameters!
+        let target_bb_cfg = (clean_cfg.bb_period, clean_cfg.bb_std_mult.to_bits());
+        let target_vwap_ctx = (timeframe, utc_offset_seconds, clean_cfg.vwap_anchor_mode);
+        let target_vwap_bands = (
+            clean_cfg.vwap_band_1.to_bits(),
+            clean_cfg.vwap_band_2.to_bits(),
+        );
+        let target_macd_cfg = (
+            clean_cfg.macd_fast,
+            clean_cfg.macd_slow,
+            clean_cfg.macd_signal,
+        );
+        let target_st_cfg = (
+            clean_cfg.supertrend_period,
+            clean_cfg.supertrend_multiplier.to_bits(),
+        );
+        let target_psar_cfg = (
+            clean_cfg.psar_af_start.to_bits(),
+            clean_cfg.psar_af_step.to_bits(),
+            clean_cfg.psar_af_max.to_bits(),
+        );
+        let target_kc_cfg = (
+            clean_cfg.keltner_ema_period,
+            clean_cfg.keltner_atr_period,
+            clean_cfg.keltner_multiplier.to_bits(),
+        );
+        let target_stoch_cfg = (
+            clean_cfg.stoch_k_period,
+            clean_cfg.stoch_k_smooth,
+            clean_cfg.stoch_d_period,
+        );
+
         let need_sma = clean_cfg.show_sma
             && (self.sma.len() != candles.len()
-                || prev_cfg.is_none_or(|p| p.sma_period != clean_cfg.sma_period));
+                || self.sma_computed_period != Some(clean_cfg.sma_period));
         let need_ema = clean_cfg.show_ema
             && (self.ema.len() != candles.len()
-                || prev_cfg.is_none_or(|p| p.ema_period != clean_cfg.ema_period));
+                || self.ema_computed_period != Some(clean_cfg.ema_period));
         let need_bb = clean_cfg.show_bbands
             && (self.bbands.middle.len() != candles.len()
-                || prev_cfg.is_none_or(|p| {
-                    p.bb_period != clean_cfg.bb_period
-                        || (p.bb_std_mult - clean_cfg.bb_std_mult).abs() > 1e-12
-                }));
+                || self.bb_computed_cfg != Some(target_bb_cfg));
         let need_vwap = clean_cfg.show_vwap
             && (self.vwap.vwap.len() != candles.len()
-                || self.vwap_context
-                    != Some((timeframe, utc_offset_seconds, clean_cfg.vwap_anchor_mode))
-                || prev_cfg.is_none_or(|p| {
-                    (p.vwap_band_1 - clean_cfg.vwap_band_1).abs() > 1e-12
-                        || (p.vwap_band_2 - clean_cfg.vwap_band_2).abs() > 1e-12
-                }));
+                || self.vwap_context != Some(target_vwap_ctx)
+                || self.vwap_computed_bands != Some(target_vwap_bands));
         let target_mp_cfg = MarketProfileConfig {
             session_period: clean_cfg.mp_session_period,
             utc_offset_seconds,
@@ -1120,14 +1193,10 @@ impl IndicatorCache {
             && self.mp_computed_cfg != Some((timeframe, target_mp_cfg));
         let need_rsi = clean_cfg.show_rsi
             && (self.rsi.len() != candles.len()
-                || prev_cfg.is_none_or(|p| p.rsi_period != clean_cfg.rsi_period));
+                || self.rsi_computed_period != Some(clean_cfg.rsi_period));
         let need_macd = clean_cfg.show_macd
             && (self.macd.macd_line.len() != candles.len()
-                || prev_cfg.is_none_or(|p| {
-                    p.macd_fast != clean_cfg.macd_fast
-                        || p.macd_slow != clean_cfg.macd_slow
-                        || p.macd_signal != clean_cfg.macd_signal
-                }));
+                || self.macd_computed_cfg != Some(target_macd_cfg));
         let target_ichi_cfg = IchimokuConfig {
             tenkan_period: clean_cfg.ichimoku_tenkan,
             kijun_period: clean_cfg.ichimoku_kijun,
@@ -1149,17 +1218,19 @@ impl IndicatorCache {
                 || self.cvd_computed_cfg != Some(target_cvd_cfg));
         let need_atr = clean_cfg.show_atr
             && (self.atr.len() != candles.len()
-                || prev_cfg.is_none_or(|p| p.atr_period != clean_cfg.atr_period));
+                || self.atr_computed_period != Some(clean_cfg.atr_period));
 
         if need_sma || need_ema || need_bb || need_rsi || need_macd {
             let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
             if need_sma {
                 self.sma = compute_sma_slices(&closes, clean_cfg.sma_period);
                 self.sma_idx = SeriesBlockIndex::build(&self.sma);
+                self.sma_computed_period = Some(clean_cfg.sma_period);
             }
             if need_ema {
                 self.ema = compute_ema_slices(&closes, clean_cfg.ema_period);
                 self.ema_idx = SeriesBlockIndex::build(&self.ema);
+                self.ema_computed_period = Some(clean_cfg.ema_period);
             }
             if need_bb {
                 self.bbands =
@@ -1167,10 +1238,12 @@ impl IndicatorCache {
                 self.bb_upper_idx = SeriesBlockIndex::build(&self.bbands.upper);
                 self.bb_middle_idx = SeriesBlockIndex::build(&self.bbands.middle);
                 self.bb_lower_idx = SeriesBlockIndex::build(&self.bbands.lower);
+                self.bb_computed_cfg = Some(target_bb_cfg);
             }
             if need_rsi {
                 self.rsi = compute_rsi_slices(&closes, clean_cfg.rsi_period);
                 self.rsi_idx = SeriesBlockIndex::build(&self.rsi);
+                self.rsi_computed_period = Some(clean_cfg.rsi_period);
             }
             if need_macd {
                 self.macd = compute_macd_slices(
@@ -1182,6 +1255,7 @@ impl IndicatorCache {
                 self.macd_line_idx = SeriesBlockIndex::build(&self.macd.macd_line);
                 self.macd_signal_idx = SeriesBlockIndex::build(&self.macd.signal_line);
                 self.macd_hist_idx = SeriesBlockIndex::build(&self.macd.histogram);
+                self.macd_computed_cfg = Some(target_macd_cfg);
             }
         }
         if need_vwap {
@@ -1198,7 +1272,8 @@ impl IndicatorCache {
             self.vwap_l1_idx = SeriesBlockIndex::build(&self.vwap.lower_1);
             self.vwap_u2_idx = SeriesBlockIndex::build(&self.vwap.upper_2);
             self.vwap_l2_idx = SeriesBlockIndex::build(&self.vwap.lower_2);
-            self.vwap_context = Some((timeframe, utc_offset_seconds, clean_cfg.vwap_anchor_mode));
+            self.vwap_context = Some(target_vwap_ctx);
+            self.vwap_computed_bands = Some(target_vwap_bands);
         }
         if need_mp {
             self.market_profile =
@@ -1208,6 +1283,7 @@ impl IndicatorCache {
         if need_atr {
             self.atr = compute_atr(candles, clean_cfg.atr_period);
             self.atr_idx = SeriesBlockIndex::build(&self.atr);
+            self.atr_computed_period = Some(clean_cfg.atr_period);
         }
         if need_ichimoku {
             self.ichimoku = compute_ichimoku(candles, target_ichi_cfg);
@@ -1228,10 +1304,7 @@ impl IndicatorCache {
 
         let need_supertrend = clean_cfg.show_supertrend
             && (self.supertrend.trend.len() != candles.len()
-                || prev_cfg.is_none_or(|p| {
-                    p.supertrend_period != clean_cfg.supertrend_period
-                        || (p.supertrend_multiplier - clean_cfg.supertrend_multiplier).abs() > 1e-12
-                }));
+                || self.supertrend_computed_cfg != Some(target_st_cfg));
         if need_supertrend {
             self.supertrend = compute_supertrend(
                 candles,
@@ -1239,15 +1312,12 @@ impl IndicatorCache {
                 clean_cfg.supertrend_multiplier,
             );
             self.supertrend_idx = SeriesBlockIndex::build(&self.supertrend.trend);
+            self.supertrend_computed_cfg = Some(target_st_cfg);
         }
 
         let need_psar = clean_cfg.show_psar
             && (self.psar.sar.len() != candles.len()
-                || prev_cfg.is_none_or(|p| {
-                    (p.psar_af_start - clean_cfg.psar_af_start).abs() > 1e-12
-                        || (p.psar_af_step - clean_cfg.psar_af_step).abs() > 1e-12
-                        || (p.psar_af_max - clean_cfg.psar_af_max).abs() > 1e-12
-                }));
+                || self.psar_computed_cfg != Some(target_psar_cfg));
         if need_psar {
             self.psar = compute_psar(
                 candles,
@@ -1256,15 +1326,12 @@ impl IndicatorCache {
                 clean_cfg.psar_af_max,
             );
             self.psar_idx = SeriesBlockIndex::build(&self.psar.sar);
+            self.psar_computed_cfg = Some(target_psar_cfg);
         }
 
         let need_keltner = clean_cfg.show_keltner
             && (self.keltner.middle.len() != candles.len()
-                || prev_cfg.is_none_or(|p| {
-                    p.keltner_ema_period != clean_cfg.keltner_ema_period
-                        || p.keltner_atr_period != clean_cfg.keltner_atr_period
-                        || (p.keltner_multiplier - clean_cfg.keltner_multiplier).abs() > 1e-12
-                }));
+                || self.keltner_computed_cfg != Some(target_kc_cfg));
         if need_keltner {
             self.keltner = compute_keltner_channels(
                 candles,
@@ -1275,22 +1342,25 @@ impl IndicatorCache {
             self.kc_upper_idx = SeriesBlockIndex::build(&self.keltner.upper);
             self.kc_middle_idx = SeriesBlockIndex::build(&self.keltner.middle);
             self.kc_lower_idx = SeriesBlockIndex::build(&self.keltner.lower);
+            self.keltner_computed_cfg = Some(target_kc_cfg);
         }
 
         let need_vol_sma = clean_cfg.show_volume_sma
             && (self.volume_sma.len() != candles.len()
-                || prev_cfg.is_none_or(|p| p.volume_sma_period != clean_cfg.volume_sma_period));
+                || self.volume_sma_computed_period != Some(clean_cfg.volume_sma_period));
         if need_vol_sma {
             self.volume_sma = compute_volume_sma(candles, clean_cfg.volume_sma_period);
             self.volume_sma_idx = SeriesBlockIndex::build(&self.volume_sma);
+            self.volume_sma_computed_period = Some(clean_cfg.volume_sma_period);
         }
 
         let need_candle_patterns =
             clean_cfg.show_candle_patterns && self.candle_patterns.len() != candles.len();
         if need_candle_patterns {
             let atr14_cow: Vec<Option<f64>>;
+            // Reuse `self.atr` ONLY when `atr_computed_period == Some(14)` (`BUG-014`: never read stale ATR!).
             let atr14_ref: &[Option<f64>] =
-                if clean_cfg.atr_period == 14 && self.atr.len() == candles.len() {
+                if self.atr_computed_period == Some(14) && self.atr.len() == candles.len() {
                     &self.atr
                 } else {
                     atr14_cow = compute_atr(candles, 14);
@@ -1302,21 +1372,18 @@ impl IndicatorCache {
 
         let need_adx = clean_cfg.show_adx
             && (self.adx.plus_di.len() != candles.len()
-                || prev_cfg.is_none_or(|p| p.adx_period != clean_cfg.adx_period));
+                || self.adx_computed_period != Some(clean_cfg.adx_period));
         if need_adx {
             self.adx = compute_adx(candles, clean_cfg.adx_period);
             self.adx_line_idx = SeriesBlockIndex::build(&self.adx.adx);
             self.plus_di_idx = SeriesBlockIndex::build(&self.adx.plus_di);
             self.minus_di_idx = SeriesBlockIndex::build(&self.adx.minus_di);
+            self.adx_computed_period = Some(clean_cfg.adx_period);
         }
 
         let need_stoch = clean_cfg.show_stochastic
             && (self.stochastic.slow_k.len() != candles.len()
-                || prev_cfg.is_none_or(|p| {
-                    p.stoch_k_period != clean_cfg.stoch_k_period
-                        || p.stoch_k_smooth != clean_cfg.stoch_k_smooth
-                        || p.stoch_d_period != clean_cfg.stoch_d_period
-                }));
+                || self.stoch_computed_cfg != Some(target_stoch_cfg));
         if need_stoch {
             self.stochastic = compute_stochastic(
                 candles,
@@ -1326,22 +1393,25 @@ impl IndicatorCache {
             );
             self.stoch_k_idx = SeriesBlockIndex::build(&self.stochastic.slow_k);
             self.stoch_d_idx = SeriesBlockIndex::build(&self.stochastic.slow_d);
+            self.stoch_computed_cfg = Some(target_stoch_cfg);
         }
 
         let need_cci = clean_cfg.show_cci
             && (self.cci.len() != candles.len()
-                || prev_cfg.is_none_or(|p| p.cci_period != clean_cfg.cci_period));
+                || self.cci_computed_period != Some(clean_cfg.cci_period));
         if need_cci {
             self.cci = compute_cci(candles, clean_cfg.cci_period);
             self.cci_idx = SeriesBlockIndex::build(&self.cci);
+            self.cci_computed_period = Some(clean_cfg.cci_period);
         }
 
         let need_mfi = clean_cfg.show_mfi
             && (self.mfi.len() != candles.len()
-                || prev_cfg.is_none_or(|p| p.mfi_period != clean_cfg.mfi_period));
+                || self.mfi_computed_period != Some(clean_cfg.mfi_period));
         if need_mfi {
             self.mfi = compute_mfi(candles, clean_cfg.mfi_period);
             self.mfi_idx = SeriesBlockIndex::build(&self.mfi);
+            self.mfi_computed_period = Some(clean_cfg.mfi_period);
         }
 
         let need_proxy_bb = clean_cfg.show_proxy_bb && self.proxy_bb.points.len() != candles.len();

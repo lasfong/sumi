@@ -263,14 +263,28 @@ pub struct AlertTriggerEvent {
     pub symbol: String,
     pub timeframe: Timeframe,
     pub bar_timestamp: i64,
-    /// Exact base-series UTC timestamp at which this trigger fired (`[MEDIUM-01]`).
-    #[serde(default)]
-    pub eval_base_timestamp: i64,
+    /// Exact base-series UTC timestamp at which this trigger fired (`[MEDIUM-01]`; `Option<i64>`
+    /// so Unix epoch `0` / `1970-01-01T00:00:00Z` is preserved faithfully instead of treated as missing — `BUG-034`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eval_base_timestamp: Option<i64>,
     pub threshold_value: f64,
     pub observed_value: f64,
     pub direction: CrossDirection,
     pub condition_summary: String,
     pub message: String,
+}
+
+impl AlertTriggerEvent {
+    /// Returns the exact base-series evaluation timestamp, falling back to `bar_timestamp` only
+    /// when deserialized from a legacy record that omitted `eval_base_timestamp`.
+    #[inline]
+    #[must_use]
+    pub const fn effective_eval_base_timestamp(&self) -> i64 {
+        match self.eval_base_timestamp {
+            Some(ts) => ts,
+            None => self.bar_timestamp,
+        }
+    }
 }
 
 /// Truncates `s` to at most `max_bytes` bytes on a valid UTF-8 code-point boundary (`[CRITICAL-01]`),

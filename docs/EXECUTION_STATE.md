@@ -2,8 +2,8 @@
 
 - **Session Identity:** `SESSION-R19-20261119T145429+0700` (`SUMI PROGRAM ORCHESTRATOR`)
 - **Previous Session:** `SESSION-R18-20261119T085800+0700` (`IMPLEMENTATION_PASS` — Committed cleanly at `312cbf9`)
-- **Timestamp (Updated):** `2026-11-19T17:26:00+0700`
-- **Program Status:** `IMPLEMENTATION_PASS` (`Milestone R19 / Wave 18 — 100% Core Feature Parity Complete Across All Waves 1–18: Global WorkstationSettings & 4 Candle Palettes, VIETNAM_HOLIDAYS_V1 [151 Dates 2018–2030] + VSD T+2 13:00 ICT FIFO Holding Lots & Bracket Lock, Data Readiness & CafeF SolieuGD Post-Split Audit Panel, & TextNote / Custom Fibs / Dual-End TrendLine / 1-Click Retina [Export PNG] Shipped, Critic-Hardened & Audited`)
+- **Timestamp (Updated):** `2026-11-20T12:42:00+0700`
+- **Program Status:** **`v1.1.0 GO_FOR_RELEASE_VERIFIED`** (`R19 Patch v1.0.0`: `34/34` QA bugs closed, `65/65` Master QA tests PASS -> **`v1.1.0 TradingView Pro & macOS Release` (`Wave 0 -> Wave 5`) COMPLETE**: `280/280` automated tests, `0` clippy native/`wasm32` warnings, `0` new crates, `4/4` `viewport_bench` `overall_pass: true` (`p99 <= 2.883 ms`), signed `dist/Sumi Workstation.app` `v1.1.0` + `dist/Sumi-Workstation-v1.1.0-arm64.dmg` verified -> [`docs/testing/V1_1_RELEASE_AUDIT.md`](testing/V1_1_RELEASE_AUDIT.md))
 
 ---
 
@@ -24,7 +24,7 @@
 
 - **OS & Hardware:** macOS (`arm64` Apple M1, `16.0 GiB` unified RAM)
 - **Rust Toolchain:** `rustup 1.29.3`, `rustc 1.99.1 (58cf8f9c3 2026-10-13)` (`stable-aarch64-apple-darwin` + `wasm32-unknown-unknown`)
-- **Crate Dependencies (`Cargo.toml` / `Cargo.lock`):** `0` new dependencies added (`git diff Cargo.toml Cargo.lock` empty).
+- **Crate Dependencies (`Cargo.toml` / `Cargo.lock`):** `0` new dependencies added (`Cargo.toml` & `Cargo.lock` only bump crate version `0.1.0 -> 1.1.0` and package description).
 - **Antigravity Orchestration (`VERIFIED`):**
   - Durable charter: [`docs/operations/SUMI_ORCHESTRATION_CHARTER.md`](operations/SUMI_ORCHESTRATION_CHARTER.md)
   - Master feature parity & anti-miss backlog ledger: [`docs/FEATURE_BACKLOG_AND_PARITY_LEDGER.md`](FEATURE_BACKLOG_AND_PARITY_LEDGER.md) (`C1..C4` updated to `[x] ĐÃ HOÀN THÀNH (R19)` — **100% Core Feature Parity Complete across all Waves 1–18!**)
@@ -59,6 +59,8 @@
 | Session R19 — Research Gate | `10` live JS/TS REA ops (`ARCHIVE/frontend` `SettingsModal`/`DashboardPage`/`ImportPage`/`drawingDomain`/`DrawingInspector` & `LWC v5.2.0` candlestick/text/screenshot TS) + `2` post-build binary REA ops (`REA-R19-01`..`12`) -> `SETTINGS_VN_HOLIDAYS_DATA_AUDIT_AND_DRAWINGS_SPEC.md` | **PASS** | `VERIFIED` |
 | Session R19 — Wave 18 Engine | Pure `f64`/`i64` WASM-safe `WorkstationSettings` + `4` `CandlePalettePreset`s (`workspace_template.rs`), `VIETNAM_HOLIDAYS_V1` (`[i32; 151]` `2018–2030` + statutory fallback) + `T+3`/`T+2` `13:00 ICT` FIFO `HoldingLot` ledger (`market_rules.rs`, `portfolio.rs`), `DataQualityAuditReport` + `UniverseDataReadinessSummary` + 5-rule `CafeFSplitAware` gate (`audit.rs`), & `TextNote` / `1..=16` custom Fibs / `[-∞, +∞]` `TrendLine` (`drawings/`) | **PASS** | `VERIFIED` (`266/266` tests + `wasm32` Clippy) |
 | Session R19 — Workstation & Audit | Interactive `[Settings]`, `[Data Audit]` (`13`-feed matrix), & 1-click `[Export PNG]` (`OffscreenWgpuHarness`), `FIFO LOTS (VSD T+2 13:00)` + `SL`/`TP` bracket lock, `--r19` (`189.58 µs` C1 RON/JSON, `95.21 µs` C2 500 T+2 + 500 FIFO, `3,557.29 µs` C3 10k audit + 13 feeds + 1k split, `1.71 µs` C4 projection, `0.253–0.372 ms` UI / `p99 <= 0.592 ms < 4.0 ms`), `SUMI_CAPTURE_BATCH=r19`, `sumi-critic` `CRITIC_PASS`, & independent `sumi-auditor` sign-off | **PASS** | `VERIFIED` |
+| `v1.0.0` QA Patch (`R19 Remediation`) | Closed `34/34` QA bugs (`BUG-001..BUG-034`), `65/65` Master QA test cases PASS (`QA_REAUDIT_REPORT_R19_PATCH.md`), signed `dist/Sumi Workstation.app` v1.0.0 | **PASS** | `VERIFIED` (`274/274` tests, `0` warnings) |
+| **`v1.1.0` TradingView Pro & macOS Release (`Wave 0 -> Wave 5`)** | Left Vertical Drawing Rail (`38 px` vector icons + `show_drawing_rail` persistence), Finder Drag-and-Drop `.csv`/`.tsv`/`.txt`/`.json` + CLI arg, `ParallelChannel` 3-point & `PriceDateRange` (`Measure` + `Shift+Click`), Chart-Direct Trading (`SL`/`TP`/Pending drag + tick/band snap + `[×]` cancel/flatten + replay-deterministic `ModifyOrderPrice`), Self-contained HTML5/SVG/Print-to-PDF Strategy Lab Export (`report_html.rs`), macOS Retina `AppIcon.icns`, File Association, & `dist/Sumi-Workstation-v1.1.0-arm64.dmg` (`V1_1_RELEASE_AUDIT.md`) | **PASS (`GO FOR v1.1.0`)** | `VERIFIED` (`280/280` tests, `0` clippy native/`wasm32`, `4/4` `viewport_bench` `p99 <= 2.883 ms < 4.0 ms`, `hdiutil`/`codesign`/`TC-65` PASS) |
 
 ---
 
@@ -117,6 +119,6 @@ cargo run --release
 
 ---
 
-## 6. Roadmap Status (`100% Core Feature Parity Complete — Awaiting Product Owner Direction`)
+## 6. Roadmap Status (`v1.1.0 GO FOR RELEASE — Awaiting Product Owner Direction`)
 
-With Milestone R19 (`Wave 18`: `C1..C4`) shipped, Critic-hardened, and audited, **`100%` of the planned Core Feature Parity Roadmap (`Waves 1–18 / Milestones R01–R19`: `S-01..S-10`, `R16-1..R16-3`, `A1..A5`, `B1..B4`, `C1..C4`) in [`docs/FEATURE_BACKLOG_AND_PARITY_LEDGER.md`](FEATURE_BACKLOG_AND_PARITY_LEDGER.md) is complete**. [`docs/NEXT_SESSION_BRIEF.md`](NEXT_SESSION_BRIEF.md) outlines post-parity release/extension options (`git push` of `R18`+`R19`, release tagging, optional external data-fetch CLI, or WASM browser packaging) awaiting Product Owner direction.
+With `v1.0.0` (`R19 Patch`) and **`v1.1.0` (`TradingView Pro & macOS Release`, Waves 0–5)** shipped, visually audited on Metal GPU Retina (`docs/testing/v1_1_evidence/`), benchmarked (`4/4` suites `overall_pass: true`, `p99 <= 2.883 ms < 4.0 ms`), and packaged into signed `dist/Sumi Workstation.app` (`v1.1.0`) + `dist/Sumi-Workstation-v1.1.0-arm64.dmg` (`8.8 MB`), **`100%` of the Core Parity Roadmap (`Waves 1–18 / R01–R19`) and `v1.1` Release Plan is complete** (full audit in [`docs/testing/V1_1_RELEASE_AUDIT.md`](testing/V1_1_RELEASE_AUDIT.md)). [`docs/NEXT_SESSION_BRIEF.md`](NEXT_SESSION_BRIEF.md) outlines next optional directions (git commit/tag/push upon PO instruction, Apple Developer ID notarization, standalone external data-sync CLI, or WASM deployment).

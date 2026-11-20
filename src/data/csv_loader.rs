@@ -105,6 +105,10 @@ pub fn load_ohlcv_csv(
             });
         }
         if fields.len() <= col_map.min_required_len {
+            if quarantine {
+                pre_quarantined += 1;
+                continue;
+            }
             return Err(DataLoadError::MalformedCsv {
                 line: line_no,
                 message: format!(
@@ -119,6 +123,10 @@ pub fn load_ohlcv_csv(
         if let Some(sym_idx) = col_map.symbol {
             let sym_raw = fields.get(sym_idx).map_or("", |s| s.trim());
             if sym_raw.is_empty() {
+                if quarantine {
+                    pre_quarantined += 1;
+                    continue;
+                }
                 return Err(DataLoadError::InvalidFieldValue {
                     row: line_no,
                     field: "symbol",
@@ -183,15 +191,12 @@ pub fn load_ohlcv_csv(
 
     let available_symbols = symbols.into_vec_with_fallback(&resolved_symbol);
 
-    let tokens: Vec<RawTimestampToken> = pending_rows.iter().map(|r| r.ts_token.clone()).collect();
-    let resolved_timestamps =
-        resolve_series_timestamps(&tokens, options.timestamp_unit).map_err(|(row, message)| {
-            DataLoadError::InvalidFieldValue {
-                row,
-                field: "timestamp",
-                message,
-            }
-        })?;
+    let (pending_rows, resolved_timestamps) = resolve_pending_csv_timestamps(
+        pending_rows,
+        options.timestamp_unit,
+        quarantine,
+        &mut pre_quarantined,
+    )?;
 
     let raw_records: Vec<RawCandleRecord> = pending_rows
         .into_iter()
@@ -216,8 +221,52 @@ pub fn load_ohlcv_csv(
         None,
         options,
     )?;
+    rep.raw_row_count = rep.raw_row_count.saturating_add(pre_quarantined);
     rep.quarantined_row_count = rep.quarantined_row_count.saturating_add(pre_quarantined);
     Ok(rep)
+}
+
+fn resolve_pending_csv_timestamps(
+    pending_rows: Vec<PendingCsvRow>,
+    unit: super::TimestampUnit,
+    quarantine: bool,
+    pre_quarantined: &mut usize,
+) -> Result<(Vec<PendingCsvRow>, Vec<ParsedTimestamp>), DataLoadError> {
+    let tokens: Vec<RawTimestampToken> = pending_rows.iter().map(|r| r.ts_token.clone()).collect();
+    match resolve_series_timestamps(&tokens, unit) {
+        Ok(ts) => Ok((pending_rows, ts)),
+        Err((row, message)) => {
+            if !quarantine {
+                return Err(DataLoadError::InvalidFieldValue {
+                    row,
+                    field: "timestamp",
+                    message,
+                });
+            }
+            // Quarantine only invalid individual timestamp tokens rather than dropping the entire symbol (`BUG-031`).
+            let mut valid_rows = Vec::with_capacity(pending_rows.len());
+            let mut valid_tokens = Vec::with_capacity(pending_rows.len());
+            for item in pending_rows {
+                if resolve_series_timestamps(std::slice::from_ref(&item.ts_token), unit).is_ok() {
+                    valid_tokens.push(item.ts_token.clone());
+                    valid_rows.push(item);
+                } else {
+                    *pre_quarantined = pre_quarantined.saturating_add(1);
+                }
+            }
+            if valid_rows.is_empty() {
+                return Err(DataLoadError::EmptyDataset);
+            }
+            let ts = resolve_series_timestamps(&valid_tokens, unit).map_err(|(r, m)| {
+                DataLoadError::InvalidFieldValue {
+                    row: r,
+                    field: "timestamp",
+                    message: m,
+                }
+            })?;
+            Ok((valid_rows, ts))
+        }
+    }
 }
 
 fn parse_pending_csv_row(
@@ -426,26 +475,25 @@ pub fn load_ohlcv_csv_multi_symbol(
     }
 
     let mut reports = Vec::with_capacity(buckets.len());
-    for (sym, pending_rows, pre_quarantined) in buckets {
+    for (sym, pending_rows, mut pre_quarantined) in buckets {
         if pending_rows.is_empty() {
             if quarantine {
                 continue;
             }
             return Err(DataLoadError::EmptyDataset);
         }
-        let tokens: Vec<RawTimestampToken> =
-            pending_rows.iter().map(|r| r.ts_token.clone()).collect();
-        let resolved_timestamps = match resolve_series_timestamps(&tokens, options.timestamp_unit) {
-            Ok(ts) => ts,
-            Err((row, message)) => {
-                if quarantine {
+        let (pending_rows, resolved_timestamps) = match resolve_pending_csv_timestamps(
+            pending_rows,
+            options.timestamp_unit,
+            quarantine,
+            &mut pre_quarantined,
+        ) {
+            Ok(pair) => pair,
+            Err(err) => {
+                if quarantine && matches!(err, DataLoadError::EmptyDataset) {
                     continue;
                 }
-                return Err(DataLoadError::InvalidFieldValue {
-                    row,
-                    field: "timestamp",
-                    message,
-                });
+                return Err(err);
             }
         };
         let other_rows = scanned_records.saturating_sub(pending_rows.len() + pre_quarantined);
@@ -466,6 +514,7 @@ pub fn load_ohlcv_csv_multi_symbol(
 
         match normalize_loaded_candles(raw_records, sym, Vec::new(), other_rows, None, options) {
             Ok(mut rep) => {
+                rep.raw_row_count = rep.raw_row_count.saturating_add(pre_quarantined);
                 rep.quarantined_row_count =
                     rep.quarantined_row_count.saturating_add(pre_quarantined);
                 reports.push(rep);
@@ -509,10 +558,32 @@ fn parse_csv_f64(raw: &str, line: usize, field: &'static str) -> Result<f64, Dat
     Ok(val)
 }
 
-/// Scans the first logical RFC-4180 record (respecting multiline quoted header cells, `MEDIUM-02`)
-/// to auto-detect `,`, `;`, or `\t`.
+/// Scans the first non-blank logical RFC-4180 record (skipping leading whitespace-only lines and
+/// respecting multiline quoted header cells, `BUG-031`) to auto-detect `,`, `;`, or `\t`.
 fn detect_delimiter(text: &str) -> u8 {
-    let trimmed = text.trim_start_matches(['\r', '\n']);
+    // Advance past any leading blank / whitespace-only lines so delimiter detection always inspects the header!
+    let mut start = 0_usize;
+    let bytes = text.as_bytes();
+    while start < bytes.len() {
+        let mut line_end = start;
+        while line_end < bytes.len() && bytes[line_end] != b'\n' && bytes[line_end] != b'\r' {
+            line_end += 1;
+        }
+        if bytes[start..line_end]
+            .iter()
+            .any(|b| !matches!(*b, b' ' | b'\t'))
+        {
+            break;
+        }
+        start = line_end;
+        if start < bytes.len() && bytes[start] == b'\r' {
+            start += 1;
+        }
+        if start < bytes.len() && bytes[start] == b'\n' {
+            start += 1;
+        }
+    }
+    let trimmed = &text[start..];
     let mut commas = 0_usize;
     let mut semis = 0_usize;
     let mut tabs = 0_usize;

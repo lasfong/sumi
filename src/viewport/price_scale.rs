@@ -1046,7 +1046,16 @@ impl PriceScale {
         max_ticks: usize,
     ) -> String {
         match self.options.mode {
-            PriceScaleMode::Percentage => format!("{:+.2}%", to_percent(raw_price, base_value)),
+            PriceScaleMode::Percentage => {
+                let pct = to_percent(raw_price, base_value);
+                if !pct.is_finite() {
+                    "—".to_owned()
+                } else if pct.abs() < 0.005 {
+                    "0.00%".to_owned()
+                } else {
+                    format!("{pct:+.2}%")
+                }
+            }
             PriceScaleMode::IndexedTo100 => {
                 format!("{:.2}", to_indexed_to_100(raw_price, base_value))
             }
@@ -1127,7 +1136,12 @@ impl PriceScale {
                         }
                         last_accepted_y = Some(ly);
                         let label = if self.options.mode == PriceScaleMode::Percentage {
-                            format!("{logical:+.dec$}%")
+                            let zero_eps = 0.5 * 10_f64.powi(-(dec as i32));
+                            if logical.abs() < zero_eps {
+                                format!("{:.dec$}%", 0.0)
+                            } else {
+                                format!("{logical:+.dec$}%")
+                            }
                         } else {
                             format!("{logical:.dec$}")
                         };

@@ -1393,6 +1393,502 @@ fn critic_r17_regression_same_bar_exit_entry_note_isolation_journal_none_overrid
     );
 }
 
+#[test]
+fn wave1_regression_vn30f_multiplier_margin_sell_tax_and_dom_sizing() {
+    use super::Position;
+    use crate::journal::{ExchangeVenue, VnPriceUnit};
+    use crate::trading::{
+        DomLadderConfig, LadderStageInput, compute_causal_dom_ladder,
+        size_ladder_qty_from_risk_budget, stage_ladder_order,
+    };
+
+    // 1. BUG-001: VN30F1M 100x kVND/pt contract multiplier + 17% initial margin:
+    let bars = vec![
+        candle(1_750_000_000, 1297.0, 1298.0, 1296.0, 1297.18),
+        candle(1_750_000_900, 1297.0, 1297.5, 1292.0, 1292.99),
+    ];
+    let mut vn30f = TradingSession::new(AccountConfig {
+        initial_cash: 100_000.0,
+        commission_bps: 4.0,
+        slippage_bps: 0.0,
+        tax_sell_bps: 0.0,
+        contract_multiplier: 100.0,
+        initial_margin_pct: 17.0,
+        venue: ExchangeVenue::Vn30Futures,
+        allow_short: true,
+        ..AccountConfig::default()
+    });
+    // 5 contracts (~110.3k kVND margin) exceeds 100k kVND -> rejected!
+    assert!(matches!(
+        vn30f.submit_order(
+            OrderRequest {
+                side: OrderSide::Buy,
+                kind: OrderKind::Market,
+                quantity: 5.0,
+                stop_loss: None,
+                take_profit: None,
+            },
+            &bars,
+            0,
+        ),
+        Err(TradingError::InsufficientBuyingPower { .. })
+    ));
+    vn30f
+        .submit_order(
+            OrderRequest {
+                side: OrderSide::Buy,
+                kind: OrderKind::Market,
+                quantity: 1.0,
+                stop_loss: None,
+                take_profit: None,
+            },
+            &bars,
+            0,
+        )
+        .unwrap();
+    let unreal = vn30f.open_position().unwrap().unrealized_pnl(1292.99);
+    assert!(
+        (unreal - (-419.0)).abs() < 1e-6,
+        "VN30F1M 1 contract -4.19 pts must have -419.0 kVND unrealized PnL, got {unreal}"
+    );
+    vn30f.flatten_position(&bars, 1).unwrap();
+    let tr = &vn30f.closed_trades()[0];
+    // Gross = -419.0 kVND; fees = (1297.18 + 1292.99) * 100 * 0.0004 = 103.6068 kVND; Net = -522.6068 kVND
+    assert!((tr.gross_pnl - (-419.0)).abs() < 1e-6);
+    assert!((tr.total_fees - ((1297.18 + 1292.99) * 100.0 * 4e-4)).abs() < 1e-6);
+    assert!((tr.net_pnl - (tr.gross_pnl - tr.total_fees)).abs() < 1e-6);
+
+    // 2. BUG-001: HOSE cash equity deducts 0.10% (10 bps) sell transfer tax on exit:
+    let eq_bars = vec![
+        candle(1_750_000_000, 50.0, 51.0, 49.0, 50.0),
+        candle(1_750_086_400, 50.0, 52.0, 49.5, 50.0),
+    ];
+    let mut hose = TradingSession::new(AccountConfig {
+        initial_cash: 100_000.0,
+        commission_bps: 15.0,
+        tax_sell_bps: 10.0,
+        slippage_bps: 0.0,
+        venue: ExchangeVenue::Hose,
+        enforce_vn_t2_lot_lock: false,
+        ..AccountConfig::default()
+    });
+    hose.submit_order(
+        OrderRequest {
+            side: OrderSide::Buy,
+            kind: OrderKind::Market,
+            quantity: 100.0,
+            stop_loss: None,
+            take_profit: None,
+        },
+        &eq_bars,
+        0,
+    )
+    .unwrap();
+    hose.flatten_position(&eq_bars, 1).unwrap();
+    let eq_tr = &hose.closed_trades()[0];
+    // Buy comm = 5000 * 0.0015 = 7.5; Sell comm + tax = 5000 * (0.0015 + 0.0010) = 12.5 -> total = 20.0
+    assert!(
+        (eq_tr.total_fees - 20.0).abs() < 1e-9,
+        "HOSE round-trip must charge 15bps buy + 15bps sell + 10bps sell tax = 20.0, got {}",
+        eq_tr.total_fees
+    );
+
+    // 3. BUG-002: DOM risk sizing on VN30F1M never double-leverages (max 4 contracts on 100k kVND @ 1300):
+    let sized = size_ladder_qty_from_risk_budget(
+        100_000.0,
+        5.0,
+        1_300.0,
+        1,
+        OrderSide::Buy,
+        ExchangeVenue::Vn30Futures,
+        VnPriceUnit::ThousandVnd,
+        Some(1_300.0),
+    )
+    .unwrap();
+    assert!(
+        (1.0..=4.0).contains(&sized),
+        "VN30F1M statutory VSD 17% margin caps 100k kVND @ 1300 at 4 contracts, got {sized}"
+    );
+
+    // 4. BUG-024 + BUG-034: HOSE 10.00 tier boundary uniqueness & pure-reduce sell bracket suppression:
+    let t0 = 1_750_000_000_i64;
+    let tier_bars = vec![
+        candle(t0, 9.30, 9.40, 9.25, 9.34),
+        candle(t0 + 86_400, 9.40, 9.99, 9.35, 9.99),
+    ];
+    let snap = compute_causal_dom_ladder(
+        &tier_bars,
+        &DomLadderConfig {
+            venue: ExchangeVenue::Hose,
+            vn_unit: VnPriceUnit::ThousandVnd,
+            half_rows: 5,
+            lookback_bars: 5,
+            center_price_override: None,
+            reference_price_override: None,
+        },
+        &[],
+        None,
+        None,
+    )
+    .unwrap();
+    let ceil_rows: Vec<f64> = snap
+        .rows
+        .iter()
+        .filter(|r| r.band_state == crate::trading::DomPriceBandState::Ceiling)
+        .map(|r| r.price)
+        .collect();
+    let mark_rows: Vec<f64> = snap
+        .rows
+        .iter()
+        .filter(|r| r.is_at_mark)
+        .map(|r| r.price)
+        .collect();
+    assert_eq!(
+        ceil_rows.len(),
+        1,
+        "expected unique CEIL row, got {ceil_rows:?}"
+    );
+    assert_eq!(
+        mark_rows.len(),
+        1,
+        "expected unique Mark row, got {mark_rows:?}"
+    );
+    let buy_above = stage_ladder_order(&LadderStageInput {
+        side: OrderSide::Buy,
+        clicked_price: 10.00,
+        mark_price: 9.99,
+        quantity: 100.0,
+        venue: ExchangeVenue::Hose,
+        resolved_unit: crate::journal::ResolvedVnPriceUnit::ThousandVnd,
+        daily_band: None,
+        stop_loss_ticks: Some(2),
+        take_profit_ticks: Some(3),
+        open_position: None,
+        allow_account_short: false,
+    })
+    .unwrap();
+    assert_eq!(
+        buy_above.kind,
+        OrderKind::Stop { stop_price: 10.00 },
+        "Buy @ 10.00 above Mark 9.99 across HOSE 10.00 tier boundary must be Stop"
+    );
+    // Pure-reduce sell on HOSE must strip short-side SL/TP brackets (`BUG-034`):
+    let reduce_sell = stage_ladder_order(&LadderStageInput {
+        side: OrderSide::Sell,
+        clicked_price: 51.0,
+        mark_price: 50.0,
+        quantity: 100.0,
+        venue: ExchangeVenue::Hose,
+        resolved_unit: crate::journal::ResolvedVnPriceUnit::ThousandVnd,
+        daily_band: None,
+        stop_loss_ticks: Some(2),
+        take_profit_ticks: Some(3),
+        open_position: Some(Position {
+            side: PositionSide::Long,
+            quantity: 200.0,
+            avg_entry_price: 49.0,
+            contract_multiplier: 1.0,
+            opened_timestamp: t0,
+            opened_base_index: 0,
+            stop_loss: None,
+            take_profit: None,
+            initial_stop_loss: None,
+            initial_risk_amount: None,
+            entry_stop_loss: None,
+            had_initial_sl_at_open: false,
+            total_entry_qty: 200.0,
+            total_entry_notional: 9_800.0,
+            total_entry_fees: 0.0,
+            open_entry_fees: 0.0,
+            closed_qty_acc: 0.0,
+            exit_notional_acc: 0.0,
+            realized_gross_pnl_acc: 0.0,
+            realized_exit_fees_acc: 0.0,
+        }),
+        allow_account_short: false,
+    })
+    .unwrap();
+    assert_eq!(reduce_sell.stop_loss, None);
+    assert_eq!(reduce_sell.take_profit, None);
+}
+
+#[test]
+fn wave1_regression_core_t2_lock_no_hose_short_def005_gap_scalein_and_coaching() {
+    use crate::data::days_from_civil;
+    use crate::journal::{
+        ExchangeVenue, TradeJournalStore, compute_settlement_timestamp_for_venue,
+    };
+    use crate::trading::{
+        PracticeDecisionLog, PracticeSessionStore, SavedPracticeSession, SessionDebriefReport,
+    };
+
+    // 1. BUG-004 + BUG-008 + BUG-017: Direct TradingSession T+2 lock, partial Flatten, HOSE no-short, non-midnight 1D, W1, US T+1:
+    let mon = days_from_civil(2026, 10, 5) * 86_400; // Mon 00:00 UTC
+    let tue = days_from_civil(2026, 10, 6) * 86_400; // Tue 00:00 UTC
+    let wed = days_from_civil(2026, 10, 7) * 86_400; // Wed 00:00 UTC
+    let thu = days_from_civil(2026, 10, 8) * 86_400; // Thu 00:00 UTC
+    // Non-midnight VN 1D close timestamps (08:00 UTC = 15:00 ICT):
+    let vn_bars = vec![
+        candle(mon + 8 * 3_600, 50.0, 51.0, 49.0, 50.0),
+        candle(tue + 8 * 3_600, 50.0, 51.0, 49.0, 50.5),
+        candle(wed + 8 * 3_600, 50.5, 52.0, 50.0, 51.0),
+        candle(thu + 8 * 3_600, 51.0, 52.0, 50.0, 51.5),
+    ];
+    let mut sess = TradingSession::new(AccountConfig {
+        initial_cash: 100_000.0,
+        commission_bps: 0.0,
+        slippage_bps: 0.0,
+        venue: ExchangeVenue::Hose,
+        enforce_vn_t2_lot_lock: true,
+        allow_short: true, // venue Hose overrides to disallow short (`BUG-008`)!
+        base_timeframe_secs: 86_400,
+        ..AccountConfig::default()
+    });
+    // Flat HOSE Short MUST fail even with allow_short=true (`BUG-008`):
+    assert!(matches!(
+        sess.submit_order(
+            OrderRequest {
+                side: OrderSide::Sell,
+                kind: OrderKind::Market,
+                quantity: 100.0,
+                stop_loss: None,
+                take_profit: None,
+            },
+            &vn_bars,
+            0,
+        ),
+        Err(TradingError::ShortSellingDisabled)
+    ));
+    // Buy 200 on Mon (08:00 UTC):
+    sess.submit_order(
+        OrderRequest {
+            side: OrderSide::Buy,
+            kind: OrderKind::Market,
+            quantity: 200.0,
+            stop_loss: None,
+            take_profit: None,
+        },
+        &vn_bars,
+        0,
+    )
+    .unwrap();
+    // On Tue (T+1, 08:00 UTC): MUST STILL BE LOCKED (`BUG-004` + `BUG-017` non-midnight 1D)!
+    assert!(matches!(
+        sess.submit_order(
+            OrderRequest {
+                side: OrderSide::Sell,
+                kind: OrderKind::Market,
+                quantity: 100.0,
+                stop_loss: None,
+                take_profit: None,
+            },
+            &vn_bars,
+            1,
+        ),
+        Err(TradingError::InsufficientSettledShares { .. })
+    ));
+    assert!(matches!(
+        sess.flatten_position(&vn_bars, 1),
+        Err(TradingError::InsufficientSettledShares { .. })
+    ));
+    // Buy 300 more on Wed (now Mon 200 settled, Wed 300 locked):
+    sess.submit_order(
+        OrderRequest {
+            side: OrderSide::Buy,
+            kind: OrderKind::Market,
+            quantity: 300.0,
+            stop_loss: None,
+            take_profit: None,
+        },
+        &vn_bars,
+        2,
+    )
+    .unwrap();
+    // Partial Flatten on Wed sells ONLY 200 settled and keeps 300 locked (`BUG-004`):
+    let flat_fill = sess.flatten_position(&vn_bars, 2).unwrap();
+    assert!((flat_fill.quantity - 200.0).abs() < 1e-9);
+    assert!((sess.open_position().unwrap().quantity - 300.0).abs() < 1e-9);
+
+    // W1 base bar on T+0 stays locked (`BUG-017`):
+    let w1_bars = vec![candle(mon, 50.0, 52.0, 49.0, 51.0)];
+    let mut w1_sess = TradingSession::new(AccountConfig {
+        venue: ExchangeVenue::Hose,
+        enforce_vn_t2_lot_lock: true,
+        base_timeframe_secs: 604_800,
+        ..AccountConfig::default()
+    });
+    w1_sess
+        .submit_order(
+            OrderRequest {
+                side: OrderSide::Buy,
+                kind: OrderKind::Market,
+                quantity: 100.0,
+                stop_loss: None,
+                take_profit: None,
+            },
+            &w1_bars,
+            0,
+        )
+        .unwrap();
+    assert!(matches!(
+        w1_sess.flatten_position(&w1_bars, 0),
+        Err(TradingError::InsufficientSettledShares { .. })
+    ));
+
+    // US Equities `SPY` Mon 00:00 UTC settles T+1 Tue 00:00 UTC (NOT Wed `BUG-017`):
+    assert_eq!(
+        compute_settlement_timestamp_for_venue(mon, ExchangeVenue::UsEquities),
+        tue
+    );
+
+    // 2. BUG-009: DEF-005 pessimistic SL-before-TP on Phase A gap-open Buy Stop fill:
+    let gap_bars = vec![
+        candle(1_000, 100.0, 101.0, 99.0, 100.0),
+        candle(2_000, 102.5, 106.0, 97.0, 101.0),
+    ];
+    let mut gap_sess = TradingSession::new(zero_friction_config());
+    gap_sess
+        .submit_order(
+            OrderRequest {
+                side: OrderSide::Buy,
+                kind: OrderKind::Stop { stop_price: 102.0 },
+                quantity: 10.0,
+                stop_loss: Some(98.0),
+                take_profit: Some(105.0),
+            },
+            &gap_bars,
+            0,
+        )
+        .unwrap();
+    gap_sess.advance_through_bars(&gap_bars, 1, 1);
+    assert_eq!(gap_sess.closed_trades().len(), 1);
+    assert_eq!(
+        gap_sess.closed_trades()[0].exit_reason,
+        FillReason::StopLossExit,
+        "Phase A gap-open dual-touch must enforce pessimistic DEF-005 SL before TP"
+    );
+    assert!((gap_sess.closed_trades()[0].exit_price - 98.0).abs() < 1e-9);
+
+    // 3. BUG-017: Scale-in margin uses live mark-to-market notional (blocks 1.5x leverage on 1.0x cash account):
+    let rally_bars = vec![
+        candle(1_000, 100.0, 101.0, 99.0, 100.0),
+        candle(2_000, 160.0, 162.0, 159.0, 160.0),
+    ];
+    let mut cash_sess = TradingSession::new(AccountConfig {
+        initial_cash: 10_000.0,
+        commission_bps: 0.0,
+        slippage_bps: 0.0,
+        max_leverage: 1.0,
+        ..AccountConfig::default()
+    });
+    // Buy 90 @ 100 = 9,000 (equity at bar 1 @ 160 = 10,000 + 5,400 = 15,400 -> max total qty @ 160 = 96.25 -> max add = 6.25):
+    cash_sess
+        .submit_order(
+            OrderRequest {
+                side: OrderSide::Buy,
+                kind: OrderKind::Market,
+                quantity: 90.0,
+                stop_loss: None,
+                take_profit: None,
+            },
+            &rally_bars,
+            0,
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            cash_sess.submit_order(
+                OrderRequest {
+                    side: OrderSide::Buy,
+                    kind: OrderKind::Market,
+                    quantity: 20.0,
+                    stop_loss: None,
+                    take_profit: None,
+                },
+                &rally_bars,
+                1,
+            ),
+            Err(TradingError::InsufficientBuyingPower { .. })
+        ),
+        "1.0x cash account must reject mark-to-market scale-in exceeding live equity"
+    );
+
+    // 4. BUG-030: Profit-locking SL > entry on naked Long does NOT fabricate R or checklist.stop_and_lot_sized,
+    //    and SessionDebriefReport::build filters headline KPIs consistently by cutoff_timestamp:
+    let mut naked_sess = TradingSession::new(zero_friction_config());
+    let n_bars = vec![
+        candle(1_000, 100.0, 101.0, 99.0, 100.0),
+        candle(2_000, 110.0, 112.0, 109.0, 110.0),
+        candle(3_000, 112.0, 113.0, 111.0, 112.0),
+    ];
+    naked_sess
+        .submit_order(
+            OrderRequest {
+                side: OrderSide::Buy,
+                kind: OrderKind::Market,
+                quantity: 10.0,
+                stop_loss: None,
+                take_profit: None,
+            },
+            &n_bars,
+            0,
+        )
+        .unwrap();
+    naked_sess
+        .update_position_brackets(Some(105.0), None, &n_bars, 1)
+        .unwrap();
+    naked_sess.flatten_position(&n_bars, 2).unwrap();
+    assert_eq!(naked_sess.closed_trades()[0].r_multiple, None);
+    let mut jrn = TradeJournalStore::new();
+    jrn.sync_paper_closed_trades("SPY", ExchangeVenue::UsEquities, naked_sess.closed_trades());
+    assert!(!jrn.entries[0].checklist.stop_and_lot_sized);
+
+    // Cutoff before exit_timestamp=3_000 excludes future closed trade from headline KPIs (`BUG-030`):
+    let debrief_past = SessionDebriefReport::build(
+        "SPY",
+        Timeframe::D1,
+        &naked_sess,
+        110.0,
+        &jrn.entries,
+        &PracticeDecisionLog::new(),
+        true,
+        1,
+        Some(2_000),
+    );
+    assert_eq!(debrief_past.closed_trades, 0);
+
+    // 5. BUG-034: >80B label deduplication in PracticeSessionStore:
+    let mut pstore = PracticeSessionStore::new();
+    let long_label = "A".repeat(100);
+    let make_slot = || SavedPracticeSession {
+        slot_id: 0,
+        label: long_label.clone(),
+        pinned: false,
+        sequence_no: 0,
+        data_source: crate::data::DataSourcePreset::Vn30Basket,
+        symbol: "FPT".to_owned(),
+        base_timeframe: Timeframe::D1,
+        active_timeframe: Timeframe::D1,
+        expected_bar_count: 3,
+        expected_first_timestamp: Some(1_000),
+        expected_last_timestamp: Some(3_000),
+        replay_active: false,
+        replay_start_base_index: 0,
+        replay_cursor_base_index: 2,
+        blind_lookback_bars: 120,
+        scanner_context: None,
+        account_config: zero_friction_config(),
+        session_start_base_index: 0,
+        commands: Vec::new(),
+        decision_notes: Vec::new(),
+        session_digest: 0,
+    };
+    let id1 = pstore.save_session(make_slot()).unwrap();
+    let id2 = pstore.save_session(make_slot()).unwrap();
+    assert_eq!(id1, id2);
+    assert_eq!(pstore.slots.len(), 1);
+}
+
 trait TapLabelExt {
     fn tap_label(self, lbl: &str) -> Self;
 }

@@ -1,27 +1,30 @@
+use crate::journal::is_vn_exchange_trading_day_days;
 use crate::model::Candle;
+
+use super::calendar::{days_from_civil, format_utc_date};
 
 /// Generates a deterministic, realistic daily OHLCV dataset for the `"VNINDEX"` benchmark series.
 ///
-/// No external network or random state is used; every invocation returns the exact
-/// same sequence of candles so tests, benchmarks (10K / 50K / 100K bars), and visual
-/// verifications are 100% reproducible in $O(N)$ time.
+/// Every bar's `timestamp` (`00:00 UTC` of the trading session) and `date_label` (`YYYY-MM-DD`) are
+/// synchronized from the same `VIETNAM_HOLIDAYS_V1`-aware Vietnam exchange trading calendar starting
+/// on Monday `2026-05-04` (eliminating weekend/holiday bars and multi-year timestamp drift, `BUG-025`).
 #[must_use]
 pub fn generate_synthetic_ohlcv(count: usize) -> Vec<Candle> {
     let total = count.max(10);
     let mut candles = Vec::with_capacity(total);
 
-    // Base timestamp: 2026-05-04 00:00:00 UTC
-    let base_ts: i64 = 1_777_852_800;
-    let day_seconds: i64 = 86_400;
-
+    // Start on Monday 2026-05-04 (first valid VN exchange trading session after 30/04–01/05 holidays).
+    let mut day_cursor = days_from_civil(2026, 5, 4);
     let mut prev_close = 1_215.0_f64;
-    let mut calendar = TradingDayCursor::new_2026_05_01();
 
     for i in 0..total {
+        while !is_vn_exchange_trading_day_days(day_cursor) {
+            day_cursor = day_cursor.saturating_add(1);
+        }
         let t = i as f64;
 
         // Multi-regime deterministic wave:
-        // - Bars 0..120 preserve 100% bit-for-bit parity with Session 01 baseline.
+        // - Bars 0..120 preserve realistic multi-swing baseline.
         // - Bars 120.. cycle realistic multi-month bull/bear regimes for 10K/50K/100K benchmarks.
         let regime_drift = if i < 35 {
             1.65
@@ -66,8 +69,9 @@ pub fn generate_synthetic_ohlcv(count: usize) -> Vec<Candle> {
         let vol_cycle = ((t * 0.49).sin().abs() * 165_000.0).round();
         let volume = (vol_base + vol_impulse + vol_cycle).round();
 
-        let timestamp = base_ts + (i as i64) * day_seconds;
-        let date_label = calendar.next_trading_date_label();
+        let timestamp = day_cursor.saturating_mul(86_400);
+        let date_label = format_utc_date(timestamp);
+        day_cursor = day_cursor.saturating_add(1);
 
         candles.push(Candle {
             timestamp,
@@ -87,61 +91,4 @@ pub fn generate_synthetic_ohlcv(count: usize) -> Vec<Candle> {
 
 fn round_price(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
-}
-
-/// Incremental $O(1)$-per-bar Gregorian weekday calendar starting at `2026-05-01` (Friday).
-struct TradingDayCursor {
-    year: u32,
-    month: u32,
-    day: u32,
-    /// `0 = Mon .. 4 = Fri, 5 = Sat, 6 = Sun`
-    weekday: u32,
-}
-
-impl TradingDayCursor {
-    const fn new_2026_05_01() -> Self {
-        Self {
-            year: 2026,
-            month: 5,
-            day: 1,
-            weekday: 4,
-        }
-    }
-
-    fn next_trading_date_label(&mut self) -> String {
-        while self.weekday >= 5 {
-            self.advance_calendar_day();
-        }
-        let label = format!("{:04}-{:02}-{:02}", self.year, self.month, self.day);
-        self.advance_calendar_day();
-        label
-    }
-
-    fn advance_calendar_day(&mut self) {
-        self.weekday = (self.weekday + 1) % 7;
-        self.day += 1;
-        if self.day > days_in_month(self.year, self.month) {
-            self.day = 1;
-            self.month += 1;
-            if self.month > 12 {
-                self.month = 1;
-                self.year += 1;
-            }
-        }
-    }
-}
-
-const fn days_in_month(year: u32, month: u32) -> u32 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 => {
-            if (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400) {
-                29
-            } else {
-                28
-            }
-        }
-        _ => 30,
-    }
 }

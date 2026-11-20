@@ -12307,6 +12307,7 @@ fn run_r19_settings_holidays_audit_drawings_benchmark(
             candle_palette: CandlePalettePreset::HollowBullish,
             auto_snapshot_interval_mins: 5,
             enforce_vn_t2_lot_lock: true,
+            show_drawing_rail: true,
         };
         let mut samples = Vec::with_capacity(80);
         for step in 0..90 {

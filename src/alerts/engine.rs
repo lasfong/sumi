@@ -79,9 +79,11 @@ pub fn drawing_line_value_at_bar(drawing: &Drawing, bar_index: usize) -> Option<
             let val = origin.value + u.max(0.0) * (through.value - origin.value);
             (val.is_finite() && val.abs() <= MAX_ABS_PRICE).then_some(val)
         }
-        DrawingGeometry::Rectangle { .. }
+        DrawingGeometry::ParallelChannel { .. }
+        | DrawingGeometry::Rectangle { .. }
         | DrawingGeometry::FibonacciRetracement { .. }
         | DrawingGeometry::RiskRewardBox { .. }
+        | DrawingGeometry::PriceDateRange { .. }
         | DrawingGeometry::FixedRangeVolumeProfile { .. }
         | DrawingGeometry::AnchoredVwap { .. }
         | DrawingGeometry::TextNote { .. } => None,
@@ -329,9 +331,11 @@ fn validate_condition(
                         }
                         Ok(())
                     }
-                    DrawingGeometry::Rectangle { .. }
+                    DrawingGeometry::ParallelChannel { .. }
+                    | DrawingGeometry::Rectangle { .. }
                     | DrawingGeometry::FibonacciRetracement { .. }
                     | DrawingGeometry::RiskRewardBox { .. }
+                    | DrawingGeometry::PriceDateRange { .. }
                     | DrawingGeometry::FixedRangeVolumeProfile { .. }
                     | DrawingGeometry::AnchoredVwap { .. }
                     | DrawingGeometry::TextNote { .. } => {
@@ -553,16 +557,16 @@ impl AlertEngine {
             self.triggers.drain(0..drop_n);
         }
         for ev in &mut self.triggers {
-            if ev.eval_base_timestamp == 0 {
-                ev.eval_base_timestamp = ev.bar_timestamp;
+            if ev.eval_base_timestamp.is_none() {
+                ev.eval_base_timestamp = Some(ev.bar_timestamp);
             }
             truncate_utf8_bytes(&mut ev.symbol, MAX_SYMBOL_BYTES);
             truncate_utf8_bytes(&mut ev.condition_summary, MAX_SUMMARY_BYTES);
             truncate_utf8_bytes(&mut ev.message, MAX_MESSAGE_BYTES);
         }
         self.triggers.sort_by(|a, b| {
-            a.eval_base_timestamp
-                .cmp(&b.eval_base_timestamp)
+            a.effective_eval_base_timestamp()
+                .cmp(&b.effective_eval_base_timestamp())
                 .then_with(|| a.bar_timestamp.cmp(&b.bar_timestamp))
                 .then_with(|| a.alert_id.cmp(&b.alert_id))
         });
@@ -683,7 +687,9 @@ impl AlertEngine {
             status: AlertStatus::Armed,
             armed_at_timestamp,
             armed_bucket_timestamp,
-            created_at_timestamp: replay_cutoff_timestamp,
+            // Always stamp causal creation timestamp (even when authored in Live mode) so rewinding
+            // Bar Replay into the past masks future-created alerts (`DEF-001`, `BUG-028`).
+            created_at_timestamp: Some(replay_cutoff_timestamp.unwrap_or(armed_at_timestamp)),
             cooldown_bars: cooldown_bars.min(MAX_ALERT_COOLDOWN_BARS),
             cooldown_remaining_bars: 0,
             trigger_count: 0,
@@ -880,7 +886,7 @@ impl AlertEngine {
                             symbol: rule.symbol.clone(),
                             timeframe: rule.timeframe,
                             bar_timestamp: bar.timestamp,
-                            eval_base_timestamp: bar.timestamp,
+                            eval_base_timestamp: Some(bar.timestamp),
                             threshold_value: level,
                             observed_value: observed,
                             direction: fired_dir,
@@ -974,24 +980,50 @@ impl AlertEngine {
                     if series_candles.len() < 2 {
                         continue;
                     }
-                    let mut closes: Vec<f64> = series_candles.iter().map(|c| c.close).collect();
+                    let tail_incomplete = rule.timeframe > base_tf
+                        && is_bucket_incomplete_at_close_for_symbol(
+                            &rule.symbol,
+                            series_candles[series_candles.len() - 1].timestamp,
+                            last_base_close_ts,
+                            base_tf,
+                            rule.timeframe,
+                        );
+                    let closed_buckets = if tail_incomplete {
+                        series_candles.len().saturating_sub(1)
+                    } else {
+                        series_candles.len()
+                    };
+                    if closed_buckets < 2 {
+                        continue;
+                    }
+                    let mut closes: Vec<f64> = series_candles[..closed_buckets]
+                        .iter()
+                        .map(|c| c.close)
+                        .collect();
                     let rsi = compute_rsi_slices(&closes, period);
 
                     let arm_base_len =
                         base_prefix.partition_point(|c| c.timestamp <= rule.armed_at_timestamp);
-                    let t_ge = series_candles
+                    let t_ge = series_candles[..closed_buckets]
                         .partition_point(|c| c.timestamp < rule.armed_bucket_timestamp);
-                    let mut start_t = series_candles
-                        .partition_point(|c| c.timestamp <= rule.armed_bucket_timestamp)
-                        .max(1);
+                    // On `rule.timeframe == base_tf` (e.g. SPY D1 at 14:30 UTC), gate strictly by `armed_at_timestamp`
+                    // so the arming bar itself is NEVER retroactively triggered (`BUG-011`).
+                    let mut start_t = if rule.timeframe == base_tf {
+                        series_candles[..closed_buckets]
+                            .partition_point(|c| c.timestamp <= rule.armed_at_timestamp)
+                            .max(1)
+                    } else {
+                        series_candles[..closed_buckets]
+                            .partition_point(|c| c.timestamp <= rule.armed_bucket_timestamp)
+                            .max(1)
+                    };
                     let mut last_fired_bucket: Option<usize> = None;
 
-                    // Intra-bucket causal check (`[CRITICAL-03]`): if `rule` was armed mid-bucket on a higher
-                    // timeframe and subsequent base ticks arrived inside `armed_bucket_timestamp`, compare the
-                    // current bucket's RSI against the exact RSI at the moment of arming!
+                    // Intra-bucket causal check (`[CRITICAL-03]`): only on completed HTF buckets (`t_ge < closed_buckets`)
+                    // so mid-week unclosed HTF bars never emit ghost triggers (`BUG-011`).
                     if rule.timeframe > base_tf
                         && arm_base_len > 0
-                        && t_ge < series_candles.len()
+                        && t_ge < closed_buckets
                         && series_candles[t_ge].timestamp == rule.armed_bucket_timestamp
                     {
                         let b_end = bucket_end_base_index(
@@ -1021,7 +1053,7 @@ impl AlertEngine {
                                     symbol: rule.symbol.clone(),
                                     timeframe: rule.timeframe,
                                     bar_timestamp: bar_ts,
-                                    eval_base_timestamp: eval_ts,
+                                    eval_base_timestamp: Some(eval_ts),
                                     threshold_value: level,
                                     observed_value: curr_v,
                                     direction: fired_dir,
@@ -1037,7 +1069,17 @@ impl AlertEngine {
                         start_t = (t_ge + 1).max(1);
                     }
 
-                    for t in start_t..series_candles.len() {
+                    for t in start_t..closed_buckets {
+                        let bar_ts = series_candles[t].timestamp;
+                        let eval_ts = if rule.timeframe == base_tf {
+                            bar_ts
+                        } else {
+                            base_prefix[bucket_end_base_index(base_prefix, rule.timeframe, bar_ts)]
+                                .timestamp
+                        };
+                        if eval_ts <= rule.armed_at_timestamp {
+                            continue;
+                        }
                         let (Some(prev_v), Some(curr_v)) = (rsi[t - 1], rsi[t]) else {
                             continue;
                         };
@@ -1048,14 +1090,6 @@ impl AlertEngine {
                                 continue;
                             }
                             last_fired_bucket = Some(t);
-                            let bar_ts = series_candles[t].timestamp;
-                            let eval_ts = if rule.timeframe == base_tf {
-                                bar_ts
-                            } else {
-                                base_prefix
-                                    [bucket_end_base_index(base_prefix, rule.timeframe, bar_ts)]
-                                .timestamp
-                            };
                             rule.trigger_count += 1;
                             rule.last_triggered_timestamp = Some(bar_ts);
                             raw_events.push(AlertTriggerEvent {
@@ -1064,7 +1098,7 @@ impl AlertEngine {
                                 symbol: rule.symbol.clone(),
                                 timeframe: rule.timeframe,
                                 bar_timestamp: bar_ts,
-                                eval_base_timestamp: eval_ts,
+                                eval_base_timestamp: Some(eval_ts),
                                 threshold_value: level,
                                 observed_value: curr_v,
                                 direction: fired_dir,
@@ -1078,19 +1112,6 @@ impl AlertEngine {
                         }
                     }
 
-                    let tail_incomplete = rule.timeframe > base_tf
-                        && is_bucket_incomplete_at_close_for_symbol(
-                            &rule.symbol,
-                            series_candles[series_candles.len() - 1].timestamp,
-                            last_base_close_ts,
-                            base_tf,
-                            rule.timeframe,
-                        );
-                    let closed_buckets = if tail_incomplete {
-                        series_candles.len().saturating_sub(1)
-                    } else {
-                        series_candles.len()
-                    };
                     rule.cooldown_remaining_bars =
                         compute_cooldown_rem(rule, last_fired_bucket, closed_buckets);
                 }
@@ -1121,21 +1142,46 @@ impl AlertEngine {
                     if series_candles.len() < 2 {
                         continue;
                     }
-                    let mut closes: Vec<f64> = series_candles.iter().map(|c| c.close).collect();
+                    let tail_incomplete = rule.timeframe > base_tf
+                        && is_bucket_incomplete_at_close_for_symbol(
+                            &rule.symbol,
+                            series_candles[series_candles.len() - 1].timestamp,
+                            last_base_close_ts,
+                            base_tf,
+                            rule.timeframe,
+                        );
+                    let closed_buckets = if tail_incomplete {
+                        series_candles.len().saturating_sub(1)
+                    } else {
+                        series_candles.len()
+                    };
+                    if closed_buckets < 2 {
+                        continue;
+                    }
+                    let mut closes: Vec<f64> = series_candles[..closed_buckets]
+                        .iter()
+                        .map(|c| c.close)
+                        .collect();
                     let macd = compute_macd_slices(&closes, fast, slow, signal);
 
                     let arm_base_len =
                         base_prefix.partition_point(|c| c.timestamp <= rule.armed_at_timestamp);
-                    let t_ge = series_candles
+                    let t_ge = series_candles[..closed_buckets]
                         .partition_point(|c| c.timestamp < rule.armed_bucket_timestamp);
-                    let mut start_t = series_candles
-                        .partition_point(|c| c.timestamp <= rule.armed_bucket_timestamp)
-                        .max(1);
+                    let mut start_t = if rule.timeframe == base_tf {
+                        series_candles[..closed_buckets]
+                            .partition_point(|c| c.timestamp <= rule.armed_at_timestamp)
+                            .max(1)
+                    } else {
+                        series_candles[..closed_buckets]
+                            .partition_point(|c| c.timestamp <= rule.armed_bucket_timestamp)
+                            .max(1)
+                    };
                     let mut last_fired_bucket: Option<usize> = None;
 
                     if rule.timeframe > base_tf
                         && arm_base_len > 0
-                        && t_ge < series_candles.len()
+                        && t_ge < closed_buckets
                         && series_candles[t_ge].timestamp == rule.armed_bucket_timestamp
                     {
                         let b_end = bucket_end_base_index(
@@ -1166,7 +1212,7 @@ impl AlertEngine {
                                     symbol: rule.symbol.clone(),
                                     timeframe: rule.timeframe,
                                     bar_timestamp: bar_ts,
-                                    eval_base_timestamp: eval_ts,
+                                    eval_base_timestamp: Some(eval_ts),
                                     threshold_value: 0.0,
                                     observed_value: curr_h,
                                     direction: fired_dir,
@@ -1182,7 +1228,21 @@ impl AlertEngine {
                         start_t = (t_ge + 1).max(1);
                     }
 
-                    for (t, bar) in series_candles.iter().enumerate().skip(start_t) {
+                    for (t, bar) in series_candles[..closed_buckets]
+                        .iter()
+                        .enumerate()
+                        .skip(start_t)
+                    {
+                        let eval_ts = if rule.timeframe == base_tf {
+                            bar.timestamp
+                        } else {
+                            base_prefix
+                                [bucket_end_base_index(base_prefix, rule.timeframe, bar.timestamp)]
+                            .timestamp
+                        };
+                        if eval_ts <= rule.armed_at_timestamp {
+                            continue;
+                        }
                         let (Some(prev_h), Some(curr_h)) =
                             (macd.histogram[t - 1], macd.histogram[t])
                         else {
@@ -1194,16 +1254,6 @@ impl AlertEngine {
                                 continue;
                             }
                             last_fired_bucket = Some(t);
-                            let eval_ts = if rule.timeframe == base_tf {
-                                bar.timestamp
-                            } else {
-                                base_prefix[bucket_end_base_index(
-                                    base_prefix,
-                                    rule.timeframe,
-                                    bar.timestamp,
-                                )]
-                                .timestamp
-                            };
                             rule.trigger_count += 1;
                             rule.last_triggered_timestamp = Some(bar.timestamp);
                             raw_events.push(AlertTriggerEvent {
@@ -1212,7 +1262,7 @@ impl AlertEngine {
                                 symbol: rule.symbol.clone(),
                                 timeframe: rule.timeframe,
                                 bar_timestamp: bar.timestamp,
-                                eval_base_timestamp: eval_ts,
+                                eval_base_timestamp: Some(eval_ts),
                                 threshold_value: 0.0,
                                 observed_value: curr_h,
                                 direction: fired_dir,
@@ -1226,19 +1276,6 @@ impl AlertEngine {
                         }
                     }
 
-                    let tail_incomplete = rule.timeframe > base_tf
-                        && is_bucket_incomplete_at_close_for_symbol(
-                            &rule.symbol,
-                            series_candles[series_candles.len() - 1].timestamp,
-                            last_base_close_ts,
-                            base_tf,
-                            rule.timeframe,
-                        );
-                    let closed_buckets = if tail_incomplete {
-                        series_candles.len().saturating_sub(1)
-                    } else {
-                        series_candles.len()
-                    };
                     rule.cooldown_remaining_bars =
                         compute_cooldown_rem(rule, last_fired_bucket, closed_buckets);
                 }
@@ -1337,20 +1374,42 @@ impl AlertEngine {
                         continue;
                     }
 
+                    let tail_incomplete = rule.timeframe > base_tf
+                        && is_bucket_incomplete_at_close_for_symbol(
+                            &rule.symbol,
+                            series_candles[series_candles.len() - 1].timestamp,
+                            last_base_close_ts,
+                            base_tf,
+                            rule.timeframe,
+                        );
+                    let closed_buckets = if tail_incomplete {
+                        series_candles.len().saturating_sub(1)
+                    } else {
+                        series_candles.len()
+                    };
+                    if closed_buckets == 0 {
+                        continue;
+                    }
+
                     let arm_base_len =
                         base_prefix.partition_point(|c| c.timestamp <= rule.armed_at_timestamp);
-                    let t_ge = series_candles
+                    let t_ge = series_candles[..closed_buckets]
                         .partition_point(|c| c.timestamp < rule.armed_bucket_timestamp);
-                    let mut start_t = series_candles
-                        .partition_point(|c| c.timestamp <= rule.armed_bucket_timestamp);
+                    let mut start_t = if rule.timeframe == base_tf {
+                        series_candles[..closed_buckets]
+                            .partition_point(|c| c.timestamp <= rule.armed_at_timestamp)
+                    } else {
+                        series_candles[..closed_buckets]
+                            .partition_point(|c| c.timestamp <= rule.armed_bucket_timestamp)
+                    };
                     let mut allow_depart_up = true;
                     let mut allow_depart_dn = true;
                     let mut last_fired_bucket: Option<usize> = None;
 
-                    // Intra-bucket sloped line check on post-arm base ticks (`[CRITICAL-03]`)
+                    // Intra-bucket sloped line check on post-arm base ticks of completed buckets (`[CRITICAL-03]`, `BUG-011`)
                     if rule.timeframe > base_tf
                         && arm_base_len > 0
-                        && t_ge < series_candles.len()
+                        && t_ge < closed_buckets
                         && series_candles[t_ge].timestamp == rule.armed_bucket_timestamp
                     {
                         let b_end = bucket_end_base_index(
@@ -1399,7 +1458,7 @@ impl AlertEngine {
                                     symbol: rule.symbol.clone(),
                                     timeframe: rule.timeframe,
                                     bar_timestamp: bar_ts,
-                                    eval_base_timestamp: eval_ts,
+                                    eval_base_timestamp: Some(eval_ts),
                                     threshold_value: line_t,
                                     observed_value: observed,
                                     direction: fired_dir,
@@ -1422,7 +1481,7 @@ impl AlertEngine {
                         start_t = t_ge + 1;
                     }
 
-                    for t in start_t..series_candles.len() {
+                    for t in start_t..closed_buckets {
                         let bar_ts = series_candles[t].timestamp;
                         let eval_ts = if rule.timeframe == base_tf {
                             bar_ts
@@ -1430,6 +1489,9 @@ impl AlertEngine {
                             base_prefix[bucket_end_base_index(base_prefix, rule.timeframe, bar_ts)]
                                 .timestamp
                         };
+                        if eval_ts <= rule.armed_at_timestamp {
+                            continue;
+                        }
                         if !target_drawing
                             .created_at_timestamp
                             .is_none_or(|cts| cts <= eval_ts)
@@ -1479,7 +1541,7 @@ impl AlertEngine {
                                 symbol: rule.symbol.clone(),
                                 timeframe: rule.timeframe,
                                 bar_timestamp: bar.timestamp,
-                                eval_base_timestamp: eval_ts,
+                                eval_base_timestamp: Some(eval_ts),
                                 threshold_value: line_t,
                                 observed_value: observed,
                                 direction: fired_dir,
@@ -1500,19 +1562,6 @@ impl AlertEngine {
                         }
                     }
 
-                    let tail_incomplete = rule.timeframe > base_tf
-                        && is_bucket_incomplete_at_close_for_symbol(
-                            &rule.symbol,
-                            series_candles[series_candles.len() - 1].timestamp,
-                            last_base_close_ts,
-                            base_tf,
-                            rule.timeframe,
-                        );
-                    let closed_buckets = if tail_incomplete {
-                        series_candles.len().saturating_sub(1)
-                    } else {
-                        series_candles.len()
-                    };
                     rule.cooldown_remaining_bars =
                         compute_cooldown_rem(rule, last_fired_bucket, closed_buckets);
                 }
@@ -1714,7 +1763,7 @@ impl AlertEngine {
                                 symbol: rule.symbol.clone(),
                                 timeframe: rule.timeframe,
                                 bar_timestamp: bar_ts,
-                                eval_base_timestamp: eval_ts,
+                                eval_base_timestamp: Some(eval_ts),
                                 threshold_value: thr_val,
                                 observed_value: obs_val,
                                 direction: fired_dir,
@@ -1834,7 +1883,7 @@ impl AlertEngine {
                                 symbol: rule.symbol.clone(),
                                 timeframe: rule.timeframe,
                                 bar_timestamp: bar_ts,
-                                eval_base_timestamp: eval_ts,
+                                eval_base_timestamp: Some(eval_ts),
                                 threshold_value: threshold,
                                 observed_value: curr_s,
                                 direction: fired_dir,
@@ -1857,8 +1906,8 @@ impl AlertEngine {
         // Order events chronologically (`eval_base_timestamp` asc, `bar_timestamp` asc, `alert_id` asc)
         // and assign deterministic `event_id`.
         raw_events.sort_by(|a, b| {
-            a.eval_base_timestamp
-                .cmp(&b.eval_base_timestamp)
+            a.effective_eval_base_timestamp()
+                .cmp(&b.effective_eval_base_timestamp())
                 .then_with(|| a.bar_timestamp.cmp(&b.bar_timestamp))
                 .then_with(|| a.alert_id.cmp(&b.alert_id))
         });
@@ -1881,11 +1930,7 @@ impl AlertEngine {
         self.triggers
             .iter()
             .filter(|ev| {
-                let ets = if ev.eval_base_timestamp != 0 {
-                    ev.eval_base_timestamp
-                } else {
-                    ev.bar_timestamp
-                };
+                let ets = ev.effective_eval_base_timestamp();
                 if replay_cutoff_timestamp.is_some_and(|cut| ets > cut) {
                     return false;
                 }
@@ -1907,11 +1952,7 @@ impl AlertEngine {
             "event_id,alert_id,symbol,timeframe,bar_timestamp,eval_base_timestamp,direction,threshold_value,observed_value,condition_summary,message\n",
         );
         for ev in visible {
-            let ets = if ev.eval_base_timestamp != 0 {
-                ev.eval_base_timestamp
-            } else {
-                ev.bar_timestamp
-            };
+            let ets = ev.effective_eval_base_timestamp();
             let dir_code = match ev.direction {
                 CrossDirection::CrossAbove => "CROSS_ABOVE",
                 CrossDirection::CrossBelow => "CROSS_BELOW",
@@ -1965,11 +2006,7 @@ impl AlertEngine {
             visible.len()
         );
         for (idx, ev) in visible.iter().enumerate() {
-            let ets = if ev.eval_base_timestamp != 0 {
-                ev.eval_base_timestamp
-            } else {
-                ev.bar_timestamp
-            };
+            let ets = ev.effective_eval_base_timestamp();
             let dir_code = match ev.direction {
                 CrossDirection::CrossAbove => "CROSS_ABOVE",
                 CrossDirection::CrossBelow => "CROSS_BELOW",

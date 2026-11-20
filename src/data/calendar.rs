@@ -532,11 +532,13 @@ pub(crate) fn resolve_series_timestamps(
     }
 
     let mut series_unit = infer_auto_unit_from_abs(max_abs);
-    // Disambiguate near-1970 millisecond series (`|v| < 10^10`, e.g. `1969-12-30..1970-04-26` in ms)
-    // where adjacent steps exceed 1 week (`604_800`) if misread as seconds and every value is `1000 * k`.
+    // Disambiguate near-1970 millisecond series (`|v| < 631_152_000`, i.e., `1969-12..1970-01` in ms)
+    // without misclassifying modern Unix-seconds series (`>= 1990`, e.g., `2024-10-04 = 1_728_000_000`)
+    // whose timestamps happen to be exact multiples of `1_000` (`BUG-013`).
     if series_unit == TimestampUnit::Seconds
         && all_exact_multiples_of_1000
         && int_samples.len() >= 2
+        && max_abs < 631_152_000_u128
     {
         int_samples.sort_unstable();
         int_samples.dedup();

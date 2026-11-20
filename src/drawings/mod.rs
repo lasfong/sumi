@@ -21,9 +21,10 @@ pub use controller::{
     MAX_UNDO_STEPS, PREVIEW_DRAWING_ID, PointerCaptureOutcome,
 };
 pub use geometry::{
-    HandlePart, LocalPoint, LocalRect, LocalSegment, PaneDrawingProjection, ProjectedDrawing,
-    ProjectedDrawingShape, ProjectedFibBand, ProjectedFibLevel, ProjectedHandle,
-    clip_parametric_line, distance_to_segment, fibonacci_level_value,
+    HandlePart, LocalPoint, LocalRect, LocalSegment, PaneDrawingProjection, PriceDateRangeMetrics,
+    ProjectedDrawing, ProjectedDrawingShape, ProjectedFibBand, ProjectedFibLevel, ProjectedHandle,
+    clip_parametric_line, compute_price_date_range_metrics, distance_to_segment,
+    fibonacci_level_value, format_measure_duration,
 };
 pub use hit_test::{
     HANDLE_HIT_RADIUS_PX, HitMatch, HitPriority, HitTarget, MAGNET_THRESHOLD_PX,
@@ -124,9 +125,11 @@ pub enum DrawingTool {
     HorizontalLine,
     TrendLine,
     Ray,
+    ParallelChannel,
     Rectangle,
     FibonacciRetracement,
     RiskRewardBox,
+    PriceDateRange,
     FixedRangeVolumeProfile,
     AnchoredVwap,
     TextNote,
@@ -141,9 +144,11 @@ impl DrawingTool {
             Self::HorizontalLine => "H-Line",
             Self::TrendLine => "Trend",
             Self::Ray => "Ray",
+            Self::ParallelChannel => "Channel",
             Self::Rectangle => "Rect",
             Self::FibonacciRetracement => "Fib",
             Self::RiskRewardBox => "Pos R:R",
+            Self::PriceDateRange => "Measure",
             Self::FixedRangeVolumeProfile => "FRVP",
             Self::AnchoredVwap => "AVWAP",
             Self::TextNote => "Note",
@@ -161,7 +166,9 @@ impl DrawingTool {
             | Self::Rectangle
             | Self::FibonacciRetracement
             | Self::RiskRewardBox
+            | Self::PriceDateRange
             | Self::FixedRangeVolumeProfile => 2,
+            Self::ParallelChannel => 3,
         }
     }
 }
@@ -373,6 +380,12 @@ impl DrawingStyle {
                 dash: LineDashStyle::Solid,
                 fill_opacity: 0.0,
             },
+            DrawingTool::ParallelChannel => Self {
+                color: DrawingColorPreset::ElectricBlue,
+                line_width: 1.75,
+                dash: LineDashStyle::Solid,
+                fill_opacity: 0.14,
+            },
             DrawingTool::Rectangle => Self {
                 color: DrawingColorPreset::Emerald,
                 line_width: 1.5,
@@ -390,6 +403,12 @@ impl DrawingStyle {
                 line_width: 1.5,
                 dash: LineDashStyle::Solid,
                 fill_opacity: 0.16,
+            },
+            DrawingTool::PriceDateRange => Self {
+                color: DrawingColorPreset::Cyan,
+                line_width: 1.5,
+                dash: LineDashStyle::Solid,
+                fill_opacity: 0.18,
             },
             DrawingTool::FixedRangeVolumeProfile => Self {
                 color: DrawingColorPreset::ElectricBlue,
@@ -454,6 +473,14 @@ pub enum DrawingGeometry {
         origin: DrawingAnchor,
         through: DrawingAnchor,
     },
+    /// 3-Point Parallel Channel (`v1.1 / Wave 2`):
+    /// Baseline connects `start -> end`; parallel border sits at `value + channel_offset`
+    /// with a dashed 50% midline and translucent fill. Supports `trend_extend_left/right`.
+    ParallelChannel {
+        start: DrawingAnchor,
+        end: DrawingAnchor,
+        channel_offset: f64,
+    },
     Rectangle {
         corner_a: DrawingAnchor,
         corner_b: DrawingAnchor,
@@ -471,6 +498,12 @@ pub enum DrawingGeometry {
         start: DrawingAnchor,
         end: DrawingAnchor,
         stop_price: f64,
+    },
+    /// Price & Date Range Measure Tool (`v1.1 / Wave 2`):
+    /// Computes causal `ΔPrice`, `Δ%`, bar count, elapsed duration, and total volume across `[start, end]`.
+    PriceDateRange {
+        start: DrawingAnchor,
+        end: DrawingAnchor,
     },
     /// Fixed Range Volume Profile (`Milestone R11`):
     /// Horizontal bar-span volume histogram with `POC`, `VAH`, `VAL` across `[start.bar_index, end.bar_index]`.
@@ -706,9 +739,11 @@ impl DrawingGeometry {
             Self::HorizontalLine { .. } => DrawingTool::HorizontalLine,
             Self::TrendLine { .. } => DrawingTool::TrendLine,
             Self::Ray { .. } => DrawingTool::Ray,
+            Self::ParallelChannel { .. } => DrawingTool::ParallelChannel,
             Self::Rectangle { .. } => DrawingTool::Rectangle,
             Self::FibonacciRetracement { .. } => DrawingTool::FibonacciRetracement,
             Self::RiskRewardBox { .. } => DrawingTool::RiskRewardBox,
+            Self::PriceDateRange { .. } => DrawingTool::PriceDateRange,
             Self::FixedRangeVolumeProfile { .. } => DrawingTool::FixedRangeVolumeProfile,
             Self::AnchoredVwap { .. } => DrawingTool::AnchoredVwap,
             Self::TextNote { .. } => DrawingTool::TextNote,
@@ -726,12 +761,14 @@ impl DrawingGeometry {
                 origin: start,
                 through: end,
             }
+            | Self::ParallelChannel { start, end, .. }
             | Self::Rectangle {
                 corner_a: start,
                 corner_b: end,
             }
             | Self::FibonacciRetracement { start, end, .. }
             | Self::RiskRewardBox { start, end, .. }
+            | Self::PriceDateRange { start, end }
             | Self::FixedRangeVolumeProfile { start, end, .. } => [start, end],
         }
     }
@@ -743,9 +780,11 @@ impl DrawingGeometry {
             Self::HorizontalLine { .. } | Self::AnchoredVwap { .. } | Self::TextNote { .. } => 1,
             Self::TrendLine { .. }
             | Self::Ray { .. }
+            | Self::ParallelChannel { .. }
             | Self::Rectangle { .. }
             | Self::FibonacciRetracement { .. }
             | Self::RiskRewardBox { .. }
+            | Self::PriceDateRange { .. }
             | Self::FixedRangeVolumeProfile { .. } => 2,
         }
     }
@@ -767,7 +806,22 @@ impl DrawingGeometry {
                 corner_a: start,
                 corner_b: end,
             }
-            | Self::FibonacciRetracement { start, end, .. } => start.is_valid() && end.is_valid(),
+            | Self::FibonacciRetracement { start, end, .. }
+            | Self::PriceDateRange { start, end } => start.is_valid() && end.is_valid(),
+            Self::ParallelChannel {
+                start,
+                end,
+                channel_offset,
+            } => {
+                start.is_valid()
+                    && end.is_valid()
+                    && channel_offset.is_finite()
+                    && channel_offset.abs() <= MAX_ABS_DRAWING_VALUE
+                    && (start.value + channel_offset).is_finite()
+                    && (start.value + channel_offset).abs() <= MAX_ABS_DRAWING_VALUE
+                    && (end.value + channel_offset).is_finite()
+                    && (end.value + channel_offset).abs() <= MAX_ABS_DRAWING_VALUE
+            }
             Self::FixedRangeVolumeProfile {
                 start,
                 end,
@@ -820,11 +874,13 @@ impl DrawingGeometry {
                 }
             }
             Self::TrendLine { start, end }
+            | Self::ParallelChannel { start, end, .. }
             | Self::Rectangle {
                 corner_a: start,
                 corner_b: end,
             }
-            | Self::FibonacciRetracement { start, end, .. } => match index {
+            | Self::FibonacciRetracement { start, end, .. }
+            | Self::PriceDateRange { start, end } => match index {
                 0 => {
                     *start = anchor;
                     true
@@ -966,7 +1022,10 @@ impl Drawing {
                 *text = cleaned;
             }
         }
-        if !matches!(self.geometry, DrawingGeometry::TrendLine { .. }) {
+        if !matches!(
+            self.geometry,
+            DrawingGeometry::TrendLine { .. } | DrawingGeometry::ParallelChannel { .. }
+        ) {
             self.trend_extend_left = false;
             self.trend_extend_right = false;
         }
@@ -1008,8 +1067,10 @@ impl Drawing {
             }
             (_, Some(_)) => false,
         };
-        let trend_ext_ok = matches!(self.geometry, DrawingGeometry::TrendLine { .. })
-            || (!self.trend_extend_left && !self.trend_extend_right);
+        let trend_ext_ok = matches!(
+            self.geometry,
+            DrawingGeometry::TrendLine { .. } | DrawingGeometry::ParallelChannel { .. }
+        ) || (!self.trend_extend_left && !self.trend_extend_right);
         self.id > 0
             && self.id < PREVIEW_DRAWING_ID
             && pane_ok
@@ -1062,12 +1123,14 @@ impl Drawing {
                 origin: start,
                 through: end,
             }
+            | DrawingGeometry::ParallelChannel { start, end, .. }
             | DrawingGeometry::Rectangle {
                 corner_a: start,
                 corner_b: end,
             }
             | DrawingGeometry::FibonacciRetracement { start, end, .. }
             | DrawingGeometry::RiskRewardBox { start, end, .. }
+            | DrawingGeometry::PriceDateRange { start, end }
             | DrawingGeometry::FixedRangeVolumeProfile { start, end, .. } => {
                 anchor_ok(start) && anchor_ok(end)
             }

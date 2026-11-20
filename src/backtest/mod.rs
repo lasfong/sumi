@@ -8,6 +8,7 @@ pub mod analytics;
 pub mod engine;
 pub mod metrics;
 pub mod monte_carlo;
+pub mod report_html;
 pub mod strategy;
 #[cfg(test)]
 mod tests;
@@ -44,6 +45,7 @@ pub use monte_carlo::{
     extract_causal_trade_equity_returns, run_monte_carlo_bootstrap,
     run_monte_carlo_from_equity_curve, run_monte_carlo_portfolio_mapped,
 };
+pub use report_html::{escape_html, render_backtest_report_html};
 pub use strategy::{
     BacktestConfig, ConfluenceThresholdGate, CustomSignalRuleSpec, DirectionalRuleLeg, FloatCmpOp,
     LogicalCombinator, MAX_CLAUSES_PER_GROUP, MAX_RULE_GROUPS, MAX_RULE_NAME_BYTES,

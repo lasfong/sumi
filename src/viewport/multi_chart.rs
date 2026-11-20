@@ -337,7 +337,9 @@ pub fn extract_visible_time_window(
 
     if logical.right > last_idx {
         let right_ws_bars = (logical.right - last_idx).max(0.0);
-        let right_whitespace_bars_frac = (right_ws_bars / total_bars_len).clamp(0.0, 0.85);
+        // Allow up to 96% right whitespace (instead of clamping hard at 85%) so `Sync T`
+        // preserves extreme future-whitespace pans (e.g. Ichimoku +26 or wide zoom) (`BUG-022`).
+        let right_whitespace_bars_frac = (right_ws_bars / total_bars_len).clamp(0.0, 0.96);
         let start_ts = logical_index_to_utc_ts(candles, slot_interval_secs, logical.left)?;
         let end_ts = candles[candles.len() - 1].timestamp;
         Some(SyncedTimeWindow {
@@ -376,10 +378,10 @@ pub fn apply_synced_time_window(
     else {
         return false;
     };
-    let frac = window.right_whitespace_bars_frac.clamp(0.0, 0.85);
+    let frac = window.right_whitespace_bars_frac.clamp(0.0, 0.96);
     let right_idx = if frac > 0.0 {
         let data_span = (data_right_idx - left_idx + 1.0).max(1.0);
-        let full_span = data_span / (1.0 - frac).max(0.15);
+        let full_span = data_span / (1.0 - frac).max(0.04);
         left_idx + full_span - 1.0
     } else {
         data_right_idx.max(left_idx + 0.5)

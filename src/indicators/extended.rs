@@ -402,8 +402,14 @@ pub fn compute_supertrend(candles: &[Candle], period: usize, multiplier: f64) ->
         }
 
         let hl2 = 0.5 * c.high + 0.5 * c.low;
-        let basic_upper = hl2 + multiplier * atr_val;
-        let basic_lower = hl2 - multiplier * atr_val;
+        let delta = multiplier * atr_val;
+        let basic_upper = hl2 + delta;
+        let basic_lower = hl2 - delta;
+        if !hl2.is_finite() || !basic_upper.is_finite() || !basic_lower.is_finite() {
+            prev_final_upper = None;
+            prev_final_lower = None;
+            continue;
+        }
 
         let (final_upper, final_lower, dir) = match (prev_final_upper, prev_final_lower) {
             (Some(pfu), Some(pfl)) if t > 0 && candles[t - 1].close.is_finite() => {
@@ -434,6 +440,11 @@ pub fn compute_supertrend(candles: &[Candle], period: usize, multiplier: f64) ->
         };
 
         let active_trend = if dir == 1 { final_lower } else { final_upper };
+        if !active_trend.is_finite() || !final_upper.is_finite() || !final_lower.is_finite() {
+            prev_final_upper = None;
+            prev_final_lower = None;
+            continue;
+        }
         trend[t] = Some(active_trend);
         upper_band[t] = Some(final_upper);
         lower_band[t] = Some(final_lower);
@@ -625,8 +636,12 @@ pub fn compute_keltner_channels(
             && m.is_finite()
             && a.is_finite()
         {
-            upper[t] = Some(m + multiplier * a);
-            lower[t] = Some(m - multiplier * a);
+            let up = m + multiplier * a;
+            let lo = m - multiplier * a;
+            if up.is_finite() && lo.is_finite() {
+                upper[t] = Some(up);
+                lower[t] = Some(lo);
+            }
         }
     }
 
@@ -658,7 +673,12 @@ pub fn compute_cci(candles: &[Candle], period: usize) -> Vec<Option<f64>> {
             ring_idx = 0;
             continue;
         }
-        let tp = (c.high + c.low + c.close) / 3.0;
+        let tp = c.high / 3.0 + c.low / 3.0 + c.close / 3.0;
+        if !tp.is_finite() {
+            valid_run = 0;
+            ring_idx = 0;
+            continue;
+        }
         ring[ring_idx] = tp;
         ring_idx += 1;
         if ring_idx == period {
@@ -669,8 +689,11 @@ pub fn compute_cci(candles: &[Candle], period: usize) -> Vec<Option<f64>> {
             continue;
         }
 
-        let avg = ring.iter().sum::<f64>() * inv_p;
-        let mean_dev = ring.iter().map(|&v| (v - avg).abs()).sum::<f64>() * inv_p;
+        let avg = ring.iter().map(|&v| v * inv_p).sum::<f64>();
+        let mean_dev = ring.iter().map(|&v| (v - avg).abs() * inv_p).sum::<f64>();
+        if !avg.is_finite() || !mean_dev.is_finite() {
+            continue;
+        }
         let diff = tp - avg;
         let scale_band = 1.0e-14 * avg.abs();
         let denom = 0.015 * mean_dev;
@@ -680,7 +703,9 @@ pub fn compute_cci(candles: &[Candle], period: usize) -> Vec<Option<f64>> {
             let v = diff / denom;
             if v.is_finite() { v } else { 0.0 }
         };
-        out[t] = Some(cci);
+        if cci.is_finite() {
+            out[t] = Some(cci);
+        }
     }
 
     out
@@ -724,7 +749,18 @@ pub fn compute_mfi(candles: &[Candle], period: usize) -> Vec<Option<f64>> {
             continue;
         }
 
-        let tp = (c.high + c.low + c.close) / 3.0;
+        let tp = c.high / 3.0 + c.low / 3.0 + c.close / 3.0;
+        let raw_mf = tp * c.volume;
+        if !tp.is_finite() || !raw_mf.is_finite() {
+            pos_ring.fill(0.0);
+            neg_ring.fill(0.0);
+            ring_idx = 0;
+            pos_sum = 0.0;
+            neg_sum = 0.0;
+            null_run = 0;
+            valid_bars = 0;
+            continue;
+        }
         valid_bars += 1;
         if valid_bars == 1 {
             prev_tp = tp;
@@ -740,8 +776,8 @@ pub fn compute_mfi(candles: &[Candle], period: usize) -> Vec<Option<f64>> {
         let tp_scale = tp.abs() + prev_tp.abs();
         prev_tp = tp;
 
-        let raw_mf = tp * c.volume;
-        let is_zero_move = delta_tp.abs() <= 1.0e-14 * tp_scale || raw_mf <= 0.0;
+        let is_zero_move =
+            !delta_tp.is_finite() || delta_tp.abs() <= 1.0e-14 * tp_scale || raw_mf <= 0.0;
         let (pos_flow, neg_flow) = if is_zero_move {
             (0.0, 0.0)
         } else if delta_tp > 0.0 {
@@ -771,18 +807,39 @@ pub fn compute_mfi(candles: &[Candle], period: usize) -> Vec<Option<f64>> {
         }
 
         if valid_bars > period {
-            if valid_bars.is_multiple_of(64) {
+            if valid_bars.is_multiple_of(64) || !pos_sum.is_finite() || !neg_sum.is_finite() {
                 pos_sum = pos_ring.iter().sum();
                 neg_sum = neg_ring.iter().sum();
             }
             let total = pos_sum + neg_sum;
-            let mfi = if total <= 0.0 {
+            let mfi = if !total.is_finite() {
+                // Overflow-safe scaled resummation for extreme `1e300+` flows (`BUG-027`).
+                let max_flow = pos_ring
+                    .iter()
+                    .chain(neg_ring.iter())
+                    .copied()
+                    .fold(0.0_f64, f64::max);
+                if max_flow > 0.0 && max_flow.is_finite() {
+                    let sp: f64 = pos_ring.iter().map(|&v| v / max_flow).sum();
+                    let sn: f64 = neg_ring.iter().map(|&v| v / max_flow).sum();
+                    let st = sp + sn;
+                    if st > 0.0 && st.is_finite() {
+                        (100.0 * (sp.clamp(0.0, st) / st)).clamp(0.0, 100.0)
+                    } else {
+                        50.0
+                    }
+                } else {
+                    continue;
+                }
+            } else if total <= 0.0 {
                 50.0
             } else {
                 let clamped_pos = pos_sum.clamp(0.0, total);
                 (100.0 * (clamped_pos / total)).clamp(0.0, 100.0)
             };
-            out[t] = Some(mfi);
+            if mfi.is_finite() {
+                out[t] = Some(mfi);
+            }
         }
     }
 
@@ -824,7 +881,17 @@ pub fn compute_volume_sma(candles: &[Candle], period: usize) -> Vec<Option<f64>>
             if valid_run.is_multiple_of(64) {
                 sum = candles[t + 1 - period..=t].iter().map(|b| b.volume).sum();
             }
-            out[t] = Some((sum * inv_p).max(0.0));
+            let mean = if sum.is_finite() {
+                sum * inv_p
+            } else {
+                candles[t + 1 - period..=t]
+                    .iter()
+                    .map(|b| b.volume * inv_p)
+                    .sum::<f64>()
+            };
+            if mean.is_finite() {
+                out[t] = Some(mean.max(0.0));
+            }
         }
     }
 

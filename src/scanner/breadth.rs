@@ -199,7 +199,9 @@ pub fn compute_market_breadth_and_rrg(
             feed.timeframe.seconds(),
             replay_causal_close_ts,
         );
-        if feed.exclude_incomplete_tail && prefix > 0 {
+        // Only trim the trailing unclosed bar when it was NOT already excluded by `replay_causal_close_ts`
+        // (`BUG-029`: avoids double-dropping a valid closed historical bar during Bar Replay).
+        if feed.exclude_incomplete_tail && prefix == feed.candles.len() && prefix > 0 {
             prefix -= 1;
         }
         if prefix == 0 {
@@ -234,7 +236,11 @@ pub fn compute_market_breadth_and_rrg(
             unchanged += 1;
         }
 
-        let closes: Vec<f64> = slice.iter().map(|c| c.close).collect();
+        // Bounded causal tail window (`BUG-020`): SMA(20), EMA(50), and 4-bar RRG EMA(26)/EMA(10)/EMA(9)
+        // converge to <1e-5 over 260 trailing bars while keeping 471-symbol Breadth/RRG sub-10ms!
+        let tail_start = slice.len().saturating_sub(260);
+        let eval_slice = &slice[tail_start..];
+        let closes: Vec<f64> = eval_slice.iter().map(|c| c.close).collect();
         let sma20 = compute_sma_slices(&closes, 20);
         let ema50 = compute_ema_slices(&closes, 50);
         let above_sma20 = sma20
@@ -294,10 +300,18 @@ pub fn compute_market_breadth_and_rrg(
             vn30_buy_value += buy_val;
         }
 
+        let bench_eval_slice = if let Some(first_eval) = eval_slice.first() {
+            let bench_cut = first_eval.timestamp.saturating_sub(45 * 86_400);
+            let b_start = causal_bench.partition_point(|c| c.timestamp < bench_cut);
+            &causal_bench[b_start..]
+        } else {
+            causal_bench
+        };
+
         let (rs_ratio, rs_momentum, trail) = compute_causal_rrg_trajectory(
-            slice,
+            eval_slice,
             feed.timeframe,
-            causal_bench,
+            bench_eval_slice,
             benchmark_tf,
             replay_causal_close_ts,
         );

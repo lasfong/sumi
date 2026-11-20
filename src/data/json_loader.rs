@@ -15,8 +15,9 @@ use super::calendar::{
 };
 use super::timeframe::Timeframe;
 use super::{
-    DataLoadError, DataLoadOptions, DataLoadReport, MAX_IMPORT_BYTES, MAX_IMPORT_RECORDS,
-    MAX_SCANNED_RECORDS, RawCandleRecord, SymbolTracker, normalize_loaded_candles,
+    DataLoadError, DataLoadOptions, DataLoadReport, InvalidRowPolicy, MAX_IMPORT_BYTES,
+    MAX_IMPORT_RECORDS, MAX_SCANNED_RECORDS, RawCandleRecord, SymbolTracker,
+    normalize_loaded_candles,
 };
 
 /// Maximum nested JSON container depth accepted before rejecting input (`DoS` recursion guard).
@@ -53,6 +54,8 @@ pub fn load_ohlcv_json(
         return Err(DataLoadError::EmptyDataset);
     }
 
+    let quarantine = options.invalid_row_policy == InvalidRowPolicy::QuarantineRow;
+    let mut pre_quarantined = 0_usize;
     let mut pending_records: Vec<PendingJsonCandle> = Vec::new();
     let mut symbols = SymbolTracker::default();
     let mut active_symbol: Option<String> = None;
@@ -71,6 +74,7 @@ pub fn load_ohlcv_json(
                 &mut symbols,
                 &mut active_symbol,
                 &mut filtered_other_symbol_rows,
+                &mut pre_quarantined,
             )?;
             found_candles_field = true;
         }
@@ -126,7 +130,12 @@ pub fn load_ohlcv_json(
                             );
                         }
                         found_candles_field = true;
-                        cursor.parse_deferred_candles_array(2, options, &mut deferred_entries)?;
+                        cursor.parse_deferred_candles_array(
+                            2,
+                            options,
+                            &mut deferred_entries,
+                            &mut pre_quarantined,
+                        )?;
                     }
                     _ => {
                         cursor.skip_value(2)?;
@@ -235,14 +244,45 @@ pub fn load_ohlcv_json(
 
     let tokens: Vec<RawTimestampToken> =
         pending_records.iter().map(|r| r.ts_token.clone()).collect();
-    let resolved_timestamps =
-        resolve_series_timestamps(&tokens, options.timestamp_unit).map_err(|(row, message)| {
-            DataLoadError::InvalidFieldValue {
-                row,
-                field: "timestamp",
-                message,
+    let (pending_records, resolved_timestamps) =
+        match resolve_series_timestamps(&tokens, options.timestamp_unit) {
+            Ok(ts) => (pending_records, ts),
+            Err((row, message)) => {
+                if !quarantine {
+                    return Err(DataLoadError::InvalidFieldValue {
+                        row,
+                        field: "timestamp",
+                        message,
+                    });
+                }
+                let mut valid_recs = Vec::with_capacity(pending_records.len());
+                let mut valid_toks = Vec::with_capacity(pending_records.len());
+                for rec in pending_records {
+                    if resolve_series_timestamps(
+                        std::slice::from_ref(&rec.ts_token),
+                        options.timestamp_unit,
+                    )
+                    .is_ok()
+                    {
+                        valid_toks.push(rec.ts_token.clone());
+                        valid_recs.push(rec);
+                    } else {
+                        pre_quarantined = pre_quarantined.saturating_add(1);
+                    }
+                }
+                if valid_recs.is_empty() {
+                    return Err(DataLoadError::EmptyDataset);
+                }
+                let ts = resolve_series_timestamps(&valid_toks, options.timestamp_unit).map_err(
+                    |(r, m)| DataLoadError::InvalidFieldValue {
+                        row: r,
+                        field: "timestamp",
+                        message: m,
+                    },
+                )?;
+                (valid_recs, ts)
             }
-        })?;
+        };
 
     let raw_records: Vec<RawCandleRecord> = pending_records
         .into_iter()
@@ -259,14 +299,17 @@ pub fn load_ohlcv_json(
         })
         .collect();
 
-    normalize_loaded_candles(
+    let mut rep = normalize_loaded_candles(
         raw_records,
         resolved_symbol,
         available_symbols,
         filtered_other_symbol_rows,
         envelope_timeframe,
         options,
-    )
+    )?;
+    rep.raw_row_count = rep.raw_row_count.saturating_add(pre_quarantined);
+    rep.quarantined_row_count = rep.quarantined_row_count.saturating_add(pre_quarantined);
+    Ok(rep)
 }
 
 #[derive(Debug, Clone)]
@@ -348,6 +391,7 @@ impl<'a> JsonCursor<'a> {
         symbols: &mut SymbolTracker,
         active_symbol: &mut Option<String>,
         filtered_other_symbol_rows: &mut usize,
+        pre_quarantined: &mut usize,
     ) -> Result<(), DataLoadError> {
         if depth > MAX_JSON_DEPTH {
             return Err(self.err("JSON nesting exceeds MAX_JSON_DEPTH (16)"));
@@ -358,6 +402,7 @@ impl<'a> JsonCursor<'a> {
             return Ok(());
         }
 
+        let quarantine = options.invalid_row_policy == InvalidRowPolicy::QuarantineRow;
         let mut ordinal = 1_usize;
         loop {
             if ordinal > MAX_SCANNED_RECORDS {
@@ -366,45 +411,58 @@ impl<'a> JsonCursor<'a> {
                 });
             }
             self.skip_ws();
-            let (row_sym, rec) = self.parse_single_candle_item(depth + 1, ordinal, options)?;
-            let effective_sym = row_sym.as_deref().or(envelope_symbol);
-            if let Some(sym_raw) = effective_sym {
-                symbols.record(sym_raw);
-                let keep = if let Some(ref filter) = options.symbol_filter {
-                    if sym_raw.eq_ignore_ascii_case(filter.trim()) {
-                        if active_symbol.is_none() {
-                            *active_symbol = Some(sym_raw.to_owned());
+            let item_start = self.pos;
+            match self.parse_single_candle_item(depth + 1, ordinal, options) {
+                Ok((row_sym, rec)) => {
+                    let effective_sym = row_sym.as_deref().or(envelope_symbol);
+                    if let Some(sym_raw) = effective_sym {
+                        symbols.record(sym_raw);
+                        let keep = if let Some(ref filter) = options.symbol_filter {
+                            if sym_raw.eq_ignore_ascii_case(filter.trim()) {
+                                if active_symbol.is_none() {
+                                    *active_symbol = Some(sym_raw.to_owned());
+                                }
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            match active_symbol {
+                                None => {
+                                    *active_symbol = Some(sym_raw.to_owned());
+                                    true
+                                }
+                                Some(chosen) => sym_raw.eq_ignore_ascii_case(chosen),
+                            }
+                        };
+                        if !keep {
+                            *filtered_other_symbol_rows += 1;
+                        } else {
+                            if out_records.len() >= MAX_IMPORT_RECORDS {
+                                return Err(DataLoadError::TooManyRecords {
+                                    max_records: MAX_IMPORT_RECORDS,
+                                });
+                            }
+                            out_records.push(rec);
                         }
-                        true
                     } else {
-                        false
-                    }
-                } else {
-                    match active_symbol {
-                        None => {
-                            *active_symbol = Some(sym_raw.to_owned());
-                            true
+                        if out_records.len() >= MAX_IMPORT_RECORDS {
+                            return Err(DataLoadError::TooManyRecords {
+                                max_records: MAX_IMPORT_RECORDS,
+                            });
                         }
-                        Some(chosen) => sym_raw.eq_ignore_ascii_case(chosen),
+                        out_records.push(rec);
                     }
-                };
-                if !keep {
-                    *filtered_other_symbol_rows += 1;
-                } else {
-                    if out_records.len() >= MAX_IMPORT_RECORDS {
-                        return Err(DataLoadError::TooManyRecords {
-                            max_records: MAX_IMPORT_RECORDS,
-                        });
-                    }
-                    out_records.push(rec);
                 }
-            } else {
-                if out_records.len() >= MAX_IMPORT_RECORDS {
-                    return Err(DataLoadError::TooManyRecords {
-                        max_records: MAX_IMPORT_RECORDS,
-                    });
+                Err(
+                    DataLoadError::InvalidFieldValue { .. }
+                    | DataLoadError::MissingRequiredColumns { .. },
+                ) if quarantine => {
+                    self.pos = item_start;
+                    self.skip_value(depth + 1)?;
+                    *pre_quarantined = pre_quarantined.saturating_add(1);
                 }
-                out_records.push(rec);
+                Err(err) => return Err(err),
             }
 
             ordinal += 1;
@@ -427,6 +485,7 @@ impl<'a> JsonCursor<'a> {
         depth: usize,
         options: &DataLoadOptions,
         out_entries: &mut Vec<(Option<String>, PendingJsonCandle)>,
+        pre_quarantined: &mut usize,
     ) -> Result<(), DataLoadError> {
         if depth > MAX_JSON_DEPTH {
             return Err(self.err("JSON nesting exceeds MAX_JSON_DEPTH (16)"));
@@ -437,6 +496,7 @@ impl<'a> JsonCursor<'a> {
             return Ok(());
         }
 
+        let quarantine = options.invalid_row_policy == InvalidRowPolicy::QuarantineRow;
         let mut ordinal = 1_usize;
         loop {
             if ordinal > MAX_SCANNED_RECORDS {
@@ -445,8 +505,19 @@ impl<'a> JsonCursor<'a> {
                 });
             }
             self.skip_ws();
-            let entry = self.parse_single_candle_item(depth + 1, ordinal, options)?;
-            out_entries.push(entry);
+            let item_start = self.pos;
+            match self.parse_single_candle_item(depth + 1, ordinal, options) {
+                Ok(entry) => out_entries.push(entry),
+                Err(
+                    DataLoadError::InvalidFieldValue { .. }
+                    | DataLoadError::MissingRequiredColumns { .. },
+                ) if quarantine => {
+                    self.pos = item_start;
+                    self.skip_value(depth + 1)?;
+                    *pre_quarantined = pre_quarantined.saturating_add(1);
+                }
+                Err(err) => return Err(err),
+            }
             ordinal += 1;
             self.skip_ws();
             if self.consume_if(b',') {

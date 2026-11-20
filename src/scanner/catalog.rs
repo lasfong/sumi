@@ -284,7 +284,24 @@ const PARAMS_RSI_CROSS: &[SignalParamSpec] = &[
         default_value: 30.0,
         min_value: 5.0,
         max_value: 95.0,
-        description: "Oversold/Overbought crossover level",
+        description: "Oversold crossover level",
+    },
+];
+
+const PARAMS_RSI_OVERBOUGHT_CROSS: &[SignalParamSpec] = &[
+    SignalParamSpec {
+        name: "period",
+        default_value: 14.0,
+        min_value: 2.0,
+        max_value: 100.0,
+        description: "Wilder RSI smoothing period",
+    },
+    SignalParamSpec {
+        name: "threshold",
+        default_value: 70.0,
+        min_value: 5.0,
+        max_value: 95.0,
+        description: "Overbought crossover level",
     },
 ];
 
@@ -788,7 +805,7 @@ pub static SIGNAL_CATALOG: [SignalCatalogEntry; 101] = [
         0,
         false,
         Some(ScanSignalKind::RsiOverboughtCrossDown),
-        PARAMS_RSI_CROSS
+        PARAMS_RSI_OVERBOUGHT_CROSS
     ),
     sig_entry!(
         "technical.macd_bull_cross",

@@ -1,8 +1,8 @@
-# SUMI TRADING WORKSTATION — NEXT SESSION BRIEF (`POST-R19 / 100% CORE PARITY COMPLETE`)
+# SUMI TRADING WORKSTATION — NEXT SESSION BRIEF (`v1.1.0 GO FOR RELEASE`)
 
-- **Prepared By:** `SESSION-R19-20261119T145429+0700` (`SUMI PROGRAM ORCHESTRATOR`)
-- **Date:** `2026-11-19`
-- **Program Status:** **`100%` Core Feature Parity Complete (`Milestones R01–R19` / `Waves 1–18`)** — Awaiting Product Owner Direction (`git push`, Release Packaging, Optional External Data-Fetch CLI, or WebAssembly Target)
+- **Prepared By:** `SUMI PROGRAM ORCHESTRATOR`
+- **Date:** `2026-11-20`
+- **Program Status:** **`v1.1.0` (`TradingView Pro & macOS Release`: `Wave 0 -> Wave 5` COMPLETE, `280/280` automated tests, `0` clippy native/`wasm32` warnings, `0` new crates, `4/4` `viewport_bench` `p99 <= 2.883 ms < 4.0 ms`, signed `dist/Sumi Workstation.app` `v1.1.0` & `dist/Sumi-Workstation-v1.1.0-arm64.dmg`) VERIFIED `GO FOR v1.1.0`** -> [`docs/testing/V1_1_RELEASE_AUDIT.md`](testing/V1_1_RELEASE_AUDIT.md)
 
 ---
 
@@ -18,27 +18,29 @@ Any successor Orchestrator session starting in `/Users/mizuhara/workspace/sumi` 
 
 ---
 
-## 2. Current Baseline Verified in R19 (`100%` Core Parity)
+## 2. Current Baseline Verified in `v1.1.0` (`100%` Core Parity + TradingView Pro & macOS Release)
 
-- **Build, WASM & Tests:** `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, `cargo clippy --lib --target wasm32-unknown-unknown -- -D warnings`, and `cargo test` (`266/266` unit + property + headless UI + Critic R03–R19 regression tests) pass with `0` warnings and `0` errors; `Cargo.toml` and `Cargo.lock` have `0` new dependencies.
-- **Complete Shipped Subsystems (`R03–R19`):**
-  - `src/data/` (`csv_loader`, `json_loader`, `calendar`, `timeframe`, `presets`, `synthetic`, & **R19** `audit.rs` `DataQualityAuditReport`, `UniverseDataReadinessSummary`, `OhlcEnvelopePolicy::CafeFSplitAware`)
-  - `src/viewport/` (`TimeScale`, `PriceScale` + `CompactVolume` + `SignedPercentage`, `MultiChartLayoutKind`, `HotkeyProfile`, `WorkspaceTemplate`, `WorkspaceSnapshotStore`, & **R19** `WorkstationSettings` + `4` `CandlePalettePreset`s)
+- **Build, WASM & Tests:** `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, `cargo clippy --lib --target wasm32-unknown-unknown -- -D warnings`, and `cargo test` (`280/280` unit + property + headless UI + QA patch + `v1.1` regression tests) pass with `0` warnings and `0` errors; `0` new dependencies added in `Cargo.toml`/`Cargo.lock`.
+- **Complete Shipped Subsystems (`R03–R19` + `v1.0.0` QA Patch + `v1.1.0`):**
+  - `src/data/` (`csv_loader`, `json_loader`, `calendar`, `timeframe`, `presets`, `synthetic`, `audit.rs` `DataQualityAuditReport`, `UniverseDataReadinessSummary`, `OhlcEnvelopePolicy::CafeFSplitAware`)
+  - `src/viewport/` (`TimeScale`, `PriceScale` + `CompactVolume` + `SignedPercentage`, `MultiChartLayoutKind`, `HotkeyProfile`, `WorkspaceTemplate`, `WorkspaceSnapshotStore`, `WorkstationSettings` + `show_drawing_rail` + `4` `CandlePalettePreset`s)
   - `src/indicators/` (`SMA`, `EMA`, `BB`, `RSI`, `MACD`, `ATR`, `VRVP`/`FRVP`, `VWAP`, `TPO`, `RS`, `Ichimoku`, `CVD`, `patterns.rs` `14` candlestick patterns, `extended.rs` `ADX`/`Stoch`/`SuperTrend`/`PSAR`/`Keltner`/`CCI`/`MFI`/`VolSMA`, `proxy_bb.rs` `T03..T200`)
-  - `src/drawings/` (`9` tools incl. **R19** `TextNote`, `1..=16` custom Fibonacci levels, `[-∞, +∞]` `TrendLine` extensions, & `DrawingPropertyPatch`)
-  - `src/replay/`, `src/trading/` (`portfolio.rs` + **R19** `enforce_vn_t2_lot_lock` `SL`/`TP` bracket cap, `ladder.rs`, `coaching.rs`), & `src/journal/` (**R19** `VIETNAM_HOLIDAYS_V1` `[i32; 151]` `2018–2030`, `T+3`/`T+2` `13:00 ICT` `HoldingLot` FIFO ledger, `planner.rs`, `ledger.rs`)
+  - `src/drawings/` (**`11` tools**: `H-Line`, `TrendLine` dual-end, `Ray`, `ParallelChannel` 3-point, `Rectangle`, `Fib` custom `1..=16`, `RiskRewardBox`, `PriceDateRange Measure` + `Shift+Click`, `FRVP`, `AnchoredVwap`, `TextNote`, & `DrawingPropertyPatch`)
+  - `src/replay/`, `src/trading/` (`portfolio.rs` + `enforce_vn_t2_lot_lock` `SL`/`TP` bracket cap + deterministic `ModifyOrderPrice` replay command, `ladder.rs`, `coaching.rs`), & `src/journal/` (`VIETNAM_HOLIDAYS_V1` `[i32; 151]` `2018–2030`, `T+3`/`T+2` `13:00 ICT` `HoldingLot` FIFO ledger, `planner.rs`, `ledger.rs`)
   - `src/scanner/` (`101`-entry `SIGNAL_CATALOG` + confirmed `right_bars = 3` divergences + `PrecomputedCatalogMatrix`, `breadth.rs`, `proxy_bb.rs` `MarketBBAggregator`, `universe.rs` `UniverseResolver`)
   - `src/alerts/` (`PriceLevel`, `RSI`, `MACD`, `DrawingLine` synced with dual-end `TrendLine`, `SignalCatalogTrigger`, `ConfluenceThreshold`, `cooldown_bars`, CSV/JSON export)
-  - `src/backtest/` (`7` presets incl. `CustomSignalRules`, `run_pit_episodes_backtest`, `run_portfolio_backtest_with_universe`, `WFO`, `SplitMix64` Monte Carlo, `MultiStrategyComparisonReport`, `AdvancedTearsheetAnalytics`, `RunManifest`)
-  - `src/chart.rs`, `src/app.rs` & `src/main.rs` (`[Settings]`, `[Data Audit]`, 1-click `[Export PNG]`, `--r19` holding all UI workloads `< 4.0 ms`: **`0.253–0.372 ms`** mean / **`p99 <= 0.592 ms`**, `"overall_pass": true`)
+  - `src/backtest/` (`7` presets incl. `CustomSignalRules`, `run_pit_episodes_backtest`, `run_portfolio_backtest_with_universe`, `WFO`, `SplitMix64` Monte Carlo, `MultiStrategyComparisonReport`, `AdvancedTearsheetAnalytics`, `RunManifest`, & **`v1.1` `report_html.rs` self-contained HTML5/SVG/Print-to-PDF export**)
+  - `src/chart.rs`, `src/app.rs` & `src/main.rs` (**`v1.1`** `38 px` Left Vertical Drawing Rail with vector icons, Finder drag-and-drop `.csv`/`.tsv`/`.txt`/`.json` + CLI file argument, Chart-Direct `SL`/`TP`/Pending drag + `[×]` cancel/flatten + crisp Z-order above price lines, `[Settings]`, `[Data Audit]`, `[Export PNG]`, `--r12/--r17/--r18/--r19` all `overall_pass: true`, worst `p99 = 2.883 ms < 4.0 ms`)
+  - **macOS Release Packaging (`v1.1.0`):** `scripts/generate_app_icon.py` -> `assets/icons/AppIcon.icns`, `scripts/package_macos_app.sh` -> signed `dist/Sumi Workstation.app` (`v1.1.0`, `CFBundleDocumentTypes` `.csv`/`.json`), `scripts/package_macos_dmg.sh` -> verified `dist/Sumi-Workstation-v1.1.0-arm64.dmg` (`8.8 MB`).
 
 ---
 
-## 3. Optional Post-Parity Directions (Awaiting Explicit Product Owner Selection)
+## 3. Optional Post-v1.1 Directions (Awaiting Explicit Product Owner Selection)
 
-1. **Git Synchronization & Release Packaging:** Push `R18` (`312cbf9`) and `R19` commits to `origin/master`, optionally tag a milestone release (only upon explicit PO command), or package a native macOS `.app` bundle.
-2. **Standalone External Data-Sync CLI (Decoupled from Core Crate per `D1`):** If live OHLCV fetching (`CafeF` daily EOD batch, `Binance` klines, `Yahoo` CSV) is desired, build an isolated companion script/CLI writing canonical CSV/JSON files into a workspace `data/` folder without adding network crates to `sumi-workstation`.
-3. **InteractiveUX / Custom Strategy Extensions:** Any bespoke trading workflow, custom strategy preset, or UI refinement requested by the Product Owner during live desktop testing (`cargo run --release`).
+1. **Git Synchronization & Release Tagging:** Review working tree, create clean commit(s) for `R19` + `v1.0.0 QA Patch` + `v1.1.0`, tag `v1.1.0`, and push to `origin/master` (only upon explicit PO command).
+2. **Apple Developer ID Signing & Notarization:** Replace ad-hoc `codesign -` with Developer ID Application certificate + `notarytool` for Gatekeeper distribution outside the local machine.
+3. **Standalone External Data-Sync CLI (Decoupled from Core Crate per `D1`):** Build an isolated companion CLI/script fetching daily EOD OHLCV (`CafeF`, `Binance`, `Yahoo`) into workspace CSV/JSON files without adding network crates to `sumi-workstation`.
+4. **WASM Browser Build & Deployment (`trunk` / WebGPU-WebGL2):** Package the already `wasm32-unknown-unknown`-clean library for browser preview if needed.
 
 ---
 

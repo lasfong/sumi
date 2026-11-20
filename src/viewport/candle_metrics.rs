@@ -143,13 +143,33 @@ impl<'a> Iterator for ConflatedCandlesIter<'a> {
         }
 
         let last = &self.candles[chunk_end - 1];
-        let mut high = first.high;
-        let mut low = first.low;
+        let mut high = if first.high.is_finite() {
+            first.high
+        } else {
+            f64::NEG_INFINITY
+        };
+        let mut low = if first.low.is_finite() {
+            first.low
+        } else {
+            f64::INFINITY
+        };
         let mut volume = 0.0;
         for c in &self.candles[start..chunk_end] {
-            high = high.max(c.high);
-            low = low.min(c.low);
-            volume += c.volume;
+            if c.high.is_finite() {
+                high = high.max(c.high);
+            }
+            if c.low.is_finite() {
+                low = low.min(c.low);
+            }
+            if c.volume.is_finite() && c.volume >= 0.0 {
+                volume += c.volume;
+            }
+        }
+        if !high.is_finite() {
+            high = first.high;
+        }
+        if !low.is_finite() {
+            low = first.low;
         }
         let end_idx = chunk_end - 1;
         Some(ConflatedCandle {

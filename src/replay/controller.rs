@@ -501,7 +501,10 @@ impl ReplayController {
         if !self.is_active() || base_candles.is_empty() {
             return aggregate_ohlcv(base_candles, base_tf, active_tf);
         }
-        let end = (self.base_cursor_index + 1).min(base_candles.len());
+        let end = self
+            .base_cursor_index
+            .saturating_add(1)
+            .min(base_candles.len());
         aggregate_ohlcv(&base_candles[..end], base_tf, active_tf)
     }
 }

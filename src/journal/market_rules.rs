@@ -73,6 +73,13 @@ impl ExchangeVenue {
                 | "VN30"
                 | "VN30-INDEX"
                 | "VN30INDEX"
+                | "VN100"
+                | "VNXALL"
+                | "VNX50"
+                | "VNMID"
+                | "VNSML"
+                | "VNFINLEAD"
+                | "VNDIAMOND"
                 | "HNX-INDEX"
                 | "HNXINDEX"
                 | "UPCOM-INDEX"
@@ -99,30 +106,66 @@ impl ExchangeVenue {
                 }
             }
             DataSourcePreset::CustomFile => {
+                let is_vn_etf = upper.starts_with("E1VF") || upper.starts_with("FUE");
+                let is_us_short_ticker = matches!(
+                    upper.as_str(),
+                    "SPY"
+                        | "QQQ"
+                        | "IWM"
+                        | "DIA"
+                        | "VOO"
+                        | "VTI"
+                        | "AMD"
+                        | "JPM"
+                        | "IBM"
+                        | "BAC"
+                        | "DIS"
+                        | "WMT"
+                        | "XOM"
+                        | "CVX"
+                        | "NKE"
+                        | "CAT"
+                        | "BA"
+                        | "GE"
+                        | "GM"
+                        | "GS"
+                        | "HD"
+                        | "KO"
+                        | "MCD"
+                        | "MMM"
+                        | "PG"
+                        | "UNH"
+                        | "UPS"
+                        | "V"
+                        | "MA"
+                        | "F"
+                        | "C"
+                        | "T"
+                );
+                let is_non_vn_alpha_ticker = !is_vn_etf
+                    && !upper.starts_with("VN")
+                    && (upper.contains('.')
+                        || (upper.len() >= 4 && upper.bytes().all(|b| b.is_ascii_alphabetic()))
+                        || (upper.len() <= 2
+                            && !upper.is_empty()
+                            && upper.bytes().all(|b| b.is_ascii_alphabetic())));
                 if upper.starts_with("VN30F") {
                     Self::Vn30Futures
                 } else if is_vn_index_ticker {
                     Self::VnIndexBenchmark
                 } else if upper.ends_with("USDT")
                     || upper.ends_with("USD")
-                    || matches!(upper.as_str(), "BTC" | "ETH" | "SOL")
+                    || upper.ends_with("BUSD")
+                    || upper.ends_with("USDC")
+                    || matches!(upper.as_str(), "BTC" | "ETH" | "SOL" | "BNB" | "XRP")
                 {
                     Self::CryptoSpotPerp
-                } else if matches!(
-                    upper.as_str(),
-                    "SPY" | "QQQ" | "IWM" | "AAPL" | "MSFT" | "NVDA" | "TSLA"
-                ) {
-                    Self::UsEquities
-                } else if matches!(
-                    upper.as_str(),
-                    "SHS" | "PVS" | "IDC" | "MBS" | "CEO" | "TNG" | "HUT" | "VCS"
-                ) {
+                } else if HNX_LISTED_SYMBOLS.binary_search(&upper.as_str()).is_ok() {
                     Self::Hnx
-                } else if matches!(
-                    upper.as_str(),
-                    "BSR" | "ACV" | "VEA" | "OIL" | "VGI" | "QNS" | "MCH"
-                ) {
+                } else if UPCOM_LISTED_SYMBOLS.binary_search(&upper.as_str()).is_ok() {
                     Self::Upcom
+                } else if is_us_short_ticker || is_non_vn_alpha_ticker {
+                    Self::UsEquities
                 } else {
                     Self::Hose
                 }
@@ -577,16 +620,45 @@ pub fn floor_to_board_lot(venue: ExchangeVenue, raw_quantity: f64) -> f64 {
 }
 
 /// Statutory VSD/VSDC `T+2` afternoon (`13:00 ICT`) cutover date (`2022-08-29`, Decision `109/QĐ-VSD`).
+/// Strictly sorted official `HNX` (`±10%` daily band, `0.10 kVND` flat tick) ticker registry (`BUG-021`).
+pub const HNX_LISTED_SYMBOLS: &[&str] = &[
+    "AAV", "AMV", "API", "APS", "BCC", "BII", "BNA", "BVS", "C69", "CEO", "CTP", "CVN", "DIH",
+    "DL1", "DST", "DTD", "DVG", "DVM", "DXP", "EVS", "FID", "GKM", "HDA", "HLD", "HMR", "HOM",
+    "HTP", "HUT", "IDC", "IDJ", "IPA", "ITQ", "IVS", "KSQ", "L14", "L40", "LAS", "LDP", "LIG",
+    "MBG", "MBS", "MST", "NAG", "NBC", "NDN", "NRC", "NSH", "NTP", "NVB", "PCH", "PGN", "PHP",
+    "PLC", "PPT", "PSD", "PSI", "PV2", "PVB", "PVC", "PVG", "PVL", "PVS", "RCL", "S99", "SCI",
+    "SD6", "SDA", "SHS", "SJE", "SRA", "SVN", "TA9", "TD6", "TIG", "TNG", "TTH", "TV4", "TVC",
+    "TVD", "VC2", "VC3", "VC7", "VCS", "VFS", "VGS", "VHE", "VIG", "VTV", "VTZ", "WSS",
+];
+
+/// Strictly sorted official `UPCOM` (`±15%` daily band, `0.10 kVND` flat tick) ticker registry (`BUG-021`).
+pub const UPCOM_LISTED_SYMBOLS: &[&str] = &[
+    "AAH", "AAS", "ABB", "ABI", "ABW", "ACM", "ACV", "AFX", "AGM", "AMS", "ATG", "AVG", "BCR",
+    "BGE", "BIG", "BMS", "BOT", "BSR", "C4G", "CKA", "CLI", "CTX", "DCS", "DDG", "DDV", "DFF",
+    "DGT", "DHB", "DIC", "DRI", "DTI", "DTP", "DVN", "F88", "FOX", "FTM", "G20", "G36", "GCF",
+    "GDA", "GPC", "HBC", "HHG", "HIO", "HKB", "HNG", "HNM", "HSV", "HU4", "HVA", "HWS", "KHD",
+    "KLB", "KSV", "KVC", "LCM", "LMH", "LSG", "LTG", "MCH", "MEC", "MKP", "MML", "MPC", "MPT",
+    "MSR", "MVC", "NED", "OIL", "PAS", "PFL", "PIV", "POM", "POS", "PPH", "PSP", "PTV", "PVO",
+    "PVV", "PVX", "PXI", "PXL", "PXS", "PXT", "QBS", "QNS", "QTP", "RIC", "SBB", "SBS", "SCL",
+    "SDD", "SGP", "SRB", "STH", "TAR", "TCD", "TIN", "TSA", "TT6", "TTN", "TV1", "TVN", "UDJ",
+    "VAB", "VEA", "VGI", "VGT", "VHG", "VIW", "VKC", "VLB", "VLC", "VST", "VTD", "VVS", "XMC",
+];
+
 /// Acquisitions prior to `2022-08-29` followed the historical `T+3` morning (`09:00 ICT`) settlement cycle.
 #[allow(clippy::inconsistent_digit_grouping)]
 pub const VSD_T2_CUTOVER_YMD: i32 = 2022_08_29;
 
 /// Authoritative Vietnam Stock Exchange (`HOSE` / `HNX` / `UPCOM` / `VN30F`) weekday public holidays,
-/// compensatory Mondays/Tuesdays (`nghỉ bù`), and government bridge-day swaps (`hoán đổi`) across `2018–2030`
-/// (`151` strictly sorted `YYYYMMDD` entries; Saturday civil-service makeup workdays never trade on VN exchanges).
+/// compensatory Mondays/Tuesdays (`nghỉ bù`), and government bridge-day swaps (`hoán đổi`) across `2016–2030`
+/// (`171` strictly sorted `YYYYMMDD` entries; Saturday civil-service makeup workdays never trade on VN exchanges).
 #[allow(clippy::inconsistent_digit_grouping)]
-pub const VIETNAM_HOLIDAYS_V1: [i32; 151] = [
-    // 2018 (11 weekday holidays, incl. 31/12 bridge swap)
+pub const VIETNAM_HOLIDAYS_V1: [i32; 171] = [
+    // 2016 (10 official HOSE/HNX weekday holidays: New Year, Tết Bính Thân, Giỗ Tổ, 30/04–01/05 comp, 02/09)
+    2016_01_01, 2016_02_08, 2016_02_09, 2016_02_10, 2016_02_11, 2016_02_12, 2016_04_18, 2016_05_02,
+    2016_05_03,
+    2016_09_02, // 2017 (10 official HOSE/HNX weekday holidays: New Year comp, Tết Đinh Dậu, Giỗ Tổ, 30/04–01/05, 02/09 comp)
+    2017_01_02, 2017_01_26, 2017_01_27, 2017_01_30, 2017_01_31, 2017_02_01, 2017_04_06, 2017_05_01,
+    2017_05_02, 2017_09_04, // 2018 (11 weekday holidays, incl. 31/12 bridge swap)
     2018_01_01, 2018_02_14, 2018_02_15, 2018_02_16, 2018_02_19, 2018_02_20, 2018_04_25, 2018_04_30,
     2018_05_01, 2018_09_03, 2018_12_31, // 2019 (11 weekday holidays, incl. 29/04 bridge swap)
     2019_01_01, 2019_02_04, 2019_02_05, 2019_02_06, 2019_02_07, 2019_02_08, 2019_04_15, 2019_04_29,
@@ -622,9 +694,9 @@ pub const VIETNAM_HOLIDAYS_V1: [i32; 151] = [
 ];
 
 /// Returns `true` if civil date `(year, month, day)` is an official Vietnam exchange weekday holiday.
-/// Uses `VIETNAM_HOLIDAYS_V1` ($O(\log N)$ binary search) for `2018..=2030`, with a deterministic
+/// Uses `VIETNAM_HOLIDAYS_V1` ($O(\log N)$ binary search) for `2016..=2030`, with a deterministic
 /// Labor Code Art. 111(3) & 112 + Resolution `28/2026/QH16` statutory fixed-holiday + compensatory
-/// Monday/Tuesday fallback outside `2018..=2030` so out-of-horizon dates never hit an unprotected cliff (`BUG-CAL-01`).
+/// Monday/Tuesday fallback outside `2016..=2030` so out-of-horizon dates never hit an unprotected cliff (`BUG-CAL-01`).
 #[must_use]
 pub fn is_vn_exchange_holiday_ymd(year: i32, month: u32, day: u32) -> bool {
     let days = days_from_civil(year, month, day);
@@ -632,7 +704,7 @@ pub fn is_vn_exchange_holiday_ymd(year: i32, month: u32, day: u32) -> bool {
     if wd >= 5 {
         return false;
     }
-    if (2018..=2030).contains(&year) {
+    if (2016..=2030).contains(&year) {
         let packed = year
             .saturating_mul(10_000)
             .saturating_add((month as i32) * 100)
@@ -640,7 +712,7 @@ pub fn is_vn_exchange_holiday_ymd(year: i32, month: u32, day: u32) -> bool {
         return VIETNAM_HOLIDAYS_V1.binary_search(&packed).is_ok();
     }
 
-    // Statutory fallback outside 2018..=2030 (`01/01`, `30/04`, `01/05`, `02/09`, `24/11` `2026+` + compensatory Mon/Tue):
+    // Statutory fallback outside 2016..=2030 (`01/01`, `30/04`, `01/05`, `02/09`, `24/11` `2026+` + compensatory Mon/Tue):
     match (month, day) {
         (1, 1) | (4, 30) | (5, 1) | (9, 2) => true,
         (11, 24) if year >= 2026 => true,
@@ -662,13 +734,17 @@ pub fn is_vn_exchange_holiday_ymd(year: i32, month: u32, day: u32) -> bool {
         // Two-day National Day (`02/09` + adjacent/compensatory weekday from `2021+`):
         (9, 3) if year >= 2021 => {
             let wd_sep2 = weekday_from_days(days_from_civil(year, 9, 2));
-            wd_sep2 != 5 // Thu -> Fri 03/09, Sun -> Mon 03/09, Mon..Wed -> 03/09
+            wd_sep2 != 5 // Mon..Thu -> 03/09, Sun -> Mon 03/09
         }
         (9, 4) if year >= 2021 => {
             let wd_sep2 = weekday_from_days(days_from_civil(year, 9, 2));
             wd_sep2 == 5 || wd_sep2 == 6 // Sat -> Mon 04/09, Sun -> Mon 03/09 + Tue 04/09
         }
-        (9, 1) if year >= 2021 => weekday_from_days(days_from_civil(year, 9, 2)) == 5,
+        (9, 1) if year >= 2021 => {
+            let wd_sep2 = weekday_from_days(days_from_civil(year, 9, 2));
+            // Fri -> Thu 01/09 + Fri 02/09; Sat -> Fri 01/09 + Mon 04/09 (`BUG-034`).
+            wd_sep2 == 4 || wd_sep2 == 5
+        }
         (9, 3) => weekday_from_days(days_from_civil(year, 9, 2)) == 6,
         (9, 4) => weekday_from_days(days_from_civil(year, 9, 2)) == 5,
         _ => false,
@@ -789,6 +865,27 @@ pub fn compute_settlement_timestamp_for_venue(entry_timestamp: i64, venue: Excha
             .clamp(MIN_SUPPORTED_EPOCH_SECS, MAX_SUPPORTED_EPOCH_SECS);
     }
 
+    // UTC-midnight daily bars (`SPY CSV`, `D1` feeds) carry civil date `YYYY-MM-DD 00:00 UTC`
+    // rather than an intraday clock instant; applying `UTC-5` would shift Monday `00:00 UTC` back
+    // into Sunday `19:00 EST` and advance `T+1` to Wednesday (`BUG-017`).
+    if clamped.rem_euclid(86_400) == 0 {
+        let mut utc_day = clamped.div_euclid(86_400);
+        while weekday_from_days(utc_day) >= 5 {
+            utc_day = utc_day.saturating_add(1);
+        }
+        let mut remaining = base_business_days;
+        while remaining > 0 {
+            utc_day = utc_day.saturating_add(1);
+            if weekday_from_days(utc_day) < 5 {
+                remaining -= 1;
+            }
+        }
+        return utc_day
+            .saturating_mul(86_400)
+            .max(clamped)
+            .clamp(MIN_SUPPORTED_EPOCH_SECS, MAX_SUPPORTED_EPOCH_SECS);
+    }
+
     while weekday_from_days(local_day) >= 5 {
         local_day = local_day.saturating_add(1);
     }
@@ -805,6 +902,42 @@ pub fn compute_settlement_timestamp_for_venue(entry_timestamp: i64, venue: Excha
         .saturating_sub(tz_offset)
         .max(clamped)
         .clamp(MIN_SUPPORTED_EPOCH_SECS, MAX_SUPPORTED_EPOCH_SECS)
+}
+
+/// Maps a bar timestamp (`UTC` seconds) to its causal settlement evaluation timestamp for `venue` and
+/// `base_timeframe_secs` (`BUG-017`):
+/// - Intraday bars (`< 1D`) evaluate at exact bar close `bar_ts + bar_secs - 1`.
+/// - Daily (`1D`) and weekly (`1W`) bars evaluate at the close of `bar_ts`'s **same trading day** in the
+///   exchange's civil calendar (`23:59:59 ICT = 16:59:59 UTC` on Vietnam venues) so non-midnight `1D` bars
+///   (`> 06:00 UTC`) never bleed into `T+2` on `T+1` and `1W` base bars never unlock `T+0`.
+#[inline]
+#[must_use]
+pub fn causal_settlement_eval_timestamp(
+    bar_timestamp: i64,
+    venue: ExchangeVenue,
+    base_timeframe_secs: i64,
+) -> i64 {
+    let tf = base_timeframe_secs.max(1);
+    if tf < 86_400 {
+        return bar_timestamp.saturating_add(tf.saturating_sub(1));
+    }
+    if venue.is_vn_cash_equity() {
+        let tz = venue.utc_offset_seconds();
+        let local_day = bar_timestamp.saturating_add(tz).div_euclid(86_400);
+        return local_day
+            .saturating_mul(86_400)
+            .saturating_add(86_399)
+            .saturating_sub(tz);
+    }
+    if bar_timestamp.rem_euclid(86_400) == 0 {
+        return bar_timestamp.saturating_add(86_399);
+    }
+    let tz = venue.utc_offset_seconds();
+    let local_day = bar_timestamp.saturating_add(tz).div_euclid(86_400);
+    local_day
+        .saturating_mul(86_400)
+        .saturating_add(86_399)
+        .saturating_sub(tz)
 }
 
 /// Individual FIFO acquisition lot tracked for statutory `T+2` (`13:00 ICT`) / `T+3` (`09:00 ICT`) settlement (`Milestone R19 / C2`).
@@ -863,7 +996,12 @@ pub fn compute_fifo_holding_lots_with_bar_secs(
     as_of_timestamp: i64,
     base_timeframe_secs: i64,
 ) -> FifoSettlementSummary {
-    let bar_span_minus_one = base_timeframe_secs.max(1).saturating_sub(1);
+    let tf_secs = base_timeframe_secs.max(1);
+    let effective_as_of = if tf_secs >= 86_400 && as_of_timestamp.rem_euclid(86_400) != 86_399 {
+        causal_settlement_eval_timestamp(as_of_timestamp, venue, tf_secs).max(as_of_timestamp)
+    } else {
+        as_of_timestamp
+    };
     let mut ordered: Vec<(usize, u64, usize, i64, OrderSide, f64, f64)> = fills
         .iter()
         .enumerate()
@@ -906,7 +1044,8 @@ pub fn compute_fifo_holding_lots_with_bar_secs(
             }
             OrderSide::Sell => {
                 let mut rem_sell = qty;
-                let sell_eval_ts = ts.saturating_add(bar_span_minus_one).min(as_of_timestamp);
+                let sell_eval_ts =
+                    causal_settlement_eval_timestamp(ts, venue, tf_secs).min(effective_as_of);
                 // 1. Prefer consuming already-settled FIFO lots first (`sell_eval_ts >= lot.sellable_at_timestamp`)
                 //    so a trader holding `100` settled Monday shares + `100` unsettled Wednesday shares
                 //    selling `100` shares on Wednesday cleanly sells the settled Monday lot without violation!
@@ -949,7 +1088,7 @@ pub fn compute_fifo_holding_lots_with_bar_secs(
 
     for lot in &lots {
         total_held_qty += lot.remaining_qty;
-        if lot.is_sellable_at(as_of_timestamp) {
+        if lot.is_sellable_at(effective_as_of) {
             sellable_qty += lot.remaining_qty;
         } else {
             locked_t2_qty += lot.remaining_qty;
@@ -969,5 +1108,45 @@ pub fn compute_fifo_holding_lots_with_bar_secs(
         locked_t2_qty: clean_quantized(locked_t2_qty),
         earliest_unlock_timestamp,
         unsettled_sell_violation_qty,
+    }
+}
+
+/// Returns `true` iff `days_since_epoch` falls within US Eastern Daylight Time (`EDT`, `UTC-4`)
+/// under the post-2007 statutory rule (second Sunday of March through the Saturday before the
+/// first Sunday of November; `BUG-010`).
+#[inline]
+#[must_use]
+pub fn is_us_nyse_dst_day(days_since_epoch: i64) -> bool {
+    let (year, month, day) = civil_from_days(days_since_epoch);
+    match month {
+        4..=10 => true,
+        1 | 2 | 12 => false,
+        3 => {
+            let mar1_days = days_from_civil(year, 3, 1);
+            let w_sun0 = (mar1_days + 4).rem_euclid(7); // 0 = Sun, 1 = Mon, .., 6 = Sat
+            let first_sun = 1 + (7 - w_sun0) % 7;
+            let second_sun = (first_sun + 7) as u32;
+            day >= second_sun
+        }
+        11 => {
+            let nov1_days = days_from_civil(year, 11, 1);
+            let w_sun0 = (nov1_days + 4).rem_euclid(7);
+            let first_sun = (1 + (7 - w_sun0) % 7) as u32;
+            day < first_sun
+        }
+        _ => false,
+    }
+}
+
+/// Returns the inclusive closing second-of-day in UTC for the regular NYSE/NASDAQ 16:00 ET
+/// session on `days_since_epoch`: `19:59:59 UTC` during `EDT` (`UTC-4`) and `20:59:59 UTC`
+/// during `EST` (`UTC-5`) (`BUG-010`).
+#[inline]
+#[must_use]
+pub fn us_nyse_regular_close_tod_utc(days_since_epoch: i64) -> i64 {
+    if is_us_nyse_dst_day(days_since_epoch) {
+        19 * 3_600 + 59 * 60 + 59
+    } else {
+        20 * 3_600 + 59 * 60 + 59
     }
 }

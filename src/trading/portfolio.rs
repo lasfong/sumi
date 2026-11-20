@@ -6,9 +6,12 @@ use crate::model::Candle;
 use super::orders::{
     AccountConfig, FillReason, MAX_ORDER_NOTIONAL, MAX_ORDER_PRICE, MAX_ORDER_QUANTITY,
     MAX_PENDING_ORDERS, MAX_RECORDED_COMMANDS, MIN_ORDER_QUANTITY, Order, OrderKind, OrderRequest,
-    OrderSide, OrderStatus, PositionSide, TradingError, apply_slippage, compute_commission,
-    validate_brackets_for_side,
+    OrderSide, OrderStatus, PositionSide, TradingError, apply_slippage, validate_brackets_for_side,
 };
+
+const fn default_pos_contract_multiplier() -> f64 {
+    1.0
+}
 
 /// Active net position in the paper-trading portfolio.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -16,6 +19,9 @@ pub struct Position {
     pub side: PositionSide,
     pub quantity: f64,
     pub avg_entry_price: f64,
+    /// Point-to-currency contract multiplier active when this position was opened (`100.0 kVND/pt` on `VN30F1M`, `1.0` on spot/cash).
+    #[serde(default = "default_pos_contract_multiplier")]
+    pub contract_multiplier: f64,
     pub opened_timestamp: i64,
     pub opened_base_index: usize,
     pub stop_loss: Option<f64>,
@@ -40,14 +46,19 @@ pub struct Position {
 }
 
 impl Position {
-    /// Mark-to-market unrealized gross PnL at `mark_price`.
+    /// Mark-to-market unrealized gross PnL at `mark_price` (accounting for `contract_multiplier`).
     #[inline]
     #[must_use]
     pub fn unrealized_pnl(&self, mark_price: f64) -> f64 {
         if !mark_price.is_finite() || self.quantity <= 0.0 {
             return 0.0;
         }
-        self.side.sign() * (mark_price - self.avg_entry_price) * self.quantity
+        let mult = if self.contract_multiplier.is_finite() && self.contract_multiplier > 0.0 {
+            self.contract_multiplier
+        } else {
+            1.0
+        };
+        self.side.sign() * (mark_price - self.avg_entry_price) * self.quantity * mult
     }
 
     /// Percentage unrealized move relative to `avg_entry_price`.
@@ -155,6 +166,11 @@ pub enum RecordedCommandKind {
     SubmitOrder(OrderRequest),
     CancelOrder {
         order_id: u64,
+    },
+    /// Modifies the trigger price of a pending `Limit` or `Stop` working order (`v1.1 / Wave 3`).
+    ModifyOrderPrice {
+        order_id: u64,
+        new_price: f64,
     },
     UpdateBrackets {
         stop_loss: Option<f64>,
@@ -294,6 +310,7 @@ pub fn extract_ticket_from_drawing(drawing: &Drawing) -> Option<DrawingTicketSyn
                 })
             }
         }
+        DrawingGeometry::ParallelChannel { .. } | DrawingGeometry::PriceDateRange { .. } => None,
     }
 }
 
@@ -475,10 +492,50 @@ impl TradingSession {
         if !self.config.enforce_vn_t2_lot_lock || !self.config.venue.is_vn_cash_equity() {
             return None;
         }
-        let eval_ts = candle_timestamp
-            .saturating_add(self.config.base_timeframe_secs.max(1).saturating_sub(1));
+        let eval_ts = crate::journal::causal_settlement_eval_timestamp(
+            candle_timestamp,
+            self.config.venue,
+            self.config.base_timeframe_secs,
+        );
         let fifo = self.fifo_holding_summary(self.config.venue, eval_ts);
         Some(fifo.sellable_qty.max(0.0))
+    }
+
+    fn check_t2_sell_lock_at(
+        &self,
+        candle_timestamp: i64,
+        requested_qty: f64,
+    ) -> Result<(), TradingError> {
+        if !self.config.enforce_vn_t2_lot_lock || !self.config.venue.is_vn_cash_equity() {
+            return Ok(());
+        }
+        let eval_ts = crate::journal::causal_settlement_eval_timestamp(
+            candle_timestamp,
+            self.config.venue,
+            self.config.base_timeframe_secs,
+        );
+        let fifo = self.fifo_holding_summary(self.config.venue, eval_ts);
+        let pending_sell_qty: f64 = self
+            .orders
+            .iter()
+            .filter(|o| {
+                o.status == OrderStatus::Pending
+                    && o.side == OrderSide::Sell
+                    && o.quantity.is_finite()
+                    && o.quantity > 0.0
+            })
+            .map(|o| o.quantity)
+            .sum();
+        let available_sellable = (fifo.sellable_qty - pending_sell_qty).max(0.0);
+        if requested_qty > available_sellable + 1.0e-7 {
+            return Err(TradingError::InsufficientSettledShares {
+                requested: requested_qty,
+                sellable: available_sellable,
+                locked_t2: fifo.locked_t2_qty,
+                earliest_unlock_timestamp: fifo.earliest_unlock_timestamp,
+            });
+        }
+        Ok(())
     }
 
     #[inline]
@@ -706,6 +763,36 @@ impl TradingSession {
         Ok(())
     }
 
+    /// Modifies the trigger price of a `Pending` `Limit` or `Stop` order at `cursor_base_index`,
+    /// recording a deterministic [`RecordedCommandKind::ModifyOrderPrice`] entry for bit-exact
+    /// Bar Replay rewind (`v1.1 / Wave 3`).
+    pub fn modify_order_price(
+        &mut self,
+        order_id: u64,
+        new_price: f64,
+        base_candles: &[Candle],
+        cursor_base_index: usize,
+    ) -> Result<(), TradingError> {
+        if base_candles.is_empty() {
+            return Err(TradingError::EmptyMarketData);
+        }
+        if self.commands.len() >= MAX_RECORDED_COMMANDS {
+            return Err(TradingError::CommandLogFull(MAX_RECORDED_COMMANDS));
+        }
+        let idx = cursor_base_index.min(base_candles.len() - 1);
+        self.sync_cursor_before_command(base_candles, idx);
+        self.apply_modify_order_price_internal(order_id, new_price)?;
+        self.commands.push(RecordedCommand {
+            base_index: idx,
+            kind: RecordedCommandKind::ModifyOrderPrice {
+                order_id,
+                new_price,
+            },
+        });
+        self.record_equity_point(idx, base_candles[idx].timestamp, base_candles[idx].close);
+        Ok(())
+    }
+
     /// Updates protective `stop_loss` and/or `take_profit` levels on the currently open position.
     ///
     /// Validated against the current mark price (`base_candles[cursor_base_index].close`) so both
@@ -836,6 +923,12 @@ impl TradingSession {
                     RecordedCommandKind::CancelOrder { order_id } => {
                         let _ = self.apply_cancel_order_internal(*order_id);
                     }
+                    RecordedCommandKind::ModifyOrderPrice {
+                        order_id,
+                        new_price,
+                    } => {
+                        let _ = self.apply_modify_order_price_internal(*order_id, *new_price);
+                    }
                     RecordedCommandKind::UpdateBrackets {
                         stop_loss,
                         take_profit,
@@ -938,7 +1031,8 @@ impl TradingSession {
             }
         };
 
-        let notional = reference_price * req.quantity;
+        let mult = self.config.effective_contract_multiplier();
+        let notional = reference_price * req.quantity * mult;
         if !notional.is_finite() || notional > MAX_ORDER_NOTIONAL {
             return Err(TradingError::NotionalOverflow);
         }
@@ -948,9 +1042,10 @@ impl TradingSession {
             req.side == pos.side.exit_order_side() && req.quantity <= pos.quantity + 1e-12
         });
 
+        let allow_short = self.config.effective_allow_short();
         let (effective_sl, effective_tp) = if !is_pure_reduce {
             let target_pos_side = req.side.to_position_side();
-            if target_pos_side == PositionSide::Short && !self.config.allow_short {
+            if target_pos_side == PositionSide::Short && !allow_short {
                 return Err(TradingError::ShortSellingDisabled);
             }
             validate_brackets_for_side(
@@ -966,7 +1061,7 @@ impl TradingSession {
             // order later opens or flips into a new position after the original position exits, it
             // can never attach inverted brackets.
             let target_pos_side = req.side.to_position_side();
-            if (target_pos_side != PositionSide::Short || self.config.allow_short)
+            if (target_pos_side != PositionSide::Short || allow_short)
                 && validate_brackets_for_side(
                     target_pos_side,
                     reference_price,
@@ -980,6 +1075,11 @@ impl TradingSession {
                 (None, None)
             }
         };
+
+        // Enforce VSD `T+2` / `T+3` settled-lot lock inside core `TradingSession` (`BUG-004`).
+        if req.side == OrderSide::Sell {
+            self.check_t2_sell_lock_at(candle.timestamp, req.quantity)?;
+        }
 
         match req.kind {
             OrderKind::Market => {
@@ -1058,6 +1158,42 @@ impl TradingSession {
         Ok(())
     }
 
+    fn apply_modify_order_price_internal(
+        &mut self,
+        order_id: u64,
+        new_price: f64,
+    ) -> Result<(), TradingError> {
+        if !new_price.is_finite() || new_price <= 0.0 || new_price > MAX_ORDER_PRICE {
+            return Err(TradingError::InvalidPrice(new_price));
+        }
+        let Some(order) = self.orders.iter_mut().find(|o| o.id == order_id) else {
+            return Err(TradingError::OrderNotFound(order_id));
+        };
+        if order.status != OrderStatus::Pending {
+            return Err(TradingError::OrderNotPending(order_id));
+        }
+        let next_kind = match order.kind {
+            OrderKind::Limit { .. } => OrderKind::Limit {
+                limit_price: new_price,
+            },
+            OrderKind::Stop { .. } => OrderKind::Stop {
+                stop_price: new_price,
+            },
+            OrderKind::Market => return Err(TradingError::OrderNotPending(order_id)),
+        };
+        let notional = new_price * order.quantity * self.config.contract_multiplier.max(1.0);
+        if !notional.is_finite() || notional > super::orders::MAX_ORDER_NOTIONAL {
+            return Err(TradingError::NotionalOverflow);
+        }
+        let bracket_side = match order.side {
+            OrderSide::Buy => PositionSide::Long,
+            OrderSide::Sell => PositionSide::Short,
+        };
+        validate_brackets_for_side(bracket_side, new_price, order.stop_loss, order.take_profit)?;
+        order.kind = next_kind;
+        Ok(())
+    }
+
     fn apply_update_brackets_internal(
         &mut self,
         stop_loss: Option<f64>,
@@ -1071,13 +1207,27 @@ impl TradingSession {
         if let Some(pos_mut) = self.open_position.as_mut() {
             pos_mut.stop_loss = stop_loss;
             pos_mut.take_profit = take_profit;
+            // Only initialize downside `initial_risk_amount` when `sl` sits strictly on the loss side
+            // of `avg_entry_price`; a profit-locking trailing stop (`SL > entry` on Long) must never
+            // fabricate a synthetic `R` denominator (`BUG-030`).
             if pos_mut.initial_stop_loss.is_none()
                 && let Some(sl) = stop_loss
             {
-                let risk_per_unit = (pos_mut.avg_entry_price - sl).abs();
-                if risk_per_unit > 1e-9 {
+                let downside_risk_per_unit = match pos_mut.side {
+                    PositionSide::Long => pos_mut.avg_entry_price - sl,
+                    PositionSide::Short => sl - pos_mut.avg_entry_price,
+                };
+                if downside_risk_per_unit > 1e-9 {
+                    let mult = if pos_mut.contract_multiplier.is_finite()
+                        && pos_mut.contract_multiplier > 0.0
+                    {
+                        pos_mut.contract_multiplier
+                    } else {
+                        1.0
+                    };
                     pos_mut.initial_stop_loss = Some(sl);
-                    pos_mut.initial_risk_amount = Some(risk_per_unit * pos_mut.quantity);
+                    pos_mut.initial_risk_amount =
+                        Some(downside_risk_per_unit * pos_mut.quantity * mult);
                 }
             }
         }
@@ -1093,7 +1243,44 @@ impl TradingSession {
             return Err(TradingError::NoOpenPosition);
         };
         let exit_side = pos.side.exit_order_side();
-        let qty = pos.quantity;
+        let full_qty = pos.quantity;
+        // Core VSD `T+2` enforcement on `Flatten`: liquidate up to the settled `[SELLABLE]` quantity,
+        // or return `InsufficientSettledShares` when 0 shares are settled (`BUG-004`).
+        let qty = if pos.side == PositionSide::Long
+            && self.config.enforce_vn_t2_lot_lock
+            && self.config.venue.is_vn_cash_equity()
+        {
+            let eval_ts = crate::journal::causal_settlement_eval_timestamp(
+                candle.timestamp,
+                self.config.venue,
+                self.config.base_timeframe_secs,
+            );
+            let fifo = self.fifo_holding_summary(self.config.venue, eval_ts);
+            let pending_sell_qty: f64 = self
+                .orders
+                .iter()
+                .filter(|o| {
+                    o.status == OrderStatus::Pending
+                        && o.side == OrderSide::Sell
+                        && o.quantity.is_finite()
+                        && o.quantity > 0.0
+                })
+                .map(|o| o.quantity)
+                .sum();
+            let available_sellable = (fifo.sellable_qty - pending_sell_qty).max(0.0);
+            let capped = full_qty.min(available_sellable);
+            if capped <= 1.0e-9 {
+                return Err(TradingError::InsufficientSettledShares {
+                    requested: full_qty,
+                    sellable: available_sellable,
+                    locked_t2: fifo.locked_t2_qty,
+                    earliest_unlock_timestamp: fifo.earliest_unlock_timestamp,
+                });
+            }
+            capped
+        } else {
+            full_qty
+        };
         let exec_price = apply_slippage(candle.close, exit_side, self.config.slippage_bps);
         let order_id = self.alloc_order_id();
         self.orders.push(Order {
@@ -1130,13 +1317,14 @@ impl TradingSession {
         quantity: f64,
         exec_price: f64,
     ) -> Result<(), TradingError> {
-        let fee = compute_commission(exec_price, quantity, self.config.commission_bps);
+        let fee = self.config.compute_fill_fee(exec_price, quantity, side);
+        let allow_short = self.config.effective_allow_short();
         match &self.open_position {
             None => {
-                if side == OrderSide::Sell && !self.config.allow_short {
+                if side == OrderSide::Sell && !allow_short {
                     return Err(TradingError::ShortSellingDisabled);
                 }
-                let required_margin = (quantity * exec_price) / self.config.max_leverage;
+                let required_margin = self.config.required_margin_for(exec_price, quantity);
                 let post_fee_cash = self.cash_balance - fee;
                 if post_fee_cash < required_margin || post_fee_cash <= 0.0 {
                     return Err(TradingError::InsufficientBuyingPower {
@@ -1147,10 +1335,10 @@ impl TradingSession {
                 Ok(())
             }
             Some(pos) if side == pos.side.entry_order_side() => {
+                // Mark-to-market scale-in margin (`BUG-017`): evaluate total new exposure at live `exec_price`,
+                // preventing `1.5x–1.8x` cash-account leverage creep when scaling into winners.
                 let new_qty = pos.quantity + quantity;
-                let new_avg =
-                    (pos.quantity * pos.avg_entry_price + quantity * exec_price) / new_qty;
-                let required_margin = (new_qty * new_avg) / self.config.max_leverage;
+                let required_margin = self.config.required_margin_for(exec_price, new_qty);
                 let post_fee_equity = (self.cash_balance - fee) + pos.unrealized_pnl(exec_price);
                 if post_fee_equity < required_margin || post_fee_equity <= 0.0 {
                     return Err(TradingError::InsufficientBuyingPower {
@@ -1167,16 +1355,15 @@ impl TradingSession {
                 }
                 // Position flip: check opposite-side permission and post-close margin sufficiency.
                 let new_side = side.to_position_side();
-                if new_side == PositionSide::Short && !self.config.allow_short {
+                if new_side == PositionSide::Short && !allow_short {
                     return Err(TradingError::ShortSellingDisabled);
                 }
                 let flip_qty = quantity - pos.quantity;
-                let close_fee =
-                    compute_commission(exec_price, pos.quantity, self.config.commission_bps);
+                let close_fee = self.config.compute_fill_fee(exec_price, pos.quantity, side);
                 let close_gross = pos.unrealized_pnl(exec_price);
                 let cash_after_close = self.cash_balance + close_gross - close_fee;
-                let open_fee = compute_commission(exec_price, flip_qty, self.config.commission_bps);
-                let required_margin = (flip_qty * exec_price) / self.config.max_leverage;
+                let open_fee = self.config.compute_fill_fee(exec_price, flip_qty, side);
+                let required_margin = self.config.required_margin_for(exec_price, flip_qty);
                 let cash_after_both = cash_after_close - open_fee;
                 if cash_after_both < required_margin || cash_after_both <= 0.0 {
                     return Err(TradingError::InsufficientBuyingPower {
@@ -1210,7 +1397,8 @@ impl TradingSession {
             .is_some_and(|p| side == p.side.entry_order_side());
 
         if self.open_position.is_none() || same_side_existing {
-            let fee = compute_commission(exec_price, quantity, self.config.commission_bps);
+            let mult = self.config.effective_contract_multiplier();
+            let fee = self.config.compute_fill_fee(exec_price, quantity, side);
             self.cash_balance -= fee;
 
             if let Some(pos) = self.open_position.as_mut() {
@@ -1218,6 +1406,7 @@ impl TradingSession {
                 let add_notional = exec_price * quantity;
                 pos.quantity += quantity;
                 pos.avg_entry_price = (prev_notional + add_notional) / pos.quantity;
+                pos.contract_multiplier = mult;
                 pos.total_entry_qty += quantity;
                 pos.total_entry_notional += add_notional;
                 pos.total_entry_fees += fee;
@@ -1263,7 +1452,7 @@ impl TradingSession {
                         pos.initial_stop_loss = Some(r_sl);
                     }
                     pos.initial_risk_amount =
-                        Some((pos.avg_entry_price - r_sl).abs() * pos.quantity);
+                        Some((pos.avg_entry_price - r_sl).abs() * pos.quantity * mult);
                 }
             } else {
                 let pos_side = side.to_position_side();
@@ -1280,12 +1469,13 @@ impl TradingSession {
                     } else {
                         fallback_dist
                     };
-                    (unit_risk > 1e-9).then_some(unit_risk * quantity)
+                    (unit_risk > 1e-9).then_some(unit_risk * quantity * mult)
                 });
                 self.open_position = Some(Position {
                     side: pos_side,
                     quantity,
                     avg_entry_price: exec_price,
+                    contract_multiplier: mult,
                     opened_timestamp: timestamp,
                     opened_base_index: base_index,
                     stop_loss: clean_sl,
@@ -1371,8 +1561,16 @@ impl TradingSession {
         let remaining_qty = (pos.quantity - actual_close).max(0.0);
         let is_full_close = remaining_qty <= 1e-12;
 
-        let exit_fee = compute_commission(exec_price, actual_close, self.config.commission_bps);
-        let gross_pnl_chunk = pos.side.sign() * (exec_price - pos.avg_entry_price) * actual_close;
+        let mult = if pos.contract_multiplier.is_finite() && pos.contract_multiplier > 0.0 {
+            pos.contract_multiplier
+        } else {
+            self.config.effective_contract_multiplier()
+        };
+        let exit_fee = self
+            .config
+            .compute_fill_fee(exec_price, actual_close, exit_side);
+        let gross_pnl_chunk =
+            pos.side.sign() * (exec_price - pos.avg_entry_price) * actual_close * mult;
         let alloc_entry_fee = if is_full_close || pos.quantity <= 0.0 {
             let rem = pos.open_entry_fees;
             pos.open_entry_fees = 0.0;
@@ -1406,8 +1604,9 @@ impl TradingSession {
             } else {
                 exec_price
             };
-            let return_pct = if pos.total_entry_notional > 0.0 {
-                (net_pnl / pos.total_entry_notional) * 100.0
+            let denom_notional = pos.total_entry_notional * mult;
+            let return_pct = if denom_notional > 0.0 {
+                (net_pnl / denom_notional) * 100.0
             } else {
                 0.0
             };
@@ -1456,34 +1655,6 @@ impl TradingSession {
     }
 
     fn process_bar_arrival(&mut self, base_index: usize, candle: &Candle) {
-        // Determine causal 4-waypoint bar path (`[O, L, H, C]` vs `[O, H, L, C]`), preserving
-        // pessimistic SL-before-TP resolution (`DEF-005`) whenever a pre-existing position touches
-        // both `SL` and `TP` inside `[candle.low, candle.high]`.
-        let pre_dual_touch_side = self.open_position.as_ref().and_then(|pos| {
-            let (Some(sl), Some(tp)) = (pos.stop_loss, pos.take_profit) else {
-                return None;
-            };
-            match pos.side {
-                PositionSide::Long if candle.low <= sl && candle.high >= tp => {
-                    Some(PositionSide::Long)
-                }
-                PositionSide::Short if candle.high >= sl && candle.low <= tp => {
-                    Some(PositionSide::Short)
-                }
-                _ => None,
-            }
-        });
-        let low_first = match pre_dual_touch_side {
-            Some(PositionSide::Long) => true,
-            Some(PositionSide::Short) => false,
-            None => candle.close >= candle.open,
-        };
-        let waypoints = if low_first {
-            [candle.open, candle.low, candle.high, candle.close]
-        } else {
-            [candle.open, candle.high, candle.low, candle.close]
-        };
-
         // Phase A: Exact Gap-Open evaluation at `price = candle.open` (`t = Open`).
         if let Some((reason, raw_exit_price)) =
             self.check_position_bracket_at_price(candle.timestamp, candle.open)
@@ -1522,6 +1693,34 @@ impl TradingSession {
                 }
             }
         }
+
+        // Determine causal 4-waypoint bar path (`[O, L, H, C]` vs `[O, H, L, C]`) AFTER Phase A so BOTH
+        // pre-existing positions AND positions newly filled on a gap-open trigger enforce pessimistic
+        // SL-before-TP resolution (`DEF-005`, `BUG-009`) whenever `[candle.low, candle.high]` touches both.
+        let dual_touch_side = self.open_position.as_ref().and_then(|pos| {
+            let (Some(sl), Some(tp)) = (pos.stop_loss, pos.take_profit) else {
+                return None;
+            };
+            match pos.side {
+                PositionSide::Long if candle.low <= sl && candle.high >= tp => {
+                    Some(PositionSide::Long)
+                }
+                PositionSide::Short if candle.high >= sl && candle.low <= tp => {
+                    Some(PositionSide::Short)
+                }
+                _ => None,
+            }
+        });
+        let low_first = match dual_touch_side {
+            Some(PositionSide::Long) => true,
+            Some(PositionSide::Short) => false,
+            None => candle.close >= candle.open,
+        };
+        let waypoints = if low_first {
+            [candle.open, candle.low, candle.high, candle.close]
+        } else {
+            [candle.open, candle.high, candle.low, candle.close]
+        };
 
         // Phase B: Causal segment-by-segment simulation across `(w_0 -> w_1)`, `(w_1 -> w_2)`, `(w_2 -> w_3)` (`[MEDIUM-01]`).
         for seg_idx in 0..3 {
@@ -1674,8 +1873,11 @@ impl TradingSession {
             && let Some(settled_cap) = self.available_settled_long_qty_at(timestamp)
             && qty > settled_cap + 1.0e-7
         {
-            let eval_ts =
-                timestamp.saturating_add(self.config.base_timeframe_secs.max(1).saturating_sub(1));
+            let eval_ts = crate::journal::causal_settlement_eval_timestamp(
+                timestamp,
+                self.config.venue,
+                self.config.base_timeframe_secs,
+            );
             let fifo = self.fifo_holding_summary(self.config.venue, eval_ts);
             self.orders[ord_idx].status = OrderStatus::Rejected {
                 reason: TradingError::InsufficientSettledShares {

@@ -3,24 +3,96 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 fn ensure_workstation_working_dir() {
-    if std::path::Path::new("ARCHIVE").exists() || std::path::Path::new("Cargo.toml").exists() {
+    if let Ok(env_dir) = std::env::var("SUMI_DATA_DIR") {
+        let p = std::path::PathBuf::from(env_dir.trim());
+        if p.is_dir() {
+            let _ = std::env::set_current_dir(p);
+            return;
+        }
+    }
+    if std::path::Path::new("data").is_dir()
+        || std::path::Path::new("ARCHIVE").exists()
+        || std::path::Path::new("Cargo.toml").exists()
+    {
         return;
     }
     if let Ok(exe) = std::env::current_exe() {
+        // 1. Prefer repo/workspace root when launched inside a checkout or `dist/Sumi Workstation.app`.
         let mut cursor = exe.parent();
         while let Some(dir) = cursor {
-            if dir.join("Cargo.toml").exists() || dir.join("ARCHIVE").exists() {
+            if dir.join("Cargo.toml").exists()
+                || dir.join("ARCHIVE").exists()
+                || dir.join("data").is_dir()
+            {
                 let _ = std::env::set_current_dir(dir);
                 return;
             }
             cursor = dir.parent();
         }
+        // 2. Standalone `.app` copied outside the repo (e.g. `/Applications` or `/tmp`):
+        //    resolve bundled `Contents/Resources` when present, or `~/Library/Application Support/Sumi Workstation`.
+        if let Some(resources) = exe
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|c| c.join("Resources"))
+            && resources.join("data").is_dir()
+        {
+            let _ = std::env::set_current_dir(resources);
+            return;
+        }
     }
+    if let Ok(home) = std::env::var("HOME") {
+        let app_support = std::path::PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("Sumi Workstation");
+        if app_support.is_dir() {
+            let _ = std::env::set_current_dir(app_support);
+            return;
+        }
+    }
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let win_support = std::path::PathBuf::from(appdata).join("Sumi Workstation");
+        if win_support.is_dir() {
+            let _ = std::env::set_current_dir(win_support);
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_initial_cli_file_arg() -> Option<std::path::PathBuf> {
+    let cwd = std::env::current_dir().ok();
+    for arg in std::env::args_os().skip(1) {
+        let s = arg.to_string_lossy();
+        if s.is_empty() || s.starts_with('-') {
+            continue;
+        }
+        let raw = std::path::PathBuf::from(&arg);
+        let abs = if raw.is_absolute() {
+            raw
+        } else if let Some(ref base) = cwd {
+            base.join(raw)
+        } else {
+            raw
+        };
+        let ext_ok = abs.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+            matches!(
+                e.to_ascii_lowercase().as_str(),
+                "csv" | "tsv" | "txt" | "json"
+            )
+        });
+        if abs.is_file() || ext_ok {
+            return Some(abs);
+        }
+    }
+    None
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
     env_logger::init();
+    // Resolve any CLI data file path BEFORE `ensure_workstation_working_dir()` potentially chdirs.
+    let cli_file_arg = resolve_initial_cli_file_arg();
     ensure_workstation_working_dir();
 
     let initial_width = std::env::var("SUMI_WINDOW_WIDTH")
@@ -65,9 +137,7 @@ fn main() -> eframe::Result {
     }
 
     let viewport = egui::ViewportBuilder::default()
-        .with_title(
-            "Sumi Trading Workstation — VNINDEX · 1D (Milestone R19 Global Settings, VN Holiday T+2 FIFO, Data Readiness Audit & Drawings)",
-        )
+        .with_title("Sumi Trading Workstation — v1.1")
         .with_inner_size([initial_width, initial_height])
         .with_min_inner_size([640.0, 420.0]);
 
@@ -79,7 +149,14 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Sumi Trading Workstation",
         native_options,
-        Box::new(|cc| Ok(Box::new(sumi_workstation::SumiWorkstationApp::new(cc)))),
+        Box::new(move |cc| {
+            let mut app = sumi_workstation::SumiWorkstationApp::new(cc);
+            if let Some(ref path) = cli_file_arg {
+                let path_str = path.to_string_lossy();
+                let _ = app.import_file_from_path(&path_str);
+            }
+            Ok(Box::new(app))
+        }),
     )
 }
 
