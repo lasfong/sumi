@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use crate::data::Timeframe;
 use crate::drawings::{
     Drawing, DrawingAnchor, DrawingGeometry, DrawingPaneTarget, DrawingStyle, DrawingTool,
@@ -14,22 +12,6 @@ use super::{
     PositionSide, TradingError, TradingSession, apply_slippage, compute_commission,
     extract_ticket_from_drawing,
 };
-
-#[derive(Default)]
-struct MemStorage(BTreeMap<String, String>);
-
-impl eframe::Storage for MemStorage {
-    fn get_string(&self, key: &str) -> Option<String> {
-        self.0.get(key).cloned()
-    }
-    fn set_string(&mut self, key: &str, value: String) {
-        self.0.insert(key.to_owned(), value);
-    }
-    fn remove_string(&mut self, key: &str) {
-        self.0.remove(key);
-    }
-    fn flush(&mut self) {}
-}
 
 fn candle(ts: i64, open: f64, high: f64, low: f64, close: f64) -> Candle {
     Candle {
@@ -465,10 +447,9 @@ fn deterministic_command_log_rewind_restores_bit_exact_state() {
     assert_eq!(session.max_drawdown_pct().to_bits(), snap_dd.to_bits());
 
     // Persistence round-trip + `sanitize_and_rebuild` also reproduces the exact same ledger!
-    let mut storage = MemStorage::default();
-    eframe::set_value(&mut storage, "trading_test", &session);
+    let serialized = serde_json::to_string(&session).expect("serialize session");
     let mut restored: TradingSession =
-        eframe::get_value(&storage, "trading_test").expect("deserialize session");
+        serde_json::from_str(&serialized).expect("deserialize session");
     restored.sanitize_and_rebuild(&candles, 35);
     assert_eq!(restored.cash_balance().to_bits(), snap_cash.to_bits());
     assert_eq!(restored.fills(), snap_fills.as_slice());

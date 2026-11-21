@@ -1,9 +1,7 @@
 #![warn(clippy::all, rust_2018_idioms)]
 
 pub mod alerts;
-pub mod app;
 pub mod backtest;
-pub mod chart;
 pub mod data;
 pub mod drawings;
 pub mod indicators;
@@ -14,4 +12,7 @@ pub mod scanner;
 pub mod trading;
 pub mod viewport;
 
-pub use app::SumiWorkstationApp;
+/// Semantic v2.0 alias exposing the core domain models (`Candle`, `PriceBounds`, ...).
+pub mod domain {
+    pub use crate::model::*;
+}

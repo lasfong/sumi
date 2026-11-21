@@ -1,0 +1,18 @@
+[package]
+name = "sumi-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Pure-Rust quantitative finance, technical indicators, scanner, backtest, replay, trading, journal, and OHLCV data engine for Sumi v2.0"
+
+[lib]
+name = "sumi_core"
+path = "src/lib.rs"
+
+[dependencies]
+log = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

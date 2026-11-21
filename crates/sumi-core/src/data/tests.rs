@@ -1043,30 +1043,50 @@ HNX-INDEX,20250717,241.31,244.10,240.80,243.55,142000000
     assert_eq!(reports[2].quarantined_row_count, 1);
 
     // 2. When unpacked local `data/raw/cafef/` files are present, verify full 471-symbol Adjusted
-    //    dataset (`941,648` rows) + 3-index `CafeF.INDEX` load cleanly via `SumiWorkstationApp`!
+    //    dataset (`941,648` rows) + 2-index `CafeF.INDEX` load cleanly via pure core multi-symbol loader!
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let adj_path = "data/raw/cafef/CafeF.SolieuGD.Adjusted.Upto06112026.csv";
-        let idx_path = "data/raw/cafef/CafeF.INDEX.Upto06112026.csv";
-        if std::path::Path::new(adj_path).exists() && std::path::Path::new(idx_path).exists() {
-            let mut app = crate::SumiWorkstationApp::default();
-            app.import_file_from_path(adj_path)
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let adj_path =
+            workspace_root.join("data/raw/cafef/CafeF.SolieuGD.Adjusted.Upto06112026.csv");
+        let idx_path = workspace_root.join("data/raw/cafef/CafeF.INDEX.Upto06112026.csv");
+        if adj_path.exists() && idx_path.exists() {
+            let cafef_opts = DataLoadOptions {
+                envelope_policy: OhlcEnvelopePolicy::CafeFSplitAware,
+                invalid_row_policy: InvalidRowPolicy::QuarantineRow,
+                ..DataLoadOptions::default()
+            };
+            let adj_csv = std::fs::read_to_string(&adj_path).expect("read CafeF Adjusted CSV");
+            let adj_reports = load_ohlcv_csv_multi_symbol(&adj_csv, &cafef_opts)
                 .expect("471-symbol CafeF Adjusted CSV must load cleanly");
-            assert_eq!(app.available_symbols.len(), 471);
-            assert_eq!(app.symbol, "FPT");
-            assert!(app.candles.len() > 2_000);
+            assert_eq!(adj_reports.len(), 471);
+
+            let fpt = adj_reports
+                .iter()
+                .find(|r| r.symbol == "FPT")
+                .expect("FPT present");
+            assert!(fpt.candles.len() > 2_000);
 
             for ticker in ["VCB", "HPG", "SSI", "BVS", "C69", "MWG"] {
-                app.select_symbol_in_source(ticker);
-                assert_eq!(app.symbol, ticker);
-                assert!(!app.candles.is_empty());
+                let rep = adj_reports
+                    .iter()
+                    .find(|r| r.symbol == ticker)
+                    .unwrap_or_else(|| panic!("ticker {ticker} present"));
+                assert!(!rep.candles.is_empty());
             }
 
-            app.import_file_from_path(idx_path)
+            let idx_csv = std::fs::read_to_string(&idx_path).expect("read CafeF INDEX CSV");
+            let idx_reports = load_ohlcv_csv_multi_symbol(&idx_csv, &cafef_opts)
                 .expect("2-symbol CafeF INDEX CSV must load cleanly with quarantined bad rows");
-            assert_eq!(app.available_symbols.len(), 2);
-            assert_eq!(app.symbol, "VNINDEX");
-            assert!(app.candles.len() > 5_000);
+            assert_eq!(idx_reports.len(), 2);
+            let vnindex = idx_reports
+                .iter()
+                .find(|r| r.symbol == "VNINDEX")
+                .expect("VNINDEX present");
+            assert!(vnindex.candles.len() > 5_000);
         }
     }
 }
@@ -1217,44 +1237,46 @@ fn wave2_regression_cafef_rule5_real_vnindex_restart_cmdk_timestamp_venues_and_q
     // 6. BUG-003 + BUG-006 + BUG-007 + BUG-012 on real CafeF data (when unpacked):
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let adj_path = "data/raw/cafef/CafeF.SolieuGD.Adjusted.Upto06112026.csv";
-        let idx_path = "data/raw/cafef/CafeF.INDEX.Upto06112026.csv";
-        if std::path::Path::new(adj_path).exists() && std::path::Path::new(idx_path).exists() {
-            let mut app = crate::SumiWorkstationApp::default();
-            app.import_file_from_path(adj_path).unwrap();
-            assert_eq!(app.available_symbols.len(), 471);
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let adj_path =
+            workspace_root.join("data/raw/cafef/CafeF.SolieuGD.Adjusted.Upto06112026.csv");
+        let idx_path = workspace_root.join("data/raw/cafef/CafeF.INDEX.Upto06112026.csv");
+        if adj_path.exists() && idx_path.exists() {
+            let cafef_opts = DataLoadOptions {
+                envelope_policy: OhlcEnvelopePolicy::CafeFSplitAware,
+                invalid_row_policy: InvalidRowPolicy::QuarantineRow,
+                ..DataLoadOptions::default()
+            };
+            let adj_csv = std::fs::read_to_string(&adj_path).unwrap();
+            let adj_reports = load_ohlcv_csv_multi_symbol(&adj_csv, &cafef_opts).unwrap();
+            assert_eq!(adj_reports.len(), 471);
 
             // BUG-005 real check: RCL retains ~1993 bars (no longer drops 798 flat post-split sessions!)
-            app.select_symbol_in_source("RCL");
+            let rcl = adj_reports
+                .iter()
+                .find(|r| r.symbol == "RCL")
+                .expect("RCL present");
             assert!(
-                app.candles.len() > 1_950,
+                rcl.candles.len() > 1_950,
                 "RCL must retain valid post-split flat sessions (>1950 bars), got {}",
-                app.candles.len()
+                rcl.candles.len()
             );
 
-            // BUG-007: Cmd+K "VCB" ranks CustomFile #1 and does NOT wipe 471 symbols!
-            app.select_symbol_in_source("FPT");
-            app.command_palette.query = "VCB".to_owned();
-            let cands = app.build_command_palette_candidates();
-            assert!(!cands.is_empty());
-            assert!(
-                matches!(
-                    cands[0].action,
-                    crate::app::PaletteAction::SelectWatchlistSymbol {
-                        preset: DataSourcePreset::CustomFile,
-                        ..
-                    }
-                ),
-                "Cmd+K 'VCB' on loaded CafeF CustomFile must rank CustomFile #1, got {:?}",
-                cands[0].title
-            );
+            let fpt = adj_reports
+                .iter()
+                .find(|r| r.symbol == "FPT")
+                .expect("FPT present");
+            assert!(fpt.candles.len() > 2_000);
 
             // BUG-006: Real VNINDEX benchmark loaded (not synthetic sine wave ~1294->2508):
             let uni = load_bundled_watchlist_universe();
             let (bsym, _, bcandles) = resolve_benchmark_series_for_window(
                 "VNINDEX",
-                app.base_candles.first().unwrap().timestamp,
-                app.base_candles.last().unwrap().timestamp,
+                fpt.candles.first().unwrap().timestamp,
+                fpt.candles.last().unwrap().timestamp,
                 &uni,
             )
             .expect("real VNINDEX benchmark");
@@ -1266,29 +1288,29 @@ fn wave2_regression_cafef_rule5_real_vnindex_restart_cmdk_timestamp_venues_and_q
                 bcandles.last().unwrap().close
             );
 
-            // BUG-012: Unchecking CafeF Split Norm rejects bad OHLC CSV and preserves FPT:
-            app.import_cafef_split_aware = false;
-            let tmp_bad = std::env::temp_dir().join("sumi_wave2_bad_ohlc_test.csv");
+            // BUG-012: RejectRow OHLC envelope policy rejects bad OHLC CSV cleanly:
             let bad_csv = "<Ticker>,<DTYYYYMMDD>,<Open>,<High>,<Low>,<Close>,<Volume>\nC69,20261030,10.0,10.0,10.0,10.5,1000\n";
-            std::fs::write(&tmp_bad, bad_csv).unwrap();
-            let err = app.import_file_from_path(tmp_bad.to_str().unwrap());
-            let _ = std::fs::remove_file(&tmp_bad);
+            let err = load_ohlcv_csv(
+                bad_csv,
+                &DataLoadOptions {
+                    envelope_policy: OhlcEnvelopePolicy::RejectRow,
+                    invalid_row_policy: InvalidRowPolicy::RejectDataset,
+                    ..DataLoadOptions::default()
+                },
+            );
             assert!(
                 err.is_err(),
-                "unchecked CafeF Split Norm must reject OHLC envelope violation"
+                "RejectRow policy must reject OHLC envelope violation"
             );
-            assert_eq!(app.symbol, "FPT");
-            assert!(app.candles.len() > 2_000);
-            app.import_cafef_split_aware = true;
 
-            // BUG-003: Restart (`restore_persisted_session`) preserves CustomFile FPT + Replay cursor:
-            assert!(app.start_replay_at_base_index(2_000));
-            app.restore_persisted_session();
-            assert_eq!(app.data_source, DataSourcePreset::CustomFile);
-            assert_eq!(app.symbol, "FPT");
-            assert!(app.replay.is_active());
-            assert_eq!(app.replay.base_cursor_index, 2_000);
-            assert_eq!(app.available_symbols.len(), 471);
+            // BUG-003: ReplayController round-trip serialization preserves FPT cursor:
+            let mut replay = ReplayController::new();
+            assert!(replay.start_at_base_index(&fpt.candles, 2_000).is_some());
+            let encoded = serde_json::to_string(&replay).unwrap();
+            let mut restored: ReplayController = serde_json::from_str(&encoded).unwrap();
+            restored.sanitize_deserialized(&fpt.candles);
+            assert!(restored.is_active());
+            assert_eq!(restored.base_cursor_index, 2_000);
         }
     }
 }

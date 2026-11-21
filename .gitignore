@@ -5,8 +5,12 @@ dist/
 build/
 exports/
 
-# Local market data & reference clones
+# Local market data, SQLite cache & reference clones
 data/raw/
+data/cache/
+*.db
+*.db-wal
+*.db-shm
 research_repos/
 docs/CafeF*/
 

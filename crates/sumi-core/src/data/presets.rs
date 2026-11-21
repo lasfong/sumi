@@ -408,7 +408,11 @@ fn workstation_data_roots() -> Vec<std::path::PathBuf> {
             roots.push(std::path::PathBuf::from(trimmed).join("Sumi Workstation"));
         }
     }
-    roots.push(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if let Some(workspace_root) = manifest_dir.parent().and_then(|p| p.parent()) {
+        roots.push(workspace_root.to_path_buf());
+    }
+    roots.push(manifest_dir);
     roots
 }
 

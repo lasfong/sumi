@@ -5,8 +5,7 @@ use super::time_scale::TimeScale;
 
 /// Precision `f64` rectangle representing a pane's plot region in screen space.
 ///
-/// Decouples core `Logical <-> PaneLocal <-> Screen` math from `egui::Rect` (`f32`) while providing
-/// zero-cost conversions at the UI boundary.
+/// Pure `Logical <-> PaneLocal <-> Screen` coordinate math independent of any GUI toolkit.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PlotRect {
     pub left: f64,
@@ -25,26 +24,6 @@ impl PlotRect {
             width,
             height,
         }
-    }
-
-    #[inline]
-    #[must_use]
-    pub fn from_egui(rect: egui::Rect) -> Self {
-        Self {
-            left: f64::from(rect.min.x),
-            top: f64::from(rect.min.y),
-            width: f64::from(rect.width().max(0.0)),
-            height: f64::from(rect.height().max(0.0)),
-        }
-    }
-
-    #[inline]
-    #[must_use]
-    pub fn to_egui(self) -> egui::Rect {
-        egui::Rect::from_min_size(
-            egui::pos2(self.left as f32, self.top as f32),
-            egui::vec2(self.width.max(0.0) as f32, self.height.max(0.0) as f32),
-        )
     }
 
     #[inline]
@@ -180,9 +159,9 @@ impl<'a> PaneViewport<'a> {
 
     #[inline]
     #[must_use]
-    pub fn data_to_screen_pos(&self, center_index: f64, price: f64) -> Option<egui::Pos2> {
+    pub fn data_to_screen_point(&self, center_index: f64, price: f64) -> Option<(f64, f64)> {
         let sx = self.float_index_to_screen_x(center_index)?;
         let sy = self.price_to_screen_y(price)?;
-        Some(egui::pos2(sx as f32, sy as f32))
+        Some((sx, sy))
     }
 }

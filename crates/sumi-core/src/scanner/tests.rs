@@ -1339,7 +1339,7 @@ fn r18_b4_proxy_bb_multihorizon_market_bb_at09_at17_and_pit_universe_resolver() 
     );
 
     // 3. `UniverseResolver` on the exact `pit_test_universe.json` fixture!
-    let fixture_json = include_str!("../../assets/fixtures/pit_test_universe.json");
+    let fixture_json = include_str!("../../../../assets/fixtures/pit_test_universe.json");
     let pit_fix =
         UniverseDefinition::from_auto_str(fixture_json).expect("load pit_test_universe.json");
     assert_eq!(pit_fix.universe_id, "TEST-PIT");

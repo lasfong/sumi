@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use crate::data::{Timeframe, aggregate_ohlcv};
 use crate::drawings::{
     Drawing, DrawingAnchor, DrawingGeometry, DrawingPaneTarget, DrawingStore, DrawingStyle,
@@ -12,22 +10,6 @@ use super::{
     MAX_PLAYBACK_DT_SECS, MAX_STEPS_PER_FRAME, ReplayController, ReplaySpeed, ReplayStatus,
     ReplayStepUnit,
 };
-
-#[derive(Default)]
-struct MemStorage(BTreeMap<String, String>);
-
-impl eframe::Storage for MemStorage {
-    fn get_string(&self, key: &str) -> Option<String> {
-        self.0.get(key).cloned()
-    }
-    fn set_string(&mut self, key: &str, value: String) {
-        self.0.insert(key.to_owned(), value);
-    }
-    fn remove_string(&mut self, key: &str) {
-        self.0.remove(key);
-    }
-    fn flush(&mut self) {}
-}
 
 fn build_1m_series(count: usize) -> Vec<Candle> {
     // Starts Monday 2026-03-02 09:00:00 UTC (`1772442000`, exact 1h/15m/5m boundary).
@@ -232,10 +214,9 @@ fn sanitize_deserialized_pauses_playing_and_clamps_indices() {
     replay.base_cursor_index = 999;
     replay.speed = ReplaySpeed::X5;
     replay.step_unit = ReplayStepUnit::BaseBar;
-    let mut storage = MemStorage::default();
-    eframe::set_value(&mut storage, "replay_test", &replay);
+    let serialized = serde_json::to_string(&replay).expect("serialize replay");
     let mut restored: ReplayController =
-        eframe::get_value(&storage, "replay_test").expect("deserialize replay");
+        serde_json::from_str(&serialized).expect("deserialize replay");
     restored.sanitize_deserialized(&base);
     assert!(!restored.selecting_cut_bar);
     assert_eq!(restored.base_cursor_index, 29);
