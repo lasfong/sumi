@@ -2265,10 +2265,8 @@ fn run_r06_data_timeframe_benchmark(
         });
     }
 
-    // Real Archive Fixtures (`CafeF.INDEX.clean.csv` & `SPY.csv`) if present in workspace
-    if let Ok(cafef_csv) =
-        std::fs::read_to_string("ARCHIVE/test-results/p0b/data/CafeF.INDEX.clean.csv")
-    {
+    // Real Sample Fixtures (`CafeF.INDEX.clean.csv` & `SPY.csv`) if present in workspace
+    if let Ok(cafef_csv) = std::fs::read_to_string("assets/fixtures/CafeF.INDEX.clean.csv") {
         let cafef_opts = DataLoadOptions {
             symbol_filter: Some("VNINDEX".to_owned()),
             ..DataLoadOptions::default()
@@ -2297,9 +2295,7 @@ fn run_r06_data_timeframe_benchmark(
         });
     }
 
-    if let Ok(spy_csv) =
-        std::fs::read_to_string("ARCHIVE/research_repos/lightweight-charts-drawing/demo/SPY.csv")
-    {
+    if let Ok(spy_csv) = std::fs::read_to_string("assets/fixtures/SPY.csv") {
         let mut samples = Vec::with_capacity(80);
         let mut raw_rows = 0_usize;
         let mut parsed_bars = 0_usize;

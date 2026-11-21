@@ -52,7 +52,7 @@ pub use universe::{
     UniverseStatus,
 };
 
-/// Causal market regime classification aligned with `SIG-REG-001..005` (`ARCHIVE/backend/app/domain/signals/regimes.py`).
+/// Causal market regime classification (`SIG-REG-001..005`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum MarketRegime {
     Uptrend,

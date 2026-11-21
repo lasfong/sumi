@@ -1,6 +1,6 @@
 //! Extended Pure-`f64`, `wasm32-unknown-unknown`-Compatible Technical Indicators (`Milestone R18 / Wave 17` — `B2`).
 //!
-//! Completes a `100%` superset of Legacy `INDICATOR_REGISTRY` (`ARCHIVE/backend/app/domain/engine/indicator_engine.py`)
+//! Extended trend, channel, momentum, and money-flow oscillators
 //! verified against TA-Lib (`ta_ADX.c`, `ta_STOCH.c`, `ta_SAR.c`, `ta_CCI.c`, `ta_MFI.c`):
 //! 1. `ADX(14)` (`+DI`, `-DI`, `ADX`)
 //! 2. `Stochastic(14, 3, 3)` (`Fast %K`, `Slow %K`, `Slow %D`)

@@ -1214,7 +1214,7 @@ impl Default for SumiWorkstationApp {
             data_source: DataSourcePreset::SyntheticVnindex,
             base_timeframe: Timeframe::D1,
             active_timeframe: Timeframe::D1,
-            import_path_input: "ARCHIVE/test-results/p0b/data/CafeF.INDEX.clean.csv".to_owned(),
+            import_path_input: "assets/fixtures/CafeF.INDEX.clean.csv".to_owned(),
             show_grid: true,
             show_crosshair: true,
             show_volume: true,

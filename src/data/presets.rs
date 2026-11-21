@@ -476,7 +476,7 @@ fn load_cafef_preset(symbol_override: Option<&str>) -> DataLoadReport {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(csv_text) = read_repo_fixture("ARCHIVE/test-results/p0b/data/CafeF.INDEX.clean.csv")
+    if let Some(csv_text) = read_repo_fixture("assets/fixtures/CafeF.INDEX.clean.csv")
         && let Ok(rep) = load_ohlcv_csv(&csv_text, &opts)
     {
         return rep;
@@ -493,8 +493,7 @@ fn load_spy_preset() -> DataLoadReport {
     };
 
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(csv_text) =
-        read_repo_fixture("ARCHIVE/research_repos/lightweight-charts-drawing/demo/SPY.csv")
+    if let Some(csv_text) = read_repo_fixture("assets/fixtures/SPY.csv")
         && let Ok(rep) = load_ohlcv_csv(&csv_text, &opts)
     {
         return rep;

@@ -976,7 +976,7 @@ fn r18_b3_signal_catalog_72_legacy_superset_causal_pivots_and_12_divergences() {
         evaluate_causal_confluence, find_catalog_entry,
     };
 
-    // 1. Exact 100% superset proof against all 72 canonical IDs from `ARCHIVE/backend/app/domain/signals/registry.py`!
+    // 1. Exact 100% superset proof against all 72 canonical signal IDs!
     const LEGACY_72_IDS: [&str; 72] = [
         "volume.relative_volume",
         "volume.spike",
@@ -1339,9 +1339,7 @@ fn r18_b4_proxy_bb_multihorizon_market_bb_at09_at17_and_pit_universe_resolver() 
     );
 
     // 3. `UniverseResolver` on the exact `pit_test_universe.json` fixture!
-    let fixture_json = include_str!(
-        "../../ARCHIVE/backend/app/domain/universe/definitions/fixtures/pit_test_universe.json"
-    );
+    let fixture_json = include_str!("../../assets/fixtures/pit_test_universe.json");
     let pit_fix =
         UniverseDefinition::from_auto_str(fixture_json).expect("load pit_test_universe.json");
     assert_eq!(pit_fix.universe_id, "TEST-PIT");

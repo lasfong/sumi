@@ -1,7 +1,7 @@
 //! Pure, Zero-Dependency Point-in-Time (`PIT`) vs `RetrospectiveFixed` Universe Resolver
 //! (`Milestone R18 / Wave 17` — `B4`).
 //!
-//! Aligned with `ARCHIVE/backend/app/domain/universe/{models,resolver}.py` and compatible with
+//! Survivorship-bias-free Point-in-Time (`PIT`) universe membership resolver compatible with
 //! `pit_test_universe.json` and `sumi420_v1_candidate.json` (`0` external crates added to `Cargo.toml`).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -772,7 +772,7 @@ pub struct UniverseResolver;
 
 impl UniverseResolver {
     /// Validates non-empty IDs/symbols, non-inverted member intervals, and non-overlapping
-    /// episodes per symbol (`ARCHIVE/backend/app/domain/universe/resolver.py:22-49`).
+    /// episodes per symbol.
     pub fn validate_definition(universe: &UniverseDefinition) -> Result<(), UniverseError> {
         if universe.universe_id.trim().is_empty() {
             return Err(UniverseError::EmptyUniverseId);

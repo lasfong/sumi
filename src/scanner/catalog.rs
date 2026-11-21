@@ -24,7 +24,7 @@ use crate::model::Candle;
 use super::{HistoricalSignalHit, MarketRegime, ScanSignalKind, SignalDirection};
 
 /// Minimum causal bar index (`50` prior bars -> `bar_index >= 50`, i.e. 51 candles) required for
-/// valid 4-family composite Technical Health scoring (`ARCHIVE/backend/app/domain/signals/health.py`).
+/// valid 4-family composite Technical Health scoring.
 pub const CONFLUENCE_WARMUP_BARS: usize = 50;
 
 /// Canonical availability event emitted for all bar-close-confirmed causal signals (`DEF-001`).
@@ -163,7 +163,7 @@ impl SignalStatus {
     }
 }
 
-/// Causal data-validity gate (`ARCHIVE/backend/app/domain/signals/models.py:15-20` + R15 tail-bar guard).
+/// Causal data-validity gate (including incomplete tail-bar suppression).
 ///
 /// Whenever `quality != SignalQuality::Valid`, [`SignalEvaluation::bool_value`] and
 /// [`SignalEvaluation::float_value`] are guaranteed to be `None`.

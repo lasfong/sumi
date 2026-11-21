@@ -1,8 +1,8 @@
 //! Deterministic `SplitMix64` Monte Carlo Bootstrap Risk Envelopes (`Milestone R15 / Wave 14`).
 //!
 //! Pure `f64`/`i64`/`u64`, `wasm32-unknown-unknown`-compatible path-order & return resampling engine
-//! with zero external RNG dependencies (`Cargo.toml` untouched), statistical sample-size honesty
-//! (`ARCHIVE/frontend/src/components/analytics/MetricResultValue.tsx`), permanent bankruptcy
+//! with zero external RNG dependencies (`Cargo.toml` untouched), statistical sample-size honesty,
+//! permanent bankruptcy
 //! absorption, and bar-aligned `p5/p25/p50/p75/p95` equity fan series for `OscillatorPaneId::Equity`.
 
 use serde::{Deserialize, Serialize};

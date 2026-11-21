@@ -111,7 +111,7 @@ fn liang_barsky_clips_finite_segments_and_360_degree_rays_accurately() {
 
 #[test]
 fn fibonacci_levels_match_canonical_archive_ratios_and_direction_reversal() {
-    // Mirrors `ARCHIVE/frontend/src/features/drawings/__tests__/drawingGeometry.test.ts:106-127`.
+    // Verifies canonical 7-level Fibonacci retracement coordinates and reversal.
     let start = DrawingAnchor::new(10.0, 100.0);
     let end = DrawingAnchor::new(30.0, 110.0);
 

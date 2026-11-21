@@ -1,7 +1,6 @@
 //! Pure `f64`, `wasm32-unknown-unknown`-compatible Ichimoku Kinko Hyo (`Ichimoku Cloud`) Engine.
 //!
-//! Eliminates legacy defects in `ARCHIVE/backend/app/domain/signals/ichimoku.py` and
-//! `ARCHIVE/frontend/src/components/chart/plugins/IchimokuCloudPlugin.ts`:
+//! Institutional Ichimoku Kinko Hyo implementation invariants:
 //! - Strict $O(N)$ sliding-window extrema via dual monotonic `VecDeque<usize>` buffers (replacing $O(N \cdot P)$ loops).
 //! - Overflow-safe midpoint `lo + 0.5 * (hi - lo)` and finite-bar corruption recovery.
 //! - Forward-displaced `Senkou Span A` & `Senkou Span B` (`len = N + D` when `N > 0`), keeping right-whitespace

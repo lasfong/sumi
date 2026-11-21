@@ -369,8 +369,7 @@ pub fn run_multi_strategy_comparison(
 // 2. Outlier Impact, Drawdown Periods, Year & Entry-Regime Breakdowns (`A5`)
 // ============================================================================
 
-/// Tail-dependency & outlier concentration diagnostics (`Milestone R17 / A5` — fixes
-/// `ARCHIVE/backend/app/services/analytics_service.py:421` denominator & `N < 3` trim bugs).
+/// Tail-dependency & outlier concentration diagnostics (`Milestone R17 / A5`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutlierImpactReport {
     pub num_trades: usize,
@@ -704,8 +703,7 @@ pub fn compute_yearly_breakdown(
         .collect()
 }
 
-/// Causal entry-signal [`MarketRegime`] performance breakdown row (`Milestone R17 / A5` — fixes
-/// `ARCHIVE/backend/app/services/backtest_service.py:583` exit-bar regime lookahead contamination).
+/// Causal entry-signal [`MarketRegime`] performance breakdown row (`Milestone R17 / A5`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RegimePerformanceSlice {
     pub regime: MarketRegime,
@@ -1131,8 +1129,7 @@ fn run_multi_phase_batch_internal(
     }
 }
 
-/// Deterministic wall-clock-free backtest reproducibility manifest (`Milestone R17 / A5` —
-/// rectifies `ARCHIVE/backend/app/services/backtest_service.py:558` `datetime.now()` non-determinism).
+/// Deterministic wall-clock-free backtest reproducibility manifest (`Milestone R17 / A5`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunManifest {
     pub schema_version: u32,

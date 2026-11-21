@@ -35,7 +35,7 @@ pub use hit_test::{
 /// Stable unique identifier assigned monotonically to each committed [`Drawing`].
 pub type DrawingId = u64;
 
-/// Canonical Fibonacci retracement ratios (`ARCHIVE/frontend/src/features/drawings/drawingDomain.ts:32`).
+/// Canonical Fibonacci retracement ratios (`0.0 ..= 1.0`).
 pub const FIBONACCI_RATIOS: [f64; 7] = [0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0];
 
 /// Institutional ICT Optimal Trade Entry (`OTE`) + extension preset ratios (`Milestone R19 / C4`).

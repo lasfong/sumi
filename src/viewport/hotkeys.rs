@@ -818,8 +818,7 @@ impl HotkeyProfile {
     }
 }
 
-/// Global keyboard eligibility policy matching legacy `isGlobalShortcutEligible`
-/// (`ARCHIVE/frontend/src/features/replay/globalShortcutPolicy.ts:10-26`): suppresses global
+/// Global keyboard eligibility policy: suppresses global
 /// transport/order hotkeys whenever any modal is open, a text/numeric widget holds keyboard focus,
 /// or a system command modifier (`Cmd`/`Ctrl`) is held.
 #[inline]

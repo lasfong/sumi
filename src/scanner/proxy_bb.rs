@@ -136,7 +136,7 @@ pub struct MarketBBSeriesResult {
 pub struct MarketBBAggregator;
 
 impl MarketBBAggregator {
-    /// Evaluates the market-level publication gate (`ARCHIVE/backend/app/domain/bb/market_aggregator.py:86-127`).
+    /// Evaluates the market-level publication gate for constituent coverage.
     #[must_use]
     pub fn evaluate_publication_gate(
         universe: &UniverseDefinition,

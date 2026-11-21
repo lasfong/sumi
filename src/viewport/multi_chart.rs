@@ -1,8 +1,7 @@
 //! Pure `f64`/`i64`, `wasm32-unknown-unknown`-compatible Synchronized Multi-Chart Grid Engine
 //! (`Milestone R12 / Wave 11`).
 //!
-//! Replaces the stateless React layout shell in `ARCHIVE/frontend/src/components/layout/MultiChartLayout.tsx`
-//! and single-controller `ReplayWorkspace.tsx` with:
+//! Provides synchronized multi-chart grid geometry (`1x1`, `1x2`, `2x1`, `2x2`) with:
 //! - Deterministic finite grid subdivision (`1x1`, `1x2`, `2x1`, `2x2`).
 //! - Independent per-chart `PriceScale` preservation while synchronizing horizontal time windows
 //!   (`SyncedTimeWindow`) and causal crosshair timestamps (`resolve_linked_crosshair_bar`).

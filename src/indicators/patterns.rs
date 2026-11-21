@@ -1,7 +1,7 @@
 //! Pure `f64`, `wasm32-unknown-unknown`-compatible Candlestick Geometry, `14` Causal Candlestick
 //! Patterns, and Transparent Candle Structure Scoring (`Milestone R18 / Wave 17` — `B1`).
 //!
-//! Aligned with `ARCHIVE/backend/app/domain/signals/{candle_features,patterns,structure}.py` while
+//! Implements causal Japanese candlestick pattern geometry while
 //! replacing fixed `1e-8` / `1e-6` thresholds with scale-relative floating-point guards so micro-priced
 //! tokens (`< 1e-6`) behave identically to `VNINDEX`, `FPT`, `SPY`, and `BTCUSDT`.
 

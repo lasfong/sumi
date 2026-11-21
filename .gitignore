@@ -1,43 +1,25 @@
-# Rust
+# Rust build & release packaging outputs
 /target/
 target/
-
-# Python
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.venv/
-venv/
-
-# Node / frontend
-node_modules/
 dist/
 build/
-.vite/
+exports/
 
-# Local databases and generated data
-*.db
-*.sqlite
-*.sqlite3
-backend/sumi.db
+# Local market data & reference clones
 data/raw/
-data/*.db
-
-# Local research/POC clones
 research_repos/
+docs/CafeF*/
 
-# Logs and temporary files
+# Temporary & agent scratch files
 *.log
 tmp/
 scratch/
 test-results/
 .agents/
-ORIGINAL_REQUEST.md
 artifacts/local/
 
-# OS metadata
+# OS metadata (macOS & Windows)
 .DS_Store
 *.DS_Store
-
-# Local raw data dumps
-docs/CafeF*/
+Thumbs.db
+Desktop.ini

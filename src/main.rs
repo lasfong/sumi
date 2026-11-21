@@ -11,7 +11,7 @@ fn ensure_workstation_working_dir() {
         }
     }
     if std::path::Path::new("data").is_dir()
-        || std::path::Path::new("ARCHIVE").exists()
+        || std::path::Path::new("assets").is_dir()
         || std::path::Path::new("Cargo.toml").exists()
     {
         return;
@@ -21,7 +21,7 @@ fn ensure_workstation_working_dir() {
         let mut cursor = exe.parent();
         while let Some(dir) = cursor {
             if dir.join("Cargo.toml").exists()
-                || dir.join("ARCHIVE").exists()
+                || dir.join("assets").is_dir()
                 || dir.join("data").is_dir()
             {
                 let _ = std::env::set_current_dir(dir);

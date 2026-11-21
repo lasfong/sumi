@@ -68,8 +68,7 @@ impl PrecomputedScannerSeries {
 }
 
 /// Computes causal Relative Volume (`RVOL`) across chronologically ordered `candles` using a
-/// strict prior window `candles[t - period .. t]` that **excludes** current bar `t`
-/// (`ARCHIVE/backend/app/domain/signals/volume.py:94–103`).
+/// strict prior window `candles[t - period .. t]` that **excludes** current bar `t`.
 #[must_use]
 pub fn compute_causal_rvol(candles: &[Candle], period: usize) -> Vec<Option<f64>> {
     let n = candles.len();
