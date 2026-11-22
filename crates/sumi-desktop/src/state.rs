@@ -131,23 +131,37 @@ impl AppState {
     }
 }
 
+/// Collects candidate workspace root directories from both `current_dir()` and `current_exe()`
+/// so double-clicking `dist/Sumi Supercharts.app` in macOS Finder (where `cwd` is `/`) or
+/// `dist\SumiSupercharts-win64\sumi-desktop.exe` in Windows Explorer still locates `data/cache`
+/// and `data/raw/cafef` inside the repository.
+pub fn workspace_ancestor_dirs() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        for anc in cwd.ancestors().take(4) {
+            let p = anc.to_path_buf();
+            if !roots.contains(&p) {
+                roots.push(p);
+            }
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        for anc in exe.ancestors().skip(1).take(7) {
+            let p = anc.to_path_buf();
+            if !roots.contains(&p) {
+                roots.push(p);
+            }
+        }
+    }
+    roots
+}
+
 /// Resolves default local paths for `sumi_market.db` and `sumi_workspace.db`.
 /// Prefers the workspace's seeded `data/cache/sumi_market.db` during dev/repo execution,
-/// falling back to the OS app data directory when packaged.
+/// falling back to the OS app data directory when packaged outside the repo.
 pub fn resolve_database_paths(app_data_dir: Option<PathBuf>) -> (PathBuf, PathBuf) {
-    let candidates = [
-        std::env::current_dir().ok().map(|d| d.join("data/cache")),
-        std::env::current_dir()
-            .ok()
-            .and_then(|d| d.parent().map(|p| p.join("data/cache"))),
-        std::env::current_dir().ok().and_then(|d| {
-            d.parent()
-                .and_then(|p| p.parent())
-                .map(|p| p.join("data/cache"))
-        }),
-    ];
-
-    for cand in candidates.into_iter().flatten() {
+    for root in workspace_ancestor_dirs() {
+        let cand = root.join("data/cache");
         let market_candidate = cand.join("sumi_market.db");
         if market_candidate.exists() {
             return (market_candidate, cand.join("sumi_workspace.db"));
@@ -169,18 +183,7 @@ fn maybe_auto_seed_cafef(market_store: &SqliteMarketStore) {
         return;
     }
 
-    let mut roots: Vec<PathBuf> = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
-        roots.push(cwd.clone());
-        if let Some(p1) = cwd.parent() {
-            roots.push(p1.to_path_buf());
-            if let Some(p2) = p1.parent() {
-                roots.push(p2.to_path_buf());
-            }
-        }
-    }
-
-    for root in roots {
+    for root in workspace_ancestor_dirs() {
         for rel in ["data/raw/cafef", "work/CafeFData"] {
             let candidate = root.join(rel);
             let has_csv = std::fs::read_dir(&candidate)

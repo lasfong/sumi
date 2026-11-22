@@ -939,8 +939,20 @@ pub async fn import_cafef_dir(
 ) -> DesktopResult<CafeFImportSummary> {
     let store = state.market_store.clone();
     tokio::task::spawn_blocking(move || {
+        let raw_path = std::path::PathBuf::from(dir.trim());
+        let resolved_dir = if raw_path.exists() {
+            raw_path
+        } else {
+            crate::state::workspace_ancestor_dirs()
+                .into_iter()
+                .map(|root| root.join(&raw_path))
+                .find(|cand| cand.exists())
+                .unwrap_or(raw_path)
+        };
         let importer = CafeFImporter::new(CafeFImportConfig::default());
-        importer.import_dir(dir, &store).map_err(DesktopError::from)
+        importer
+            .import_dir(resolved_dir, &store)
+            .map_err(DesktopError::from)
     })
     .await
     .map_err(|e| DesktopError::Internal(e.to_string()))?

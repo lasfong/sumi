@@ -34,7 +34,8 @@ node --version
 npm --version
 
 Write-Host "`n[1/4] Installing & building Frontend UI (React 19 + KLineChart v10.1.1)..." -ForegroundColor Yellow
-npm --prefix ui ci
+# Use `npm install --include=optional` rather than `npm ci` to avoid npm#4828 missing win32-x64-msvc native bindings
+npm --prefix ui install --include=optional --no-audit --no-fund
 npm --prefix ui run typecheck
 npm --prefix ui run build
 
@@ -61,8 +62,8 @@ try {
     if ($HasCargoTauri) {
         cargo tauri build
     } else {
-        Write-Host "cargo-tauri not found globally; using local @tauri-apps/cli via npm..." -ForegroundColor DarkYellow
-        npx --prefix (Join-Path $RepoRoot "ui") tauri build
+        Write-Host "cargo-tauri not found globally; using local @tauri-apps/cli..." -ForegroundColor DarkYellow
+        & (Join-Path $RepoRoot "ui\node_modules\.bin\tauri.cmd") build
     }
 } finally {
     Pop-Location

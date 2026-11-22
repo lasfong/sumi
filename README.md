@@ -66,10 +66,10 @@ npm --prefix ui install
 npm --prefix ui run build
 
 # 2. Chạy chế độ phát triển trực tiếp (Hot-reload Tauri v2 + Vite)
-cd crates/sumi-desktop && npx --prefix ../../ui tauri dev
+cd crates/sumi-desktop && ../../ui/node_modules/.bin/tauri dev
 
 # 3. Đóng gói ứng dụng macOS (.app / .dmg)
-cd crates/sumi-desktop && npx --prefix ../../ui tauri build
+cd crates/sumi-desktop && ../../ui/node_modules/.bin/tauri build --bundles app,dmg
 ```
 
 ---
