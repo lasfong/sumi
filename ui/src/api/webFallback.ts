@@ -1,0 +1,894 @@
+import type {
+  BarsPageResponse,
+  BrokerStateSnapshot,
+  DataStatusResponse,
+  IntervalKey,
+  MonteCarloResponse,
+  OhlcvBar,
+  PriceAlertRecord,
+  ReplaySnapshotResponse,
+  ResolvedSymbol,
+  ResolvedSymbolResponse,
+  SavedDrawingRecord,
+  SavedIndicatorSpec,
+  SavedLayoutRecord,
+  SignalCatalogItemDto,
+  StockScreenerInput,
+  StockScreenerResponse,
+  StrategyBacktestInput,
+  StrategyBacktestResponse,
+  SubmitPaperOrderInput,
+  SymbolSearchResult,
+  VnBandLevels,
+  WalkForwardResponse,
+  WatchlistGroup,
+  WatchlistQuoteSnapshot,
+  WorkspaceBootstrapResponse,
+} from '../types/market'
+import { intervalToDurationMs } from '../chart/periods'
+
+const CURATED_SYMBOLS: Array<{
+  ticker: string
+  exchange: string
+  symbol: string
+  description: string
+  marketType: string
+  currency: string
+  basePrice: number
+  precision: number
+}> = [
+  { ticker: 'HOSE:FPT', exchange: 'HOSE', symbol: 'FPT', description: 'Công ty Cổ phần FPT', marketType: 'stock', currency: 'VND', basePrice: 132500, precision: 0 },
+  { ticker: 'HOSE:VCB', exchange: 'HOSE', symbol: 'VCB', description: 'Ngân hàng TMCP Ngoại thương Việt Nam', marketType: 'stock', currency: 'VND', basePrice: 92400, precision: 0 },
+  { ticker: 'HOSE:HPG', exchange: 'HOSE', symbol: 'HPG', description: 'Tập đoàn Hòa Phát', marketType: 'stock', currency: 'VND', basePrice: 27450, precision: 0 },
+  { ticker: 'HOSE:MWG', exchange: 'HOSE', symbol: 'MWG', description: 'Đầu tư Thế Giới Di Động', marketType: 'stock', currency: 'VND', basePrice: 64200, precision: 0 },
+  { ticker: 'HOSE:TCB', exchange: 'HOSE', symbol: 'TCB', description: 'Ngân hàng TMCP Kỹ thương Việt Nam', marketType: 'stock', currency: 'VND', basePrice: 24350, precision: 0 },
+  { ticker: 'HOSE:MBB', exchange: 'HOSE', symbol: 'MBB', description: 'Ngân hàng TMCP Quân đội (MBBank)', marketType: 'stock', currency: 'VND', basePrice: 25600, precision: 0 },
+  { ticker: 'HOSE:SSI', exchange: 'HOSE', symbol: 'SSI', description: 'Chứng khoán SSI', marketType: 'stock', currency: 'VND', basePrice: 26850, precision: 0 },
+  { ticker: 'HOSE:VHM', exchange: 'HOSE', symbol: 'VHM', description: 'Vinhomes JSC', marketType: 'stock', currency: 'VND', basePrice: 41900, precision: 0 },
+  { ticker: 'HOSE:VNM', exchange: 'HOSE', symbol: 'VNM', description: 'Sữa Việt Nam (Vinamilk)', marketType: 'stock', currency: 'VND', basePrice: 66800, precision: 0 },
+  { ticker: 'HOSE:VIC', exchange: 'HOSE', symbol: 'VIC', description: 'Tập đoàn Vingroup', marketType: 'stock', currency: 'VND', basePrice: 42300, precision: 0 },
+  { ticker: 'HOSE:ACB', exchange: 'HOSE', symbol: 'ACB', description: 'Ngân hàng TMCP Á Châu', marketType: 'stock', currency: 'VND', basePrice: 25400, precision: 0 },
+  { ticker: 'HOSE:MSN', exchange: 'HOSE', symbol: 'MSN', description: 'Tập đoàn Masan', marketType: 'stock', currency: 'VND', basePrice: 74500, precision: 0 },
+  { ticker: 'HOSE:VNINDEX', exchange: 'HOSE', symbol: 'VNINDEX', description: 'Chỉ số VN-Index (HOSE)', marketType: 'index', currency: 'VND', basePrice: 1278.45, precision: 2 },
+  { ticker: 'HOSE:VN30', exchange: 'HOSE', symbol: 'VN30', description: 'Chỉ số VN30 (HOSE)', marketType: 'index', currency: 'VND', basePrice: 1345.2, precision: 2 },
+  { ticker: 'HNX:VN30F1!', exchange: 'HNX', symbol: 'VN30F1!', description: 'HĐTL VN30 kỳ hạn gần nhất', marketType: 'futures', currency: 'VND', basePrice: 1348.5, precision: 1 },
+  { ticker: 'HNX:SHS', exchange: 'HNX', symbol: 'SHS', description: 'Chứng khoán Sài Gòn - Hà Nội', marketType: 'stock', currency: 'VND', basePrice: 15200, precision: 0 },
+  { ticker: 'HNX:PVS', exchange: 'HNX', symbol: 'PVS', description: 'Dịch vụ Kỹ thuật Dầu khí Việt Nam', marketType: 'stock', currency: 'VND', basePrice: 38700, precision: 0 },
+  { ticker: 'UPCOM:ACV', exchange: 'UPCOM', symbol: 'ACV', description: 'Tổng Công ty Cảng hàng không Việt Nam', marketType: 'stock', currency: 'VND', basePrice: 118500, precision: 0 },
+  { ticker: 'BINANCE:BTCUSDT', exchange: 'BINANCE', symbol: 'BTCUSDT', description: 'Bitcoin / TetherUS', marketType: 'crypto', currency: 'USDT', basePrice: 91450.5, precision: 2 },
+  { ticker: 'BINANCE:ETHUSDT', exchange: 'BINANCE', symbol: 'ETHUSDT', description: 'Ethereum / TetherUS', marketType: 'crypto', currency: 'USDT', basePrice: 3280.4, precision: 2 },
+  { ticker: 'BINANCE:SOLUSDT', exchange: 'BINANCE', symbol: 'SOLUSDT', description: 'Solana / TetherUS', marketType: 'crypto', currency: 'USDT', basePrice: 214.8, precision: 2 },
+  { ticker: 'NASDAQ:AAPL', exchange: 'NASDAQ', symbol: 'AAPL', description: 'Apple Inc.', marketType: 'stock', currency: 'USD', basePrice: 229.4, precision: 2 },
+  { ticker: 'NASDAQ:NVDA', exchange: 'NASDAQ', symbol: 'NVDA', description: 'NVIDIA Corporation', marketType: 'stock', currency: 'USD', basePrice: 141.8, precision: 2 },
+  { ticker: 'AMEX:SPY', exchange: 'AMEX', symbol: 'SPY', description: 'SPDR S&P 500 ETF Trust', marketType: 'fund', currency: 'USD', basePrice: 594.2, precision: 2 },
+  { ticker: 'FX_IDC:USDVND', exchange: 'FX_IDC', symbol: 'USDVND', description: 'US Dollar / Vietnamese Dong', marketType: 'forex', currency: 'VND', basePrice: 25420, precision: 0 },
+]
+
+function hashStr(s: string): number {
+  let h = 2166136261
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  return h >>> 0
+}
+
+function generateSeries(ticker: string, interval: IntervalKey, count = 420): OhlcvBar[] {
+  const meta = CURATED_SYMBOLS.find((s) => s.ticker === ticker) ?? {
+    basePrice: 50000,
+    precision: 0,
+    exchange: 'HOSE',
+  }
+  const stepMs = intervalToDurationMs(interval)
+  const now = Math.floor(Date.now() / stepMs) * stepMs
+  let seed = hashStr(`${ticker}@${interval}`)
+  const nextRand = () => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0
+    return seed / 0xffffffff
+  }
+  const bars: OhlcvBar[] = []
+  let price = meta.basePrice * 0.78
+  const tick = meta.precision === 0 ? (price >= 50000 ? 100 : 50) : Math.pow(10, -meta.precision)
+  const snap = (v: number) => Math.round(v / tick) * tick
+  for (let i = count - 1; i >= 0; i--) {
+    const ts = now - i * stepMs
+    const drift = (nextRand() - 0.482) * 0.028
+    const open = snap(price)
+    const close = snap(Math.max(tick, open * (1 + drift)))
+    const wickUp = Math.abs((nextRand() - 0.2) * 0.014) * open
+    const wickDn = Math.abs((nextRand() - 0.2) * 0.014) * open
+    const high = snap(Math.max(open, close) + wickUp)
+    const low = snap(Math.max(tick, Math.min(open, close) - wickDn))
+    const volume = Math.round((800_000 + nextRand() * 4_500_000) * (1 + Math.abs(drift) * 20))
+    bars.push({ timestamp: ts, open, high, low, close, volume, turnover: close * volume })
+    price = close
+  }
+  return bars
+}
+
+function computeBand(exchange: string, marketType: string, ref: number): VnBandLevels | null {
+  if (marketType === 'index' || !['HOSE', 'HNX', 'UPCOM'].includes(exchange)) return null
+  const pct = exchange === 'HOSE' ? 0.07 : exchange === 'HNX' ? 0.1 : 0.15
+  const tick = exchange === 'HOSE' ? (ref >= 50000 ? 100 : ref >= 10000 ? 50 : 10) : 100
+  const ceiling = Math.floor((ref * (1 + pct)) / tick) * tick
+  const floor = Math.ceil((ref * (1 - pct)) / tick) * tick
+  return {
+    venue: exchange,
+    label: `±${Math.round(pct * 100)}%`,
+    reference: ref,
+    ceiling,
+    floor,
+    tickSize: tick,
+  }
+}
+
+function makeResolvedSymbol(ticker: string): ResolvedSymbol {
+  const found = CURATED_SYMBOLS.find((s) => s.ticker === ticker)
+  const [ex = 'HOSE', sym = ticker] = ticker.split(':')
+  const precision = found?.precision ?? (['HOSE', 'HNX', 'UPCOM'].includes(ex) ? 0 : 2)
+  return {
+    ticker: found?.ticker ?? `${ex}:${sym}`,
+    exchange: found?.exchange ?? ex,
+    listed_exchange: found?.exchange ?? ex,
+    symbol: found?.symbol ?? sym,
+    description: found?.description ?? `${sym} (${ex})`,
+    market_type: found?.marketType ?? 'stock',
+    currency: found?.currency ?? (['HOSE', 'HNX', 'UPCOM'].includes(ex) ? 'VND' : 'USD'),
+    timezone: ['HOSE', 'HNX', 'UPCOM'].includes(ex) ? 'Asia/Ho_Chi_Minh' : 'Etc/UTC',
+    session: ['HOSE', 'HNX', 'UPCOM'].includes(ex) ? '0900-1500' : '24x7',
+    price_precision: precision,
+    volume_precision: found?.marketType === 'crypto' ? 4 : 0,
+    pricescale: Math.pow(10, precision),
+    minmov: 1,
+    minmove2: 0,
+    tick_size: precision === 0 ? 100 : Math.pow(10, -precision),
+    variable_tick_size: ex === 'HOSE' ? '10 10000 50 50000 100' : '',
+    variable_tick_table: null,
+    point_value: sym.startsWith('VN30F') ? 100000 : 1,
+    delay_secs: 0,
+    isin: '',
+  }
+}
+
+const DEFAULT_WATCHLISTS: WatchlistGroup[] = [
+  {
+    id: 'wl_vn30',
+    name: 'VN30 Bluechips',
+    tickers: ['HOSE:FPT', 'HOSE:VCB', 'HOSE:HPG', 'HOSE:MWG', 'HOSE:TCB', 'HOSE:MBB', 'HOSE:SSI', 'HOSE:VHM', 'HOSE:VNM', 'HOSE:VIC', 'HOSE:ACB', 'HOSE:MSN'],
+    sortOrder: 0,
+  },
+  {
+    id: 'wl_vn_indices',
+    name: 'Chỉ số & Phái sinh',
+    tickers: ['HOSE:VNINDEX', 'HOSE:VN30', 'HNX:VN30F1!', 'HNX:SHS', 'HNX:PVS', 'UPCOM:ACV'],
+    sortOrder: 1,
+  },
+  {
+    id: 'wl_crypto',
+    name: 'Crypto Realtime',
+    tickers: ['BINANCE:BTCUSDT', 'BINANCE:ETHUSDT', 'BINANCE:SOLUSDT'],
+    sortOrder: 2,
+  },
+  {
+    id: 'wl_global',
+    name: 'Quốc tế & FX',
+    tickers: ['NASDAQ:AAPL', 'NASDAQ:NVDA', 'AMEX:SPY', 'FX_IDC:USDVND'],
+    sortOrder: 3,
+  },
+]
+
+const lsGet = <T,>(k: string, fallback: T): T => {
+  try {
+    const raw = localStorage.getItem(k)
+    return raw ? (JSON.parse(raw) as T) : fallback
+  } catch {
+    return fallback
+  }
+}
+const lsSet = (k: string, v: unknown) => {
+  try {
+    localStorage.setItem(k, JSON.stringify(v))
+  } catch {
+    // ignore quota errors
+  }
+}
+
+let webReplay: {
+  ticker: string
+  interval: IntervalKey
+  bars: OhlcvBar[]
+  cursor: number
+  speed: number
+} | null = null
+
+let webBrokerOrders: BrokerStateSnapshot['orders'] = []
+let webBrokerCash = 500_000_000
+let webBrokerPos: BrokerStateSnapshot['openPosition'] = null
+let webBrokerLots: BrokerStateSnapshot['fifoSummary']['lots'] = []
+let webBrokerClosed: BrokerStateSnapshot['closedTrades'] = []
+let webNextId = 1
+
+export const webFallbackApi = {
+  searchSymbols(query: string, category?: string): SymbolSearchResult[] {
+    const q = query.trim().toUpperCase()
+    const cat = (category ?? 'all').toLowerCase()
+    return CURATED_SYMBOLS.filter((item) => {
+      if (cat === 'hose' && item.exchange !== 'HOSE') return false
+      if (cat === 'hnx' && (item.exchange !== 'HNX' || item.marketType === 'futures')) return false
+      if (cat === 'upcom' && item.exchange !== 'UPCOM') return false
+      if (cat === 'derivatives' && item.marketType !== 'futures') return false
+      if (cat === 'crypto' && item.marketType !== 'crypto') return false
+      if (cat === 'global' && (['HOSE', 'HNX', 'UPCOM'].includes(item.exchange) || item.marketType === 'crypto')) return false
+      return !q || item.symbol.includes(q) || item.ticker.includes(q) || item.description.toUpperCase().includes(q)
+    }).map((item) => ({
+      ticker: item.ticker,
+      exchange: item.exchange,
+      prefix: item.exchange,
+      symbol: item.symbol,
+      description: item.description,
+      market_type: item.marketType,
+      currency_code: item.currency,
+      country_code: ['HOSE', 'HNX', 'UPCOM'].includes(item.exchange) ? 'VN' : 'US',
+      provider_id: 'web_preview',
+      type_specs: [],
+    }))
+  },
+
+  resolveSymbol(ticker: string): ResolvedSymbolResponse {
+    const info = makeResolvedSymbol(ticker)
+    const bars = generateSeries(ticker, '1D', 60)
+    const last = bars[bars.length - 1]
+    const prev = bars[bars.length - 2]
+    const change = last && prev ? last.close - prev.close : 0
+    const changePercent = prev && prev.close ? (change / prev.close) * 100 : 0
+    return {
+      symbolInfo: info,
+      lastPrice: last?.close ?? null,
+      prevClose: prev?.close ?? null,
+      change,
+      changePercent,
+      volume: last?.volume ?? null,
+      vnBand: prev ? computeBand(info.exchange, info.market_type, prev.close) : null,
+    }
+  },
+
+  getBars(ticker: string, interval: IntervalKey, mode: string, timestamp?: number | null, limit = 300): BarsPageResponse {
+    const info = makeResolvedSymbol(ticker)
+    let all = generateSeries(ticker, interval, 480)
+    const replayActive = Boolean(webReplay && webReplay.ticker === ticker && webReplay.interval === interval)
+    if (replayActive && webReplay) {
+      all = webReplay.bars.slice(0, webReplay.cursor + 1)
+    }
+    let slice: OhlcvBar[]
+    if (mode === 'forward' && timestamp != null) {
+      const older = all.filter((b) => b.timestamp < timestamp)
+      slice = older.slice(-limit)
+    } else if (mode === 'backward' && timestamp != null) {
+      const newer = all.filter((b) => b.timestamp > timestamp)
+      slice = newer.slice(0, limit)
+    } else {
+      slice = all.slice(-limit)
+    }
+    const prevClose = all.length >= 2 ? all[all.length - 2].close : all[all.length - 1]?.close ?? 0
+    return {
+      bars: slice,
+      hasOlder: slice.length > 0 && slice[0].timestamp > all[0].timestamp,
+      hasNewer: false,
+      source: 'cache_hit',
+      symbolInfo: info,
+      vnBand: prevClose > 0 ? computeBand(info.exchange, info.market_type, prevClose) : null,
+      replayActive,
+    }
+  },
+
+  getWatchlistSnapshots(tickers: string[]): WatchlistQuoteSnapshot[] {
+    return tickers.map((ticker) => {
+      const res = this.resolveSymbol(ticker)
+      return {
+        ticker: res.symbolInfo.ticker,
+        exchange: res.symbolInfo.exchange,
+        symbol: res.symbolInfo.symbol,
+        description: res.symbolInfo.description,
+        lastPrice: res.lastPrice,
+        prevClose: res.prevClose,
+        change: res.change,
+        changePercent: res.changePercent,
+        volume: res.volume,
+        pricePrecision: res.symbolInfo.price_precision,
+        vnBand: res.vnBand,
+        timestampMs: Date.now(),
+      }
+    })
+  },
+
+  getDataStatus(): DataStatusResponse {
+    return {
+      stats: {
+        db_path: 'data/cache/sumi_market.db (preview)',
+        total_symbols: 473,
+        total_series: 473,
+        total_bars: 951420,
+      },
+      offlineMode: false,
+    }
+  },
+
+  loadBootstrap(): WorkspaceBootstrapResponse {
+    return {
+      settings: lsGet<Record<string, unknown> | null>('sumi_ws_settings', null),
+      layouts: lsGet<SavedLayoutRecord[]>('sumi_ws_layouts', []),
+      watchlists: lsGet<WatchlistGroup[]>('sumi_ws_watchlists', DEFAULT_WATCHLISTS),
+      alerts: lsGet<PriceAlertRecord[]>('sumi_ws_alerts', []),
+    }
+  },
+
+  saveSettings(settings: Record<string, unknown>) {
+    lsSet('sumi_ws_settings', settings)
+  },
+
+  getDrawings(ticker: string): SavedDrawingRecord[] {
+    return lsGet<SavedDrawingRecord[]>(`sumi_drawings_${ticker}`, [])
+  },
+
+  upsertDrawing(d: SavedDrawingRecord) {
+    const list = this.getDrawings(d.ticker).filter((x) => x.id !== d.id)
+    list.push(d)
+    lsSet(`sumi_drawings_${d.ticker}`, list)
+  },
+
+  deleteDrawing(ticker: string, id: string) {
+    const list = this.getDrawings(ticker).filter((x) => x.id !== id)
+    lsSet(`sumi_drawings_${ticker}`, list)
+  },
+
+  clearDrawings(ticker: string) {
+    lsSet(`sumi_drawings_${ticker}`, [])
+  },
+
+  getPaneIndicators(slotId: string): SavedIndicatorSpec[] {
+    return lsGet<SavedIndicatorSpec[]>(`sumi_inds_${slotId}`, [])
+  },
+
+  savePaneIndicators(slotId: string, inds: SavedIndicatorSpec[]) {
+    lsSet(`sumi_inds_${slotId}`, inds)
+  },
+
+  saveLayout(id: string, name: string, layoutJson: Record<string, unknown>): SavedLayoutRecord {
+    const rec: SavedLayoutRecord = { id, name, layoutJson, updatedAtMs: Date.now() }
+    const list = lsGet<SavedLayoutRecord[]>('sumi_ws_layouts', []).filter((x) => x.id !== id)
+    list.unshift(rec)
+    lsSet('sumi_ws_layouts', list)
+    return rec
+  },
+
+  deleteLayout(id: string) {
+    lsSet('sumi_ws_layouts', lsGet<SavedLayoutRecord[]>('sumi_ws_layouts', []).filter((x) => x.id !== id))
+  },
+
+  createWatchlist(id: string, name: string): WatchlistGroup {
+    const list = lsGet<WatchlistGroup[]>('sumi_ws_watchlists', DEFAULT_WATCHLISTS)
+    const group: WatchlistGroup = { id, name, tickers: [], sortOrder: list.length }
+    list.push(group)
+    lsSet('sumi_ws_watchlists', list)
+    return group
+  },
+
+  deleteWatchlist(id: string) {
+    lsSet('sumi_ws_watchlists', lsGet<WatchlistGroup[]>('sumi_ws_watchlists', DEFAULT_WATCHLISTS).filter((w) => w.id !== id))
+  },
+
+  addWatchlistSymbol(watchlistId: string, ticker: string) {
+    const list = lsGet<WatchlistGroup[]>('sumi_ws_watchlists', DEFAULT_WATCHLISTS).map((w) =>
+      w.id === watchlistId && !w.tickers.includes(ticker) ? { ...w, tickers: [...w.tickers, ticker] } : w,
+    )
+    lsSet('sumi_ws_watchlists', list)
+  },
+
+  removeWatchlistSymbol(watchlistId: string, ticker: string) {
+    const list = lsGet<WatchlistGroup[]>('sumi_ws_watchlists', DEFAULT_WATCHLISTS).map((w) =>
+      w.id === watchlistId ? { ...w, tickers: w.tickers.filter((t) => t !== ticker) } : w,
+    )
+    lsSet('sumi_ws_watchlists', list)
+  },
+
+  createAlert(ticker: string, condition: string, targetPrice: number, message: string): PriceAlertRecord {
+    const rec: PriceAlertRecord = {
+      id: `alert_${Date.now()}`,
+      ticker,
+      condition,
+      targetPrice,
+      message,
+      status: 'armed',
+      createdAtMs: Date.now(),
+      triggeredAtMs: null,
+    }
+    const list = lsGet<PriceAlertRecord[]>('sumi_ws_alerts', [])
+    list.unshift(rec)
+    lsSet('sumi_ws_alerts', list)
+    return rec
+  },
+
+  toggleAlert(id: string, status: string) {
+    const list = lsGet<PriceAlertRecord[]>('sumi_ws_alerts', []).map((a) => (a.id === id ? { ...a, status } : a))
+    lsSet('sumi_ws_alerts', list)
+  },
+
+  deleteAlert(id: string) {
+    lsSet('sumi_ws_alerts', lsGet<PriceAlertRecord[]>('sumi_ws_alerts', []).filter((a) => a.id !== id))
+  },
+
+  replayStart(ticker: string, interval: IntervalKey, cutTimestampMs?: number | null): ReplaySnapshotResponse {
+    const bars = generateSeries(ticker, interval, 480)
+    let cursor = Math.max(20, bars.length - 60)
+    if (cutTimestampMs != null) {
+      const idx = bars.findIndex((b) => b.timestamp >= cutTimestampMs)
+      if (idx > 1) cursor = idx
+    }
+    webReplay = { ticker, interval, bars, cursor, speed: 1 }
+    return {
+      active: true,
+      status: 'Paused',
+      ticker,
+      interval,
+      cursorIndex: cursor,
+      totalBars: bars.length,
+      cutoffTimestampMs: bars[cursor].timestamp,
+      speedMultiplier: 1,
+      visibleBars: bars.slice(0, cursor + 1),
+      steppedBar: null,
+      broker: this.brokerState(ticker, interval),
+    }
+  },
+
+  replayStep(delta: number): ReplaySnapshotResponse {
+    if (!webReplay) throw new Error('Replay chưa khởi động')
+    const prev = webReplay.cursor
+    webReplay.cursor = Math.max(1, Math.min(webReplay.bars.length - 1, webReplay.cursor + delta))
+    const stepped = delta === 1 && webReplay.cursor === prev + 1 ? webReplay.bars[webReplay.cursor] : null
+    return {
+      active: true,
+      status: webReplay.cursor >= webReplay.bars.length - 1 ? 'Completed' : 'Paused',
+      ticker: webReplay.ticker,
+      interval: webReplay.interval,
+      cursorIndex: webReplay.cursor,
+      totalBars: webReplay.bars.length,
+      cutoffTimestampMs: webReplay.bars[webReplay.cursor].timestamp,
+      speedMultiplier: webReplay.speed,
+      visibleBars: stepped ? [] : webReplay.bars.slice(0, webReplay.cursor + 1),
+      steppedBar: stepped,
+      broker: this.brokerState(webReplay.ticker, webReplay.interval),
+    }
+  },
+
+  replayStop() {
+    webReplay = null
+  },
+
+  brokerState(ticker: string, interval: IntervalKey): BrokerStateSnapshot {
+    const res = this.resolveSymbol(ticker)
+    const mark = res.lastPrice ?? 100000
+    const unreal = webBrokerPos ? (mark - webBrokerPos.avg_entry_price) * webBrokerPos.quantity : 0
+    const equity = webBrokerCash + unreal
+    const nowSec = Math.floor(Date.now() / 1000)
+    const sellable = webBrokerLots.filter((l) => nowSec >= l.sellable_at_timestamp).reduce((a, b) => a + b.remaining_qty, 0)
+    const totalHeld = webBrokerLots.reduce((a, b) => a + b.remaining_qty, 0)
+    return {
+      ticker,
+      interval,
+      venue: res.symbolInfo.exchange,
+      boardLot: ['HOSE', 'HNX', 'UPCOM'].includes(res.symbolInfo.exchange) ? 100 : 1,
+      allowsShort: !['HOSE', 'HNX', 'UPCOM'].includes(res.symbolInfo.exchange),
+      enforceVnT2LotLock: ['HOSE', 'HNX', 'UPCOM'].includes(res.symbolInfo.exchange),
+      markPrice: mark,
+      markTimestampMs: Date.now(),
+      vnBand: res.vnBand,
+      config: {
+        initial_cash: 500_000_000,
+        commission_bps: 15,
+        tax_sell_bps: 10,
+        slippage_bps: 2,
+        contract_multiplier: 1,
+        initial_margin_pct: 100,
+        max_leverage: 1,
+        allow_short: false,
+        enforce_vn_t2_lot_lock: true,
+        venue: res.symbolInfo.exchange,
+        base_timeframe_secs: 86400,
+      },
+      metrics: {
+        cash_balance: webBrokerCash,
+        unrealized_pnl: unreal,
+        equity,
+        net_pnl: equity - 500_000_000,
+        return_pct: ((equity - 500_000_000) / 500_000_000) * 100,
+        max_drawdown_pct: 0,
+        pending_order_count: webBrokerOrders.filter((o) => o.order.status === 'Pending').length,
+        fill_count: webBrokerOrders.filter((o) => o.order.status === 'Filled').length,
+        closed_trade_count: webBrokerClosed.length,
+        win_count: webBrokerClosed.filter((t) => t.trade.net_pnl > 0).length,
+        loss_count: webBrokerClosed.filter((t) => t.trade.net_pnl < 0).length,
+        breakeven_count: 0,
+        win_rate_pct: webBrokerClosed.length ? (webBrokerClosed.filter((t) => t.trade.net_pnl > 0).length / webBrokerClosed.length) * 100 : 0,
+        avg_return_pct: 0,
+        profit_factor: null,
+        net_r_multiple: 0,
+        avg_r_multiple: null,
+        expectancy_pnl: null,
+      },
+      openPosition: webBrokerPos,
+      orders: webBrokerOrders,
+      fifoSummary: {
+        venue: res.symbolInfo.exchange,
+        as_of_timestamp: nowSec,
+        lots: webBrokerLots,
+        total_held_qty: totalHeld,
+        sellable_qty: sellable,
+        locked_t2_qty: totalHeld - sellable,
+        earliest_unlock_timestamp: webBrokerLots.find((l) => nowSec < l.sellable_at_timestamp)?.sellable_at_timestamp ?? null,
+        unsettled_sell_violation_qty: 0,
+      },
+      closedTrades: webBrokerClosed,
+      replayLinked: Boolean(webReplay),
+    }
+  },
+
+  submitPaperOrder(input: SubmitPaperOrderInput): BrokerStateSnapshot {
+    const snap = this.brokerState(input.ticker, input.interval as IntervalKey)
+    if (snap.boardLot === 100 && input.quantity % 100 !== 0) {
+      throw new Error(`Sàn ${snap.venue}: khối lượng phải là bội số lô chẵn 100 cổ phiếu`)
+    }
+    const price = input.vnOrderType === 'LO' ? (input.price ?? snap.markPrice) : snap.markPrice
+    if (input.vnOrderType === 'LO' && snap.vnBand) {
+      if (price > snap.vnBand.ceiling || price < snap.vnBand.floor) {
+        throw new Error(`Giá đặt nằm ngoài biên độ trần/sàn [${snap.vnBand.floor} — ${snap.vnBand.ceiling}]`)
+      }
+    }
+    const id = webNextId++
+    const isMarket = ['MP', 'ATO', 'ATC'].includes(input.vnOrderType)
+    const nowMs = Date.now()
+    const nowSec = Math.floor(nowMs / 1000)
+    webBrokerOrders = [
+      {
+        order: {
+          id,
+          side: input.side === 'BUY' ? 'Buy' : 'Sell',
+          kind: isMarket ? 'Market' : { Limit: { limit_price: price } },
+          quantity: input.quantity,
+          stop_loss: input.stopLoss ?? null,
+          take_profit: input.takeProfit ?? null,
+          submitted_base_index: 0,
+          submitted_timestamp: nowSec,
+          status: isMarket ? 'Filled' : 'Pending',
+          filled_price: isMarket ? price : null,
+          filled_timestamp: isMarket ? nowSec : null,
+        },
+        vnOrderType: input.vnOrderType,
+        submittedTimestampMs: nowMs,
+        filledTimestampMs: isMarket ? nowMs : null,
+      },
+      ...webBrokerOrders,
+    ]
+    if (isMarket && input.side === 'BUY') {
+      // Match sumi-core accounting: cash_balance tracks realized equity ledger (deduct fill fee;
+      // equity = cash_balance + unrealized_pnl). Available buying power subtracts open notional in UI.
+      webBrokerCash -= price * input.quantity * 0.0015
+      const prevQty = webBrokerPos?.quantity ?? 0
+      const newQty = prevQty + input.quantity
+      const avg = webBrokerPos ? (webBrokerPos.avg_entry_price * prevQty + price * input.quantity) / newQty : price
+      webBrokerPos = {
+        side: 'Long',
+        quantity: newQty,
+        avg_entry_price: avg,
+        contract_multiplier: 1,
+        opened_timestamp: nowSec,
+        opened_base_index: 0,
+        stop_loss: input.stopLoss ?? null,
+        take_profit: input.takeProfit ?? null,
+        initial_stop_loss: input.stopLoss ?? null,
+        initial_risk_amount: null,
+        had_initial_sl_at_open: Boolean(input.stopLoss),
+      }
+      webBrokerLots.push({
+        lot_id: id,
+        buy_fill_id: id,
+        buy_base_index: 0,
+        buy_timestamp: nowSec,
+        buy_price: price,
+        initial_qty: input.quantity,
+        remaining_qty: input.quantity,
+        sellable_at_timestamp: nowSec + 2 * 86400,
+      })
+    }
+    return this.brokerState(input.ticker, input.interval as IntervalKey)
+  },
+
+  cancelPaperOrder(ticker: string, interval: IntervalKey, orderId: number): BrokerStateSnapshot {
+    webBrokerOrders = webBrokerOrders.map((item) =>
+      item.order.id === orderId && item.order.status === 'Pending'
+        ? { ...item, order: { ...item.order, status: 'Cancelled' } }
+        : item,
+    )
+    return this.brokerState(ticker, interval)
+  },
+
+  modifyPaperOrder(
+    ticker: string,
+    interval: IntervalKey,
+    orderId: number,
+    newPrice: number,
+  ): BrokerStateSnapshot {
+    webBrokerOrders = webBrokerOrders.map((item) => {
+      if (item.order.id !== orderId || item.order.status !== 'Pending') return item
+      const kind =
+        typeof item.order.kind === 'object' && 'Stop' in item.order.kind
+          ? { Stop: { stop_price: newPrice } }
+          : { Limit: { limit_price: newPrice } }
+      return { ...item, order: { ...item.order, kind } }
+    })
+    return this.brokerState(ticker, interval)
+  },
+
+  updatePositionBrackets(
+    ticker: string,
+    interval: IntervalKey,
+    stopLoss: number | null,
+    takeProfit: number | null,
+  ): BrokerStateSnapshot {
+    if (webBrokerPos) {
+      webBrokerPos = {
+        ...webBrokerPos,
+        stop_loss: stopLoss,
+        take_profit: takeProfit,
+      }
+    }
+    return this.brokerState(ticker, interval)
+  },
+
+  flattenPaperPosition(ticker: string, interval: IntervalKey): BrokerStateSnapshot {
+    const snap = this.brokerState(ticker, interval)
+    if (webBrokerPos) {
+      const nowSec = Math.floor(Date.now() / 1000)
+      if (snap.enforceVnT2LotLock && snap.fifoSummary.sellable_qty <= 0) {
+        throw new Error('Cổ phiếu đang khóa thanh toán VSD T+2 (về tài khoản 13:00 ICT) — chưa khả dụng để bán')
+      }
+      const mark = snap.markPrice
+      const gross = (mark - webBrokerPos.avg_entry_price) * webBrokerPos.quantity
+      const fee = mark * webBrokerPos.quantity * 0.0025
+      webBrokerCash += gross - fee
+      const id = webNextId++
+      webBrokerClosed = [
+        {
+          trade: {
+            trade_id: id,
+            side: webBrokerPos.side,
+            quantity: webBrokerPos.quantity,
+            entry_price: webBrokerPos.avg_entry_price,
+            exit_price: mark,
+            entry_base_index: 0,
+            exit_base_index: 1,
+            entry_timestamp: webBrokerPos.opened_timestamp,
+            exit_timestamp: nowSec,
+            exit_reason: 'ManualFlatten',
+            initial_stop_loss: webBrokerPos.initial_stop_loss,
+            had_initial_sl_at_open: webBrokerPos.had_initial_sl_at_open,
+            gross_pnl: gross,
+            total_fees: fee,
+            net_pnl: gross - fee,
+            return_pct: ((mark - webBrokerPos.avg_entry_price) / webBrokerPos.avg_entry_price) * 100,
+            r_multiple: null,
+          },
+          entryTimestampMs: webBrokerPos.opened_timestamp * 1000,
+          exitTimestampMs: nowSec * 1000,
+          maePct: -0.8,
+          mfePct: 1.4,
+          setupTag: '',
+          mistakeTag: '',
+          note: '',
+        },
+        ...webBrokerClosed,
+      ]
+      webBrokerPos = null
+      webBrokerLots = []
+    }
+    return this.brokerState(ticker, interval)
+  },
+
+  resetPaperAccount(ticker: string, interval: IntervalKey, initialCash = 500_000_000): BrokerStateSnapshot {
+    webBrokerOrders = []
+    webBrokerCash = initialCash
+    webBrokerPos = null
+    webBrokerLots = []
+    webBrokerClosed = []
+    webNextId = 1
+    return this.brokerState(ticker, interval)
+  },
+
+  runBacktest(input: StrategyBacktestInput): StrategyBacktestResponse {
+    const bars = generateSeries(input.ticker, input.interval as IntervalKey, 360)
+    const equityCurve = bars.map((b, i) => {
+      const factor = 1 + (i / bars.length) * 0.24 + Math.sin(i / 14) * 0.045
+      const eq = input.initialCash * factor
+      return {
+        barIndex: i,
+        timestampMs: b.timestamp,
+        equity: eq,
+        underwaterPct: Math.min(0, Math.sin(i / 14) * 4.5 - 1.5),
+      }
+    })
+    const trades = [45, 110, 175, 240, 305].map((idx, k) => {
+      const entry = bars[idx]
+      const exit = bars[Math.min(bars.length - 1, idx + 22)]
+      const ret = ((exit.close - entry.close) / entry.close) * 100
+      const qty = 1000
+      return {
+        tradeId: k + 1,
+        side: 'LONG',
+        quantity: qty,
+        entryBarIndex: idx,
+        exitBarIndex: idx + 22,
+        entryTimestampMs: entry.timestamp,
+        exitTimestampMs: exit.timestamp,
+        entryPrice: entry.close,
+        exitPrice: exit.close,
+        barsHeld: 22,
+        grossPnl: (exit.close - entry.close) * qty,
+        netPnl: (exit.close - entry.close) * qty * 0.996,
+        returnPct: ret,
+        rMultiple: ret / 3.5,
+        maePct: -Math.abs(ret * 0.45 + 1.1),
+        mfePct: Math.abs(ret) + 2.2,
+        exitReason: ret >= 0 ? 'TP' : 'SL',
+      }
+    })
+    return {
+      ticker: input.ticker,
+      interval: input.interval,
+      presetLabel: 'SMA/EMA Trend Crossover',
+      barCount: bars.length,
+      tearsheet: {
+        initial_cash: input.initialCash,
+        final_cash: input.initialCash * 1.24,
+        final_equity: input.initialCash * 1.24,
+        realized_net_profit: input.initialCash * 0.24,
+        total_return_abs: input.initialCash * 0.24,
+        total_return_pct: 24.0,
+        cagr_pct: 18.4,
+        max_drawdown_abs: input.initialCash * 0.062,
+        max_drawdown_pct: 6.2,
+        max_drawdown_duration_bars: 28,
+        sharpe_ratio: 1.72,
+        sortino_ratio: 2.38,
+        calmar_ratio: 2.96,
+        num_trades: trades.length,
+        num_winners: trades.filter((t) => t.netPnl > 0).length,
+        num_losers: trades.filter((t) => t.netPnl <= 0).length,
+        num_breakeven: 0,
+        win_rate_pct: (trades.filter((t) => t.netPnl > 0).length / trades.length) * 100,
+        profit_factor: 2.18,
+        expectancy_net: (input.initialCash * 0.24) / trades.length,
+        avg_trade_return_pct: 4.8,
+        avg_win_pct: 8.2,
+        avg_loss_pct: -3.4,
+        avg_bars_held: 22,
+        avg_r_multiple: 1.32,
+        exposure_pct: 44.5,
+        total_fees_and_tax: 2450000,
+        low_sample_warning: true,
+      },
+      inSampleTearsheet: null,
+      outOfSampleTearsheet: null,
+      robustness: 'Robust',
+      equityCurve,
+      trades,
+    }
+  },
+
+  runWfo(input: StrategyBacktestInput): WalkForwardResponse {
+    const bt = this.runBacktest(input)
+    return {
+      ticker: input.ticker,
+      interval: input.interval,
+      totalBars: bt.barCount,
+      profitableFolds: 3,
+      foldCount: 4,
+      wfePct: 76.4,
+      paramStabilityPct: 75.0,
+      verdict: 'RobustOutOfSample',
+      verdictLabel: 'WFO ROBUST',
+      stitchedOosTearsheet: bt.tearsheet,
+      stitchedOosCurve: bt.equityCurve,
+      folds: [],
+    }
+  },
+
+  runMonteCarlo(input: StrategyBacktestInput): MonteCarloResponse {
+    return {
+      simulations: 1000,
+      seed: 202615,
+      sampleCount: 30,
+      horizonSteps: 30,
+      validity: 'Valid',
+      lowSampleWarning: false,
+      statusReason: 'OK',
+      metrics: {
+        terminal_equity: {
+          p5: input.initialCash * 0.94,
+          p25: input.initialCash * 1.11,
+          p50: input.initialCash * 1.24,
+          p75: input.initialCash * 1.38,
+          p95: input.initialCash * 1.56,
+        },
+        terminal_return_pct: { p5: -6, p25: 11, p50: 24, p75: 38, p95: 56 },
+        max_drawdown_p50_pct: 7.4,
+        max_drawdown_var_95_pct: 15.2,
+        max_drawdown_cvar_95_pct: 18.6,
+        max_drawdown_var_99_pct: 21.1,
+        max_drawdown_cvar_99_pct: 24.0,
+        prob_of_profit_pct: 88.4,
+        prob_of_loss_pct: 11.6,
+        prob_of_ruin_pct: 0.2,
+      },
+      checkpointEnvelopes: Array.from({ length: 16 }, (_, i) => {
+        const f = i / 15
+        return {
+          p5: input.initialCash * (1 - 0.06 * f),
+          p25: input.initialCash * (1 + 0.11 * f),
+          p50: input.initialCash * (1 + 0.24 * f),
+          p75: input.initialCash * (1 + 0.38 * f),
+          p95: input.initialCash * (1 + 0.56 * f),
+        }
+      }),
+    }
+  },
+
+  getSignalCatalog(): SignalCatalogItemDto[] {
+    return [
+      { id: 'health.composite_score', astAlias: 'health_score', labelEn: 'Technical Health Score', labelVi: 'Điểm Sức khỏe Kỹ thuật (4-Family)', description: 'Composite causal health score [-100..+100]', category: 'health', categoryLabel: 'Technical Health', outputType: 'FLOAT', status: 'ACTIVE', warmupBars: 50 },
+      { id: 'tech.golden_cross', astAlias: 'golden_cross', labelEn: 'SMA20 / EMA50 Golden Cross', labelVi: 'Giao cắt Vàng SMA20/EMA50', description: 'Bullish moving average crossover', category: 'technical', categoryLabel: 'Technical Crossovers', outputType: 'BOOL', status: 'ACTIVE', warmupBars: 50 },
+      { id: 'tech.macd_bull_cross', astAlias: 'macd_bull', labelEn: 'MACD Bullish Cross', labelVi: 'MACD Cắt Lên Đường Tín Hiệu', description: 'MACD line crosses above signal', category: 'technical', categoryLabel: 'Technical Crossovers', outputType: 'BOOL', status: 'ACTIVE', warmupBars: 35 },
+      { id: 'tech.rsi_oversold_cross_up', astAlias: 'rsi_os_up', labelEn: 'RSI(14) Cross Above 30', labelVi: 'RSI(14) Vượt Lên Vùng Quá Bán 30', description: 'RSI exits oversold territory', category: 'technical', categoryLabel: 'Technical Crossovers', outputType: 'BOOL', status: 'ACTIVE', warmupBars: 15 },
+      { id: 'vol.rvol_spike_2x', astAlias: 'vol_2x', labelEn: 'Volume Spike >= 2.0x', labelVi: 'Đột biến Khối lượng >= 2.0x', description: 'Relative volume surge above 2x 20-bar mean', category: 'volume', categoryLabel: 'Relative Volume', outputType: 'BOOL', status: 'ACTIVE', warmupBars: 20 },
+      { id: 'ichi.kumo_breakout', astAlias: 'kumo_brk', labelEn: 'Ichimoku Kumo Breakout', labelVi: 'Phá vỡ Đám mây Ichimoku (Kumo)', description: 'Close breaks above Senkou Span A & B cloud', category: 'ichimoku', categoryLabel: 'Ichimoku Kinko Hyo', outputType: 'BOOL', status: 'ACTIVE', warmupBars: 52 },
+      { id: 'pattern.bb_squeeze_breakout', astAlias: 'bb_sqz_brk', labelEn: 'Bollinger Squeeze Breakout', labelVi: 'Bứt phá Nén Bollinger Bands', description: 'Volatility expansion breakout', category: 'pattern', categoryLabel: 'Candlestick & Volatility Patterns', outputType: 'BOOL', status: 'ACTIVE', warmupBars: 20 },
+    ]
+  },
+
+  runScreener(input: StockScreenerInput): StockScreenerResponse {
+    const q = (input.searchQuery ?? '').trim().toUpperCase()
+    const ex = input.exchangeFilter.toUpperCase()
+    const rows = CURATED_SYMBOLS.filter((s) => s.marketType === 'stock')
+      .filter((s) => ex === 'ALL' || ex === 'WATCHLIST' || s.exchange === ex)
+      .filter((s) => !q || s.symbol.includes(q) || s.description.toUpperCase().includes(q))
+      .map((s, idx) => {
+        const res = this.resolveSymbol(s.ticker)
+        return {
+          ticker: s.ticker,
+          exchange: s.exchange,
+          symbol: s.symbol,
+          description: s.description,
+          lastClose: res.lastPrice ?? s.basePrice,
+          changePct: res.changePercent ?? 0,
+          lastVolume: res.volume ?? 1500000,
+          rvol20: 1.1 + ((idx * 37) % 18) / 10,
+          rsi14: 42 + ((idx * 19) % 34),
+          macdHist: ((idx % 5) - 2) * 120,
+          atrPct: 1.8 + ((idx * 7) % 20) / 10,
+          regime: idx % 3 === 0 ? 'Uptrend' : idx % 3 === 1 ? 'Recovery' : 'Pullback',
+          regimeShort: idx % 3 === 0 ? 'UP' : idx % 3 === 1 ? 'REC' : 'PB',
+          healthScore: 35 + ((idx * 23) % 55),
+          bullishSignals: 3 + (idx % 6),
+          bearishSignals: idx % 3,
+          matchedSignals: ['Giao cắt Vàng SMA20/EMA50', 'Phá vỡ Đám mây Ichimoku'],
+          selectedSignalValue: input.signalId ? 'BULL' : null,
+          lastTimestampMs: Date.now(),
+        }
+      })
+    return {
+      totalCatalogSignals: 101,
+      scannedSymbols: rows.length,
+      matchedSymbols: rows.length,
+      elapsedMs: 14,
+      rows,
+    }
+  },
+}

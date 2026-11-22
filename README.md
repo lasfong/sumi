@@ -1,95 +1,100 @@
-# Sumi v2.0 — Quantitative Market Data & Trading Engine (Rust Workspace)
+# Sumi Supercharts v2.0 — TradingView-Grade Quantitative Workstation (Rust + Tauri v2 + KLineChart v10)
 
-Kiến trúc **Sumi v2.0** (chuẩn bị cho giao diện Tauri v2 + KLineChart v10.1.1 Supercharts) với tầng lõi định lượng và dữ liệu thị trường viết bằng **Rust** (Edition 2024, Rust `>= 1.91`), đa nền tảng **macOS** và **Windows (`x86_64-pc-windows-msvc`)**.
+Ứng dụng Desktop phân tích kỹ thuật, lọc cổ phiếu và kiểm định chiến lược định lượng **Sumi Supercharts v2.0** xây dựng trên kiến trúc **Tauri v2 + Cargo Workspace (`Rust >= 1.91`, Edition 2024) + React 19 + TypeScript + `klinecharts@10.1.1`**, hỗ trợ đa nền tảng **Windows 10/11 (`x86_64-pc-windows-msvc` / WebView2)** và **macOS (`aarch64` / `x86_64` / WKWebView)**.
 
 ---
 
-## 1. Cấu Trúc Cargo Workspace
+## 1. Cấu Trúc Dự Án
 
 ```text
 sumi/
-├── Cargo.toml                         # Virtual Cargo Workspace (resolver = "3")
+├── Cargo.toml                          # Virtual Cargo Workspace (resolver = "3")
+├── scripts/
+│   └── build_windows.ps1               # Đóng gói tự động 1 lệnh trên Windows 10/11 (MSVC / WebView2)
 ├── crates/
-│   ├── sumi-core/                     # Lõi định lượng thuần Rust (zero GUI / zero C / WASM-safe)
-│   │   └── src/
-│   │       ├── model.rs (domain)      # OHLCV Candle, PriceBounds
-│   │       ├── data/                  # RFC-4180 CSV/JSON, CafeF 5-rule split norm, đa khung thời gian & audit
-│   │       ├── indicators/            # 24+ chỉ báo, mẫu hình nến, Volume Profile, TPO, VWAP, Ichimoku, CVD, ProxyBB
-│   │       ├── scanner/               # 101 tín hiệu, độ rộng thị trường RRG, MarketBB & PIT Universe
-│   │       ├── backtest/              # Strategy Engine, Rule Builder, WFO, Monte Carlo, báo cáo HTML
-│   │       ├── replay/                # Bar Replay nhân quả đa khung giờ (chống lộ tương lai)
-│   │       ├── trading/               # Paper Trading, DOM Ladder, Coaching & khóa lô T+2 FIFO
-│   │       ├── journal/               # Quy tắc bước giá HOSE/HNX/UPCOM/VN30F, lịch nghỉ lễ VN & nhật ký giao dịch
-│   │       ├── alerts/                # Cảnh báo giá, chỉ báo, đường vẽ & confluence
-│   │       ├── drawings/              # Mô hình hình học & lưu trữ công cụ vẽ
-│   │       └── viewport/              # Hệ tọa độ TimeScale/PriceScale, template & snapshot
-│   └── sumi-data/                     # Tầng dữ liệu thị trường Cache-First + CLI kiểm thử
-│       └── src/
-│           ├── types.rs               # Interval (1m..1M), KLinePeriod, OhlcvBar (Unix ms + turnover), VN bands & ticks
-│           ├── provider.rs            # Trait MarketDataProvider + BarSubscription / QuoteSubscription
-│           ├── tradingview_feed.rs    # tradingview-rs (rustls-tls only, ProData -> Data fallback, auto-reconnect)
-│           ├── rate_limit.rs          # TokenBucketRateLimiter + Semaphore bảo vệ truy vấn batch/Scanner
-│           ├── storage.rs             # SQLite WAL (WITHOUT ROWID clustered B-tree), phân trang Init/Forward/Backward
-│           ├── cache_service.rs       # MarketDataService: Cache-First (< 5ms), gap-fill tự động & chế độ Offline
-│           ├── cafef_importer.rs      # Nhập nhanh CafeF CSV (471+ mã & chỉ số VN, chuẩn hóa raw VND)
-│           ├── logging.rs             # Bộ lọc tracing áp dụng tradingview::RECOMMENDED_LOG_DIRECTIVES
-│           └── bin/sumi-data-cli.rs   # Công cụ CLI kiểm thử thực tế
-├── assets/fixtures/                   # Dữ liệu mẫu kiểm thử tự động
-└── data/                              # (gitignored) data/raw/cafef/ & data/cache/sumi_market.db
+│   ├── sumi-core/                      # Lõi định lượng thuần Rust (199 unit tests, zero GUI / WASM-safe)
+│   │   └── src/                        # OHLCV, CafeF 5-rule split norm, 24+ chỉ báo, 101 tín hiệu Scanner,
+│   │                                   # Backtest / Walk-Forward / Monte Carlo, Bar Replay nhân quả, Paper Broker VSD T+2
+│   ├── sumi-data/                      # Tầng dữ liệu thị trường Cache-First + CLI (sumi-data-cli)
+│   │   └── src/                        # tradingview-rs (rustls-tls thuần Rust), SQLite WAL WITHOUT ROWID (< 1ms),
+│   │                                   # TokenBucketRateLimiter, CafeFImporter (473 mã VN), Offline fallback
+│   └── sumi-desktop/                   # Ứng dụng Tauri v2 (47 IPC commands, Tauri Channels realtime, SQLite Workspace)
+├── ui/                                 # Giao diện Supercharts (React 19 + TypeScript + Tailwind CSS v4 + klinecharts v10.1.1)
+│   └── src/
+│       ├── chart/                      # KLineViewport v10, 37+ Overlays (Long/Short R:R, Ruler, Elliott, Gann, Fib...),
+│       │                               # 27 chỉ báo gốc + 5 chỉ báo định lượng (Ichimoku Kumo, SuperTrend, VWAP, ATR, StochRSI)
+│       ├── components/                 # TopHeader (38px), LeftDrawingRail (42px), RightWidgetBar, ReplayControlBar,
+│       │                               # Modals (<dialog> chuẩn), BottomTradingDock (Paper T+2 / WFO-MC / Screener 101)
+│       └── store/                      # Zustand state đồng bộ Multi-Chart (1 / 2v / 2h / 4 ô) & SQLite
+└── assets/fixtures/                    # Dữ liệu mẫu kiểm thử tự động
 ```
 
 ---
 
 ## 2. Yêu Cầu Môi Trường
 
-- **macOS (`aarch64-apple-darwin` / `x86_64-apple-darwin`):** Xcode Command Line Tools + Rust stable (`>= 1.91`).
-- **Windows 10/11 (`x86_64-pc-windows-msvc`):** Visual Studio C++ Build Tools (*Desktop development with C++* + Windows SDK) + Rust stable (`>= 1.91`). Không cần `wreq`, BoringSSL, CMake hay Perl (`tradingview-rs` dùng `default-features = false, features = ["rustls-tls"]`).
+- **Windows 10/11 (`x86_64-pc-windows-msvc`):**
+  1. [Rust stable (`>= 1.91`)](https://rustup.rs) kèm **Visual Studio C++ Build Tools** (*Desktop development with C++* + Windows 10/11 SDK).
+  2. [Node.js LTS (`>= 20`)](https://nodejs.org).
+  3. `WebView2` (đã tích hợp sẵn mặc định trên Windows 10/11).
+  *(Lưu ý: Không cần cài CMake, Perl hay BoringSSL vì `tradingview-rs` được ghim `default-features = false, features = ["rustls-tls"]`).*
+- **macOS (`aarch64-apple-darwin` / `x86_64-apple-darwin`):**
+  1. Xcode Command Line Tools + Rust stable (`>= 1.91`).
+  2. Node.js LTS (`>= 20`).
 
 ---
 
-## 3. Kiểm Định Chất Lượng & Kiểm Thử
+## 3. Khởi Chạy & Đóng Gói Ứng Dụng
+
+### Trên Windows 10/11 (PowerShell)
+
+```powershell
+# Cài dependencies UI, chạy toàn bộ kiểm định TypeScript + Clippy + Tests, đóng gói bộ cài (.exe / .msi / NSIS) và mở ứng dụng:
+powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1 -Run
+
+# Build & chạy nhanh (bỏ qua bước chạy lại unit tests):
+powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1 -SkipTests -Run
+```
+
+Sản phẩm đóng gói được xuất ra tại `dist\SumiSupercharts-win64\`.
+
+### Trên macOS (Terminal)
 
 ```bash
-# Định dạng mã nguồn
-cargo fmt --all -- --check
+# 1. Cài đặt gói giao diện và kiểm tra build Frontend
+npm --prefix ui install
+npm --prefix ui run build
 
-# Clippy toàn workspace (zero warnings)
-cargo clippy --workspace --all-targets -- -D warnings
+# 2. Chạy chế độ phát triển trực tiếp (Hot-reload Tauri v2 + Vite)
+cd crates/sumi-desktop && npx --prefix ../../ui tauri dev
 
-# Clippy kiểm tra tương thích Windows MSVC (chạy trực tiếp trên Windows hoặc với Windows SDK;
-# trên macOS thuần, sumi-core thuần Rust kiểm tra trực tiếp không cần Windows SDK)
-cargo clippy -p sumi-core --all-targets --target x86_64-pc-windows-msvc -- -D warnings
-cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
-
-# Chạy toàn bộ unit tests + mock/offline integration tests (216 tests)
-cargo test --workspace
+# 3. Đóng gói ứng dụng macOS (.app / .dmg)
+cd crates/sumi-desktop && npx --prefix ../../ui tauri build
 ```
 
 ---
 
-## 4. Sử Dụng `sumi-data-cli`
+## 4. Nạp Dữ Liệu Lịch Sử CafeF (Tùy Chọn — Khuyên Dùng Cho Offline & Toàn Sàn VN)
+
+- **Cách 1 (Tự động khi khởi động):** Đặt các file CSV của CafeF (`CafeF.SolieuGD.Adjusted*.csv`, `CafeF.INDEX*.csv`) vào thư mục `data/raw/cafef/` hoặc `work/CafeFData/` trước khi mở app lần đầu — ứng dụng sẽ tự động nạp toàn bộ 473+ mã vào kho SQLite cục bộ.
+- **Cách 2 (Trực tiếp trên Giao diện):** Nhấp biểu tượng **Kho Dữ Liệu SQLite** (cạnh nút Wifi góc phải trên cùng thanh Topbar), nhập đường dẫn thư mục chứa CSV CafeF (ví dụ `D:\CafeFData` hoặc `data/raw/cafef`) và bấm **"Nạp thư mục CafeF vào SQLite"**.
+- **Cách 3 (Qua CLI `sumi-data-cli`):**
+  ```bash
+  cargo run -p sumi-data --bin sumi-data-cli -- import-cafef --dir data/raw/cafef
+  ```
+- Ngay cả khi **chưa nạp CafeF**, khi có kết nối Internet ứng dụng vẫn tự động tải và lưu đệm dữ liệu từ `tradingview-rs` cho biểu đồ, Watchlist và rổ mã mặc định của bộ lọc Screener.
+
+---
+
+## 5. Cổng Kiểm Định Chất Lượng
 
 ```bash
-# 1. Nạp dữ liệu lịch sử nền CafeF (473 mã & chỉ số VN -> ~951k nến ngày) vào SQLite cache
-cargo run --bin sumi-data-cli -- import-cafef --dir data/raw/cafef
+# Kiểm tra kiểu TypeScript & đóng gói giao diện
+npm --prefix ui run typecheck
+npm --prefix ui run build
 
-# 2. Tìm kiếm mã chứng khoán / crypto / phái sinh
-cargo run --bin sumi-data-cli -- search FPT --exchange HOSE
-cargo run --bin sumi-data-cli -- search BTCUSDT --exchange BINANCE
-
-# 3. Phân giải metadata (precision, bước giá biến thiên HOSE, biên độ Trần/Sàn VN)
-cargo run --bin sumi-data-cli -- resolve HOSE:FPT
-cargo run --bin sumi-data-cli -- resolve HOSE:VCB
-cargo run --bin sumi-data-cli -- resolve "HNX:VN30F1!"
-cargo run --bin sumi-data-cli -- resolve BINANCE:BTCUSDT
-cargo run --bin sumi-data-cli -- resolve FX_IDC:USDVND
-
-# 4. Tải nến OHLCV Cache-First (Init / Forward --before / Backward --after)
-cargo run --bin sumi-data-cli -- bars HOSE:FPT --interval 15m --limit 200
-cargo run --bin sumi-data-cli -- bars HOSE:FPT --interval 1D --limit 200
-cargo run --bin sumi-data-cli -- --offline bars HOSE:HPG --interval 1D --limit 50
-
-# 5. Streaming nến & quote thời gian thực (tự lưu tích lũy vào SQLite)
-cargo run --bin sumi-data-cli -- stream BINANCE:BTCUSDT --interval 1m --max-events 5
-cargo run --bin sumi-data-cli -- stream BINANCE:BTCUSDT --quotes --max-events 5
+# Kiểm tra định dạng, Clippy không cảnh báo và chạy toàn bộ bộ kiểm thử (221 tests)
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```

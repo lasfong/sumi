@@ -1,0 +1,288 @@
+import React, { useEffect, useMemo, useRef, useState } from 'react'
+import * as api from './api/tauri'
+import { KLineViewport } from './chart/KLineViewport'
+import { BottomTradingDock } from './components/BottomTradingDock'
+import { LeftDrawingRail } from './components/LeftDrawingRail'
+import { ReplayControlBar } from './components/ReplayControlBar'
+import { RightWidgetBar } from './components/RightWidgetBar'
+import { TopHeader } from './components/TopHeader'
+import { IndicatorsModal } from './components/modals/IndicatorsModal'
+import { SymbolSearchModal } from './components/modals/SymbolSearchModal'
+import { useWorkspaceStore } from './store/workspaceStore'
+
+export const App: React.FC = () => {
+  const bootstrap = useWorkspaceStore((s) => s.bootstrap)
+  const gridLayout = useWorkspaceStore((s) => s.gridLayout)
+  const panes = useWorkspaceStore((s) => s.panes)
+  const activeSlotId = useWorkspaceStore((s) => s.activeSlotId)
+  const rightPanelOpen = useWorkspaceStore((s) => s.rightPanelOpen)
+  const rightPanelWidth = useWorkspaceStore((s) => s.rightPanelWidth)
+  const bottomDockOpen = useWorkspaceStore((s) => s.bottomDockOpen)
+  const bottomDockMaximized = useWorkspaceStore((s) => s.bottomDockMaximized)
+  const bottomDockHeight = useWorkspaceStore((s) => s.bottomDockHeight)
+  const watchlists = useWorkspaceStore((s) => s.watchlists)
+  const activeWatchlistId = useWorkspaceStore((s) => s.activeWatchlistId)
+  const dataStatus = useWorkspaceStore((s) => s.dataStatus)
+  const toasts = useWorkspaceStore((s) => s.toasts)
+
+  const setActiveSlotId = useWorkspaceStore((s) => s.setActiveSlotId)
+  const setRightPanelWidth = useWorkspaceStore((s) => s.setRightPanelWidth)
+  const setBottomDockHeight = useWorkspaceStore((s) => s.setBottomDockHeight)
+  const applyLiveQuote = useWorkspaceStore((s) => s.applyLiveQuote)
+  const openSymbolSearch = useWorkspaceStore((s) => s.openSymbolSearch)
+  const setActiveDrawingTool = useWorkspaceStore((s) => s.setActiveDrawingTool)
+  const setReplayPlaying = useWorkspaceStore((s) => s.setReplayPlaying)
+  const dismissToast = useWorkspaceStore((s) => s.dismissToast)
+
+  const [draggingHandle, setDraggingHandle] = useState<'right' | 'bottom' | null>(null)
+  const dragStartRef = useRef<{ x: number; y: number; startSize: number }>({ x: 0, y: 0, startSize: 0 })
+
+  // 1. Bootstrap SQLite workspace state on startup
+  useEffect(() => {
+    void bootstrap()
+  }, [bootstrap])
+
+  // 2. Live Quote streaming for active watchlist symbols via Tauri Channel
+  const activeWatchlistTickersKey = useMemo(() => {
+    const activeWl = watchlists.find((w) => w.id === activeWatchlistId) ?? watchlists[0]
+    return (activeWl?.tickers ?? []).join(',')
+  }, [watchlists, activeWatchlistId])
+
+  useEffect(() => {
+    if (!activeWatchlistTickersKey || dataStatus?.offlineMode) return
+    const tickers = activeWatchlistTickersKey.split(',').filter(Boolean)
+    if (tickers.length === 0) return
+
+    let active = true
+    void api.subscribeQuotes(tickers, (quote) => {
+      if (active) {
+        applyLiveQuote(quote)
+      }
+    })
+    return () => {
+      active = false
+      void api.unsubscribeQuotes()
+    }
+  }, [activeWatchlistTickersKey, dataStatus?.offlineMode, applyLiveQuote])
+
+  // 3. Global TradingView Hotkeys (type any letter -> Symbol Search, Alt+T/H/V/F -> Draw, Space -> Replay)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null
+      const inInput =
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      const state = useWorkspaceStore.getState()
+      if (inInput || state.symbolSearchOpen || state.indicatorsModalOpen) return
+
+      // Drawing hotkeys
+      if (e.altKey && !e.ctrlKey && !e.metaKey) {
+        const k = e.key.toLowerCase()
+        if (k === 't') {
+          e.preventDefault()
+          setActiveDrawingTool('segment')
+          return
+        }
+        if (k === 'h') {
+          e.preventDefault()
+          setActiveDrawingTool('horizontalStraightLine')
+          return
+        }
+        if (k === 'j') {
+          e.preventDefault()
+          setActiveDrawingTool('horizontalRayLine')
+          return
+        }
+        if (k === 'v') {
+          e.preventDefault()
+          setActiveDrawingTool('verticalStraightLine')
+          return
+        }
+        if (k === 'f') {
+          e.preventDefault()
+          setActiveDrawingTool('fibonacciLine')
+          return
+        }
+      }
+
+      if (e.shiftKey && e.key.toLowerCase() === 'm' && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault()
+        setActiveDrawingTool('priceDateRange')
+        return
+      }
+
+      if (e.key === ' ' && state.replay?.active) {
+        e.preventDefault()
+        setReplayPlaying(!state.replayPlaying)
+        return
+      }
+
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        openSymbolSearch('')
+        return
+      }
+
+      // TradingView signature: typing any alphanumeric character opens Symbol Search immediately!
+      if (!e.ctrlKey && !e.metaKey && !e.altKey && /^[a-zA-Z0-9]$/.test(e.key)) {
+        e.preventDefault()
+        openSymbolSearch(e.key.toUpperCase())
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [openSymbolSearch, setActiveDrawingTool, setReplayPlaying])
+
+  // 4. Smooth pointer-based Resizable Split Panes (Right Widgetbar + Bottom Dock)
+  useEffect(() => {
+    if (!draggingHandle) return
+    const onPointerMove = (e: PointerEvent) => {
+      if (draggingHandle === 'right') {
+        const delta = dragStartRef.current.x - e.clientX
+        setRightPanelWidth(dragStartRef.current.startSize + delta)
+      } else if (draggingHandle === 'bottom') {
+        const delta = dragStartRef.current.y - e.clientY
+        setBottomDockHeight(dragStartRef.current.startSize + delta)
+      }
+    }
+    const onPointerUp = () => setDraggingHandle(null)
+    window.addEventListener('pointermove', onPointerMove)
+    window.addEventListener('pointerup', onPointerUp)
+    return () => {
+      window.removeEventListener('pointermove', onPointerMove)
+      window.removeEventListener('pointerup', onPointerUp)
+    }
+  }, [draggingHandle, setRightPanelWidth, setBottomDockHeight])
+
+  const visiblePanes = useMemo(() => {
+    if (gridLayout === '1') return panes.slice(0, 1)
+    if (gridLayout === '2v' || gridLayout === '2h') return panes.slice(0, 2)
+    return panes.slice(0, 4)
+  }, [gridLayout, panes])
+
+  const gridClass =
+    gridLayout === '1'
+      ? 'grid-cols-1 grid-rows-1'
+      : gridLayout === '2v'
+        ? 'grid-cols-2 grid-rows-1'
+        : gridLayout === '2h'
+          ? 'grid-cols-1 grid-rows-2'
+          : 'grid-cols-2 grid-rows-2'
+
+  return (
+    <div
+      className="flex flex-col w-screen h-screen overflow-hidden"
+      style={{ backgroundColor: 'var(--tv-bg-chart)', color: 'var(--tv-text-primary)' }}
+    >
+      {/* 38px Supercharts Top Header */}
+      <TopHeader />
+
+      {/* Main Workstation Body: Left Drawing Rail | Center (Charts + Bottom Dock) | Right Widgetbar */}
+      <div className="flex flex-1 min-h-0 overflow-hidden">
+        {/* 42px Left Drawing Rail (37+ tools) */}
+        <LeftDrawingRail />
+
+        {/* Center Workspace Column */}
+        <main className="flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden">
+          {/* Causal Bar Replay Floating Control Strip (when active) */}
+          <ReplayControlBar />
+
+          {/* Multi-Chart Viewport Grid (1 / 2v / 2h / 4) */}
+          <div className={`grid ${gridClass} flex-1 min-h-0 overflow-hidden`}>
+            {visiblePanes.map((pane) => (
+              <KLineViewport
+                key={pane.slotId}
+                pane={pane}
+                isActive={pane.slotId === activeSlotId}
+                isMultiPane={visiblePanes.length > 1}
+                onActivate={() => setActiveSlotId(pane.slotId)}
+              />
+            ))}
+          </div>
+
+          {/* Horizontal Resize Handle for Bottom Trading Dock */}
+          {bottomDockOpen && !bottomDockMaximized && (
+            <div
+              role="separator"
+              aria-orientation="horizontal"
+              aria-label="Kéo thay đổi chiều cao thanh giao dịch dưới"
+              className="split-handle-h"
+              data-dragging={draggingHandle === 'bottom'}
+              onPointerDown={(e) => {
+                dragStartRef.current = { x: e.clientX, y: e.clientY, startSize: bottomDockHeight }
+                setDraggingHandle('bottom')
+              }}
+            />
+          )}
+
+          {/* Bottom Trading Dock (Paper Trading VN T+2 / Strategy Tester / Stock Screener 101) */}
+          <BottomTradingDock />
+        </main>
+
+        {/* Vertical Resize Handle for Right Widgetbar */}
+        {rightPanelOpen && (
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Kéo thay đổi độ rộng bảng Watchlist"
+            className="split-handle-v"
+            data-dragging={draggingHandle === 'right'}
+            onPointerDown={(e) => {
+              dragStartRef.current = { x: e.clientX, y: e.clientY, startSize: rightPanelWidth }
+              setDraggingHandle('right')
+            }}
+          />
+        )}
+
+        {/* Right Widgetbar (Watchlist Realtime + VN Symbol Detail + Price Alerts) */}
+        {rightPanelOpen && <RightWidgetBar />}
+      </div>
+
+      {/* Native <dialog> Modals */}
+      <SymbolSearchModal />
+      <IndicatorsModal />
+
+      {/* Non-intrusive Toast Stack (bottom-left of chart area so right Symbol Details card stays uncovered) */}
+      {toasts.length > 0 && (
+        <div
+          aria-live="polite"
+          className="fixed bottom-4 left-14 z-50 flex flex-col gap-1.5 max-w-sm pointer-events-none"
+        >
+          {toasts.map((t) => (
+            <div
+              key={t.id}
+              className="pointer-events-auto flex items-center justify-between gap-2 px-3 py-2 rounded-md shadow-xl text-[12px]"
+              style={{
+                backgroundColor: 'var(--tv-bg-elevated)',
+                border: `1px solid ${
+                  t.kind === 'error'
+                    ? '#F23645'
+                    : t.kind === 'success'
+                      ? '#089981'
+                      : t.kind === 'warning'
+                        ? '#FBC02D'
+                        : 'var(--tv-accent)'
+                }`,
+                color: 'var(--tv-text-primary)',
+              }}
+            >
+              <span>{t.message}</span>
+              <button
+                type="button"
+                className="border-0 bg-transparent cursor-pointer text-[var(--tv-text-secondary)] hover:text-[var(--tv-text-primary)]"
+                onClick={() => dismissToast(t.id)}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+export default App

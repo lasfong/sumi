@@ -4,6 +4,9 @@ target/
 dist/
 build/
 exports/
+ui/node_modules/
+ui/dist/
+crates/sumi-desktop/gen/schemas/
 
 # Local market data, SQLite cache & reference clones
 data/raw/
