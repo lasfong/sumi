@@ -421,8 +421,12 @@ export const webFallbackApi = {
     const bars = generateSeries(ticker, interval, 480)
     let cursor = Math.max(20, bars.length - 60)
     if (cutTimestampMs != null) {
-      const idx = bars.findIndex((b) => b.timestamp >= cutTimestampMs)
-      if (idx > 1) cursor = idx
+      let cut = 1
+      for (let i = 0; i < bars.length; i++) {
+        if (bars[i].timestamp <= cutTimestampMs) cut = i
+        else break
+      }
+      cursor = Math.max(1, Math.min(bars.length - 1, cut))
     }
     webReplay = { ticker, interval, bars, cursor, speed: 1 }
     return {
@@ -437,6 +441,29 @@ export const webFallbackApi = {
       visibleBars: bars.slice(0, cursor + 1),
       steppedBar: null,
       broker: this.brokerState(ticker, interval),
+    }
+  },
+
+  replayJump(targetTimestampMs: number): ReplaySnapshotResponse {
+    if (!webReplay) throw new Error('Replay chưa khởi động')
+    let cut = 1
+    for (let i = 0; i < webReplay.bars.length; i++) {
+      if (webReplay.bars[i].timestamp <= targetTimestampMs) cut = i
+      else break
+    }
+    webReplay.cursor = Math.max(1, Math.min(webReplay.bars.length - 1, cut))
+    return {
+      active: true,
+      status: webReplay.cursor >= webReplay.bars.length - 1 ? 'Completed' : 'Paused',
+      ticker: webReplay.ticker,
+      interval: webReplay.interval,
+      cursorIndex: webReplay.cursor,
+      totalBars: webReplay.bars.length,
+      cutoffTimestampMs: webReplay.bars[webReplay.cursor].timestamp,
+      speedMultiplier: webReplay.speed,
+      visibleBars: webReplay.bars.slice(0, webReplay.cursor + 1),
+      steppedBar: null,
+      broker: this.brokerState(webReplay.ticker, webReplay.interval),
     }
   },
 
@@ -466,10 +493,14 @@ export const webFallbackApi = {
 
   brokerState(ticker: string, interval: IntervalKey): BrokerStateSnapshot {
     const res = this.resolveSymbol(ticker)
-    const mark = res.lastPrice ?? 100000
+    const replayBar =
+      webReplay && webReplay.ticker === ticker && webReplay.interval === interval
+        ? webReplay.bars[webReplay.cursor]
+        : null
+    const mark = replayBar?.close ?? res.lastPrice ?? 100000
     const unreal = webBrokerPos ? (mark - webBrokerPos.avg_entry_price) * webBrokerPos.quantity : 0
     const equity = webBrokerCash + unreal
-    const nowSec = Math.floor(Date.now() / 1000)
+    const nowSec = replayBar ? Math.floor(replayBar.timestamp / 1000) : Math.floor(Date.now() / 1000)
     const sellable = webBrokerLots.filter((l) => nowSec >= l.sellable_at_timestamp).reduce((a, b) => a + b.remaining_qty, 0)
     const totalHeld = webBrokerLots.reduce((a, b) => a + b.remaining_qty, 0)
     return {
@@ -704,35 +735,66 @@ export const webFallbackApi = {
   },
 
   runBacktest(input: StrategyBacktestInput): StrategyBacktestResponse {
-    const bars = generateSeries(input.ticker, input.interval as IntervalKey, 360)
-    const equityCurve = bars.map((b, i) => {
-      const factor = 1 + (i / bars.length) * 0.24 + Math.sin(i / 14) * 0.045
-      const eq = input.initialCash * factor
-      return {
-        barIndex: i,
-        timestampMs: b.timestamp,
-        equity: eq,
-        underwaterPct: Math.min(0, Math.sin(i / 14) * 4.5 - 1.5),
-      }
-    })
-    const trades = [45, 110, 175, 240, 305].map((idx, k) => {
+    const presetLabels: Record<StrategyBacktestInput['preset'], string> = {
+      sma_ema: 'SMA/EMA Trend Crossover',
+      rsi_mean_rev: 'RSI Mean Reversion',
+      macd: 'MACD Momentum',
+      bb_squeeze: 'Bollinger Squeeze Breakout',
+      donchian_atr: 'Donchian ATR Breakout',
+      rsi_bb: 'RSI + Bollinger Confluence',
+    }
+    let bars = generateSeries(input.ticker, input.interval as IntervalKey, 480)
+    if (input.fromTimestampMs != null && input.toTimestampMs != null && input.fromTimestampMs > input.toTimestampMs) {
+      throw new Error("Khoảng thời gian Backtest không hợp lệ: 'Từ ngày' phải nhỏ hơn hoặc bằng 'Đến ngày'")
+    }
+    if (input.fromTimestampMs != null || input.toTimestampMs != null) {
+      bars = bars.filter(
+        (b) =>
+          (input.fromTimestampMs == null || b.timestamp >= input.fromTimestampMs) &&
+          (input.toTimestampMs == null || b.timestamp <= input.toTimestampMs),
+      )
+    }
+    if (bars.length < 30) {
+      throw new Error(`Không đủ lịch sử nến trong khoảng thời gian đã chọn cho ${input.ticker} (có ${bars.length} nến, cần >= 30)`)
+    }
+    const paramSeed =
+      (input.fastSma ?? 20) +
+      (input.slowEma ?? 50) +
+      (input.rsiPeriod ?? 14) +
+      (input.macdFast ?? 12) +
+      (input.bbPeriod ?? 20) +
+      (input.donchianEntry ?? 20)
+    const step = Math.max(18, Math.floor(bars.length / 7))
+    const hold = Math.max(8, Math.min(26, 12 + (paramSeed % 13)))
+    const entryIndices: number[] = []
+    for (let idx = Math.min(24, Math.floor(bars.length * 0.1)); idx + hold < bars.length; idx += step) {
+      entryIndices.push(idx)
+      if (entryIndices.length >= 8) break
+    }
+
+    const trades = entryIndices.map((idx, k) => {
       const entry = bars[idx]
-      const exit = bars[Math.min(bars.length - 1, idx + 22)]
-      const ret = ((exit.close - entry.close) / entry.close) * 100
-      const qty = 1000
+      const exitIdx = Math.min(bars.length - 1, idx + hold)
+      const exit = bars[exitIdx]
+      const isShort = input.direction === 'short' || (input.direction === 'both' && k % 2 === 1)
+      const ret = isShort
+        ? ((entry.close - exit.close) / entry.close) * 100
+        : ((exit.close - entry.close) / entry.close) * 100
+      const qty = Math.max(100, Math.floor((input.initialCash * 0.85) / Math.max(1, entry.close) / 100) * 100)
+      const grossPnl = (isShort ? entry.close - exit.close : exit.close - entry.close) * qty
       return {
         tradeId: k + 1,
-        side: 'LONG',
+        side: isShort ? 'SHORT' : 'LONG',
         quantity: qty,
         entryBarIndex: idx,
-        exitBarIndex: idx + 22,
+        exitBarIndex: exitIdx,
         entryTimestampMs: entry.timestamp,
         exitTimestampMs: exit.timestamp,
         entryPrice: entry.close,
         exitPrice: exit.close,
-        barsHeld: 22,
-        grossPnl: (exit.close - entry.close) * qty,
-        netPnl: (exit.close - entry.close) * qty * 0.996,
+        barsHeld: exitIdx - idx,
+        grossPnl,
+        netPnl: grossPnl * 0.996,
         returnPct: ret,
         rMultiple: ret / 3.5,
         maePct: -Math.abs(ret * 0.45 + 1.1),
@@ -740,40 +802,58 @@ export const webFallbackApi = {
         exitReason: ret >= 0 ? 'TP' : 'SL',
       }
     })
+
+    const totalNetPnl = trades.reduce((acc, t) => acc + t.netPnl, 0)
+    const totalRetPct = input.initialCash > 0 ? (totalNetPnl / input.initialCash) * 100 : 0
+    const equityCurve = bars.map((b, i) => {
+      const progress = i / Math.max(1, bars.length - 1)
+      const eq = input.initialCash + totalNetPnl * progress + Math.sin(i / 14) * input.initialCash * 0.025
+      return {
+        barIndex: i,
+        timestampMs: b.timestamp,
+        equity: eq,
+        underwaterPct: Math.min(0, Math.sin(i / 14) * 4.5 - 1.5),
+      }
+    })
+    const winners = trades.filter((t) => t.netPnl > 0)
+    const losers = trades.filter((t) => t.netPnl <= 0)
+    const sumWin = winners.reduce((a, b) => a + b.netPnl, 0)
+    const sumLoss = Math.abs(losers.reduce((a, b) => a + b.netPnl, 0))
+
     return {
       ticker: input.ticker,
       interval: input.interval,
-      presetLabel: 'SMA/EMA Trend Crossover',
+      presetLabel: presetLabels[input.preset] ?? 'SMA/EMA Trend Crossover',
       barCount: bars.length,
       tearsheet: {
         initial_cash: input.initialCash,
-        final_cash: input.initialCash * 1.24,
-        final_equity: input.initialCash * 1.24,
-        realized_net_profit: input.initialCash * 0.24,
-        total_return_abs: input.initialCash * 0.24,
-        total_return_pct: 24.0,
-        cagr_pct: 18.4,
+        final_cash: input.initialCash + totalNetPnl,
+        final_equity: input.initialCash + totalNetPnl,
+        realized_net_profit: totalNetPnl,
+        total_return_abs: totalNetPnl,
+        total_return_pct: totalRetPct,
+        cagr_pct: totalRetPct * 0.85,
         max_drawdown_abs: input.initialCash * 0.062,
         max_drawdown_pct: 6.2,
         max_drawdown_duration_bars: 28,
-        sharpe_ratio: 1.72,
-        sortino_ratio: 2.38,
-        calmar_ratio: 2.96,
+        sharpe_ratio: totalRetPct >= 0 ? 1.54 : -0.45,
+        sortino_ratio: totalRetPct >= 0 ? 2.12 : -0.62,
+        calmar_ratio: totalRetPct / 6.2,
         num_trades: trades.length,
-        num_winners: trades.filter((t) => t.netPnl > 0).length,
-        num_losers: trades.filter((t) => t.netPnl <= 0).length,
+        num_winners: winners.length,
+        num_losers: losers.length,
         num_breakeven: 0,
-        win_rate_pct: (trades.filter((t) => t.netPnl > 0).length / trades.length) * 100,
-        profit_factor: 2.18,
-        expectancy_net: (input.initialCash * 0.24) / trades.length,
-        avg_trade_return_pct: 4.8,
-        avg_win_pct: 8.2,
-        avg_loss_pct: -3.4,
-        avg_bars_held: 22,
-        avg_r_multiple: 1.32,
+        win_rate_pct: trades.length ? (winners.length / trades.length) * 100 : 0,
+        profit_factor: sumLoss > 0 ? sumWin / sumLoss : winners.length > 0 ? 3.5 : 0,
+        expectancy_net: trades.length ? totalNetPnl / trades.length : 0,
+        avg_trade_return_pct: trades.length ? trades.reduce((a, b) => a + b.returnPct, 0) / trades.length : 0,
+        avg_win_pct: winners.length ? winners.reduce((a, b) => a + b.returnPct, 0) / winners.length : 0,
+        avg_loss_pct: losers.length ? losers.reduce((a, b) => a + b.returnPct, 0) / losers.length : 0,
+        avg_bars_held: hold,
+        avg_r_multiple: 1.18,
         exposure_pct: 44.5,
-        total_fees_and_tax: 2450000,
-        low_sample_warning: true,
+        total_fees_and_tax: Math.abs(totalNetPnl) * 0.04 + 850_000,
+        low_sample_warning: trades.length < 15,
       },
       inSampleTearsheet: null,
       outOfSampleTearsheet: null,
@@ -856,8 +936,13 @@ export const webFallbackApi = {
   runScreener(input: StockScreenerInput): StockScreenerResponse {
     const q = (input.searchQuery ?? '').trim().toUpperCase()
     const ex = input.exchangeFilter.toUpperCase()
+    const regimeTarget = (input.regimeFilter ?? '').trim().toLowerCase()
     const rows = CURATED_SYMBOLS.filter((s) => s.marketType === 'stock')
-      .filter((s) => ex === 'ALL' || ex === 'WATCHLIST' || s.exchange === ex)
+      .filter((s) => {
+        if (ex === 'WATCHLIST') return !input.tickers?.length || input.tickers.includes(s.ticker)
+        if (ex === 'ALL') return ['HOSE', 'HNX', 'UPCOM'].includes(s.exchange)
+        return s.exchange === ex
+      })
       .filter((s) => !q || s.symbol.includes(q) || s.description.toUpperCase().includes(q))
       .map((s, idx) => {
         const res = this.resolveSymbol(s.ticker)
@@ -883,6 +968,7 @@ export const webFallbackApi = {
           lastTimestampMs: Date.now(),
         }
       })
+      .filter((r) => !regimeTarget || r.regime.toLowerCase() === regimeTarget)
     return {
       totalCatalogSignals: 101,
       scannedSymbols: rows.length,

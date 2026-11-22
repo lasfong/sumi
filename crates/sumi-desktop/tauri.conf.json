@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Sumi Supercharts",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "identifier": "com.sumi.supercharts",
   "build": {
     "beforeDevCommand": "npm --prefix ../ui run dev",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Sumi Supercharts v2.0",
+        "title": "Sumi Supercharts v2.1",
         "width": 1440,
         "height": 900,
         "minWidth": 1024,

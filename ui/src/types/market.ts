@@ -6,7 +6,7 @@ export type ChartStyleKind = 'candle_solid' | 'candle_stroke' | 'heikin_ashi' | 
 
 export type PriceScaleKind = 'normal' | 'percentage' | 'logarithm'
 
-export type GridLayoutKind = '1' | '2v' | '2h' | '4'
+export type GridLayoutKind = '1' | '2v' | '2h' | '3' | '4'
 
 export type MagnetMode = 'normal' | 'weak_magnet' | 'strong_magnet'
 
@@ -414,12 +414,29 @@ export interface StrategyBacktestInput {
   rsiPeriod?: number | null
   rsiOversold?: number | null
   rsiOverbought?: number | null
+  rsiConfluenceBuy?: number | null
+  rsiConfluenceSell?: number | null
+  macdFast?: number | null
+  macdSlow?: number | null
+  macdSignal?: number | null
+  macdTrendEma?: number | null
   bbPeriod?: number | null
   bbStdMult?: number | null
+  maxSqueezeBwPct?: number | null
   donchianEntry?: number | null
   donchianExit?: number | null
   inSampleSplitPct?: number | null
   maxBars?: number | null
+  fromTimestampMs?: number | null
+  toTimestampMs?: number | null
+}
+
+export interface BacktestChartOverlayState {
+  ticker: string
+  interval: string
+  presetLabel: string
+  trades: StrategyTradeDto[]
+  visible: boolean
 }
 
 export interface BacktestTearsheet {

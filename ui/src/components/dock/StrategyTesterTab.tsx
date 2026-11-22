@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { BarChart3, Dice5, Play, TrendingUp } from 'lucide-react'
+import { BarChart3, Calendar, Dice5, Eye, EyeOff, Play, Scissors, TrendingUp } from 'lucide-react'
 import * as api from '../../api/tauri'
 import { useWorkspaceStore } from '../../store/workspaceStore'
 import type {
@@ -80,15 +80,38 @@ function EquityAndDrawdownChart({ points }: { points: StrategyEquityPointDto[] }
 export const StrategyTesterTab: React.FC = () => {
   const panes = useWorkspaceStore((s) => s.panes)
   const activeSlotId = useWorkspaceStore((s) => s.activeSlotId)
+  const replay = useWorkspaceStore((s) => s.replay)
+  const backtestOverlay = useWorkspaceStore((s) => s.backtestOverlay)
   const scrollActiveChartToTimestamp = useWorkspaceStore((s) => s.scrollActiveChartToTimestamp)
+  const setBacktestOverlay = useWorkspaceStore((s) => s.setBacktestOverlay)
+  const toggleBacktestOverlayVisible = useWorkspaceStore((s) => s.toggleBacktestOverlayVisible)
   const pushToast = useWorkspaceStore((s) => s.pushToast)
 
   const activePane = panes.find((p) => p.slotId === activeSlotId) ?? panes[0]
 
   const [preset, setPreset] = useState<StrategyBacktestInput['preset']>('sma_ema')
   const [direction, setDirection] = useState<'long' | 'short' | 'both'>('long')
+
+  // Dynamic strategy parameters per preset (fixes BUG-017!)
   const [fastSma, setFastSma] = useState('20')
   const [slowEma, setSlowEma] = useState('50')
+  const [rsiPeriod, setRsiPeriod] = useState('14')
+  const [rsiOversold, setRsiOversold] = useState('30')
+  const [rsiOverbought, setRsiOverbought] = useState('70')
+  const [macdFast, setMacdFast] = useState('12')
+  const [macdSlow, setMacdSlow] = useState('26')
+  const [macdSignal, setMacdSignal] = useState('9')
+  const [macdTrendEma, setMacdTrendEma] = useState('200')
+  const [bbPeriod, setBbPeriod] = useState('20')
+  const [bbStdMult, setBbStdMult] = useState('2.0')
+  const [maxSqueezeBwPct, setMaxSqueezeBwPct] = useState('10')
+  const [donchianEntry, setDonchianEntry] = useState('20')
+  const [donchianExit, setDonchianExit] = useState('10')
+
+  // Date range picker (`Từ ngày` - `Đến ngày`, fixes BUG-016!)
+  const [fromDate, setFromDate] = useState('')
+  const [toDate, setToDate] = useState('')
+
   const [stopLossPct, setStopLossPct] = useState('5')
   const [takeProfitPct, setTakeProfitPct] = useState('12')
   const [initialCash, setInitialCash] = useState('500000000')
@@ -104,6 +127,26 @@ export const StrategyTesterTab: React.FC = () => {
     activePane.ticker.startsWith('HOSE:') ||
     activePane.ticker.startsWith('HNX:') ||
     activePane.ticker.startsWith('UPCOM:')
+
+  const parseDateStartMs = (val: string): number | null => {
+    if (!val) return null
+    const ms = Date.parse(`${val}T00:00:00Z`)
+    return Number.isFinite(ms) ? ms : null
+  }
+  const parseDateEndMs = (val: string): number | null => {
+    if (!val) return null
+    const ms = Date.parse(`${val}T23:59:59.999Z`)
+    return Number.isFinite(ms) ? ms : null
+  }
+
+  const handleUseReplayRange = () => {
+    if (!replay?.active || !replay.cutoffTimestampMs) return
+    const endDate = new Date(replay.cutoffTimestampMs)
+    const startDate = new Date(replay.cutoffTimestampMs - 365 * 86_400_000)
+    setFromDate(startDate.toISOString().slice(0, 10))
+    setToDate(endDate.toISOString().slice(0, 10))
+    pushToast('info', `Đã lấy khoảng thời gian Backtest theo mốc Replay đến ${endDate.toLocaleDateString('vi-VN')}`)
+  }
 
   const buildInput = (): StrategyBacktestInput => ({
     ticker: activePane.ticker,
@@ -121,8 +164,24 @@ export const StrategyTesterTab: React.FC = () => {
     minHoldingBars: Number(minHold) || 0,
     fastSma: Number(fastSma) || 20,
     slowEma: Number(slowEma) || 50,
+    rsiPeriod: Number(rsiPeriod) || 14,
+    rsiOversold: Number(rsiOversold) || 30,
+    rsiOverbought: Number(rsiOverbought) || 70,
+    rsiConfluenceBuy: Number(rsiOversold) || 35,
+    rsiConfluenceSell: Number(rsiOverbought) || 65,
+    macdFast: Number(macdFast) || 12,
+    macdSlow: Number(macdSlow) || 26,
+    macdSignal: Number(macdSignal) || 9,
+    macdTrendEma: Number(macdTrendEma) || 200,
+    bbPeriod: Number(bbPeriod) || 20,
+    bbStdMult: Number(bbStdMult) || 2.0,
+    maxSqueezeBwPct: Number(maxSqueezeBwPct) || 10,
+    donchianEntry: Number(donchianEntry) || 20,
+    donchianExit: Number(donchianExit) || 10,
     inSampleSplitPct: 0.7,
     maxBars: 2500,
+    fromTimestampMs: parseDateStartMs(fromDate),
+    toTimestampMs: parseDateEndMs(toDate),
   })
 
   const handleRunBacktest = async () => {
@@ -130,6 +189,14 @@ export const StrategyTesterTab: React.FC = () => {
     try {
       const res = await api.runStrategyBacktest(buildInput())
       setBtResult(res)
+      // Automatically plot Buy (▲) & Sell (▼) arrows directly on the candlestick chart!
+      setBacktestOverlay({
+        ticker: res.ticker,
+        interval: res.interval,
+        presetLabel: res.presetLabel,
+        trades: res.trades,
+        visible: true,
+      })
       setView('overview')
     } catch (err) {
       pushToast('error', String(err))
@@ -207,23 +274,233 @@ export const StrategyTesterTab: React.FC = () => {
           <option value="short">Short Only</option>
         </select>
 
-        <label className="flex items-center gap-1 text-[11px]" style={{ color: 'var(--tv-text-secondary)' }}>
-          <span>Fast/Slow</span>
+        {/* Dynamic Strategy Parameters matching selected preset (fixes BUG-017!) */}
+        {preset === 'sma_ema' && (
+          <label className="flex items-center gap-1 text-[11px]" style={{ color: 'var(--tv-text-secondary)' }}>
+            <span>SMA/EMA</span>
+            <input
+              aria-label="Fast SMA"
+              type="number"
+              value={fastSma}
+              onChange={(e) => setFastSma(e.target.value)}
+              className="w-12 px-1 py-0.5 rounded text-[11px] tabular-nums text-center no-spinner"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            />
+            <input
+              aria-label="Slow EMA"
+              type="number"
+              value={slowEma}
+              onChange={(e) => setSlowEma(e.target.value)}
+              className="w-12 px-1 py-0.5 rounded text-[11px] tabular-nums text-center no-spinner"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            />
+          </label>
+        )}
+
+        {preset === 'rsi_mean_rev' && (
+          <div className="flex items-center gap-1 text-[11px]" style={{ color: 'var(--tv-text-secondary)' }}>
+            <span>RSI</span>
+            <input
+              aria-label="RSI Period"
+              type="number"
+              value={rsiPeriod}
+              onChange={(e) => setRsiPeriod(e.target.value)}
+              title="Chu kỳ RSI"
+              className="w-11 px-1 py-0.5 rounded text-[11px] tabular-nums text-center no-spinner"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            />
+            <span>OS/OB</span>
+            <input
+              aria-label="RSI Oversold"
+              type="number"
+              value={rsiOversold}
+              onChange={(e) => setRsiOversold(e.target.value)}
+              title="Ngưỡng quá bán (Oversold)"
+              className="w-11 px-1 py-0.5 rounded text-[11px] tabular-nums text-center no-spinner"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            />
+            <input
+              aria-label="RSI Overbought"
+              type="number"
+              value={rsiOverbought}
+              onChange={(e) => setRsiOverbought(e.target.value)}
+              title="Ngưỡng quá mua (Overbought)"
+              className="w-11 px-1 py-0.5 rounded text-[11px] tabular-nums text-center no-spinner"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            />
+          </div>
+        )}
+
+        {preset === 'macd' && (
+          <div className="flex items-center gap-1 text-[11px]" style={{ color: 'var(--tv-text-secondary)' }}>
+            <span>MACD</span>
+            <input
+              aria-label="MACD Fast"
+              type="number"
+              value={macdFast}
+              onChange={(e) => setMacdFast(e.target.value)}
+              title="MACD Fast EMA"
+              className="w-11 px-1 py-0.5 rounded text-[11px] tabular-nums text-center no-spinner"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            />
+            <input
+              aria-label="MACD Slow"
+              type="number"
+              value={macdSlow}
+              onChange={(e) => setMacdSlow(e.target.value)}
+              title="MACD Slow EMA"
+              className="w-11 px-1 py-0.5 rounded text-[11px] tabular-nums text-center no-spinner"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            />
+            <input
+              aria-label="MACD Signal"
+              type="number"
+              value={macdSignal}
+              onChange={(e) => setMacdSignal(e.target.value)}
+              title="MACD Signal"
+              className="w-10 px-1 py-0.5 rounded text-[11px] tabular-nums text-center no-spinner"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            />
+            <span>EMA</span>
+            <input
+              aria-label="MACD Trend EMA"
+              type="number"
+              value={macdTrendEma}
+              onChange={(e) => setMacdTrendEma(e.target.value)}
+              title="Đường lọc xu hướng EMA"
+              className="w-12 px-1 py-0.5 rounded text-[11px] tabular-nums text-center no-spinner"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            />
+          </div>
+        )}
+
+        {preset === 'bb_squeeze' && (
+          <div className="flex items-center gap-1 text-[11px]" style={{ color: 'var(--tv-text-secondary)' }}>
+            <span>BB/Std/Sqz%</span>
+            <input
+              aria-label="BB Period"
+              type="number"
+              value={bbPeriod}
+              onChange={(e) => setBbPeriod(e.target.value)}
+              className="w-11 px-1 py-0.5 rounded text-[11px] tabular-nums text-center no-spinner"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            />
+            <input
+              aria-label="BB StdDev"
+              type="number"
+              step="0.1"
+              value={bbStdMult}
+              onChange={(e) => setBbStdMult(e.target.value)}
+              className="w-11 px-1 py-0.5 rounded text-[11px] tabular-nums text-center no-spinner"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            />
+            <input
+              aria-label="Max Squeeze BW %"
+              type="number"
+              step="0.5"
+              value={maxSqueezeBwPct}
+              onChange={(e) => setMaxSqueezeBwPct(e.target.value)}
+              className="w-11 px-1 py-0.5 rounded text-[11px] tabular-nums text-center no-spinner"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            />
+          </div>
+        )}
+
+        {preset === 'donchian_atr' && (
+          <div className="flex items-center gap-1 text-[11px]" style={{ color: 'var(--tv-text-secondary)' }}>
+            <span>Kênh Vào/Ra</span>
+            <input
+              aria-label="Donchian Entry"
+              type="number"
+              value={donchianEntry}
+              onChange={(e) => setDonchianEntry(e.target.value)}
+              className="w-12 px-1 py-0.5 rounded text-[11px] tabular-nums text-center no-spinner"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            />
+            <input
+              aria-label="Donchian Exit"
+              type="number"
+              value={donchianExit}
+              onChange={(e) => setDonchianExit(e.target.value)}
+              className="w-12 px-1 py-0.5 rounded text-[11px] tabular-nums text-center no-spinner"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            />
+          </div>
+        )}
+
+        {preset === 'rsi_bb' && (
+          <div className="flex items-center gap-1 text-[11px]" style={{ color: 'var(--tv-text-secondary)' }}>
+            <span>RSI/BB</span>
+            <input
+              aria-label="RSI Period"
+              type="number"
+              value={rsiPeriod}
+              onChange={(e) => setRsiPeriod(e.target.value)}
+              title="RSI Period"
+              className="w-11 px-1 py-0.5 rounded text-[11px] tabular-nums text-center no-spinner"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            />
+            <input
+              aria-label="BB Period"
+              type="number"
+              value={bbPeriod}
+              onChange={(e) => setBbPeriod(e.target.value)}
+              title="BB Period"
+              className="w-11 px-1 py-0.5 rounded text-[11px] tabular-nums text-center no-spinner"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            />
+            <input
+              aria-label="BB StdDev"
+              type="number"
+              step="0.1"
+              value={bbStdMult}
+              onChange={(e) => setBbStdMult(e.target.value)}
+              title="BB StdDev"
+              className="w-11 px-1 py-0.5 rounded text-[11px] tabular-nums text-center no-spinner"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            />
+          </div>
+        )}
+
+        {/* Date Range Filter (Từ ngày - Đến ngày + Lấy theo vùng Replay, fixes BUG-016!) */}
+        <div className="flex items-center gap-1 text-[11px]" style={{ color: 'var(--tv-text-secondary)' }}>
+          <Calendar className="w-3 h-3 shrink-0" />
           <input
-            type="number"
-            value={fastSma}
-            onChange={(e) => setFastSma(e.target.value)}
-            className="w-13 px-1.5 py-0.5 rounded text-[11px] tabular-nums text-center no-spinner"
+            type="date"
+            aria-label="Từ ngày Backtest"
+            value={fromDate}
+            onChange={(e) => setFromDate(e.target.value)}
+            title="Từ ngày (để trống = toàn bộ lịch sử)"
+            className="px-1.5 py-0.5 rounded text-[10.5px] tabular-nums outline-none"
             style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
           />
+          <span>→</span>
           <input
-            type="number"
-            value={slowEma}
-            onChange={(e) => setSlowEma(e.target.value)}
-            className="w-13 px-1.5 py-0.5 rounded text-[11px] tabular-nums text-center no-spinner"
+            type="date"
+            aria-label="Đến ngày Backtest"
+            value={toDate}
+            onChange={(e) => setToDate(e.target.value)}
+            title="Đến ngày (để trống = hiện tại)"
+            className="px-1.5 py-0.5 rounded text-[10.5px] tabular-nums outline-none"
             style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
           />
-        </label>
+          {replay?.active && (
+            <button
+              type="button"
+              onClick={handleUseReplayRange}
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10.5px] border cursor-pointer"
+              style={{
+                backgroundColor: 'var(--tv-accent-soft)',
+                borderColor: 'var(--tv-accent)',
+                color: 'var(--tv-accent)',
+              }}
+              title="Lấy khoảng thời gian theo vùng Bar Replay hiện tại"
+            >
+              <Scissors className="w-2.5 h-2.5" />
+              <span>Theo Replay</span>
+            </button>
+          )}
+        </div>
 
         <label className="flex items-center gap-1 text-[11px]" style={{ color: 'var(--tv-text-secondary)' }}>
           <span>SL/TP %</span>
@@ -331,6 +608,22 @@ export const StrategyTesterTab: React.FC = () => {
 
         {ts && (
           <div className="flex items-center gap-3 text-[11px] tabular-nums">
+            {backtestOverlay && (
+              <button
+                type="button"
+                onClick={toggleBacktestOverlayVisible}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10.5px] font-medium border cursor-pointer"
+                style={{
+                  backgroundColor: backtestOverlay.visible ? 'var(--tv-accent-soft)' : 'transparent',
+                  borderColor: backtestOverlay.visible ? 'var(--tv-accent)' : 'var(--tv-border)',
+                  color: backtestOverlay.visible ? 'var(--tv-accent)' : 'var(--tv-text-secondary)',
+                }}
+                title="Hiện/Ẩn mũi tên tín hiệu Mua/Bán trên biểu đồ nến"
+              >
+                {backtestOverlay.visible ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
+                <span>{backtestOverlay.visible ? 'Hiện tín hiệu trên nến' : 'Đã ẩn tín hiệu'}</span>
+              </button>
+            )}
             <span>
               <span style={{ color: 'var(--tv-text-secondary)' }}>Lợi nhuận: </span>
               <strong style={{ color: ts.total_return_pct >= 0 ? 'var(--tv-up)' : 'var(--tv-down)' }}>

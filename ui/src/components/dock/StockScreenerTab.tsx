@@ -73,7 +73,7 @@ export const StockScreenerTab: React.FC = () => {
   useEffect(() => {
     void runScan()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [exchangeFilter, categoryFilter, signalId, regimeFilter])
 
   const handleSort = (col: SortKey) => {
     const nextDir = sortCol === col && sortDir === 'ascending' ? 'descending' : 'ascending'

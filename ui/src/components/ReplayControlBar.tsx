@@ -10,6 +10,7 @@ export const ReplayControlBar: React.FC = () => {
   const replayPlaying = useWorkspaceStore((s) => s.replayPlaying)
 
   const setReplaySelectingCut = useWorkspaceStore((s) => s.setReplaySelectingCut)
+  const startReplay = useWorkspaceStore((s) => s.startReplay)
   const stepReplay = useWorkspaceStore((s) => s.stepReplay)
   const setReplaySpeed = useWorkspaceStore((s) => s.setReplaySpeed)
   const setReplayPlaying = useWorkspaceStore((s) => s.setReplayPlaying)
@@ -30,6 +31,45 @@ export const ReplayControlBar: React.FC = () => {
     }, intervalMs)
     return () => window.clearInterval(timer)
   }, [replay?.active, replay?.speedMultiplier, replayPlaying, stepReplay])
+
+  // Pre-cut interactive scissor selection strip (TradingView flow when clicking "Phát lại")
+  if (!replay?.active && replaySelectingCut) {
+    return (
+      <div
+        className="flex items-center justify-between gap-2 px-3 py-1 shrink-0"
+        style={{
+          backgroundColor: 'color-mix(in srgb, var(--tv-accent) 16%, var(--tv-bg-panel))',
+          borderBottom: '1px solid var(--tv-accent)',
+        }}
+      >
+        <div className="flex items-center gap-2 text-[11.5px]">
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10.5px] font-bold tracking-wide bg-[#2962FF] text-white">
+            <Scissors className="w-3 h-3" />
+            CHỌN ĐIỂM CẮT REPLAY
+          </span>
+          <span>Di chuyển đường rèm màu xanh trên biểu đồ và nhấp chuột vào vị trí quá khứ muốn cắt nến.</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            className="tv-btn text-[11.5px] bg-[#2962FF] text-white hover:bg-[#1E53E5] px-2.5"
+            onClick={() => void startReplay(null)}
+            title="Cắt nhanh lùi 60 cây nến từ hiện tại"
+          >
+            Cắt nhanh (-60 nến)
+          </button>
+          <button
+            type="button"
+            className="tv-btn text-[11.5px] text-[#F23645]"
+            onClick={() => setReplaySelectingCut(false)}
+          >
+            <X className="w-3.5 h-3.5" />
+            <span>Hủy (Esc)</span>
+          </button>
+        </div>
+      </div>
+    )
+  }
 
   if (!replay?.active) return null
 

@@ -7,6 +7,7 @@ import { ReplayControlBar } from './components/ReplayControlBar'
 import { RightWidgetBar } from './components/RightWidgetBar'
 import { TopHeader } from './components/TopHeader'
 import { IndicatorsModal } from './components/modals/IndicatorsModal'
+import { IndicatorSettingsModal } from './components/modals/IndicatorSettingsModal'
 import { SymbolSearchModal } from './components/modals/SymbolSearchModal'
 import { useWorkspaceStore } from './store/workspaceStore'
 
@@ -76,7 +77,7 @@ export const App: React.FC = () => {
           target.tagName === 'SELECT' ||
           target.isContentEditable)
       const state = useWorkspaceStore.getState()
-      if (inInput || state.symbolSearchOpen || state.indicatorsModalOpen) return
+      if (inInput || state.symbolSearchOpen || state.indicatorsModalOpen || state.editingIndicator) return
 
       // Drawing hotkeys
       if (e.altKey && !e.ctrlKey && !e.metaKey) {
@@ -160,6 +161,7 @@ export const App: React.FC = () => {
   const visiblePanes = useMemo(() => {
     if (gridLayout === '1') return panes.slice(0, 1)
     if (gridLayout === '2v' || gridLayout === '2h') return panes.slice(0, 2)
+    if (gridLayout === '3') return panes.slice(0, 3)
     return panes.slice(0, 4)
   }, [gridLayout, panes])
 
@@ -190,16 +192,23 @@ export const App: React.FC = () => {
           {/* Causal Bar Replay Floating Control Strip (when active) */}
           <ReplayControlBar />
 
-          {/* Multi-Chart Viewport Grid (1 / 2v / 2h / 4) */}
-          <div className={`grid ${gridClass} flex-1 min-h-0 overflow-hidden`}>
-            {visiblePanes.map((pane) => (
-              <KLineViewport
+          {/* Multi-Chart Viewport Grid (1 / 2v / 2h / 3 / 4) */}
+          <div className={`grid ${gridClass} flex-1 min-w-0 min-h-0 overflow-hidden`}>
+            {visiblePanes.map((pane, idx) => (
+              <div
                 key={pane.slotId}
-                pane={pane}
-                isActive={pane.slotId === activeSlotId}
-                isMultiPane={visiblePanes.length > 1}
-                onActivate={() => setActiveSlotId(pane.slotId)}
-              />
+                className={`min-w-0 min-h-0 overflow-hidden ${
+                  gridLayout === '3' && idx === 0 ? 'row-span-2' : ''
+                }`}
+              >
+                <KLineViewport
+                  pane={pane}
+                  isActive={pane.slotId === activeSlotId}
+                  isMultiPane={visiblePanes.length > 1}
+                  gridLayout={gridLayout}
+                  onActivate={() => setActiveSlotId(pane.slotId)}
+                />
+              </div>
             ))}
           </div>
 
@@ -244,12 +253,13 @@ export const App: React.FC = () => {
       {/* Native <dialog> Modals */}
       <SymbolSearchModal />
       <IndicatorsModal />
+      <IndicatorSettingsModal />
 
-      {/* Non-intrusive Toast Stack (bottom-left of chart area so right Symbol Details card stays uncovered) */}
+      {/* Non-intrusive Toast Stack (top-right below header so bottom dock & order forms stay clear) */}
       {toasts.length > 0 && (
         <div
           aria-live="polite"
-          className="fixed bottom-4 left-14 z-50 flex flex-col gap-1.5 max-w-sm pointer-events-none"
+          className="fixed top-12 right-4 z-50 flex flex-col gap-1.5 max-w-sm pointer-events-none"
         >
           {toasts.map((t) => (
             <div

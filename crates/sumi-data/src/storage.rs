@@ -659,6 +659,116 @@ impl SqliteMarketStore {
         Ok(out)
     }
 
+    /// Merges symbols, OHLCV bars, and `series_meta` from another SQLite market database
+    /// (such as a repository-seeded CafeF cache) using `INSERT OR IGNORE`, preserving any newer
+    /// bars already stored in this database.
+    ///
+    /// Returns the number of newly inserted OHLCV bars.
+    pub fn merge_from_sqlite_path(&self, seed_path: &Path) -> Result<usize> {
+        if !seed_path.exists() {
+            return Ok(0);
+        }
+        if let (Ok(canon_self), Ok(canon_seed)) = (
+            std::fs::canonicalize(&self.db_path),
+            std::fs::canonicalize(seed_path),
+        ) && canon_self == canon_seed
+        {
+            return Ok(0);
+        }
+
+        let seed_str = seed_path.to_string_lossy().into_owned();
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| DataError::Storage("SQLite mutex poisoned".to_owned()))?;
+
+        conn.execute("ATTACH DATABASE ?1 AS seed_db", params![seed_str])?;
+        let merge_result = (|| -> Result<usize> {
+            let tx = conn.transaction()?;
+
+            // Record existing series that overlap with the seed DB so we only recompute their stats.
+            let overlapping: Vec<(String, String, String, String, i64)> = {
+                let mut stmt = tx.prepare(
+                    r#"
+                    SELECT m.exchange, m.symbol, m.interval, m.adjustment, s.reached_start
+                    FROM series_meta m
+                    JOIN seed_db.series_meta s
+                      ON m.exchange = s.exchange
+                     AND m.symbol = s.symbol
+                     AND m.interval = s.interval
+                     AND m.adjustment = s.adjustment
+                    "#,
+                )?;
+                let rows = stmt.query_map([], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                })?;
+                let mut list = Vec::new();
+                for row in rows {
+                    list.push(row?);
+                }
+                list
+            };
+
+            tx.execute(
+                "INSERT OR IGNORE INTO symbols SELECT * FROM seed_db.symbols",
+                [],
+            )?;
+            let inserted_bars =
+                tx.execute("INSERT OR IGNORE INTO bars SELECT * FROM seed_db.bars", [])?;
+            tx.execute(
+                "INSERT OR IGNORE INTO series_meta SELECT * FROM seed_db.series_meta",
+                [],
+            )?;
+
+            for (ex, sym, iv, adj, seed_reached) in overlapping {
+                let agg: Option<(i64, i64, i64)> = tx.query_row(
+                    r#"
+                    SELECT MIN(timestamp_ms), MAX(timestamp_ms), COUNT(*)
+                    FROM bars
+                    WHERE exchange = ?1 AND symbol = ?2 AND interval = ?3 AND adjustment = ?4
+                    "#,
+                    params![&ex, &sym, &iv, &adj],
+                    |r| {
+                        let count: i64 = r.get(2)?;
+                        if count == 0 {
+                            Ok(None)
+                        } else {
+                            Ok(Some((r.get(0)?, r.get(1)?, count)))
+                        }
+                    },
+                )?;
+                if let Some((earliest_ms, latest_ms, count)) = agg {
+                    tx.execute(
+                        r#"
+                        UPDATE series_meta
+                        SET earliest_ms   = ?5,
+                            latest_ms     = ?6,
+                            bar_count     = ?7,
+                            reached_start = MAX(reached_start, ?8)
+                        WHERE exchange = ?1 AND symbol = ?2 AND interval = ?3 AND adjustment = ?4
+                        "#,
+                        params![
+                            &ex,
+                            &sym,
+                            &iv,
+                            &adj,
+                            earliest_ms,
+                            latest_ms,
+                            count,
+                            seed_reached
+                        ],
+                    )?;
+                }
+            }
+
+            tx.commit()?;
+            Ok(inserted_bars)
+        })();
+
+        let _ = conn.execute("DETACH DATABASE seed_db", []);
+        merge_result
+    }
+
     /// Returns global row/series/symbol totals stored in the SQLite cache.
     pub fn stats(&self) -> Result<StoreStats> {
         let conn = self
@@ -921,5 +1031,55 @@ mod tests {
         let hnx_hits = store.search_local_symbols("", Some("HNX"), 10).unwrap();
         assert_eq!(hnx_hits.len(), 1);
         assert_eq!(hnx_hits[0].ticker, "HNX:SHS");
+    }
+
+    #[test]
+    fn merge_from_sqlite_path_imports_missing_history_and_preserves_newer_bars() {
+        let dir = std::env::temp_dir().join(format!("sumi_merge_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let seed_path = dir.join("seed.db");
+        let app_path = dir.join("app.db");
+
+        let seed = SqliteMarketStore::open(&seed_path).unwrap();
+        let app = SqliteMarketStore::open(&app_path).unwrap();
+
+        let fpt = SymbolKey::new("HOSE", "FPT").unwrap();
+        let vcb = SymbolKey::new("HOSE", "VCB").unwrap();
+        seed.upsert_symbol(&ResolvedSymbol::from_cafef_vn_ticker("HOSE", "FPT", false))
+            .unwrap();
+        seed.upsert_symbol(&ResolvedSymbol::from_cafef_vn_ticker("HOSE", "VCB", false))
+            .unwrap();
+
+        let fpt_key = SeriesKey::new(&fpt, Interval::D1, Adjustment::Splits);
+        let vcb_key = SeriesKey::new(&vcb, Interval::D1, Adjustment::Splits);
+        let full_fpt = synth_bars(20, 1_700_000_000_000, 86_400_000);
+        let full_vcb = synth_bars(15, 1_700_000_000_000, 86_400_000);
+        seed.upsert_bars(&fpt_key, &full_fpt[..15], "cafef", Some(true))
+            .unwrap();
+        seed.upsert_bars(&vcb_key, &full_vcb, "cafef", Some(true))
+            .unwrap();
+
+        // App DB only has the newest 5 bars of FPT (e.g. from TradingView online fetch).
+        app.upsert_symbol(&ResolvedSymbol::from_cafef_vn_ticker("HOSE", "FPT", false))
+            .unwrap();
+        app.upsert_bars(&fpt_key, &full_fpt[15..], "tradingview", Some(false))
+            .unwrap();
+
+        let inserted = app.merge_from_sqlite_path(&seed_path).unwrap();
+        assert_eq!(inserted, 30); // 15 older FPT bars + 15 VCB bars
+
+        let stats = app.stats().unwrap();
+        assert_eq!(stats.total_symbols, 2);
+        assert_eq!(stats.total_series, 2);
+        assert_eq!(stats.total_bars, 35);
+
+        let fpt_meta = app.series_meta(&fpt_key).unwrap().unwrap();
+        assert_eq!(fpt_meta.bar_count, 20);
+        assert_eq!(fpt_meta.earliest_ms, full_fpt[0].timestamp);
+        assert_eq!(fpt_meta.latest_ms, full_fpt[19].timestamp);
+        assert!(fpt_meta.reached_start);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

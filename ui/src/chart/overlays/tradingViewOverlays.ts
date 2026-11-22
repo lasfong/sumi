@@ -415,10 +415,79 @@ export const vnPriceBandLine: OverlayTemplate<VnBandExtendData> = {
   },
 }
 
+export interface BacktestTradeMarkerExtendData {
+  kind: 'buy' | 'sell'
+  label: string
+  color: string
+}
+
+export const backtestTradeMarker: OverlayTemplate<BacktestTradeMarkerExtendData> = {
+  name: 'backtestTradeMarker',
+  totalStep: 2,
+  lock: true,
+  needDefaultPointFigure: false,
+  needDefaultXAxisFigure: false,
+  needDefaultYAxisFigure: false,
+  createPointFigures: ({ coordinates, overlay }) => {
+    if (coordinates.length === 0) return []
+    const { x, y } = coordinates[0]
+    const ext = overlay.extendData
+    const isBuy = ext?.kind !== 'sell'
+    const color = ext?.color ?? (isBuy ? '#089981' : '#F23645')
+    const label = ext?.label ?? (isBuy ? 'MUA' : 'BÁN')
+
+    const arrowTipY = isBuy ? y + 5 : y - 5
+    const arrowBaseY = isBuy ? y + 14 : y - 14
+    const textY = isBuy ? y + 17 : y - 17
+
+    return [
+      {
+        type: 'polygon',
+        ignoreEvent: true,
+        attrs: {
+          coordinates: [
+            { x, y: arrowTipY },
+            { x: x - 5.5, y: arrowBaseY },
+            { x: x + 5.5, y: arrowBaseY },
+          ],
+        },
+        styles: {
+          style: 'fill',
+          color,
+        },
+      },
+      {
+        type: 'text',
+        ignoreEvent: true,
+        attrs: {
+          x,
+          y: textY,
+          text: label,
+          align: 'center',
+          baseline: isBuy ? 'top' : 'bottom',
+        },
+        styles: {
+          style: 'fill',
+          color: '#FFFFFF',
+          backgroundColor: color,
+          borderRadius: 2,
+          paddingLeft: 4,
+          paddingRight: 4,
+          paddingTop: 1.5,
+          paddingBottom: 1.5,
+          size: 9.5,
+          weight: '600',
+        },
+      },
+    ]
+  },
+}
+
 export const TRADINGVIEW_CUSTOM_OVERLAYS: OverlayTemplate[] = [
   longPosition,
   shortPosition,
   priceDateRange,
   brokerOrderLine as OverlayTemplate,
   vnPriceBandLine as OverlayTemplate,
+  backtestTradeMarker as OverlayTemplate,
 ]

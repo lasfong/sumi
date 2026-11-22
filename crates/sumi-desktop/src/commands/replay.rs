@@ -43,6 +43,19 @@ fn map_speed(mult: f64) -> ReplaySpeed {
     }
 }
 
+pub(crate) fn resolve_replay_cut_index(bars: &[OhlcvBar], cut_timestamp_ms: Option<i64>) -> usize {
+    if bars.len() <= 1 {
+        return 0;
+    }
+    let default_cut = bars.len().saturating_sub(60).max(5).min(bars.len() - 1);
+    if let Some(ts_ms) = cut_timestamp_ms {
+        let pos = bars.partition_point(|b| b.timestamp <= ts_ms);
+        pos.saturating_sub(1).clamp(1, bars.len() - 1)
+    } else {
+        default_cut
+    }
+}
+
 #[tauri::command]
 pub async fn replay_start(
     state: State<'_, AppState>,
@@ -70,13 +83,7 @@ pub async fn replay_start(
     }
 
     let base_candles: Vec<Candle> = bars.iter().map(|b| b.to_core_candle(iv)).collect();
-    let default_cut = bars.len().saturating_sub(60).max(5);
-    let cut_idx = if let Some(ts_ms) = cut_timestamp_ms {
-        let pos = bars.partition_point(|b| b.timestamp <= ts_ms);
-        pos.saturating_sub(1).clamp(1, bars.len() - 1)
-    } else {
-        default_cut
-    };
+    let cut_idx = resolve_replay_cut_index(&bars, cut_timestamp_ms);
 
     let mut controller = ReplayController::new();
     controller.start_at_base_index(&base_candles, cut_idx);
@@ -347,4 +354,35 @@ pub async fn replay_get_state(state: State<'_, AppState>) -> DesktopResult<Repla
         stepped_bar: None,
         broker: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_replay_cut_index_cuts_exact_bar_with_zero_future_leak() {
+        let step = 86_400_000_i64;
+        let base = 1_700_000_000_000_i64;
+        let bars: Vec<OhlcvBar> = (0..200)
+            .map(|i| OhlcvBar::new(base + i * step, 100.0, 105.0, 95.0, 102.0, 1_000.0))
+            .collect();
+
+        // Exact timestamp hit at index 42
+        let exact = resolve_replay_cut_index(&bars, Some(base + 42 * step));
+        assert_eq!(exact, 42);
+        assert_eq!(bars[..=exact].len(), 43);
+
+        // Timestamp between bar 42 and 43 still lands cleanly on bar 42 (zero future bar leakage!)
+        let mid = resolve_replay_cut_index(&bars, Some(base + 42 * step + 12_000));
+        assert_eq!(mid, 42);
+
+        // Timestamp before bar 0 clamps safely to index 1
+        let early = resolve_replay_cut_index(&bars, Some(base - 10_000));
+        assert_eq!(early, 1);
+
+        // Default cut when None leaves 60 bars of forward runway
+        let default_idx = resolve_replay_cut_index(&bars, None);
+        assert_eq!(default_idx, 140);
+    }
 }

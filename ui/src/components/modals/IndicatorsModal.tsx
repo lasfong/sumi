@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { Eye, EyeOff, Plus, Search, Sliders, Trash2, X } from 'lucide-react'
+import { Eye, EyeOff, Plus, Search, Settings, Sliders, Trash2, X } from 'lucide-react'
 import { INDICATOR_CATALOG, findIndicatorMeta } from '../../chart/indicators/catalog'
-import { useWorkspaceStore } from '../../store/workspaceStore'
+import { INDICATOR_COLOR_PALETTE, useWorkspaceStore } from '../../store/workspaceStore'
 
 const CATEGORIES = ['Tất cả', 'Sumi Quant', 'Xu hướng', 'Dao động', 'Khối lượng', 'Biến động'] as const
 
@@ -13,6 +13,7 @@ export const IndicatorsModal: React.FC = () => {
   const addIndicatorToActivePane = useWorkspaceStore((s) => s.addIndicatorToActivePane)
   const updateIndicatorInActivePane = useWorkspaceStore((s) => s.updateIndicatorInActivePane)
   const removeIndicatorFromActivePane = useWorkspaceStore((s) => s.removeIndicatorFromActivePane)
+  const openIndicatorSettings = useWorkspaceStore((s) => s.openIndicatorSettings)
 
   const activePane = panes.find((p) => p.slotId === activeSlotId) ?? panes[0]
   const dialogRef = useRef<HTMLDialogElement | null>(null)
@@ -217,14 +218,20 @@ export const IndicatorsModal: React.FC = () => {
           <div className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--tv-text-secondary)' }}>
             Đang bật trên biểu đồ ({activePane.indicators.length})
           </div>
+          <div className="text-[10px]" style={{ color: 'var(--tv-text-muted)' }}>
+            Hỗ trợ gắn nhiều đường cùng loại (VD: EMA 20 + EMA 50 + EMA 200) và chỉnh trực tiếp trên góc biểu đồ.
+          </div>
           {activePane.indicators.length === 0 ? (
             <div className="text-[11.5px] py-4 text-center" style={{ color: 'var(--tv-text-secondary)' }}>
               Chưa bật chỉ báo nào
             </div>
           ) : (
-            activePane.indicators.map((ind) => {
+            activePane.indicators.map((ind, indIdx) => {
               const meta = findIndicatorMeta(ind.name)
               const isEditing = editingId === ind.id
+              const lineColor =
+                (ind.styles as { lines?: Array<{ color?: string }> } | null | undefined)?.lines?.[0]?.color ??
+                INDICATOR_COLOR_PALETTE[indIdx % INDICATOR_COLOR_PALETTE.length]
               return (
                 <div
                   key={ind.id}
@@ -235,26 +242,43 @@ export const IndicatorsModal: React.FC = () => {
                   }}
                 >
                   <div className="flex items-center justify-between gap-1">
-                    <div className="min-w-0">
-                      <div className="font-semibold text-[12px] truncate">
-                        {ind.name}
-                        {ind.calcParams.length > 0 && (
-                          <span className="font-normal ml-1 tabular-nums" style={{ color: 'var(--tv-text-secondary)' }}>
-                            ({ind.calcParams.join(', ')})
-                          </span>
-                        )}
-                      </div>
-                      <div className="text-[10px]" style={{ color: 'var(--tv-text-secondary)' }}>
-                        {ind.isMain ? 'Chồng trên nến' : 'Khung phụ'}
+                    <div className="min-w-0 flex items-center gap-1.5">
+                      <span
+                        className="w-2.5 h-2.5 rounded-full shrink-0"
+                        style={{ backgroundColor: lineColor }}
+                      />
+                      <div className="min-w-0">
+                        <div className="font-semibold text-[12px] truncate">
+                          {ind.name}
+                          {ind.calcParams.length > 0 && (
+                            <span className="font-normal ml-1 tabular-nums" style={{ color: 'var(--tv-text-secondary)' }}>
+                              ({ind.calcParams.join(', ')})
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[10px]" style={{ color: 'var(--tv-text-secondary)' }}>
+                          {ind.isMain ? 'Chồng trên nến' : 'Khung phụ'}
+                        </div>
                       </div>
                     </div>
                     <div className="flex items-center gap-0.5 shrink-0">
+                      <button
+                        type="button"
+                        className="tv-icon-btn w-6 h-6"
+                        onClick={() => {
+                          setIndicatorsModalOpen(false)
+                          openIndicatorSettings(activePane.slotId, ind.id)
+                        }}
+                        title="Cài đặt tham số & màu sắc"
+                      >
+                        <Settings className="w-3.5 h-3.5" />
+                      </button>
                       {ind.calcParams.length > 0 && (
                         <button
                           type="button"
                           className="tv-icon-btn w-6 h-6"
                           onClick={() => (isEditing ? setEditingId(null) : startEdit(ind.id, ind.calcParams))}
-                          title="Cài đặt tham số"
+                          title="Chỉnh nhanh tham số"
                         >
                           <Sliders className="w-3.5 h-3.5" />
                         </button>

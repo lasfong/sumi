@@ -601,13 +601,40 @@ pub async fn get_bars(
         limit: page_limit,
     };
 
-    let page = match svc.get_bars(&req).await {
-        Ok(p) => p,
+    let (page, needs_revalidation) = match svc.get_bars_stale_while_revalidate(&req).await {
+        Ok(swr) => (swr.page, swr.needs_revalidation),
         Err(err) => {
-            warn!(ticker = %sym, %interval, error = %err, "get_bars failed; falling back to instant cache");
-            svc.get_bars_instant(&req).await?
+            warn!(ticker = %sym, %interval, error = %err, "get_bars SWR failed; falling back to instant cache");
+            (svc.get_bars_instant(&req).await?, false)
         }
     };
+
+    // Non-blocking Stale-While-Revalidate: spawn background upstream refresh & push delta bars
+    // smoothly over `bar_updates_tx` so subscribed charts update without blocking symbol switches!
+    if needs_revalidation && !state.is_offline() {
+        let bg_svc = svc.clone();
+        let bg_series = series.clone();
+        let bg_tx = state.bar_updates_tx.clone();
+        let ticker_norm = sym.ticker();
+        let iv_str = iv.as_str().to_owned();
+        tokio::spawn(async move {
+            match bg_svc.revalidate_series(&bg_series, page_limit).await {
+                Ok(delta_bars) => {
+                    for bar in delta_bars {
+                        let _ = bg_tx.send(LiveBarPayload {
+                            ticker: ticker_norm.clone(),
+                            interval: iv_str.clone(),
+                            bar,
+                            is_update: true,
+                        });
+                    }
+                }
+                Err(err) => {
+                    debug!(series = %bg_series, error = %err, "background SWR revalidation skipped");
+                }
+            }
+        });
+    }
 
     let sym_info = page
         .symbol_info
@@ -659,41 +686,115 @@ pub async fn subscribe_bars(
     let series = SeriesKey::new(&sym, iv, Adjustment::Splits);
     let svc = state.active_market_service();
 
-    let (mut bar_sub, archiver) = match svc.subscribe_bars_with_archival(series.clone()).await {
-        Ok(pair) => pair,
-        Err(err) => {
-            warn!(%stream_id, %ticker, %interval, error = %err, "live bar subscription unavailable");
-            return Ok(false);
-        }
-    };
-
     let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
     let ticker_norm = sym.ticker();
     let iv_str = iv.as_str().to_owned();
+    let mut swr_rx = state.bar_updates_tx.subscribe();
+    let stream_id_log = stream_id.clone();
 
     let forwarder = tokio::spawn(async move {
+        // Connect upstream TradingView WS in the background while immediately forwarding any
+        // Stale-While-Revalidate delta bars so `subscribe_bars` returns in < 0.2ms!
+        let connect_fut = svc.subscribe_bars_with_archival(series.clone());
+        tokio::pin!(connect_fut);
+
+        let mut live_pair: Option<(sumi_data::BarSubscription, tokio::task::JoinHandle<()>)> = None;
+
+        // Phase 1: Wait for either WS connection, SWR update, or cancellation.
         loop {
             tokio::select! {
                 _ = &mut cancel_rx => {
-                    debug!(%ticker_norm, %iv_str, "bar stream cancelled by frontend");
+                    debug!(%ticker_norm, %iv_str, "bar stream cancelled before WS handshake completed");
+                    return;
+                }
+                swr_ev = swr_rx.recv() => {
+                    match swr_ev {
+                        Ok(payload)
+                            if payload.ticker.eq_ignore_ascii_case(&ticker_norm)
+                                && payload.interval == iv_str =>
+                        {
+                            if on_bar.send(payload).is_err() {
+                                return;
+                            }
+                        }
+                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+                ws_res = &mut connect_fut => {
+                    match ws_res {
+                        Ok(pair) => {
+                            live_pair = Some(pair);
+                        }
+                        Err(err) => {
+                            warn!(stream_id = %stream_id_log, %ticker_norm, %iv_str, error = %err, "live WS bar subscription unavailable; keeping SWR bar channel active");
+                        }
+                    }
                     break;
                 }
-                maybe_ev = bar_sub.recv() => {
-                    let Some(ev) = maybe_ev else { break; };
-                    let payload = LiveBarPayload {
-                        ticker: ticker_norm.clone(),
-                        interval: iv_str.clone(),
-                        bar: ev.bar,
-                        is_update: ev.is_update,
-                    };
-                    if on_bar.send(payload).is_err() {
+            }
+        }
+
+        // Phase 2: Forward both live WS ticks and SWR delta updates until cancelled.
+        if let Some((mut bar_sub, archiver)) = live_pair {
+            loop {
+                tokio::select! {
+                    _ = &mut cancel_rx => {
+                        debug!(%ticker_norm, %iv_str, "bar stream cancelled by frontend");
                         break;
+                    }
+                    swr_ev = swr_rx.recv() => {
+                        match swr_ev {
+                            Ok(payload)
+                                if payload.ticker.eq_ignore_ascii_case(&ticker_norm)
+                                    && payload.interval == iv_str =>
+                            {
+                                if on_bar.send(payload).is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {}
+                        }
+                    }
+                    maybe_ev = bar_sub.recv() => {
+                        let Some(ev) = maybe_ev else { break; };
+                        let payload = LiveBarPayload {
+                            ticker: ticker_norm.clone(),
+                            interval: iv_str.clone(),
+                            bar: ev.bar,
+                            is_update: ev.is_update,
+                        };
+                        if on_bar.send(payload).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            bar_sub.unsubscribe().await;
+            archiver.abort();
+        } else {
+            // Keep forwarding background SWR updates even when live WS failed.
+            loop {
+                tokio::select! {
+                    _ = &mut cancel_rx => break,
+                    swr_ev = swr_rx.recv() => {
+                        match swr_ev {
+                            Ok(payload)
+                                if payload.ticker.eq_ignore_ascii_case(&ticker_norm)
+                                    && payload.interval == iv_str =>
+                            {
+                                if on_bar.send(payload).is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
                     }
                 }
             }
         }
-        bar_sub.unsubscribe().await;
-        archiver.abort();
     });
 
     let mut guard = state.bar_streams.lock().await;
@@ -938,7 +1039,7 @@ pub async fn import_cafef_dir(
     dir: String,
 ) -> DesktopResult<CafeFImportSummary> {
     let store = state.market_store.clone();
-    tokio::task::spawn_blocking(move || {
+    let summary = tokio::task::spawn_blocking(move || {
         let raw_path = std::path::PathBuf::from(dir.trim());
         let resolved_dir = if raw_path.exists() {
             raw_path
@@ -955,5 +1056,7 @@ pub async fn import_cafef_dir(
             .map_err(DesktopError::from)
     })
     .await
-    .map_err(|e| DesktopError::Internal(e.to_string()))?
+    .map_err(|e| DesktopError::Internal(e.to_string()))??;
+    state.market_service.invalidate_ram_cache();
+    Ok(summary)
 }

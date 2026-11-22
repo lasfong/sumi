@@ -166,7 +166,10 @@ pub async fn run_stock_screener(
                 store_candidates.search_local_symbols(&q_upper_clone, ex_arg, max_symbols)?;
             let mut local: Vec<(SymbolKey, String)> = hits
                 .into_iter()
-                .filter(|h| h.market_type != "index")
+                .filter(|h| {
+                    h.market_type != "index"
+                        && matches!(h.exchange.as_str(), "HOSE" | "HNX" | "UPCOM")
+                })
                 .filter_map(|h| SymbolKey::parse(&h.ticker).ok().map(|k| (k, h.description)))
                 .collect();
 

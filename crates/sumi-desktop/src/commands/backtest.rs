@@ -9,7 +9,7 @@ use sumi_core::backtest::{
 };
 use sumi_core::data::Timeframe;
 use sumi_core::model::Candle;
-use sumi_data::{Adjustment, BarsRequest, Interval, SeriesKey, SymbolKey};
+use sumi_data::{Adjustment, BarsRequest, Interval, OhlcvBar, SeriesKey, SymbolKey};
 use tauri::State;
 
 use crate::error::{DesktopError, DesktopResult};
@@ -38,12 +38,21 @@ pub struct StrategyBacktestInput {
     pub rsi_period: Option<usize>,
     pub rsi_oversold: Option<f64>,
     pub rsi_overbought: Option<f64>,
+    pub rsi_confluence_buy: Option<f64>,
+    pub rsi_confluence_sell: Option<f64>,
+    pub macd_fast: Option<usize>,
+    pub macd_slow: Option<usize>,
+    pub macd_signal: Option<usize>,
+    pub macd_trend_ema: Option<usize>,
     pub bb_period: Option<usize>,
     pub bb_std_mult: Option<f64>,
+    pub max_squeeze_bw_pct: Option<f64>,
     pub donchian_entry: Option<usize>,
     pub donchian_exit: Option<usize>,
     pub in_sample_split_pct: Option<f64>,
     pub max_bars: Option<usize>,
+    pub from_timestamp_ms: Option<i64>,
+    pub to_timestamp_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -173,11 +182,32 @@ fn build_backtest_config(input: &StrategyBacktestInput) -> BacktestConfig {
     if let Some(v) = input.rsi_overbought {
         params.rsi_overbought = v;
     }
+    if let Some(v) = input.rsi_confluence_buy {
+        params.rsi_confluence_buy = v;
+    }
+    if let Some(v) = input.rsi_confluence_sell {
+        params.rsi_confluence_sell = v;
+    }
+    if let Some(v) = input.macd_fast {
+        params.macd_fast = v;
+    }
+    if let Some(v) = input.macd_slow {
+        params.macd_slow = v;
+    }
+    if let Some(v) = input.macd_signal {
+        params.macd_signal = v;
+    }
+    if let Some(v) = input.macd_trend_ema {
+        params.macd_trend_ema = v;
+    }
     if let Some(v) = input.bb_period {
         params.bb_period = v;
     }
     if let Some(v) = input.bb_std_mult {
         params.bb_std_mult = v;
+    }
+    if let Some(v) = input.max_squeeze_bw_pct {
+        params.max_squeeze_bw_pct = v;
     }
     if let Some(v) = input.donchian_entry {
         params.donchian_entry_period = v;
@@ -212,11 +242,44 @@ fn build_backtest_config(input: &StrategyBacktestInput) -> BacktestConfig {
     cfg
 }
 
+pub(crate) fn filter_bars_by_range(
+    bars: Vec<OhlcvBar>,
+    from_timestamp_ms: Option<i64>,
+    to_timestamp_ms: Option<i64>,
+    max_bars: usize,
+) -> DesktopResult<Vec<OhlcvBar>> {
+    if let (Some(from_ms), Some(to_ms)) = (from_timestamp_ms, to_timestamp_ms)
+        && from_ms > to_ms
+    {
+        return Err(DesktopError::Validation(
+            "Khoảng thời gian Backtest không hợp lệ: 'Từ ngày' phải nhỏ hơn hoặc bằng 'Đến ngày'"
+                .to_owned(),
+        ));
+    }
+
+    let mut filtered: Vec<OhlcvBar> = bars
+        .into_iter()
+        .filter(|b| {
+            let after_from = from_timestamp_ms.is_none_or(|f| b.timestamp >= f);
+            let before_to = to_timestamp_ms.is_none_or(|t| b.timestamp <= t);
+            after_from && before_to
+        })
+        .collect();
+
+    if filtered.len() > max_bars {
+        let start = filtered.len() - max_bars;
+        filtered.drain(..start);
+    }
+    Ok(filtered)
+}
+
 async fn load_backtest_candles(
     state: &AppState,
     ticker: &str,
     interval_str: &str,
     max_bars: usize,
+    from_timestamp_ms: Option<i64>,
+    to_timestamp_ms: Option<i64>,
 ) -> DesktopResult<(String, Interval, Timeframe, Vec<Candle>)> {
     let sym = SymbolKey::parse(ticker)?;
     let iv: Interval = interval_str.parse()?;
@@ -224,8 +287,14 @@ async fn load_backtest_candles(
     let series = SeriesKey::new(&sym, iv, Adjustment::Splits);
     let svc = state.active_market_service();
 
+    let fetch_limit = if from_timestamp_ms.is_some() || to_timestamp_ms.is_some() {
+        max_bars.max(6_000)
+    } else {
+        max_bars
+    };
+
     let mut bars = svc
-        .get_bars_instant(&BarsRequest::init(series.clone(), max_bars))
+        .get_bars_instant(&BarsRequest::init(series.clone(), fetch_limit))
         .await?
         .bars;
     if bars.is_empty() {
@@ -234,9 +303,12 @@ async fn load_backtest_candles(
             .await?
             .bars;
     }
+
+    let bars = filter_bars_by_range(bars, from_timestamp_ms, to_timestamp_ms, max_bars)?;
+
     if bars.len() < 30 {
         return Err(DesktopError::Validation(format!(
-            "Không đủ lịch sử nến để chạy Backtest cho {} (có {} nến, cần >= 30)",
+            "Không đủ lịch sử nến trong khoảng thời gian đã chọn cho {} (có {} nến, cần >= 30)",
             sym.ticker(),
             bars.len()
         )));
@@ -291,8 +363,15 @@ pub async fn run_strategy_backtest(
     input: StrategyBacktestInput,
 ) -> DesktopResult<StrategyBacktestResponse> {
     let max_bars = input.max_bars.unwrap_or(2_500).clamp(60, 10_000);
-    let (ticker, iv, tf, candles) =
-        load_backtest_candles(&state, &input.ticker, &input.interval, max_bars).await?;
+    let (ticker, iv, tf, candles) = load_backtest_candles(
+        &state,
+        &input.ticker,
+        &input.interval,
+        max_bars,
+        input.from_timestamp_ms,
+        input.to_timestamp_ms,
+    )
+    .await?;
     let cfg = build_backtest_config(&input);
 
     let report = tokio::task::spawn_blocking(move || {
@@ -333,6 +412,8 @@ pub async fn run_strategy_wfo(
         &input.backtest.ticker,
         &input.backtest.interval,
         max_bars,
+        input.backtest.from_timestamp_ms,
+        input.backtest.to_timestamp_ms,
     )
     .await?;
     let cfg = build_backtest_config(&input.backtest);
@@ -383,6 +464,8 @@ pub async fn run_strategy_monte_carlo(
         &input.backtest.ticker,
         &input.backtest.interval,
         max_bars,
+        input.backtest.from_timestamp_ms,
+        input.backtest.to_timestamp_ms,
     )
     .await?;
     let cfg = build_backtest_config(&input.backtest);
@@ -420,4 +503,84 @@ pub async fn run_strategy_monte_carlo(
         metrics: report.metrics,
         checkpoint_envelopes: report.checkpoint_envelopes,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_input(preset: &str) -> StrategyBacktestInput {
+        StrategyBacktestInput {
+            ticker: "HOSE:FPT".to_owned(),
+            interval: "1D".to_owned(),
+            preset: preset.to_owned(),
+            direction: "long".to_owned(),
+            initial_cash: 500_000_000.0,
+            commission_bps: 15.0,
+            tax_sell_bps: 10.0,
+            slippage_bps: 5.0,
+            lot_step: 100.0,
+            position_size_pct: 95.0,
+            stop_loss_pct: Some(7.0),
+            take_profit_pct: Some(15.0),
+            min_holding_bars: Some(2),
+            fast_sma: Some(12),
+            slow_ema: Some(34),
+            rsi_period: Some(10),
+            rsi_oversold: Some(25.0),
+            rsi_overbought: Some(75.0),
+            rsi_confluence_buy: Some(38.0),
+            rsi_confluence_sell: Some(66.0),
+            macd_fast: Some(8),
+            macd_slow: Some(21),
+            macd_signal: Some(5),
+            macd_trend_ema: Some(100),
+            bb_period: Some(18),
+            bb_std_mult: Some(2.2),
+            max_squeeze_bw_pct: Some(8.5),
+            donchian_entry: Some(25),
+            donchian_exit: Some(12),
+            in_sample_split_pct: Some(70.0),
+            max_bars: Some(500),
+            from_timestamp_ms: None,
+            to_timestamp_ms: None,
+        }
+    }
+
+    #[test]
+    fn build_backtest_config_wires_all_dynamic_strategy_params() {
+        let cfg = build_backtest_config(&sample_input("macd"));
+        assert_eq!(cfg.preset, StrategyPresetKind::MacdMomentum);
+        assert_eq!(cfg.params.macd_fast, 8);
+        assert_eq!(cfg.params.macd_slow, 21);
+        assert_eq!(cfg.params.macd_signal, 5);
+        assert_eq!(cfg.params.macd_trend_ema, 100);
+        assert_eq!(cfg.params.bb_period, 18);
+        assert!((cfg.params.max_squeeze_bw_pct - 8.5).abs() < 1e-6);
+        assert_eq!(cfg.params.donchian_entry_period, 25);
+        assert_eq!(cfg.params.donchian_exit_period, 12);
+    }
+
+    #[test]
+    fn filter_bars_by_range_slices_dates_and_rejects_inverted_window() {
+        let step = 86_400_000_i64;
+        let base = 1_700_000_000_000_i64;
+        let bars: Vec<OhlcvBar> = (0..100)
+            .map(|i| OhlcvBar::new(base + i * step, 100.0, 105.0, 95.0, 102.0, 1_000.0))
+            .collect();
+
+        let sliced = filter_bars_by_range(
+            bars.clone(),
+            Some(base + 10 * step),
+            Some(base + 59 * step),
+            500,
+        )
+        .unwrap();
+        assert_eq!(sliced.len(), 50);
+        assert_eq!(sliced.first().unwrap().timestamp, base + 10 * step);
+        assert_eq!(sliced.last().unwrap().timestamp, base + 59 * step);
+
+        let err = filter_bars_by_range(bars, Some(base + 60 * step), Some(base + 10 * step), 500);
+        assert!(err.is_err());
+    }
 }

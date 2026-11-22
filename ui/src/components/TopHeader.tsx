@@ -10,6 +10,7 @@ import {
   Grid2x2,
   History,
   LayoutGrid,
+  LayoutPanelLeft,
   Moon,
   PanelBottom,
   PanelRight,
@@ -53,6 +54,7 @@ export const TopHeader: React.FC = () => {
   const rightPanelOpen = useWorkspaceStore((s) => s.rightPanelOpen)
   const bottomDockOpen = useWorkspaceStore((s) => s.bottomDockOpen)
   const replay = useWorkspaceStore((s) => s.replay)
+  const replaySelectingCut = useWorkspaceStore((s) => s.replaySelectingCut)
 
   const openSymbolSearch = useWorkspaceStore((s) => s.openSymbolSearch)
   const setActiveInterval = useWorkspaceStore((s) => s.setActiveInterval)
@@ -71,7 +73,7 @@ export const TopHeader: React.FC = () => {
   const importCafeFDirectory = useWorkspaceStore((s) => s.importCafeFDirectory)
   const setRightPanelOpen = useWorkspaceStore((s) => s.setRightPanelOpen)
   const setBottomDockOpen = useWorkspaceStore((s) => s.setBottomDockOpen)
-  const startReplay = useWorkspaceStore((s) => s.startReplay)
+  const setReplaySelectingCut = useWorkspaceStore((s) => s.setReplaySelectingCut)
   const stopReplay = useWorkspaceStore((s) => s.stopReplay)
   const triggerExportPng = useWorkspaceStore((s) => s.triggerExportPng)
 
@@ -255,19 +257,19 @@ export const TopHeader: React.FC = () => {
           )}
         </button>
 
-        {/* Causal Bar Replay Button */}
+        {/* Causal Bar Replay Button — opens Interactive Scissor Curtain immediately like TradingView */}
         <button
           type="button"
           className="tv-btn"
-          data-active={Boolean(replay?.active)}
+          data-active={Boolean(replay?.active) || replaySelectingCut}
           onClick={() => {
             if (replay?.active) {
               void stopReplay()
             } else {
-              void startReplay(null)
+              setReplaySelectingCut(!replaySelectingCut)
             }
           }}
-          title="Phát lại nến nhân quả (Bar Replay — không rò rỉ dữ liệu tương lai)"
+          title="Phát lại nến nhân quả (Bar Replay — kéo rèm cắt chọn điểm bất kỳ trên biểu đồ)"
         >
           <History className="w-4 h-4" />
           <span>Phát lại</span>
@@ -332,21 +334,22 @@ export const TopHeader: React.FC = () => {
           </button>
           {openMenu === 'layout' && (
             <div
-              className="absolute right-0 top-[34px] w-68 rounded-md p-2.5 shadow-2xl z-50 space-y-2.5"
+              className="absolute right-0 top-[34px] w-76 rounded-md p-2.5 shadow-2xl z-50 space-y-2.5"
               style={{
                 backgroundColor: 'var(--tv-bg-elevated)',
                 border: '1px solid var(--tv-border)',
               }}
             >
               <div className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--tv-text-secondary)' }}>
-                Khung đa biểu đồ
+                Khung đa biểu đồ (Đa khung thời gian)
               </div>
-              <div className="grid grid-cols-4 gap-1.5">
+              <div className="grid grid-cols-5 gap-1.5">
                 {(
                   [
                     { key: '1', label: '1 ô', Icon: Square },
                     { key: '2v', label: '2 dọc', Icon: Columns2 },
                     { key: '2h', label: '2 ngang', Icon: Rows2 },
+                    { key: '3', label: '3 ô', Icon: LayoutPanelLeft },
                     { key: '4', label: '4 ô', Icon: Grid2x2 },
                   ] as Array<{ key: GridLayoutKind; label: string; Icon: React.ComponentType<{ className?: string }> }>
                 ).map(({ key, label, Icon }) => (

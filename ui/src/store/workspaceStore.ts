@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type {
+  BacktestChartOverlayState,
   BottomDockTab,
   BrokerStateSnapshot,
   ChartPaneConfig,
@@ -19,6 +20,19 @@ import type {
 } from '../types/market'
 import * as api from '../api/tauri'
 
+const SETTINGS_SCHEMA_VERSION = 2
+
+export const INDICATOR_COLOR_PALETTE = [
+  '#2962FF',
+  '#FF9800',
+  '#E040FB',
+  '#00BCD4',
+  '#FBC02D',
+  '#26A69A',
+  '#EF5350',
+  '#AB47BC',
+] as const
+
 export interface SyncOptions {
   symbol: boolean
   interval: boolean
@@ -31,6 +45,12 @@ export interface ToastNotice {
   message: string
 }
 
+export const DEFAULT_SYNC: SyncOptions = {
+  symbol: true,
+  interval: false,
+  crosshair: true,
+}
+
 const DEFAULT_PANES: ChartPaneConfig[] = [
   {
     slotId: 'pane-0',
@@ -41,44 +61,88 @@ const DEFAULT_PANES: ChartPaneConfig[] = [
     showVnBands: true,
     showCountdown: true,
     indicators: [
-      { id: 'ind_vol_default', name: 'VOL', paneId: 'pane_vol', isMain: false, calcParams: [5, 10, 20], visible: true },
-      { id: 'ind_ema_default', name: 'EMA', paneId: 'candle_pane', isMain: true, calcParams: [20, 50], visible: true },
+      { id: 'ind_vol_0', name: 'VOL', paneId: 'pane_vol_0', isMain: false, calcParams: [5, 10, 20], visible: true },
+      {
+        id: 'ind_ema20_0',
+        name: 'EMA',
+        paneId: 'candle_pane',
+        isMain: true,
+        calcParams: [20],
+        visible: true,
+        styles: { lines: [{ color: '#2962FF', size: 1.6 }] },
+      },
+      {
+        id: 'ind_ema50_0',
+        name: 'EMA',
+        paneId: 'candle_pane',
+        isMain: true,
+        calcParams: [50],
+        visible: true,
+        styles: { lines: [{ color: '#FF9800', size: 1.6 }] },
+      },
     ],
   },
   {
     slotId: 'pane-1',
-    ticker: 'HOSE:VCB',
-    interval: '1D',
+    ticker: 'HOSE:FPT',
+    interval: '4h',
     chartStyle: 'candle_solid',
     priceScale: 'normal',
     showVnBands: true,
     showCountdown: true,
     indicators: [
-      { id: 'ind_vol_1', name: 'VOL', paneId: 'pane_vol', isMain: false, calcParams: [5, 10, 20], visible: true },
+      { id: 'ind_vol_1', name: 'VOL', paneId: 'pane_vol_1', isMain: false, calcParams: [5, 10, 20], visible: true },
+      {
+        id: 'ind_ema20_1',
+        name: 'EMA',
+        paneId: 'candle_pane',
+        isMain: true,
+        calcParams: [20],
+        visible: true,
+        styles: { lines: [{ color: '#2962FF', size: 1.5 }] },
+      },
     ],
   },
   {
     slotId: 'pane-2',
-    ticker: 'HOSE:HPG',
-    interval: '1D',
+    ticker: 'HOSE:FPT',
+    interval: '1h',
     chartStyle: 'candle_solid',
     priceScale: 'normal',
     showVnBands: true,
     showCountdown: true,
     indicators: [
-      { id: 'ind_vol_2', name: 'VOL', paneId: 'pane_vol', isMain: false, calcParams: [5, 10, 20], visible: true },
+      { id: 'ind_vol_2', name: 'VOL', paneId: 'pane_vol_2', isMain: false, calcParams: [5, 10, 20], visible: true },
+      {
+        id: 'ind_ema20_2',
+        name: 'EMA',
+        paneId: 'candle_pane',
+        isMain: true,
+        calcParams: [20],
+        visible: true,
+        styles: { lines: [{ color: '#2962FF', size: 1.5 }] },
+      },
     ],
   },
   {
     slotId: 'pane-3',
-    ticker: 'BINANCE:BTCUSDT',
-    interval: '1h',
+    ticker: 'HOSE:FPT',
+    interval: '15m',
     chartStyle: 'candle_solid',
     priceScale: 'normal',
-    showVnBands: false,
+    showVnBands: true,
     showCountdown: true,
     indicators: [
-      { id: 'ind_vol_3', name: 'VOL', paneId: 'pane_vol', isMain: false, calcParams: [5, 10, 20], visible: true },
+      { id: 'ind_vol_3', name: 'VOL', paneId: 'pane_vol_3', isMain: false, calcParams: [5, 10, 20], visible: true },
+      {
+        id: 'ind_ema20_3',
+        name: 'EMA',
+        paneId: 'candle_pane',
+        isMain: true,
+        calcParams: [20],
+        visible: true,
+        styles: { lines: [{ color: '#2962FF', size: 1.5 }] },
+      },
     ],
   },
 ]
@@ -99,9 +163,9 @@ export interface WorkspaceState {
   clearDrawingsNonce: number
   exportPngNonce: number
 
-  // Crosshair sync broadcast & jump-to-timestamp command
-  syncedCrosshair: { sourceSlotId: string; timestamp: number | null; price?: number } | null
+  // Jump-to-timestamp command & Strategy Backtest chart overlay
   scrollToTimestampCmd: { slotId: string; timestampMs: number; nonce: number } | null
+  backtestOverlay: BacktestChartOverlayState | null
 
   // Panels layout
   rightPanelOpen: boolean
@@ -115,6 +179,7 @@ export interface WorkspaceState {
   symbolSearchOpen: boolean
   symbolSearchInitialQuery: string
   indicatorsModalOpen: boolean
+  editingIndicator: { slotId: string; indicatorId: string } | null
 
   // Watchlists, live quotes, alerts, layouts, data status
   watchlists: WatchlistGroup[]
@@ -154,9 +219,11 @@ export interface WorkspaceState {
   toggleActiveVnBands: () => void
   toggleActiveCountdown: () => void
 
-  addIndicatorToActivePane: (spec: Omit<SavedIndicatorSpec, 'id'>) => void
-  updateIndicatorInActivePane: (id: string, patch: Partial<SavedIndicatorSpec>) => void
-  removeIndicatorFromActivePane: (id: string) => void
+  addIndicatorToActivePane: (spec: Omit<SavedIndicatorSpec, 'id'>, slotId?: string) => void
+  updateIndicatorInActivePane: (id: string, patch: Partial<SavedIndicatorSpec>, slotId?: string) => void
+  removeIndicatorFromActivePane: (id: string, slotId?: string) => void
+  openIndicatorSettings: (slotId: string, indicatorId: string) => void
+  closeIndicatorSettings: () => void
 
   setActiveDrawingTool: (tool: string | null) => void
   setMagnetMode: (mode: MagnetMode) => void
@@ -165,8 +232,15 @@ export interface WorkspaceState {
   triggerClearDrawings: () => void
   triggerExportPng: () => void
 
-  publishCrosshairSync: (sourceSlotId: string, timestamp: number | null) => void
   scrollActiveChartToTimestamp: (timestampMs: number) => void
+  setBacktestOverlay: (overlay: BacktestChartOverlayState | null) => void
+  toggleBacktestOverlayVisible: () => void
+  submitQuickLimitOrder: (
+    ticker: string,
+    interval: IntervalKey,
+    side: 'BUY' | 'SELL',
+    price: number,
+  ) => Promise<void>
 
   setRightPanelOpen: (open: boolean) => void
   setRightPanelWidth: (width: number) => void
@@ -248,6 +322,7 @@ function schedulePersistSettings(state: WorkspaceState): void {
   }
   persistTimer = window.setTimeout(() => {
     const payload = {
+      settingsVersion: SETTINGS_SCHEMA_VERSION,
       theme: state.theme,
       gridLayout: state.gridLayout,
       sync: state.sync,
@@ -268,7 +343,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   initialized: false,
   theme: 'dark',
   gridLayout: '1',
-  sync: { symbol: false, interval: true, crosshair: true },
+  sync: DEFAULT_SYNC,
   activeSlotId: 'pane-0',
   panes: DEFAULT_PANES,
 
@@ -279,8 +354,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   clearDrawingsNonce: 0,
   exportPngNonce: 0,
 
-  syncedCrosshair: null,
   scrollToTimestampCmd: null,
+  backtestOverlay: null,
 
   rightPanelOpen: true,
   rightPanelWidth: 288,
@@ -292,6 +367,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   symbolSearchOpen: false,
   symbolSearchInitialQuery: '',
   indicatorsModalOpen: false,
+  editingIndicator: null,
 
   watchlists: [],
   activeWatchlistId: 'wl_vn30',
@@ -318,9 +394,34 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const theme: ThemeMode = saved.theme === 'light' ? 'light' : 'dark'
       applyThemeToDocument(theme)
 
-      const panes = Array.isArray(saved.panes) && saved.panes.length === 4
-        ? (saved.panes as ChartPaneConfig[])
-        : DEFAULT_PANES
+      const savedVersion = typeof saved.settingsVersion === 'number' ? saved.settingsVersion : 1
+      let panes: ChartPaneConfig[] =
+        Array.isArray(saved.panes) && saved.panes.length === 4
+          ? (saved.panes as ChartPaneConfig[])
+          : DEFAULT_PANES
+
+      // Migrate v2.0.0 workspace settings to v2.1.0 Multi-Timeframe TradingView defaults:
+      // sync.symbol = true, sync.interval = false, and multi-timeframe intervals (1D / 4h / 1h / 15m).
+      let sync: SyncOptions =
+        savedVersion >= SETTINGS_SCHEMA_VERSION && saved.sync
+          ? (saved.sync as SyncOptions)
+          : DEFAULT_SYNC
+
+      if (savedVersion < SETTINGS_SCHEMA_VERSION) {
+        const primaryTicker = panes[0]?.ticker ?? 'HOSE:FPT'
+        const isVnPrimary =
+          primaryTicker.startsWith('HOSE:') ||
+          primaryTicker.startsWith('HNX:') ||
+          primaryTicker.startsWith('UPCOM:')
+        const mtfIntervals: IntervalKey[] = ['1D', '4h', '1h', '15m']
+        panes = panes.map((p, idx) => ({
+          ...p,
+          ticker: primaryTicker,
+          interval: mtfIntervals[idx] ?? p.interval,
+          showVnBands: isVnPrimary,
+        }))
+        sync = DEFAULT_SYNC
+      }
 
       const watchlists = boot.watchlists
       const activeWatchlistId =
@@ -332,7 +433,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         initialized: true,
         theme,
         gridLayout: (saved.gridLayout as GridLayoutKind) ?? '1',
-        sync: (saved.sync as SyncOptions) ?? { symbol: false, interval: true, crosshair: true },
+        sync,
         activeSlotId: typeof saved.activeSlotId === 'string' ? saved.activeSlotId : 'pane-0',
         panes,
         rightPanelOpen: typeof saved.rightPanelOpen === 'boolean' ? saved.rightPanelOpen : true,
@@ -346,6 +447,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         layouts: boot.layouts,
         dataStatus: status,
       })
+
+      if (savedVersion < SETTINGS_SCHEMA_VERSION) {
+        schedulePersistSettings(get())
+      }
 
       await Promise.all([get().refreshWatchlistQuotes(), get().refreshBroker()])
     } catch (err) {
@@ -366,7 +471,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   setGridLayout: (gridLayout) => {
-    set({ gridLayout })
+    const visibleCount =
+      gridLayout === '1' ? 1 : gridLayout === '2v' || gridLayout === '2h' ? 2 : gridLayout === '3' ? 3 : 4
+    const curActive = get().activeSlotId
+    const visibleIds = get().panes.slice(0, visibleCount).map((p) => p.slotId)
+    const nextActive = visibleIds.includes(curActive) ? curActive : (visibleIds[0] ?? 'pane-0')
+    set({ gridLayout, activeSlotId: nextActive })
     schedulePersistSettings(get())
   },
 
@@ -385,7 +495,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const targetSlot = slotId ?? get().activeSlotId
     const syncSymbol = get().sync.symbol
     const isVn = ticker.startsWith('HOSE:') || ticker.startsWith('HNX:') || ticker.startsWith('UPCOM:')
+    if (get().replay?.active && targetSlot === get().activeSlotId) {
+      void get().stopReplay()
+    }
     set((s) => ({
+      replaySelectingCut: false,
       panes: s.panes.map((p) =>
         syncSymbol || p.slotId === targetSlot
           ? { ...p, ticker, showVnBands: isVn }
@@ -399,7 +513,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   setActiveInterval: (interval, slotId) => {
     const targetSlot = slotId ?? get().activeSlotId
     const syncIv = get().sync.interval
+    if (get().replay?.active && targetSlot === get().activeSlotId) {
+      void get().stopReplay()
+    }
     set((s) => ({
+      replaySelectingCut: false,
       panes: s.panes.map((p) => (syncIv || p.slotId === targetSlot ? { ...p, interval } : p)),
     }))
     schedulePersistSettings(get())
@@ -438,10 +556,40 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     schedulePersistSettings(get())
   },
 
-  addIndicatorToActivePane: (spec) => {
-    const slot = get().activeSlotId
+  addIndicatorToActivePane: (spec, slotId) => {
+    const slot = slotId ?? get().activeSlotId
+    const targetPane = get().panes.find((p) => p.slotId === slot)
+    const sameCount = targetPane ? targetPane.indicators.filter((i) => i.name === spec.name).length : 0
+    const nextColor = INDICATOR_COLOR_PALETTE[sameCount % INDICATOR_COLOR_PALETTE.length]
+
+    // Auto-assign distinct line colors & sensible next period when adding another MA/EMA/SMA instance!
+    let calcParams = [...spec.calcParams]
+    if ((spec.name === 'EMA' || spec.name === 'MA') && sameCount > 0) {
+      const presetPeriods = [20, 50, 200, 10, 100]
+      calcParams = [presetPeriods[sameCount % presetPeriods.length]]
+    }
+
+    const styles =
+      spec.styles ??
+      (spec.isMain
+        ? {
+            lines: (calcParams.length > 0 ? calcParams : [1]).map((_, idx) => ({
+              color: INDICATOR_COLOR_PALETTE[(sameCount + idx) % INDICATOR_COLOR_PALETTE.length],
+              size: 1.6,
+            })),
+          }
+        : {
+            lines: [
+              { color: nextColor, size: 1.5 },
+              { color: INDICATOR_COLOR_PALETTE[(sameCount + 1) % INDICATOR_COLOR_PALETTE.length], size: 1.5 },
+              { color: INDICATOR_COLOR_PALETTE[(sameCount + 2) % INDICATOR_COLOR_PALETTE.length], size: 1.5 },
+            ],
+          })
+
     const newItem: SavedIndicatorSpec = {
       ...spec,
+      calcParams,
+      styles,
       id: `ind_${spec.name}_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
     }
     set((s) => ({
@@ -456,8 +604,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     schedulePersistSettings(get())
   },
 
-  updateIndicatorInActivePane: (id, patch) => {
-    const slot = get().activeSlotId
+  updateIndicatorInActivePane: (id, patch, slotId) => {
+    const slot = slotId ?? get().activeSlotId
     set((s) => ({
       panes: s.panes.map((p) =>
         p.slotId === slot
@@ -475,12 +623,16 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     schedulePersistSettings(get())
   },
 
-  removeIndicatorFromActivePane: (id) => {
-    const slot = get().activeSlotId
+  removeIndicatorFromActivePane: (id, slotId) => {
+    const slot = slotId ?? get().activeSlotId
     set((s) => ({
       panes: s.panes.map((p) =>
         p.slotId === slot ? { ...p, indicators: p.indicators.filter((ind) => ind.id !== id) } : p,
       ),
+      editingIndicator:
+        s.editingIndicator?.slotId === slot && s.editingIndicator?.indicatorId === id
+          ? null
+          : s.editingIndicator,
     }))
     const pane = get().panes.find((p) => p.slotId === slot)
     if (pane) {
@@ -489,17 +641,16 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     schedulePersistSettings(get())
   },
 
+  openIndicatorSettings: (slotId, indicatorId) =>
+    set({ editingIndicator: { slotId, indicatorId } }),
+  closeIndicatorSettings: () => set({ editingIndicator: null }),
+
   setActiveDrawingTool: (activeDrawingTool) => set({ activeDrawingTool }),
   setMagnetMode: (magnetMode) => set({ magnetMode }),
   toggleDrawingsLocked: () => set((s) => ({ drawingsLocked: !s.drawingsLocked })),
   toggleDrawingsHidden: () => set((s) => ({ drawingsHidden: !s.drawingsHidden })),
   triggerClearDrawings: () => set((s) => ({ clearDrawingsNonce: s.clearDrawingsNonce + 1 })),
   triggerExportPng: () => set((s) => ({ exportPngNonce: s.exportPngNonce + 1 })),
-
-  publishCrosshairSync: (sourceSlotId, timestamp) => {
-    if (!get().sync.crosshair) return
-    set({ syncedCrosshair: { sourceSlotId, timestamp } })
-  },
 
   scrollActiveChartToTimestamp: (timestampMs) => {
     const slotId = get().activeSlotId
@@ -510,6 +661,38 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         nonce: (s.scrollToTimestampCmd?.nonce ?? 0) + 1,
       },
     }))
+  },
+
+  setBacktestOverlay: (backtestOverlay) => set({ backtestOverlay }),
+  toggleBacktestOverlayVisible: () =>
+    set((s) =>
+      s.backtestOverlay
+        ? { backtestOverlay: { ...s.backtestOverlay, visible: !s.backtestOverlay.visible } }
+        : s,
+    ),
+
+  submitQuickLimitOrder: async (ticker, interval, side, price) => {
+    const isVn = ticker.startsWith('HOSE:') || ticker.startsWith('HNX:') || ticker.startsWith('UPCOM:')
+    const tick = isVn ? (price >= 50000 ? 100 : price >= 10000 ? 50 : 10) : 0.01
+    const snapped = isVn ? Math.round(price / tick) * tick : Number(price.toFixed(2))
+    const qty = isVn ? 1000 : 1
+    try {
+      const snap = await api.brokerSubmitOrder({
+        ticker,
+        interval,
+        side,
+        vnOrderType: 'LO',
+        quantity: qty,
+        price: snapped,
+      })
+      set({ broker: snap, bottomDockOpen: true, bottomDockTab: 'paper' })
+      get().pushToast(
+        'success',
+        `Đã đặt lệnh LO ${side === 'BUY' ? 'MUA' : 'BÁN'} ${qty.toLocaleString('en-US')} ${ticker} @ ${snapped.toLocaleString('en-US')}`,
+      )
+    } catch (err) {
+      get().pushToast('error', String(err))
+    }
   },
 
   setRightPanelOpen: (rightPanelOpen) => {

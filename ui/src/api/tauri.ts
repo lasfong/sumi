@@ -292,7 +292,7 @@ export async function replayStep(delta: number): Promise<ReplaySnapshotResponse>
 }
 
 export async function replayJump(targetTimestampMs: number): Promise<ReplaySnapshotResponse> {
-  if (!isTauriRuntime()) return webFallbackApi.replayStep(0)
+  if (!isTauriRuntime()) return webFallbackApi.replayJump(targetTimestampMs)
   return invoke<ReplaySnapshotResponse>('replay_jump', { targetTimestampMs })
 }
 

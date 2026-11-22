@@ -1,7 +1,99 @@
-import type { CandleType, DeepPartial, Styles } from 'klinecharts'
+import type { CandleType, DeepPartial, Styles, TooltipFeatureStyle } from 'klinecharts'
 import type { ChartStyleKind, ThemeMode } from '../types/market'
 
 const FONT_FAMILY = '-apple-system, BlinkMacSystemFont, "Trebuchet MS", Roboto, Ubuntu, sans-serif'
+
+/**
+ * Crisp 0..13px SVG path feature buttons rendered directly inside KLineChart v10's
+ * on-chart indicator legend (Eye Hide/Show, Gear Settings, X Delete) — identical to TradingView!
+ */
+export function buildIndicatorTooltipFeatures(
+  theme: ThemeMode,
+  visible = true,
+): TooltipFeatureStyle[] {
+  const isDark = theme === 'dark'
+  const color = isDark ? '#8A8E9B' : '#5D606B'
+  const activeColor = isDark ? '#FFFFFF' : '#131722'
+  const activeBg = isDark ? 'rgba(255, 255, 255, 0.14)' : 'rgba(19, 23, 34, 0.09)'
+  const eyePath = visible
+    ? 'M1 6.5 Q6.5 1.8 12 6.5 Q6.5 11.2 1 6.5 Z M6.5 4.8 A1.7 1.7 0 1 0 6.5 8.2 A1.7 1.7 0 1 0 6.5 4.8 Z'
+    : 'M1 6.5 Q6.5 1.8 12 6.5 Q6.5 11.2 1 6.5 Z M2 11 L11 2'
+
+  return [
+    {
+      id: 'toggle_visible',
+      position: 'middle',
+      marginLeft: 6,
+      marginTop: 1,
+      marginRight: 1,
+      marginBottom: 1,
+      paddingLeft: 3,
+      paddingTop: 2,
+      paddingRight: 3,
+      paddingBottom: 2,
+      size: 13,
+      color: visible ? color : '#2962FF',
+      activeColor,
+      backgroundColor: 'transparent',
+      activeBackgroundColor: activeBg,
+      borderRadius: 3,
+      type: 'path',
+      content: {
+        style: 'stroke',
+        lineWidth: 1.25,
+        path: eyePath,
+      },
+    },
+    {
+      id: 'settings',
+      position: 'middle',
+      marginLeft: 2,
+      marginTop: 1,
+      marginRight: 1,
+      marginBottom: 1,
+      paddingLeft: 3,
+      paddingTop: 2,
+      paddingRight: 3,
+      paddingBottom: 2,
+      size: 13,
+      color,
+      activeColor,
+      backgroundColor: 'transparent',
+      activeBackgroundColor: activeBg,
+      borderRadius: 3,
+      type: 'path',
+      content: {
+        style: 'stroke',
+        lineWidth: 1.25,
+        path: 'M6.5 4.2 A2.3 2.3 0 1 0 6.5 8.8 A2.3 2.3 0 1 0 6.5 4.2 Z M6.5 1 L6.5 2.6 M6.5 10.4 L6.5 12 M1 6.5 L2.6 6.5 M10.4 6.5 L12 6.5 M2.6 2.6 L3.8 3.8 M9.2 9.2 L10.4 10.4 M10.4 2.6 L9.2 3.8 M3.8 9.2 L2.6 10.4',
+      },
+    },
+    {
+      id: 'remove',
+      position: 'middle',
+      marginLeft: 2,
+      marginTop: 1,
+      marginRight: 4,
+      marginBottom: 1,
+      paddingLeft: 3,
+      paddingTop: 2,
+      paddingRight: 3,
+      paddingBottom: 2,
+      size: 13,
+      color,
+      activeColor: '#F23645',
+      backgroundColor: 'transparent',
+      activeBackgroundColor: 'rgba(242, 54, 69, 0.16)',
+      borderRadius: 3,
+      type: 'path',
+      content: {
+        style: 'stroke',
+        lineWidth: 1.35,
+        path: 'M3 3 L10 10 M10 3 L3 10',
+      },
+    },
+  ]
+}
 
 export function buildSuperchartsStyles(
   theme: ThemeMode,
@@ -271,6 +363,7 @@ export function buildSuperchartsStyles(
           color: textSecondary,
           defaultValue: '—',
         },
+        features: buildIndicatorTooltipFeatures(theme, true),
       },
     },
     xAxis: {
