@@ -194,7 +194,7 @@ export const IndicatorsModal: React.FC = () => {
       >
         <div>
           <h2 id="indicators-modal-title" className="m-0 text-[15px] font-semibold">
-            Bộ Chỉ Báo Kỹ Thuật QMV (3 Yumeko Thật · 11 Cốt lõi · 5 Phụ trợ)
+            Bộ Chỉ Báo Kỹ Thuật QMV ({INDICATOR_CATALOG.filter((i) => i.tier === 'yumeko').length} Yumeko Thật · {INDICATOR_CATALOG.filter((i) => i.tier === 'core').length} Cốt lõi · {INDICATOR_CATALOG.filter((i) => i.tier === 'aux').length} Phụ trợ)
           </h2>
           <div className="text-[11px]" style={{ color: 'var(--tv-text-secondary)' }}>
             Đang áp dụng cho khung {activePane.ticker} ({activePane.interval}) — Tham số chuẩn QMV V7 & KT01
@@ -286,7 +286,7 @@ export const IndicatorsModal: React.FC = () => {
                   {effectiveShowAux ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
                   <span>Phụ trợ Định lượng — Nâng cao ({auxItems.length})</span>
                 </span>
-                <span className="text-[10px] font-normal">ATR · VRVP · VWAP · OBV · ADX</span>
+                <span className="text-[10px] font-normal">VRVP · TPO · SuperTrend · PSAR · Keltner · Stoch · MFI · CVD · Nến</span>
               </button>
               {effectiveShowAux && <div className="mt-1 space-y-1">{auxItems.map(renderCatalogRow)}</div>}
             </div>

@@ -1,4 +1,5 @@
 pub mod analog_cone;
+pub mod analytics;
 pub mod backtest;
 pub mod broker;
 pub mod market;

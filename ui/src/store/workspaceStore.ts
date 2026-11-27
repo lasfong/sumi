@@ -63,6 +63,14 @@ export interface ToastNotice {
   message: string
 }
 
+export interface TradePlannerDraft {
+  ticker?: string
+  side?: 'LONG' | 'SHORT'
+  entryPrice?: number
+  stopLoss?: number
+  targetPrice?: number
+}
+
 export const DEFAULT_SYNC: SyncOptions = {
   symbol: true,
   interval: false,
@@ -202,6 +210,9 @@ export interface WorkspaceState {
   symbolSearchInitialQuery: string
   indicatorsModalOpen: boolean
   editingIndicator: { slotId: string; indicatorId: string } | null
+  tradePlannerOpen: boolean
+  tradePlannerDraft: TradePlannerDraft | null
+  debriefModalOpen: boolean
 
   // Watchlists, live quotes, alerts, layouts, data status
   watchlists: WatchlistGroup[]
@@ -296,6 +307,9 @@ export interface WorkspaceState {
   openSymbolSearch: (initialQuery?: string) => void
   closeSymbolSearch: () => void
   setIndicatorsModalOpen: (open: boolean) => void
+  openTradePlanner: (draft?: TradePlannerDraft) => void
+  closeTradePlanner: () => void
+  setDebriefModalOpen: (open: boolean) => void
 
   setActiveWatchlistId: (id: string) => void
   refreshWatchlistQuotes: () => Promise<void>
@@ -329,11 +343,23 @@ export interface WorkspaceState {
       interval?: IntervalKey | null
       paramsJson?: Record<string, unknown> | null
       soundEnabled?: boolean
+      frequency?: 'once' | 'once_per_bar_close'
+      cooldownBars?: number
     },
   ) => Promise<void>
+  updateExistingAlert: (params: {
+    id: string
+    condition?: string
+    targetPrice?: number
+    message?: string
+    frequency?: 'once' | 'once_per_bar_close'
+    cooldownBars?: number
+    rearm?: boolean
+  }) => Promise<void>
   toggleAlert: (id: string, status: string) => Promise<void>
   removeAlert: (id: string) => Promise<void>
   checkLiveBarAlerts: (ticker: string, interval: IntervalKey) => Promise<void>
+  scanAllWatchlistAlerts: (silent?: boolean) => Promise<PriceAlertRecord[]>
 
   saveCurrentIndicatorTemplate: (name: string, description?: string) => Promise<void>
   applyIndicatorTemplate: (tpl: IndicatorTemplateRecord) => void
@@ -466,6 +492,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   symbolSearchInitialQuery: '',
   indicatorsModalOpen: false,
   editingIndicator: null,
+  tradePlannerOpen: false,
+  tradePlannerDraft: null,
+  debriefModalOpen: false,
 
   watchlists: [],
   activeWatchlistId: 'wl_qmv30',
@@ -1092,6 +1121,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     set({ symbolSearchOpen: true, symbolSearchInitialQuery: initialQuery }),
   closeSymbolSearch: () => set({ symbolSearchOpen: false, symbolSearchInitialQuery: '' }),
   setIndicatorsModalOpen: (indicatorsModalOpen) => set({ indicatorsModalOpen }),
+  openTradePlanner: (draft) => set({ tradePlannerOpen: true, tradePlannerDraft: draft ?? null }),
+  closeTradePlanner: () => set({ tradePlannerOpen: false, tradePlannerDraft: null }),
+  setDebriefModalOpen: (debriefModalOpen) => set({ debriefModalOpen }),
 
   setActiveWatchlistId: (activeWatchlistId) => {
     set({ activeWatchlistId })
@@ -1224,9 +1256,15 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       opts?.alertKind === 'drawing'
         ? 'đường vẽ'
         : opts?.alertKind === 'indicator'
-          ? 'chỉ báo'
+          ? 'chỉ báo / tín hiệu'
           : `@ ${targetPrice.toLocaleString('en-US')}`
     get().pushToast('success', `Đã tạo cảnh báo ${ticker} (${kindLabel})`)
+  },
+
+  updateExistingAlert: async (params) => {
+    const updated = await api.updateAlert(params)
+    set((s) => ({ alerts: s.alerts.map((a) => (a.id === updated.id ? updated : a)) }))
+    get().pushToast('success', `Đã cập nhật cảnh báo ${updated.ticker}`)
   },
 
   toggleAlert: async (id, status) => {
@@ -1237,6 +1275,27 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   removeAlert: async (id) => {
     await api.deleteAlert(id)
     set((s) => ({ alerts: s.alerts.filter((a) => a.id !== id) }))
+  },
+
+  scanAllWatchlistAlerts: async (silent = false) => {
+    try {
+      const fired = await api.scanWatchlistAlerts()
+      if (fired.length > 0) {
+        set((s) => ({
+          alerts: s.alerts.map((a) => fired.find((f) => f.id === a.id) ?? a),
+        }))
+        for (const f of fired) {
+          notifyAlertTriggered(f)
+          get().pushToast('warning', `🔔 Watchlist Alert ${f.ticker}: ${f.message || `Khớp mốc ${f.targetPrice}`}`)
+        }
+      } else if (!silent) {
+        get().pushToast('info', 'Quét xong toàn bộ cảnh báo đang chờ — chưa có mã nào kích hoạt')
+      }
+      return fired
+    } catch (err) {
+      if (!silent) get().pushToast('error', `Lỗi quét cảnh báo: ${String(err)}`)
+      return []
+    }
   },
 
   checkLiveBarAlerts: async (ticker, interval) => {
@@ -1487,9 +1546,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const hasSteppedMap = Object.keys(barsMap).length > 0
       const firedAlerts = snap.triggeredAlerts ?? []
 
+      const prevStatus = get().replay?.status
       set((s) => ({
         replay: snap,
         replayPlaying: snap.status === 'Completed' ? false : s.replayPlaying,
+        debriefModalOpen:
+          snap.status === 'Completed' && prevStatus !== 'Completed' ? true : s.debriefModalOpen,
         broker: snap.broker ?? s.broker,
         alerts:
           firedAlerts.length > 0

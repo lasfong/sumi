@@ -13,7 +13,9 @@ import { TopDownContextStrip } from './components/TopDownContextStrip'
 import { TopHeader } from './components/TopHeader'
 import { IndicatorsModal } from './components/modals/IndicatorsModal'
 import { IndicatorSettingsModal } from './components/modals/IndicatorSettingsModal'
+import { SessionDebriefModal } from './components/modals/SessionDebriefModal'
 import { SymbolSearchModal } from './components/modals/SymbolSearchModal'
+import { TradePlannerModal } from './components/modals/TradePlannerModal'
 import { useWorkspaceStore } from './store/workspaceStore'
 
 export const App: React.FC = () => {
@@ -129,6 +131,19 @@ export const App: React.FC = () => {
     }
   }, [activeWatchlistTickersKey, dataStatus?.offlineMode, applyLiveQuote])
 
+  // 2b. Background Watchlist Alerts scanner (every 60s when armed alerts exist, Wave 3)
+  useEffect(() => {
+    if (!api.isTauriRuntime()) return
+    const timer = window.setInterval(() => {
+      const st = useWorkspaceStore.getState()
+      if (st.replay?.active) return
+      if (st.alerts.some((a) => a.status === 'armed')) {
+        void st.scanAllWatchlistAlerts(true)
+      }
+    }, 60_000)
+    return () => window.clearInterval(timer)
+  }, [])
+
   // 3. Global TradingView Hotkeys (type any letter -> Symbol Search, Alt+T/H/V/F -> Draw, Space -> Replay)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -140,7 +155,16 @@ export const App: React.FC = () => {
           target.tagName === 'SELECT' ||
           target.isContentEditable)
       const state = useWorkspaceStore.getState()
-      if (inInput || state.symbolSearchOpen || state.indicatorsModalOpen || state.editingIndicator) return
+      if (
+        inInput ||
+        state.symbolSearchOpen ||
+        state.indicatorsModalOpen ||
+        state.editingIndicator ||
+        state.tradePlannerOpen ||
+        state.debriefModalOpen
+      ) {
+        return
+      }
 
       // Drawing hotkeys — match `e.code` so macOS Option+T/H/J/V/F (`†/˙/∆/√/ƒ`) work on physical keyboards (`BUG-021`)!
       if (e.altKey && !e.ctrlKey && !e.metaKey) {
@@ -320,6 +344,8 @@ export const App: React.FC = () => {
       <SymbolSearchModal />
       <IndicatorsModal />
       <IndicatorSettingsModal />
+      <TradePlannerModal />
+      <SessionDebriefModal />
 
       {/* Non-intrusive Toast Stack (top-right below header so bottom dock & order forms stay clear) */}
       {toasts.length > 0 && (

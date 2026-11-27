@@ -1,24 +1,33 @@
 import { Channel, invoke } from '@tauri-apps/api/core'
 import type {
+  AlertDeliveryConfig,
+  AlertTriggerLogRecord,
   AnalogConeQueryParams,
   AnalogConeResponseDto,
   BarsPageResponse,
   BidirectionalFolderSyncResult,
   BrokerStateSnapshot,
   CafeFImportSummary,
+  ChecklistState,
   CorporateEventMarker,
   DataStatusResponse,
+  DomLadderSnapshot,
   DoraemiTransportStatusDto,
+  ExportBacktestHtmlResponse,
   ExportBundleResponse,
   ExportedVerdictListItem,
   ExportedVerdictReceipt,
   IndicatorTemplateRecord,
   IntervalKey,
+  JournalAnalyticsResponseDto,
   LiveBarPayload,
   LiveQuote,
+  MarketBreadthRrgResponse,
   MonteCarloResponse,
+  ParameterSweepResponseDto,
   PortfolioBacktestInput,
   PortfolioBacktestResponse,
+  PresetsBattleResponseDto,
   PriceAlertRecord,
   QmvRealChartSeriesDto,
   ReplaySnapshotResponse,
@@ -28,6 +37,7 @@ import type {
   SavedIndicatorSpec,
   SavedLayoutRecord,
   SavedReplaySessionRecord,
+  SessionDebriefReport,
   SignalCatalogItemDto,
   StockScreenerInput,
   StockScreenerResponse,
@@ -38,6 +48,8 @@ import type {
   SyncProgressPayload,
   SyncStatusDto,
   TopDownSymbolContextDto,
+  TradePlanRequestDto,
+  TradePlanResponseDto,
   VnUniverseSyncSummary,
   WalkForwardResponse,
   WatchlistGroup,
@@ -423,6 +435,8 @@ export async function createAlert(
     interval?: IntervalKey | null
     paramsJson?: Record<string, unknown> | null
     soundEnabled?: boolean
+    frequency?: 'once' | 'once_per_bar_close'
+    cooldownBars?: number
   },
 ): Promise<PriceAlertRecord> {
   if (!isTauriRuntime()) return webFallbackApi.createAlert(ticker, condition, targetPrice, message)
@@ -435,7 +449,76 @@ export async function createAlert(
     interval: opts?.interval ?? null,
     paramsJson: opts?.paramsJson ?? null,
     soundEnabled: opts?.soundEnabled ?? true,
+    frequency: opts?.frequency ?? 'once',
+    cooldownBars: opts?.cooldownBars ?? 0,
   })
+}
+
+export async function updateAlert(params: {
+  id: string
+  condition?: string
+  targetPrice?: number
+  message?: string
+  interval?: IntervalKey | null
+  paramsJson?: Record<string, unknown> | null
+  soundEnabled?: boolean
+  frequency?: 'once' | 'once_per_bar_close'
+  cooldownBars?: number
+  rearm?: boolean
+}): Promise<PriceAlertRecord> {
+  if (!isTauriRuntime()) {
+    return webFallbackApi.updateAlert(params)
+  }
+  return invoke<PriceAlertRecord>('update_alert', {
+    id: params.id,
+    condition: params.condition ?? null,
+    targetPrice: params.targetPrice ?? null,
+    message: params.message ?? null,
+    interval: params.interval ?? null,
+    paramsJson: params.paramsJson ?? null,
+    soundEnabled: params.soundEnabled ?? null,
+    frequency: params.frequency ?? null,
+    cooldownBars: params.cooldownBars ?? null,
+    rearm: params.rearm ?? false,
+  })
+}
+
+export async function listAlertLogs(limit = 100): Promise<AlertTriggerLogRecord[]> {
+  if (!isTauriRuntime()) return []
+  return invoke<AlertTriggerLogRecord[]>('list_alert_logs', { limit })
+}
+
+export async function clearAlertLogs(): Promise<void> {
+  if (!isTauriRuntime()) return
+  await invoke<void>('clear_alert_logs')
+}
+
+export async function scanWatchlistAlerts(): Promise<PriceAlertRecord[]> {
+  if (!isTauriRuntime()) return []
+  return invoke<PriceAlertRecord[]>('scan_watchlist_alerts')
+}
+
+export async function getAlertDeliveryConfig(): Promise<AlertDeliveryConfig> {
+  if (!isTauriRuntime()) {
+    return {
+      osNotificationEnabled: true,
+      telegramBotToken: '',
+      telegramChatId: '',
+      webhookUrl: '',
+      watchlistBackgroundScanEnabled: true,
+    }
+  }
+  return invoke<AlertDeliveryConfig>('get_alert_delivery_config')
+}
+
+export async function saveAlertDeliveryConfig(config: AlertDeliveryConfig): Promise<AlertDeliveryConfig> {
+  if (!isTauriRuntime()) return config
+  return invoke<AlertDeliveryConfig>('save_alert_delivery_config', { config })
+}
+
+export async function testAlertDelivery(): Promise<string[]> {
+  if (!isTauriRuntime()) return ['in_app']
+  return invoke<string[]>('test_alert_delivery')
 }
 
 export async function toggleAlertStatus(id: string, status: string): Promise<void> {
@@ -666,9 +749,48 @@ export async function brokerUpdateJournalNote(
   setupTag: string,
   mistakeTag: string,
   note: string,
+  checklistJson?: ChecklistState | null,
 ): Promise<void> {
   if (!isTauriRuntime()) return
-  await invoke('broker_update_journal_note', { ticker, tradeId, setupTag, mistakeTag, note })
+  await invoke('broker_update_journal_note', {
+    ticker,
+    tradeId,
+    setupTag,
+    mistakeTag,
+    note,
+    checklistJson: checklistJson ?? null,
+  })
+}
+
+export async function brokerGetJournalAnalytics(
+  ticker: string,
+  interval: IntervalKey,
+): Promise<JournalAnalyticsResponseDto> {
+  if (!isTauriRuntime()) return webFallbackApi.brokerGetJournalAnalytics(ticker)
+  return invoke<JournalAnalyticsResponseDto>('broker_get_journal_analytics', { ticker, interval })
+}
+
+export async function computeDomLadder(
+  ticker: string,
+  interval: IntervalKey,
+  halfRows = 8,
+  lookbackBars = 100,
+): Promise<DomLadderSnapshot> {
+  if (!isTauriRuntime()) return webFallbackApi.computeDomLadder(ticker)
+  return invoke<DomLadderSnapshot>('compute_dom_ladder_cmd', { ticker, interval, halfRows, lookbackBars })
+}
+
+export async function computeTradePlan(input: TradePlanRequestDto): Promise<TradePlanResponseDto> {
+  if (!isTauriRuntime()) return webFallbackApi.computeTradePlan(input)
+  return invoke<TradePlanResponseDto>('compute_trade_plan_cmd', { input })
+}
+
+export async function computeReplayDebrief(
+  ticker: string,
+  interval: IntervalKey,
+): Promise<SessionDebriefReport> {
+  if (!isTauriRuntime()) return webFallbackApi.computeReplayDebrief(ticker, interval)
+  return invoke<SessionDebriefReport>('compute_replay_debrief_cmd', { ticker, interval })
 }
 
 // ─── Strategy Tester (Backtest / WFO / Monte Carlo) ──────────────────────────
@@ -802,4 +924,52 @@ export async function yumekoVerifyResearchExport(dir: string): Promise<ResearchE
     }
   }
   return invoke<ResearchExportVerificationDto>('yumeko_verify_research_export', { dir })
+}
+
+// ─── Wave 3: Market Breadth/RRG, Backtest Export, Sweep & Presets Battle ────
+
+export async function getMarketBreadthAndRrg(
+  scope = 'ALL_VN',
+  asOfDate?: string | null,
+): Promise<MarketBreadthRrgResponse> {
+  if (!isTauriRuntime()) return webFallbackApi.getMarketBreadthAndRrg(scope, asOfDate ?? null)
+  return invoke<MarketBreadthRrgResponse>('get_market_breadth_and_rrg', {
+    scope,
+    asOfDate: asOfDate ?? null,
+  })
+}
+
+export async function exportBacktestReportHtml(
+  input: StrategyBacktestInput,
+): Promise<ExportBacktestHtmlResponse> {
+  if (!isTauriRuntime()) {
+    throw new Error('Xuất báo cáo Backtest HTML/PDF yêu cầu Sumi Desktop runtime')
+  }
+  return invoke<ExportBacktestHtmlResponse>('export_backtest_report_html', { input })
+}
+
+export async function runStrategyParameterSweep(
+  input: StrategyBacktestInput,
+  rankingMetric = 'sharpe',
+): Promise<ParameterSweepResponseDto> {
+  if (!isTauriRuntime()) {
+    throw new Error('Tối ưu hóa tham số (Parameter Sweep) yêu cầu Sumi Desktop runtime')
+  }
+  return invoke<ParameterSweepResponseDto>('run_strategy_parameter_sweep', {
+    input,
+    rankingMetric,
+  })
+}
+
+export async function runStrategyPresetsBattle(
+  input: StrategyBacktestInput,
+  rankingMetric = 'sharpe',
+): Promise<PresetsBattleResponseDto> {
+  if (!isTauriRuntime()) {
+    throw new Error('Đấu trường Chiến lược (All-Presets Battle) yêu cầu Sumi Desktop runtime')
+  }
+  return invoke<PresetsBattleResponseDto>('run_strategy_presets_battle', {
+    input,
+    rankingMetric,
+  })
 }

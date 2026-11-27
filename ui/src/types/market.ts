@@ -10,7 +10,7 @@ export type GridLayoutKind = '1' | '2v' | '2h' | '3' | '4'
 
 export type MagnetMode = 'normal' | 'weak_magnet' | 'strong_magnet'
 
-export type BottomDockTab = 'paper' | 'strategy' | 'screener'
+export type BottomDockTab = 'paper' | 'strategy' | 'screener' | 'breadth'
 
 export interface OhlcvBar {
   timestamp: number
@@ -323,6 +323,9 @@ export interface PriceAlertRecord {
   soundEnabled?: boolean
   message: string
   status: 'armed' | 'triggered' | 'paused' | string
+  frequency?: 'once' | 'once_per_bar_close' | string
+  cooldownBars?: number
+  lastFiredBarTs?: number | null
   createdAtMs: number
   triggeredAtMs: number | null
 }
@@ -475,6 +478,15 @@ export interface ClosedTrade {
   r_multiple: number | null
 }
 
+export interface ChecklistState {
+  trend_aligned: boolean
+  level_confirmed: boolean
+  catalyst_or_volume_ok: boolean
+  stop_and_lot_sized: boolean
+  band_and_t2_checked: boolean
+  calm_state: boolean
+}
+
 export interface EnrichedClosedTrade {
   trade: ClosedTrade
   entryTimestampMs: number
@@ -484,6 +496,7 @@ export interface EnrichedClosedTrade {
   setupTag: string
   mistakeTag: string
   note: string
+  checklistJson?: ChecklistState | null
 }
 
 export interface ExecutionFill {
@@ -1290,4 +1303,311 @@ export interface DeepLinkPayload {
   asOf: string | null
   interval: IntervalKey | null
   tab: string | null
+}
+
+// ─── Wave 3 Quantitative Analytics, Alerts 2.0, Trade Planner, DOM, Debrief ──
+
+export interface AlertTriggerLogRecord {
+  id: string
+  alertId: string
+  ticker: string
+  alertKind: string
+  condition: string
+  triggerPrice: number
+  barTimestampMs: number
+  triggeredAtMs: number
+  message: string
+  deliveredChannels: string
+}
+
+export interface AlertDeliveryConfig {
+  osNotificationEnabled: boolean
+  telegramBotToken: string
+  telegramChatId: string
+  webhookUrl: string
+  watchlistBackgroundScanEnabled: boolean
+}
+
+export type RrgQuadrant = 'Leading' | 'Weakening' | 'Lagging' | 'Improving'
+
+export interface SymbolBreadthRotation {
+  instrument_id: string
+  symbol: string
+  preset_label: string
+  last_close: number
+  return_1bar_pct: number
+  traded_value: number
+  buy_flow_ratio_pct: number
+  above_sma20: boolean | null
+  above_ema50: boolean | null
+  rs_ratio: number
+  rs_momentum: number
+  quadrant: RrgQuadrant
+  trail: Array<[number, number]>
+}
+
+export interface MarketBreadthSnapshot {
+  benchmark_symbol: string
+  evaluated_timestamp: number | null
+  participating_count: number
+  advancers: number
+  decliners: number
+  unchanged: number
+  adv_dec_ratio: number
+  pct_above_sma20: number
+  pct_above_ema50: number
+  total_traded_value: number
+  aggregate_buy_value: number
+  aggregate_sell_value: number
+  money_flow_buy_pct: number
+  vn30_participating_count: number
+  vn30_money_flow_buy_pct: number
+  quadrant_counts: [number, number, number, number]
+  rotations: SymbolBreadthRotation[]
+}
+
+export interface SectorHeatmapTileDto {
+  ticker: string
+  symbol: string
+  sectorCode: string
+  sectorLabel: string
+  lastClose: number
+  changePct: number
+  tradedValue: number
+  buyFlowRatioPct: number
+  rsRatio: number
+  rsMomentum: number
+  quadrant: RrgQuadrant
+  inQmv30: boolean
+  inQmv60: boolean
+}
+
+export interface SectorHeatmapGroupDto {
+  sectorCode: string
+  sectorLabel: string
+  sectorGroupLabel: string
+  stockCount: number
+  advancers: number
+  decliners: number
+  unchanged: number
+  avgChangePct: number
+  weightedChangePct: number
+  totalTradedValue: number
+  avgBuyFlowPct: number
+  stocks: SectorHeatmapTileDto[]
+}
+
+export interface MarketBreadthRrgResponse {
+  scope: string
+  asOfDate: string | null
+  replayLocked: boolean
+  snapshot: MarketBreadthSnapshot
+  sectors: SectorHeatmapGroupDto[]
+  elapsedMs: number
+}
+
+export interface TradePlanRequestDto {
+  ticker: string
+  side: 'LONG' | 'SHORT'
+  accountEquity: number
+  availableCash: number
+  riskPct: number
+  maxPositionPct?: number | null
+  entryPrice: number
+  stopLoss: number
+  targetPrice: number
+  referencePrice?: number | null
+  commissionBps?: number | null
+  taxSellBps?: number | null
+  slippageBps?: number | null
+}
+
+export interface TradePlanResponseDto {
+  ticker: string
+  venue: string
+  side: 'LONG' | 'SHORT' | string
+  snappedEntry: number
+  snappedStop: number
+  snappedTarget: number
+  breakevenPrice: number
+  maxRiskAmount: number
+  plannedQuantity: number
+  positionNotional: number
+  marginRequired: number
+  plannedRiskAmount: number
+  plannedRiskPctActual: number
+  estimatedNetProfit: number
+  estimatedRoundTripFriction: number
+  grossRMultiple: number
+  netRMultiple: number
+  requiredWinRatePct: number
+  settlementTimestampMs: number | null
+  affordable: boolean
+  warnings: string[]
+}
+
+export interface DomLadderRow {
+  price: number
+  tick_size: number
+  band_state: 'AboveCeiling' | 'Ceiling' | 'Reference' | 'Floor' | 'BelowFloor' | 'Normal' | string
+  is_at_mark: boolean
+  is_at_position_entry: boolean
+  synth_bid_depth: number
+  synth_ask_depth: number
+  traded_buy_volume: number
+  traded_sell_volume: number
+  net_delta: number
+  working_buy_qty: number
+  working_sell_qty: number
+  working_order_ids: number[]
+}
+
+export interface DomLadderSnapshot {
+  data_fidelity: string
+  venue: string
+  resolved_unit: string
+  price_decimals: number
+  mark_price: number
+  center_price: number
+  daily_band: {
+    reference_price: number
+    ceiling_price: number
+    floor_price: number
+    band_pct: number
+  } | null
+  rows: DomLadderRow[]
+  max_row_depth: number
+  max_row_volume: number
+  cumulative_buy_volume: number
+  cumulative_sell_volume: number
+  bid_ask_imbalance_pct: number
+  poc_price: number | null
+  causal_bar_count: number
+  last_causal_timestamp: number | null
+}
+
+export interface JournalSetupBreakdown {
+  setup: string
+  trade_count: number
+  win_rate_pct: number
+  net_pnl: number
+  avg_r: number | null
+}
+
+export interface JournalAnalytics {
+  visible_entry_count: number
+  planned_count: number
+  closed_count: number
+  win_count: number
+  loss_count: number
+  win_rate_pct: number
+  total_net_pnl: number
+  profit_factor: number | null
+  expectancy_r: number | null
+  sqn: number | null
+  discipline_score_pct: number
+  mistake_trade_count: number
+  cost_of_mistakes: number
+  avg_entry_drift_pct: number | null
+  current_streak: number
+  setup_attribution: JournalSetupBreakdown[]
+}
+
+export interface JournalEquityPointDto {
+  tradeIndex: number
+  timestampMs: number
+  cumulativePnl: number
+  tradePnl: number
+}
+
+export interface JournalAnalyticsResponseDto {
+  ticker: string
+  analytics: JournalAnalytics
+  equityPoints: JournalEquityPointDto[]
+}
+
+export interface CoachingCallout {
+  severity: 'Positive' | 'Neutral' | 'Caution' | 'Critical' | string
+  title: string
+  detail: string
+}
+
+export interface MistakeCostBreakdown {
+  mistake: string
+  trade_count: number
+  decision_note_count: number
+  net_pnl_impact: number
+  adverse_cost_abs: number
+}
+
+export interface SetupEdgeBreakdown {
+  setup: string
+  trade_count: number
+  win_count: number
+  win_rate_pct: number
+  net_pnl: number
+  avg_r: number | null
+}
+
+export interface SessionDebriefReport {
+  symbol: string
+  timeframe: string
+  closed_trades: number
+  win_count: number
+  loss_count: number
+  breakeven_count: number
+  win_rate_pct: number
+  total_net_pnl: number
+  total_return_pct: number
+  avg_return_pct: number
+  profit_factor: number | null
+  expectancy_pnl: number | null
+  net_r_multiple: number
+  avg_r_multiple: number | null
+  max_drawdown_pct: number
+  total_opened_positions: number
+  sl_adherent_positions: number
+  sl_adherence_pct: number | null
+  mistake_breakdown: MistakeCostBreakdown[]
+  setup_breakdown: SetupEdgeBreakdown[]
+  callouts: CoachingCallout[]
+}
+
+export interface ExportBacktestHtmlResponse {
+  filePath: string
+  html: string
+}
+
+export interface SweepVariantRow {
+  rank: number
+  label: string
+  config: Record<string, unknown>
+  tearsheet: BacktestTearsheet
+  in_sample_return_pct: number | null
+  out_of_sample_return_pct: number | null
+  robustness: string | null
+}
+
+export interface ParameterSweepResponseDto {
+  ticker: string
+  interval: string
+  presetLabel: string
+  rankingLabel: string
+  variants: SweepVariantRow[]
+}
+
+export interface PresetBattleItemDto {
+  rank: number
+  presetSlug: StrategyPresetSlug | string
+  presetLabel: string
+  paramSummary: string
+  tearsheet: BacktestTearsheet
+  robustness: string | null
+}
+
+export interface PresetsBattleResponseDto {
+  ticker: string
+  interval: string
+  rankingLabel: string
+  rows: PresetBattleItemDto[]
 }

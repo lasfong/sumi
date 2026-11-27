@@ -6,9 +6,11 @@ use sumi_core::backtest::{
     OpenBacktestPosition, PortfolioConstituentAttribution, PortfolioUniverseFilter,
     PortfolioWeightingMode, PositionSizingMode, QuantileEnvelope5, RobustnessVerdict, SignalClause,
     SignalClauseGroup, SignalPredicate, StopTakeConfig, StrategyDirectionMode, StrategyParams,
-    StrategyPresetKind, SweepRankingMetric, WalkForwardConfig, WalkForwardFoldResult,
-    WalkForwardVerdict, run_backtest_with_options, run_monte_carlo_bootstrap,
-    run_portfolio_backtest, run_walk_forward_validation,
+    StrategyPresetKind, SweepRankingMetric, SweepVariantRow, PresetBattleRow, WalkForwardConfig,
+    WalkForwardFoldResult, WalkForwardVerdict, compute_advanced_tearsheet_analytics,
+    render_backtest_report_html, run_all_presets_battle, run_backtest_with_options,
+    run_monte_carlo_bootstrap, run_parameter_sweep, run_portfolio_backtest,
+    run_walk_forward_validation,
 };
 use sumi_core::data::{DataSourcePreset, Timeframe, WatchlistFeedEntry};
 use sumi_core::model::Candle;
@@ -955,6 +957,237 @@ pub async fn run_strategy_portfolio(
         equity_curve,
         constituents: report.constituents,
         survivor_bias_caveat: report.survivor_bias_caveat,
+    })
+}
+
+// ─── Wave 3: HTML/PDF Report Export, Parameter Sweep & All-Presets Battle ────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportBacktestHtmlResponse {
+    pub file_path: String,
+    pub html: String,
+}
+
+fn parse_ranking_metric(raw: Option<&str>) -> SweepRankingMetric {
+    match raw
+        .map(|s| s.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("return" | "total_return") => SweepRankingMetric::TotalReturnPct,
+        Some("calmar") => SweepRankingMetric::CalmarRatio,
+        Some("profit_factor" | "pf") => SweepRankingMetric::ProfitFactor,
+        _ => SweepRankingMetric::SharpeRatio,
+    }
+}
+
+/// Renders an institutional offline-first HTML/Print-to-PDF Backtest Report (`render_backtest_report_html`),
+/// writes it to `<SUMI_DATA_DIR>/reports/`, and returns both `filePath` and `html`.
+#[tauri::command]
+pub async fn export_backtest_report_html(
+    state: State<'_, AppState>,
+    input: StrategyBacktestInput,
+) -> DesktopResult<ExportBacktestHtmlResponse> {
+    let max_bars = input.max_bars.unwrap_or(2_500).clamp(60, 5_000);
+    let (ticker, iv, tf, candles) = load_backtest_candles(
+        &state,
+        &input.ticker,
+        &input.interval,
+        max_bars,
+        input.from_timestamp_ms,
+        input.to_timestamp_ms,
+    )
+    .await?;
+    let mut cfg = build_backtest_config(&input);
+    if cfg.enforce_vn_microstructure {
+        cfg.benchmark_non_downtrend_days = load_vnindex_non_downtrend_days(&state);
+    }
+    let venue = sumi_core::journal::ExchangeVenue::infer_from_symbol_and_preset(
+        &ticker,
+        DataSourcePreset::CustomFile,
+    );
+    let data_dir = state.data_dir.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let res = run_backtest_with_options(
+            ticker.clone(),
+            tf,
+            &candles,
+            &cfg,
+            BacktestRunOptions::default(),
+        );
+        let analytics = compute_advanced_tearsheet_analytics(
+            &candles,
+            &res,
+            sumi_core::backtest::MultiPhaseSplitMode::default(),
+            BacktestRunOptions::default(),
+        );
+        let html = render_backtest_report_html(&res, &candles, venue, Some(&analytics));
+        let reports_dir = data_dir.join("reports");
+        std::fs::create_dir_all(&reports_dir)?;
+        let safe_sym = ticker.replace(':', "_").replace('!', "");
+        let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+        let file_path = reports_dir.join(format!(
+            "sumi_backtest_{}_{}_{}.html",
+            safe_sym,
+            iv.as_str(),
+            ts
+        ));
+        std::fs::write(&file_path, &html)?;
+        Ok(ExportBacktestHtmlResponse {
+            file_path: file_path.display().to_string(),
+            html,
+        })
+    })
+    .await
+    .map_err(|e| DesktopError::Internal(e.to_string()))?
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParameterSweepResponseDto {
+    pub ticker: String,
+    pub interval: String,
+    pub preset_label: String,
+    pub ranking_label: String,
+    pub variants: Vec<SweepVariantRow>,
+}
+
+/// Runs a deterministic parameter grid sweep across variants of the active strategy preset.
+#[tauri::command]
+pub async fn run_strategy_parameter_sweep(
+    state: State<'_, AppState>,
+    input: StrategyBacktestInput,
+    ranking_metric: Option<String>,
+) -> DesktopResult<ParameterSweepResponseDto> {
+    let max_bars = input.max_bars.unwrap_or(2_500).clamp(60, 5_000);
+    let (ticker, iv, tf, candles) = load_backtest_candles(
+        &state,
+        &input.ticker,
+        &input.interval,
+        max_bars,
+        input.from_timestamp_ms,
+        input.to_timestamp_ms,
+    )
+    .await?;
+    let mut cfg = build_backtest_config(&input);
+    if cfg.enforce_vn_microstructure {
+        cfg.benchmark_non_downtrend_days = load_vnindex_non_downtrend_days(&state);
+    }
+    let metric = parse_ranking_metric(ranking_metric.as_deref());
+
+    let report = tokio::task::spawn_blocking(move || {
+        run_parameter_sweep(
+            ticker,
+            tf,
+            &candles,
+            &cfg,
+            metric,
+            BacktestRunOptions::default(),
+        )
+    })
+    .await
+    .map_err(|e| DesktopError::Internal(e.to_string()))?;
+
+    Ok(ParameterSweepResponseDto {
+        ticker: report.symbol,
+        interval: iv.as_str().to_owned(),
+        preset_label: report.preset.full_label().to_owned(),
+        ranking_label: format!("{:?}", report.ranking_metric),
+        variants: report.variants,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetBattleItemDto {
+    pub rank: usize,
+    pub preset_slug: String,
+    pub preset_label: String,
+    pub param_summary: String,
+    pub tearsheet: BacktestTearsheet,
+    pub robustness: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetsBattleResponseDto {
+    pub ticker: String,
+    pub interval: String,
+    pub ranking_label: String,
+    pub rows: Vec<PresetBattleItemDto>,
+}
+
+fn preset_kind_to_slug(kind: StrategyPresetKind) -> &'static str {
+    match kind {
+        StrategyPresetKind::QmvSupportVpa => "qmv_s1",
+        StrategyPresetKind::QmvSafeBottomDiv => "qmv_s2",
+        StrategyPresetKind::QmvIchimokuV7 => "qmv_s3",
+        StrategyPresetKind::QmvDualCycleFlow => "qmv_s4",
+        StrategyPresetKind::QmvCongestionBreakout => "qmv_s5",
+        StrategyPresetKind::QmvMultiGateConfluence => "qmv_s6",
+        StrategyPresetKind::SmaEmaTrendCross => "sma_ema",
+        StrategyPresetKind::RsiMeanReversion => "rsi_mean_rev",
+        StrategyPresetKind::MacdMomentum => "macd",
+        StrategyPresetKind::BollingerSqueezeBreakout => "bb_squeeze",
+        StrategyPresetKind::DonchianAtrBreakout => "donchian_atr",
+        StrategyPresetKind::RsiBollingerConfluence => "rsi_bb",
+        StrategyPresetKind::CustomSignalRules => "custom",
+    }
+}
+
+/// Runs head-to-head All-Presets Battle across all built-in QMV S1–S6 and Baseline strategies.
+#[tauri::command]
+pub async fn run_strategy_presets_battle(
+    state: State<'_, AppState>,
+    input: StrategyBacktestInput,
+    ranking_metric: Option<String>,
+) -> DesktopResult<PresetsBattleResponseDto> {
+    let max_bars = input.max_bars.unwrap_or(2_500).clamp(60, 5_000);
+    let (ticker, iv, tf, candles) = load_backtest_candles(
+        &state,
+        &input.ticker,
+        &input.interval,
+        max_bars,
+        input.from_timestamp_ms,
+        input.to_timestamp_ms,
+    )
+    .await?;
+    let mut cfg = build_backtest_config(&input);
+    if cfg.enforce_vn_microstructure {
+        cfg.benchmark_non_downtrend_days = load_vnindex_non_downtrend_days(&state);
+    }
+    let metric = parse_ranking_metric(ranking_metric.as_deref());
+    let ticker_out = ticker.clone();
+
+    let rows: Vec<PresetBattleRow> = tokio::task::spawn_blocking(move || {
+        run_all_presets_battle(
+            ticker,
+            tf,
+            &candles,
+            &cfg,
+            metric,
+            BacktestRunOptions::default(),
+        )
+    })
+    .await
+    .map_err(|e| DesktopError::Internal(e.to_string()))?;
+
+    Ok(PresetsBattleResponseDto {
+        ticker: ticker_out,
+        interval: iv.as_str().to_owned(),
+        ranking_label: format!("{metric:?}"),
+        rows: rows
+            .into_iter()
+            .map(|r| PresetBattleItemDto {
+                rank: r.rank,
+                preset_slug: preset_kind_to_slug(r.preset).to_owned(),
+                preset_label: r.preset.full_label().to_owned(),
+                param_summary: r.param_summary,
+                tearsheet: r.tearsheet,
+                robustness: r.robustness.map(|v| v.label().to_owned()),
+            })
+            .collect(),
     })
 }
 

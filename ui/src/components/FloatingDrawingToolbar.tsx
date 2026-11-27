@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { BellPlus, Copy, GripVertical, Lock, Trash2, Unlock } from 'lucide-react'
+import { BellPlus, Calculator, Copy, GripVertical, Lock, Trash2, Unlock } from 'lucide-react'
 
 export type DrawingLineStyleKind = 'solid' | 'dashed' | 'dotted'
 
@@ -20,6 +20,7 @@ interface FloatingDrawingToolbarProps {
   onChangeLineStyle: (style: DrawingLineStyleKind) => void
   onToggleLock: () => void
   onCreateAlert?: () => void
+  onOpenTradePlanner?: () => void
   onClone: () => void
   onDelete: () => void
 }
@@ -43,6 +44,7 @@ export const FloatingDrawingToolbar: React.FC<FloatingDrawingToolbarProps> = ({
   onChangeLineStyle,
   onToggleLock,
   onCreateAlert,
+  onOpenTradePlanner,
   onClone,
   onDelete,
 }) => {
@@ -327,6 +329,22 @@ export const FloatingDrawingToolbar: React.FC<FloatingDrawingToolbarProps> = ({
             <BellPlus aria-hidden="true" className="w-3.5 h-3.5" />
           </button>
         )}
+
+      {/* Open Trade Planner directly from Long/Short Position R:R Tool (Wave 3) */}
+      {onOpenTradePlanner && ['longPosition', 'shortPosition'].includes(selected.name) && (
+        <button
+          type="button"
+          data-tb-item="true"
+          tabIndex={hasNativeFocusGroup ? undefined : -1}
+          aria-label="Mở Kế hoạch Lệnh (Trade Planner) từ khung R:R"
+          onClick={onOpenTradePlanner}
+          className="tv-btn h-6 px-2 text-[10.5px] font-semibold bg-[#2962FF] text-white"
+          title="Tính khối lượng lô 100 & gửi thẳng vào Paper Broker từ khung R:R này"
+        >
+          <Calculator aria-hidden="true" className="w-3 h-3" />
+          <span>Kế hoạch Lệnh</span>
+        </button>
+      )}
 
       {/* Clone */}
       <button

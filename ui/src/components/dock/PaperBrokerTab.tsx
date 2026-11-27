@@ -1,9 +1,49 @@
 import React, { useEffect, useState } from 'react'
-import { RotateCcw, ShieldAlert, X } from 'lucide-react'
+import { Calculator, RefreshCw, RotateCcw, ShieldAlert, X } from 'lucide-react'
 import * as api from '../../api/tauri'
 import { useWorkspaceStore } from '../../store/workspaceStore'
+import type { ChecklistState, DomLadderSnapshot, JournalAnalyticsResponseDto } from '../../types/market'
 
-type BrokerSubTab = 'positions' | 'orders' | 'fifo' | 'journal'
+type BrokerSubTab = 'positions' | 'orders' | 'fifo' | 'dom' | 'journal'
+
+const SETUP_TAGS = [
+  { value: 'Untagged', label: 'Chưa gắn Setup' },
+  { value: 'TrendPullback', label: 'Pullback Xu hướng' },
+  { value: 'SqueezeBreakout', label: 'Breakout Nén BB' },
+  { value: 'MeanReversion', label: 'Hồi quy Trung bình' },
+  { value: 'SupportBounce', label: 'Bật Hỗ trợ cứng' },
+  { value: 'MomentumContinuation', label: 'Tiếp diễn Động lượng' },
+  { value: 'LiquiditySweep', label: 'Quét Thanh khoản' },
+] as const
+
+const MISTAKE_TAGS = [
+  { value: 'None', label: 'Đúng kỷ luật' },
+  { value: 'FomoChase', label: 'FOMO Đuổi giá' },
+  { value: 'MovedStopLoss', label: 'Dời/Gỡ Cắt lỗ' },
+  { value: 'EarlyExit', label: 'Chốt non sớm' },
+  { value: 'OversizedRisk', label: 'Quá cỡ vị thế' },
+  { value: 'CounterTrendImpulse', label: 'Bắt dao ngược xu hướng' },
+  { value: 'IgnoredDailyBand', label: 'Vi phạm Biên độ / T+2' },
+  { value: 'SkippedChecklist', label: 'Bỏ qua Checklist' },
+] as const
+
+const CHECKLIST_KEYS: Array<{ key: keyof ChecklistState; short: string; title: string }> = [
+  { key: 'trend_aligned', short: 'XH', title: 'Thuận xu hướng khung lớn' },
+  { key: 'level_confirmed', short: 'CĐ', title: 'Xác nhận vùng hỗ trợ/kháng cự' },
+  { key: 'catalyst_or_volume_ok', short: 'Vol', title: 'Dòng tiền / Khối lượng đạt chuẩn' },
+  { key: 'stop_and_lot_sized', short: 'SL', title: 'Đặt SL & tính lô 100 trước khi vào' },
+  { key: 'band_and_t2_checked', short: 'T+2', title: 'Kiểm tra biên độ & khóa T+2' },
+  { key: 'calm_state', short: 'TL', title: 'Tâm lý ổn định, không FOMO' },
+]
+
+const DEFAULT_CHECKLIST: ChecklistState = {
+  trend_aligned: true,
+  level_confirmed: false,
+  catalyst_or_volume_ok: false,
+  stop_and_lot_sized: true,
+  band_and_t2_checked: true,
+  calm_state: false,
+}
 
 function fmtMoney(v: number, isVnd: boolean): string {
   if (!Number.isFinite(v)) return '—'
@@ -29,21 +69,27 @@ export const PaperBrokerTab: React.FC = () => {
   const broker = useWorkspaceStore((s) => s.broker)
   const setBrokerSnapshot = useWorkspaceStore((s) => s.setBrokerSnapshot)
   const refreshBroker = useWorkspaceStore((s) => s.refreshBroker)
+  const openTradePlanner = useWorkspaceStore((s) => s.openTradePlanner)
   const pushToast = useWorkspaceStore((s) => s.pushToast)
 
   const activePane = panes.find((p) => p.slotId === activeSlotId) ?? panes[0]
 
   const [subTab, setSubTab] = useState<BrokerSubTab>('positions')
   const [side, setSide] = useState<'BUY' | 'SELL'>('BUY')
-  const [vnOrderType, setVnOrderType] = useState<'LO' | 'MP' | 'ATO' | 'ATC'>('LO')
+  const [vnOrderType, setVnOrderType] = useState<'LO' | 'MP' | 'ATO' | 'ATC' | 'STOP'>('LO')
   const [qty, setQty] = useState<string>('1000')
   const [price, setPrice] = useState<string>('')
   const [stopLoss, setStopLoss] = useState<string>('')
   const [takeProfit, setTakeProfit] = useState<string>('')
   const [submitting, setSubmitting] = useState(false)
-  const [noteDrafts, setNoteDrafts] = useState<Record<number, { setup: string; note: string }>>({})
+  const [noteDrafts, setNoteDrafts] = useState<
+    Record<number, { setup: string; mistake: string; note: string; checklist: ChecklistState }>
+  >({})
   const [bracketDraft, setBracketDraft] = useState<{ sl: string; tp: string }>({ sl: '', tp: '' })
   const [orderPriceDrafts, setOrderPriceDrafts] = useState<Record<number, string>>({})
+  const [domSnap, setDomSnap] = useState<DomLadderSnapshot | null>(null)
+  const [domLoading, setDomLoading] = useState(false)
+  const [journalStats, setJournalStats] = useState<JournalAnalyticsResponseDto | null>(null)
 
   const isIndexTicker = (() => {
     const sym = (activePane.ticker.split(':')[1] ?? activePane.ticker).toUpperCase()
@@ -88,12 +134,31 @@ export const PaperBrokerTab: React.FC = () => {
     }
   }, [broker?.replayLinked, broker?.markPrice, broker?.markTimestampMs])
 
+  useEffect(() => {
+    if (subTab !== 'dom') return
+    setDomLoading(true)
+    void api
+      .computeDomLadder(activePane.ticker, activePane.interval, 8, 100)
+      .then(setDomSnap)
+      .catch(() => setDomSnap(null))
+      .finally(() => setDomLoading(false))
+  }, [subTab, activePane.ticker, activePane.interval, broker?.markTimestampMs, broker?.orders.length])
+
+  useEffect(() => {
+    if (subTab !== 'journal') return
+    void api
+      .brokerGetJournalAnalytics(activePane.ticker, activePane.interval)
+      .then(setJournalStats)
+      .catch(() => setJournalStats(null))
+  }, [subTab, activePane.ticker, activePane.interval, broker?.closedTrades.length])
+
   const isVnd = ['HOSE', 'HNX', 'UPCOM', 'VN30F', 'Hose', 'Hnx', 'Upcom', 'Vn30Futures'].includes(
     broker?.venue ?? 'Hose',
   )
   const lotStep = broker?.boardLot ?? 100
   const numericQty = Number(qty)
-  const numericPrice = vnOrderType === 'LO' ? Number(price) : (broker?.markPrice ?? 0)
+  const needsExplicitPrice = vnOrderType === 'LO' || vnOrderType === 'STOP'
+  const numericPrice = needsExplicitPrice ? Number(price) : (broker?.markPrice ?? 0)
   const lotInvalid = lotStep === 100 && (!Number.isFinite(numericQty) || numericQty <= 0 || numericQty % 100 !== 0)
   const bandInvalid =
     vnOrderType === 'LO' &&
@@ -122,7 +187,7 @@ export const PaperBrokerTab: React.FC = () => {
         side,
         vnOrderType,
         quantity: numericQty,
-        price: vnOrderType === 'LO' ? Number(price) : null,
+        price: needsExplicitPrice ? Number(price) : null,
         stopLoss: stopLoss.trim() ? Number(stopLoss) : null,
         takeProfit: takeProfit.trim() ? Number(takeProfit) : null,
       })
@@ -210,9 +275,18 @@ export const PaperBrokerTab: React.FC = () => {
   const saveJournalNote = async (tradeId: number) => {
     const draft = noteDrafts[tradeId]
     if (!draft) return
-    await api.brokerUpdateJournalNote(activePane.ticker, tradeId, draft.setup, '', draft.note)
+    await api.brokerUpdateJournalNote(
+      activePane.ticker,
+      tradeId,
+      draft.setup,
+      draft.mistake,
+      draft.note,
+      draft.checklist,
+    )
     await refreshBroker()
-    pushToast('success', `Đã lưu ghi chú nhật ký cho lệnh #${tradeId}`)
+    const stats = await api.brokerGetJournalAnalytics(activePane.ticker, activePane.interval).catch(() => null)
+    if (stats) setJournalStats(stats)
+    pushToast('success', `Đã lưu nhật ký (Setup / Sai lầm / Checklist) cho lệnh #${tradeId}`)
   }
 
   const contractMult =
@@ -250,16 +324,35 @@ export const PaperBrokerTab: React.FC = () => {
               </span>
             )}
           </div>
-          <button
-            type="button"
-            className="tv-btn h-5 px-1.5 text-[10.5px]"
-            style={{ color: 'var(--tv-text-secondary)' }}
-            onClick={() => void handleReset()}
-            title="Reset tài khoản giả lập"
-          >
-            <RotateCcw className="w-3 h-3" />
-            <span>Reset</span>
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              className="tv-btn h-5 px-1.5 text-[10.5px] text-[#2962FF]"
+              onClick={() =>
+                openTradePlanner({
+                  ticker: activePane.ticker,
+                  side: side === 'SELL' ? 'SHORT' : 'LONG',
+                  entryPrice: Number(price) || broker?.markPrice,
+                  stopLoss: stopLoss.trim() ? Number(stopLoss) : undefined,
+                  targetPrice: takeProfit.trim() ? Number(takeProfit) : undefined,
+                })
+              }
+              title="Mở máy tính Kế hoạch R:R & Khối lượng chuẩn (Trade Planner)"
+            >
+              <Calculator className="w-3 h-3" />
+              <span>Kế hoạch R:R</span>
+            </button>
+            <button
+              type="button"
+              className="tv-btn h-5 px-1.5 text-[10.5px]"
+              style={{ color: 'var(--tv-text-secondary)' }}
+              onClick={() => void handleReset()}
+              title="Reset tài khoản giả lập"
+            >
+              <RotateCcw className="w-3 h-3" />
+              <span>Reset</span>
+            </button>
+          </div>
         </div>
 
         {/* Buy / Sell Segmented Buttons */}
@@ -288,9 +381,9 @@ export const PaperBrokerTab: React.FC = () => {
           </button>
         </div>
 
-        {/* VN Order Type Selector: LO / MP / ATO / ATC */}
-        <div className="grid grid-cols-4 gap-1">
-          {(['LO', 'MP', 'ATO', 'ATC'] as const).map((ot) => (
+        {/* VN Order Type Selector: LO / MP / ATO / ATC / STOP */}
+        <div className="grid grid-cols-5 gap-1">
+          {(['LO', 'MP', 'ATO', 'ATC', 'STOP'] as const).map((ot) => (
             <button
               key={ot}
               type="button"
@@ -307,8 +400,8 @@ export const PaperBrokerTab: React.FC = () => {
           ))}
         </div>
 
-        {/* Quantity + LO Price side-by-side in 2 columns so submit button stays 100% visible */}
-        <div className={`grid gap-1.5 ${vnOrderType === 'LO' ? 'grid-cols-2' : 'grid-cols-1'}`}>
+        {/* Quantity + LO/STOP Price side-by-side in 2 columns so submit button stays 100% visible */}
+        <div className={`grid gap-1.5 ${needsExplicitPrice ? 'grid-cols-2' : 'grid-cols-1'}`}>
           <div className="space-y-0.5">
             <div className="flex items-center justify-between text-[10px]" style={{ color: 'var(--tv-text-secondary)' }}>
               <span>KL {lotStep === 100 ? '(Lô 100)' : ''}</span>
@@ -341,10 +434,10 @@ export const PaperBrokerTab: React.FC = () => {
             />
           </div>
 
-          {vnOrderType === 'LO' && (
+          {needsExplicitPrice && (
             <div className="space-y-0.5">
               <div className="flex items-center justify-between text-[10px]" style={{ color: 'var(--tv-text-secondary)' }}>
-                <span>Giá LO</span>
+                <span>{vnOrderType === 'STOP' ? 'Giá STOP' : 'Giá LO'}</span>
                 {broker?.vnBand && (
                   <div className="flex gap-0.5 tabular-nums">
                     <button
@@ -493,8 +586,9 @@ export const PaperBrokerTab: React.FC = () => {
               [
                 { id: 'positions', label: `Vị thế (${broker?.openPosition ? 1 : 0})` },
                 { id: 'orders', label: `Lệnh (${broker?.orders.length ?? 0})` },
-                { id: 'fifo', label: `Lô FIFO VSD T+2 (${broker?.fifoSummary.lots.length ?? 0})` },
-                { id: 'journal', label: `Nhật ký MAE/MFE (${broker?.closedTrades.length ?? 0})` },
+                { id: 'fifo', label: `Lô FIFO T+2 (${broker?.fifoSummary.lots.length ?? 0})` },
+                { id: 'dom', label: 'DOM (OHLCV Proxy)' },
+                { id: 'journal', label: `Nhật ký & SQN (${broker?.closedTrades.length ?? 0})` },
               ] as const
             ).map((t) => (
               <button
@@ -802,33 +896,206 @@ export const PaperBrokerTab: React.FC = () => {
             </div>
           )}
 
+          {subTab === 'dom' && (
+            <div className="p-2 space-y-2">
+              <div
+                className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 rounded text-[11px]"
+                style={{ backgroundColor: 'var(--tv-bg-elevated)', border: '1px solid var(--tv-border)' }}
+              >
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span
+                    className="px-1.5 py-0.5 rounded text-[9.5px] font-bold"
+                    style={{ backgroundColor: 'rgba(251, 192, 45, 0.18)', color: '#FBC02D' }}
+                    title="Dựng tổng hợp từ chuỗi nến OHLCV nhân quả (không phải dữ liệu sổ lệnh Level-2 sở giao dịch)"
+                  >
+                    ⚠ {domSnap?.data_fidelity ?? 'OHLCV_SYNTH_DOM_PROXY'}
+                  </span>
+                  <span style={{ color: 'var(--tv-text-secondary)' }}>
+                    Cân bằng Mua/Bán:{' '}
+                    <strong style={{ color: (domSnap?.bid_ask_imbalance_pct ?? 50) >= 50 ? 'var(--tv-up)' : 'var(--tv-down)' }}>
+                      {(domSnap?.bid_ask_imbalance_pct ?? 50).toFixed(1)}%
+                    </strong>
+                    {domSnap?.poc_price != null && (
+                      <>
+                        {' '}· POC: <strong style={{ color: '#FBC02D' }}>{domSnap.poc_price.toLocaleString('en-US')}</strong>
+                      </>
+                    )}
+                    {' '}· Nhấp mức giá để điền nhanh vào phiếu LO
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className="tv-icon-btn w-6 h-6"
+                  onClick={() => {
+                    setDomLoading(true)
+                    void api
+                      .computeDomLadder(activePane.ticker, activePane.interval, 8, 100)
+                      .then(setDomSnap)
+                      .finally(() => setDomLoading(false))
+                  }}
+                  title="Tải lại DOM Ladder"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${domLoading ? 'animate-spin' : ''}`} />
+                </button>
+              </div>
+              {domSnap ? (
+                <table className="tv-table tabular-nums">
+                  <thead>
+                    <tr>
+                      <th scope="col" className="text-right">KL Mua (Bid Proxy)</th>
+                      <th scope="col" className="text-center">Mức Giá (Click đặt LO)</th>
+                      <th scope="col">KL Bán (Ask Proxy)</th>
+                      <th scope="col" className="text-right">Net Delta</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {domSnap.rows.map((row) => {
+                      const bidW = domSnap.max_row_depth > 0 ? Math.min(100, (row.synth_bid_depth / domSnap.max_row_depth) * 100) : 0
+                      const askW = domSnap.max_row_depth > 0 ? Math.min(100, (row.synth_ask_depth / domSnap.max_row_depth) * 100) : 0
+                      const isPoc = domSnap.poc_price != null && Math.abs(row.price - domSnap.poc_price) < 1e-6
+                      return (
+                        <tr
+                          key={row.price}
+                          style={{
+                            backgroundColor: row.is_at_mark
+                              ? 'var(--tv-accent-soft)'
+                              : row.is_at_position_entry
+                                ? 'rgba(8, 153, 129, 0.12)'
+                                : undefined,
+                          }}
+                        >
+                          <td className="text-right relative">
+                            {row.synth_bid_depth > 0 && (
+                              <div
+                                className="absolute right-0 top-0.5 bottom-0.5 rounded-l"
+                                style={{ width: `${bidW}%`, backgroundColor: 'rgba(8, 153, 129, 0.22)' }}
+                              />
+                            )}
+                            <span className="relative z-10 text-[#089981]">
+                              {row.synth_bid_depth > 0 ? Math.round(row.synth_bid_depth).toLocaleString('en-US') : ''}
+                            </span>
+                          </td>
+                          <td className="text-center">
+                            <button
+                              type="button"
+                              className="px-2 py-0.5 rounded font-bold border-0 bg-transparent cursor-pointer hover:bg-[var(--tv-hover)] text-[var(--tv-text-primary)]"
+                              onClick={() => {
+                                setVnOrderType('LO')
+                                setPrice(String(row.price))
+                              }}
+                              title="Điền mức giá này vào phiếu lệnh LO"
+                            >
+                              {row.price.toLocaleString('en-US')}
+                              {row.band_state === 'Ceiling' && <span className="ml-1 text-[9px] text-[var(--tv-vn-ceil)]">CEIL</span>}
+                              {row.band_state === 'Floor' && <span className="ml-1 text-[9px] text-[var(--tv-vn-floor)]">FLR</span>}
+                              {row.band_state === 'Reference' && <span className="ml-1 text-[9px] text-[var(--tv-vn-ref)]">REF</span>}
+                              {isPoc && <span className="ml-1 text-[9px] text-[#FBC02D]">POC</span>}
+                            </button>
+                          </td>
+                          <td className="relative">
+                            {row.synth_ask_depth > 0 && (
+                              <div
+                                className="absolute left-0 top-0.5 bottom-0.5 rounded-r"
+                                style={{ width: `${askW}%`, backgroundColor: 'rgba(242, 54, 69, 0.22)' }}
+                              />
+                            )}
+                            <span className="relative z-10 text-[#F23645]">
+                              {row.synth_ask_depth > 0 ? Math.round(row.synth_ask_depth).toLocaleString('en-US') : ''}
+                            </span>
+                          </td>
+                          <td
+                            className="text-right font-medium"
+                            style={{ color: row.net_delta >= 0 ? 'var(--tv-up)' : 'var(--tv-down)' }}
+                          >
+                            {row.net_delta >= 0 ? '+' : ''}
+                            {Math.round(row.net_delta).toLocaleString('en-US')}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              ) : (
+                <div className="text-center py-6 text-[11.5px]" style={{ color: 'var(--tv-text-secondary)' }}>
+                  {domLoading ? 'Đang dựng sổ lệnh tổng hợp (OHLCV Proxy)...' : 'Không đủ dữ liệu để dựng DOM Ladder.'}
+                </div>
+              )}
+            </div>
+          )}
+
           {subTab === 'journal' && (() => {
             const partialFills = (broker?.fills ?? [])
               .filter((f) => f.realized_net_pnl !== null && f.realized_net_pnl !== undefined)
               .slice()
               .reverse()
             const closedList = broker?.closedTrades ?? []
+            const ja = journalStats?.analytics
+            const eqPts = journalStats?.equityPoints ?? []
             return (
-              <div className="space-y-2">
+              <div className="space-y-2 p-2">
+                {/* Journal Behavioral Analytics Banner (`SQN`, `Cost of Mistakes`, `Discipline %`, PnL Sparkline) */}
+                {ja && (
+                  <div
+                    className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 rounded text-[11px] tabular-nums"
+                    style={{ backgroundColor: 'var(--tv-bg-elevated)', border: '1px solid var(--tv-border)' }}
+                  >
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                      <span>
+                        <span style={{ color: 'var(--tv-text-secondary)' }}>SQN: </span>
+                        <strong>{ja.sqn != null ? ja.sqn.toFixed(2) : '—'}</strong>
+                      </span>
+                      <span>
+                        <span style={{ color: 'var(--tv-text-secondary)' }}>Kỷ luật Checklist: </span>
+                        <strong style={{ color: ja.discipline_score_pct >= 75 ? 'var(--tv-up)' : '#FBC02D' }}>
+                          {ja.discipline_score_pct.toFixed(0)}%
+                        </strong>
+                      </span>
+                      <span>
+                        <span style={{ color: 'var(--tv-text-secondary)' }}>Chi phí Sai lầm: </span>
+                        <strong style={{ color: ja.cost_of_mistakes > 0 ? 'var(--tv-down)' : 'var(--tv-up)' }}>
+                          {fmtMoney(ja.cost_of_mistakes, isVnd)} ({ja.mistake_trade_count} lệnh)
+                        </strong>
+                      </span>
+                      <span>
+                        <span style={{ color: 'var(--tv-text-secondary)' }}>Expectancy R: </span>
+                        <strong>{ja.expectancy_r != null ? `${ja.expectancy_r >= 0 ? '+' : ''}${ja.expectancy_r.toFixed(2)}R` : '—'}</strong>
+                      </span>
+                    </div>
+                    {eqPts.length >= 2 && (() => {
+                      const vals = eqPts.map((p) => p.cumulativePnl)
+                      const minV = Math.min(...vals, 0)
+                      const maxV = Math.max(...vals, 1)
+                      const spanV = Math.max(1e-6, maxV - minV)
+                      const pts = eqPts
+                        .map((p, i) => `${((i / (eqPts.length - 1)) * 110 + 2).toFixed(1)},${(24 - ((p.cumulativePnl - minV) / spanV) * 20).toFixed(1)}`)
+                        .join(' ')
+                      const lastPos = eqPts[eqPts.length - 1].cumulativePnl >= 0
+                      return (
+                        <svg viewBox="0 0 114 26" className="w-[114px] h-[26px] shrink-0">
+                          <polyline fill="none" stroke={lastPos ? '#089981' : '#F23645'} strokeWidth="1.6" points={pts} />
+                        </svg>
+                      )
+                    })()}
+                  </div>
+                )}
+
                 <table className="tv-table tabular-nums">
-                  <caption className="sr-only-live">Nhật ký giao dịch MAE và MFE</caption>
+                  <caption className="sr-only-live">Nhật ký giao dịch MAE, MFE, Setup, Sai lầm và Checklist</caption>
                   <thead>
                     <tr>
                       <th scope="col">#</th>
-                      <th scope="col">Chiều</th>
-                      <th scope="col">KL</th>
                       <th scope="col">Vào / Ra</th>
                       <th scope="col">Net PnL (%)</th>
-                      <th scope="col">R</th>
-                      <th scope="col">MAE %</th>
-                      <th scope="col">MFE %</th>
-                      <th scope="col">Ghi chú & Setup</th>
+                      <th scope="col">MAE / MFE</th>
+                      <th scope="col">Setup & Sai lầm</th>
+                      <th scope="col">Checklist (6 điểm)</th>
+                      <th scope="col">Ghi chú</th>
                     </tr>
                   </thead>
                   <tbody>
                     {closedList.length === 0 && partialFills.length === 0 ? (
                       <tr>
-                        <td colSpan={9} className="text-center py-6" style={{ color: 'var(--tv-text-secondary)' }}>
+                        <td colSpan={7} className="text-center py-6" style={{ color: 'var(--tv-text-secondary)' }}>
                           Chưa có giao dịch đã đóng hoặc chốt một phần nào trong nhật ký.
                         </td>
                       </tr>
@@ -836,21 +1103,98 @@ export const PaperBrokerTab: React.FC = () => {
                       <>
                         {closedList.map((item) => {
                           const t = item.trade
-                          const draft = noteDrafts[t.trade_id] ?? { setup: item.setupTag, note: item.note }
+                          const draft = noteDrafts[t.trade_id] ?? {
+                            setup: item.setupTag || 'Untagged',
+                            mistake: item.mistakeTag || 'None',
+                            note: item.note,
+                            checklist: item.checklistJson ?? DEFAULT_CHECKLIST,
+                          }
                           return (
                             <tr key={`closed_${t.trade_id}`}>
-                              <td>#{t.trade_id}</td>
-                              <td>{t.side}</td>
-                              <td>{t.quantity.toLocaleString('en-US')}</td>
+                              <td>
+                                #{t.trade_id} <span className="text-[10px] opacity-70">{t.side}</span>
+                              </td>
                               <td>
                                 {t.entry_price.toLocaleString('en-US')} → {t.exit_price.toLocaleString('en-US')}
                               </td>
                               <td style={{ color: t.net_pnl >= 0 ? 'var(--tv-up)' : 'var(--tv-down)', fontWeight: 600 }}>
-                                {fmtMoney(t.net_pnl, isVnd)} ({t.return_pct >= 0 ? '+' : ''}{t.return_pct.toFixed(2)}%)
+                                {fmtMoney(t.net_pnl, isVnd)} ({t.return_pct >= 0 ? '+' : ''}{t.return_pct.toFixed(1)}%)
                               </td>
-                              <td>{t.r_multiple != null ? `${t.r_multiple.toFixed(2)}R` : '—'}</td>
-                              <td style={{ color: 'var(--tv-down)' }}>{item.maePct.toFixed(2)}%</td>
-                              <td style={{ color: 'var(--tv-up)' }}>+{item.mfePct.toFixed(2)}%</td>
+                              <td>
+                                <span style={{ color: 'var(--tv-down)' }}>{item.maePct.toFixed(1)}%</span> /{' '}
+                                <span style={{ color: 'var(--tv-up)' }}>+{item.mfePct.toFixed(1)}%</span>
+                              </td>
+                              <td>
+                                <div className="flex flex-col gap-1">
+                                  <select
+                                    aria-label={`Setup lệnh #${t.trade_id}`}
+                                    value={draft.setup}
+                                    onChange={(e) =>
+                                      setNoteDrafts((m) => ({
+                                        ...m,
+                                        [t.trade_id]: { ...draft, setup: e.target.value },
+                                      }))
+                                    }
+                                    className="px-1 py-0.5 rounded text-[10.5px] outline-none"
+                                    style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+                                  >
+                                    {SETUP_TAGS.map((s) => (
+                                      <option key={s.value} value={s.value}>{s.label}</option>
+                                    ))}
+                                  </select>
+                                  <select
+                                    aria-label={`Sai lầm lệnh #${t.trade_id}`}
+                                    value={draft.mistake}
+                                    onChange={(e) =>
+                                      setNoteDrafts((m) => ({
+                                        ...m,
+                                        [t.trade_id]: { ...draft, mistake: e.target.value },
+                                      }))
+                                    }
+                                    className="px-1 py-0.5 rounded text-[10.5px] outline-none"
+                                    style={{
+                                      backgroundColor: 'var(--tv-bg-input)',
+                                      color: draft.mistake !== 'None' ? '#F23645' : 'var(--tv-text-primary)',
+                                      border: '1px solid var(--tv-border)',
+                                    }}
+                                  >
+                                    {MISTAKE_TAGS.map((m) => (
+                                      <option key={m.value} value={m.value}>{m.label}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                              </td>
+                              <td>
+                                <div className="flex flex-wrap gap-0.5 max-w-[140px]">
+                                  {CHECKLIST_KEYS.map((ck) => {
+                                    const active = Boolean(draft.checklist[ck.key])
+                                    return (
+                                      <button
+                                        key={ck.key}
+                                        type="button"
+                                        title={ck.title}
+                                        onClick={() =>
+                                          setNoteDrafts((m) => ({
+                                            ...m,
+                                            [t.trade_id]: {
+                                              ...draft,
+                                              checklist: { ...draft.checklist, [ck.key]: !active },
+                                            },
+                                          }))
+                                        }
+                                        className="px-1 py-0 rounded text-[9.5px] font-semibold border cursor-pointer"
+                                        style={{
+                                          backgroundColor: active ? 'rgba(8, 153, 129, 0.22)' : 'transparent',
+                                          borderColor: active ? '#089981' : 'var(--tv-border)',
+                                          color: active ? '#089981' : 'var(--tv-text-secondary)',
+                                        }}
+                                      >
+                                        {ck.short}
+                                      </button>
+                                    )
+                                  })}
+                                </div>
+                              </td>
                               <td>
                                 <div className="flex items-center gap-1">
                                   <input
@@ -863,7 +1207,7 @@ export const PaperBrokerTab: React.FC = () => {
                                         [t.trade_id]: { ...draft, note: e.target.value },
                                       }))
                                     }
-                                    className="px-1.5 py-0.5 rounded text-[11px] w-36 outline-none"
+                                    className="px-1.5 py-0.5 rounded text-[11px] w-28 outline-none"
                                     style={{
                                       backgroundColor: 'var(--tv-bg-input)',
                                       color: 'var(--tv-text-primary)',
@@ -887,7 +1231,12 @@ export const PaperBrokerTab: React.FC = () => {
                           partialFills.map((f) => {
                             const pnl = f.realized_net_pnl ?? 0
                             const pseudoId = 100_000 + f.fill_id
-                            const draft = noteDrafts[pseudoId] ?? { setup: 'Chốt phần', note: '' }
+                            const draft = noteDrafts[pseudoId] ?? {
+                              setup: 'Untagged',
+                              mistake: 'None',
+                              note: '',
+                              checklist: DEFAULT_CHECKLIST,
+                            }
                             return (
                               <tr key={`partial_${f.fill_id}`}>
                                 <td>
@@ -895,13 +1244,11 @@ export const PaperBrokerTab: React.FC = () => {
                                     Chốt phần #{f.fill_id}
                                   </span>
                                 </td>
-                                <td>{f.side}</td>
-                                <td>{f.quantity.toLocaleString('en-US')}</td>
                                 <td>
                                   @ {f.price.toLocaleString('en-US')} ({fmtTs(f.timestamp)})
                                 </td>
                                 <td style={{ color: pnl >= 0 ? 'var(--tv-up)' : 'var(--tv-down)', fontWeight: 600 }}>
-                                  {fmtMoney(pnl, isVnd)} (Phí {fmtMoney(f.fee, isVnd)})
+                                  {fmtMoney(pnl, isVnd)}
                                 </td>
                                 <td>—</td>
                                 <td>—</td>
@@ -918,7 +1265,7 @@ export const PaperBrokerTab: React.FC = () => {
                                           [pseudoId]: { ...draft, note: e.target.value },
                                         }))
                                       }
-                                      className="px-1.5 py-0.5 rounded text-[11px] w-36 outline-none"
+                                      className="px-1.5 py-0.5 rounded text-[11px] w-28 outline-none"
                                       style={{
                                         backgroundColor: 'var(--tv-bg-input)',
                                         color: 'var(--tv-text-primary)',

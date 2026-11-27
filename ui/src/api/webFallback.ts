@@ -1364,4 +1364,226 @@ export const webFallbackApi = {
       foreignFlow: [],
     }
   },
+
+  updateAlert(params: {
+    id: string
+    condition?: string
+    targetPrice?: number
+    message?: string
+    frequency?: string
+    cooldownBars?: number
+    rearm?: boolean
+  }): PriceAlertRecord {
+    const list = lsGet<PriceAlertRecord[]>('sumi_ws_alerts', [])
+    let updated: PriceAlertRecord | null = null
+    const next = list.map((a) => {
+      if (a.id !== params.id) return a
+      updated = {
+        ...a,
+        condition: params.condition ?? a.condition,
+        targetPrice: params.targetPrice ?? a.targetPrice,
+        message: params.message ?? a.message,
+        frequency: params.frequency ?? a.frequency,
+        cooldownBars: params.cooldownBars ?? a.cooldownBars,
+        status: params.rearm ? 'armed' : a.status,
+      }
+      return updated
+    })
+    lsSet('sumi_ws_alerts', next)
+    if (!updated) throw new Error(`Không tìm thấy cảnh báo ${params.id}`)
+    return updated
+  },
+
+  getMarketBreadthAndRrg(scope: string, asOfDate: string | null) {
+    return {
+      scope,
+      asOfDate,
+      replayLocked: Boolean(webReplay),
+      snapshot: {
+        benchmark_symbol: 'VNINDEX',
+        evaluated_timestamp: Math.floor(Date.now() / 1000),
+        participating_count: 10,
+        advancers: 6,
+        decliners: 3,
+        unchanged: 1,
+        adv_dec_ratio: 2.0,
+        pct_above_sma20: 60,
+        pct_above_ema50: 55,
+        total_traded_value: 1_200_000_000_000,
+        aggregate_buy_value: 720_000_000_000,
+        aggregate_sell_value: 480_000_000_000,
+        money_flow_buy_pct: 60,
+        vn30_participating_count: 8,
+        vn30_money_flow_buy_pct: 62,
+        quadrant_counts: [4, 2, 2, 2] as [number, number, number, number],
+        rotations: CURATED_SYMBOLS.filter((s) => s.exchange === 'HOSE' && s.marketType === 'stock').slice(0, 8).map((s, idx) => ({
+          instrument_id: s.ticker,
+          symbol: s.symbol,
+          preset_label: s.exchange,
+          last_close: s.basePrice,
+          return_1bar_pct: (idx % 3 === 0 ? 1.8 : idx % 3 === 1 ? -0.9 : 0.4),
+          traded_value: s.basePrice * 1_500_000,
+          buy_flow_ratio_pct: 52 + idx * 2,
+          above_sma20: idx % 2 === 0,
+          above_ema50: true,
+          rs_ratio: 98 + idx * 0.9,
+          rs_momentum: 99 + (idx % 4) * 0.8,
+          quadrant: (idx % 2 === 0 ? 'Leading' : 'Improving') as 'Leading' | 'Improving',
+          trail: [
+            [97.5 + idx * 0.7, 98.5 + (idx % 4) * 0.6] as [number, number],
+            [98 + idx * 0.9, 99 + (idx % 4) * 0.8] as [number, number],
+          ],
+        })),
+      },
+      sectors: [],
+      elapsedMs: 12,
+    }
+  },
+
+  computeTradePlan(input: {
+    ticker: string
+    side: 'LONG' | 'SHORT'
+    accountEquity: number
+    availableCash: number
+    riskPct: number
+    entryPrice: number
+    stopLoss: number
+    targetPrice: number
+  }) {
+    const riskPerShare = Math.max(1, Math.abs(input.entryPrice - input.stopLoss))
+    const rewardPerShare = Math.max(0, Math.abs(input.targetPrice - input.entryPrice))
+    const maxRisk = (input.accountEquity * input.riskPct) / 100
+    const rawQty = Math.floor(maxRisk / riskPerShare / 100) * 100
+    const qty = Math.max(100, rawQty)
+    const notional = qty * input.entryPrice
+    const friction = notional * 0.004
+    const grossR = rewardPerShare / riskPerShare
+    const netProfit = qty * rewardPerShare - friction
+    const actualRisk = qty * riskPerShare + friction
+    return {
+      ticker: input.ticker,
+      venue: 'HOSE',
+      side: input.side,
+      snappedEntry: input.entryPrice,
+      snappedStop: input.stopLoss,
+      snappedTarget: input.targetPrice,
+      breakevenPrice: input.entryPrice * 1.004,
+      maxRiskAmount: maxRisk,
+      plannedQuantity: qty,
+      positionNotional: notional,
+      marginRequired: notional,
+      plannedRiskAmount: actualRisk,
+      plannedRiskPctActual: (actualRisk / Math.max(1, input.accountEquity)) * 100,
+      estimatedNetProfit: netProfit,
+      estimatedRoundTripFriction: friction,
+      grossRMultiple: grossR,
+      netRMultiple: netProfit / Math.max(1, actualRisk),
+      requiredWinRatePct: 100 / (1 + Math.max(0.1, netProfit / Math.max(1, actualRisk))),
+      settlementTimestampMs: Date.now() + 2 * 86_400_000,
+      affordable: notional <= input.availableCash,
+      warnings: [],
+    }
+  },
+
+  computeDomLadder(ticker: string) {
+    const res = this.resolveSymbol(ticker)
+    const mark = res.lastPrice ?? 100_000
+    const tick = res.symbolInfo.tick_size ?? 100
+    const rows = Array.from({ length: 13 }, (_, idx) => {
+      const offset = 6 - idx
+      const price = mark + offset * tick
+      return {
+        price,
+        tick_size: tick,
+        band_state: offset === 0 ? 'Reference' : 'Normal',
+        is_at_mark: offset === 0,
+        is_at_position_entry: false,
+        synth_bid_depth: offset < 0 ? 45_000 + Math.abs(offset) * 12_000 : 0,
+        synth_ask_depth: offset > 0 ? 40_000 + offset * 10_000 : 0,
+        traded_buy_volume: 120_000,
+        traded_sell_volume: 95_000,
+        net_delta: 25_000,
+        working_buy_qty: 0,
+        working_sell_qty: 0,
+        working_order_ids: [],
+      }
+    })
+    return {
+      data_fidelity: 'OHLCV_SYNTH_DOM_PROXY',
+      venue: res.symbolInfo.exchange,
+      resolved_unit: 'RawVnd',
+      price_decimals: res.symbolInfo.price_precision,
+      mark_price: mark,
+      center_price: mark,
+      daily_band: null,
+      rows,
+      max_row_depth: 120_000,
+      max_row_volume: 215_000,
+      cumulative_buy_volume: 1_560_000,
+      cumulative_sell_volume: 1_235_000,
+      bid_ask_imbalance_pct: 55.8,
+      poc_price: mark,
+      causal_bar_count: 100,
+      last_causal_timestamp: Math.floor(Date.now() / 1000),
+    }
+  },
+
+  brokerGetJournalAnalytics(ticker: string) {
+    return {
+      ticker,
+      analytics: {
+        visible_entry_count: webBrokerClosed.length,
+        planned_count: 0,
+        closed_count: webBrokerClosed.length,
+        win_count: webBrokerClosed.filter((t) => t.trade.net_pnl > 0).length,
+        loss_count: webBrokerClosed.filter((t) => t.trade.net_pnl < 0).length,
+        win_rate_pct: webBrokerClosed.length
+          ? (webBrokerClosed.filter((t) => t.trade.net_pnl > 0).length / webBrokerClosed.length) * 100
+          : 0,
+        total_net_pnl: webBrokerClosed.reduce((acc, t) => acc + t.trade.net_pnl, 0),
+        profit_factor: null,
+        expectancy_r: null,
+        sqn: null,
+        discipline_score_pct: 100,
+        mistake_trade_count: 0,
+        cost_of_mistakes: 0,
+        avg_entry_drift_pct: null,
+        current_streak: 0,
+        setup_attribution: [],
+      },
+      equityPoints: [],
+    }
+  },
+
+  computeReplayDebrief(ticker: string, interval: IntervalKey) {
+    return {
+      symbol: ticker,
+      timeframe: interval,
+      closed_trades: webBrokerClosed.length,
+      win_count: webBrokerClosed.filter((t) => t.trade.net_pnl > 0).length,
+      loss_count: webBrokerClosed.filter((t) => t.trade.net_pnl < 0).length,
+      breakeven_count: 0,
+      win_rate_pct: 0,
+      total_net_pnl: 0,
+      total_return_pct: 0,
+      avg_return_pct: 0,
+      profit_factor: null,
+      expectancy_pnl: null,
+      net_r_multiple: 0,
+      avg_r_multiple: null,
+      max_drawdown_pct: 0,
+      total_opened_positions: 0,
+      sl_adherent_positions: 0,
+      sl_adherence_pct: null,
+      mistake_breakdown: [],
+      setup_breakdown: [],
+      callouts: [
+        {
+          severity: 'Neutral',
+          title: 'Chưa có lệnh hoàn tất trong phiên Replay',
+          detail: 'Đặt lệnh Mua/Bán kèm SL trong chế độ Bar Replay để nhận phân tích kỷ luật & điểm coaching chi tiết.',
+        },
+      ],
+    }
+  },
 }

@@ -40,6 +40,7 @@ pub struct EnrichedClosedTrade {
     pub setup_tag: String,
     pub mistake_tag: String,
     pub note: String,
+    pub checklist_json: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,7 +82,7 @@ pub struct SubmitPaperOrderInput {
     pub take_profit: Option<f64>,
 }
 
-fn infer_venue_for_ticker(ticker: &str) -> ExchangeVenue {
+pub(crate) fn infer_venue_for_ticker(ticker: &str) -> ExchangeVenue {
     let upper = ticker.trim().to_ascii_uppercase();
     if let Some((ex, sym)) = upper.split_once(':') {
         if sym.starts_with("VN30F") || sym.starts_with("VN301") {
@@ -565,6 +566,7 @@ pub(crate) fn build_broker_snapshot(
                 setup_tag: ann.map_or_else(String::new, |a| a.setup_tag.clone()),
                 mistake_tag: ann.map_or_else(String::new, |a| a.mistake_tag.clone()),
                 note: ann.map_or_else(String::new, |a| a.note.clone()),
+                checklist_json: ann.and_then(|a| a.checklist_json.clone()),
             }
         })
         .collect();
@@ -969,10 +971,18 @@ pub async fn broker_update_journal_note(
     setup_tag: String,
     mistake_tag: String,
     note: String,
+    checklist_json: Option<serde_json::Value>,
 ) -> DesktopResult<JournalAnnotationRecord> {
     let ws = state.workspace.clone();
     tokio::task::spawn_blocking(move || {
-        ws.upsert_journal_annotation(&ticker, trade_id, &setup_tag, &mistake_tag, &note)
+        ws.upsert_journal_annotation_full(
+            &ticker,
+            trade_id,
+            &setup_tag,
+            &mistake_tag,
+            &note,
+            checklist_json,
+        )
     })
     .await
     .map_err(|e| DesktopError::Internal(e.to_string()))?

@@ -2132,6 +2132,34 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
                 },
               )
             }}
+            onOpenTradePlanner={() => {
+              const chart = chartRef.current
+              if (!chart) return
+              const [ov] = chart.getOverlays({ id: selectedDrawing.id, groupId: 'user_drawings' })
+              if (!ov || !ov.points.length) return
+              const entry = ov.points[0]?.value
+              const p1 = ov.points[1]?.value
+              const p2 = ov.points[2]?.value
+              const isShort = ov.name === 'shortPosition'
+              let tp = p1
+              let sl = p2
+              if (typeof entry === 'number' && typeof p1 === 'number' && typeof p2 === 'number') {
+                if (isShort) {
+                  tp = Math.min(p1, p2)
+                  sl = Math.max(p1, p2)
+                } else {
+                  tp = Math.max(p1, p2)
+                  sl = Math.min(p1, p2)
+                }
+              }
+              useWorkspaceStore.getState().openTradePlanner({
+                ticker: pane.ticker,
+                side: isShort ? 'SHORT' : 'LONG',
+                entryPrice: entry,
+                stopLoss: sl,
+                targetPrice: tp,
+              })
+            }}
             onClone={handleCloneSelectedDrawing}
             onDelete={() => deleteSelectedDrawingById(selectedDrawing.id)}
           />

@@ -1,14 +1,25 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sumi_core::alerts::{CrossDirection, evaluate_4_waypoint_cross};
 use sumi_core::indicators::{compute_ema_slices, compute_macd_slices, compute_rsi_slices};
-use sumi_data::{Adjustment, BarQueryMode, Interval, OhlcvBar, SeriesKey, SymbolKey};
+use sumi_core::model::Candle;
+use sumi_core::scanner::{
+    ConfluenceWeightProfile, PrecomputedCatalogMatrix, SIGNAL_CATALOG, SignalOutputType,
+    catalog_entry_index,
+};
+use sumi_data::{
+    Adjustment, BarQueryMode, Interval, OhlcvBar, SeriesKey, SymbolKey, sumi_config_dir,
+    write_private_file_0600,
+};
 use tauri::State;
 
 use crate::error::{DesktopError, DesktopResult};
 use crate::state::AppState;
 use crate::workspace_db::{
-    IndicatorTemplateRecord, PriceAlertRecord, SavedDrawingRecord, SavedIndicatorSpec,
-    SavedLayoutRecord, SavedReplaySessionRecord, WatchlistGroup,
+    AlertTriggerLogRecord, IndicatorTemplateRecord, PriceAlertRecord, SavedDrawingRecord,
+    SavedIndicatorSpec, SavedLayoutRecord, SavedReplaySessionRecord, WatchlistGroup,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -289,6 +300,8 @@ pub async fn create_alert(
     interval: Option<String>,
     params_json: Option<Value>,
     sound_enabled: Option<bool>,
+    frequency: Option<String>,
+    cooldown_bars: Option<i32>,
 ) -> DesktopResult<PriceAlertRecord> {
     let kind = alert_kind
         .as_deref()
@@ -306,6 +319,11 @@ pub async fn create_alert(
             "Ngưỡng cảnh báo không hợp lệ".to_owned(),
         ));
     }
+    let freq = frequency
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| matches!(s.as_str(), "once" | "once_per_bar_close"))
+        .unwrap_or_else(|| "once".to_owned());
     let now_ms = chrono::Utc::now().timestamp_millis();
     let seq = state
         .alert_seq
@@ -321,6 +339,9 @@ pub async fn create_alert(
         sound_enabled: sound_enabled.unwrap_or(true),
         message,
         status: "armed".to_owned(),
+        frequency: freq,
+        cooldown_bars: cooldown_bars.unwrap_or(0).clamp(0, 500),
+        last_fired_bar_ts: None,
         created_at_ms: now_ms,
         triggered_at_ms: None,
     };
@@ -330,6 +351,241 @@ pub async fn create_alert(
         .await
         .map_err(|e| DesktopError::Internal(e.to_string()))??;
     Ok(record)
+}
+
+/// Updates an existing alert (condition, target, message, frequency, cooldown, params, sound) and re-arms it.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn update_alert(
+    state: State<'_, AppState>,
+    id: String,
+    condition: Option<String>,
+    target_price: Option<f64>,
+    message: Option<String>,
+    interval: Option<String>,
+    params_json: Option<Value>,
+    sound_enabled: Option<bool>,
+    frequency: Option<String>,
+    cooldown_bars: Option<i32>,
+    rearm: Option<bool>,
+) -> DesktopResult<PriceAlertRecord> {
+    let ws = state.workspace.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut alert = ws
+            .list_alerts()?
+            .into_iter()
+            .find(|a| a.id == id)
+            .ok_or_else(|| DesktopError::Validation(format!("Không tìm thấy cảnh báo {id}")))?;
+        if let Some(c) = condition {
+            alert.condition = c;
+        }
+        if let Some(tp) = target_price {
+            if !tp.is_finite() {
+                return Err(DesktopError::Validation("Ngưỡng giá không hợp lệ".to_owned()));
+            }
+            alert.target_price = tp;
+        }
+        if let Some(m) = message {
+            alert.message = m;
+        }
+        if let Some(iv) = interval {
+            alert.interval = Some(iv);
+        }
+        if let Some(p) = params_json {
+            alert.params_json = Some(p);
+        }
+        if let Some(snd) = sound_enabled {
+            alert.sound_enabled = snd;
+        }
+        if let Some(f) = frequency
+            && matches!(f.as_str(), "once" | "once_per_bar_close")
+        {
+            alert.frequency = f;
+        }
+        if let Some(cd) = cooldown_bars {
+            alert.cooldown_bars = cd.clamp(0, 500);
+        }
+        if rearm.unwrap_or(false) {
+            alert.status = "armed".to_owned();
+        }
+        ws.upsert_alert(&alert)?;
+        Ok(alert)
+    })
+    .await
+    .map_err(|e| DesktopError::Internal(e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn list_alert_logs(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> DesktopResult<Vec<AlertTriggerLogRecord>> {
+    let ws = state.workspace.clone();
+    let lim = limit.unwrap_or(100);
+    tokio::task::spawn_blocking(move || ws.list_alert_trigger_logs(lim))
+        .await
+        .map_err(|e| DesktopError::Internal(e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn clear_alert_logs(state: State<'_, AppState>) -> DesktopResult<()> {
+    let ws = state.workspace.clone();
+    tokio::task::spawn_blocking(move || ws.clear_alert_trigger_logs())
+        .await
+        .map_err(|e| DesktopError::Internal(e.to_string()))?
+}
+
+// ─── Private Alert Notification Delivery (`~/.config/sumi/alerts_secrets.json` 0600) ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlertDeliveryConfig {
+    #[serde(default = "default_true_flag")]
+    pub os_notification_enabled: bool,
+    #[serde(default)]
+    pub telegram_bot_token: String,
+    #[serde(default)]
+    pub telegram_chat_id: String,
+    #[serde(default)]
+    pub webhook_url: String,
+    #[serde(default = "default_true_flag")]
+    pub watchlist_background_scan_enabled: bool,
+}
+
+fn default_true_flag() -> bool {
+    true
+}
+
+impl Default for AlertDeliveryConfig {
+    fn default() -> Self {
+        Self {
+            os_notification_enabled: true,
+            telegram_bot_token: String::new(),
+            telegram_chat_id: String::new(),
+            webhook_url: String::new(),
+            watchlist_background_scan_enabled: true,
+        }
+    }
+}
+
+fn alerts_secrets_path() -> PathBuf {
+    sumi_config_dir().join("alerts_secrets.json")
+}
+
+pub(crate) fn load_alert_delivery_config_from(path: &std::path::Path) -> AlertDeliveryConfig {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<AlertDeliveryConfig>(&s).ok())
+        .unwrap_or_default()
+}
+
+pub(crate) fn save_alert_delivery_config_to(
+    path: &std::path::Path,
+    cfg: &AlertDeliveryConfig,
+) -> DesktopResult<()> {
+    let bytes = serde_json::to_vec_pretty(cfg)?;
+    write_private_file_0600(path, &bytes).map_err(|e| DesktopError::Internal(e.to_string()))
+}
+
+#[tauri::command]
+pub async fn get_alert_delivery_config() -> DesktopResult<AlertDeliveryConfig> {
+    tokio::task::spawn_blocking(|| load_alert_delivery_config_from(&alerts_secrets_path()))
+        .await
+        .map_err(|e| DesktopError::Internal(e.to_string()))
+}
+
+#[tauri::command]
+pub async fn save_alert_delivery_config(
+    config: AlertDeliveryConfig,
+) -> DesktopResult<AlertDeliveryConfig> {
+    let out = config.clone();
+    tokio::task::spawn_blocking(move || {
+        save_alert_delivery_config_to(&alerts_secrets_path(), &config)
+    })
+    .await
+    .map_err(|e| DesktopError::Internal(e.to_string()))??;
+    Ok(out)
+}
+
+async fn dispatch_external_alert_channels(cfg: &AlertDeliveryConfig, alert: &PriceAlertRecord) -> Vec<&'static str> {
+    let mut channels = vec!["in_app"];
+    if cfg.os_notification_enabled {
+        channels.push("os");
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(6))
+        .build()
+        .ok();
+    let Some(client) = client else {
+        return channels;
+    };
+
+    let token = cfg.telegram_bot_token.trim();
+    let chat_id = cfg.telegram_chat_id.trim();
+    if !token.is_empty() && !chat_id.is_empty() {
+        let text = format!(
+            "🔔 Sumi Alert · {}\n{}\nMốc: {} ({})",
+            alert.ticker, alert.message, alert.target_price, alert.condition
+        );
+        let url = format!("https://api.telegram.org/bot{token}/sendMessage");
+        if client
+            .post(&url)
+            .json(&serde_json::json!({ "chat_id": chat_id, "text": text }))
+            .send()
+            .await
+            .is_ok_and(|r| r.status().is_success())
+        {
+            channels.push("telegram");
+        }
+    }
+
+    let webhook = cfg.webhook_url.trim();
+    if webhook.starts_with("http://") || webhook.starts_with("https://") {
+        let payload = serde_json::json!({
+            "source": "sumi_supercharts",
+            "alertId": alert.id,
+            "ticker": alert.ticker,
+            "alertKind": alert.alert_kind,
+            "condition": alert.condition,
+            "targetPrice": alert.target_price,
+            "message": alert.message,
+            "triggeredAtMs": alert.triggered_at_ms,
+        });
+        if client
+            .post(webhook)
+            .json(&payload)
+            .send()
+            .await
+            .is_ok_and(|r| r.status().is_success())
+        {
+            channels.push("webhook");
+        }
+    }
+    channels
+}
+
+#[tauri::command]
+pub async fn test_alert_delivery() -> DesktopResult<Vec<String>> {
+    let cfg = load_alert_delivery_config_from(&alerts_secrets_path());
+    let sample = PriceAlertRecord {
+        id: "test_alert".to_owned(),
+        ticker: "HOSE:FPT".to_owned(),
+        alert_kind: "price".to_owned(),
+        condition: "cross_above".to_owned(),
+        target_price: 130_000.0,
+        interval: Some("1D".to_owned()),
+        params_json: None,
+        sound_enabled: true,
+        message: "Kiểm tra kết nối thông báo từ Sumi Supercharts v3.0".to_owned(),
+        status: "triggered".to_owned(),
+        frequency: "once".to_owned(),
+        cooldown_bars: 0,
+        last_fired_bar_ts: None,
+        created_at_ms: chrono::Utc::now().timestamp_millis(),
+        triggered_at_ms: Some(chrono::Utc::now().timestamp_millis()),
+    };
+    let channels = dispatch_external_alert_channels(&cfg, &sample).await;
+    Ok(channels.into_iter().map(str::to_owned).collect())
 }
 
 #[tauri::command]
@@ -474,11 +730,123 @@ pub(crate) fn evaluate_indicator_alert_on_bars(
             match alert.condition.as_str() {
                 "cross_above" => prev_c <= prev_ema && curr_c > curr_ema,
                 "cross_below" => prev_c >= prev_ema && curr_c < curr_ema,
-                _ => (prev_c <= prev_ema && curr_c > curr_ema) || (prev_c >= prev_ema && curr_c < curr_ema),
+                _ => {
+                    (prev_c <= prev_ema && curr_c > curr_ema)
+                        || (prev_c >= prev_ema && curr_c < curr_ema)
+                }
+            }
+        }
+        // Wave 3: Full 123 QMV SIGNAL_CATALOG causal trigger (`sumi-core::scanner::PrecomputedCatalogMatrix`)
+        "SIGNAL" => {
+            let Some(catalog_id) = params.get("catalogId").and_then(Value::as_str) else {
+                return false;
+            };
+            let Some(entry_idx) = catalog_entry_index(catalog_id.trim()) else {
+                return false;
+            };
+            let entry = &SIGNAL_CATALOG[entry_idx];
+            let iv = alert
+                .interval
+                .as_deref()
+                .and_then(|s| s.parse::<Interval>().ok())
+                .unwrap_or(Interval::D1);
+            let candles: Vec<Candle> = bars.iter().map(|b| b.to_core_candle(iv)).collect();
+            let matrix = PrecomputedCatalogMatrix::compute(&candles);
+            let profile = ConfluenceWeightProfile::Balanced;
+            let curr_pt = matrix.point_at_with_profile(entry_idx, n - 1, profile);
+            let prev_pt = matrix.point_at_with_profile(entry_idx, n - 2, profile);
+            match entry.output_type {
+                SignalOutputType::Bool => {
+                    let prev_on = prev_pt.is_some_and(|p| p.quality.is_valid() && p.bool_value == Some(true));
+                    let curr_on = curr_pt.is_some_and(|p| p.quality.is_valid() && p.bool_value == Some(true));
+                    !prev_on && curr_on
+                }
+                SignalOutputType::Float => {
+                    let threshold = params
+                        .get("threshold")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(alert.target_price);
+                    let (Some(pv), Some(cv)) = (
+                        prev_pt.filter(|p| p.quality.is_valid()).and_then(|p| p.float_value),
+                        curr_pt.filter(|p| p.quality.is_valid()).and_then(|p| p.float_value),
+                    ) else {
+                        return false;
+                    };
+                    match alert.condition.as_str() {
+                        "cross_above" => pv < threshold && cv >= threshold,
+                        "cross_below" => pv > threshold && cv <= threshold,
+                        _ => (pv < threshold && cv >= threshold) || (pv > threshold && cv <= threshold),
+                    }
+                }
+                SignalOutputType::Enum => {
+                    let prev_d = prev_pt.filter(|p| p.quality.is_valid()).and_then(|p| p.direction);
+                    let curr_d = curr_pt.filter(|p| p.quality.is_valid()).and_then(|p| p.direction);
+                    prev_d != curr_d && curr_d.is_some()
+                }
+            }
+        }
+        // Wave 3: 4-Family Technical Health Confluence Threshold crossing (`[-100, +100]`)
+        "CONFLUENCE" => {
+            let iv = alert
+                .interval
+                .as_deref()
+                .and_then(|s| s.parse::<Interval>().ok())
+                .unwrap_or(Interval::D1);
+            let candles: Vec<Candle> = bars.iter().map(|b| b.to_core_candle(iv)).collect();
+            let matrix = PrecomputedCatalogMatrix::compute(&candles);
+            let profile = match params
+                .get("profile")
+                .and_then(Value::as_str)
+                .map(|s| s.to_ascii_lowercase())
+                .as_deref()
+            {
+                Some("trend" | "trend_focused") => ConfluenceWeightProfile::TrendFocused,
+                _ => ConfluenceWeightProfile::Balanced,
+            };
+            let threshold = params
+                .get("threshold")
+                .and_then(Value::as_f64)
+                .unwrap_or(alert.target_price);
+            let Ok(prev_h) = matrix.health_score_at(n - 2, profile) else {
+                return false;
+            };
+            let Ok(curr_h) = matrix.health_score_at(n - 1, profile) else {
+                return false;
+            };
+            if !prev_h.is_finite() || !curr_h.is_finite() {
+                return false;
+            }
+            match alert.condition.as_str() {
+                "cross_above" => prev_h < threshold && curr_h >= threshold,
+                "cross_below" => prev_h > threshold && curr_h <= threshold,
+                _ => (prev_h < threshold && curr_h >= threshold) || (prev_h > threshold && curr_h <= threshold),
             }
         }
         _ => false,
     }
+}
+
+fn parse_cross_dir(cond: &str) -> CrossDirection {
+    match cond {
+        "cross_above" => CrossDirection::CrossAbove,
+        "cross_below" => CrossDirection::CrossBelow,
+        _ => CrossDirection::CrossAny,
+    }
+}
+
+fn alert_cooldown_elapsed(alert: &PriceAlertRecord, bar_ts_ms: i64, causal_bars: &[OhlcvBar]) -> bool {
+    let Some(last_ts) = alert.last_fired_bar_ts else {
+        return true;
+    };
+    if bar_ts_ms <= last_ts {
+        return false;
+    }
+    let cd = alert.cooldown_bars.max(0) as usize;
+    if cd == 0 {
+        return true;
+    }
+    let bars_since = causal_bars.iter().filter(|b| b.timestamp > last_ts && b.timestamp <= bar_ts_ms).count();
+    bars_since > cd
 }
 
 #[tauri::command]
@@ -490,7 +858,7 @@ pub async fn check_price_alerts(
 ) -> DesktopResult<Vec<PriceAlertRecord>> {
     let ws = state.workspace.clone();
     let norm = ticker.trim().to_ascii_uppercase();
-    tokio::task::spawn_blocking(move || {
+    let fired = tokio::task::spawn_blocking(move || -> DesktopResult<Vec<PriceAlertRecord>> {
         let alerts = ws.list_alerts()?;
         let now_ms = chrono::Utc::now().timestamp_millis();
         let mut fired = Vec::new();
@@ -513,16 +881,96 @@ pub async fn check_price_alerts(
                     || (prev_price > level && current_price <= level),
             };
             if crossed {
-                a.status = "triggered".to_owned();
+                let next_status = if a.frequency == "once_per_bar_close" {
+                    "armed"
+                } else {
+                    "triggered"
+                };
+                a.status = next_status.to_owned();
                 a.triggered_at_ms = Some(now_ms);
-                ws.set_alert_status(&a.id, "triggered", Some(now_ms))?;
+                a.last_fired_bar_ts = Some(now_ms);
+                let _ = ws.record_alert_fire(&a, next_status, now_ms, current_price, "in_app");
                 fired.push(a);
             }
         }
         Ok(fired)
     })
     .await
-    .map_err(|e| DesktopError::Internal(e.to_string()))?
+    .map_err(|e| DesktopError::Internal(e.to_string()))??;
+
+    // Async non-blocking Telegram / Webhook delivery
+    if !fired.is_empty() {
+        let cfg = load_alert_delivery_config_from(&alerts_secrets_path());
+        if !cfg.telegram_bot_token.trim().is_empty() || !cfg.webhook_url.trim().is_empty() {
+            let to_send = fired.clone();
+            tauri::async_runtime::spawn(async move {
+                for al in &to_send {
+                    let _ = dispatch_external_alert_channels(&cfg, al).await;
+                }
+            });
+        }
+    }
+    Ok(fired)
+}
+
+/// Evaluates all armed alerts across every ticker in Watchlists (`Watchlist Alerts` background scan, Wave 3).
+#[tauri::command]
+pub async fn scan_watchlist_alerts(
+    state: State<'_, AppState>,
+) -> DesktopResult<Vec<PriceAlertRecord>> {
+    let ws = state.workspace.clone();
+    let store = state.market_store.clone();
+    let fired = tokio::task::spawn_blocking(move || {
+        let alerts = ws.list_alerts()?;
+        let armed: Vec<PriceAlertRecord> = alerts
+            .into_iter()
+            .filter(|a| a.status == "armed")
+            .collect();
+        let mut seen_pairs = std::collections::BTreeSet::new();
+        for a in &armed {
+            let iv_str = a.interval.as_deref().unwrap_or("1D").to_owned();
+            seen_pairs.insert((a.ticker.clone(), iv_str));
+        }
+        let mut all_fired = Vec::new();
+        for (ticker, iv_str) in seen_pairs {
+            let Ok(sym) = SymbolKey::parse(&ticker) else {
+                continue;
+            };
+            let Ok(iv) = iv_str.parse::<Interval>() else {
+                continue;
+            };
+            let Ok(page) = store.query_bars(
+                &SeriesKey::new(&sym, iv, Adjustment::Splits),
+                BarQueryMode::Init,
+                260,
+            ) else {
+                continue;
+            };
+            if page.bars.len() < 2 {
+                continue;
+            }
+            let bar = page.bars[page.bars.len() - 1];
+            let prev_close = page.bars[page.bars.len() - 2].close;
+            let hits = evaluate_bar_alerts_slice(&ws, &ticker, prev_close, &bar, &page.bars);
+            all_fired.extend(hits);
+        }
+        Ok::<Vec<PriceAlertRecord>, DesktopError>(all_fired)
+    })
+    .await
+    .map_err(|e| DesktopError::Internal(e.to_string()))??;
+
+    if !fired.is_empty() {
+        let cfg = load_alert_delivery_config_from(&alerts_secrets_path());
+        if !cfg.telegram_bot_token.trim().is_empty() || !cfg.webhook_url.trim().is_empty() {
+            let to_send = fired.clone();
+            tauri::async_runtime::spawn(async move {
+                for al in &to_send {
+                    let _ = dispatch_external_alert_channels(&cfg, al).await;
+                }
+            });
+        }
+    }
+    Ok(fired)
 }
 
 /// Evaluates armed price, drawing-line, AND indicator (`RSI`/`MACD`/`EMA`) alerts on live bar arrival (v2.2).
@@ -584,38 +1032,32 @@ pub(crate) fn evaluate_bar_alerts_slice(
         if a.ticker != norm || a.status != "armed" {
             continue;
         }
+        if !alert_cooldown_elapsed(&a, bar.timestamp, causal_bars) {
+            continue;
+        }
+        let core_bar = bar.to_core_candle(Interval::D1);
+        let dir = parse_cross_dir(&a.condition);
         let crossed = match a.alert_kind.as_str() {
             "drawing" => {
                 if let Some(target) = evaluate_drawing_line_price_at(&a, bar.timestamp) {
-                    match a.condition.as_str() {
-                        "cross_above" => prev_close < target && bar.high >= target,
-                        "cross_below" => prev_close > target && bar.low <= target,
-                        _ => {
-                            (prev_close < target && bar.high >= target)
-                                || (prev_close > target && bar.low <= target)
-                        }
-                    }
+                    evaluate_4_waypoint_cross(Some(prev_close), &core_bar, target, dir).is_some()
                 } else {
                     false
                 }
             }
             "indicator" => evaluate_indicator_alert_on_bars(&a, causal_bars),
-            _ => {
-                let target = a.target_price;
-                match a.condition.as_str() {
-                    "cross_above" => prev_close < target && bar.high >= target,
-                    "cross_below" => prev_close > target && bar.low <= target,
-                    _ => {
-                        (prev_close < target && bar.high >= target)
-                            || (prev_close > target && bar.low <= target)
-                    }
-                }
-            }
+            _ => evaluate_4_waypoint_cross(Some(prev_close), &core_bar, a.target_price, dir).is_some(),
         };
         if crossed {
-            a.status = "triggered".to_owned();
+            let next_status = if a.frequency == "once_per_bar_close" {
+                "armed"
+            } else {
+                "triggered"
+            };
+            a.status = next_status.to_owned();
             a.triggered_at_ms = Some(bar.timestamp);
-            let _ = ws.set_alert_status(&a.id, "triggered", Some(bar.timestamp));
+            a.last_fired_bar_ts = Some(bar.timestamp);
+            let _ = ws.record_alert_fire(&a, next_status, bar.timestamp, bar.close, "in_app");
             fired.push(a);
         }
     }
@@ -716,6 +1158,9 @@ mod tests {
             sound_enabled: true,
             message: "Break trendline".to_owned(),
             status: "armed".to_owned(),
+            frequency: "once".to_owned(),
+            cooldown_bars: 0,
+            last_fired_bar_ts: None,
             created_at_ms: t0,
             triggered_at_ms: None,
         })
@@ -738,6 +1183,9 @@ mod tests {
             sound_enabled: true,
             message: "RSI > 65".to_owned(),
             status: "armed".to_owned(),
+            frequency: "once_per_bar_close".to_owned(),
+            cooldown_bars: 2,
+            last_fired_bar_ts: None,
             created_at_ms: t0,
             triggered_at_ms: None,
         })
@@ -754,5 +1202,11 @@ mod tests {
         let fired_ind = evaluate_bar_alerts_slice(&ws, "HOSE:FPT", 100.5, &last, &bars);
         assert_eq!(fired_ind.len(), 1);
         assert_eq!(fired_ind[0].id, "al_rsi");
+        // `once_per_bar_close` remains armed AND logs trigger history!
+        assert_eq!(fired_ind[0].status, "armed");
+        assert!(ws.list_alert_trigger_logs(10).unwrap().len() >= 2);
+        // Same bar must NOT re-fire due to cooldown
+        let repeat = evaluate_bar_alerts_slice(&ws, "HOSE:FPT", 100.5, &last, &bars);
+        assert!(repeat.is_empty());
     }
 }

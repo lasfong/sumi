@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import {
+  Award,
   Bookmark,
   Eye,
   EyeOff,
@@ -33,6 +34,7 @@ export const ReplayControlBar: React.FC = () => {
   const saveCurrentReplaySession = useWorkspaceStore((s) => s.saveCurrentReplaySession)
   const resumeSavedReplaySession = useWorkspaceStore((s) => s.resumeSavedReplaySession)
   const deleteSavedReplaySession = useWorkspaceStore((s) => s.deleteSavedReplaySession)
+  const setDebriefModalOpen = useWorkspaceStore((s) => s.setDebriefModalOpen)
 
   const [sessionsMenuOpen, setSessionsMenuOpen] = useState(false)
   const [sessionNameDraft, setSessionNameDraft] = useState('')
@@ -335,6 +337,17 @@ export const ReplayControlBar: React.FC = () => {
             ))}
           </select>
         </label>
+
+        <button
+          type="button"
+          className="tv-btn text-[11px]"
+          style={{ color: '#FBC02D' }}
+          onClick={() => setDebriefModalOpen(true)}
+          title="Xem báo cáo Tổng kết phiên luyện tập (SL Adherence, Chi phí sai lầm, Coaching Callouts)"
+        >
+          <Award className="w-3.5 h-3.5" aria-hidden="true" />
+          <span className="hidden xl:inline">Tổng kết</span>
+        </button>
 
         <button
           type="button"

@@ -8,16 +8,20 @@ const WIDTH_OPTIONS = [1, 1.5, 2, 3]
 interface LineStyleDraft {
   color: string
   size: number
+  style: 'solid' | 'dashed'
+  dashedValue?: number[]
 }
 
 function extractLineStyles(styles: Record<string, unknown> | null | undefined, count: number): LineStyleDraft[] {
   const rawLines = Array.isArray((styles as { lines?: unknown } | null)?.lines)
-    ? ((styles as { lines: Array<{ color?: string; size?: number }> }).lines)
+    ? ((styles as { lines: Array<{ color?: string; size?: number; style?: string; dashedValue?: number[] }> }).lines)
     : []
   const n = Math.max(1, count)
   return Array.from({ length: n }, (_, i) => ({
     color: rawLines[i]?.color ?? INDICATOR_COLOR_PALETTE[i % INDICATOR_COLOR_PALETTE.length],
     size: typeof rawLines[i]?.size === 'number' ? rawLines[i].size! : 1.6,
+    style: rawLines[i]?.style === 'dashed' ? 'dashed' : 'solid',
+    dashedValue: Array.isArray(rawLines[i]?.dashedValue) ? rawLines[i].dashedValue : [4, 4],
   }))
 }
 
@@ -120,7 +124,8 @@ export const IndicatorSettingsModal: React.FC = () => {
     const nextStyles: Record<string, unknown> = {
       ...(indicator.styles ?? {}),
       lines: draftLines.map((ln) => ({
-        style: 'solid',
+        style: ln.style,
+        dashedValue: ln.style === 'dashed' ? (ln.dashedValue ?? [4, 4]) : undefined,
         smooth: false,
         color: ln.color,
         size: ln.size,
@@ -291,6 +296,24 @@ export const IndicatorSettingsModal: React.FC = () => {
                           </option>
                         ))}
                       </select>
+                      <button
+                        type="button"
+                        aria-label={`Kiểu nét đường ${idx + 1}`}
+                        onClick={() => {
+                          const next = [...draftLines]
+                          next[idx] = { ...next[idx], style: ln.style === 'dashed' ? 'solid' : 'dashed' }
+                          setDraftLines(next)
+                        }}
+                        className="px-1.5 py-0.5 rounded text-[10px] border cursor-pointer"
+                        style={{
+                          backgroundColor: 'var(--tv-bg-input)',
+                          color: 'var(--tv-text-primary)',
+                          borderColor: 'var(--tv-border)',
+                        }}
+                        title="Chuyển nét liền / nét đứt"
+                      >
+                        {ln.style === 'dashed' ? '---' : '───'}
+                      </button>
                     </div>
                   </div>
                 ))}

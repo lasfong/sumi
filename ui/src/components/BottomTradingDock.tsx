@@ -1,7 +1,8 @@
 import React from 'react'
-import { Briefcase, ChevronDown, ChevronUp, FlaskConical, Maximize2, Minimize2, Radar } from 'lucide-react'
+import { Briefcase, ChevronDown, ChevronUp, Compass, FlaskConical, Maximize2, Minimize2, Radar } from 'lucide-react'
 import { useWorkspaceStore } from '../store/workspaceStore'
 import type { BottomDockTab } from '../types/market'
+import { MarketBreadthRrgTab } from './dock/MarketBreadthRrgTab'
 import { PaperBrokerTab } from './dock/PaperBrokerTab'
 import { StockScreenerTab } from './dock/StockScreenerTab'
 import { StrategyTesterTab } from './dock/StrategyTesterTab'
@@ -10,6 +11,7 @@ const DOCK_TABS: Array<{ id: BottomDockTab; label: string; Icon: React.Component
   { id: 'paper', label: 'Giao dịch Giả lập (VN T+2)', Icon: Briefcase },
   { id: 'strategy', label: 'Kiểm định Chiến lược QMV (WFO / MC)', Icon: FlaskConical },
   { id: 'screener', label: 'Bộ lọc Kỹ thuật QMV (Screener)', Icon: Radar },
+  { id: 'breadth', label: 'Thị trường & RRG (Heatmap)', Icon: Compass },
 ]
 
 export const BottomTradingDock: React.FC = () => {
@@ -88,6 +90,7 @@ export const BottomTradingDock: React.FC = () => {
           {bottomDockTab === 'paper' && <PaperBrokerTab />}
           {bottomDockTab === 'strategy' && <StrategyTesterTab />}
           {bottomDockTab === 'screener' && <StockScreenerTab />}
+          {bottomDockTab === 'breadth' && <MarketBreadthRrgTab />}
         </div>
       )}
     </section>

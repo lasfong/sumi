@@ -110,6 +110,15 @@ export const DRAWING_TOOL_GROUPS: DrawingToolGroup[] = [
     ],
   },
   {
+    id: 'volume_structure',
+    labelVi: 'Cấu trúc Khối lượng (AVWAP / FRVP)',
+    defaultTool: 'anchoredVwap',
+    items: [
+      { key: 'anchoredVwap', labelVi: 'Anchored VWAP Neo Nến (±1σ / ±2σ)' },
+      { key: 'fixedRangeVolumeProfile', labelVi: 'Hồ Sơ Khối Lượng Vùng Chọn (FRVP + POC / VA70)' },
+    ],
+  },
+  {
     id: 'measure',
     labelVi: 'Thước đo Giá & Thời gian',
     defaultTool: 'priceDateRange',
@@ -324,6 +333,26 @@ export function DrawingToolIcon({ name, className = 'w-[18px] h-[18px]' }: { nam
         <svg {...common}>
           <line x1="3" y1="11" x2="12" y2="11" strokeDasharray="2 2" />
           <rect x="12" y="8" width="7" height="6" rx="1.5" fill="#2962FF" stroke="#2962FF" />
+        </svg>
+      )
+    case 'anchoredVwap':
+      return (
+        <svg {...common}>
+          <circle cx="4.5" cy="15.5" r="2" fill="#FBC02D" stroke="#FBC02D" />
+          <path d="M6.5 15.5 C 10 14, 13 9, 19 6" stroke="#FBC02D" strokeWidth={1.8} />
+          <path d="M6.5 12 C 10 10.5, 13 6, 19 3.5" strokeDasharray="2 2" stroke="#FBC02D" strokeOpacity="0.65" />
+          <path d="M6.5 18.5 C 10 17.5, 13 12.5, 19 9.5" strokeDasharray="2 2" stroke="#FBC02D" strokeOpacity="0.65" />
+        </svg>
+      )
+    case 'fixedRangeVolumeProfile':
+      return (
+        <svg {...common}>
+          <line x1="4" y1="3" x2="4" y2="19" stroke="#2962FF" />
+          <line x1="18" y1="3" x2="18" y2="19" stroke="#2962FF" strokeDasharray="2 2" />
+          <rect x="4" y="5" width="6" height="2.4" fill="#089981" stroke="none" />
+          <rect x="4" y="8.5" width="12" height="2.6" fill="#FBC02D" stroke="none" />
+          <rect x="4" y="12.2" width="8.5" height="2.4" fill="#089981" stroke="none" />
+          <rect x="4" y="15.6" width="5" height="2.2" fill="#F23645" stroke="none" />
         </svg>
       )
     case 'priceDateRange':

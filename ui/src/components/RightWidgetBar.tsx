@@ -3,6 +3,7 @@ import {
   Bell,
   BellOff,
   BellPlus,
+  Edit3,
   Eye,
   EyeOff,
   Layers,
@@ -10,6 +11,7 @@ import {
   Lock,
   Plus,
   RefreshCw,
+  Send,
   Settings,
   Sparkles,
   Trash2,
@@ -19,7 +21,13 @@ import {
 import * as api from '../api/tauri'
 import { drawingSyncBus } from '../chart/drawingSyncBus'
 import { useWorkspaceStore } from '../store/workspaceStore'
-import type { SavedDrawingRecord, WatchlistQuoteSnapshot } from '../types/market'
+import type {
+  AlertDeliveryConfig,
+  AlertTriggerLogRecord,
+  SavedDrawingRecord,
+  SignalCatalogItemDto,
+  WatchlistQuoteSnapshot,
+} from '../types/market'
 import { playAlertChime } from '../utils/alertSound'
 import { YumekoQmvPanel } from './YumekoQmvPanel'
 
@@ -187,8 +195,11 @@ export const RightWidgetBar: React.FC = () => {
   const removeSymbolFromWatchlist = useWorkspaceStore((s) => s.removeSymbolFromWatchlist)
   const createNewWatchlist = useWorkspaceStore((s) => s.createNewWatchlist)
   const createNewAlert = useWorkspaceStore((s) => s.createNewAlert)
+  const updateExistingAlert = useWorkspaceStore((s) => s.updateExistingAlert)
   const toggleAlert = useWorkspaceStore((s) => s.toggleAlert)
   const removeAlert = useWorkspaceStore((s) => s.removeAlert)
+  const scanAllWatchlistAlerts = useWorkspaceStore((s) => s.scanAllWatchlistAlerts)
+  const pushToast = useWorkspaceStore((s) => s.pushToast)
   const updateIndicatorInActivePane = useWorkspaceStore((s) => s.updateIndicatorInActivePane)
   const removeIndicatorFromActivePane = useWorkspaceStore((s) => s.removeIndicatorFromActivePane)
   const openIndicatorSettings = useWorkspaceStore((s) => s.openIndicatorSettings)
@@ -277,15 +288,48 @@ export const RightWidgetBar: React.FC = () => {
     })
   }
 
-  // Alert creation form state (Price + Indicator RSI/MACD/EMA, v2.2)
-  const [alertMode, setAlertMode] = useState<'price' | 'indicator'>('price')
+  // Alert 2.0 state (Price / Indicator / 123 QMV Signals / Confluence + Cadence + Logs + Telegram/Webhook, Wave 3)
+  const [alertSubTab, setAlertSubTab] = useState<'list' | 'logs' | 'delivery'>('list')
+  const [alertMode, setAlertMode] = useState<'price' | 'indicator' | 'signal' | 'confluence'>('price')
   const [alertCondition, setAlertCondition] = useState<'cross_above' | 'cross_below' | 'cross_any'>('cross_above')
   const [alertPrice, setAlertPrice] = useState('')
   const [alertIndType, setAlertIndType] = useState<'RSI' | 'MACD' | 'EMA'>('RSI')
   const [alertIndPeriod, setAlertIndPeriod] = useState('14')
   const [alertIndThreshold, setAlertIndThreshold] = useState('70')
+  const [alertSignalId, setAlertSignalId] = useState('qmv.ichimoku_v7_bullish')
+  const [alertConfluenceProfile, setAlertConfluenceProfile] = useState<'balanced' | 'trend'>('balanced')
+  const [alertConfluenceThreshold, setAlertConfluenceThreshold] = useState('35')
+  const [alertFrequency, setAlertFrequency] = useState<'once' | 'once_per_bar_close'>('once')
+  const [alertCooldownBars, setAlertCooldownBars] = useState('0')
   const [alertSoundEnabled, setAlertSoundEnabled] = useState(true)
   const [alertMessage, setAlertMessage] = useState('')
+  const [signalCatalog, setSignalCatalog] = useState<SignalCatalogItemDto[]>([])
+  const [alertLogs, setAlertLogs] = useState<AlertTriggerLogRecord[]>([])
+  const [deliveryCfg, setDeliveryCfg] = useState<AlertDeliveryConfig>({
+    osNotificationEnabled: true,
+    telegramBotToken: '',
+    telegramChatId: '',
+    webhookUrl: '',
+    watchlistBackgroundScanEnabled: true,
+  })
+  const [editingAlertId, setEditingAlertId] = useState<string | null>(null)
+  const [editAlertPrice, setEditAlertPrice] = useState('')
+  const [editAlertMessage, setEditAlertMessage] = useState('')
+  const [editAlertFreq, setEditAlertFreq] = useState<'once' | 'once_per_bar_close'>('once')
+  const [editAlertCooldown, setEditAlertCooldown] = useState('0')
+
+  useEffect(() => {
+    if (rightTab !== 'alerts') return
+    if (signalCatalog.length === 0) {
+      void api.getSignalCatalog().then(setSignalCatalog).catch(() => {})
+    }
+    if (alertSubTab === 'logs') {
+      void api.listAlertLogs(100).then(setAlertLogs).catch(() => {})
+    }
+    if (alertSubTab === 'delivery') {
+      void api.getAlertDeliveryConfig().then(setDeliveryCfg).catch(() => {})
+    }
+  }, [rightTab, alertSubTab, signalCatalog.length])
 
   const armedAlertsCount = useMemo(
     () => alerts.filter((a) => a.status === 'armed').length,
@@ -303,6 +347,56 @@ export const RightWidgetBar: React.FC = () => {
 
   const handleCreateAlert = (e: React.FormEvent) => {
     e.preventDefault()
+    const cooldownBars = Math.max(0, Math.min(500, Number(alertCooldownBars) || 0))
+    if (alertMode === 'signal') {
+      const sigMeta = signalCatalog.find((s) => s.id === alertSignalId)
+      const defaultMsg = `Tín hiệu QMV: ${sigMeta?.labelVi || alertSignalId} (${activePane.interval})`
+      void createNewAlert(
+        activePane.ticker,
+        alertCondition,
+        0,
+        alertMessage.trim() || defaultMsg,
+        {
+          alertKind: 'indicator',
+          interval: activePane.interval,
+          paramsJson: {
+            indicator: 'SIGNAL',
+            signalId: alertSignalId,
+            threshold: Number(alertIndThreshold) || 0,
+          },
+          soundEnabled: alertSoundEnabled,
+          frequency: alertFrequency,
+          cooldownBars,
+        },
+      )
+      setAlertMessage('')
+      return
+    }
+    if (alertMode === 'confluence') {
+      const thr = Number(alertConfluenceThreshold)
+      const safeThr = Number.isFinite(thr) ? thr : 35
+      const defaultMsg = `Điểm Hợp lưu (${alertConfluenceProfile === 'trend' ? 'Trend' : 'Balanced'}) ${alertCondition === 'cross_above' ? 'cắt lên' : alertCondition === 'cross_below' ? 'cắt xuống' : 'chạm'} ${safeThr}`
+      void createNewAlert(
+        activePane.ticker,
+        alertCondition,
+        safeThr,
+        alertMessage.trim() || defaultMsg,
+        {
+          alertKind: 'indicator',
+          interval: activePane.interval,
+          paramsJson: {
+            indicator: 'CONFLUENCE',
+            profile: alertConfluenceProfile,
+            threshold: safeThr,
+          },
+          soundEnabled: alertSoundEnabled,
+          frequency: alertFrequency,
+          cooldownBars,
+        },
+      )
+      setAlertMessage('')
+      return
+    }
     if (alertMode === 'indicator') {
       const period = Math.max(2, Number(alertIndPeriod) || 14)
       const threshold = Number(alertIndThreshold)
@@ -330,6 +424,8 @@ export const RightWidgetBar: React.FC = () => {
             signal: 9,
           },
           soundEnabled: alertSoundEnabled,
+          frequency: alertFrequency,
+          cooldownBars,
         },
       )
       setAlertMessage('')
@@ -342,7 +438,13 @@ export const RightWidgetBar: React.FC = () => {
       alertCondition,
       price,
       alertMessage.trim() || `${activePane.ticker} chạm mốc ${price.toLocaleString('en-US')}`,
-      { alertKind: 'price', interval: activePane.interval, soundEnabled: alertSoundEnabled },
+      {
+        alertKind: 'price',
+        interval: activePane.interval,
+        soundEnabled: alertSoundEnabled,
+        frequency: alertFrequency,
+        cooldownBars,
+      },
     )
     setAlertPrice('')
     setAlertMessage('')
@@ -667,282 +769,567 @@ export const RightWidgetBar: React.FC = () => {
           </div>
         </div>
       ) : rightTab === 'alerts' ? (
-        /* Multi-Kind Alerts Tab Panel (Price / Drawing-Line / Indicator + Sound Chime, v2.2) */
+        /* Alerts 2.0 Panel: Price / Indicator / 123 QMV Signals / Confluence + Logs + Telegram/Webhook (Wave 3) */
         <div role="tabpanel" aria-labelledby="rw-tab-alerts" className="flex flex-col flex-1 min-h-0">
-          <form
-            onSubmit={handleCreateAlert}
-            className="p-2.5 space-y-2 shrink-0"
-            style={{ borderBottom: '1px solid var(--tv-border)' }}
+          {/* Alerts 2.0 Sub-Navigation Strip */}
+          <div
+            className="flex items-center justify-between gap-1 px-2 py-1 shrink-0"
+            style={{ borderBottom: '1px solid var(--tv-border)', backgroundColor: 'var(--tv-bg-elevated)' }}
           >
-            <div className="flex items-center justify-between gap-1">
-              <span className="text-[11px] font-semibold truncate" style={{ color: 'var(--tv-text-secondary)' }}>
-                CẢNH BÁO · {activePane.ticker}
-              </span>
-              <div className="flex items-center gap-0.5 shrink-0">
+            <div className="flex items-center gap-0.5">
+              {(
+                [
+                  { id: 'list', label: `Cảnh báo (${alerts.length})` },
+                  { id: 'logs', label: 'Lịch sử' },
+                  { id: 'delivery', label: 'Kênh báo' },
+                ] as const
+              ).map((st) => (
                 <button
+                  key={st.id}
                   type="button"
+                  onClick={() => setAlertSubTab(st.id)}
                   className="px-1.5 py-0.5 rounded text-[10px] font-semibold border-0 cursor-pointer"
                   style={{
-                    backgroundColor: alertMode === 'price' ? 'var(--tv-accent)' : 'var(--tv-hover)',
-                    color: alertMode === 'price' ? '#FFFFFF' : 'var(--tv-text-secondary)',
+                    backgroundColor: alertSubTab === st.id ? 'var(--tv-accent-soft)' : 'transparent',
+                    color: alertSubTab === st.id ? 'var(--tv-accent)' : 'var(--tv-text-secondary)',
                   }}
-                  onClick={() => setAlertMode('price')}
                 >
-                  Giá
+                  {st.label}
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              className="px-1.5 py-0.5 rounded text-[10px] font-semibold border cursor-pointer"
+              style={{ borderColor: 'var(--tv-border)', backgroundColor: 'transparent', color: 'var(--tv-text-primary)' }}
+              onClick={() => void scanAllWatchlistAlerts(false)}
+              title="Quét ngay tất cả cảnh báo đang chờ trên mọi mã Watchlist"
+            >
+              Quét WL
+            </button>
+          </div>
+
+          {alertSubTab === 'delivery' ? (
+            <div className="flex-1 overflow-y-auto tv-scroll p-2.5 space-y-2.5 text-[11px]">
+              <div className="text-[10.5px]" style={{ color: 'var(--tv-text-secondary)' }}>
+                Cấu hình lưu riêng tại <code>~/.config/sumi/alerts_secrets.json</code> (quyền 0600, tuyệt đối không xuất vào Sync Bundle).
+              </div>
+              <label className="flex items-center gap-1.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={deliveryCfg.osNotificationEnabled}
+                  onChange={(e) => setDeliveryCfg((c) => ({ ...c, osNotificationEnabled: e.target.checked }))}
+                />
+                <span>Thông báo Hệ điều hành (OS Notification)</span>
+              </label>
+              <label className="flex items-center gap-1.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={deliveryCfg.watchlistBackgroundScanEnabled}
+                  onChange={(e) => setDeliveryCfg((c) => ({ ...c, watchlistBackgroundScanEnabled: e.target.checked }))}
+                />
+                <span>Tự quét Watchlist Alerts mỗi 60 giây</span>
+              </label>
+              <div className="space-y-1">
+                <div style={{ color: 'var(--tv-text-secondary)' }}>Telegram Bot Token</div>
+                <input
+                  type="password"
+                  value={deliveryCfg.telegramBotToken}
+                  onChange={(e) => setDeliveryCfg((c) => ({ ...c, telegramBotToken: e.target.value }))}
+                  placeholder="123456:ABC-DEF..."
+                  className="w-full px-2 py-1 rounded text-[11px] outline-none"
+                  style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+                />
+              </div>
+              <div className="space-y-1">
+                <div style={{ color: 'var(--tv-text-secondary)' }}>Telegram Chat ID</div>
+                <input
+                  type="text"
+                  value={deliveryCfg.telegramChatId}
+                  onChange={(e) => setDeliveryCfg((c) => ({ ...c, telegramChatId: e.target.value }))}
+                  placeholder="-100123456789 hoặc user chat id"
+                  className="w-full px-2 py-1 rounded text-[11px] outline-none"
+                  style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+                />
+              </div>
+              <div className="space-y-1">
+                <div style={{ color: 'var(--tv-text-secondary)' }}>Webhook POST URL (Discord / Slack / n8n)</div>
+                <input
+                  type="url"
+                  value={deliveryCfg.webhookUrl}
+                  onChange={(e) => setDeliveryCfg((c) => ({ ...c, webhookUrl: e.target.value }))}
+                  placeholder="https://..."
+                  className="w-full px-2 py-1 rounded text-[11px] outline-none"
+                  style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+                />
+              </div>
+              <div className="flex items-center gap-1.5 pt-1">
+                <button
+                  type="button"
+                  className="flex-1 py-1.5 rounded text-[11.5px] font-semibold bg-[#2962FF] text-white border-0 cursor-pointer"
+                  onClick={() => {
+                    void api
+                      .saveAlertDeliveryConfig(deliveryCfg)
+                      .then(() => pushToast('success', 'Đã lưu cấu hình kênh báo riêng tư (0600)'))
+                      .catch((err) => pushToast('error', String(err)))
+                  }}
+                >
+                  Lưu cấu hình
                 </button>
                 <button
                   type="button"
-                  className="px-1.5 py-0.5 rounded text-[10px] font-semibold border-0 cursor-pointer"
-                  style={{
-                    backgroundColor: alertMode === 'indicator' ? 'var(--tv-accent)' : 'var(--tv-hover)',
-                    color: alertMode === 'indicator' ? '#FFFFFF' : 'var(--tv-text-secondary)',
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded text-[11px] font-semibold border cursor-pointer"
+                  style={{ borderColor: 'var(--tv-border)', backgroundColor: 'var(--tv-bg-elevated)', color: 'var(--tv-text-primary)' }}
+                  onClick={() => {
+                    void api
+                      .testAlertDelivery()
+                      .then((ch) => pushToast('info', `Đã gửi thử qua kênh: ${ch.join(', ')}`))
+                      .catch((err) => pushToast('error', String(err)))
                   }}
-                  onClick={() => setAlertMode('indicator')}
                 >
-                  Chỉ báo
+                  <Send className="w-3 h-3" />
+                  <span>Gửi thử</span>
                 </button>
               </div>
             </div>
-
-            {alertMode === 'price' ? (
-              <div className="grid grid-cols-2 gap-1.5">
-                <select
-                  aria-label="Điều kiện cảnh báo"
-                  value={alertCondition}
-                  onChange={(e) => setAlertCondition(e.target.value as 'cross_above' | 'cross_below' | 'cross_any')}
-                  className="px-2 py-1 rounded text-[11.5px] outline-none"
-                  style={{
-                    backgroundColor: 'var(--tv-bg-input)',
-                    color: 'var(--tv-text-primary)',
-                    border: '1px solid var(--tv-border)',
-                  }}
-                >
-                  <option value="cross_above">Cắt lên trên ▲</option>
-                  <option value="cross_below">Cắt xuống dưới ▼</option>
-                  <option value="cross_any">Chạm mức giá ◇</option>
-                </select>
-                <input
-                  type="number"
-                  step="any"
-                  value={alertPrice}
-                  onChange={(e) => setAlertPrice(e.target.value)}
-                  placeholder={activeQuote?.lastPrice ? String(activeQuote.lastPrice) : 'Mức giá...'}
-                  className="px-2 py-1 rounded text-[11.5px] tabular-nums outline-none"
-                  style={{
-                    backgroundColor: 'var(--tv-bg-input)',
-                    color: 'var(--tv-text-primary)',
-                    border: '1px solid var(--tv-border)',
-                  }}
-                />
+          ) : alertSubTab === 'logs' ? (
+            <div className="flex-1 flex flex-col min-h-0">
+              <div className="flex items-center justify-between px-2.5 py-1 text-[10.5px]" style={{ borderBottom: '1px solid var(--tv-border)', color: 'var(--tv-text-secondary)' }}>
+                <span>Nhật ký kích hoạt ({alertLogs.length})</span>
+                {alertLogs.length > 0 && (
+                  <button
+                    type="button"
+                    className="border-0 bg-transparent p-0 text-[#F23645] cursor-pointer text-[10.5px]"
+                    onClick={() => void api.clearAlertLogs().then(() => setAlertLogs([]))}
+                  >
+                    Xóa log
+                  </button>
+                )}
               </div>
-            ) : (
-              <div className="space-y-1.5">
-                <div className="grid grid-cols-2 gap-1.5">
-                  <select
-                    aria-label="Chọn chỉ báo cảnh báo"
-                    value={alertIndType}
-                    onChange={(e) => {
-                      const next = e.target.value as 'RSI' | 'MACD' | 'EMA'
-                      setAlertIndType(next)
-                      setAlertIndPeriod(next === 'EMA' ? '20' : '14')
-                      setAlertIndThreshold(next === 'RSI' ? '70' : '0')
-                    }}
-                    className="px-2 py-1 rounded text-[11.5px] outline-none"
-                    style={{
-                      backgroundColor: 'var(--tv-bg-input)',
-                      color: 'var(--tv-text-primary)',
-                      border: '1px solid var(--tv-border)',
-                    }}
-                  >
-                    <option value="RSI">RSI (Wilder)</option>
-                    <option value="MACD">MACD Hist (0)</option>
-                    <option value="EMA">Giá cắt EMA</option>
-                  </select>
-                  <select
-                    aria-label="Hướng cắt chỉ báo"
-                    value={alertCondition}
-                    onChange={(e) => setAlertCondition(e.target.value as 'cross_above' | 'cross_below' | 'cross_any')}
-                    className="px-2 py-1 rounded text-[11.5px] outline-none"
-                    style={{
-                      backgroundColor: 'var(--tv-bg-input)',
-                      color: 'var(--tv-text-primary)',
-                      border: '1px solid var(--tv-border)',
-                    }}
-                  >
-                    <option value="cross_above">Cắt lên ▲</option>
-                    <option value="cross_below">Cắt xuống ▼</option>
-                    <option value="cross_any">Cắt hai chiều ◇</option>
-                  </select>
+              <div className="flex-1 overflow-y-auto tv-scroll p-2 space-y-1.5">
+                {alertLogs.length === 0 ? (
+                  <div className="text-center py-8 text-[11.5px]" style={{ color: 'var(--tv-text-secondary)' }}>
+                    Chưa có cảnh báo nào kích hoạt trong lịch sử.
+                  </div>
+                ) : (
+                  alertLogs.map((lg) => (
+                    <div
+                      key={lg.id}
+                      className="p-2 rounded text-[10.5px] space-y-0.5"
+                      style={{ backgroundColor: 'var(--tv-bg-elevated)', border: '1px solid var(--tv-border)' }}
+                    >
+                      <div className="flex items-center justify-between">
+                        <strong className="text-[#2962FF]">{lg.ticker}</strong>
+                        <span className="tabular-nums" style={{ color: 'var(--tv-text-secondary)' }}>
+                          {new Date(lg.triggeredAtMs).toLocaleString('vi-VN', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                      </div>
+                      <div>{lg.message}</div>
+                      <div className="flex items-center justify-between text-[9.5px]" style={{ color: 'var(--tv-text-secondary)' }}>
+                        <span>Giá khớp: {lg.triggerPrice.toLocaleString('en-US')}</span>
+                        <span>Kênh: {lg.deliveredChannels}</span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          ) : (
+            <>
+              <form
+                onSubmit={handleCreateAlert}
+                className="p-2.5 space-y-2 shrink-0"
+                style={{ borderBottom: '1px solid var(--tv-border)' }}
+              >
+                <div className="flex items-center justify-between gap-1">
+                  <span className="text-[10.5px] font-semibold truncate" style={{ color: 'var(--tv-text-secondary)' }}>
+                    {activePane.ticker}
+                  </span>
+                  <div className="flex items-center gap-0.5 shrink-0">
+                    {(
+                      [
+                        { id: 'price', label: 'Giá' },
+                        { id: 'indicator', label: 'Chỉ báo' },
+                        { id: 'signal', label: '123 QMV' },
+                        { id: 'confluence', label: 'Hợp lưu' },
+                      ] as const
+                    ).map((m) => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        className="px-1.5 py-0.5 rounded text-[9.5px] font-semibold border-0 cursor-pointer"
+                        style={{
+                          backgroundColor: alertMode === m.id ? 'var(--tv-accent)' : 'var(--tv-hover)',
+                          color: alertMode === m.id ? '#FFFFFF' : 'var(--tv-text-secondary)',
+                        }}
+                        onClick={() => setAlertMode(m.id)}
+                      >
+                        {m.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                {alertIndType !== 'MACD' && (
+
+                {alertMode === 'price' ? (
                   <div className="grid grid-cols-2 gap-1.5">
+                    <select
+                      aria-label="Điều kiện cảnh báo"
+                      value={alertCondition}
+                      onChange={(e) => setAlertCondition(e.target.value as 'cross_above' | 'cross_below' | 'cross_any')}
+                      className="px-2 py-1 rounded text-[11px] outline-none"
+                      style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+                    >
+                      <option value="cross_above">Cắt lên trên ▲</option>
+                      <option value="cross_below">Cắt xuống dưới ▼</option>
+                      <option value="cross_any">Chạm mức giá ◇</option>
+                    </select>
                     <input
                       type="number"
-                      aria-label="Chu kỳ chỉ báo"
-                      value={alertIndPeriod}
-                      onChange={(e) => setAlertIndPeriod(e.target.value)}
-                      placeholder="Chu kỳ (14)"
-                      className="px-2 py-1 rounded text-[11.5px] tabular-nums outline-none"
-                      style={{
-                        backgroundColor: 'var(--tv-bg-input)',
-                        color: 'var(--tv-text-primary)',
-                        border: '1px solid var(--tv-border)',
-                      }}
+                      step="any"
+                      value={alertPrice}
+                      onChange={(e) => setAlertPrice(e.target.value)}
+                      placeholder={activeQuote?.lastPrice ? String(activeQuote.lastPrice) : 'Mức giá...'}
+                      className="px-2 py-1 rounded text-[11px] tabular-nums outline-none"
+                      style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
                     />
-                    {alertIndType === 'RSI' && (
-                      <input
-                        type="number"
-                        aria-label="Ngưỡng RSI"
-                        value={alertIndThreshold}
-                        onChange={(e) => setAlertIndThreshold(e.target.value)}
-                        placeholder="Ngưỡng (70 / 30)"
-                        className="px-2 py-1 rounded text-[11.5px] tabular-nums outline-none"
-                        style={{
-                          backgroundColor: 'var(--tv-bg-input)',
-                          color: 'var(--tv-text-primary)',
-                          border: '1px solid var(--tv-border)',
+                  </div>
+                ) : alertMode === 'signal' ? (
+                  <select
+                    aria-label="Chọn tín hiệu từ 123 QMV Signal Catalog"
+                    value={alertSignalId}
+                    onChange={(e) => setAlertSignalId(e.target.value)}
+                    className="w-full px-2 py-1 rounded text-[11px] outline-none"
+                    style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+                  >
+                    {(signalCatalog.length > 0 ? signalCatalog : [{ id: 'qmv.ichimoku_v7_bullish', labelVi: 'Ichimoku V7 Bullish', categoryLabel: 'QMV' } as SignalCatalogItemDto]).map((sig) => (
+                      <option key={sig.id} value={sig.id}>
+                        [{sig.categoryLabel}] {sig.labelVi}
+                      </option>
+                    ))}
+                  </select>
+                ) : alertMode === 'confluence' ? (
+                  <div className="grid grid-cols-3 gap-1">
+                    <select
+                      value={alertConfluenceProfile}
+                      onChange={(e) => setAlertConfluenceProfile(e.target.value as 'balanced' | 'trend')}
+                      className="px-1.5 py-1 rounded text-[10.5px] outline-none"
+                      style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+                    >
+                      <option value="balanced">Balanced</option>
+                      <option value="trend">Trend</option>
+                    </select>
+                    <select
+                      value={alertCondition}
+                      onChange={(e) => setAlertCondition(e.target.value as 'cross_above' | 'cross_below' | 'cross_any')}
+                      className="px-1.5 py-1 rounded text-[10.5px] outline-none"
+                      style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+                    >
+                      <option value="cross_above">Cắt lên ▲</option>
+                      <option value="cross_below">Cắt xuống ▼</option>
+                    </select>
+                    <input
+                      type="number"
+                      value={alertConfluenceThreshold}
+                      onChange={(e) => setAlertConfluenceThreshold(e.target.value)}
+                      placeholder="35"
+                      className="px-1.5 py-1 rounded text-[11px] tabular-nums outline-none"
+                      style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+                    />
+                  </div>
+                ) : (
+                  <div className="space-y-1.5">
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <select
+                        aria-label="Chọn chỉ báo cảnh báo"
+                        value={alertIndType}
+                        onChange={(e) => {
+                          const next = e.target.value as 'RSI' | 'MACD' | 'EMA'
+                          setAlertIndType(next)
+                          setAlertIndPeriod(next === 'EMA' ? '20' : '14')
+                          setAlertIndThreshold(next === 'RSI' ? '70' : '0')
                         }}
-                      />
+                        className="px-2 py-1 rounded text-[11px] outline-none"
+                        style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+                      >
+                        <option value="RSI">RSI (Wilder)</option>
+                        <option value="MACD">MACD Hist (0)</option>
+                        <option value="EMA">Giá cắt EMA</option>
+                      </select>
+                      <select
+                        aria-label="Hướng cắt chỉ báo"
+                        value={alertCondition}
+                        onChange={(e) => setAlertCondition(e.target.value as 'cross_above' | 'cross_below' | 'cross_any')}
+                        className="px-2 py-1 rounded text-[11px] outline-none"
+                        style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+                      >
+                        <option value="cross_above">Cắt lên ▲</option>
+                        <option value="cross_below">Cắt xuống ▼</option>
+                        <option value="cross_any">Cắt hai chiều ◇</option>
+                      </select>
+                    </div>
+                    {alertIndType !== 'MACD' && (
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <input
+                          type="number"
+                          aria-label="Chu kỳ chỉ báo"
+                          value={alertIndPeriod}
+                          onChange={(e) => setAlertIndPeriod(e.target.value)}
+                          placeholder="Chu kỳ (14)"
+                          className="px-2 py-1 rounded text-[11px] tabular-nums outline-none"
+                          style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+                        />
+                        {alertIndType === 'RSI' && (
+                          <input
+                            type="number"
+                            aria-label="Ngưỡng RSI"
+                            value={alertIndThreshold}
+                            onChange={(e) => setAlertIndThreshold(e.target.value)}
+                            placeholder="Ngưỡng (70 / 30)"
+                            className="px-2 py-1 rounded text-[11px] tabular-nums outline-none"
+                            style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+                          />
+                        )}
+                      </div>
                     )}
                   </div>
                 )}
-              </div>
-            )}
 
-            <input
-              type="text"
-              value={alertMessage}
-              onChange={(e) => setAlertMessage(e.target.value)}
-              placeholder="Ghi chú cảnh báo (tùy chọn)..."
-              className="w-full px-2 py-1 rounded text-[11.5px] outline-none"
-              style={{
-                backgroundColor: 'var(--tv-bg-input)',
-                color: 'var(--tv-text-primary)',
-                border: '1px solid var(--tv-border)',
-              }}
-            />
-
-            <div className="flex items-center justify-between text-[11px]">
-              <label className="flex items-center gap-1.5 cursor-pointer" style={{ color: 'var(--tv-text-secondary)' }}>
-                <input
-                  type="checkbox"
-                  checked={alertSoundEnabled}
-                  onChange={(e) => setAlertSoundEnabled(e.target.checked)}
-                />
-                <span>Phát âm báo (Chime)</span>
-              </label>
-              <button
-                type="button"
-                className="inline-flex items-center gap-1 border-0 bg-transparent p-0 cursor-pointer text-[10.5px] text-[var(--tv-accent)] hover:underline"
-                onClick={() => playAlertChime()}
-                title="Nghe thử âm báo chuông"
-              >
-                <Volume2 className="w-3 h-3" aria-hidden="true" />
-                <span>Thử âm</span>
-              </button>
-            </div>
-
-            <button
-              type="submit"
-              className="w-full py-1.5 rounded text-[12px] font-semibold bg-[#2962FF] hover:bg-[#1E53E5] text-white border-0 cursor-pointer"
-            >
-              {alertMode === 'indicator' ? `+ Thêm Cảnh Báo ${alertIndType}` : '+ Thêm Cảnh Báo Giá'}
-            </button>
-          </form>
-
-          <div className="flex-1 overflow-y-auto tv-scroll p-2 space-y-1.5">
-            {alerts.length === 0 ? (
-              <div className="text-center py-8 text-[11.5px]" style={{ color: 'var(--tv-text-secondary)' }}>
-                Chưa có cảnh báo nào. Tạo cảnh báo Giá, Chỉ báo ở trên hoặc bấm 🔔 trên đường xu hướng.
-              </div>
-            ) : (
-              alerts.map((a) => {
-                const kindTag =
-                  a.alertKind === 'drawing' ? 'ĐƯỜNG VẼ' : a.alertKind === 'indicator' ? 'CHỈ BÁO' : 'GIÁ'
-                return (
-                  <div
-                    key={a.id}
-                    className="p-2 rounded space-y-1"
-                    style={{
-                      backgroundColor: 'var(--tv-bg-elevated)',
-                      border: '1px solid var(--tv-border)',
-                    }}
+                {/* Cadence + Cooldown */}
+                <div className="grid grid-cols-[1fr_76px] gap-1.5">
+                  <select
+                    aria-label="Tần suất kích hoạt"
+                    value={alertFrequency}
+                    onChange={(e) => setAlertFrequency(e.target.value as 'once' | 'once_per_bar_close')}
+                    className="px-2 py-1 rounded text-[10.5px] outline-none"
+                    style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
                   >
-                    <div className="flex items-center justify-between gap-1">
-                      <div className="flex items-center gap-1 min-w-0">
-                        <button
-                          type="button"
-                          className="font-semibold text-[12px] bg-transparent border-0 p-0 cursor-pointer text-[var(--tv-text-primary)] hover:text-[#2962FF] truncate"
-                          onClick={() => setActiveTicker(a.ticker)}
-                        >
-                          {a.ticker}
-                        </button>
-                        <span
-                          className="px-1 py-0 rounded text-[9px] font-bold shrink-0"
-                          style={{ backgroundColor: 'var(--tv-hover)', color: 'var(--tv-text-secondary)' }}
-                        >
-                          {kindTag}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-1 shrink-0">
-                        <span
-                          className="px-1.5 py-0.5 rounded text-[9.5px] font-bold uppercase"
-                          style={{
-                            backgroundColor:
-                              a.status === 'armed'
-                                ? 'var(--tv-up-soft)'
-                                : a.status === 'triggered'
-                                  ? 'var(--tv-accent-soft)'
-                                  : 'var(--tv-hover)',
-                            color:
-                              a.status === 'armed'
-                                ? 'var(--tv-up)'
-                                : a.status === 'triggered'
-                                  ? 'var(--tv-accent)'
-                                  : 'var(--tv-text-secondary)',
-                          }}
-                        >
-                          {a.status === 'armed' ? 'ĐANG CHỜ' : a.status === 'triggered' ? 'ĐÃ KHỚP' : 'TẠM DỪNG'}
-                        </span>
-                        <button
-                          type="button"
-                          className="border-0 bg-transparent p-0.5 cursor-pointer text-[var(--tv-text-secondary)] hover:text-[var(--tv-text-primary)]"
-                          onClick={() => void toggleAlert(a.id, a.status === 'armed' ? 'paused' : 'armed')}
-                          title={a.status === 'armed' ? 'Tạm dừng cảnh báo' : 'Kích hoạt lại cảnh báo'}
-                        >
-                          {a.status === 'armed' ? <BellOff className="w-3.5 h-3.5" /> : <Bell className="w-3.5 h-3.5" />}
-                        </button>
-                        <button
-                          type="button"
-                          className="border-0 bg-transparent p-0.5 cursor-pointer text-[var(--tv-text-secondary)] hover:text-[#F23645]"
-                          onClick={() => void removeAlert(a.id)}
-                          title="Xóa cảnh báo"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </div>
-                    <div className="flex items-center justify-between text-[11px] tabular-nums">
-                      <span style={{ color: 'var(--tv-text-secondary)' }}>
-                        {a.condition === 'cross_above'
-                          ? 'Cắt lên ▲'
-                          : a.condition === 'cross_below'
-                            ? 'Cắt xuống ▼'
-                            : 'Chạm mức ◇'}
-                        {a.interval ? ` · ${a.interval}` : ''}
-                      </span>
-                      <span className="font-semibold">{a.targetPrice.toLocaleString('en-US')}</span>
-                    </div>
-                    {a.message && (
-                      <div className="text-[10.5px] truncate" style={{ color: 'var(--tv-text-secondary)' }}>
-                        {a.message}
-                      </div>
-                    )}
+                    <option value="once">Chỉ báo 1 lần (Once)</option>
+                    <option value="once_per_bar_close">Mỗi lần đóng nến (Lặp lại)</option>
+                  </select>
+                  <input
+                    type="number"
+                    min={0}
+                    max={500}
+                    value={alertCooldownBars}
+                    onChange={(e) => setAlertCooldownBars(e.target.value)}
+                    placeholder="Nghỉ nến"
+                    title="Số phiên nghỉ (cooldown bars) giữa 2 lần kích hoạt"
+                    className="px-1.5 py-1 rounded text-[10.5px] tabular-nums outline-none"
+                    style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+                  />
+                </div>
+
+                <input
+                  type="text"
+                  value={alertMessage}
+                  onChange={(e) => setAlertMessage(e.target.value)}
+                  placeholder="Ghi chú cảnh báo (tùy chọn)..."
+                  className="w-full px-2 py-1 rounded text-[11px] outline-none"
+                  style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+                />
+
+                <div className="flex items-center justify-between text-[10.5px]">
+                  <label className="flex items-center gap-1.5 cursor-pointer" style={{ color: 'var(--tv-text-secondary)' }}>
+                    <input
+                      type="checkbox"
+                      checked={alertSoundEnabled}
+                      onChange={(e) => setAlertSoundEnabled(e.target.checked)}
+                    />
+                    <span>Âm báo (Chime)</span>
+                  </label>
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1 border-0 bg-transparent p-0 cursor-pointer text-[10.5px] text-[var(--tv-accent)] hover:underline"
+                    onClick={() => playAlertChime()}
+                    title="Nghe thử âm báo chuông"
+                  >
+                    <Volume2 className="w-3 h-3" aria-hidden="true" />
+                    <span>Thử âm</span>
+                  </button>
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full py-1.5 rounded text-[11.5px] font-semibold bg-[#2962FF] hover:bg-[#1E53E5] text-white border-0 cursor-pointer"
+                >
+                  {alertMode === 'signal'
+                    ? '+ Thêm Cảnh Báo Tín Hiệu QMV'
+                    : alertMode === 'confluence'
+                      ? '+ Thêm Cảnh Báo Hợp Lưu'
+                      : alertMode === 'indicator'
+                        ? `+ Thêm Cảnh Báo ${alertIndType}`
+                        : '+ Thêm Cảnh Báo Giá'}
+                </button>
+              </form>
+
+              <div className="flex-1 overflow-y-auto tv-scroll p-2 space-y-1.5">
+                {alerts.length === 0 ? (
+                  <div className="text-center py-8 text-[11.5px]" style={{ color: 'var(--tv-text-secondary)' }}>
+                    Chưa có cảnh báo nào. Tạo cảnh báo Giá, Chỉ báo, 123 QMV hoặc Hợp lưu ở trên.
                   </div>
-                )
-              })
-            )}
-          </div>
+                ) : (
+                  alerts.map((a) => {
+                    const kindTag =
+                      a.alertKind === 'drawing' ? 'ĐƯỜNG VẼ' : a.alertKind === 'indicator' ? 'CHỈ BÁO' : 'GIÁ'
+                    const isEditing = editingAlertId === a.id
+                    return (
+                      <div
+                        key={a.id}
+                        className="p-2 rounded space-y-1"
+                        style={{ backgroundColor: 'var(--tv-bg-elevated)', border: '1px solid var(--tv-border)' }}
+                      >
+                        <div className="flex items-center justify-between gap-1">
+                          <div className="flex items-center gap-1 min-w-0">
+                            <button
+                              type="button"
+                              className="font-semibold text-[12px] bg-transparent border-0 p-0 cursor-pointer text-[var(--tv-text-primary)] hover:text-[#2962FF] truncate"
+                              onClick={() => setActiveTicker(a.ticker)}
+                            >
+                              {a.ticker}
+                            </button>
+                            <span
+                              className="px-1 py-0 rounded text-[9px] font-bold shrink-0"
+                              style={{ backgroundColor: 'var(--tv-hover)', color: 'var(--tv-text-secondary)' }}
+                            >
+                              {kindTag}
+                            </span>
+                            {a.frequency === 'once_per_bar_close' && (
+                              <span className="px-1 py-0 rounded text-[8.5px] font-bold bg-[#2962FF]/20 text-[#2962FF]">
+                                LẶP
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-1 shrink-0">
+                            <span
+                              className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase"
+                              style={{
+                                backgroundColor:
+                                  a.status === 'armed'
+                                    ? 'var(--tv-up-soft)'
+                                    : a.status === 'triggered'
+                                      ? 'var(--tv-accent-soft)'
+                                      : 'var(--tv-hover)',
+                                color:
+                                  a.status === 'armed'
+                                    ? 'var(--tv-up)'
+                                    : a.status === 'triggered'
+                                      ? 'var(--tv-accent)'
+                                      : 'var(--tv-text-secondary)',
+                              }}
+                            >
+                              {a.status === 'armed' ? 'CHỜ' : a.status === 'triggered' ? 'KHỚP' : 'DỪNG'}
+                            </span>
+                            <button
+                              type="button"
+                              className="border-0 bg-transparent p-0.5 cursor-pointer text-[var(--tv-text-secondary)] hover:text-[#2962FF]"
+                              onClick={() => {
+                                if (isEditing) {
+                                  setEditingAlertId(null)
+                                } else {
+                                  setEditingAlertId(a.id)
+                                  setEditAlertPrice(String(a.targetPrice))
+                                  setEditAlertMessage(a.message)
+                                  setEditAlertFreq(a.frequency === 'once_per_bar_close' ? 'once_per_bar_close' : 'once')
+                                  setEditAlertCooldown(String(a.cooldownBars ?? 0))
+                                }
+                              }}
+                              title="Sửa cảnh báo"
+                            >
+                              <Edit3 className="w-3 h-3" />
+                            </button>
+                            <button
+                              type="button"
+                              className="border-0 bg-transparent p-0.5 cursor-pointer text-[var(--tv-text-secondary)] hover:text-[var(--tv-text-primary)]"
+                              onClick={() => void toggleAlert(a.id, a.status === 'armed' ? 'paused' : 'armed')}
+                              title={a.status === 'armed' ? 'Tạm dừng cảnh báo' : 'Kích hoạt lại cảnh báo'}
+                            >
+                              {a.status === 'armed' ? <BellOff className="w-3.5 h-3.5" /> : <Bell className="w-3.5 h-3.5" />}
+                            </button>
+                            <button
+                              type="button"
+                              className="border-0 bg-transparent p-0.5 cursor-pointer text-[var(--tv-text-secondary)] hover:text-[#F23645]"
+                              onClick={() => void removeAlert(a.id)}
+                              title="Xóa cảnh báo"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+
+                        {isEditing ? (
+                          <div className="space-y-1.5 pt-1 border-t" style={{ borderColor: 'var(--tv-border)' }}>
+                            <div className="grid grid-cols-2 gap-1">
+                              <input
+                                type="number"
+                                step="any"
+                                value={editAlertPrice}
+                                onChange={(e) => setEditAlertPrice(e.target.value)}
+                                className="px-1.5 py-0.5 rounded text-[10.5px] tabular-nums outline-none"
+                                style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+                              />
+                              <select
+                                value={editAlertFreq}
+                                onChange={(e) => setEditAlertFreq(e.target.value as 'once' | 'once_per_bar_close')}
+                                className="px-1 py-0.5 rounded text-[10px] outline-none"
+                                style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+                              >
+                                <option value="once">1 lần</option>
+                                <option value="once_per_bar_close">Lặp nến</option>
+                              </select>
+                            </div>
+                            <div className="flex gap-1">
+                              <input
+                                type="text"
+                                value={editAlertMessage}
+                                onChange={(e) => setEditAlertMessage(e.target.value)}
+                                className="flex-1 px-1.5 py-0.5 rounded text-[10.5px] outline-none"
+                                style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+                              />
+                              <button
+                                type="button"
+                                className="px-2 py-0.5 rounded text-[10px] font-semibold bg-[#089981] text-white border-0 cursor-pointer"
+                                onClick={() => {
+                                  void updateExistingAlert({
+                                    id: a.id,
+                                    targetPrice: Number(editAlertPrice) || a.targetPrice,
+                                    message: editAlertMessage,
+                                    frequency: editAlertFreq,
+                                    cooldownBars: Number(editAlertCooldown) || 0,
+                                    rearm: true,
+                                  }).then(() => setEditingAlertId(null))
+                                }}
+                              >
+                                Lưu
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <>
+                            <div className="flex items-center justify-between text-[11px] tabular-nums">
+                              <span style={{ color: 'var(--tv-text-secondary)' }}>
+                                {a.condition === 'cross_above'
+                                  ? 'Cắt lên ▲'
+                                  : a.condition === 'cross_below'
+                                    ? 'Cắt xuống ▼'
+                                    : 'Chạm mức ◇'}
+                                {a.interval ? ` · ${a.interval}` : ''}
+                              </span>
+                              <span className="font-semibold">{a.targetPrice.toLocaleString('en-US')}</span>
+                            </div>
+                            {a.message && (
+                              <div className="text-[10.5px] truncate" style={{ color: 'var(--tv-text-secondary)' }}>
+                                {a.message}
+                              </div>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    )
+                  })
+                )}
+              </div>
+            </>
+          )}
         </div>
       ) : rightTab === 'yumeko' ? (
         <YumekoQmvPanel />

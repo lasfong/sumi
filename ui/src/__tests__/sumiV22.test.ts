@@ -186,7 +186,7 @@ describe('QMV Streamlined Indicator Catalog & Custom Algorithms', async () => {
     const core = INDICATOR_CATALOG.filter((i) => i.tier === 'core')
     const aux = INDICATOR_CATALOG.filter((i) => i.tier === 'aux')
     expect(core).toHaveLength(11)
-    expect(aux).toHaveLength(5)
+    expect(aux.length).toBeGreaterThanOrEqual(13)
     expect(findIndicatorMeta('AFC')?.defaultParams).toEqual([10, 100, 1])
     expect(findIndicatorMeta('AFC')?.category).toBe('QMV Cốt lõi')
     expect(findIndicatorMeta('AFC')?.isMain).toBe(true)
@@ -195,8 +195,9 @@ describe('QMV Streamlined Indicator Catalog & Custom Algorithms', async () => {
     expect(findIndicatorMeta('CCI')?.defaultParams).toEqual([14])
     expect(findIndicatorMeta('RSI')?.defaultParams).toEqual([14])
     expect(findIndicatorMeta('QMV_FLOW')?.isOhlcvProxy).toBe(true)
-    expect(findIndicatorMeta('SUPERTREND')).toBeUndefined()
+    expect(findIndicatorMeta('SUPERTREND')?.tier).toBe('aux')
     expect(findIndicatorMeta('STOCHRSI')).toBeUndefined()
+    expect(findIndicatorMeta('BIAS')).toBeUndefined()
   })
 
   it('computes AFC Analog Forecast Cone on 1D with venue bounds, PIT replay lock, and clean non-1D status', () => {

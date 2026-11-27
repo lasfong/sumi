@@ -5,6 +5,7 @@ import {
   Briefcase,
   Calendar,
   Dice5,
+  Download,
   Eye,
   EyeOff,
   Play,
@@ -12,6 +13,7 @@ import {
   Scissors,
   ShieldCheck,
   SlidersHorizontal,
+  Swords,
   Trash2,
   TrendingUp,
 } from 'lucide-react'
@@ -20,7 +22,10 @@ import { useWorkspaceStore } from '../../store/workspaceStore'
 import type {
   CustomClauseInput,
   MonteCarloResponse,
+  ParameterSweepResponseDto,
   PortfolioBacktestResponse,
+  PresetsBattleResponseDto,
+  QuantileEnvelope5,
   SignalCatalogItemDto,
   StrategyBacktestInput,
   StrategyBacktestResponse,
@@ -29,7 +34,45 @@ import type {
   WalkForwardResponse,
 } from '../../types/market'
 
-type TesterView = 'overview' | 'trades' | 'portfolio' | 'wfo' | 'mc'
+type TesterView = 'overview' | 'trades' | 'portfolio' | 'wfo' | 'mc' | 'sweep' | 'battle'
+
+function MonteCarloFanChart({ envelopes, initialCash }: { envelopes: QuantileEnvelope5[]; initialCash: number }) {
+  if (envelopes.length < 2) return null
+  const w = 720
+  const h = 132
+  const padX = 12
+  const padY = 10
+  let lo = initialCash
+  let hi = initialCash
+  for (const e of envelopes) {
+    lo = Math.min(lo, e.p5)
+    hi = Math.max(hi, e.p95)
+  }
+  const span = Math.max(1e-6, hi - lo)
+  const toX = (i: number) => padX + (i / (envelopes.length - 1)) * (w - padX * 2)
+  const toY = (v: number) => padY + (1 - (v - lo) / span) * (h - padY * 2)
+
+  const bandPath = (topKey: keyof QuantileEnvelope5, botKey: keyof QuantileEnvelope5) => {
+    const fwd = envelopes.map((e, i) => `${i === 0 ? 'M' : 'L'}${toX(i).toFixed(1)},${toY(e[topKey]).toFixed(1)}`).join(' ')
+    const rev = envelopes
+      .slice()
+      .reverse()
+      .map((e, ri) => `L${toX(envelopes.length - 1 - ri).toFixed(1)},${toY(e[botKey]).toFixed(1)}`)
+      .join(' ')
+    return `${fwd} ${rev} Z`
+  }
+  const p50Path = envelopes.map((e, i) => `${i === 0 ? 'M' : 'L'}${toX(i).toFixed(1)},${toY(e.p50).toFixed(1)}`).join(' ')
+  const baseLineY = toY(initialCash)
+
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-[132px]" preserveAspectRatio="none">
+      <path d={bandPath('p95', 'p5')} fill="rgba(41, 98, 255, 0.14)" />
+      <path d={bandPath('p75', 'p25')} fill="rgba(8, 153, 129, 0.24)" />
+      <line x1={padX} y1={baseLineY} x2={w - padX} y2={baseLineY} stroke="rgba(148, 163, 184, 0.55)" strokeDasharray="4 4" />
+      <path d={p50Path} fill="none" stroke="#089981" strokeWidth="2" />
+    </svg>
+  )
+}
 
 const QMV_PRESETS: Array<{ key: StrategyPresetSlug; label: string }> = [
   { key: 'qmv_s1', label: '★ QMV S1 — Hỗ Trợ Cứng + Cạn Cung & Nổ Vol (KT01)' },
@@ -213,10 +256,16 @@ export const StrategyTesterTab: React.FC = () => {
   const [minHold, setMinHold] = useState('2')
 
   const [view, setView] = useState<TesterView>('overview')
-  const [running, setRunning] = useState<'bt' | 'wfo' | 'mc' | 'pf' | null>(null)
+  const [running, setRunning] = useState<'bt' | 'wfo' | 'mc' | 'pf' | 'sweep' | 'battle' | 'export' | null>(null)
   const [btResult, setBtResult] = useState<StrategyBacktestResponse | null>(null)
   const [wfoResult, setWfoResult] = useState<WalkForwardResponse | null>(null)
   const [mcResult, setMcResult] = useState<MonteCarloResponse | null>(null)
+  const [sweepResult, setSweepResult] = useState<ParameterSweepResponseDto | null>(null)
+  const [battleResult, setBattleResult] = useState<PresetsBattleResponseDto | null>(null)
+  const [rankMetric, setRankMetric] = useState<'sharpe' | 'return' | 'calmar' | 'profit_factor'>('sharpe')
+  const [wfoFolds, setWfoFolds] = useState('5')
+  const [wfoIsRatio, setWfoIsRatio] = useState('70')
+  const [wfoAnchored, setWfoAnchored] = useState(false)
 
   const upperTicker = activePane.ticker.toUpperCase()
   const isVn30f = upperTicker.includes('VN30F') || upperTicker.includes('VN301!')
@@ -383,7 +432,9 @@ export const StrategyTesterTab: React.FC = () => {
   const handleRunWfo = async () => {
     setRunning('wfo')
     try {
-      const res = await api.runStrategyWfo(buildInput(), 5, 0.7, false)
+      const folds = Math.max(2, Math.min(8, Number(wfoFolds) || 5))
+      const isRatio = Math.max(50, Math.min(85, Number(wfoIsRatio) || 70)) / 100
+      const res = await api.runStrategyWfo(buildInput(), folds, isRatio, wfoAnchored)
       setWfoResult(res)
       setView('wfo')
     } catch (err) {
@@ -399,6 +450,51 @@ export const StrategyTesterTab: React.FC = () => {
       const res = await api.runStrategyMonteCarlo(buildInput(), 2000, 50)
       setMcResult(res)
       setView('mc')
+    } catch (err) {
+      pushToast('error', String(err))
+    } finally {
+      setRunning(null)
+    }
+  }
+
+  const handleRunSweep = async () => {
+    setRunning('sweep')
+    try {
+      const res = await api.runStrategyParameterSweep(buildInput(), rankMetric)
+      setSweepResult(res)
+      setView('sweep')
+    } catch (err) {
+      pushToast('error', String(err))
+    } finally {
+      setRunning(null)
+    }
+  }
+
+  const handleRunBattle = async () => {
+    setRunning('battle')
+    try {
+      const res = await api.runStrategyPresetsBattle(buildInput(), rankMetric)
+      setBattleResult(res)
+      setView('battle')
+    } catch (err) {
+      pushToast('error', String(err))
+    } finally {
+      setRunning(null)
+    }
+  }
+
+  const handleExportHtml = async () => {
+    setRunning('export')
+    try {
+      const res = await api.exportBacktestReportHtml(buildInput())
+      const blob = new Blob([res.html], { type: 'text/html;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = res.filePath.split(/[\\/]/).pop() || 'sumi_backtest_report.html'
+      a.click()
+      window.setTimeout(() => URL.revokeObjectURL(url), 5_000)
+      pushToast('success', `Đã xuất báo cáo HTML/PDF tại: ${res.filePath}`)
     } catch (err) {
       pushToast('error', String(err))
     } finally {
@@ -562,6 +658,39 @@ export const StrategyTesterTab: React.FC = () => {
           >
             <Dice5 className="w-3 h-3" />
             <span>{running === 'mc' ? 'MC...' : 'Monte Carlo'}</span>
+          </button>
+          <button
+            type="button"
+            disabled={running !== null}
+            onClick={() => void handleRunSweep()}
+            className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium border cursor-pointer disabled:opacity-50"
+            style={{ backgroundColor: 'var(--tv-bg-panel)', borderColor: 'var(--tv-border)', color: 'var(--tv-text-primary)' }}
+            title="Quét lưới tham số tối ưu cho chiến lược đang chọn"
+          >
+            <SlidersHorizontal className="w-3 h-3" />
+            <span>{running === 'sweep' ? 'Quét...' : 'Tối ưu'}</span>
+          </button>
+          <button
+            type="button"
+            disabled={running !== null}
+            onClick={() => void handleRunBattle()}
+            className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium border cursor-pointer disabled:opacity-50"
+            style={{ backgroundColor: 'var(--tv-bg-panel)', borderColor: 'var(--tv-border)', color: 'var(--tv-text-primary)' }}
+            title="Đấu trường xếp hạng toàn bộ 12 chiến lược QMV S1–S6 & Tham chiếu"
+          >
+            <Swords className="w-3 h-3" />
+            <span>{running === 'battle' ? 'Đấu...' : 'Đấu trường'}</span>
+          </button>
+          <button
+            type="button"
+            disabled={running !== null}
+            onClick={() => void handleExportHtml()}
+            className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium border cursor-pointer disabled:opacity-50"
+            style={{ backgroundColor: 'var(--tv-bg-panel)', borderColor: 'var(--tv-border)', color: '#089981' }}
+            title="Xuất báo cáo định lượng chuẩn HTML / In PDF (kèm biểu đồ SVG & RunManifest)"
+          >
+            <Download className="w-3 h-3" />
+            <span>{running === 'export' ? 'Đang xuất...' : 'HTML/PDF'}</span>
           </button>
         </div>
       </div>
@@ -1108,7 +1237,9 @@ export const StrategyTesterTab: React.FC = () => {
                   : 'Phân nhóm QMV (Rổ / Ngành / DT)',
               },
               { id: 'wfo', label: 'Walk-Forward (WFO)' },
-              { id: 'mc', label: 'Monte Carlo (VaR/CVaR)' },
+              { id: 'mc', label: 'Monte Carlo (Fan/VaR)' },
+              { id: 'sweep', label: 'Tối ưu Tham số' },
+              { id: 'battle', label: 'Đấu trường Chiến lược' },
             ] as const
           ).map((t) => (
             <button
@@ -1495,9 +1626,52 @@ export const StrategyTesterTab: React.FC = () => {
 
         {view === 'wfo' && (
           <div className="space-y-2">
+            {/* Configurable WFO Controls */}
+            <div
+              className="flex flex-wrap items-center gap-2 p-2 rounded text-[11px]"
+              style={{ backgroundColor: 'var(--tv-bg-elevated)', border: '1px solid var(--tv-border)' }}
+            >
+              <label className="flex items-center gap-1" style={{ color: 'var(--tv-text-secondary)' }}>
+                <span>Số Fold (2–8):</span>
+                <input
+                  type="number"
+                  min={2}
+                  max={8}
+                  value={wfoFolds}
+                  onChange={(e) => setWfoFolds(e.target.value)}
+                  className="w-12 px-1 py-0.5 rounded text-center tabular-nums no-spinner"
+                  style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+                />
+              </label>
+              <label className="flex items-center gap-1" style={{ color: 'var(--tv-text-secondary)' }}>
+                <span>Tỷ lệ IS %:</span>
+                <input
+                  type="number"
+                  min={50}
+                  max={85}
+                  value={wfoIsRatio}
+                  onChange={(e) => setWfoIsRatio(e.target.value)}
+                  className="w-12 px-1 py-0.5 rounded text-center tabular-nums no-spinner"
+                  style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+                />
+              </label>
+              <label className="inline-flex items-center gap-1 cursor-pointer" style={{ color: 'var(--tv-text-secondary)' }}>
+                <input type="checkbox" checked={wfoAnchored} onChange={(e) => setWfoAnchored(e.target.checked)} className="m-0" />
+                <span>Anchored WFO</span>
+              </label>
+              <button
+                type="button"
+                disabled={running !== null}
+                onClick={() => void handleRunWfo()}
+                className="px-2.5 py-0.5 rounded text-[11px] font-semibold bg-[#2962FF] text-white border-0 cursor-pointer"
+              >
+                {running === 'wfo' ? 'Đang chạy...' : 'Chạy WFO'}
+              </button>
+            </div>
+
             {!wfoResult ? (
               <div className="text-center py-6 text-[11.5px]" style={{ color: 'var(--tv-text-secondary)' }}>
-                Nhấn "WFO 5-Fold" để chạy tối ưu hóa Walk-Forward Out-of-Sample chống Overfitting trên lưới tham số QMV.
+                Nhấn "Chạy WFO" để chạy tối ưu hóa Walk-Forward Out-of-Sample chống Overfitting trên lưới tham số QMV.
               </div>
             ) : (
               <>
@@ -1526,9 +1700,48 @@ export const StrategyTesterTab: React.FC = () => {
                     </strong>
                   </span>
                 </div>
-                <div className="h-[130px] rounded p-1.5" style={{ backgroundColor: 'var(--tv-bg-chart)', border: '1px solid var(--tv-border)' }}>
+                <div className="h-[118px] rounded p-1.5" style={{ backgroundColor: 'var(--tv-bg-chart)', border: '1px solid var(--tv-border)' }}>
                   <EquityAndDrawdownChart points={wfoResult.stitchedOosCurve} />
                 </div>
+                {/* Full Per-Fold Breakdown Table */}
+                {wfoResult.folds.length > 0 && (
+                  <div className="rounded overflow-auto max-h-[160px] tv-scroll" style={{ border: '1px solid var(--tv-border)' }}>
+                    <table className="tv-table tabular-nums">
+                      <thead>
+                        <tr>
+                          <th scope="col">Fold</th>
+                          <th scope="col">Cửa sổ IS / OOS</th>
+                          <th scope="col">Bộ tham số thắng IS</th>
+                          <th scope="col" className="text-right">IS %</th>
+                          <th scope="col" className="text-right">OOS %</th>
+                          <th scope="col" className="text-right">OOS Sharpe</th>
+                          <th scope="col" className="text-right">OOS DD</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {wfoResult.folds.map((f) => (
+                          <tr key={f.fold_index}>
+                            <td>#{f.fold_index + 1}</td>
+                            <td>
+                              {f.is_start_bar}..{f.is_end_bar} / {f.oos_start_bar}..{f.oos_end_bar}
+                            </td>
+                            <td className="font-medium">{f.winning_label}</td>
+                            <td className="text-right" style={{ color: f.is_tearsheet.total_return_pct >= 0 ? 'var(--tv-up)' : 'var(--tv-down)' }}>
+                              {f.is_tearsheet.total_return_pct >= 0 ? '+' : ''}{f.is_tearsheet.total_return_pct.toFixed(1)}%
+                            </td>
+                            <td className="text-right font-semibold" style={{ color: f.oos_tearsheet.total_return_pct >= 0 ? 'var(--tv-up)' : 'var(--tv-down)' }}>
+                              {f.oos_tearsheet.total_return_pct >= 0 ? '+' : ''}{f.oos_tearsheet.total_return_pct.toFixed(1)}%
+                            </td>
+                            <td className="text-right">
+                              {f.oos_tearsheet.sharpe_ratio != null ? f.oos_tearsheet.sharpe_ratio.toFixed(2) : '—'}
+                            </td>
+                            <td className="text-right text-[#F23645]">-{f.oos_tearsheet.max_drawdown_pct.toFixed(1)}%</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </>
             )}
           </div>
@@ -1538,48 +1751,213 @@ export const StrategyTesterTab: React.FC = () => {
           <div className="space-y-2">
             {!mcResult ? (
               <div className="text-center py-6 text-[11.5px]" style={{ color: 'var(--tv-text-secondary)' }}>
-                Nhấn "Monte Carlo" để chạy 2,000 kịch bản Bootstrap SplitMix64 đánh giá rủi ro đuôi (VaR95 / CVaR95).
+                Nhấn "Monte Carlo" để chạy 2,000 kịch bản Bootstrap SplitMix64 đánh giá rủi ro đuôi (VaR95 / CVaR95) & vẽ Nón phân vị.
               </div>
             ) : !mcResult.metrics ? (
               <div className="text-center py-6 text-[11.5px]" style={{ color: 'var(--tv-vn-ref)' }}>
                 Không đủ số lệnh mẫu để chạy Monte Carlo ({mcResult.statusReason})
               </div>
             ) : (
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-2 tabular-nums text-[11.5px]">
-                <div className="p-2 rounded" style={{ backgroundColor: 'var(--tv-bg-elevated)', border: '1px solid var(--tv-border)' }}>
-                  <div style={{ color: 'var(--tv-text-secondary)' }}>Xác suất có lãi</div>
-                  <div className="text-[15px] font-bold" style={{ color: 'var(--tv-up)' }}>
-                    {mcResult.metrics.prob_of_profit_pct.toFixed(1)}%
+              <>
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-2 tabular-nums text-[11.5px]">
+                  <div className="p-2 rounded" style={{ backgroundColor: 'var(--tv-bg-elevated)', border: '1px solid var(--tv-border)' }}>
+                    <div style={{ color: 'var(--tv-text-secondary)' }}>Xác suất có lãi</div>
+                    <div className="text-[15px] font-bold" style={{ color: 'var(--tv-up)' }}>
+                      {mcResult.metrics.prob_of_profit_pct.toFixed(1)}%
+                    </div>
+                  </div>
+                  <div className="p-2 rounded" style={{ backgroundColor: 'var(--tv-bg-elevated)', border: '1px solid var(--tv-border)' }}>
+                    <div style={{ color: 'var(--tv-text-secondary)' }}>Xác suất sụt &gt;50%</div>
+                    <div className="text-[15px] font-bold" style={{ color: 'var(--tv-down)' }}>
+                      {mcResult.metrics.prob_of_ruin_pct.toFixed(2)}%
+                    </div>
+                  </div>
+                  <div className="p-2 rounded" style={{ backgroundColor: 'var(--tv-bg-elevated)', border: '1px solid var(--tv-border)' }}>
+                    <div style={{ color: 'var(--tv-text-secondary)' }}>Lợi nhuận P50 (Trung vị)</div>
+                    <div className="text-[15px] font-bold">
+                      {mcResult.metrics.terminal_return_pct.p50 >= 0 ? '+' : ''}
+                      {mcResult.metrics.terminal_return_pct.p50.toFixed(2)}%
+                    </div>
+                  </div>
+                  <div className="p-2 rounded" style={{ backgroundColor: 'var(--tv-bg-elevated)', border: '1px solid var(--tv-border)' }}>
+                    <div style={{ color: 'var(--tv-text-secondary)' }}>Biên P5 — P95</div>
+                    <div className="text-[13px] font-bold">
+                      <span style={{ color: 'var(--tv-down)' }}>{mcResult.metrics.terminal_return_pct.p5.toFixed(1)}%</span>
+                      {' .. '}
+                      <span style={{ color: 'var(--tv-up)' }}>+{mcResult.metrics.terminal_return_pct.p95.toFixed(1)}%</span>
+                    </div>
+                  </div>
+                  <div className="p-2 rounded" style={{ backgroundColor: 'var(--tv-bg-elevated)', border: '1px solid var(--tv-border)' }}>
+                    <div style={{ color: 'var(--tv-text-secondary)' }}>Max DD VaR95 / CVaR95</div>
+                    <div className="text-[13px] font-bold" style={{ color: 'var(--tv-down)' }}>
+                      -{mcResult.metrics.max_drawdown_var_95_pct.toFixed(1)}% / -{mcResult.metrics.max_drawdown_cvar_95_pct.toFixed(1)}%
+                    </div>
                   </div>
                 </div>
-                <div className="p-2 rounded" style={{ backgroundColor: 'var(--tv-bg-elevated)', border: '1px solid var(--tv-border)' }}>
-                  <div style={{ color: 'var(--tv-text-secondary)' }}>Xác suất sụt &gt;50%</div>
-                  <div className="text-[15px] font-bold" style={{ color: 'var(--tv-down)' }}>
-                    {mcResult.metrics.prob_of_ruin_pct.toFixed(2)}%
+                {mcResult.checkpointEnvelopes.length >= 2 && (
+                  <div className="rounded p-2" style={{ backgroundColor: 'var(--tv-bg-chart)', border: '1px solid var(--tv-border)' }}>
+                    <div className="flex items-center justify-between text-[10.5px] mb-1" style={{ color: 'var(--tv-text-secondary)' }}>
+                      <span>Biểu đồ Quạt Monte Carlo ({mcResult.simulations.toLocaleString('en-US')} kịch bản · P5–P95 ngoài / P25–P75 lõi / P50 trung vị)</span>
+                      <span>Mẫu: {mcResult.sampleCount} lệnh</span>
+                    </div>
+                    <MonteCarloFanChart
+                      envelopes={mcResult.checkpointEnvelopes}
+                      initialCash={Number(initialCash) || 500_000_000}
+                    />
                   </div>
-                </div>
-                <div className="p-2 rounded" style={{ backgroundColor: 'var(--tv-bg-elevated)', border: '1px solid var(--tv-border)' }}>
-                  <div style={{ color: 'var(--tv-text-secondary)' }}>Lợi nhuận P50 (Trung vị)</div>
-                  <div className="text-[15px] font-bold">
-                    {mcResult.metrics.terminal_return_pct.p50 >= 0 ? '+' : ''}
-                    {mcResult.metrics.terminal_return_pct.p50.toFixed(2)}%
-                  </div>
-                </div>
-                <div className="p-2 rounded" style={{ backgroundColor: 'var(--tv-bg-elevated)', border: '1px solid var(--tv-border)' }}>
-                  <div style={{ color: 'var(--tv-text-secondary)' }}>Biên P5 — P95</div>
-                  <div className="text-[13px] font-bold">
-                    <span style={{ color: 'var(--tv-down)' }}>{mcResult.metrics.terminal_return_pct.p5.toFixed(1)}%</span>
-                    {' .. '}
-                    <span style={{ color: 'var(--tv-up)' }}>+{mcResult.metrics.terminal_return_pct.p95.toFixed(1)}%</span>
-                  </div>
-                </div>
-                <div className="p-2 rounded" style={{ backgroundColor: 'var(--tv-bg-elevated)', border: '1px solid var(--tv-border)' }}>
-                  <div style={{ color: 'var(--tv-text-secondary)' }}>Max DD VaR95 / CVaR95</div>
-                  <div className="text-[13px] font-bold" style={{ color: 'var(--tv-down)' }}>
-                    -{mcResult.metrics.max_drawdown_var_95_pct.toFixed(1)}% / -{mcResult.metrics.max_drawdown_cvar_95_pct.toFixed(1)}%
-                  </div>
-                </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {view === 'sweep' && (
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 text-[11px]">
+              <span style={{ color: 'var(--tv-text-secondary)' }}>Xếp hạng theo:</span>
+              <select
+                value={rankMetric}
+                onChange={(e) => setRankMetric(e.target.value as typeof rankMetric)}
+                className="px-2 py-0.5 rounded outline-none"
+                style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+              >
+                <option value="sharpe">Sharpe Ratio</option>
+                <option value="return">Tổng Lợi nhuận %</option>
+                <option value="calmar">Calmar Ratio</option>
+                <option value="profit_factor">Profit Factor</option>
+              </select>
+              <button
+                type="button"
+                disabled={running !== null}
+                onClick={() => void handleRunSweep()}
+                className="px-2.5 py-0.5 rounded font-semibold bg-[#2962FF] text-white border-0 cursor-pointer"
+              >
+                {running === 'sweep' ? 'Đang quét...' : 'Chạy Quét Lưới Tham Số'}
+              </button>
+            </div>
+            {!sweepResult ? (
+              <div className="text-center py-6 text-[11.5px]" style={{ color: 'var(--tv-text-secondary)' }}>
+                Nhấn "Chạy Quét Lưới Tham Số" để tự động so sánh các tổ hợp tham số cho chiến lược đang chọn.
               </div>
+            ) : (
+              <table className="tv-table tabular-nums">
+                <thead>
+                  <tr>
+                    <th scope="col">#</th>
+                    <th scope="col">Tổ hợp tham số</th>
+                    <th scope="col" className="text-right">LN %</th>
+                    <th scope="col" className="text-right">Max DD</th>
+                    <th scope="col" className="text-right">Sharpe</th>
+                    <th scope="col" className="text-right">PF</th>
+                    <th scope="col" className="text-right">IS / OOS %</th>
+                    <th scope="col">Độ bền</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sweepResult.variants.map((v) => (
+                    <tr key={`${v.rank}_${v.label}`}>
+                      <td className="font-bold">#{v.rank}</td>
+                      <td className="font-medium">{v.label}</td>
+                      <td className="text-right font-semibold" style={{ color: v.tearsheet.total_return_pct >= 0 ? 'var(--tv-up)' : 'var(--tv-down)' }}>
+                        {v.tearsheet.total_return_pct >= 0 ? '+' : ''}{v.tearsheet.total_return_pct.toFixed(2)}%
+                      </td>
+                      <td className="text-right text-[#F23645]">-{v.tearsheet.max_drawdown_pct.toFixed(1)}%</td>
+                      <td className="text-right">{v.tearsheet.sharpe_ratio != null ? v.tearsheet.sharpe_ratio.toFixed(2) : '—'}</td>
+                      <td className="text-right">{v.tearsheet.profit_factor != null ? v.tearsheet.profit_factor.toFixed(2) : '—'}</td>
+                      <td className="text-right">
+                        {v.in_sample_return_pct != null ? `${v.in_sample_return_pct.toFixed(0)}%` : '—'} /{' '}
+                        {v.out_of_sample_return_pct != null ? `${v.out_of_sample_return_pct.toFixed(0)}%` : '—'}
+                      </td>
+                      <td>
+                        <span className="px-1.5 py-0 rounded text-[10px] font-semibold" style={{ backgroundColor: 'var(--tv-hover)' }}>
+                          {v.robustness ?? '—'}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
+
+        {view === 'battle' && (
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 text-[11px]">
+              <span style={{ color: 'var(--tv-text-secondary)' }}>Xếp hạng Đấu trường:</span>
+              <select
+                value={rankMetric}
+                onChange={(e) => setRankMetric(e.target.value as typeof rankMetric)}
+                className="px-2 py-0.5 rounded outline-none"
+                style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+              >
+                <option value="sharpe">Sharpe Ratio</option>
+                <option value="return">Tổng Lợi nhuận %</option>
+                <option value="calmar">Calmar Ratio</option>
+                <option value="profit_factor">Profit Factor</option>
+              </select>
+              <button
+                type="button"
+                disabled={running !== null}
+                onClick={() => void handleRunBattle()}
+                className="px-2.5 py-0.5 rounded font-semibold bg-[#2962FF] text-white border-0 cursor-pointer"
+              >
+                {running === 'battle' ? 'Đang chạy...' : 'Chạy Đấu Trường 12 Chiến Lược'}
+              </button>
+            </div>
+            {!battleResult ? (
+              <div className="text-center py-6 text-[11.5px]" style={{ color: 'var(--tv-text-secondary)' }}>
+                Chạy Đấu trường Chiến lược để so găng trực tiếp toàn bộ 6 chiến lược QMV + 6 chiến lược Tham chiếu trên {activePane.ticker}.
+              </div>
+            ) : (
+              <table className="tv-table tabular-nums">
+                <thead>
+                  <tr>
+                    <th scope="col">#</th>
+                    <th scope="col">Chiến lược</th>
+                    <th scope="col" className="text-right">LN %</th>
+                    <th scope="col" className="text-right">Max DD</th>
+                    <th scope="col" className="text-right">Win%</th>
+                    <th scope="col" className="text-right">Sharpe</th>
+                    <th scope="col" className="text-right">PF</th>
+                    <th scope="col">Độ bền</th>
+                    <th scope="col">Chọn</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {battleResult.rows.map((r) => (
+                    <tr key={r.presetSlug}>
+                      <td className="font-bold">#{r.rank}</td>
+                      <td className="font-medium">{r.presetLabel}</td>
+                      <td className="text-right font-semibold" style={{ color: r.tearsheet.total_return_pct >= 0 ? 'var(--tv-up)' : 'var(--tv-down)' }}>
+                        {r.tearsheet.total_return_pct >= 0 ? '+' : ''}{r.tearsheet.total_return_pct.toFixed(2)}%
+                      </td>
+                      <td className="text-right text-[#F23645]">-{r.tearsheet.max_drawdown_pct.toFixed(1)}%</td>
+                      <td className="text-right">{r.tearsheet.win_rate_pct.toFixed(0)}% ({r.tearsheet.num_trades})</td>
+                      <td className="text-right">{r.tearsheet.sharpe_ratio != null ? r.tearsheet.sharpe_ratio.toFixed(2) : '—'}</td>
+                      <td className="text-right">{r.tearsheet.profit_factor != null ? r.tearsheet.profit_factor.toFixed(2) : '—'}</td>
+                      <td>
+                        <span className="px-1.5 py-0 rounded text-[10px] font-semibold" style={{ backgroundColor: 'var(--tv-hover)' }}>
+                          {r.robustness ?? '—'}
+                        </span>
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPreset(r.presetSlug as StrategyPresetSlug)
+                            setView('overview')
+                            pushToast('info', `Đã chuyển sang chiến lược ${r.presetLabel}`)
+                          }}
+                          className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[#2962FF] text-white border-0 cursor-pointer"
+                        >
+                          Dùng
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             )}
           </div>
         )}

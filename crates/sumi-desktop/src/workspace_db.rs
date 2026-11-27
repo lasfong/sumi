@@ -10,7 +10,7 @@ use sumi_core::scanner::qmv_universe::{
 
 use crate::error::{DesktopError, DesktopResult};
 
-const WORKSPACE_SCHEMA_VERSION: i32 = 4;
+const WORKSPACE_SCHEMA_VERSION: i32 = 5;
 const QMV_WORKSTATION_MIGRATION_KEY: &str = "qmv_workstation_v1_migrated";
 
 fn qmv_prefixed_ticker(symbol: &str) -> String {
@@ -27,6 +27,10 @@ fn default_alert_kind() -> String {
 
 fn default_sound_enabled() -> bool {
     true
+}
+
+fn default_alert_frequency() -> String {
+    "once".to_owned()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,8 +100,30 @@ pub struct PriceAlertRecord {
     pub message: String,
     /// `"armed"` | `"triggered"` | `"paused"`
     pub status: String,
+    /// `"once"` (default) | `"once_per_bar_close"`
+    #[serde(default = "default_alert_frequency")]
+    pub frequency: String,
+    #[serde(default)]
+    pub cooldown_bars: i32,
+    #[serde(default)]
+    pub last_fired_bar_ts: Option<i64>,
     pub created_at_ms: i64,
     pub triggered_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlertTriggerLogRecord {
+    pub id: String,
+    pub alert_id: String,
+    pub ticker: String,
+    pub alert_kind: String,
+    pub condition: String,
+    pub trigger_price: f64,
+    pub bar_timestamp_ms: i64,
+    pub triggered_at_ms: i64,
+    pub message: String,
+    pub delivered_channels: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +159,8 @@ pub struct JournalAnnotationRecord {
     pub setup_tag: String,
     pub mistake_tag: String,
     pub note: String,
+    #[serde(default)]
+    pub checklist_json: Option<Value>,
     pub updated_at_ms: i64,
 }
 
@@ -317,15 +345,33 @@ impl WorkspaceStore {
                 deleted_at_ms INTEGER NOT NULL,
                 PRIMARY KEY (entity_kind, entity_key)
             );
+
+            CREATE TABLE IF NOT EXISTS alert_trigger_log (
+                id                 TEXT PRIMARY KEY,
+                alert_id           TEXT NOT NULL,
+                ticker             TEXT NOT NULL,
+                alert_kind         TEXT NOT NULL,
+                condition          TEXT NOT NULL,
+                trigger_price      REAL NOT NULL,
+                bar_timestamp_ms   INTEGER NOT NULL,
+                triggered_at_ms    INTEGER NOT NULL,
+                message            TEXT NOT NULL,
+                delivered_channels TEXT NOT NULL DEFAULT 'in_app'
+            );
+            CREATE INDEX IF NOT EXISTS idx_alert_log_ts ON alert_trigger_log(triggered_at_ms DESC);
             "#,
         )?;
 
-        // Idempotent additive columns for existing v1–v3 tables
+        // Idempotent additive columns for existing v1–v4 tables
         for ddl in [
             "ALTER TABLE price_alerts ADD COLUMN alert_kind TEXT NOT NULL DEFAULT 'price'",
             "ALTER TABLE price_alerts ADD COLUMN interval TEXT",
             "ALTER TABLE price_alerts ADD COLUMN params_json TEXT",
             "ALTER TABLE price_alerts ADD COLUMN sound_enabled INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE price_alerts ADD COLUMN frequency TEXT NOT NULL DEFAULT 'once'",
+            "ALTER TABLE price_alerts ADD COLUMN cooldown_bars INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE price_alerts ADD COLUMN last_fired_bar_ts INTEGER",
+            "ALTER TABLE journal_annotations ADD COLUMN checklist_json TEXT",
             "ALTER TABLE watchlists ADD COLUMN updated_at_ms INTEGER NOT NULL DEFAULT 0",
         ] {
             let _ = conn.execute(ddl, []);
@@ -868,7 +914,8 @@ impl WorkspaceStore {
         let mut stmt = conn.prepare(
             r#"
             SELECT id, ticker, alert_kind, condition, target_price, interval, params_json,
-                   sound_enabled, message, status, created_at_ms, triggered_at_ms
+                   sound_enabled, message, status, frequency, cooldown_bars, last_fired_bar_ts,
+                   created_at_ms, triggered_at_ms
             FROM price_alerts
             ORDER BY created_at_ms DESC
             "#,
@@ -888,8 +935,13 @@ impl WorkspaceStore {
                     sound_enabled: r.get::<_, Option<i64>>(7)?.unwrap_or(1) != 0,
                     message: r.get(8)?,
                     status: r.get(9)?,
-                    created_at_ms: r.get(10)?,
-                    triggered_at_ms: r.get(11)?,
+                    frequency: r
+                        .get::<_, Option<String>>(10)?
+                        .unwrap_or_else(default_alert_frequency),
+                    cooldown_bars: r.get::<_, Option<i32>>(11)?.unwrap_or(0),
+                    last_fired_bar_ts: r.get(12)?,
+                    created_at_ms: r.get(13)?,
+                    triggered_at_ms: r.get(14)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -911,12 +963,18 @@ impl WorkspaceStore {
         } else {
             alert.alert_kind.trim()
         };
+        let freq = if alert.frequency.trim().is_empty() {
+            "once"
+        } else {
+            alert.frequency.trim()
+        };
         conn.execute(
             r#"
             INSERT INTO price_alerts (
                 id, ticker, alert_kind, condition, target_price, interval, params_json,
-                sound_enabled, message, status, created_at_ms, triggered_at_ms
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                sound_enabled, message, status, frequency, cooldown_bars, last_fired_bar_ts,
+                created_at_ms, triggered_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
             ON CONFLICT(id) DO UPDATE SET
                 alert_kind = excluded.alert_kind,
                 condition = excluded.condition,
@@ -926,6 +984,9 @@ impl WorkspaceStore {
                 sound_enabled = excluded.sound_enabled,
                 message = excluded.message,
                 status = excluded.status,
+                frequency = excluded.frequency,
+                cooldown_bars = excluded.cooldown_bars,
+                last_fired_bar_ts = excluded.last_fired_bar_ts,
                 triggered_at_ms = excluded.triggered_at_ms
             "#,
             params![
@@ -939,6 +1000,9 @@ impl WorkspaceStore {
                 i64::from(alert.sound_enabled),
                 alert.message,
                 alert.status,
+                freq,
+                alert.cooldown_bars.clamp(0, 500),
+                alert.last_fired_bar_ts,
                 alert.created_at_ms,
                 alert.triggered_at_ms,
             ],
@@ -960,6 +1024,105 @@ impl WorkspaceStore {
             "UPDATE price_alerts SET status = ?2, triggered_at_ms = COALESCE(?3, triggered_at_ms) WHERE id = ?1",
             params![id, status, triggered_at_ms],
         )?;
+        Ok(())
+    }
+
+    pub fn record_alert_fire(
+        &self,
+        alert: &PriceAlertRecord,
+        next_status: &str,
+        bar_timestamp_ms: i64,
+        trigger_price: f64,
+        delivered_channels: &str,
+    ) -> DesktopResult<AlertTriggerLogRecord> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        conn.execute(
+            "UPDATE price_alerts SET status = ?2, triggered_at_ms = ?3, last_fired_bar_ts = ?4 WHERE id = ?1",
+            params![&alert.id, next_status, now_ms, bar_timestamp_ms],
+        )?;
+        let log = AlertTriggerLogRecord {
+            id: format!("alog_{}_{}", now_ms, uuid::Uuid::new_v4().simple()),
+            alert_id: alert.id.clone(),
+            ticker: alert.ticker.clone(),
+            alert_kind: alert.alert_kind.clone(),
+            condition: alert.condition.clone(),
+            trigger_price,
+            bar_timestamp_ms,
+            triggered_at_ms: now_ms,
+            message: alert.message.clone(),
+            delivered_channels: delivered_channels.to_owned(),
+        };
+        conn.execute(
+            r#"
+            INSERT INTO alert_trigger_log (
+                id, alert_id, ticker, alert_kind, condition, trigger_price,
+                bar_timestamp_ms, triggered_at_ms, message, delivered_channels
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "#,
+            params![
+                &log.id,
+                &log.alert_id,
+                &log.ticker,
+                &log.alert_kind,
+                &log.condition,
+                log.trigger_price,
+                log.bar_timestamp_ms,
+                log.triggered_at_ms,
+                &log.message,
+                &log.delivered_channels,
+            ],
+        )?;
+        // Keep bounded history (500 latest log rows)
+        let _ = conn.execute(
+            "DELETE FROM alert_trigger_log WHERE id NOT IN (SELECT id FROM alert_trigger_log ORDER BY triggered_at_ms DESC LIMIT 500)",
+            [],
+        );
+        Ok(log)
+    }
+
+    pub fn list_alert_trigger_logs(&self, limit: usize) -> DesktopResult<Vec<AlertTriggerLogRecord>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT id, alert_id, ticker, alert_kind, condition, trigger_price,
+                   bar_timestamp_ms, triggered_at_ms, message, delivered_channels
+            FROM alert_trigger_log
+            ORDER BY triggered_at_ms DESC
+            LIMIT ?1
+            "#,
+        )?;
+        let rows = stmt
+            .query_map(params![limit.clamp(1, 500) as i64], |r| {
+                Ok(AlertTriggerLogRecord {
+                    id: r.get(0)?,
+                    alert_id: r.get(1)?,
+                    ticker: r.get(2)?,
+                    alert_kind: r.get(3)?,
+                    condition: r.get(4)?,
+                    trigger_price: r.get(5)?,
+                    bar_timestamp_ms: r.get(6)?,
+                    triggered_at_ms: r.get(7)?,
+                    message: r.get(8)?,
+                    delivered_channels: r.get(9)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn clear_alert_trigger_logs(&self) -> DesktopResult<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        conn.execute("DELETE FROM alert_trigger_log", [])?;
         Ok(())
     }
 
@@ -994,7 +1157,7 @@ impl WorkspaceStore {
         let normalized = ticker.trim().to_ascii_uppercase();
         let mut stmt = conn.prepare(
             r#"
-            SELECT trade_id, ticker, setup_tag, mistake_tag, note, updated_at_ms
+            SELECT trade_id, ticker, setup_tag, mistake_tag, note, checklist_json, updated_at_ms
             FROM journal_annotations
             WHERE ticker = ?1
             ORDER BY trade_id DESC
@@ -1002,13 +1165,15 @@ impl WorkspaceStore {
         )?;
         let rows = stmt
             .query_map(params![normalized], |r| {
+                let ck_raw: Option<String> = r.get(5)?;
                 Ok(JournalAnnotationRecord {
                     trade_id: r.get::<_, i64>(0)?.max(0) as u64,
                     ticker: r.get(1)?,
                     setup_tag: r.get(2)?,
                     mistake_tag: r.get(3)?,
                     note: r.get(4)?,
-                    updated_at_ms: r.get(5)?,
+                    checklist_json: ck_raw.and_then(|s| serde_json::from_str::<Value>(&s).ok()),
+                    updated_at_ms: r.get(6)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1023,23 +1188,40 @@ impl WorkspaceStore {
         mistake_tag: &str,
         note: &str,
     ) -> DesktopResult<JournalAnnotationRecord> {
+        self.upsert_journal_annotation_full(ticker, trade_id, setup_tag, mistake_tag, note, None)
+    }
+
+    pub fn upsert_journal_annotation_full(
+        &self,
+        ticker: &str,
+        trade_id: u64,
+        setup_tag: &str,
+        mistake_tag: &str,
+        note: &str,
+        checklist_json: Option<Value>,
+    ) -> DesktopResult<JournalAnnotationRecord> {
         let conn = self
             .conn
             .lock()
             .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
         let normalized = ticker.trim().to_ascii_uppercase();
         let now_ms = chrono::Utc::now().timestamp_millis();
+        let ck_str = checklist_json
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         conn.execute(
             r#"
-            INSERT INTO journal_annotations (trade_id, ticker, setup_tag, mistake_tag, note, updated_at_ms)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            INSERT INTO journal_annotations (trade_id, ticker, setup_tag, mistake_tag, note, checklist_json, updated_at_ms)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             ON CONFLICT(ticker, trade_id) DO UPDATE SET
                 setup_tag = excluded.setup_tag,
                 mistake_tag = excluded.mistake_tag,
                 note = excluded.note,
+                checklist_json = COALESCE(excluded.checklist_json, journal_annotations.checklist_json),
                 updated_at_ms = excluded.updated_at_ms
             "#,
-            params![trade_id as i64, &normalized, setup_tag, mistake_tag, note, now_ms],
+            params![trade_id as i64, &normalized, setup_tag, mistake_tag, note, ck_str, now_ms],
         )?;
         Ok(JournalAnnotationRecord {
             trade_id,
@@ -1047,6 +1229,7 @@ impl WorkspaceStore {
             setup_tag: setup_tag.to_owned(),
             mistake_tag: mistake_tag.to_owned(),
             note: note.to_owned(),
+            checklist_json,
             updated_at_ms: now_ms,
         })
     }
@@ -1744,20 +1927,22 @@ impl WorkspaceStore {
             .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT trade_id, ticker, setup_tag, mistake_tag, note, updated_at_ms
+            SELECT trade_id, ticker, setup_tag, mistake_tag, note, checklist_json, updated_at_ms
             FROM journal_annotations
             ORDER BY ticker ASC, trade_id ASC
             "#,
         )?;
         let rows = stmt
             .query_map([], |r| {
+                let ck_raw: Option<String> = r.get(5)?;
                 Ok(JournalAnnotationRecord {
                     trade_id: r.get::<_, i64>(0)?.max(0) as u64,
                     ticker: r.get(1)?,
                     setup_tag: r.get(2)?,
                     mistake_tag: r.get(3)?,
                     note: r.get(4)?,
-                    updated_at_ms: r.get(5)?,
+                    checklist_json: ck_raw.and_then(|s| serde_json::from_str::<Value>(&s).ok()),
+                    updated_at_ms: r.get(6)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1770,14 +1955,20 @@ impl WorkspaceStore {
             .lock()
             .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
         let normalized = rec.ticker.trim().to_ascii_uppercase();
+        let ck_str = rec
+            .checklist_json
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         conn.execute(
             r#"
-            INSERT INTO journal_annotations (trade_id, ticker, setup_tag, mistake_tag, note, updated_at_ms)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            INSERT INTO journal_annotations (trade_id, ticker, setup_tag, mistake_tag, note, checklist_json, updated_at_ms)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             ON CONFLICT(ticker, trade_id) DO UPDATE SET
                 setup_tag = excluded.setup_tag,
                 mistake_tag = excluded.mistake_tag,
                 note = excluded.note,
+                checklist_json = excluded.checklist_json,
                 updated_at_ms = excluded.updated_at_ms
             WHERE excluded.updated_at_ms >= journal_annotations.updated_at_ms
             "#,
@@ -1787,6 +1978,7 @@ impl WorkspaceStore {
                 &rec.setup_tag,
                 &rec.mistake_tag,
                 &rec.note,
+                ck_str,
                 rec.updated_at_ms,
             ],
         )?;
@@ -2023,6 +2215,9 @@ mod tests {
                 sound_enabled: true,
                 message: "FPT breakout".to_owned(),
                 status: "armed".to_owned(),
+                frequency: "once".to_owned(),
+                cooldown_bars: 0,
+                last_fired_bar_ts: None,
                 created_at_ms: 1_700_000_000_000,
                 triggered_at_ms: None,
             })

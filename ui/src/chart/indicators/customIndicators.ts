@@ -727,8 +727,12 @@ export const vrvpIndicator: IndicatorTemplate<VrvpPoint, number> = {
 
     let maxBinVol = 0
     let pocBin = 0
+    let totalVolAll = 0
+    const totBins = new Float64Array(bins)
     for (let k = 0; k < bins; k++) {
       const tot = upVol[k] + dnVol[k]
+      totBins[k] = tot
+      totalVolAll += tot
       if (tot > maxBinVol) {
         maxBinVol = tot
         pocBin = k
@@ -736,8 +740,37 @@ export const vrvpIndicator: IndicatorTemplate<VrvpPoint, number> = {
     }
     if (maxBinVol <= 0) return false
 
-    const maxBarWidth = Math.min(132, bounding.width * 0.2)
+    // Compute 70% Value Area (`VAH` / `VAL`) via symmetrical outward expansion from POC (matches `sumi-core`)
+    const vaTarget = totalVolAll * 0.7
+    let vaSum = totBins[pocBin]
+    let loVa = pocBin
+    let hiVa = pocBin
+    while (vaSum < vaTarget && (loVa > 0 || hiVa < bins - 1)) {
+      const upNext = hiVa + 1 < bins ? totBins[hiVa + 1] : -1
+      const dnNext = loVa > 0 ? totBins[loVa - 1] : -1
+      if (upNext >= dnNext && hiVa + 1 < bins) {
+        hiVa++
+        vaSum += totBins[hiVa]
+      } else if (loVa > 0) {
+        loVa--
+        vaSum += totBins[loVa]
+      } else {
+        break
+      }
+    }
+
+    const vahPrice = lo + (hiVa + 1) * step
+    const valPrice = lo + loVa * step
+    const yVah = yAxis.convertToPixel(vahPrice)
+    const yVal = yAxis.convertToPixel(valPrice)
+
+    const maxBarWidth = Math.min(136, bounding.width * 0.22)
     ctx.save()
+
+    // Subtle Value Area (70%) shaded band on right profile edge
+    ctx.fillStyle = 'rgba(41, 98, 255, 0.06)'
+    ctx.fillRect(bounding.width - maxBarWidth - 4, Math.min(yVah, yVal), maxBarWidth + 4, Math.abs(yVal - yVah))
+
     for (let k = 0; k < bins; k++) {
       const pLow = lo + k * step
       const pHigh = pLow + step
@@ -745,29 +778,62 @@ export const vrvpIndicator: IndicatorTemplate<VrvpPoint, number> = {
       const yBot = yAxis.convertToPixel(pLow)
       const h = Math.max(1.5, Math.abs(yBot - yTop) - 1)
       const y = Math.min(yTop, yBot)
-      const tot = upVol[k] + dnVol[k]
+      const tot = totBins[k]
       if (tot <= 0) continue
+      const inVa = k >= loVa && k <= hiVa
       const totalW = (tot / maxBinVol) * maxBarWidth
       const upW = (upVol[k] / tot) * totalW
       const dnW = totalW - upW
       const xRight = bounding.width
 
-      ctx.fillStyle = k === pocBin ? 'rgba(8, 153, 129, 0.36)' : 'rgba(8, 153, 129, 0.18)'
+      ctx.fillStyle =
+        k === pocBin
+          ? 'rgba(251, 192, 45, 0.45)'
+          : inVa
+            ? 'rgba(8, 153, 129, 0.34)'
+            : 'rgba(8, 153, 129, 0.14)'
       ctx.fillRect(xRight - totalW, y, upW, h)
-      ctx.fillStyle = k === pocBin ? 'rgba(242, 54, 69, 0.36)' : 'rgba(242, 54, 69, 0.18)'
+      ctx.fillStyle =
+        k === pocBin
+          ? 'rgba(251, 192, 45, 0.30)'
+          : inVa
+            ? 'rgba(242, 54, 69, 0.34)'
+            : 'rgba(242, 54, 69, 0.14)'
       ctx.fillRect(xRight - dnW, y, dnW, h)
     }
+
+    // VAH / VAL dashed boundaries
+    ctx.setLineDash([3, 3])
+    ctx.strokeStyle = 'rgba(41, 98, 255, 0.65)'
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    ctx.moveTo(bounding.width - maxBarWidth - 18, yVah)
+    ctx.lineTo(bounding.width, yVah)
+    ctx.moveTo(bounding.width - maxBarWidth - 18, yVal)
+    ctx.lineTo(bounding.width, yVal)
+    ctx.stroke()
 
     // Point of Control (POC) horizontal reference line
     const pocPrice = lo + (pocBin + 0.5) * step
     const yPoc = yAxis.convertToPixel(pocPrice)
     ctx.beginPath()
     ctx.setLineDash([5, 4])
-    ctx.strokeStyle = 'rgba(251, 192, 45, 0.85)'
-    ctx.lineWidth = 1.25
+    ctx.strokeStyle = 'rgba(251, 192, 45, 0.88)'
+    ctx.lineWidth = 1.3
     ctx.moveTo(0, yPoc)
     ctx.lineTo(bounding.width, yPoc)
     ctx.stroke()
+
+    ctx.setLineDash([])
+    ctx.font = '600 9.5px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+    ctx.textAlign = 'right'
+    ctx.textBaseline = 'bottom'
+    ctx.fillStyle = '#FBC02D'
+    ctx.fillText(`POC ${pocPrice >= 1000 ? Math.round(pocPrice).toLocaleString('en-US') : pocPrice.toFixed(2)}`, bounding.width - 6, yPoc - 2)
+    ctx.fillStyle = '#60A5FA'
+    ctx.fillText('VAH', bounding.width - 6, yVah - 2)
+    ctx.textBaseline = 'top'
+    ctx.fillText('VAL', bounding.width - 6, yVal + 2)
     ctx.restore()
     return false
   },
