@@ -42,6 +42,37 @@ pub struct PersistedBrokerSnapshot {
     pub order_types_meta: HashMap<u64, String>,
 }
 
+/// Metadata for a True Blind Replay Drill (random historical symbol, normalized to `100.00` at cut bar).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlindDrillMeta {
+    pub enabled: bool,
+    pub alias_code: String,
+    pub price_scale: f64,
+    pub revealed: bool,
+    pub real_ticker: String,
+    pub cut_date: String,
+}
+
+impl BlindDrillMeta {
+    /// Returns a spoiler-free copy with `real_ticker` and `cut_date` masked while `!revealed`.
+    #[must_use]
+    pub fn masked_for_ui(&self) -> Self {
+        if self.revealed {
+            self.clone()
+        } else {
+            Self {
+                enabled: self.enabled,
+                alias_code: self.alias_code.clone(),
+                price_scale: self.price_scale,
+                revealed: false,
+                real_ticker: String::new(),
+                cut_date: String::new(),
+            }
+        }
+    }
+}
+
 /// Active causal Multi-Timeframe Bar Replay session (`sumi-core` `ReplayController`).
 pub struct ReplayRuntime {
     pub ticker: String,
@@ -53,6 +84,7 @@ pub struct ReplayRuntime {
     pub base_candles: Vec<Candle>,
     pub controller: ReplayController,
     pub speed_multiplier: f64,
+    pub blind_drill: Option<BlindDrillMeta>,
 }
 
 /// Active Paper Broker session (either live chart or synchronized with Bar Replay).

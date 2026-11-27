@@ -153,6 +153,10 @@ pub(crate) enum PendingStrategyOrder {
         side: PositionSide,
         signal_bar: usize,
     },
+    ScaleIn {
+        side: PositionSide,
+        signal_bar: usize,
+    },
     Exit {
         signal_bar: usize,
         reason: BacktestExitReason,
@@ -161,6 +165,13 @@ pub(crate) enum PendingStrategyOrder {
         new_side: PositionSide,
         signal_bar: usize,
     },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PositionTranche {
+    qty: f64,
+    entry_bar_abs: usize,
+    entry_timestamp: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -175,12 +186,15 @@ pub(crate) struct ActivePositionState {
     pub(crate) entry_sell_tax: f64,
     fixed_stop_loss: Option<f64>,
     take_profit: Option<f64>,
+    tp1_price: Option<f64>,
+    scaled_out_tp1: bool,
     trailing_stop: Option<f64>,
     initial_risk_amount: Option<f64>,
     highest_since_entry: f64,
     lowest_since_entry: f64,
     mae_pct: f64,
     mfe_pct: f64,
+    tranches: Vec<PositionTranche>,
 }
 
 #[derive(Debug, Clone)]
@@ -274,6 +288,63 @@ impl ActivePositionState {
         self.observe_price(candle.high);
         self.observe_price(candle.close);
     }
+
+    #[inline]
+    fn unlocked_quantity_at(
+        &self,
+        bar_idx: usize,
+        min_hold_bars: usize,
+        timeframe: Timeframe,
+        venue: ExchangeVenue,
+        enforce_vn: bool,
+    ) -> f64 {
+        if self.tranches.is_empty() {
+            let req = effective_pit_min_hold_bars(
+                min_hold_bars,
+                self.entry_timestamp,
+                timeframe,
+                venue,
+                enforce_vn,
+            );
+            return if bar_idx.saturating_sub(self.entry_bar_abs) >= req {
+                self.quantity
+            } else {
+                0.0
+            };
+        }
+        let mut unlocked = 0.0_f64;
+        for t in &self.tranches {
+            let req = effective_pit_min_hold_bars(
+                min_hold_bars,
+                t.entry_timestamp,
+                timeframe,
+                venue,
+                enforce_vn,
+            );
+            if bar_idx.saturating_sub(t.entry_bar_abs) >= req {
+                unlocked += t.qty;
+            }
+        }
+        unlocked.min(self.quantity)
+    }
+
+    fn deduct_tranches_fifo(&mut self, mut qty_to_deduct: f64) {
+        let mut idx = 0;
+        while idx < self.tranches.len() && qty_to_deduct > 1.0e-9 {
+            if self.tranches[idx].qty <= qty_to_deduct + 1.0e-9 {
+                qty_to_deduct -= self.tranches[idx].qty;
+                self.tranches.remove(idx);
+            } else {
+                self.tranches[idx].qty -= qty_to_deduct;
+                qty_to_deduct = 0.0;
+                idx += 1;
+            }
+        }
+        if let Some(first) = self.tranches.first() {
+            self.entry_bar_abs = first.entry_bar_abs;
+            self.entry_timestamp = first.entry_timestamp;
+        }
+    }
 }
 
 pub(crate) struct PrecomputedFeatures {
@@ -283,6 +354,8 @@ pub(crate) struct PrecomputedFeatures {
     sma_20: Vec<Option<f64>>,
     sma_50: Vec<Option<f64>>,
     ema_200: Vec<Option<f64>>,
+    trailing_ma: Vec<Option<f64>>,
+    trailing_kijun: Vec<Option<f64>>,
     rsi: Vec<Option<f64>>,
     macd: MacdOutput,
     macd_trend_ema: Vec<Option<f64>>,
@@ -345,6 +418,17 @@ impl PrecomputedFeatures {
         } else {
             Vec::new()
         };
+        let trailing_ma = config
+            .risk
+            .trailing_ma_period
+            .map(|period| compute_sma_slices(&closes, period))
+            .unwrap_or_default();
+        let trailing_kijun = config
+            .risk
+            .trailing_kijun_period
+            .filter(|_| len > 0)
+            .map(|period| donchian_midpoint_series(candles, period))
+            .unwrap_or_default();
         let rsi = if matches!(
             config.preset,
             StrategyPresetKind::RsiMeanReversion
@@ -473,6 +557,8 @@ impl PrecomputedFeatures {
             sma_20,
             sma_50,
             ema_200,
+            trailing_ma,
+            trailing_kijun,
             rsi,
             macd,
             macd_trend_ema,
@@ -532,7 +618,29 @@ pub fn run_backtest_with_options(
     config: &BacktestConfig,
     options: BacktestRunOptions,
 ) -> BacktestRunResult {
-    run_backtest_with_shared_catalog(symbol, timeframe, candles, config, options, None)
+    run_backtest_with_shared_catalog_and_magnifier(symbol, timeframe, candles, config, options, None, None)
+}
+
+/// Runs a deterministic strategy backtest with optional intrabar sub-bars for Bar Magnifier
+/// dual-touch SL/TP chronological resolution (`Wave 5 — Strategy Tester 2.0`).
+#[must_use]
+pub fn run_backtest_with_magnifier(
+    symbol: impl Into<String>,
+    timeframe: Timeframe,
+    candles: &[Candle],
+    config: &BacktestConfig,
+    options: BacktestRunOptions,
+    intrabar_candles: Option<&[Candle]>,
+) -> BacktestRunResult {
+    run_backtest_with_shared_catalog_and_magnifier(
+        symbol,
+        timeframe,
+        candles,
+        config,
+        options,
+        None,
+        intrabar_candles,
+    )
 }
 
 /// Returns `false` when `symbol` maps to a Vietnamese spot equity venue (`HOSE`, `HNX`, `UPCOM`)
@@ -558,6 +666,26 @@ fn run_backtest_with_shared_catalog(
     config: &BacktestConfig,
     options: BacktestRunOptions,
     shared_catalog: Option<Arc<PrecomputedCatalogMatrix>>,
+) -> BacktestRunResult {
+    run_backtest_with_shared_catalog_and_magnifier(
+        symbol,
+        timeframe,
+        candles,
+        config,
+        options,
+        shared_catalog,
+        None,
+    )
+}
+
+fn run_backtest_with_shared_catalog_and_magnifier(
+    symbol: impl Into<String>,
+    timeframe: Timeframe,
+    candles: &[Candle],
+    config: &BacktestConfig,
+    options: BacktestRunOptions,
+    shared_catalog: Option<Arc<PrecomputedCatalogMatrix>>,
+    intrabar_candles: Option<&[Candle]>,
 ) -> BacktestRunResult {
     let symbol = symbol.into();
     let mut clean_cfg = config.clone();
@@ -596,7 +724,7 @@ fn run_backtest_with_shared_catalog(
         features.venue =
             ExchangeVenue::infer_from_symbol_and_preset(&symbol, DataSourcePreset::CustomFile);
     }
-    let full_sim = simulate_window_with_features(
+    let (full_sim, _) = simulate_window_with_carry_and_magnifier(
         causal_candles,
         0,
         causal_candles.len(),
@@ -604,7 +732,11 @@ fn run_backtest_with_shared_catalog(
         &clean_cfg,
         &features,
         options.incomplete_tail_bar,
+        None,
+        false,
+        false,
         venue_allows_short,
+        intrabar_candles,
     );
 
     let open_entry_fee = full_sim
@@ -1613,6 +1745,37 @@ pub(crate) fn simulate_window_with_carry(
     use_absolute_indices: bool,
     venue_allows_short: bool,
 ) -> (WindowSimulationOutput, SimulationCarryState) {
+    simulate_window_with_carry_and_magnifier(
+        candles,
+        start_idx,
+        end_idx,
+        timeframe,
+        config,
+        features,
+        incomplete_tail_bar,
+        carry_in,
+        allow_handoff_at_end,
+        use_absolute_indices,
+        venue_allows_short,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn simulate_window_with_carry_and_magnifier(
+    candles: &[Candle],
+    start_idx: usize,
+    end_idx: usize,
+    timeframe: Timeframe,
+    config: &BacktestConfig,
+    features: &PrecomputedFeatures,
+    incomplete_tail_bar: bool,
+    carry_in: Option<SimulationCarryState>,
+    allow_handoff_at_end: bool,
+    use_absolute_indices: bool,
+    venue_allows_short: bool,
+    intrabar_candles: Option<&[Candle]>,
+) -> (WindowSimulationOutput, SimulationCarryState) {
     let end = end_idx.min(candles.len());
     let start = start_idx.min(end);
     let span = end.saturating_sub(start);
@@ -1646,7 +1809,16 @@ pub(crate) fn simulate_window_with_carry(
                     reason,
                 } => {
                     if let Some(mut pos) = active_pos.take() {
-                        if pos.side == PositionSide::Long && locked_floor_no_bid {
+                        let unlocked_qty = pos.unlocked_quantity_at(
+                            i,
+                            min_hold_bars,
+                            timeframe,
+                            features.venue,
+                            config.enforce_vn_microstructure,
+                        );
+                        if unlocked_qty <= 1.0e-9 {
+                            active_pos = Some(pos);
+                        } else if pos.side == PositionSide::Long && locked_floor_no_bid {
                             // Vietnam `trắng bên mua`: cannot sell into a locked-floor session; defer to next bar!
                             active_pos = Some(pos);
                             if i + 1 < end || allow_handoff_at_end {
@@ -1681,19 +1853,37 @@ pub(crate) fn simulate_window_with_carry(
                             );
                             pos.observe_price(raw_px);
                             pos.observe_price(exec_price);
-                            close_position_into_trade(
-                                pos,
-                                i,
-                                out_bar_idx,
-                                use_absolute_indices,
-                                candle.timestamp,
-                                exec_price,
-                                reason,
-                                config,
-                                &mut cash,
-                                &mut next_trade_id,
-                                &mut trades,
-                            );
+                            if unlocked_qty + 1.0e-9 >= pos.quantity {
+                                close_position_into_trade(
+                                    pos,
+                                    i,
+                                    out_bar_idx,
+                                    use_absolute_indices,
+                                    candle.timestamp,
+                                    exec_price,
+                                    reason,
+                                    config,
+                                    &mut cash,
+                                    &mut next_trade_id,
+                                    &mut trades,
+                                );
+                            } else {
+                                partial_close_position_into_trade(
+                                    &mut pos,
+                                    unlocked_qty,
+                                    i,
+                                    out_bar_idx,
+                                    use_absolute_indices,
+                                    candle.timestamp,
+                                    exec_price,
+                                    reason,
+                                    config,
+                                    &mut cash,
+                                    &mut next_trade_id,
+                                    &mut trades,
+                                );
+                                active_pos = Some(pos);
+                            }
                         }
                     }
                 }
@@ -1702,7 +1892,16 @@ pub(crate) fn simulate_window_with_carry(
                     signal_bar,
                 } => {
                     if let Some(mut pos) = active_pos.take() {
-                        if pos.side == PositionSide::Long && locked_floor_no_bid {
+                        let unlocked_qty = pos.unlocked_quantity_at(
+                            i,
+                            min_hold_bars,
+                            timeframe,
+                            features.venue,
+                            config.enforce_vn_microstructure,
+                        );
+                        if unlocked_qty <= 1.0e-9 {
+                            active_pos = Some(pos);
+                        } else if pos.side == PositionSide::Long && locked_floor_no_bid {
                             active_pos = Some(pos);
                             if i + 1 < end || allow_handoff_at_end {
                                 pending_order = Some(PendingStrategyOrder::Reverse {
@@ -1728,19 +1927,37 @@ pub(crate) fn simulate_window_with_carry(
                             );
                             pos.observe_price(raw_px);
                             pos.observe_price(exec_price);
-                            close_position_into_trade(
-                                pos,
-                                i,
-                                out_bar_idx,
-                                use_absolute_indices,
-                                candle.timestamp,
-                                exec_price,
-                                BacktestExitReason::SignalReversal,
-                                config,
-                                &mut cash,
-                                &mut next_trade_id,
-                                &mut trades,
-                            );
+                            if unlocked_qty + 1.0e-9 >= pos.quantity {
+                                close_position_into_trade(
+                                    pos,
+                                    i,
+                                    out_bar_idx,
+                                    use_absolute_indices,
+                                    candle.timestamp,
+                                    exec_price,
+                                    BacktestExitReason::SignalReversal,
+                                    config,
+                                    &mut cash,
+                                    &mut next_trade_id,
+                                    &mut trades,
+                                );
+                            } else {
+                                partial_close_position_into_trade(
+                                    &mut pos,
+                                    unlocked_qty,
+                                    i,
+                                    out_bar_idx,
+                                    use_absolute_indices,
+                                    candle.timestamp,
+                                    exec_price,
+                                    BacktestExitReason::SignalReversal,
+                                    config,
+                                    &mut cash,
+                                    &mut next_trade_id,
+                                    &mut trades,
+                                );
+                                active_pos = Some(pos);
+                            }
                         }
                     }
                     let side_permitted = config.direction_mode.allows_side(new_side)
@@ -1792,22 +2009,48 @@ pub(crate) fn simulate_window_with_carry(
                         );
                     }
                 }
+                PendingStrategyOrder::ScaleIn { side, signal_bar } => {
+                    let side_permitted = config.direction_mode.allows_side(side)
+                        && (venue_allows_short || side == PositionSide::Long);
+                    if let Some(pos) = active_pos.as_mut()
+                        && pos.side == side
+                        && side_permitted
+                    {
+                        let sig_out = if use_absolute_indices {
+                            signal_bar
+                        } else {
+                            signal_bar.saturating_sub(start)
+                        };
+                        try_scale_in_position_at_open(
+                            pos,
+                            sig_out,
+                            i,
+                            candles,
+                            candle,
+                            vn_band,
+                            config,
+                            features,
+                            &mut cash,
+                            &mut unexecuted_signals,
+                        );
+                    }
+                }
             }
         }
 
-        // STEP B: Evaluate Margin Insolvency (`[CRITICAL-03]`) & Intrabar Protective `SL`, `TP`, `TrailingStop`.
+        // STEP B: Evaluate Margin Insolvency (`[CRITICAL-03]`) & Intrabar Protective `SL`, `TP1`, `TP`, `TrailingStop`.
         if let Some(mut pos) = active_pos.take() {
-            let bars_held_so_far = i.saturating_sub(pos.entry_bar_abs);
             let is_after_entry_bar = i > pos.entry_bar_abs;
             let exit_side = pos.side.exit_order_side();
-            let req_hold = effective_pit_min_hold_bars(
+            let unlocked_qty = pos.unlocked_quantity_at(
+                i,
                 min_hold_bars,
-                pos.entry_timestamp,
                 timeframe,
                 features.venue,
                 config.enforce_vn_microstructure,
             );
-            let voluntary_unlocked = bars_held_so_far >= req_hold;
+            let voluntary_unlocked = unlocked_qty > 1.0e-9;
+            let all_unlocked = unlocked_qty + 1.0e-9 >= pos.quantity;
             let suppress_long_exit_locked_floor =
                 pos.side == PositionSide::Long && locked_floor_no_bid;
             let eff_stop = if voluntary_unlocked && !suppress_long_exit_locked_floor {
@@ -1817,6 +2060,11 @@ pub(crate) fn simulate_window_with_carry(
             };
             let tp_opt = if voluntary_unlocked {
                 pos.take_profit
+            } else {
+                None
+            };
+            let tp1_opt = if voluntary_unlocked && !pos.scaled_out_tp1 {
+                pos.tp1_price
             } else {
                 None
             };
@@ -1849,6 +2097,11 @@ pub(crate) fn simulate_window_with_carry(
                     (None, Some(liq_px)) => Some((liq_px, BacktestExitReason::MarginLiquidation)),
                     (None, None) => None,
                 };
+
+            let bar_end_ts = candles
+                .get(i + 1)
+                .map(|c| c.timestamp)
+                .unwrap_or_else(|| candle.timestamp.saturating_add(timeframe.seconds().max(60)));
 
             // 1. Gap-Open check at `Open[i]` (only when `i > pos.entry_bar_abs` and `Open[i]` is valid finite > 0).
             let gap_trigger: Option<(f64, BacktestExitReason)> = if is_after_entry_bar && valid_open
@@ -1907,52 +2160,161 @@ pub(crate) fn simulate_window_with_carry(
                 );
                 pos.observe_price(candle.open);
                 pos.observe_price(exec_price);
-                close_position_into_trade(
-                    pos,
-                    i,
-                    out_bar_idx,
-                    use_absolute_indices,
-                    candle.timestamp,
-                    exec_price,
-                    reason,
-                    config,
-                    &mut cash,
-                    &mut next_trade_id,
-                    &mut trades,
-                );
+                if all_unlocked || reason == BacktestExitReason::MarginLiquidation {
+                    close_position_into_trade(
+                        pos,
+                        i,
+                        out_bar_idx,
+                        use_absolute_indices,
+                        candle.timestamp,
+                        exec_price,
+                        reason,
+                        config,
+                        &mut cash,
+                        &mut next_trade_id,
+                        &mut trades,
+                    );
+                } else {
+                    partial_close_position_into_trade(
+                        &mut pos,
+                        unlocked_qty,
+                        i,
+                        out_bar_idx,
+                        use_absolute_indices,
+                        candle.timestamp,
+                        exec_price,
+                        reason,
+                        config,
+                        &mut cash,
+                        &mut next_trade_id,
+                        &mut trades,
+                    );
+                    pos.update_excursions(candle);
+                    ratchet_trailing_stop_post_close(&mut pos, candle, i, config, features);
+                    active_pos = Some(pos);
+                }
             } else {
                 if is_after_entry_bar {
                     pos.observe_price(candle.open);
                 }
-                // 2. Pessimistic intrabar `[Low, High]` check (`SL`/`Liq` takes strict precedence on dual-touch bars!).
-                let intrabar_trigger = match pos.side {
+                // 2. Intrabar `[Low, High]` check with optional Bar Magnifier chronological tie-breaker!
+                let sl_hit_opt = match pos.side {
                     PositionSide::Long => {
                         let moved_adversely = is_after_entry_bar || candle.low < candle.open;
-                        if moved_adversely
-                            && let Some((sl_px, reason)) =
-                                effective_adverse_stop.filter(|(px, _)| candle.low <= *px)
-                        {
-                            Some((sl_px, reason, true))
+                        if moved_adversely {
+                            effective_adverse_stop.filter(|(px, _)| candle.low <= *px)
                         } else {
-                            tp_opt
-                                .filter(|px| candle.high >= *px)
-                                .map(|tp_px| (tp_px, BacktestExitReason::TakeProfit, false))
+                            None
                         }
                     }
                     PositionSide::Short => {
                         let moved_adversely = is_after_entry_bar || candle.high > candle.open;
-                        if moved_adversely
-                            && let Some((sl_px, reason)) =
-                                effective_adverse_stop.filter(|(px, _)| candle.high >= *px)
-                        {
-                            Some((sl_px, reason, true))
+                        if moved_adversely {
+                            effective_adverse_stop.filter(|(px, _)| candle.high >= *px)
                         } else {
-                            tp_opt
-                                .filter(|px| candle.low <= *px)
-                                .map(|tp_px| (tp_px, BacktestExitReason::TakeProfit, false))
+                            None
                         }
                     }
                 };
+                let tp_hit_opt = match pos.side {
+                    PositionSide::Long => tp_opt.filter(|px| candle.high >= *px),
+                    PositionSide::Short => tp_opt.filter(|px| candle.low <= *px),
+                };
+                let tp1_hit_opt = match pos.side {
+                    PositionSide::Long => tp1_opt.filter(|px| candle.high >= *px),
+                    PositionSide::Short => tp1_opt.filter(|px| candle.low <= *px),
+                };
+
+                let intrabar_trigger = match (sl_hit_opt, tp_hit_opt) {
+                    (Some((sl_px, reason)), Some(tp_px)) => {
+                        let tp_first = config.risk.use_bar_magnifier
+                            && intrabar_candles.is_some_and(|subs| {
+                                resolve_dual_touch_with_magnifier(
+                                    pos.side,
+                                    sl_px,
+                                    tp_px,
+                                    candle.timestamp,
+                                    bar_end_ts,
+                                    subs,
+                                ) == Some(true)
+                            });
+                        if tp_first {
+                            Some((tp_px, BacktestExitReason::TakeProfit, false))
+                        } else {
+                            Some((sl_px, reason, true))
+                        }
+                    }
+                    (Some((sl_px, reason)), None) => Some((sl_px, reason, true)),
+                    (None, Some(tp_px)) => Some((tp_px, BacktestExitReason::TakeProfit, false)),
+                    (None, None) => None,
+                };
+
+                // Optional partial TP1 scale-out if TP1 triggered before full exit (or solo on bar)!
+                let mut current_unlocked = unlocked_qty;
+                if let (Some(tp1_px), Some(scale_pct)) = (tp1_hit_opt, config.risk.scale_out_pct) {
+                    let allow_tp1 = match intrabar_trigger {
+                        None => true,
+                        Some((_, BacktestExitReason::TakeProfit, false)) => false,
+                        Some((sl_px, _, true)) => {
+                            config.risk.use_bar_magnifier
+                                && intrabar_candles.is_some_and(|subs| {
+                                    resolve_dual_touch_with_magnifier(
+                                        pos.side,
+                                        sl_px,
+                                        tp1_px,
+                                        candle.timestamp,
+                                        bar_end_ts,
+                                        subs,
+                                    ) == Some(true)
+                                })
+                        }
+                        Some(_) => false,
+                    };
+                    if allow_tp1 && current_unlocked > 1.0e-9 {
+                        let raw_part_qty = current_unlocked * (scale_pct * 0.01);
+                        let part_qty = if config.lot_step >= 1.0 {
+                            (raw_part_qty / config.lot_step).floor() * config.lot_step
+                        } else {
+                            raw_part_qty
+                        };
+                        if part_qty >= MIN_ORDER_QUANTITY && part_qty + 1.0e-9 < pos.quantity {
+                            let raw_tp1_px = if is_after_entry_bar && valid_open {
+                                match pos.side {
+                                    PositionSide::Long if candle.open >= tp1_px => candle.open,
+                                    PositionSide::Short if candle.open <= tp1_px => candle.open,
+                                    _ => tp1_px,
+                                }
+                            } else {
+                                tp1_px
+                            };
+                            let exec_tp1 = quantize_vn_exec_price(
+                                apply_slippage(raw_tp1_px, exit_side, config.slippage_bps),
+                                exit_side,
+                                features.venue,
+                                vn_band,
+                                config.enforce_vn_microstructure,
+                            );
+                            pos.observe_price(raw_tp1_px);
+                            pos.observe_price(exec_tp1);
+                            partial_close_position_into_trade(
+                                &mut pos,
+                                part_qty,
+                                i,
+                                out_bar_idx,
+                                use_absolute_indices,
+                                candle.timestamp,
+                                exec_tp1,
+                                BacktestExitReason::TakeProfit,
+                                config,
+                                &mut cash,
+                                &mut next_trade_id,
+                                &mut trades,
+                            );
+                            pos.scaled_out_tp1 = true;
+                            current_unlocked = (current_unlocked - part_qty).max(0.0);
+                        }
+                    }
+                }
 
                 if let Some((raw_px, reason, is_adverse_exit)) = intrabar_trigger {
                     if !is_adverse_exit {
@@ -1976,19 +2338,45 @@ pub(crate) fn simulate_window_with_carry(
                         } else {
                             reason
                         };
-                    close_position_into_trade(
-                        pos,
-                        i,
-                        out_bar_idx,
-                        use_absolute_indices,
-                        candle.timestamp,
-                        exec_price,
-                        final_reason,
-                        config,
-                        &mut cash,
-                        &mut next_trade_id,
-                        &mut trades,
-                    );
+                    if current_unlocked + 1.0e-9 >= pos.quantity
+                        || final_reason == BacktestExitReason::MarginLiquidation
+                    {
+                        close_position_into_trade(
+                            pos,
+                            i,
+                            out_bar_idx,
+                            use_absolute_indices,
+                            candle.timestamp,
+                            exec_price,
+                            final_reason,
+                            config,
+                            &mut cash,
+                            &mut next_trade_id,
+                            &mut trades,
+                        );
+                    } else if current_unlocked > 1.0e-9 {
+                        partial_close_position_into_trade(
+                            &mut pos,
+                            current_unlocked,
+                            i,
+                            out_bar_idx,
+                            use_absolute_indices,
+                            candle.timestamp,
+                            exec_price,
+                            final_reason,
+                            config,
+                            &mut cash,
+                            &mut next_trade_id,
+                            &mut trades,
+                        );
+                        pos.update_excursions(candle);
+                        ratchet_trailing_stop_post_close(&mut pos, candle, i, config, features);
+                        active_pos = Some(pos);
+                    } else {
+                        pos.update_excursions(candle);
+                        ratchet_trailing_stop_post_close(&mut pos, candle, i, config, features);
+                        active_pos = Some(pos);
+                    }
                 } else {
                     pos.update_excursions(candle);
                     ratchet_trailing_stop_post_close(&mut pos, candle, i, config, features);
@@ -2052,7 +2440,8 @@ pub(crate) fn simulate_window_with_carry(
             if is_last_bar_in_window && !allow_handoff_at_end {
                 // `TEST-BT-001`: Final causal bar cannot fill on non-existent bar `end`!
                 let (side, is_exit) = match order {
-                    PendingStrategyOrder::Entry { side, .. } => (side, false),
+                    PendingStrategyOrder::Entry { side, .. }
+                    | PendingStrategyOrder::ScaleIn { side, .. } => (side, false),
                     PendingStrategyOrder::Exit { .. } => (
                         active_pos.as_ref().map_or(PositionSide::Long, |p| p.side),
                         true,
@@ -2396,19 +2785,22 @@ fn try_open_position_at_open(
     let max_notional_cap =
         ((*cash * config.max_leverage) / (1.0 + entry_fee_rate)).clamp(0.0, MAX_ORDER_NOTIONAL);
 
+    let tranche_divisor = config.risk.max_pyramiding.max(1) as f64;
     let desired_notional = match config.sizing {
         PositionSizingMode::PercentEquity(pct) => {
-            (*cash * (pct * 0.01) * config.max_leverage).min(max_notional_cap)
+            ((*cash * (pct * 0.01) * config.max_leverage) / tranche_divisor).min(max_notional_cap)
         }
         PositionSizingMode::RiskPercentPerTrade(risk_pct) => {
             if let Some(unit_dist) = unit_stop_dist {
-                let risk_budget = *cash * (risk_pct * 0.01);
+                let risk_budget = (*cash * (risk_pct * 0.01)) / tranche_divisor;
                 ((risk_budget / unit_dist) * exec_price).min(max_notional_cap)
             } else {
-                (*cash * 0.25 * config.max_leverage).min(max_notional_cap)
+                ((*cash * 0.25 * config.max_leverage) / tranche_divisor).min(max_notional_cap)
             }
         }
-        PositionSizingMode::FixedNotional(notional) => notional.min(max_notional_cap),
+        PositionSizingMode::FixedNotional(notional) => {
+            (notional / tranche_divisor).min(max_notional_cap)
+        }
     };
 
     let mut quantity = (desired_notional / exec_price).min(MAX_ORDER_QUANTITY);
@@ -2457,6 +2849,14 @@ fn try_open_position_at_open(
             PositionSide::Short => (exec_price - rr * dist).max(1.0e-8),
         });
     let take_profit = rr_tp.or(pct_tp);
+    let tp1_price = config
+        .risk
+        .scale_out_pct
+        .zip(config.risk.tp1_pct)
+        .map(|(_, pct)| match side {
+            PositionSide::Long => exec_price * (1.0 + pct * 0.01),
+            PositionSide::Short => (exec_price * (1.0 - pct * 0.01)).max(1.0e-8),
+        });
     let initial_risk_amount = unit_stop_dist.map(|d| d * quantity);
 
     *cash -= total_entry_fee;
@@ -2471,13 +2871,200 @@ fn try_open_position_at_open(
         entry_sell_tax,
         fixed_stop_loss,
         take_profit,
+        tp1_price,
+        scaled_out_tp1: false,
         trailing_stop: initial_trail,
         initial_risk_amount,
         highest_since_entry: exec_price,
         lowest_since_entry: exec_price,
         mae_pct: 0.0,
         mfe_pct: 0.0,
+        tranches: vec![PositionTranche {
+            qty: quantity,
+            entry_bar_abs: fill_bar,
+            entry_timestamp: candle.timestamp,
+        }],
     });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_scale_in_position_at_open(
+    pos: &mut ActivePositionState,
+    signal_bar_local: usize,
+    fill_bar_abs: usize,
+    candles: &[Candle],
+    candle: &Candle,
+    vn_band: Option<DailyPriceBand>,
+    config: &BacktestConfig,
+    features: &PrecomputedFeatures,
+    cash: &mut f64,
+    unexecuted_signals: &mut Vec<UnexecutedSignal>,
+) {
+    if pos.tranches.len() >= config.risk.max_pyramiding.max(1) {
+        return;
+    }
+    let side = pos.side;
+    if !candle.open.is_finite() || candle.open <= 0.0 || candle.open > MAX_ORDER_PRICE {
+        return;
+    }
+    if config.enforce_vn_microstructure
+        && features.venue.is_vn_cash_equity()
+        && side == PositionSide::Long
+        && vn_band.is_some_and(|b| is_session_locked_ceiling_no_ask(candle, b))
+    {
+        unexecuted_signals.push(UnexecutedSignal {
+            signal_bar_index: signal_bar_local,
+            timestamp: candle.timestamp,
+            side,
+            is_exit: false,
+            reason: UnfilledReason::LimitLocked,
+        });
+        return;
+    }
+    if config.min_entry_avg_vol_20 > 0.0 && fill_bar_abs >= 20 {
+        let avg_vol_20: f64 = candles[fill_bar_abs - 20..fill_bar_abs]
+            .iter()
+            .map(|b| if b.volume.is_finite() { b.volume.max(0.0) } else { 0.0 })
+            .sum::<f64>()
+            / 20.0;
+        if avg_vol_20 < config.min_entry_avg_vol_20 {
+            return;
+        }
+    }
+    if *cash <= 0.0 || !cash.is_finite() {
+        return;
+    }
+
+    let order_side = match side {
+        PositionSide::Long => OrderSide::Buy,
+        PositionSide::Short => OrderSide::Sell,
+    };
+    let exec_price = quantize_vn_exec_price(
+        apply_slippage(candle.open, order_side, config.slippage_bps),
+        order_side,
+        features.venue,
+        vn_band,
+        config.enforce_vn_microstructure,
+    );
+    if !exec_price.is_finite() || exec_price <= 0.0 || exec_price > MAX_ORDER_PRICE {
+        return;
+    }
+
+    let entry_fee_rate = (config.commission_bps
+        + if order_side == OrderSide::Sell {
+            config.tax_sell_bps
+        } else {
+            0.0
+        })
+        * 1.0e-4;
+    let total_equity = (*cash + pos.unrealized_pnl(exec_price)).max(0.0);
+    let remaining_notional_cap = ((total_equity * config.max_leverage) / (1.0 + entry_fee_rate)
+        - pos.quantity * exec_price)
+        .clamp(0.0, MAX_ORDER_NOTIONAL);
+    if remaining_notional_cap <= 0.0 {
+        return;
+    }
+
+    let tranche_divisor = config.risk.max_pyramiding.max(1) as f64;
+    let unit_stop_dist = pos
+        .effective_stop()
+        .map(|(sl, _)| (exec_price - sl).abs())
+        .filter(|d| d.is_finite() && *d > 1.0e-9);
+    let desired_notional = match config.sizing {
+        PositionSizingMode::PercentEquity(pct) => {
+            ((total_equity * (pct * 0.01) * config.max_leverage) / tranche_divisor)
+                .min(remaining_notional_cap)
+        }
+        PositionSizingMode::RiskPercentPerTrade(risk_pct) => {
+            if let Some(unit_dist) = unit_stop_dist {
+                let risk_budget = (total_equity * (risk_pct * 0.01)) / tranche_divisor;
+                ((risk_budget / unit_dist) * exec_price).min(remaining_notional_cap)
+            } else {
+                ((total_equity * 0.25 * config.max_leverage) / tranche_divisor)
+                    .min(remaining_notional_cap)
+            }
+        }
+        PositionSizingMode::FixedNotional(notional) => {
+            (notional / tranche_divisor).min(remaining_notional_cap)
+        }
+    };
+
+    let mut add_qty = (desired_notional / exec_price).min(MAX_ORDER_QUANTITY - pos.quantity);
+    if config.lot_step >= 1.0 {
+        add_qty = (add_qty / config.lot_step).floor() * config.lot_step;
+    }
+    if !add_qty.is_finite() || add_qty < MIN_ORDER_QUANTITY || add_qty * exec_price <= 0.0 {
+        return;
+    }
+
+    let add_comm = compute_commission(exec_price, add_qty, config.commission_bps);
+    let add_sell_tax = if order_side == OrderSide::Sell {
+        compute_commission(exec_price, add_qty, config.tax_sell_bps)
+    } else {
+        0.0
+    };
+    let total_add_fee = add_comm + add_sell_tax;
+    if total_add_fee >= *cash {
+        return;
+    }
+
+    let new_qty = pos.quantity + add_qty;
+    let new_avg = (pos.entry_price * pos.quantity + exec_price * add_qty) / new_qty;
+    *cash -= total_add_fee;
+    pos.quantity = new_qty;
+    pos.entry_price = new_avg;
+    pos.entry_fee += add_comm;
+    pos.entry_sell_tax += add_sell_tax;
+    if let (Some(risk_amt), Some(unit_dist)) = (pos.initial_risk_amount.as_mut(), unit_stop_dist) {
+        *risk_amt += unit_dist * add_qty;
+    }
+    if !pos.scaled_out_tp1
+        && let Some((_, pct)) = config.risk.scale_out_pct.zip(config.risk.tp1_pct)
+    {
+        pos.tp1_price = Some(match side {
+            PositionSide::Long => new_avg * (1.0 + pct * 0.01),
+            PositionSide::Short => (new_avg * (1.0 - pct * 0.01)).max(1.0e-8),
+        });
+    }
+    pos.tranches.push(PositionTranche {
+        qty: add_qty,
+        entry_bar_abs: fill_bar_abs,
+        entry_timestamp: candle.timestamp,
+    });
+}
+
+/// Uses intrabar `sub_bars` inside `[bar_start_ts, bar_end_ts)` chronologically to determine
+/// whether `tp_px` was touched strictly BEFORE `sl_px` on a dual-touch bar.
+fn resolve_dual_touch_with_magnifier(
+    side: PositionSide,
+    sl_px: f64,
+    tp_px: f64,
+    bar_start_ts: i64,
+    bar_end_ts: i64,
+    sub_bars: &[Candle],
+) -> Option<bool> {
+    let start = sub_bars.partition_point(|c| c.timestamp < bar_start_ts);
+    let mut saw_any = false;
+    for sb in &sub_bars[start..] {
+        if sb.timestamp >= bar_end_ts {
+            break;
+        }
+        saw_any = true;
+        let (sl_hit, tp_hit) = match side {
+            PositionSide::Long => (sb.low <= sl_px, sb.high >= tp_px),
+            PositionSide::Short => (sb.high >= sl_px, sb.low <= tp_px),
+        };
+        if sl_hit && tp_hit {
+            return Some(false);
+        }
+        if sl_hit {
+            return Some(false);
+        }
+        if tp_hit {
+            return Some(true);
+        }
+    }
+    if saw_any { Some(false) } else { None }
 }
 
 #[inline]
@@ -2527,6 +3114,46 @@ fn ratchet_trailing_stop_post_close(
         if profit_span >= min_profit_wave {
             let cand_2_3 = (pos.entry_price + (2.0 / 3.0) * profit_span).max(1.0e-8);
             pos.trailing_stop = Some(pos.trailing_stop.map_or(cand_2_3, |prev| prev.max(cand_2_3)));
+        }
+    }
+
+    // Wave 5 Post-Close MA Trailing Stop (strictly causal: computed after `Close[bar_idx]`, protects `bar_idx + 1`).
+    if config.risk.trailing_ma_period.is_some()
+        && let Some(ma_val) = features
+            .trailing_ma
+            .get(bar_idx)
+            .copied()
+            .flatten()
+            .filter(|v| v.is_finite() && *v > 0.0)
+    {
+        match pos.side {
+            PositionSide::Long if candle.close > ma_val => {
+                pos.trailing_stop = Some(pos.trailing_stop.map_or(ma_val, |prev| prev.max(ma_val)));
+            }
+            PositionSide::Short if candle.close < ma_val => {
+                pos.trailing_stop = Some(pos.trailing_stop.map_or(ma_val, |prev| prev.min(ma_val)));
+            }
+            _ => {}
+        }
+    }
+
+    // Wave 5 Post-Close Ichimoku Kijun-sen Trailing Stop (strictly causal post-close ratchet).
+    if config.risk.trailing_kijun_period.is_some()
+        && let Some(kj_val) = features
+            .trailing_kijun
+            .get(bar_idx)
+            .copied()
+            .flatten()
+            .filter(|v| v.is_finite() && *v > 0.0)
+    {
+        match pos.side {
+            PositionSide::Long if candle.close > kj_val => {
+                pos.trailing_stop = Some(pos.trailing_stop.map_or(kj_val, |prev| prev.max(kj_val)));
+            }
+            PositionSide::Short if candle.close < kj_val => {
+                pos.trailing_stop = Some(pos.trailing_stop.map_or(kj_val, |prev| prev.min(kj_val)));
+            }
+            _ => {}
         }
     }
 }
@@ -2681,6 +3308,99 @@ fn close_position_into_trade(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn partial_close_position_into_trade(
+    pos: &mut ActivePositionState,
+    close_qty: f64,
+    exit_bar_abs: usize,
+    exit_bar_out: usize,
+    use_absolute_indices: bool,
+    exit_timestamp: i64,
+    exec_price: f64,
+    exit_reason: BacktestExitReason,
+    config: &BacktestConfig,
+    cash: &mut f64,
+    next_trade_id: &mut u64,
+    trades: &mut Vec<BacktestTrade>,
+) {
+    let close_qty = close_qty.clamp(0.0, pos.quantity);
+    if close_qty <= 1.0e-9 || pos.quantity <= 1.0e-9 {
+        return;
+    }
+    let exec_price = if exec_price.is_finite() && exec_price > 0.0 {
+        exec_price
+    } else {
+        pos.entry_price
+    };
+    let frac = (close_qty / pos.quantity).clamp(0.0, 1.0);
+    let part_entry_fee = pos.entry_fee * frac;
+    let part_entry_tax = pos.entry_sell_tax * frac;
+    let part_risk_amt = pos.initial_risk_amount.map(|r| r * frac);
+
+    let exit_side = pos.side.exit_order_side();
+    let exit_fee = compute_commission(exec_price, close_qty, config.commission_bps);
+    let close_sell_tax = if exit_side == OrderSide::Sell {
+        compute_commission(exec_price, close_qty, config.tax_sell_bps)
+    } else {
+        0.0
+    };
+    let total_sell_tax = part_entry_tax + close_sell_tax;
+    let gross_pnl = pos.side.sign() * (exec_price - pos.entry_price) * close_qty;
+    let net_pnl = gross_pnl - part_entry_fee - exit_fee - total_sell_tax;
+    *cash = (*cash + gross_pnl - exit_fee - close_sell_tax).max(0.0);
+
+    let notional_in = pos.entry_price * close_qty;
+    let return_pct = if notional_in > 0.0 {
+        (net_pnl / notional_in) * 100.0
+    } else {
+        0.0
+    };
+    let r_multiple = part_risk_amt
+        .filter(|r| r.is_finite() && *r > 1.0e-9)
+        .map(|r| net_pnl / r);
+
+    let trade_id = *next_trade_id;
+    *next_trade_id = next_trade_id.saturating_add(1);
+    let entry_bar_out = if use_absolute_indices {
+        pos.entry_bar_abs
+    } else {
+        pos.entry_bar_index
+    };
+    let entry_bar_abs_before = pos.entry_bar_abs;
+    let entry_ts_before = pos.entry_timestamp;
+
+    pos.quantity = (pos.quantity - close_qty).max(0.0);
+    pos.entry_fee = (pos.entry_fee - part_entry_fee).max(0.0);
+    pos.entry_sell_tax = (pos.entry_sell_tax - part_entry_tax).max(0.0);
+    if let (Some(rem_risk), Some(used_risk)) = (pos.initial_risk_amount.as_mut(), part_risk_amt) {
+        *rem_risk = (*rem_risk - used_risk).max(0.0);
+    }
+    pos.deduct_tranches_fifo(close_qty);
+
+    trades.push(BacktestTrade {
+        trade_id,
+        side: pos.side,
+        quantity: close_qty,
+        entry_bar_index: entry_bar_out,
+        exit_bar_index: exit_bar_out,
+        entry_timestamp: entry_ts_before,
+        exit_timestamp,
+        entry_price: pos.entry_price,
+        exit_price: exec_price,
+        bars_held: exit_bar_abs.saturating_sub(entry_bar_abs_before),
+        gross_pnl,
+        entry_fee: part_entry_fee,
+        exit_fee,
+        exit_tax: total_sell_tax,
+        net_pnl,
+        return_pct,
+        r_multiple,
+        mae_pct: pos.mae_pct.min(return_pct).min(0.0),
+        mfe_pct: pos.mfe_pct.max(return_pct).max(0.0),
+        exit_reason,
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
 fn evaluate_close_of_bar_order(
     i: usize,
     min_hold_bars: usize,
@@ -2697,65 +3417,82 @@ fn evaluate_close_of_bar_order(
     if let Some(pos) = active_pos {
         // Notice: at `Close[i]`, if the exit fills at `Open[i + 1]`, `exit_bar - entry_bar == (i + 1) - entry_bar_abs`.
         let bars_held_at_next_open = (i + 1).saturating_sub(pos.entry_bar_abs);
-        let req_hold = effective_pit_min_hold_bars(
+        let unlocked_at_next = pos.unlocked_quantity_at(
+            i + 1,
             min_hold_bars,
-            pos.entry_timestamp,
             timeframe,
             features.venue,
             config.enforce_vn_microstructure,
         );
-        if bars_held_at_next_open < req_hold {
-            return None;
-        }
+        let has_unlocked_exit = unlocked_at_next > 1.0e-9;
 
-        // 1. Check opposite reversal signal first when `LongShort` is active AND venue permits the new side (`BUG-008`).
-        let opposite_entry = match pos.side {
-            PositionSide::Long => bear_entry,
-            PositionSide::Short => bull_entry,
-        };
-        let opposite_side = match pos.side {
-            PositionSide::Long => PositionSide::Short,
-            PositionSide::Short => PositionSide::Long,
-        };
-        let opposite_side_permitted = venue_allows_short || opposite_side == PositionSide::Long;
-        if opposite_entry
-            && config.direction_mode == StrategyDirectionMode::LongShort
-            && opposite_side_permitted
-        {
-            return Some(PendingStrategyOrder::Reverse {
-                new_side: opposite_side,
-                signal_bar: i,
-            });
-        }
-
-        // 2. Check strategy exit rule (`CustomSignalRules` keeps all 4 directional legs strictly isolated
-        //    so `short_entry` / `long_entry` never leaks into `LongOnly` / `ShortOnly` exits).
-        let rule_exit = if config.preset == StrategyPresetKind::CustomSignalRules {
-            match pos.side {
-                PositionSide::Long => long_exit,
-                PositionSide::Short => short_exit,
+        if has_unlocked_exit {
+            // 1. Check opposite reversal signal first when `LongShort` is active AND venue permits the new side (`BUG-008`).
+            let opposite_entry = match pos.side {
+                PositionSide::Long => bear_entry,
+                PositionSide::Short => bull_entry,
+            };
+            let opposite_side = match pos.side {
+                PositionSide::Long => PositionSide::Short,
+                PositionSide::Short => PositionSide::Long,
+            };
+            let opposite_side_permitted = venue_allows_short || opposite_side == PositionSide::Long;
+            if opposite_entry
+                && config.direction_mode == StrategyDirectionMode::LongShort
+                && opposite_side_permitted
+            {
+                return Some(PendingStrategyOrder::Reverse {
+                    new_side: opposite_side,
+                    signal_bar: i,
+                });
             }
-        } else {
-            match pos.side {
-                PositionSide::Long => long_exit || bear_entry,
-                PositionSide::Short => short_exit || bull_entry,
+
+            // 2. Check strategy exit rule (`CustomSignalRules` keeps all 4 directional legs strictly isolated
+            //    so `short_entry` / `long_entry` never leaks into `LongOnly` / `ShortOnly` exits).
+            let rule_exit = if config.preset == StrategyPresetKind::CustomSignalRules {
+                match pos.side {
+                    PositionSide::Long => long_exit,
+                    PositionSide::Short => short_exit,
+                }
+            } else {
+                match pos.side {
+                    PositionSide::Long => long_exit || bear_entry,
+                    PositionSide::Short => short_exit || bull_entry,
+                }
+            };
+            if rule_exit {
+                return Some(PendingStrategyOrder::Exit {
+                    signal_bar: i,
+                    reason: BacktestExitReason::SignalExit,
+                });
             }
-        };
-        if rule_exit {
-            return Some(PendingStrategyOrder::Exit {
-                signal_bar: i,
-                reason: BacktestExitReason::SignalExit,
-            });
+
+            // 3. Check `max_holding_bars` timeout (`bars_held_at_next_open >= max_h`).
+            if let Some(max_h) = config.risk.max_holding_bars
+                && bars_held_at_next_open >= max_h
+            {
+                return Some(PendingStrategyOrder::Exit {
+                    signal_bar: i,
+                    reason: BacktestExitReason::MaxBarsExit,
+                });
+            }
         }
 
-        // 3. Check `max_holding_bars` timeout (`bars_held_at_next_open >= max_h`).
-        if let Some(max_h) = config.risk.max_holding_bars
-            && bars_held_at_next_open >= max_h
+        // 4. Wave 5 Pyramiding (`max_pyramiding > 1`): allow same-direction scale-in tranche at `Open[i + 1]`.
+        if config.risk.max_pyramiding > 1
+            && pos.tranches.len() < config.risk.max_pyramiding
+            && i >= pos.tranches.last().map_or(pos.entry_bar_abs, |t| t.entry_bar_abs)
         {
-            return Some(PendingStrategyOrder::Exit {
-                signal_bar: i,
-                reason: BacktestExitReason::MaxBarsExit,
-            });
+            let same_side_entry = match pos.side {
+                PositionSide::Long => bull_entry,
+                PositionSide::Short => bear_entry,
+            };
+            if same_side_entry {
+                return Some(PendingStrategyOrder::ScaleIn {
+                    side: pos.side,
+                    signal_bar: i,
+                });
+            }
         }
 
         None

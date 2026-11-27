@@ -440,6 +440,106 @@ export const webFallbackApi = {
     lsSet('sumi_ws_watchlists', list)
   },
 
+  renameWatchlist(id: string, name: string) {
+    const list = lsGet<WatchlistGroup[]>('sumi_ws_watchlists', DEFAULT_WATCHLISTS).map((w) =>
+      w.id === id ? { ...w, name: name.trim() } : w,
+    )
+    lsSet('sumi_ws_watchlists', list)
+  },
+
+  reorderWatchlistSymbols(watchlistId: string, tickers: string[]) {
+    const list = lsGet<WatchlistGroup[]>('sumi_ws_watchlists', DEFAULT_WATCHLISTS).map((w) =>
+      w.id === watchlistId ? { ...w, tickers } : w,
+    )
+    lsSet('sumi_ws_watchlists', list)
+  },
+
+  listSymbolFlags() {
+    return lsGet<Array<{ ticker: string; color: string; updatedAtMs: number }>>('sumi_symbol_flags', [])
+  },
+
+  setSymbolFlag(ticker: string, color: string) {
+    const rec = { ticker: ticker.trim().toUpperCase(), color: color.trim().toLowerCase(), updatedAtMs: Date.now() }
+    const next = this.listSymbolFlags().filter((f) => f.ticker !== rec.ticker)
+    next.push(rec)
+    lsSet('sumi_symbol_flags', next)
+    return rec
+  },
+
+  clearSymbolFlag(ticker: string) {
+    const up = ticker.trim().toUpperCase()
+    lsSet(
+      'sumi_symbol_flags',
+      this.listSymbolFlags().filter((f) => f.ticker !== up),
+    )
+  },
+
+  replayStartRandomBlindDrill(interval: IntervalKey = '1D'): ReplaySnapshotResponse {
+    const pick = CURATED_SYMBOLS[Math.floor(Math.random() * 10)] ?? CURATED_SYMBOLS[0]
+    const raw = generateSeries(pick.ticker, interval, 240)
+    const cutIdx = 150
+    const cutClose = raw[cutIdx]?.close || 100
+    const scale = 100 / cutClose
+    const scaled = raw.map((b) => ({
+      ...b,
+      open: Number((b.open * scale).toFixed(2)),
+      high: Number((b.high * scale).toFixed(2)),
+      low: Number((b.low * scale).toFixed(2)),
+      close: Number((b.close * scale).toFixed(2)),
+    }))
+    const alias = `MÃ ẨN #${1000 + Math.floor(Math.random() * 9000)}`
+    webReplay = { ticker: alias, interval, bars: scaled, cursor: cutIdx, speed: 1 }
+    return {
+      active: true,
+      status: 'Paused',
+      ticker: alias,
+      interval,
+      trackedIntervals: [interval],
+      cursorIndex: cutIdx,
+      totalBars: scaled.length,
+      cutoffTimestampMs: scaled[cutIdx]?.timestamp ?? null,
+      speedMultiplier: 1,
+      visibleBars: scaled.slice(0, cutIdx + 1),
+      steppedBar: null,
+      cutoffBar: scaled[cutIdx] ?? null,
+      prevCutoffClose: scaled[cutIdx - 1]?.close ?? null,
+      vnBand: null,
+      broker: null,
+      blindDrill: {
+        enabled: true,
+        aliasCode: alias,
+        priceScale: scale,
+        revealed: false,
+        realTicker: '',
+        cutDate: '',
+      },
+    }
+  },
+
+  replayRevealBlindDrill(): ReplaySnapshotResponse {
+    return {
+      active: Boolean(webReplay),
+      status: 'Paused',
+      ticker: 'HOSE:FPT',
+      interval: webReplay?.interval ?? '1D',
+      cursorIndex: webReplay?.cursor ?? 0,
+      totalBars: webReplay?.bars.length ?? 0,
+      cutoffTimestampMs: webReplay?.bars[webReplay.cursor]?.timestamp ?? null,
+      speedMultiplier: webReplay?.speed ?? 1,
+      visibleBars: webReplay ? webReplay.bars.slice(0, webReplay.cursor + 1) : [],
+      steppedBar: null,
+      broker: null,
+      blindDrill: {
+        enabled: true,
+        aliasCode: webReplay?.ticker ?? 'MÃ ẨN',
+        priceScale: 1,
+        revealed: true,
+        realTicker: 'HOSE:FPT',
+        cutDate: new Date().toISOString().slice(0, 10),
+      },
+    }
+  },
+
   createAlert(ticker: string, condition: string, targetPrice: number, message: string): PriceAlertRecord {
     const rec: PriceAlertRecord = {
       id: `alert_${Date.now()}`,

@@ -215,6 +215,13 @@ export interface WorkspaceState {
   fundamentalsVersion: number
   savedScreens: SavedScreenRecord[]
 
+  // Wave 5: Workspace UX Pro (Maximize Pane, Command Palette, Symbol Flags, Indicator Undo/Redo)
+  maximizedSlotId: string | null
+  commandPaletteOpen: boolean
+  symbolFlags: Record<string, string>
+  indicatorUndoStack: Array<{ slotId: string; indicators: SavedIndicatorSpec[] }>
+  indicatorRedoStack: Array<{ slotId: string; indicators: SavedIndicatorSpec[] }>
+
   // Modals
   symbolSearchOpen: boolean
   symbolSearchInitialQuery: string
@@ -275,8 +282,12 @@ export interface WorkspaceState {
   addIndicatorToActivePane: (spec: Omit<SavedIndicatorSpec, 'id'>, slotId?: string) => void
   updateIndicatorInActivePane: (id: string, patch: Partial<SavedIndicatorSpec>, slotId?: string) => void
   removeIndicatorFromActivePane: (id: string, slotId?: string) => void
+  undoIndicatorChange: () => boolean
+  redoIndicatorChange: () => boolean
   openIndicatorSettings: (slotId: string, indicatorId: string) => void
   closeIndicatorSettings: () => void
+  toggleMaximizeSlot: (slotId?: string) => void
+  setCommandPaletteOpen: (open: boolean) => void
 
   setActiveDrawingTool: (tool: string | null) => void
   setMagnetMode: (mode: MagnetMode) => void
@@ -343,6 +354,10 @@ export interface WorkspaceState {
   removeSymbolFromWatchlist: (ticker: string) => Promise<void>
   createNewWatchlist: (name: string) => Promise<void>
   createWatchlistWithSymbols: (name: string, tickers: string[]) => Promise<void>
+  renameWatchlist: (id: string, name: string) => Promise<void>
+  deleteWatchlistById: (id: string) => Promise<void>
+  reorderWatchlistSymbols: (watchlistId: string, tickers: string[]) => Promise<void>
+  setSymbolFlag: (ticker: string, color: string | null) => Promise<void>
 
   // Wave 4 actions: Compare (+), Fundamentals & Saved Screener Presets
   addCompareTicker: (ticker: string, slotId?: string) => void
@@ -399,6 +414,8 @@ export interface WorkspaceState {
   setReplaySelectingCut: (selecting: boolean) => void
   setReplayBlindMode: (blind: boolean) => void
   startReplay: (cutTimestampMs?: number | null) => Promise<void>
+  startRandomBlindDrill: () => Promise<void>
+  revealBlindDrill: () => Promise<void>
   stepReplay: (delta: number) => Promise<void>
   jumpReplay: (targetTimestampMs: number) => Promise<void>
   setReplaySpeed: (mult: number) => Promise<void>
@@ -513,6 +530,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   fundamentalsByTicker: {},
   fundamentalsVersion: 0,
   savedScreens: [],
+
+  maximizedSlotId: null,
+  commandPaletteOpen: false,
+  symbolFlags: {},
+  indicatorUndoStack: [],
+  indicatorRedoStack: [],
 
   symbolSearchOpen: false,
   symbolSearchInitialQuery: '',
@@ -648,6 +671,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         layouts: boot.layouts,
         indicatorTemplates: boot.indicatorTemplates ?? [],
         replaySessions: boot.replaySessions ?? [],
+        symbolFlags: Object.fromEntries(
+          (boot.symbolFlags ?? []).map((f) => [f.ticker.trim().toUpperCase(), f.color]),
+        ),
         showVnSessionBreaks:
           typeof saved.showVnSessionBreaks === 'boolean' ? saved.showVnSessionBreaks : true,
         dataStatus: status,
@@ -845,7 +871,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       styles,
       id: `ind_${spec.name}_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
     }
+    const prevIndicators = targetPane ? targetPane.indicators.map((i) => ({ ...i })) : []
     set((s) => ({
+      indicatorUndoStack: [...s.indicatorUndoStack.slice(-24), { slotId: slot, indicators: prevIndicators }],
+      indicatorRedoStack: [],
       panes: s.panes.map((p) =>
         p.slotId === slot ? { ...p, indicators: [...p.indicators, newItem] } : p,
       ),
@@ -859,7 +888,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   updateIndicatorInActivePane: (id, patch, slotId) => {
     const slot = slotId ?? get().activeSlotId
+    const targetPane = get().panes.find((p) => p.slotId === slot)
+    const prevIndicators = targetPane ? targetPane.indicators.map((i) => ({ ...i })) : []
     set((s) => ({
+      indicatorUndoStack: [...s.indicatorUndoStack.slice(-24), { slotId: slot, indicators: prevIndicators }],
+      indicatorRedoStack: [],
       panes: s.panes.map((p) =>
         p.slotId === slot
           ? {
@@ -878,7 +911,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   removeIndicatorFromActivePane: (id, slotId) => {
     const slot = slotId ?? get().activeSlotId
+    const targetPane = get().panes.find((p) => p.slotId === slot)
+    const prevIndicators = targetPane ? targetPane.indicators.map((i) => ({ ...i })) : []
     set((s) => ({
+      indicatorUndoStack: [...s.indicatorUndoStack.slice(-24), { slotId: slot, indicators: prevIndicators }],
+      indicatorRedoStack: [],
       panes: s.panes.map((p) =>
         p.slotId === slot ? { ...p, indicators: p.indicators.filter((ind) => ind.id !== id) } : p,
       ),
@@ -894,9 +931,62 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     schedulePersistSettings(get())
   },
 
+  undoIndicatorChange: () => {
+    const stack = get().indicatorUndoStack
+    if (stack.length === 0) return false
+    const entry = stack[stack.length - 1]
+    const curPane = get().panes.find((p) => p.slotId === entry.slotId)
+    const curSnapshot = curPane ? curPane.indicators.map((i) => ({ ...i })) : []
+    set((s) => ({
+      indicatorUndoStack: s.indicatorUndoStack.slice(0, -1),
+      indicatorRedoStack: [...s.indicatorRedoStack.slice(-24), { slotId: entry.slotId, indicators: curSnapshot }],
+      panes: s.panes.map((p) =>
+        p.slotId === entry.slotId ? { ...p, indicators: entry.indicators } : p,
+      ),
+    }))
+    void api.savePaneIndicators(entry.slotId, entry.indicators)
+    schedulePersistSettings(get())
+    get().pushToast('info', 'Đã hoàn tác thay đổi chỉ báo (Undo)')
+    return true
+  },
+
+  redoIndicatorChange: () => {
+    const stack = get().indicatorRedoStack
+    if (stack.length === 0) return false
+    const entry = stack[stack.length - 1]
+    const curPane = get().panes.find((p) => p.slotId === entry.slotId)
+    const curSnapshot = curPane ? curPane.indicators.map((i) => ({ ...i })) : []
+    set((s) => ({
+      indicatorRedoStack: s.indicatorRedoStack.slice(0, -1),
+      indicatorUndoStack: [...s.indicatorUndoStack.slice(-24), { slotId: entry.slotId, indicators: curSnapshot }],
+      panes: s.panes.map((p) =>
+        p.slotId === entry.slotId ? { ...p, indicators: entry.indicators } : p,
+      ),
+    }))
+    void api.savePaneIndicators(entry.slotId, entry.indicators)
+    schedulePersistSettings(get())
+    get().pushToast('info', 'Đã làm lại thay đổi chỉ báo (Redo)')
+    return true
+  },
+
   openIndicatorSettings: (slotId, indicatorId) =>
     set({ editingIndicator: { slotId, indicatorId } }),
   closeIndicatorSettings: () => set({ editingIndicator: null }),
+
+  toggleMaximizeSlot: (slotId) => {
+    const state = get()
+    if (state.gridLayout === '1') {
+      if (state.maximizedSlotId !== null) set({ maximizedSlotId: null })
+      return
+    }
+    const target = slotId ?? state.activeSlotId
+    set((s) => ({
+      maximizedSlotId: s.maximizedSlotId === target ? null : target,
+      activeSlotId: target,
+    }))
+  },
+
+  setCommandPaletteOpen: (commandPaletteOpen) => set({ commandPaletteOpen }),
 
   setActiveDrawingTool: (activeDrawingTool) => set({ activeDrawingTool }),
   setMagnetMode: (magnetMode) => set({ magnetMode }),
@@ -1275,6 +1365,54 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }))
   },
 
+  renameWatchlist: async (id, name) => {
+    const trimmed = name.trim()
+    if (!trimmed) return
+    await api.renameWatchlist(id, trimmed)
+    set((s) => ({
+      watchlists: s.watchlists.map((w) => (w.id === id ? { ...w, name: trimmed } : w)),
+    }))
+    get().pushToast('success', `Đã đổi tên danh mục → "${trimmed}"`)
+  },
+
+  deleteWatchlistById: async (id) => {
+    const lists = get().watchlists
+    if (lists.length <= 1) {
+      get().pushToast('warning', 'Cần giữ lại tối thiểu 1 danh mục theo dõi')
+      return
+    }
+    await api.deleteWatchlist(id)
+    const remaining = lists.filter((w) => w.id !== id)
+    set((s) => ({
+      watchlists: remaining,
+      activeWatchlistId: s.activeWatchlistId === id ? (remaining[0]?.id ?? '') : s.activeWatchlistId,
+    }))
+    get().pushToast('info', 'Đã xóa danh mục theo dõi')
+  },
+
+  reorderWatchlistSymbols: async (watchlistId, tickers) => {
+    set((s) => ({
+      watchlists: s.watchlists.map((w) => (w.id === watchlistId ? { ...w, tickers } : w)),
+    }))
+    await api.reorderWatchlistSymbols(watchlistId, tickers)
+  },
+
+  setSymbolFlag: async (ticker, color) => {
+    const up = ticker.trim().toUpperCase()
+    if (!up) return
+    if (!color) {
+      await api.clearSymbolFlag(up)
+      set((s) => {
+        const next = { ...s.symbolFlags }
+        delete next[up]
+        return { symbolFlags: next }
+      })
+    } else {
+      const rec = await api.setSymbolFlag(up, color)
+      set((s) => ({ symbolFlags: { ...s.symbolFlags, [rec.ticker]: rec.color } }))
+    }
+  },
+
   createNewAlert: async (ticker, condition, targetPrice, message, opts) => {
     const rec = await api.createAlert(ticker, condition, targetPrice, message, opts)
     set((s) => ({ alerts: [rec, ...s.alerts] }))
@@ -1364,12 +1502,16 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   applyIndicatorTemplate: (tpl) => {
     const slot = get().activeSlotId
+    const curPane = get().panes.find((p) => p.slotId === slot)
+    const prevIndicators = curPane ? curPane.indicators.map((i) => ({ ...i })) : []
     const freshIndicators = tpl.indicators.map((ind, idx) => ({
       ...ind,
       id: `${ind.name.toLowerCase()}_${Date.now()}_${idx}`,
       paneId: ind.isMain ? 'candle_pane' : `pane_${ind.name.toLowerCase()}_${Date.now()}_${idx}`,
     }))
     set((s) => ({
+      indicatorUndoStack: [...s.indicatorUndoStack.slice(-24), { slotId: slot, indicators: prevIndicators }],
+      indicatorRedoStack: [],
       panes: s.panes.map((p) => (p.slotId === slot ? { ...p, indicators: freshIndicators } : p)),
     }))
     void api.savePaneIndicators(slot, freshIndicators)
@@ -1556,6 +1698,60 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         'info',
         `Bar Replay nhân quả kích hoạt (${tfList} · nến ${snap.cursorIndex + 1}/${snap.totalBars})`,
       )
+    } catch (err) {
+      get().pushToast('error', String(err))
+    }
+  },
+
+  startRandomBlindDrill: async () => {
+    try {
+      const snap = await api.replayStartRandomBlindDrill('1D')
+      const slot = get().activeSlotId
+      set((s) => ({
+        panes: s.panes.map((p) =>
+          p.slotId === slot
+            ? { ...p, ticker: snap.ticker, interval: '1D', showVnBands: false }
+            : p,
+        ),
+        replay: snap,
+        replayBlindMode: true,
+        replaySelectingCut: false,
+        replayPlaying: false,
+        replaySteppedBar: null,
+        replayStepEvent: null,
+        replayResetNonce: s.replayResetNonce + 1,
+        broker: snap.broker ?? s.broker,
+      }))
+      get().pushToast(
+        'success',
+        `🎲 Bắt đầu Luyện Mù Ngẫu Nhiên (${snap.ticker} · Giá chuẩn hóa về 100.00 · Trục X chỉ hiện Phiên #N)`,
+      )
+    } catch (err) {
+      get().pushToast('error', `Không thể khởi động Blind Drill: ${String(err)}`)
+    }
+  },
+
+  revealBlindDrill: async () => {
+    try {
+      const snap = await api.replayRevealBlindDrill()
+      const bd = snap.blindDrill
+      const slot = get().activeSlotId
+      set((s) => ({
+        replay: snap,
+        replayPlaying: false,
+        replayBlindMode: false,
+        debriefModalOpen: true,
+        panes: bd?.realTicker
+          ? s.panes.map((p) => (p.slotId === slot ? { ...p, ticker: bd.realTicker } : p))
+          : s.panes,
+        replayResetNonce: s.replayResetNonce + 1,
+      }))
+      if (bd?.realTicker) {
+        get().pushToast(
+          'info',
+          `👁 Đã lật mở mã thật: ${bd.realTicker} (Mốc cắt lịch sử: ${bd.cutDate})`,
+        )
+      }
     } catch (err) {
       get().pushToast('error', String(err))
     }

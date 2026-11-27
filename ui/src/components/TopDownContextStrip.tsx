@@ -8,9 +8,15 @@ export const TopDownContextStrip: React.FC = () => {
   const yumekoContext = useWorkspaceStore((s) => s.yumekoContext)
   const yumekoLoading = useWorkspaceStore((s) => s.yumekoLoading)
   const exportingKt01 = useWorkspaceStore((s) => s.exportingKt01)
+  const replay = useWorkspaceStore((s) => s.replay)
   const setYumekoAsOf = useWorkspaceStore((s) => s.setYumekoAsOf)
   const setRightTab = useWorkspaceStore((s) => s.setRightTab)
   const exportActiveKt01Verdict = useWorkspaceStore((s) => s.exportActiveKt01Verdict)
+
+  // Suppress upstream Top-Down spoilers while an unrevealed True Blind Replay Drill is active!
+  if (replay?.active && replay.blindDrill?.enabled && !replay.blindDrill.revealed) {
+    return null
+  }
 
   const bb = yumekoContext?.hp01Blackbox ?? null
   const isReal = yumekoContext?.flowProvenance === 'qmv_real' && Boolean(bb?.isProviderProprietary)

@@ -28,9 +28,9 @@ pub use engine::{
     BacktestRunOptions, BacktestRunResult, MultiSymbolBattleReport, OpenBacktestPosition,
     ParameterSweepReport, PresetBattleRow, SweepVariantRow, SymbolBattleRow,
     is_bucket_incomplete_at_close, is_bucket_incomplete_at_close_for_symbol,
-    run_all_presets_battle, run_backtest, run_backtest_with_options, run_multi_symbol_battle,
-    run_multi_symbol_battle_with_close_cutoff, run_multi_symbol_battle_with_universe,
-    run_parameter_sweep, run_pit_episodes_backtest,
+    run_all_presets_battle, run_backtest, run_backtest_with_magnifier, run_backtest_with_options,
+    run_multi_symbol_battle, run_multi_symbol_battle_with_close_cutoff,
+    run_multi_symbol_battle_with_universe, run_parameter_sweep, run_pit_episodes_backtest,
 };
 pub use metrics::{
     BacktestEquityPoint, BacktestExitReason, BacktestTearsheet, BacktestTrade,

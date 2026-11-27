@@ -10,7 +10,7 @@ use sumi_core::scanner::qmv_universe::{
 
 use crate::error::{DesktopError, DesktopResult};
 
-const WORKSPACE_SCHEMA_VERSION: i32 = 6;
+const WORKSPACE_SCHEMA_VERSION: i32 = 7;
 const QMV_WORKSTATION_MIGRATION_KEY: &str = "qmv_workstation_v1_migrated";
 
 fn qmv_prefixed_ticker(symbol: &str) -> String {
@@ -68,6 +68,14 @@ pub struct SavedScreenRecord {
     pub id: String,
     pub name: String,
     pub filter_json: Value,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SymbolFlagRecord {
+    pub ticker: String,
+    pub color: String,
     pub updated_at_ms: i64,
 }
 
@@ -373,6 +381,12 @@ impl WorkspaceStore {
                 id            TEXT PRIMARY KEY,
                 name          TEXT NOT NULL,
                 filter_json   TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS symbol_flags (
+                ticker        TEXT PRIMARY KEY,
+                color         TEXT NOT NULL,
                 updated_at_ms INTEGER NOT NULL
             );
             "#,
@@ -894,7 +908,11 @@ impl WorkspaceStore {
             .conn
             .lock()
             .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
-        let normalized = ticker.trim().to_ascii_uppercase();
+        let normalized = if ticker.trim().starts_with("###") {
+            ticker.trim().to_owned()
+        } else {
+            ticker.trim().to_ascii_uppercase()
+        };
         let next_order: i32 = conn.query_row(
             "SELECT COALESCE(MAX(sort_order) + 1, 0) FROM watchlist_items WHERE watchlist_id = ?1",
             params![watchlist_id],
@@ -916,6 +934,144 @@ impl WorkspaceStore {
         conn.execute(
             "DELETE FROM watchlist_items WHERE watchlist_id = ?1 AND ticker = ?2",
             params![watchlist_id, normalized],
+        )?;
+        Ok(())
+    }
+
+    pub fn rename_watchlist(&self, id: &str, name: &str) -> DesktopResult<()> {
+        let clean = name.trim();
+        if clean.is_empty() {
+            return Err(DesktopError::Validation(
+                "Tên danh mục theo dõi không được để trống".to_owned(),
+            ));
+        }
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        conn.execute(
+            "UPDATE watchlists SET name = ?2, updated_at_ms = ?3 WHERE id = ?1",
+            params![id, clean, now_ms],
+        )?;
+        Ok(())
+    }
+
+    pub fn reorder_watchlist_symbols(
+        &self,
+        watchlist_id: &str,
+        tickers: &[String],
+    ) -> DesktopResult<()> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM watchlist_items WHERE watchlist_id = ?1",
+            params![watchlist_id],
+        )?;
+        for (idx, raw) in tickers.iter().enumerate() {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let normalized = if trimmed.starts_with("###") {
+                trimmed.to_owned()
+            } else {
+                trimmed.to_ascii_uppercase()
+            };
+            tx.execute(
+                "INSERT OR IGNORE INTO watchlist_items (watchlist_id, ticker, sort_order) VALUES (?1, ?2, ?3)",
+                params![watchlist_id, normalized, idx as i32],
+            )?;
+        }
+        tx.execute(
+            "UPDATE watchlists SET updated_at_ms = ?2 WHERE id = ?1",
+            params![watchlist_id, now_ms],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    // ─── Symbol Color Flags (Wave 5, v7) ─────────────────────────────────────
+
+    pub fn list_symbol_flags(&self) -> DesktopResult<Vec<SymbolFlagRecord>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let mut stmt = conn.prepare(
+            "SELECT ticker, color, updated_at_ms FROM symbol_flags ORDER BY ticker ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(SymbolFlagRecord {
+                    ticker: r.get(0)?,
+                    color: r.get(1)?,
+                    updated_at_ms: r.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn set_symbol_flag(&self, ticker: &str, color: &str) -> DesktopResult<SymbolFlagRecord> {
+        let norm_ticker = ticker.trim().to_ascii_uppercase();
+        let norm_color = color.trim().to_ascii_lowercase();
+        if norm_ticker.is_empty() || norm_color.is_empty() {
+            return Err(DesktopError::Validation(
+                "Mã chứng khoán và màu cờ đánh dấu không được để trống".to_owned(),
+            ));
+        }
+        let rec = SymbolFlagRecord {
+            ticker: norm_ticker,
+            color: norm_color,
+            updated_at_ms: chrono::Utc::now().timestamp_millis(),
+        };
+        self.set_symbol_flag_with_ts(&rec)?;
+        Ok(rec)
+    }
+
+    pub fn set_symbol_flag_with_ts(&self, rec: &SymbolFlagRecord) -> DesktopResult<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        conn.execute(
+            r#"
+            INSERT INTO symbol_flags (ticker, color, updated_at_ms)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(ticker) DO UPDATE SET
+                color = excluded.color,
+                updated_at_ms = excluded.updated_at_ms
+            WHERE excluded.updated_at_ms >= symbol_flags.updated_at_ms
+            "#,
+            params![&rec.ticker, &rec.color, rec.updated_at_ms],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_symbol_flag(&self, ticker: &str) -> DesktopResult<()> {
+        let norm_ticker = ticker.trim().to_ascii_uppercase();
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        conn.execute(
+            "DELETE FROM symbol_flags WHERE ticker = ?1",
+            params![&norm_ticker],
+        )?;
+        conn.execute(
+            r#"
+            INSERT INTO sync_tombstones (entity_kind, entity_key, deleted_at_ms)
+            VALUES ('symbol_flag', ?1, ?2)
+            ON CONFLICT(entity_kind, entity_key) DO UPDATE SET
+                deleted_at_ms = MAX(deleted_at_ms, excluded.deleted_at_ms)
+            "#,
+            params![&norm_ticker, now_ms],
         )?;
         Ok(())
     }
@@ -2370,6 +2526,41 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|t| t.entity_kind == "saved_screen" && t.entity_key == "scr_1")
+        );
+
+        // Wave 5 Watchlist Pro (v7): rename, reorder (including ###SECTION headers), symbol flags + tombstone
+        store.rename_watchlist("wl_qmv30", "QMV30 Core Pro").unwrap();
+        let renamed = store.list_watchlists().unwrap();
+        assert_eq!(renamed[0].name, "QMV30 Core Pro");
+
+        store
+            .reorder_watchlist_symbols(
+                "wl_qmv30",
+                &[
+                    "###SECTION:NGÂN HÀNG".to_owned(),
+                    "HOSE:VCB".to_owned(),
+                    "HOSE:FPT".to_owned(),
+                ],
+            )
+            .unwrap();
+        let reordered = store.list_watchlists().unwrap();
+        assert_eq!(
+            reordered[0].tickers,
+            vec!["###SECTION:NGÂN HÀNG", "HOSE:VCB", "HOSE:FPT"]
+        );
+
+        let flag = store.set_symbol_flag("hose:fpt", "green").unwrap();
+        assert_eq!(flag.ticker, "HOSE:FPT");
+        assert_eq!(flag.color, "green");
+        assert_eq!(store.list_symbol_flags().unwrap().len(), 1);
+        store.clear_symbol_flag("HOSE:FPT").unwrap();
+        assert!(store.list_symbol_flags().unwrap().is_empty());
+        assert!(
+            store
+                .list_tombstones()
+                .unwrap()
+                .iter()
+                .any(|t| t.entity_kind == "symbol_flag" && t.entity_key == "HOSE:FPT")
         );
     }
 }

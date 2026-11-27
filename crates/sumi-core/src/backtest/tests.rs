@@ -3720,3 +3720,201 @@ fn qmv_vn_microstructure_enforces_locked_ceiling_locked_floor_and_pit_t3_t2() {
     );
     assert_eq!(first_trade.exit_price % 50.0, 0.0);
 }
+
+#[test]
+fn wave5_pyramiding_scale_out_trailing_ma_kijun_and_bar_magnifier() {
+    let base_ts = 1_700_000_000_i64; // Post-2022 T+2 regime
+
+    // 1. Bar Magnifier: dual-touch bar (High=115 >= TP 110, Low=93 <= SL 95).
+    //    Intrabar 1H sub-bars hit TP FIRST (hour 1 High=114), then drop to SL (hour 3 Low=93).
+    //    Without magnifier -> StopLoss (pessimistic). With magnifier -> TakeProfit!
+    let dual_candles = vec![
+        make_candle(base_ts, 99.0, 101.0, 98.0, 100.0),
+        make_candle(base_ts + 86_400, 100.0, 101.0, 98.0, 100.0),
+        make_candle(base_ts + 2 * 86_400, 100.0, 104.0, 99.0, 103.0), // Donchian(2) breakout!
+        make_candle(base_ts + 3 * 86_400, 100.0, 115.0, 93.0, 96.0),  // Fill Open=100; dual-touch SL & TP!
+        make_candle(base_ts + 4 * 86_400, 96.0, 98.0, 95.0, 97.0),
+    ];
+    let day3_ts = base_ts + 3 * 86_400;
+    let intrabar_tp_first = vec![
+        make_candle(day3_ts + 3_600, 100.0, 114.0, 99.0, 112.0), // Hits TP=110 first!
+        make_candle(day3_ts + 2 * 3_600, 112.0, 113.0, 92.0, 96.0), // Hits SL=95 later!
+    ];
+    let intrabar_sl_first = vec![
+        make_candle(day3_ts + 3_600, 100.0, 102.0, 93.0, 94.0), // Hits SL=95 first!
+        make_candle(day3_ts + 2 * 3_600, 94.0, 115.0, 94.0, 112.0), // Hits TP=110 later!
+    ];
+    let mut mag_cfg = BacktestConfig {
+        preset: StrategyPresetKind::DonchianAtrBreakout,
+        params: StrategyParams {
+            donchian_entry_period: 2,
+            donchian_exit_period: 2,
+            ..StrategyParams::default()
+        },
+        sizing: PositionSizingMode::FixedNotional(10_000.0),
+        risk: StopTakeConfig {
+            stop_loss_pct: Some(5.0),
+            take_profit_pct: Some(10.0),
+            use_bar_magnifier: true,
+            ..StopTakeConfig::default()
+        },
+        initial_cash: 100_000.0,
+        commission_bps: 0.0,
+        tax_sell_bps: 0.0,
+        slippage_bps: 0.0,
+        lot_step: 0.0,
+        in_sample_split_pct: None,
+        ..BacktestConfig::default()
+    };
+
+    let res_tp_first = run_backtest_with_magnifier(
+        "TEST",
+        Timeframe::D1,
+        &dual_candles,
+        &mag_cfg,
+        BacktestRunOptions::default(),
+        Some(&intrabar_tp_first),
+    );
+    assert_eq!(res_tp_first.trades.len(), 1);
+    assert_eq!(
+        res_tp_first.trades[0].exit_reason,
+        BacktestExitReason::TakeProfit,
+        "Bar Magnifier must resolve TP-before-SL chronologically"
+    );
+
+    let res_sl_first = run_backtest_with_magnifier(
+        "TEST",
+        Timeframe::D1,
+        &dual_candles,
+        &mag_cfg,
+        BacktestRunOptions::default(),
+        Some(&intrabar_sl_first),
+    );
+    assert_eq!(res_sl_first.trades.len(), 1);
+    assert_eq!(
+        res_sl_first.trades[0].exit_reason,
+        BacktestExitReason::StopLoss,
+        "Bar Magnifier must resolve SL-before-TP chronologically"
+    );
+
+    // 2. Partial TP1 Scale-Out + Exact Cash Conservation
+    let scale_candles = vec![
+        make_candle(base_ts, 99.0, 101.0, 98.0, 100.0),
+        make_candle(base_ts + 86_400, 100.0, 101.0, 98.0, 100.0),
+        make_candle(base_ts + 2 * 86_400, 100.0, 104.0, 99.0, 103.0), // Breakout -> fill Open[3]=100
+        make_candle(base_ts + 3 * 86_400, 100.0, 104.0, 99.0, 103.0), // Hold
+        make_candle(base_ts + 4 * 86_400, 103.0, 111.0, 102.0, 109.0), // Hits TP1 (+10% = 110) -> 50% scale-out!
+        make_candle(base_ts + 5 * 86_400, 109.0, 126.0, 108.0, 125.0), // Hits full TP (+25% = 125) -> remaining 50%!
+    ];
+    mag_cfg.risk.use_bar_magnifier = false;
+    mag_cfg.risk.take_profit_pct = Some(25.0);
+    mag_cfg.risk.tp1_pct = Some(10.0);
+    mag_cfg.risk.scale_out_pct = Some(50.0);
+    mag_cfg.commission_bps = 15.0;
+    let res_scale = run_backtest("TEST", Timeframe::D1, &scale_candles, &mag_cfg, None);
+    assert_eq!(res_scale.trades.len(), 2, "must emit partial TP1 trade + final TP trade");
+    assert!((res_scale.trades[0].quantity - 50.0).abs() < 1e-6);
+    assert!((res_scale.trades[1].quantity - 50.0).abs() < 1e-6);
+    let sum_pnl: f64 = res_scale.trades.iter().map(|t| t.net_pnl).sum();
+    let final_cash = res_scale.equity_curve.last().unwrap().cash;
+    assert!(
+        ((mag_cfg.initial_cash + sum_pnl) - final_cash).abs() < 1e-6,
+        "Partial scale-out must preserve exact cash conservation"
+    );
+
+    // 3. Pyramiding (max_pyramiding = 3) + FIFO T+2 tranche lockup
+    let pyr_candles = vec![
+        make_candle(base_ts, 99.0, 100.0, 98.0, 99.5),
+        make_candle(base_ts + 86_400, 99.5, 100.0, 98.5, 99.5),
+        make_candle(base_ts + 2 * 86_400, 100.0, 103.0, 99.5, 102.0), // Signal 1 -> Tranche 1 at Open[3]
+        make_candle(base_ts + 3 * 86_400, 102.0, 105.0, 101.0, 104.0), // Signal 2 (still breakout!) -> Tranche 2 at Open[4]
+        make_candle(base_ts + 4 * 86_400, 104.0, 106.0, 103.0, 105.0), // Tranche 2 filled at bar 4!
+        make_candle(base_ts + 5 * 86_400, 105.0, 105.5, 97.0, 98.0), // Signal exit at bar 5 (bar 6 >= T+2 for T1 & T2)
+        make_candle(base_ts + 6 * 86_400, 98.0, 99.0, 97.0, 98.5),   // Exit fills at Open[6]
+    ];
+    let pyr_cfg = BacktestConfig {
+        preset: StrategyPresetKind::DonchianAtrBreakout,
+        params: StrategyParams {
+            donchian_entry_period: 2,
+            donchian_exit_period: 2,
+            ..StrategyParams::default()
+        },
+        sizing: PositionSizingMode::FixedNotional(30_000.0),
+        risk: StopTakeConfig {
+            stop_loss_pct: None,
+            take_profit_pct: None,
+            min_holding_bars: 2,
+            max_pyramiding: 3,
+            ..StopTakeConfig::default()
+        },
+        initial_cash: 100_000.0,
+        commission_bps: 10.0,
+        tax_sell_bps: 0.0,
+        slippage_bps: 0.0,
+        lot_step: 0.0,
+        in_sample_split_pct: None,
+        ..BacktestConfig::default()
+    };
+    let res_pyr = run_backtest("TEST", Timeframe::D1, &pyr_candles, &pyr_cfg, None);
+    // Bar 3 has 1 tranche (~98 shares), Bar 4 adds 2nd tranche (~194 shares total)!
+    assert!(
+        res_pyr.equity_curve[4].position_qty > res_pyr.equity_curve[3].position_qty * 1.5,
+        "Pyramiding must add a 2nd tranche at Open[4]"
+    );
+    let pyr_sum: f64 = res_pyr.trades.iter().map(|t| t.net_pnl).sum();
+    let pyr_final = res_pyr.equity_curve.last().unwrap().cash;
+    assert!(
+        ((pyr_cfg.initial_cash + pyr_sum) - pyr_final).abs() < 1e-6,
+        "Pyramiding must preserve exact cash conservation"
+    );
+
+    // 4. Post-Close MA / Kijun Trailing Stop (zero lookahead!)
+    let mut trail_candles = Vec::new();
+    for idx in 0..25 {
+        let px = if idx < 10 {
+            100.0
+        } else if idx < 20 {
+            100.0 + (idx - 9) as f64 * 2.0 // Steady uptrend up to 120!
+        } else {
+            120.0 - (idx - 19) as f64 * 6.0 // Sharp drop breaking below MA5 / Kijun5!
+        };
+        trail_candles.push(make_candle(
+            base_ts + idx as i64 * 86_400,
+            px,
+            px + 1.0,
+            px - 1.0,
+            px,
+        ));
+    }
+    let trail_cfg = BacktestConfig {
+        preset: StrategyPresetKind::DonchianAtrBreakout,
+        params: StrategyParams {
+            donchian_entry_period: 3,
+            donchian_exit_period: 20, // Wide exit so trailing MA/Kijun fires first!
+            ..StrategyParams::default()
+        },
+        sizing: PositionSizingMode::FixedNotional(10_000.0),
+        risk: StopTakeConfig {
+            stop_loss_pct: None,
+            take_profit_pct: None,
+            trailing_ma_period: Some(5),
+            trailing_kijun_period: Some(5),
+            ..StopTakeConfig::default()
+        },
+        initial_cash: 100_000.0,
+        commission_bps: 0.0,
+        tax_sell_bps: 0.0,
+        slippage_bps: 0.0,
+        lot_step: 0.0,
+        in_sample_split_pct: None,
+        ..BacktestConfig::default()
+    };
+    let res_trail = run_backtest("TEST", Timeframe::D1, &trail_candles, &trail_cfg, None);
+    assert!(
+        res_trail
+            .trades
+            .iter()
+            .any(|t| t.exit_reason == BacktestExitReason::TrailingStop),
+        "Post-close MA/Kijun trailing stop must trigger TrailingStop exit when uptrend breaks"
+    );
+}

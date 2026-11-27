@@ -353,6 +353,12 @@ export interface SavedReplaySessionRecord {
   updatedAtMs: number
 }
 
+export interface SymbolFlagRecord {
+  ticker: string
+  color: string
+  updatedAtMs: number
+}
+
 export interface WorkspaceBootstrapResponse {
   settings: Record<string, unknown> | null
   layouts: SavedLayoutRecord[]
@@ -360,6 +366,7 @@ export interface WorkspaceBootstrapResponse {
   alerts: PriceAlertRecord[]
   indicatorTemplates?: IndicatorTemplateRecord[]
   replaySessions?: SavedReplaySessionRecord[]
+  symbolFlags?: SymbolFlagRecord[]
 }
 
 // ─── Paper Broker Types ────────────────────────────────────────────────────
@@ -548,6 +555,15 @@ export interface SubmitPaperOrderInput {
 
 // ─── Bar Replay Types ──────────────────────────────────────────────────────
 
+export interface BlindDrillMeta {
+  enabled: boolean
+  aliasCode: string
+  priceScale: number
+  revealed: boolean
+  realTicker: string
+  cutDate: string
+}
+
 export interface ReplaySnapshotResponse {
   active: boolean
   status: 'Inactive' | 'Paused' | 'Playing' | 'Completed'
@@ -566,6 +582,7 @@ export interface ReplaySnapshotResponse {
   vnBand?: VnBandLevels | null
   triggeredAlerts?: PriceAlertRecord[]
   broker: BrokerStateSnapshot | null
+  blindDrill?: BlindDrillMeta | null
 }
 
 // ─── Strategy Tester Types ─────────────────────────────────────────────────
@@ -577,6 +594,11 @@ export interface CustomClauseInput {
   boolExpected?: boolean
 }
 
+export interface RuleGroupInput {
+  combinator?: 'and' | 'or'
+  clauses: CustomClauseInput[]
+}
+
 export interface CustomRulesInput {
   name?: string
   entryCombinator?: 'and' | 'or'
@@ -584,6 +606,14 @@ export interface CustomRulesInput {
   exitCombinator?: 'and' | 'or'
   exitClauses?: CustomClauseInput[]
   minHealthScore?: number | null
+  longEntryInterOp?: 'and' | 'or'
+  longEntryGroups?: RuleGroupInput[]
+  longExitInterOp?: 'and' | 'or'
+  longExitGroups?: RuleGroupInput[]
+  shortEntryInterOp?: 'and' | 'or'
+  shortEntryGroups?: RuleGroupInput[]
+  shortExitInterOp?: 'and' | 'or'
+  shortExitGroups?: RuleGroupInput[]
 }
 
 export type StrategyPresetSlug =
@@ -651,6 +681,14 @@ export interface StrategyBacktestInput {
   qmvMinPillars?: number | null
   supportStopLookback?: number | null
   qmvWaveTrailing23?: boolean | null
+  // Wave 5 — Strategy Tester 2.0 Risk & Magnifier Controls
+  maxPyramiding?: number | null
+  scaleOutPct?: number | null
+  tp1Pct?: number | null
+  trailingStopAtrMult?: number | null
+  trailingMaPeriod?: number | null
+  trailingKijunPeriod?: number | null
+  useBarMagnifier?: boolean | null
 }
 
 export interface PortfolioConstituentAttribution {
@@ -751,6 +789,13 @@ export interface StrategyTradeDto {
   exitReason: string
 }
 
+export interface MonthlyReturnCellDto {
+  year: number
+  month: number
+  returnPct: number
+  tradesCount: number
+}
+
 export interface StrategyBacktestResponse {
   ticker: string
   interval: string
@@ -762,6 +807,8 @@ export interface StrategyBacktestResponse {
   robustness: string | null
   equityCurve: StrategyEquityPointDto[]
   trades: StrategyTradeDto[]
+  monthlyReturns?: MonthlyReturnCellDto[]
+  barMagnifierBars?: number
 }
 
 export interface WalkForwardFoldResult {

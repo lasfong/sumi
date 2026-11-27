@@ -41,15 +41,43 @@ const DRAWING_LABELS: Record<string, string> = {
   verticalStraightLine: 'Đường dọc',
   priceChannelLine: 'Kênh giá',
   parallelStraightLine: 'Kênh song song',
+  andrewsPitchfork: 'Chĩa ba Andrews Pitchfork',
   fibonacciLine: 'Fibonacci Thoái lui',
   fibonacciExtension: 'Fibonacci Mở rộng',
+  fibTimeZones: 'Vùng thời gian Fibonacci',
   rect: 'Vùng chữ nhật',
   circle: 'Hình tròn',
   triangle: 'Tam giác',
+  path: 'Đường dẫn đa đoạn (Path)',
+  highlighter: 'Bút dạ quang (Highlighter)',
+  anchoredVwap: 'Anchored VWAP Neo Nến',
+  fixedRangeVolumeProfile: 'Hồ sơ Khối lượng (FRVP)',
   longPosition: 'Kế hoạch Long R:R',
   shortPosition: 'Kế hoạch Short R:R',
   priceDateRange: 'Đo Giá & Thời gian',
   simpleAnnotation: 'Ghi chú văn bản',
+}
+
+const FLAG_COLORS: Array<{ key: string; hex: string; label: string }> = [
+  { key: 'red', hex: '#F23645', label: 'Đỏ (Cảnh giác / Cắt lỗ)' },
+  { key: 'orange', hex: '#FF9800', label: 'Cam (Theo dõi sát)' },
+  { key: 'green', hex: '#089981', label: 'Xanh lá (Đạt điểm mua KT01)' },
+  { key: 'blue', hex: '#2962FF', label: 'Xanh dương (Dẫn dắt ngành)' },
+  { key: 'purple', hex: '#AB47BC', label: 'Tím (BCTC / Đột biến)' },
+]
+
+const DRAWING_FOLDERS = [
+  'Mặc định',
+  'Hỗ trợ & Kháng cự',
+  'Xu hướng & Sóng',
+  'Kế hoạch Lệnh',
+  'Ghi chú',
+] as const
+
+function resolveDrawingFolder(extendData: unknown): string {
+  if (!extendData || typeof extendData !== 'object') return 'Mặc định'
+  const f = (extendData as Record<string, unknown>).folder
+  return typeof f === 'string' && f.trim() ? f : 'Mặc định'
 }
 
 function resolveDrawingTfPreset(extendData: unknown): string {
@@ -83,19 +111,37 @@ interface WatchlistRowProps {
   ticker: string
   quote: WatchlistQuoteSnapshot | undefined
   flash: { dir: 'up' | 'down'; nonce: number } | undefined
+  flagColor?: string
   isSelected: boolean
   isBlindMasked: boolean
   onSelect: () => void
+  onCycleFlag: () => void
   onRemove: () => void
+  onDragStart: () => void
+  onDragOver: (e: React.DragEvent<HTMLDivElement>) => void
+  onDrop: () => void
 }
 
 /**
- * Zero-DOM-Churn Watchlist Row (`BUG-030` fixed + `modern-web-guidance` `motion` compliant):
+ * Zero-DOM-Churn Watchlist Row (`BUG-030` fixed + `modern-web-guidance` `motion` compliant + Wave 5 Flag & Drag):
  * Keeps a stable `key={ticker}` so React NEVER unmounts/remounts rows on price ticks,
  * animating background highlights via Web Animations API only when `prefers-reduced-motion: no-preference`.
  */
 const WatchlistRow: React.FC<WatchlistRowProps> = React.memo(
-  ({ ticker, quote, flash, isSelected, isBlindMasked, onSelect, onRemove }) => {
+  ({
+    ticker,
+    quote,
+    flash,
+    flagColor,
+    isSelected,
+    isBlindMasked,
+    onSelect,
+    onCycleFlag,
+    onRemove,
+    onDragStart,
+    onDragOver,
+    onDrop,
+  }) => {
     const rowRef = useRef<HTMLDivElement | null>(null)
     const lastFlashNonceRef = useRef<number>(flash?.nonce ?? 0)
 
@@ -121,6 +167,7 @@ const WatchlistRow: React.FC<WatchlistRowProps> = React.memo(
     const shortSym = ticker.includes(':') ? ticker.split(':')[1] : ticker
     const ex = ticker.includes(':') ? ticker.split(':')[0] : ''
     const chgPct = quote?.changePercent ?? null
+    const flagHex = FLAG_COLORS.find((f) => f.key === flagColor)?.hex
 
     let priceColor = 'var(--tv-text-primary)'
     if (quote?.lastPrice != null && quote.vnBand) {
@@ -136,6 +183,10 @@ const WatchlistRow: React.FC<WatchlistRowProps> = React.memo(
     return (
       <div
         ref={rowRef}
+        draggable
+        onDragStart={onDragStart}
+        onDragOver={onDragOver}
+        onDrop={onDrop}
         className="group grid grid-cols-[1fr_76px_64px_16px] gap-x-2 items-center px-2 py-1.5 cursor-pointer border-b tabular-nums"
         style={{
           borderColor: 'color-mix(in srgb, var(--tv-border) 45%, transparent)',
@@ -145,6 +196,20 @@ const WatchlistRow: React.FC<WatchlistRowProps> = React.memo(
       >
         <div className="min-w-0 pr-1">
           <div className="flex items-center gap-1">
+            <button
+              type="button"
+              aria-label={`Đánh dấu màu cờ cho ${shortSym}`}
+              title="Nhấp để gắn / đổi màu cờ đánh dấu (đồng bộ đa máy)"
+              onClick={(e) => {
+                e.stopPropagation()
+                onCycleFlag()
+              }}
+              className="w-2.5 h-2.5 rounded-full shrink-0 border p-0 cursor-pointer"
+              style={{
+                backgroundColor: flagHex ?? 'transparent',
+                borderColor: flagHex ?? 'var(--tv-border)',
+              }}
+            />
             <span className="font-semibold text-[12px] truncate">{shortSym}</span>
             <span className="text-[9.5px]" style={{ color: 'var(--tv-text-secondary)' }}>
               {ex}
@@ -194,6 +259,12 @@ export const RightWidgetBar: React.FC = () => {
   const addSymbolToWatchlist = useWorkspaceStore((s) => s.addSymbolToWatchlist)
   const removeSymbolFromWatchlist = useWorkspaceStore((s) => s.removeSymbolFromWatchlist)
   const createNewWatchlist = useWorkspaceStore((s) => s.createNewWatchlist)
+  const renameWatchlist = useWorkspaceStore((s) => s.renameWatchlist)
+  const deleteWatchlistById = useWorkspaceStore((s) => s.deleteWatchlistById)
+  const reorderWatchlistSymbols = useWorkspaceStore((s) => s.reorderWatchlistSymbols)
+  const symbolFlags = useWorkspaceStore((s) => s.symbolFlags)
+  const setSymbolFlag = useWorkspaceStore((s) => s.setSymbolFlag)
+  const scrollActiveChartToTimestamp = useWorkspaceStore((s) => s.scrollActiveChartToTimestamp)
   const createNewAlert = useWorkspaceStore((s) => s.createNewAlert)
   const updateExistingAlert = useWorkspaceStore((s) => s.updateExistingAlert)
   const toggleAlert = useWorkspaceStore((s) => s.toggleAlert)
@@ -254,6 +325,15 @@ export const RightWidgetBar: React.FC = () => {
   const [addTickerInput, setAddTickerInput] = useState('')
   const [showNewListForm, setShowNewListForm] = useState(false)
   const [newListName, setNewListName] = useState('')
+  const [renamingList, setRenamingList] = useState(false)
+  const [renameDraft, setRenameDraft] = useState('')
+  const [flagFilter, setFlagFilter] = useState<string>('all')
+  const [wlSort, setWlSort] = useState<{ key: 'none' | 'symbol' | 'price' | 'pct'; dir: 'asc' | 'desc' }>({
+    key: 'none',
+    dir: 'desc',
+  })
+  const [dragTicker, setDragTicker] = useState<string | null>(null)
+  const [drawingFolderFilter, setDrawingFolderFilter] = useState<string>('all')
 
   // Object Tree live drawings list for active ticker (synced via SQLite + drawingSyncBus, v2.2)
   const [tickerDrawings, setTickerDrawings] = useState<SavedDrawingRecord[]>([])
@@ -543,14 +623,17 @@ export const RightWidgetBar: React.FC = () => {
 
       {rightTab === 'watchlist' ? (
         <div role="tabpanel" aria-labelledby="rw-tab-watchlist" className="flex flex-col flex-1 min-h-0">
-          {/* Watchlist Category Selector + Add Symbol */}
+          {/* Watchlist Category Selector + Rename/Delete + Flag Filter + Add Symbol/Section (Wave 5 Pro) */}
           <div className="p-2 space-y-1.5 shrink-0" style={{ borderBottom: '1px solid var(--tv-border)' }}>
             <div className="flex items-center gap-1">
               <select
                 aria-label="Chọn danh mục theo dõi"
                 value={activeWatchlist?.id ?? ''}
-                onChange={(e) => setActiveWatchlistId(e.target.value)}
-                className="flex-1 px-2 py-1 rounded text-[11.5px] font-medium outline-none cursor-pointer"
+                onChange={(e) => {
+                  setActiveWatchlistId(e.target.value)
+                  setRenamingList(false)
+                }}
+                className="flex-1 min-w-0 px-2 py-1 rounded text-[11.5px] font-medium outline-none cursor-pointer"
                 style={{
                   backgroundColor: 'var(--tv-bg-input)',
                   color: 'var(--tv-text-primary)',
@@ -559,19 +642,74 @@ export const RightWidgetBar: React.FC = () => {
               >
                 {watchlists.map((w) => (
                   <option key={w.id} value={w.id}>
-                    {w.name} ({w.tickers.length})
+                    {w.name} ({w.tickers.filter((t) => !t.startsWith('###')).length})
                   </option>
                 ))}
               </select>
               <button
                 type="button"
-                className="tv-icon-btn w-7 h-7"
-                onClick={() => setShowNewListForm((v) => !v)}
+                className="tv-icon-btn w-6 h-6 shrink-0"
+                onClick={() => {
+                  if (activeWatchlist) {
+                    setRenameDraft(activeWatchlist.name)
+                    setRenamingList((v) => !v)
+                    setShowNewListForm(false)
+                  }
+                }}
+                title="Đổi tên danh mục hiện tại"
+              >
+                <Edit3 className="w-3 h-3" />
+              </button>
+              <button
+                type="button"
+                className="tv-icon-btn w-6 h-6 shrink-0"
+                onClick={() => {
+                  setShowNewListForm((v) => !v)
+                  setRenamingList(false)
+                }}
                 title="Tạo danh mục mới"
               >
                 <Plus className="w-3.5 h-3.5" />
               </button>
+              {watchlists.length > 1 && activeWatchlist && (
+                <button
+                  type="button"
+                  className="tv-icon-btn w-6 h-6 shrink-0 hover:text-[#F23645]"
+                  onClick={() => void deleteWatchlistById(activeWatchlist.id)}
+                  title="Xóa danh mục hiện tại"
+                >
+                  <Trash2 className="w-3 h-3" />
+                </button>
+              )}
             </div>
+
+            {renamingList && activeWatchlist && (
+              <div className="flex gap-1">
+                <input
+                  type="text"
+                  value={renameDraft}
+                  onChange={(e) => setRenameDraft(e.target.value)}
+                  placeholder="Tên mới cho danh mục..."
+                  className="flex-1 px-2 py-1 rounded text-[11px] outline-none"
+                  style={{
+                    backgroundColor: 'var(--tv-bg-input)',
+                    border: '1px solid var(--tv-border)',
+                    color: 'var(--tv-text-primary)',
+                  }}
+                />
+                <button
+                  type="button"
+                  className="px-2 py-1 rounded text-[11px] font-semibold bg-[#089981] text-white border-0 cursor-pointer"
+                  onClick={() => {
+                    if (!renameDraft.trim()) return
+                    void renameWatchlist(activeWatchlist.id, renameDraft)
+                    setRenamingList(false)
+                  }}
+                >
+                  Lưu
+                </button>
+              </div>
+            )}
 
             {showNewListForm && (
               <div className="flex gap-1">
@@ -607,7 +745,7 @@ export const RightWidgetBar: React.FC = () => {
                 type="text"
                 value={addTickerInput}
                 onChange={(e) => setAddTickerInput(e.target.value)}
-                placeholder="Thêm mã (VD: FPT, BINANCE:BTCUSDT)"
+                placeholder="Thêm mã (FPT) hoặc ###PHÂN MỤC..."
                 className="flex-1 px-2 py-1 rounded text-[11px] outline-none"
                 style={{
                   backgroundColor: 'var(--tv-bg-input)',
@@ -623,40 +761,184 @@ export const RightWidgetBar: React.FC = () => {
                   borderColor: 'var(--tv-border)',
                   color: 'var(--tv-text-primary)',
                 }}
+                title="Thêm mã hoặc tiêu đề phân mục (###SECTION:Tên)"
               >
                 +
               </button>
             </form>
+
+            {/* Color Flag Filter Strip */}
+            <div className="flex items-center justify-between gap-1 text-[10px]">
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setFlagFilter('all')}
+                  className="px-1.5 py-0.5 rounded border-0 cursor-pointer text-[9.5px] font-semibold"
+                  style={{
+                    backgroundColor: flagFilter === 'all' ? 'var(--tv-accent-soft)' : 'transparent',
+                    color: flagFilter === 'all' ? 'var(--tv-accent)' : 'var(--tv-text-secondary)',
+                  }}
+                >
+                  Tất cả
+                </button>
+                {FLAG_COLORS.map((fl) => (
+                  <button
+                    key={fl.key}
+                    type="button"
+                    aria-label={`Lọc theo cờ ${fl.label}`}
+                    title={fl.label}
+                    onClick={() => setFlagFilter((prev) => (prev === fl.key ? 'all' : fl.key))}
+                    className="w-3.5 h-3.5 rounded-full p-0 cursor-pointer"
+                    style={{
+                      backgroundColor: fl.hex,
+                      border: flagFilter === fl.key ? '2px solid #FFFFFF' : '1px solid rgba(255,255,255,0.2)',
+                      opacity: flagFilter === 'all' || flagFilter === fl.key ? 1 : 0.35,
+                    }}
+                  />
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  const label = `###SECTION:NHÓM ${(activeWatchlist?.tickers.filter((t) => t.startsWith('###')).length ?? 0) + 1}`
+                  void addSymbolToWatchlist(label)
+                }}
+                className="border-0 bg-transparent p-0 text-[9.5px] cursor-pointer text-[var(--tv-text-secondary)] hover:text-[var(--tv-accent)]"
+                title="Thêm thanh phân mục (Section Header) để gom nhóm mã"
+              >
+                + Phân mục
+              </button>
+            </div>
           </div>
 
-          {/* Watchlist Table Header */}
+          {/* Sortable Watchlist Table Header */}
           <div
-            className="grid grid-cols-[1fr_76px_64px_16px] gap-x-2 items-center px-2 py-1 text-[10.5px] font-medium shrink-0"
+            className="grid grid-cols-[1fr_76px_64px_16px] gap-x-2 items-center px-2 py-1 text-[10.5px] font-medium shrink-0 select-none"
             style={{ color: 'var(--tv-text-secondary)', borderBottom: '1px solid var(--tv-border)' }}
           >
-            <span>Mã</span>
-            <span className="text-right whitespace-nowrap">Giá khớp</span>
-            <span className="text-right whitespace-nowrap">% Đổi</span>
+            {(
+              [
+                { key: 'symbol', label: 'Mã', align: 'text-left' },
+                { key: 'price', label: 'Giá khớp', align: 'text-right' },
+                { key: 'pct', label: '% Đổi', align: 'text-right' },
+              ] as const
+            ).map((col) => {
+              const activeSort = wlSort.key === col.key
+              return (
+                <button
+                  key={col.key}
+                  type="button"
+                  onClick={() =>
+                    setWlSort((prev) =>
+                      prev.key !== col.key
+                        ? { key: col.key, dir: col.key === 'symbol' ? 'asc' : 'desc' }
+                        : prev.dir === 'desc'
+                          ? { key: col.key, dir: 'asc' }
+                          : { key: 'none', dir: 'desc' },
+                    )
+                  }
+                  className={`${col.align} whitespace-nowrap border-0 bg-transparent p-0 cursor-pointer font-medium text-[10.5px]`}
+                  style={{ color: activeSort ? 'var(--tv-accent)' : 'var(--tv-text-secondary)' }}
+                >
+                  {col.label}
+                  {activeSort ? (wlSort.dir === 'asc' ? ' ▲' : ' ▼') : ''}
+                </button>
+              )
+            })}
             <span />
           </div>
 
-          {/* Watchlist Rows with Zero-Remount WAAPI Flash (`BUG-030`) & Blind Mode (`BUG-041`) */}
+          {/* Watchlist Rows with Section Headers, Color Flags, Drag Reorder & Blind Mode */}
           <div className="flex-1 overflow-y-auto tv-scroll">
-            {(activeWatchlist?.tickers ?? []).map((ticker) => {
-              const isBlindRow = Boolean(replayMaskTicker && ticker.toUpperCase() === replayMaskTicker)
-              return (
-                <WatchlistRow
-                  key={ticker}
-                  ticker={ticker}
-                  quote={buildEffectiveQuote(ticker)}
-                  flash={quoteFlashMap[ticker]}
-                  isSelected={activePane.ticker === ticker}
-                  isBlindMasked={isBlindRow}
-                  onSelect={() => setActiveTicker(ticker)}
-                  onRemove={() => void removeSymbolFromWatchlist(ticker)}
-                />
-              )
-            })}
+            {(() => {
+              const rawTickers = activeWatchlist?.tickers ?? []
+              let items = rawTickers.filter((tk) => {
+                if (tk.startsWith('###')) return flagFilter === 'all' && wlSort.key === 'none'
+                if (flagFilter === 'all') return true
+                return symbolFlags[tk.toUpperCase()] === flagFilter
+              })
+              if (wlSort.key !== 'none') {
+                items = [...items].sort((a, b) => {
+                  const qa = buildEffectiveQuote(a)
+                  const qb = buildEffectiveQuote(b)
+                  let diff = 0
+                  if (wlSort.key === 'symbol') {
+                    diff = a.localeCompare(b)
+                  } else if (wlSort.key === 'price') {
+                    diff = (qa?.lastPrice ?? -Infinity) - (qb?.lastPrice ?? -Infinity)
+                  } else {
+                    diff = (qa?.changePercent ?? -Infinity) - (qb?.changePercent ?? -Infinity)
+                  }
+                  return wlSort.dir === 'asc' ? diff : -diff
+                })
+              }
+              const cycleFlagFor = (tk: string) => {
+                const cur = symbolFlags[tk.toUpperCase()]
+                const idx = FLAG_COLORS.findIndex((f) => f.key === cur)
+                const next = idx === -1 ? FLAG_COLORS[0].key : idx + 1 < FLAG_COLORS.length ? FLAG_COLORS[idx + 1].key : null
+                void setSymbolFlag(tk, next)
+              }
+              const handleDropOn = (targetTicker: string) => {
+                if (!dragTicker || !activeWatchlist || dragTicker === targetTicker) return
+                const list = [...activeWatchlist.tickers]
+                const fromIdx = list.indexOf(dragTicker)
+                const toIdx = list.indexOf(targetTicker)
+                if (fromIdx === -1 || toIdx === -1) return
+                const [moved] = list.splice(fromIdx, 1)
+                list.splice(toIdx, 0, moved)
+                setDragTicker(null)
+                setWlSort({ key: 'none', dir: 'desc' })
+                void reorderWatchlistSymbols(activeWatchlist.id, list)
+              }
+              return items.map((ticker) => {
+                if (ticker.startsWith('###')) {
+                  const title = ticker.replace(/^###(?:SECTION:)?/i, '').trim() || 'PHÂN MỤC'
+                  return (
+                    <div
+                      key={ticker}
+                      draggable
+                      onDragStart={() => setDragTicker(ticker)}
+                      onDragOver={(e) => e.preventDefault()}
+                      onDrop={() => handleDropOn(ticker)}
+                      className="group flex items-center justify-between px-2 py-1 text-[10px] font-bold uppercase tracking-wider select-none"
+                      style={{
+                        backgroundColor: 'var(--tv-bg-elevated)',
+                        color: 'var(--tv-text-secondary)',
+                        borderBottom: '1px solid var(--tv-border)',
+                      }}
+                    >
+                      <span className="truncate">{title}</span>
+                      <button
+                        type="button"
+                        aria-label={`Xóa phân mục ${title}`}
+                        className="opacity-0 group-hover:opacity-100 border-0 bg-transparent p-0 cursor-pointer text-[var(--tv-text-secondary)] hover:text-[#F23645]"
+                        onClick={() => void removeSymbolFromWatchlist(ticker)}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  )
+                }
+                const isBlindRow = Boolean(replayMaskTicker && ticker.toUpperCase() === replayMaskTicker)
+                return (
+                  <WatchlistRow
+                    key={ticker}
+                    ticker={ticker}
+                    quote={buildEffectiveQuote(ticker)}
+                    flash={quoteFlashMap[ticker]}
+                    flagColor={symbolFlags[ticker.toUpperCase()]}
+                    isSelected={activePane.ticker === ticker}
+                    isBlindMasked={isBlindRow}
+                    onSelect={() => setActiveTicker(ticker)}
+                    onCycleFlag={() => cycleFlagFor(ticker)}
+                    onRemove={() => void removeSymbolFromWatchlist(ticker)}
+                    onDragStart={() => setDragTicker(ticker)}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={() => handleDropOn(ticker)}
+                  />
+                )
+              })
+            })()}
           </div>
 
           {/* Active Symbol Detail Card (Trần / Tham chiếu / Sàn / Bước giá / Khối lượng) */}
@@ -1461,140 +1743,193 @@ export const RightWidgetBar: React.FC = () => {
             )}
           </div>
 
-          {/* Saved Drawings + Timeframe Visibility */}
+          {/* Saved Drawings + Folder Grouping + Click-to-Jump + Timeframe Visibility (Wave 5 Pro) */}
           <div className="space-y-1">
-            <div className="flex items-center justify-between px-1">
+            <div className="flex items-center justify-between gap-1 px-1">
               <span className="text-[10.5px] font-semibold uppercase tracking-wide" style={{ color: 'var(--tv-text-secondary)' }}>
                 Hình vẽ PTKT ({tickerDrawings.length})
               </span>
-              <span className="text-[9.5px]" style={{ color: 'var(--tv-text-secondary)' }}>
-                Khung: {activePane.interval}
-              </span>
+              <select
+                aria-label="Lọc thư mục hình vẽ"
+                value={drawingFolderFilter}
+                onChange={(e) => setDrawingFolderFilter(e.target.value)}
+                className="px-1 py-0.5 rounded text-[9.5px] outline-none cursor-pointer"
+                style={{
+                  backgroundColor: 'var(--tv-bg-input)',
+                  color: 'var(--tv-text-primary)',
+                  border: '1px solid var(--tv-border)',
+                }}
+              >
+                <option value="all">Tất cả thư mục</option>
+                {DRAWING_FOLDERS.map((f) => (
+                  <option key={f} value={f}>
+                    {f}
+                  </option>
+                ))}
+              </select>
             </div>
             {tickerDrawings.length === 0 ? (
               <div className="text-[11px] px-2 py-4 text-center" style={{ color: 'var(--tv-text-secondary)' }}>
                 Chưa có hình vẽ nào trên {activePane.ticker}.
               </div>
             ) : (
-              tickerDrawings.map((rec) => {
-                const p0Val = rec.points[0]?.value
-                const tfPreset = resolveDrawingTfPreset(rec.extendData)
-                const isLineTool = [
-                  'segment',
-                  'rayLine',
-                  'straightLine',
-                  'horizontalStraightLine',
-                  'horizontalRayLine',
-                  'horizontalSegment',
-                ].includes(rec.name)
-                return (
-                  <div
-                    key={rec.id}
-                    className="p-2 rounded space-y-1.5"
-                    style={{
-                      backgroundColor: 'var(--tv-bg-elevated)',
-                      border: '1px solid var(--tv-border)',
-                      opacity: rec.visible ? 1 : 0.55,
-                    }}
-                  >
-                    <div className="flex items-center justify-between gap-1">
-                      <div className="min-w-0">
-                        <div className="text-[11.5px] font-semibold truncate">
-                          {DRAWING_LABELS[rec.name] ?? rec.name}
-                        </div>
-                        <div className="text-[10px] tabular-nums" style={{ color: 'var(--tv-text-secondary)' }}>
-                          {typeof p0Val === 'number' ? `@ ${p0Val.toLocaleString('en-US')}` : rec.id}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-0.5 shrink-0">
-                        {isLineTool && (
+              tickerDrawings
+                .filter((rec) => drawingFolderFilter === 'all' || resolveDrawingFolder(rec.extendData) === drawingFolderFilter)
+                .map((rec) => {
+                  const p0Val = rec.points[0]?.value
+                  const p0Ts = rec.points[0]?.timestamp
+                  const tfPreset = resolveDrawingTfPreset(rec.extendData)
+                  const folder = resolveDrawingFolder(rec.extendData)
+                  const isLineTool = [
+                    'segment',
+                    'rayLine',
+                    'straightLine',
+                    'horizontalStraightLine',
+                    'horizontalRayLine',
+                    'horizontalSegment',
+                  ].includes(rec.name)
+                  return (
+                    <div
+                      key={rec.id}
+                      className="p-2 rounded space-y-1.5"
+                      style={{
+                        backgroundColor: 'var(--tv-bg-elevated)',
+                        border: '1px solid var(--tv-border)',
+                        opacity: rec.visible ? 1 : 0.55,
+                      }}
+                    >
+                      <div className="flex items-center justify-between gap-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (typeof p0Ts === 'number' && Number.isFinite(p0Ts)) {
+                              scrollActiveChartToTimestamp(p0Ts)
+                            }
+                          }}
+                          className="min-w-0 flex-1 text-left bg-transparent border-0 p-0 cursor-pointer text-[var(--tv-text-primary)] hover:text-[#2962FF]"
+                          title={typeof p0Ts === 'number' ? 'Nhấp để cuộn biểu đồ tới vị trí hình vẽ này' : undefined}
+                        >
+                          <div className="text-[11.5px] font-semibold truncate">
+                            {DRAWING_LABELS[rec.name] ?? rec.name}
+                          </div>
+                          <div className="text-[10px] tabular-nums truncate" style={{ color: 'var(--tv-text-secondary)' }}>
+                            {typeof p0Val === 'number' ? `@ ${p0Val.toLocaleString('en-US')}` : rec.id}
+                            {folder !== 'Mặc định' ? ` · 📁 ${folder}` : ''}
+                          </div>
+                        </button>
+                        <div className="flex items-center gap-0.5 shrink-0">
+                          {isLineTool && (
+                            <button
+                              type="button"
+                              aria-label={`Đặt cảnh báo cắt ${rec.name}`}
+                              title="Đặt cảnh báo cắt đường vẽ này"
+                              className="tv-icon-btn w-6 h-6 text-[#FBC02D]"
+                              onClick={() =>
+                                void createNewAlert(
+                                  rec.ticker,
+                                  'cross_any',
+                                  Number((p0Val ?? 0).toFixed(2)),
+                                  `Cắt ${DRAWING_LABELS[rec.name] ?? rec.name} (${rec.ticker})`,
+                                  {
+                                    alertKind: 'drawing',
+                                    interval: activePane.interval,
+                                    paramsJson: {
+                                      drawingId: rec.id,
+                                      drawingName: rec.name,
+                                      points: rec.points,
+                                    },
+                                    soundEnabled: true,
+                                  },
+                                )
+                              }
+                            >
+                              <BellPlus className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                           <button
                             type="button"
-                            aria-label={`Đặt cảnh báo cắt ${rec.name}`}
-                            title="Đặt cảnh báo cắt đường vẽ này"
-                            className="tv-icon-btn w-6 h-6 text-[#FBC02D]"
-                            onClick={() =>
-                              void createNewAlert(
-                                rec.ticker,
-                                'cross_any',
-                                Number((p0Val ?? 0).toFixed(2)),
-                                `Cắt ${DRAWING_LABELS[rec.name] ?? rec.name} (${rec.ticker})`,
-                                {
-                                  alertKind: 'drawing',
-                                  interval: activePane.interval,
-                                  paramsJson: {
-                                    drawingId: rec.id,
-                                    drawingName: rec.name,
-                                    points: rec.points,
-                                  },
-                                  soundEnabled: true,
-                                },
-                              )
-                            }
+                            aria-label={rec.visible ? 'Ẩn hình vẽ' : 'Hiện hình vẽ'}
+                            className="tv-icon-btn w-6 h-6"
+                            onClick={() => mutateDrawingObject(rec, { visible: !rec.visible })}
                           >
-                            <BellPlus className="w-3.5 h-3.5" />
+                            {rec.visible ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
                           </button>
-                        )}
-                        <button
-                          type="button"
-                          aria-label={rec.visible ? 'Ẩn hình vẽ' : 'Hiện hình vẽ'}
-                          className="tv-icon-btn w-6 h-6"
-                          onClick={() => mutateDrawingObject(rec, { visible: !rec.visible })}
+                          <button
+                            type="button"
+                            aria-label={rec.lock ? 'Mở khóa hình vẽ' : 'Khóa hình vẽ'}
+                            className="tv-icon-btn w-6 h-6"
+                            onClick={() => mutateDrawingObject(rec, { lock: !rec.lock })}
+                          >
+                            {rec.lock ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
+                          </button>
+                          <button
+                            type="button"
+                            aria-label="Xóa hình vẽ"
+                            className="tv-icon-btn w-6 h-6 hover:text-[#F23645]"
+                            onClick={() => deleteDrawingObject(rec)}
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Folder & Visibility by Timeframe controls */}
+                      <div className="grid grid-cols-2 gap-1 text-[10px]">
+                        <select
+                          aria-label={`Thư mục của ${DRAWING_LABELS[rec.name] ?? rec.name}`}
+                          value={folder}
+                          onChange={(e) => {
+                            const baseExt =
+                              rec.extendData && typeof rec.extendData === 'object'
+                                ? (rec.extendData as Record<string, unknown>)
+                                : {}
+                            mutateDrawingObject(rec, {
+                              extendData: { ...baseExt, folder: e.target.value },
+                            })
+                          }}
+                          className="px-1 py-0.5 rounded text-[10px] outline-none cursor-pointer"
+                          style={{
+                            backgroundColor: 'var(--tv-bg-input)',
+                            color: 'var(--tv-text-primary)',
+                            border: '1px solid var(--tv-border)',
+                          }}
                         >
-                          {rec.visible ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-                        </button>
-                        <button
-                          type="button"
-                          aria-label={rec.lock ? 'Mở khóa hình vẽ' : 'Khóa hình vẽ'}
-                          className="tv-icon-btn w-6 h-6"
-                          onClick={() => mutateDrawingObject(rec, { lock: !rec.lock })}
+                          {DRAWING_FOLDERS.map((f) => (
+                            <option key={f} value={f}>
+                              📁 {f}
+                            </option>
+                          ))}
+                        </select>
+                        <select
+                          aria-label={`Khung giờ hiển thị của ${DRAWING_LABELS[rec.name] ?? rec.name}`}
+                          value={tfPreset}
+                          onChange={(e) => {
+                            const v = e.target.value
+                            const visValue = v.startsWith('only:') ? [v.slice(5)] : v
+                            const baseExt =
+                              rec.extendData && typeof rec.extendData === 'object'
+                                ? (rec.extendData as Record<string, unknown>)
+                                : {}
+                            mutateDrawingObject(rec, {
+                              extendData: { ...baseExt, visibleTimeframes: visValue },
+                            })
+                          }}
+                          className="px-1 py-0.5 rounded text-[10px] outline-none cursor-pointer"
+                          style={{
+                            backgroundColor: 'var(--tv-bg-input)',
+                            color: 'var(--tv-text-primary)',
+                            border: '1px solid var(--tv-border)',
+                          }}
                         >
-                          {rec.lock ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
-                        </button>
-                        <button
-                          type="button"
-                          aria-label="Xóa hình vẽ"
-                          className="tv-icon-btn w-6 h-6 hover:text-[#F23645]"
-                          onClick={() => deleteDrawingObject(rec)}
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                          <option value="all">Mọi khung giờ</option>
+                          <option value="intraday">Intraday (≤ 4H)</option>
+                          <option value="swing">Swing (≥ 1D)</option>
+                          <option value={`only:${activePane.interval}`}>Chỉ khung {activePane.interval}</option>
+                        </select>
                       </div>
                     </div>
-
-                    {/* Visibility by Timeframe selector (`Tất cả` / `Intraday <= 4H` / `Swing >= 1D` / `Chỉ khung này`) */}
-                    <div className="flex items-center justify-between gap-1.5 text-[10px]">
-                      <span style={{ color: 'var(--tv-text-secondary)' }}>Hiển thị khung:</span>
-                      <select
-                        aria-label={`Khung giờ hiển thị của ${DRAWING_LABELS[rec.name] ?? rec.name}`}
-                        value={tfPreset}
-                        onChange={(e) => {
-                          const v = e.target.value
-                          const visValue = v.startsWith('only:') ? [v.slice(5)] : v
-                          const baseExt =
-                            rec.extendData && typeof rec.extendData === 'object'
-                              ? (rec.extendData as Record<string, unknown>)
-                              : {}
-                          mutateDrawingObject(rec, {
-                            extendData: { ...baseExt, visibleTimeframes: visValue },
-                          })
-                        }}
-                        className="px-1.5 py-0.5 rounded text-[10px] outline-none cursor-pointer"
-                        style={{
-                          backgroundColor: 'var(--tv-bg-input)',
-                          color: 'var(--tv-text-primary)',
-                          border: '1px solid var(--tv-border)',
-                        }}
-                      >
-                        <option value="all">Mọi khung giờ</option>
-                        <option value="intraday">Intraday (≤ 4H)</option>
-                        <option value="swing">Swing (≥ 1D)</option>
-                        <option value={`only:${activePane.interval}`}>Chỉ khung {activePane.interval}</option>
-                      </select>
-                    </div>
-                  </div>
-                )
-              })
+                  )
+                })
             )}
           </div>
         </div>

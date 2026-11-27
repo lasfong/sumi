@@ -19,7 +19,8 @@ use crate::error::{DesktopError, DesktopResult};
 use crate::state::AppState;
 use crate::workspace_db::{
     AlertTriggerLogRecord, IndicatorTemplateRecord, PriceAlertRecord, SavedDrawingRecord,
-    SavedIndicatorSpec, SavedLayoutRecord, SavedReplaySessionRecord, WatchlistGroup,
+    SavedIndicatorSpec, SavedLayoutRecord, SavedReplaySessionRecord, SymbolFlagRecord,
+    WatchlistGroup,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +32,7 @@ pub struct WorkspaceBootstrapResponse {
     pub alerts: Vec<PriceAlertRecord>,
     pub indicator_templates: Vec<IndicatorTemplateRecord>,
     pub replay_sessions: Vec<SavedReplaySessionRecord>,
+    pub symbol_flags: Vec<SymbolFlagRecord>,
 }
 
 #[tauri::command]
@@ -46,6 +48,7 @@ pub async fn load_workspace_bootstrap(
             alerts: ws.list_alerts()?,
             indicator_templates: ws.list_indicator_templates()?,
             replay_sessions: ws.list_replay_sessions()?,
+            symbol_flags: ws.list_symbol_flags()?,
         })
     })
     .await
@@ -276,6 +279,58 @@ pub async fn remove_watchlist_symbol(
 ) -> DesktopResult<()> {
     let ws = state.workspace.clone();
     tokio::task::spawn_blocking(move || ws.remove_watchlist_symbol(&watchlist_id, &ticker))
+        .await
+        .map_err(|e| DesktopError::Internal(e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn rename_watchlist(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+) -> DesktopResult<()> {
+    let ws = state.workspace.clone();
+    tokio::task::spawn_blocking(move || ws.rename_watchlist(&id, &name))
+        .await
+        .map_err(|e| DesktopError::Internal(e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn reorder_watchlist_symbols(
+    state: State<'_, AppState>,
+    watchlist_id: String,
+    tickers: Vec<String>,
+) -> DesktopResult<()> {
+    let ws = state.workspace.clone();
+    tokio::task::spawn_blocking(move || ws.reorder_watchlist_symbols(&watchlist_id, &tickers))
+        .await
+        .map_err(|e| DesktopError::Internal(e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn list_symbol_flags(state: State<'_, AppState>) -> DesktopResult<Vec<SymbolFlagRecord>> {
+    let ws = state.workspace.clone();
+    tokio::task::spawn_blocking(move || ws.list_symbol_flags())
+        .await
+        .map_err(|e| DesktopError::Internal(e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn set_symbol_flag(
+    state: State<'_, AppState>,
+    ticker: String,
+    color: String,
+) -> DesktopResult<SymbolFlagRecord> {
+    let ws = state.workspace.clone();
+    tokio::task::spawn_blocking(move || ws.set_symbol_flag(&ticker, &color))
+        .await
+        .map_err(|e| DesktopError::Internal(e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn clear_symbol_flag(state: State<'_, AppState>, ticker: String) -> DesktopResult<()> {
+    let ws = state.workspace.clone();
+    tokio::task::spawn_blocking(move || ws.clear_symbol_flag(&ticker))
         .await
         .map_err(|e| DesktopError::Internal(e.to_string()))?
 }

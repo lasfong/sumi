@@ -1,21 +1,22 @@
+use chrono::{Datelike, FixedOffset, TimeZone};
 use serde::{Deserialize, Serialize};
 use sumi_core::backtest::{
     BacktestConfig, BacktestEquityPoint, BacktestRunOptions, BacktestTearsheet, BacktestTrade,
     ConfluenceThresholdGate, CustomSignalRuleSpec, DEFAULT_MONTE_CARLO_SEED, DirectionalRuleLeg,
     FloatCmpOp, LogicalCombinator, MonteCarloConfig, MonteCarloRiskMetrics, MonteCarloValidity,
     OpenBacktestPosition, PortfolioConstituentAttribution, PortfolioUniverseFilter,
-    PortfolioWeightingMode, PositionSizingMode, QuantileEnvelope5, RobustnessVerdict, SignalClause,
-    SignalClauseGroup, SignalPredicate, StopTakeConfig, StrategyDirectionMode, StrategyParams,
-    StrategyPresetKind, SweepRankingMetric, SweepVariantRow, PresetBattleRow, WalkForwardConfig,
-    WalkForwardFoldResult, WalkForwardVerdict, compute_advanced_tearsheet_analytics,
-    render_backtest_report_html, run_all_presets_battle, run_backtest_with_options,
-    run_monte_carlo_bootstrap, run_parameter_sweep, run_portfolio_backtest,
-    run_walk_forward_validation,
+    PortfolioWeightingMode, PositionSizingMode, PresetBattleRow, QuantileEnvelope5,
+    RobustnessVerdict, SignalClause, SignalClauseGroup, SignalPredicate, StopTakeConfig,
+    StrategyDirectionMode, StrategyParams, StrategyPresetKind, SweepRankingMetric, SweepVariantRow,
+    WalkForwardConfig, WalkForwardFoldResult, WalkForwardVerdict,
+    compute_advanced_tearsheet_analytics, render_backtest_report_html, run_all_presets_battle,
+    run_backtest_with_magnifier, run_backtest_with_options, run_monte_carlo_bootstrap,
+    run_parameter_sweep, run_portfolio_backtest, run_walk_forward_validation,
 };
 use sumi_core::data::{DataSourcePreset, Timeframe, WatchlistFeedEntry};
 use sumi_core::model::Candle;
 use sumi_core::scanner::{SignalOutputType, find_catalog_entry};
-use sumi_data::{Adjustment, BarsRequest, Interval, OhlcvBar, SeriesKey, SymbolKey};
+use sumi_data::{Adjustment, BarQueryMode, BarsRequest, Interval, OhlcvBar, SeriesKey, SymbolKey};
 use tauri::State;
 
 use crate::error::{DesktopError, DesktopResult};
@@ -34,14 +35,40 @@ pub struct CustomClauseInput {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RuleGroupInput {
+    /// `"and"` | `"or"`
+    pub combinator: Option<String>,
+    pub clauses: Vec<CustomClauseInput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CustomRulesInput {
     pub name: Option<String>,
-    /// `"and"` | `"or"`
+    /// Legacy flat entry combinator (`"and"` | `"or"`)
     pub entry_combinator: Option<String>,
+    #[serde(default)]
     pub entry_clauses: Vec<CustomClauseInput>,
     pub exit_combinator: Option<String>,
     pub exit_clauses: Option<Vec<CustomClauseInput>>,
     pub min_health_score: Option<f64>,
+    // Wave 5: Full 2-tier AND/OR 4-leg groups (`sumi-core::backtest::CustomSignalRuleSpec`)
+    #[serde(default)]
+    pub long_entry_inter_op: Option<String>,
+    #[serde(default)]
+    pub long_entry_groups: Option<Vec<RuleGroupInput>>,
+    #[serde(default)]
+    pub long_exit_inter_op: Option<String>,
+    #[serde(default)]
+    pub long_exit_groups: Option<Vec<RuleGroupInput>>,
+    #[serde(default)]
+    pub short_entry_inter_op: Option<String>,
+    #[serde(default)]
+    pub short_entry_groups: Option<Vec<RuleGroupInput>>,
+    #[serde(default)]
+    pub short_exit_inter_op: Option<String>,
+    #[serde(default)]
+    pub short_exit_groups: Option<Vec<RuleGroupInput>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -113,6 +140,30 @@ pub struct StrategyBacktestInput {
     pub support_stop_lookback: Option<usize>,
     #[serde(default)]
     pub qmv_wave_trailing_2_3: Option<bool>,
+    // Wave 5 — Strategy Tester 2.0 Risk & Magnifier Controls
+    #[serde(default)]
+    pub max_pyramiding: Option<usize>,
+    #[serde(default)]
+    pub scale_out_pct: Option<f64>,
+    #[serde(default)]
+    pub tp1_pct: Option<f64>,
+    #[serde(default)]
+    pub trailing_stop_atr_mult: Option<f64>,
+    #[serde(default)]
+    pub trailing_ma_period: Option<usize>,
+    #[serde(default)]
+    pub trailing_kijun_period: Option<usize>,
+    #[serde(default)]
+    pub use_bar_magnifier: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MonthlyReturnCellDto {
+    pub year: i32,
+    pub month: u32,
+    pub return_pct: f64,
+    pub trades_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -160,6 +211,8 @@ pub struct StrategyBacktestResponse {
     pub open_position: Option<OpenBacktestPosition>,
     pub equity_curve: Vec<StrategyEquityPointDto>,
     pub trades: Vec<StrategyTradeDto>,
+    pub monthly_returns: Vec<MonthlyReturnCellDto>,
+    pub bar_magnifier_bars: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -249,52 +302,101 @@ fn build_clause_from_input(c: &CustomClauseInput) -> SignalClause {
     cl
 }
 
-fn build_custom_rule_spec(custom: &CustomRulesInput) -> CustomSignalRuleSpec {
-    let entry_clauses: Vec<SignalClause> = custom
-        .entry_clauses
-        .iter()
-        .filter(|c| !c.catalog_id.trim().is_empty())
-        .map(build_clause_from_input)
-        .collect();
-    let exit_clauses: Vec<SignalClause> = custom
-        .exit_clauses
-        .as_deref()
+fn build_groups_from_input(groups_opt: Option<&[RuleGroupInput]>) -> Vec<SignalClauseGroup> {
+    groups_opt
         .unwrap_or(&[])
         .iter()
-        .filter(|c| !c.catalog_id.trim().is_empty())
-        .map(build_clause_from_input)
-        .collect();
+        .filter_map(|g| {
+            let clauses: Vec<SignalClause> = g
+                .clauses
+                .iter()
+                .filter(|c| !c.catalog_id.trim().is_empty())
+                .map(build_clause_from_input)
+                .collect();
+            if clauses.is_empty() {
+                None
+            } else {
+                Some(SignalClauseGroup {
+                    intra_op: parse_combinator(g.combinator.as_deref()),
+                    clauses,
+                })
+            }
+        })
+        .collect()
+}
 
+fn build_custom_rule_spec(custom: &CustomRulesInput) -> CustomSignalRuleSpec {
     let mut gate = ConfluenceThresholdGate::default();
     if let Some(min_h) = custom.min_health_score.filter(|v| v.is_finite()) {
         gate.enabled = true;
         gate.min_score = Some(min_h);
     }
 
-    let long_entry = DirectionalRuleLeg {
-        enabled: !entry_clauses.is_empty() || gate.enabled,
-        inter_group_op: LogicalCombinator::AllAnd,
-        groups: if entry_clauses.is_empty() {
+    let long_entry_groups = if custom.long_entry_groups.is_some() {
+        build_groups_from_input(custom.long_entry_groups.as_deref())
+    } else {
+        let legacy: Vec<SignalClause> = custom
+            .entry_clauses
+            .iter()
+            .filter(|c| !c.catalog_id.trim().is_empty())
+            .map(build_clause_from_input)
+            .collect();
+        if legacy.is_empty() {
             Vec::new()
         } else {
             vec![SignalClauseGroup {
                 intra_op: parse_combinator(custom.entry_combinator.as_deref()),
-                clauses: entry_clauses,
+                clauses: legacy,
             }]
-        },
-        confluence_gate: gate,
+        }
     };
-    let long_exit = DirectionalRuleLeg {
-        enabled: !exit_clauses.is_empty(),
-        inter_group_op: LogicalCombinator::AllAnd,
-        groups: if exit_clauses.is_empty() {
+
+    let long_exit_groups = if custom.long_exit_groups.is_some() {
+        build_groups_from_input(custom.long_exit_groups.as_deref())
+    } else {
+        let legacy: Vec<SignalClause> = custom
+            .exit_clauses
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .filter(|c| !c.catalog_id.trim().is_empty())
+            .map(build_clause_from_input)
+            .collect();
+        if legacy.is_empty() {
             Vec::new()
         } else {
             vec![SignalClauseGroup {
                 intra_op: parse_combinator(custom.exit_combinator.as_deref()),
-                clauses: exit_clauses,
+                clauses: legacy,
             }]
-        },
+        }
+    };
+
+    let short_entry_groups = build_groups_from_input(custom.short_entry_groups.as_deref());
+    let short_exit_groups = build_groups_from_input(custom.short_exit_groups.as_deref());
+
+    let long_entry = DirectionalRuleLeg {
+        enabled: !long_entry_groups.is_empty() || gate.enabled,
+        inter_group_op: parse_combinator(custom.long_entry_inter_op.as_deref()),
+        groups: long_entry_groups,
+        confluence_gate: gate,
+    };
+    let long_exit = DirectionalRuleLeg {
+        enabled: !long_exit_groups.is_empty(),
+        inter_group_op: parse_combinator(custom.long_exit_inter_op.as_deref()),
+        groups: long_exit_groups,
+        confluence_gate: ConfluenceThresholdGate::default(),
+    };
+    let short_entry = DirectionalRuleLeg {
+        enabled: !short_entry_groups.is_empty(),
+        inter_group_op: parse_combinator(custom.short_entry_inter_op.as_deref()),
+        groups: short_entry_groups,
+        confluence_gate: ConfluenceThresholdGate::default(),
+    };
+    let short_exit = DirectionalRuleLeg {
+        enabled: !short_exit_groups.is_empty(),
+        inter_group_op: parse_combinator(custom.short_exit_inter_op.as_deref()),
+        groups: short_exit_groups,
         confluence_gate: ConfluenceThresholdGate::default(),
     };
 
@@ -304,12 +406,12 @@ fn build_custom_rule_spec(custom: &CustomRulesInput) -> CustomSignalRuleSpec {
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .unwrap_or("Chiến lược tự thiết kế (101 Tín hiệu)")
+            .unwrap_or("Chiến lược tự thiết kế (123 Tín hiệu)")
             .to_owned(),
         long_entry,
         long_exit,
-        short_entry: DirectionalRuleLeg::default(),
-        short_exit: DirectionalRuleLeg::default(),
+        short_entry,
+        short_exit,
     };
     spec.sanitize();
     spec
@@ -435,10 +537,19 @@ fn build_backtest_config(input: &StrategyBacktestInput) -> BacktestConfig {
     let risk = StopTakeConfig {
         stop_loss_pct: input.stop_loss_pct.filter(|v| v.is_finite() && *v > 0.0),
         take_profit_pct: input.take_profit_pct.filter(|v| v.is_finite() && *v > 0.0),
+        trailing_stop_atr_mult: input
+            .trailing_stop_atr_mult
+            .filter(|v| v.is_finite() && *v > 0.0),
         min_holding_bars: input.min_holding_bars.unwrap_or(0),
         support_stop_lookback: input.support_stop_lookback.or(default_sup_lb),
         qmv_wave_trailing_2_3: input.qmv_wave_trailing_2_3.unwrap_or(default_wave_trail),
         max_holding_bars: is_qmv_preset.then_some(25),
+        max_pyramiding: input.max_pyramiding.unwrap_or(1),
+        scale_out_pct: input.scale_out_pct.filter(|v| v.is_finite() && *v > 0.0),
+        tp1_pct: input.tp1_pct.filter(|v| v.is_finite() && *v > 0.0),
+        trailing_ma_period: input.trailing_ma_period.filter(|&p| p >= 5),
+        trailing_kijun_period: input.trailing_kijun_period.filter(|&p| p >= 5),
+        use_bar_magnifier: input.use_bar_magnifier.unwrap_or(false),
         ..StopTakeConfig::default()
     };
 
@@ -628,6 +739,92 @@ fn map_trades(trades: &[BacktestTrade]) -> Vec<StrategyTradeDto> {
         .collect()
 }
 
+fn compute_monthly_returns(
+    equity_curve: &[BacktestEquityPoint],
+    trades: &[BacktestTrade],
+) -> Vec<MonthlyReturnCellDto> {
+    use std::collections::BTreeMap;
+    let Some(ict) = FixedOffset::east_opt(7 * 3600) else {
+        return Vec::new();
+    };
+    let mut trade_counts: BTreeMap<(i32, u32), usize> = BTreeMap::new();
+    for tr in trades {
+        if let Some(dt) = ict.timestamp_opt(tr.exit_timestamp, 0).single() {
+            *trade_counts.entry((dt.year(), dt.month())).or_insert(0) += 1;
+        }
+    }
+    let mut month_bounds: BTreeMap<(i32, u32), (f64, f64)> = BTreeMap::new();
+    let mut prev_eq: Option<f64> = None;
+    for pt in equity_curve {
+        let Some(dt) = ict.timestamp_opt(pt.timestamp, 0).single() else {
+            continue;
+        };
+        let ym = (dt.year(), dt.month());
+        let start_eq = prev_eq.unwrap_or(pt.equity);
+        month_bounds
+            .entry(ym)
+            .and_modify(|e| e.1 = pt.equity)
+            .or_insert((start_eq, pt.equity));
+        prev_eq = Some(pt.equity);
+    }
+    month_bounds
+        .into_iter()
+        .map(|((year, month), (start_eq, end_eq))| {
+            let ret = if start_eq > 1.0e-6 {
+                ((end_eq - start_eq) / start_eq) * 100.0
+            } else {
+                0.0
+            };
+            MonthlyReturnCellDto {
+                year,
+                month,
+                return_pct: (ret * 100.0).round() / 100.0,
+                trades_count: trade_counts.get(&(year, month)).copied().unwrap_or(0),
+            }
+        })
+        .collect()
+}
+
+fn load_intrabar_magnifier_candles(
+    state: &AppState,
+    ticker: &str,
+    iv: Interval,
+    outer_candles: &[Candle],
+) -> Vec<Candle> {
+    if iv != Interval::D1 || outer_candles.is_empty() {
+        return Vec::new();
+    }
+    let Ok(sym) = SymbolKey::parse(ticker) else {
+        return Vec::new();
+    };
+    let first_ms = outer_candles
+        .first()
+        .map_or(0, |c| c.timestamp.saturating_mul(1_000));
+    let last_ms = outer_candles
+        .last()
+        .map_or(i64::MAX, |c| c.timestamp.saturating_add(86_400).saturating_mul(1_000));
+
+    for sub_iv in [Interval::H1, Interval::M15] {
+        let series = SeriesKey::new(&sym, sub_iv, Adjustment::Splits);
+        if let Ok(page) = state
+            .market_store
+            .query_bars(&series, BarQueryMode::Init, 20_000)
+            && !page.bars.is_empty()
+        {
+            let filtered: Vec<Candle> = page
+                .bars
+                .into_iter()
+                .filter(|b| b.timestamp >= first_ms && b.timestamp <= last_ms)
+                .map(|b| b.to_core_candle(sub_iv))
+                .collect();
+            if !filtered.is_empty() {
+                return filtered;
+            }
+        }
+    }
+    Vec::new()
+}
+
 #[tauri::command]
 pub async fn run_strategy_backtest(
     state: State<'_, AppState>,
@@ -647,14 +844,22 @@ pub async fn run_strategy_backtest(
     if cfg.enforce_vn_microstructure {
         cfg.benchmark_non_downtrend_days = load_vnindex_non_downtrend_days(&state);
     }
+    let intrabar_candles = if cfg.risk.use_bar_magnifier {
+        load_intrabar_magnifier_candles(&state, &ticker, iv, &candles)
+    } else {
+        Vec::new()
+    };
+    let magnifier_bars = intrabar_candles.len();
 
     let report = tokio::task::spawn_blocking(move || {
-        run_backtest_with_options(
+        let sub_slice = (!intrabar_candles.is_empty()).then_some(intrabar_candles.as_slice());
+        run_backtest_with_magnifier(
             ticker.clone(),
             tf,
             &candles,
             &cfg,
             BacktestRunOptions::default(),
+            sub_slice,
         )
     })
     .await
@@ -667,6 +872,7 @@ pub async fn run_strategy_backtest(
     } else {
         report.config.preset.full_label().to_owned()
     };
+    let monthly_returns = compute_monthly_returns(&report.equity_curve, &report.trades);
 
     Ok(StrategyBacktestResponse {
         ticker: report.symbol,
@@ -680,6 +886,8 @@ pub async fn run_strategy_backtest(
         open_position: report.open_position,
         equity_curve: map_equity_points(&report.equity_curve),
         trades: map_trades(&report.trades),
+        monthly_returns,
+        bar_magnifier_bars: magnifier_bars,
     })
 }
 
@@ -1245,6 +1453,13 @@ mod tests {
             qmv_min_pillars: None,
             support_stop_lookback: None,
             qmv_wave_trailing_2_3: None,
+            max_pyramiding: None,
+            scale_out_pct: None,
+            tp1_pct: None,
+            trailing_stop_atr_mult: None,
+            trailing_ma_period: None,
+            trailing_kijun_period: None,
+            use_bar_magnifier: None,
         }
     }
 
@@ -1314,6 +1529,14 @@ mod tests {
                 bool_expected: Some(true),
             }]),
             min_health_score: Some(10.0),
+            long_entry_inter_op: None,
+            long_entry_groups: None,
+            long_exit_inter_op: None,
+            long_exit_groups: None,
+            short_entry_inter_op: None,
+            short_entry_groups: None,
+            short_exit_inter_op: None,
+            short_exit_groups: None,
         });
         let cfg = build_backtest_config(&inp);
         assert_eq!(cfg.preset, StrategyPresetKind::CustomSignalRules);

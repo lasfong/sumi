@@ -530,6 +530,160 @@ export const xabcd: OverlayTemplate = {
   },
 }
 
+/** Wave 5: Multi-point directional Path polyline with terminal arrowhead. */
+export const pathOverlay: OverlayTemplate = {
+  name: 'path',
+  totalStep: Number.MAX_SAFE_INTEGER,
+  needDefaultPointFigure: true,
+  needDefaultXAxisFigure: true,
+  needDefaultYAxisFigure: true,
+  createPointFigures: ({ coordinates }) => {
+    if (coordinates.length < 2) {
+      return [{ type: 'line', attrs: { coordinates } }]
+    }
+    const prev = coordinates[coordinates.length - 2]
+    const last = coordinates[coordinates.length - 1]
+    const angle = Math.atan2(last.y - prev.y, last.x - prev.x)
+    const headLen = 10
+    const leftWing: Coordinate = {
+      x: last.x - headLen * Math.cos(angle - Math.PI / 6),
+      y: last.y - headLen * Math.sin(angle - Math.PI / 6),
+    }
+    const rightWing: Coordinate = {
+      x: last.x - headLen * Math.cos(angle + Math.PI / 6),
+      y: last.y - headLen * Math.sin(angle + Math.PI / 6),
+    }
+    return [
+      { type: 'line', attrs: { coordinates } },
+      { type: 'line', ignoreEvent: true, attrs: { coordinates: [leftWing, last, rightWing] } },
+    ]
+  },
+}
+
+/** Wave 5: Wide semi-transparent Highlighter marker stroke. */
+export const highlighter: OverlayTemplate = {
+  name: 'highlighter',
+  totalStep: Number.MAX_SAFE_INTEGER,
+  needDefaultPointFigure: false,
+  needDefaultXAxisFigure: false,
+  needDefaultYAxisFigure: false,
+  styles: {
+    line: {
+      color: 'rgba(251, 192, 45, 0.36)',
+      size: 14,
+      style: 'solid',
+    },
+  },
+  createPointFigures: ({ coordinates }) => [
+    {
+      type: 'line',
+      attrs: { coordinates },
+      styles: {
+        color: 'rgba(251, 192, 45, 0.36)',
+        size: 14,
+        style: 'solid',
+      },
+    },
+  ],
+}
+
+/** Wave 5: Andrews Pitchfork — 3-point median line + parallel upper/lower channel tines. */
+export const andrewsPitchfork: OverlayTemplate = {
+  name: 'andrewsPitchfork',
+  totalStep: 4,
+  needDefaultPointFigure: true,
+  needDefaultXAxisFigure: true,
+  needDefaultYAxisFigure: true,
+  styles: { polygon: { color: FILL_BLUE } },
+  createPointFigures: ({ coordinates, bounding }) => {
+    if (coordinates.length < 2) {
+      return [{ type: 'line', attrs: { coordinates } }]
+    }
+    if (coordinates.length === 2) {
+      return [{ type: 'line', attrs: { coordinates }, styles: { style: 'dashed' } }]
+    }
+    const [p0, p1, p2] = coordinates
+    const mid: Coordinate = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 }
+    const dx = mid.x - p0.x
+    const dy = mid.y - p0.y
+
+    const medianRay = getRayLine([p0, mid], bounding)
+    const upperRay = getRayLine([p1, { x: p1.x + dx, y: p1.y + dy }], bounding)
+    const lowerRay = getRayLine([p2, { x: p2.x + dx, y: p2.y + dy }], bounding)
+
+    const medianEnd = Array.isArray(medianRay) && medianRay.length === 2 ? medianRay[1] : mid
+    const upperEnd = Array.isArray(upperRay) && upperRay.length === 2 ? upperRay[1] : p1
+    const lowerEnd = Array.isArray(lowerRay) && lowerRay.length === 2 ? lowerRay[1] : p2
+
+    return [
+      {
+        type: 'polygon',
+        ignoreEvent: true,
+        attrs: [
+          { coordinates: [p1, upperEnd, medianEnd, mid] },
+          { coordinates: [mid, medianEnd, lowerEnd, p2] },
+        ],
+        styles: { style: 'fill' },
+      },
+      { type: 'line', attrs: { coordinates: [p1, p2] }, styles: { style: 'dashed' } },
+      { type: 'line', attrs: { coordinates: [p0, medianEnd] } },
+      { type: 'line', attrs: { coordinates: [p1, upperEnd] } },
+      { type: 'line', attrs: { coordinates: [p2, lowerEnd] } },
+    ]
+  },
+}
+
+const FIB_TIME_NUMBERS = [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89]
+
+/** Wave 5: Fibonacci Time Zones — vertical time projection lines at Fibonacci bar intervals. */
+export const fibTimeZones: OverlayTemplate = {
+  name: 'fibTimeZones',
+  totalStep: 3,
+  needDefaultPointFigure: true,
+  needDefaultXAxisFigure: true,
+  needDefaultYAxisFigure: false,
+  createPointFigures: ({ coordinates, bounding }) => {
+    if (coordinates.length === 0) return []
+    const x0 = coordinates[0].x
+    const stepX = coordinates.length > 1 ? coordinates[1].x - x0 : 0
+    if (Math.abs(stepX) < 1e-3) {
+      return [
+        {
+          type: 'line',
+          attrs: {
+            coordinates: [
+              { x: x0, y: 0 },
+              { x: x0, y: bounding.height },
+            ],
+          },
+        },
+      ]
+    }
+    const lines: LineAttrs[] = []
+    const texts: TextAttrs[] = []
+    for (const fib of FIB_TIME_NUMBERS) {
+      const x = x0 + fib * stepX
+      if (x < -40 || x > bounding.width + 40) continue
+      lines.push({
+        coordinates: [
+          { x, y: 0 },
+          { x, y: bounding.height },
+        ],
+      })
+      texts.push({
+        x: x + 3,
+        y: 14,
+        text: `${fib}`,
+        baseline: 'top',
+      })
+    }
+    return [
+      { type: 'line', attrs: lines, styles: { style: 'dashed' } },
+      { type: 'text', ignoreEvent: true, attrs: texts },
+    ]
+  },
+}
+
 export const PRO_UPGRADED_OVERLAYS: OverlayTemplate[] = [
   arrow,
   circle,
@@ -548,4 +702,8 @@ export const PRO_UPGRADED_OVERLAYS: OverlayTemplate[] = [
   anyWaves,
   abcd,
   xabcd,
+  pathOverlay,
+  highlighter,
+  andrewsPitchfork,
+  fibTimeZones,
 ]

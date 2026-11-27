@@ -564,6 +564,63 @@ pub async fn resolve_symbol(
     state: State<'_, AppState>,
     ticker: String,
 ) -> DesktopResult<ResolvedSymbolResponse> {
+    // Wave 5: True Blind Replay Drill symbol alias resolution (zero spoiler!)
+    {
+        let rg = state.replay.lock().await;
+        if let Some(rt) = rg.as_ref()
+            && rt.controller.is_active()
+            && let Some(ref bd) = rt.blind_drill
+            && bd.enabled
+            && (bd.alias_code == ticker || (!bd.revealed && rt.ticker.eq_ignore_ascii_case(&ticker)))
+        {
+            let idx = rt
+                .controller
+                .base_cursor_index
+                .min(rt.base_bars.len().saturating_sub(1));
+            let last = rt.base_bars.get(idx);
+            let prev = idx.checked_sub(1).and_then(|i| rt.base_bars.get(i));
+            let (last_price, prev_close, change, change_percent, volume) = match (prev, last) {
+                (Some(p), Some(l)) => {
+                    let chg = l.close - p.close;
+                    let pct = if p.close.abs() > 1e-9 {
+                        (chg / p.close) * 100.0
+                    } else {
+                        0.0
+                    };
+                    (Some(l.close), Some(p.close), Some(chg), Some(pct), Some(l.volume))
+                }
+                (None, Some(l)) => (Some(l.close), Some(l.open), Some(l.close - l.open), Some(0.0), Some(l.volume)),
+                _ => (None, None, None, None, None),
+            };
+            let display = if bd.revealed {
+                rt.ticker.clone()
+            } else {
+                bd.alias_code.clone()
+            };
+            let mut blind_sym = synthesize_fallback_symbol(&SymbolKey {
+                exchange: "BLIND".to_owned(),
+                symbol: display.clone(),
+            });
+            blind_sym.ticker = display.clone();
+            blind_sym.description = if bd.revealed {
+                format!("Blind Drill — {} (Cắt {})", bd.real_ticker, bd.cut_date)
+            } else {
+                "Chế độ Luyện Mù — Giá đã chuẩn hóa về 100.00".to_owned()
+            };
+            blind_sym.currency = "IDX".to_owned();
+            blind_sym.timezone = "Asia/Ho_Chi_Minh".to_owned();
+            return Ok(ResolvedSymbolResponse {
+                symbol_info: blind_sym,
+                last_price,
+                prev_close,
+                change,
+                change_percent,
+                volume,
+                vn_band: None,
+            });
+        }
+    }
+
     if is_synthetic_expression(&ticker) {
         let parsed = parse_expression(&ticker)?;
         let resolved = synthesize_expression_symbol(&parsed);
@@ -668,6 +725,64 @@ pub async fn get_bars(
         .transpose()?
         .unwrap_or(Adjustment::Splits);
     let page_limit = limit.unwrap_or(300).clamp(1, 5_000);
+
+    // Wave 5: True Blind Replay Drill bar serving BEFORE `SymbolKey::parse` (handles `"MÃ ẨN #XXXX"`!)
+    {
+        let mut replay_guard = state.replay.lock().await;
+        if let Some(rt) = replay_guard.as_mut()
+            && rt.controller.is_active()
+            && let Some(ref bd) = rt.blind_drill
+            && bd.enabled
+            && (bd.alias_code == ticker || rt.ticker.eq_ignore_ascii_case(&ticker))
+        {
+            let visible =
+                crate::commands::replay::materialize_replay_bars(rt, iv, &state.market_store);
+            let mode_lower = mode.to_ascii_lowercase();
+            let bars: Vec<OhlcvBar> = match mode_lower.as_str() {
+                "forward" => {
+                    let before = timestamp.unwrap_or(i64::MAX);
+                    let older: Vec<OhlcvBar> = visible
+                        .iter()
+                        .copied()
+                        .filter(|b| b.timestamp < before)
+                        .collect();
+                    let start = older.len().saturating_sub(page_limit);
+                    older[start..].to_vec()
+                }
+                "backward" => Vec::new(),
+                _ => {
+                    let start = visible.len().saturating_sub(page_limit);
+                    visible[start..].to_vec()
+                }
+            };
+            let has_older = bars
+                .first()
+                .and_then(|first| visible.first().map(|v| first.timestamp > v.timestamp))
+                .unwrap_or(false);
+            let display = if bd.revealed {
+                rt.ticker.clone()
+            } else {
+                bd.alias_code.clone()
+            };
+            let mut blind_sym = synthesize_fallback_symbol(&SymbolKey {
+                exchange: "BLIND".to_owned(),
+                symbol: display.clone(),
+            });
+            blind_sym.ticker = display.clone();
+            blind_sym.description = "Blind Drill (Normalized 100.00)".to_owned();
+            blind_sym.currency = "IDX".to_owned();
+            blind_sym.timezone = "Asia/Ho_Chi_Minh".to_owned();
+            return Ok(BarsPageResponse {
+                bars,
+                has_older,
+                has_newer: false,
+                source: DataSourceOrigin::CacheHit,
+                symbol_info: Some(blind_sym),
+                vn_band: None,
+                replay_active: true,
+            });
+        }
+    }
 
     // Synthetic arithmetic ratio/spread expressions (`HOSE:SSI / HOSE:VNINDEX`, `HNX:VN30F1! - HOSE:VN30`, etc.)
     if is_synthetic_expression(&ticker) {

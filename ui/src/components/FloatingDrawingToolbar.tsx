@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { BellPlus, Calculator, Copy, GripVertical, Lock, Trash2, Unlock } from 'lucide-react'
+import { BellPlus, Calculator, Copy, GripVertical, Lock, Trash2, Type, Unlock } from 'lucide-react'
 
 export type DrawingLineStyleKind = 'solid' | 'dashed' | 'dotted'
 
@@ -10,6 +10,7 @@ export interface SelectedDrawingState {
   size: number
   lineStyle: DrawingLineStyleKind
   lock: boolean
+  text?: string
 }
 
 interface FloatingDrawingToolbarProps {
@@ -19,6 +20,7 @@ interface FloatingDrawingToolbarProps {
   onChangeSize: (size: number) => void
   onChangeLineStyle: (style: DrawingLineStyleKind) => void
   onToggleLock: () => void
+  onChangeText?: (text: string) => void
   onCreateAlert?: () => void
   onOpenTradePlanner?: () => void
   onClone: () => void
@@ -43,6 +45,7 @@ export const FloatingDrawingToolbar: React.FC<FloatingDrawingToolbarProps> = ({
   onChangeSize,
   onChangeLineStyle,
   onToggleLock,
+  onChangeText,
   onCreateAlert,
   onOpenTradePlanner,
   onClone,
@@ -52,6 +55,13 @@ export const FloatingDrawingToolbar: React.FC<FloatingDrawingToolbarProps> = ({
   const [pos, setPos] = useState<{ x: number; y: number }>({ x: 260, y: 360 })
   const hasUserDraggedRef = useRef(false)
   const [colorMenuOpen, setColorMenuOpen] = useState(false)
+  const [textEditOpen, setTextEditOpen] = useState(false)
+  const [textDraft, setTextDraft] = useState(selected.text ?? '')
+
+  useEffect(() => {
+    setTextEditOpen(false)
+    setTextDraft(selected.text ?? '')
+  }, [selected.id, selected.text])
   const dragRef = useRef<{ active: boolean; offsetX: number; offsetY: number }>({
     active: false,
     offsetX: 0,
@@ -311,6 +321,59 @@ export const FloatingDrawingToolbar: React.FC<FloatingDrawingToolbarProps> = ({
       >
         {selected.lock ? <Lock aria-hidden="true" className="w-3.5 h-3.5" /> : <Unlock aria-hidden="true" className="w-3.5 h-3.5" />}
       </button>
+
+      {/* Edit Callout / Annotation Text (Wave 5) */}
+      {onChangeText && ['simpleAnnotation', 'simpleTag'].includes(selected.name) && (
+        <div className="relative">
+          <button
+            type="button"
+            data-tb-item="true"
+            tabIndex={hasNativeFocusGroup ? undefined : -1}
+            aria-label="Sửa nội dung ghi chú"
+            data-active={textEditOpen}
+            onClick={() => setTextEditOpen((v) => !v)}
+            className="tv-btn h-6 px-1.5 text-[10.5px]"
+            title="Sửa văn bản ghi chú (Callout Text)"
+          >
+            <Type aria-hidden="true" className="w-3.5 h-3.5" />
+            <span>Sửa chữ</span>
+          </button>
+          {textEditOpen && (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault()
+                onChangeText(textDraft.trim() || 'Ghi chú')
+                setTextEditOpen(false)
+              }}
+              className="absolute left-0 bottom-8 z-40 p-2 rounded-md shadow-2xl flex items-center gap-1 w-60"
+              style={{
+                backgroundColor: 'var(--tv-bg-elevated)',
+                border: '1px solid var(--tv-border)',
+              }}
+            >
+              <input
+                type="text"
+                autoFocus
+                value={textDraft}
+                onChange={(e) => setTextDraft(e.target.value)}
+                placeholder="Nhập nội dung ghi chú..."
+                className="flex-1 px-2 py-1 rounded text-[11px] outline-none"
+                style={{
+                  backgroundColor: 'var(--tv-bg-input)',
+                  border: '1px solid var(--tv-border)',
+                  color: 'var(--tv-text-primary)',
+                }}
+              />
+              <button
+                type="submit"
+                className="px-2 py-1 rounded text-[11px] font-semibold bg-[#2962FF] text-white border-0 cursor-pointer"
+              >
+                Lưu
+              </button>
+            </form>
+          )}
+        </div>
+      )}
 
       {/* Attach Alert to Drawing Line (v2.2) */}
       {onCreateAlert &&

@@ -13,14 +13,15 @@ use tauri::State;
 
 use crate::commands::broker::{
     BrokerStateSnapshot, build_broker_snapshot, reset_replay_broker_at,
-    restore_replay_broker_from_json, snapshot_replay_broker_json,
+    reset_replay_broker_for_blind_drill, restore_replay_broker_from_json,
+    snapshot_replay_broker_json,
 };
 use crate::commands::market::{
     VnBandLevels, compute_vn_band_from_bars, synthesize_fallback_symbol,
 };
 use crate::commands::workspace::evaluate_replay_bar_alerts;
 use crate::error::{DesktopError, DesktopResult};
-use crate::state::{AppState, ReplayRuntime};
+use crate::state::{AppState, BlindDrillMeta, ReplayRuntime};
 use crate::workspace_db::{PriceAlertRecord, SavedReplaySessionRecord};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +52,46 @@ pub struct ReplaySnapshotResponse {
     /// Armed price alerts triggered during this replay step (`BUG-017`).
     pub triggered_alerts: Vec<PriceAlertRecord>,
     pub broker: Option<BrokerStateSnapshot>,
+    /// Wave 5 True Blind Drill metadata (`real_ticker` & `cut_date` masked while `!revealed`).
+    #[serde(default)]
+    pub blind_drill: Option<BlindDrillMeta>,
+}
+
+fn display_ticker_for_runtime(rt: &ReplayRuntime) -> String {
+    if let Some(ref bd) = rt.blind_drill
+        && bd.enabled
+        && !bd.revealed
+    {
+        return bd.alias_code.clone();
+    }
+    rt.ticker.clone()
+}
+
+fn masked_blind_drill(rt: &ReplayRuntime) -> Option<BlindDrillMeta> {
+    rt.blind_drill.as_ref().map(BlindDrillMeta::masked_for_ui)
+}
+
+fn splitmix64_next(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+fn scale_ohlcv_bars(bars: &[OhlcvBar], scale: f64) -> Vec<OhlcvBar> {
+    let round2 = |v: f64| (v * scale * 100.0).round() / 100.0;
+    bars.iter()
+        .map(|b| OhlcvBar {
+            timestamp: b.timestamp,
+            open: round2(b.open),
+            high: round2(b.high),
+            low: round2(b.low),
+            close: round2(b.close),
+            volume: b.volume,
+            turnover: b.turnover * scale,
+        })
+        .collect()
 }
 
 fn map_speed(mult: f64) -> ReplaySpeed {
@@ -362,6 +403,7 @@ pub async fn replay_start(
             base_candles: base_candles.clone(),
             controller,
             speed_multiplier: 1.0,
+            blind_drill: None,
         });
     }
 
@@ -394,7 +436,186 @@ pub async fn replay_start(
         vn_band,
         triggered_alerts: Vec::new(),
         broker: Some(broker_snapshot),
+        blind_drill: None,
     })
+}
+
+/// Wave 5: True Blind Replay Drill — picks a random historical symbol from `QMV60` (or local DB),
+/// randomizes a historical cut date with >= 100 bars behind and >= 45 bars ahead, normalizes all
+/// OHLC prices so the cut bar closes at `100.00`, and masks symbol identity until revealed!
+#[tauri::command]
+pub async fn replay_start_random_blind_drill(
+    state: State<'_, AppState>,
+    interval: Option<String>,
+    seed: Option<u64>,
+) -> DesktopResult<ReplaySnapshotResponse> {
+    let chosen_iv: Interval = interval
+        .as_deref()
+        .unwrap_or("1D")
+        .parse()
+        .unwrap_or(Interval::D1);
+
+    let store = state.market_store.clone();
+    let mut rng_state = seed.unwrap_or_else(|| {
+        Utc::now()
+            .timestamp_nanos_opt()
+            .map(|n| n as u64)
+            .unwrap_or(0x554D_495F_5633_0005)
+    });
+    if rng_state == 0 {
+        rng_state = 0x554D_495F_5633_0005;
+    }
+
+    let (real_ticker, raw_bars) = tokio::task::spawn_blocking(move || -> DesktopResult<(String, Vec<OhlcvBar>)> {
+        let mut candidates: Vec<(String, Vec<OhlcvBar>)> = Vec::new();
+        for sym_code in sumi_core::scanner::qmv_universe::QMV60_SYMBOLS {
+            let full = match sym_code {
+                "IDC" | "MBS" | "PVS" | "SHS" => format!("HNX:{sym_code}"),
+                "BSR" | "DDV" | "STH" | "VGI" => format!("UPCOM:{sym_code}"),
+                _ => format!("HOSE:{sym_code}"),
+            };
+            if let Ok(key) = SymbolKey::parse(&full) {
+                let series = SeriesKey::new(&key, chosen_iv, Adjustment::Splits);
+                if let Ok(page) = store.query_bars(&series, BarQueryMode::Init, 2_500)
+                    && page.bars.len() >= 180
+                {
+                    candidates.push((key.ticker(), page.bars));
+                }
+            }
+        }
+        // Fallback: any cached symbols with >= 150 bars (e.g. Clean-Slate DB with custom stocks)
+        if candidates.is_empty()
+            && let Ok(syms) = store.search_local_symbols("", None, 120)
+        {
+            for sym in syms {
+                if let Ok(key) = SymbolKey::parse(&sym.ticker) {
+                    let series = SeriesKey::new(&key, chosen_iv, Adjustment::Splits);
+                    if let Ok(page) = store.query_bars(&series, BarQueryMode::Init, 2_500)
+                        && page.bars.len() >= 150
+                    {
+                        candidates.push((key.ticker(), page.bars));
+                    }
+                }
+            }
+        }
+        if candidates.is_empty() {
+            return Err(DesktopError::Validation(
+                "Cần tối thiểu 1 mã có >= 150 cây nến trong kho dữ liệu để luyện Blind Drill ngẫu nhiên".to_owned(),
+            ));
+        }
+        let pick_idx = (splitmix64_next(&mut rng_state) as usize) % candidates.len();
+        Ok(candidates.swap_remove(pick_idx))
+    })
+    .await
+    .map_err(|e| DesktopError::Internal(e.to_string()))??;
+
+    let min_cut = 100.min(raw_bars.len().saturating_sub(50));
+    let max_cut = raw_bars.len().saturating_sub(45).max(min_cut + 1);
+    let cut_span = max_cut.saturating_sub(min_cut).max(1);
+    let cut_idx = min_cut + ((splitmix64_next(&mut rng_state) as usize) % cut_span);
+
+    let raw_cut_bar = raw_bars[cut_idx];
+    let price_scale = if raw_cut_bar.close.is_finite() && raw_cut_bar.close > 0.0 {
+        100.0 / raw_cut_bar.close
+    } else {
+        1.0
+    };
+    let scaled_bars = scale_ohlcv_bars(&raw_bars, price_scale);
+    let base_candles: Vec<Candle> = scaled_bars
+        .iter()
+        .map(|b| b.to_core_candle(chosen_iv))
+        .collect();
+    let alias_num = 1000 + (splitmix64_next(&mut rng_state) % 9000);
+    let alias_code = format!("MÃ ẨN #{alias_num:04}");
+    let cut_date = Utc
+        .timestamp_millis_opt(raw_cut_bar.timestamp)
+        .single()
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_default();
+
+    let drill_meta = BlindDrillMeta {
+        enabled: true,
+        alias_code: alias_code.clone(),
+        price_scale,
+        revealed: false,
+        real_ticker: real_ticker.clone(),
+        cut_date,
+    };
+
+    let mut controller = ReplayController::new();
+    controller.start_at_base_index(&base_candles, cut_idx);
+
+    let visible_bars = scaled_bars[..=cut_idx].to_vec();
+    let cutoff_bar = scaled_bars.get(cut_idx).copied();
+    let prev_cutoff_close = cut_idx
+        .checked_sub(1)
+        .and_then(|i| scaled_bars.get(i))
+        .map(|b| b.close);
+    let cutoff_ms = cutoff_bar.map(|b| b.timestamp);
+    let total_bars = scaled_bars.len();
+    let status = controller.status;
+
+    {
+        let mut rg = state.replay.lock().await;
+        *rg = Some(ReplayRuntime {
+            ticker: real_ticker,
+            interval: chosen_iv,
+            tracked_intervals: vec![chosen_iv],
+            base_bars: scaled_bars.clone(),
+            base_candles: base_candles.clone(),
+            controller,
+            speed_multiplier: 1.0,
+            blind_drill: Some(drill_meta.clone()),
+        });
+    }
+
+    let broker_snapshot = reset_replay_broker_for_blind_drill(
+        &state,
+        &alias_code,
+        chosen_iv,
+        scaled_bars,
+        base_candles,
+        cut_idx,
+    )
+    .await?;
+
+    Ok(ReplaySnapshotResponse {
+        active: true,
+        status,
+        ticker: alias_code,
+        interval: chosen_iv.as_str().to_owned(),
+        tracked_intervals: vec![chosen_iv.as_str().to_owned()],
+        cursor_index: cut_idx,
+        total_bars,
+        cutoff_timestamp_ms: cutoff_ms,
+        speed_multiplier: 1.0,
+        visible_bars,
+        stepped_bar: None,
+        stepped_bars_by_interval: HashMap::new(),
+        cutoff_bar,
+        prev_cutoff_close,
+        vn_band: None,
+        triggered_alerts: Vec::new(),
+        broker: Some(broker_snapshot),
+        blind_drill: Some(drill_meta.masked_for_ui()),
+    })
+}
+
+/// Reveals the hidden real ticker & historical cut date for an active Blind Replay Drill!
+#[tauri::command]
+pub async fn replay_reveal_blind_drill(
+    state: State<'_, AppState>,
+) -> DesktopResult<ReplaySnapshotResponse> {
+    {
+        let mut rg = state.replay.lock().await;
+        let rt = rg.as_mut().ok_or_else(|| {
+            DesktopError::NotFound("Phiên Bar Replay chưa được khởi động".to_owned())
+        })?;
+        if let Some(bd) = rt.blind_drill.as_mut() {
+            bd.revealed = true;
+        }
+    }
+    replay_get_state(state).await
 }
 
 #[tauri::command]
@@ -408,6 +629,7 @@ pub async fn replay_step(
 
     let (
         ticker,
+        display_ticker,
         iv,
         tracked_strings,
         status,
@@ -423,6 +645,7 @@ pub async fn replay_step(
         vn_band,
         base_bars_clone,
         base_candles,
+        blind_drill_meta,
     ) = {
         let mut rg = state.replay.lock().await;
         let rt = rg.as_mut().ok_or_else(|| {
@@ -462,7 +685,15 @@ pub async fn replay_step(
             .checked_sub(1)
             .and_then(|i| rt.base_bars.get(i))
             .map(|b| b.close);
-        let band = compute_replay_vn_band(&state, &rt.ticker, &rt.base_bars[..=new_idx], rt.interval);
+        let is_blind_masked = rt
+            .blind_drill
+            .as_ref()
+            .is_some_and(|b| b.enabled && !b.revealed);
+        let band = if is_blind_masked {
+            None
+        } else {
+            compute_replay_vn_band(&state, &rt.ticker, &rt.base_bars[..=new_idx], rt.interval)
+        };
         let tracked_strs: Vec<String> = rt
             .tracked_intervals
             .iter()
@@ -470,6 +701,7 @@ pub async fn replay_step(
             .collect();
         (
             rt.ticker.clone(),
+            display_ticker_for_runtime(rt),
             rt.interval,
             tracked_strs,
             rt.controller.status,
@@ -485,6 +717,7 @@ pub async fn replay_step(
             band,
             rt.base_bars.clone(),
             rt.base_candles.clone(),
+            masked_blind_drill(rt),
         )
     };
 
@@ -529,7 +762,7 @@ pub async fn replay_step(
     Ok(ReplaySnapshotResponse {
         active: true,
         status,
-        ticker,
+        ticker: display_ticker,
         interval: iv.as_str().to_owned(),
         tracked_intervals: tracked_strings,
         cursor_index: new_idx,
@@ -544,6 +777,7 @@ pub async fn replay_step(
         vn_band,
         triggered_alerts,
         broker: Some(broker_snapshot),
+        blind_drill: blind_drill_meta,
     })
 }
 
@@ -553,7 +787,7 @@ pub async fn replay_jump(
     target_timestamp_ms: i64,
 ) -> DesktopResult<ReplaySnapshotResponse> {
     let (
-        ticker,
+        display_ticker,
         iv,
         tracked_strings,
         status,
@@ -566,6 +800,7 @@ pub async fn replay_jump(
         vn_band,
         base_bars_clone,
         base_candles,
+        blind_drill_meta,
     ) = {
         let mut rg = state.replay.lock().await;
         let rt = rg.as_mut().ok_or_else(|| {
@@ -587,14 +822,22 @@ pub async fn replay_jump(
             .checked_sub(1)
             .and_then(|i| rt.base_bars.get(i))
             .map(|b| b.close);
-        let band = compute_replay_vn_band(&state, &rt.ticker, &vis, rt.interval);
+        let is_blind_masked = rt
+            .blind_drill
+            .as_ref()
+            .is_some_and(|b| b.enabled && !b.revealed);
+        let band = if is_blind_masked {
+            None
+        } else {
+            compute_replay_vn_band(&state, &rt.ticker, &vis, rt.interval)
+        };
         let tracked_strs: Vec<String> = rt
             .tracked_intervals
             .iter()
             .map(|i| i.as_str().to_owned())
             .collect();
         (
-            rt.ticker.clone(),
+            display_ticker_for_runtime(rt),
             rt.interval,
             tracked_strs,
             rt.controller.status,
@@ -607,6 +850,7 @@ pub async fn replay_jump(
             band,
             rt.base_bars.clone(),
             rt.base_candles.clone(),
+            masked_blind_drill(rt),
         )
     };
 
@@ -623,7 +867,7 @@ pub async fn replay_jump(
     Ok(ReplaySnapshotResponse {
         active: true,
         status,
-        ticker,
+        ticker: display_ticker,
         interval: iv.as_str().to_owned(),
         tracked_intervals: tracked_strings,
         cursor_index: new_idx,
@@ -638,6 +882,7 @@ pub async fn replay_jump(
         vn_band,
         triggered_alerts: Vec::new(),
         broker: Some(broker_snapshot),
+        blind_drill: blind_drill_meta,
     })
 }
 
@@ -689,6 +934,7 @@ pub async fn replay_get_state(state: State<'_, AppState>) -> DesktopResult<Repla
             vn_band: None,
             triggered_alerts: Vec::new(),
             broker: None,
+            blind_drill: None,
         });
     };
     let idx = rt
@@ -701,7 +947,15 @@ pub async fn replay_get_state(state: State<'_, AppState>) -> DesktopResult<Repla
         .and_then(|i| rt.base_bars.get(i))
         .map(|b| b.close);
     let visible = rt.base_bars[..=idx].to_vec();
-    let band = compute_replay_vn_band(&state, &rt.ticker, &visible, rt.interval);
+    let is_blind_masked = rt
+        .blind_drill
+        .as_ref()
+        .is_some_and(|b| b.enabled && !b.revealed);
+    let band = if is_blind_masked {
+        None
+    } else {
+        compute_replay_vn_band(&state, &rt.ticker, &visible, rt.interval)
+    };
     let tracked_strings = rt
         .tracked_intervals
         .iter()
@@ -710,7 +964,7 @@ pub async fn replay_get_state(state: State<'_, AppState>) -> DesktopResult<Repla
     Ok(ReplaySnapshotResponse {
         active: rt.controller.is_active(),
         status: rt.controller.status,
-        ticker: rt.ticker.clone(),
+        ticker: display_ticker_for_runtime(rt),
         interval: rt.interval.as_str().to_owned(),
         tracked_intervals: tracked_strings,
         cursor_index: idx,
@@ -725,6 +979,7 @@ pub async fn replay_get_state(state: State<'_, AppState>) -> DesktopResult<Repla
         vn_band: band,
         triggered_alerts: Vec::new(),
         broker: None,
+        blind_drill: masked_blind_drill(rt),
     })
 }
 
@@ -883,6 +1138,7 @@ pub async fn resume_replay_session(
             base_candles: base_candles.clone(),
             controller,
             speed_multiplier: clamped_speed,
+            blind_drill: None,
         });
     }
 
@@ -915,6 +1171,7 @@ pub async fn resume_replay_session(
         vn_band,
         triggered_alerts: Vec::new(),
         broker: broker_snapshot,
+        blind_drill: None,
     })
 }
 
@@ -987,6 +1244,7 @@ mod tests {
             base_candles,
             controller: ctrl,
             speed_multiplier: 1.0,
+            blind_drill: None,
         };
 
         let h4 = materialize_replay_bars(&rt, Interval::H4, &store);
@@ -997,5 +1255,31 @@ mod tests {
             h4[1].high
         );
         assert!((h4[1].volume - 200.0).abs() < 1e-9, "partial 4h bar must sum only bars 4..=5 volume");
+    }
+
+    #[test]
+    fn blind_drill_normalization_scales_cut_bar_to_100_and_masks_metadata() {
+        let base = 1_700_000_000_000_i64;
+        let bars = vec![
+            OhlcvBar::new(base, 120_000.0, 125_000.0, 118_000.0, 122_000.0, 500_000.0),
+            OhlcvBar::new(base + 86_400_000, 122_000.0, 130_000.0, 121_000.0, 125_000.0, 600_000.0),
+        ];
+        let scale = 100.0 / bars[1].close;
+        let scaled = scale_ohlcv_bars(&bars, scale);
+        assert!((scaled[1].close - 100.0).abs() < 1e-6);
+        assert!((scaled[0].close - 97.6).abs() < 1e-6);
+
+        let meta = BlindDrillMeta {
+            enabled: true,
+            alias_code: "MÃ ẨN #4242".to_owned(),
+            price_scale: scale,
+            revealed: false,
+            real_ticker: "HOSE:FPT".to_owned(),
+            cut_date: "2024-03-15".to_owned(),
+        };
+        let masked = meta.masked_for_ui();
+        assert_eq!(masked.alias_code, "MÃ ẨN #4242");
+        assert!(masked.real_ticker.is_empty());
+        assert!(masked.cut_date.is_empty());
     }
 }

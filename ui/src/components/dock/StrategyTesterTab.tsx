@@ -22,10 +22,12 @@ import { useWorkspaceStore } from '../../store/workspaceStore'
 import type {
   CustomClauseInput,
   MonteCarloResponse,
+  MonthlyReturnCellDto,
   ParameterSweepResponseDto,
   PortfolioBacktestResponse,
   PresetsBattleResponseDto,
   QuantileEnvelope5,
+  RuleGroupInput,
   SignalCatalogItemDto,
   StrategyBacktestInput,
   StrategyBacktestResponse,
@@ -165,6 +167,101 @@ function EquityAndDrawdownChart({ points }: { points: StrategyEquityPointDto[] }
   )
 }
 
+function MonthlyReturnsHeatmap({ cells }: { cells: MonthlyReturnCellDto[] }) {
+  if (!cells || cells.length === 0) return null
+  const years = Array.from(new Set(cells.map((c) => c.year))).sort((a, b) => b - a)
+  const cellMap = new Map<string, MonthlyReturnCellDto>()
+  for (const c of cells) {
+    cellMap.set(`${c.year}-${c.month}`, c)
+  }
+  const bgFor = (ret: number) => {
+    if (ret > 0.01) {
+      const alpha = Math.min(0.65, 0.14 + Math.abs(ret) * 0.03)
+      return `rgba(8, 153, 129, ${alpha.toFixed(2)})`
+    }
+    if (ret < -0.01) {
+      const alpha = Math.min(0.65, 0.14 + Math.abs(ret) * 0.03)
+      return `rgba(242, 54, 69, ${alpha.toFixed(2)})`
+    }
+    return 'var(--tv-bg-panel)'
+  }
+
+  return (
+    <div
+      className="rounded p-2 space-y-1.5"
+      style={{ backgroundColor: 'var(--tv-bg-elevated)', border: '1px solid var(--tv-border)' }}
+    >
+      <div className="flex items-center justify-between text-[10.5px]" style={{ color: 'var(--tv-text-secondary)' }}>
+        <span className="font-semibold">Ma trận Hiệu suất Theo Tháng × Năm (Monthly Heatmap %)</span>
+        <span>{years.length} năm</span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-[10px] tabular-nums border-collapse">
+          <thead>
+            <tr style={{ color: 'var(--tv-text-secondary)' }}>
+              <th className="text-left px-1 py-0.5 font-semibold">Năm</th>
+              {Array.from({ length: 12 }, (_, i) => (
+                <th key={i + 1} className="text-center px-1 py-0.5 font-semibold">
+                  T{i + 1}
+                </th>
+              ))}
+              <th className="text-right px-1.5 py-0.5 font-semibold">Cả năm</th>
+            </tr>
+          </thead>
+          <tbody>
+            {years.map((yr) => {
+              let compounded = 1.0
+              for (let m = 1; m <= 12; m++) {
+                const c = cellMap.get(`${yr}-${m}`)
+                if (c) compounded *= 1 + c.returnPct / 100
+              }
+              const yrPct = (compounded - 1) * 100
+              return (
+                <tr key={yr}>
+                  <td className="font-semibold px-1 py-0.5">{yr}</td>
+                  {Array.from({ length: 12 }, (_, idx) => {
+                    const m = idx + 1
+                    const c = cellMap.get(`${yr}-${m}`)
+                    if (!c) {
+                      return (
+                        <td key={m} className="text-center px-0.5 py-0.5" style={{ color: 'var(--tv-text-muted)' }}>
+                          ·
+                        </td>
+                      )
+                    }
+                    return (
+                      <td key={m} className="p-0.5">
+                        <div
+                          className="rounded px-1 py-0.5 text-center font-medium"
+                          style={{
+                            backgroundColor: bgFor(c.returnPct),
+                            color: 'var(--tv-text-primary)',
+                          }}
+                          title={`Tháng ${m}/${yr}: ${c.returnPct >= 0 ? '+' : ''}${c.returnPct.toFixed(2)}% (${c.tradesCount} lệnh đóng)`}
+                        >
+                          {c.returnPct >= 0 ? '+' : ''}
+                          {c.returnPct.toFixed(1)}
+                        </div>
+                      </td>
+                    )
+                  })}
+                  <td
+                    className="text-right px-1.5 py-0.5 font-bold"
+                    style={{ color: yrPct >= 0 ? 'var(--tv-up)' : 'var(--tv-down)' }}
+                  >
+                    {yrPct >= 0 ? '+' : ''}
+                    {yrPct.toFixed(1)}%
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 export const StrategyTesterTab: React.FC = () => {
   const panes = useWorkspaceStore((s) => s.panes)
   const activeSlotId = useWorkspaceStore((s) => s.activeSlotId)
@@ -198,19 +295,45 @@ export const StrategyTesterTab: React.FC = () => {
   const [useSupportStop, setUseSupportStop] = useState(true)
   const [qmvWaveTrailing23, setQmvWaveTrailing23] = useState(true)
 
-  // Custom QMV Signal Rule Builder state
+  // Custom QMV Signal Rule Builder state — Wave 5 Full 2-tier AND/OR 4-Leg Engine
   const [customRuleName, setCustomRuleName] = useState('QMV Vượt Mây V7 + Dòng Tiền T+')
-  const [entryCombinator, setEntryCombinator] = useState<'and' | 'or'>('and')
-  const [entryClauses, setEntryClauses] = useState<CustomClauseInput[]>([
-    { catalogId: 'qmv.ichimoku_v7_bullish', boolExpected: true },
-    { catalogId: 'qmv.flow_turn_up_t_plus', boolExpected: true },
-  ])
-  const [exitClauseEnabled, setExitClauseEnabled] = useState(true)
-  const [exitClause, setExitClause] = useState<CustomClauseInput>({
-    catalogId: 'qmv.flow_turn_down_70_80',
-    boolExpected: true,
+  const [activeRuleLeg, setActiveRuleLeg] = useState<'long_entry' | 'long_exit' | 'short_entry' | 'short_exit'>('long_entry')
+  const [ruleLegs, setRuleLegs] = useState<
+    Record<'long_entry' | 'long_exit' | 'short_entry' | 'short_exit', { interOp: 'and' | 'or'; groups: RuleGroupInput[] }>
+  >({
+    long_entry: {
+      interOp: 'and',
+      groups: [
+        {
+          combinator: 'and',
+          clauses: [
+            { catalogId: 'qmv.ichimoku_v7_bullish', boolExpected: true },
+            { catalogId: 'qmv.flow_turn_up_t_plus', boolExpected: true },
+          ],
+        },
+      ],
+    },
+    long_exit: {
+      interOp: 'or',
+      groups: [
+        {
+          combinator: 'or',
+          clauses: [{ catalogId: 'qmv.flow_turn_down_70_80', boolExpected: true }],
+        },
+      ],
+    },
+    short_entry: { interOp: 'and', groups: [] },
+    short_exit: { interOp: 'or', groups: [] },
   })
   const [minHealthScore, setMinHealthScore] = useState('')
+
+  // Wave 5 — Strategy Tester 2.0 Risk & Bar Magnifier Controls
+  const [maxPyramiding, setMaxPyramiding] = useState('1')
+  const [scaleOutEnabled, setScaleOutEnabled] = useState(false)
+  const [tp1Pct, setTp1Pct] = useState('10')
+  const [scaleOutPct, setScaleOutPct] = useState('50')
+  const [trailingStopMode, setTrailingStopMode] = useState<'none' | 'atr' | 'ma20' | 'kijun18'>('none')
+  const [useBarMagnifier, setUseBarMagnifier] = useState(false)
 
   // Portfolio Multi-Symbol Backtest state (supports QMV Groups & Watchlists)
   const [portfolioTarget, setPortfolioTarget] = useState<string>('QMV:QMV30')
@@ -365,14 +488,27 @@ export const StrategyTesterTab: React.FC = () => {
       qmvUseVnindexGate: isQmvPreset ? qmvUseVnindexGate : false,
       supportStopLookback: isQmvPreset && useSupportStop ? supWin : null,
       qmvWaveTrailing23: isQmvPreset ? qmvWaveTrailing23 : false,
+      maxPyramiding: Math.max(1, Math.min(5, Number(maxPyramiding) || 1)),
+      scaleOutPct: scaleOutEnabled ? Math.max(10, Math.min(90, Number(scaleOutPct) || 50)) : null,
+      tp1Pct: scaleOutEnabled ? Math.max(0.5, Number(tp1Pct) || 10) : null,
+      trailingStopAtrMult: trailingStopMode === 'atr' ? 2.0 : null,
+      trailingMaPeriod: trailingStopMode === 'ma20' ? 20 : null,
+      trailingKijunPeriod: trailingStopMode === 'kijun18' ? 18 : null,
+      useBarMagnifier,
       customRules:
         preset === 'custom'
           ? {
-              name: customRuleName.trim() || 'Chiến lược QMV tự thiết kế',
-              entryCombinator,
-              entryClauses,
-              exitCombinator: 'or',
-              exitClauses: exitClauseEnabled ? [exitClause] : [],
+              name: customRuleName.trim() || 'Chiến lược QMV tự thiết kế (123 tín hiệu)',
+              entryCombinator: ruleLegs.long_entry.groups[0]?.combinator ?? 'and',
+              entryClauses: ruleLegs.long_entry.groups[0]?.clauses ?? [],
+              longEntryInterOp: ruleLegs.long_entry.interOp,
+              longEntryGroups: ruleLegs.long_entry.groups,
+              longExitInterOp: ruleLegs.long_exit.interOp,
+              longExitGroups: ruleLegs.long_exit.groups,
+              shortEntryInterOp: ruleLegs.short_entry.interOp,
+              shortEntryGroups: direction === 'long' ? [] : ruleLegs.short_entry.groups,
+              shortExitInterOp: ruleLegs.short_exit.interOp,
+              shortExitGroups: direction === 'long' ? [] : ruleLegs.short_exit.groups,
               minHealthScore: parsedMinHealth,
             }
           : null,
@@ -820,6 +956,102 @@ export const StrategyTesterTab: React.FC = () => {
         </button>
       </div>
 
+      {/* Row 1c: Wave 5 Strategy Tester 2.0 Risk Controls (Pyramiding / TP1 Scale-out / Trailing / Bar Magnifier) */}
+      <div
+        className="flex flex-wrap items-center gap-2.5 px-3 py-1 shrink-0 text-[10.5px] tabular-nums"
+        style={{ borderBottom: '1px solid var(--tv-border)', backgroundColor: 'var(--tv-bg-panel)', color: 'var(--tv-text-secondary)' }}
+      >
+        <label className="flex items-center gap-1" title="Chia lệnh mua thêm cùng chiều (tối đa 5 đợt, tuân thủ FIFO T+2 từng đợt)">
+          <span>Pyramiding:</span>
+          <select
+            aria-label="Số đợt Pyramiding"
+            value={maxPyramiding}
+            onChange={(e) => setMaxPyramiding(e.target.value)}
+            className="px-1.5 py-0.5 rounded text-[10.5px] outline-none"
+            style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+          >
+            <option value="1">1 lệnh (Tắt)</option>
+            <option value="2">2 đợt</option>
+            <option value="3">3 đợt</option>
+            <option value="4">4 đợt</option>
+            <option value="5">5 đợt</option>
+          </select>
+        </label>
+
+        <label className="inline-flex items-center gap-1 cursor-pointer select-none" title="Chốt lời một phần vị thế tại mục tiêu TP1 và giữ phần còn lại chạy tiếp">
+          <input
+            type="checkbox"
+            checked={scaleOutEnabled}
+            onChange={(e) => setScaleOutEnabled(e.target.checked)}
+            className="m-0"
+          />
+          <span>Chốt lời TP1:</span>
+        </label>
+        {scaleOutEnabled && (
+          <div className="flex items-center gap-1">
+            <input
+              type="number"
+              step="1"
+              min="1"
+              value={tp1Pct}
+              onChange={(e) => setTp1Pct(e.target.value)}
+              aria-label="Mục tiêu TP1 %"
+              className="w-11 px-1 py-0.5 rounded text-center no-spinner"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            />
+            <span>% chốt</span>
+            <input
+              type="number"
+              step="5"
+              min="10"
+              max="90"
+              value={scaleOutPct}
+              onChange={(e) => setScaleOutPct(e.target.value)}
+              aria-label="Tỷ lệ khối lượng chốt TP1 %"
+              className="w-11 px-1 py-0.5 rounded text-center no-spinner"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            />
+            <span>% KL</span>
+          </div>
+        )}
+
+        <label className="flex items-center gap-1" title="Chặn lãi tự động sau đóng nến (Zero-Lookahead Post-Close Trailing Stop)">
+          <span>Trailing:</span>
+          <select
+            aria-label="Chế độ Trailing Stop"
+            value={trailingStopMode}
+            onChange={(e) => setTrailingStopMode(e.target.value as 'none' | 'atr' | 'ma20' | 'kijun18')}
+            className="px-1.5 py-0.5 rounded text-[10.5px] outline-none"
+            style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+          >
+            <option value="none">Tắt</option>
+            <option value="atr">ATR(14) × 2.0</option>
+            <option value="ma20">MA20 Post-Close</option>
+            <option value="kijun18">Kijun(18) Post-Close</option>
+          </select>
+        </label>
+
+        <label
+          className="inline-flex items-center gap-1 cursor-pointer select-none ml-auto"
+          title="Bar Magnifier: dùng nến con 1H/15m trong bộ nhớ để xác định chính xác SL hay TP chạm trước trên cây nến ngày biên độ rộng"
+        >
+          <input
+            type="checkbox"
+            checked={useBarMagnifier}
+            onChange={(e) => setUseBarMagnifier(e.target.checked)}
+            className="m-0"
+          />
+          <span style={{ color: useBarMagnifier ? '#2962FF' : undefined, fontWeight: useBarMagnifier ? 600 : 400 }}>
+            Bar Magnifier (1H)
+          </span>
+          {btResult && (btResult.barMagnifierBars ?? 0) > 0 && (
+            <span className="px-1 rounded text-[9.5px] bg-[#2962FF]/20 text-[#2962FF]">
+              {btResult.barMagnifierBars} sub-bars
+            </span>
+          )}
+        </label>
+      </div>
+
       {/* Row 2: QMV Playbook Dynamic Parameters & Risk Guards */}
       {isQmvPreset && (
         <div
@@ -1045,180 +1277,304 @@ export const StrategyTesterTab: React.FC = () => {
         </div>
       )}
 
-      {/* Custom QMV Signal Rule Builder Panel */}
-      {preset === 'custom' && (
-        <div
-          className="flex flex-wrap items-center gap-2 px-3 py-1.5 shrink-0 text-[11px]"
-          style={{ borderBottom: '1px solid var(--tv-border)', backgroundColor: 'var(--tv-bg-panel)' }}
-        >
-          <span className="inline-flex items-center gap-1 font-semibold text-[#2962FF]">
-            <SlidersHorizontal className="w-3 h-3" />
-            <span>Quy tắc QMV:</span>
-          </span>
-          <input
-            aria-label="Tên chiến lược QMV tự thiết kế"
-            type="text"
-            value={customRuleName}
-            onChange={(e) => setCustomRuleName(e.target.value)}
-            className="w-40 px-1.5 py-0.5 rounded text-[11px] outline-none"
-            style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
-          />
-          <select
-            aria-label="Toán tử kết hợp điều kiện vào lệnh"
-            value={entryCombinator}
-            onChange={(e) => setEntryCombinator(e.target.value as 'and' | 'or')}
-            className="px-1.5 py-0.5 rounded text-[11px] font-semibold outline-none"
-            style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+      {/* Custom QMV Signal Rule Builder Panel — Wave 5 Full 2-Tier AND/OR 4-Leg Engine */}
+      {preset === 'custom' && (() => {
+        const legState = ruleLegs[activeRuleLeg]
+        const updateLeg = (next: { interOp: 'and' | 'or'; groups: RuleGroupInput[] }) => {
+          setRuleLegs((prev) => ({ ...prev, [activeRuleLeg]: next }))
+        }
+        const catalogList = signalCatalog.length > 0 ? signalCatalog : qmvCatalogSignals
+        return (
+          <div
+            className="flex flex-col gap-1.5 px-3 py-1.5 shrink-0 text-[11px]"
+            style={{ borderBottom: '1px solid var(--tv-border)', backgroundColor: 'var(--tv-bg-panel)' }}
           >
-            <option value="and">AND (Đồng thời)</option>
-            <option value="or">OR (Bất kỳ)</option>
-          </select>
-
-          {entryClauses.map((clause, idx) => {
-            const floatMode = isFloatSignal(clause.catalogId)
-            return (
-              <div
-                key={idx}
-                className="flex items-center gap-1 px-1.5 py-0.5 rounded"
-                style={{ backgroundColor: 'var(--tv-bg-elevated)', border: '1px solid var(--tv-border)' }}
-              >
-                <select
-                  aria-label={`Tín hiệu vào lệnh ${idx + 1}`}
-                  value={clause.catalogId}
-                  onChange={(e) => {
-                    const nextId = e.target.value
-                    const nextFloat = isFloatSignal(nextId)
-                    setEntryClauses((prev) =>
-                      prev.map((c, i) =>
-                        i === idx
-                          ? nextFloat
-                            ? { catalogId: nextId, op: '>=', threshold: 1.3 }
-                            : { catalogId: nextId, boolExpected: true }
-                          : c,
-                      ),
-                    )
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="inline-flex items-center gap-1 font-semibold text-[#2962FF]">
+                <SlidersHorizontal className="w-3 h-3" />
+                <span>Rule Engine (123 tín hiệu):</span>
+              </span>
+              <input
+                aria-label="Tên chiến lược QMV tự thiết kế"
+                type="text"
+                value={customRuleName}
+                onChange={(e) => setCustomRuleName(e.target.value)}
+                className="w-40 px-1.5 py-0.5 rounded text-[11px] outline-none"
+                style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+              />
+              {(
+                [
+                  { id: 'long_entry', label: 'Vào Long' },
+                  { id: 'long_exit', label: 'Thoát Long' },
+                  ...(direction !== 'long'
+                    ? [
+                        { id: 'short_entry' as const, label: 'Vào Short' },
+                        { id: 'short_exit' as const, label: 'Thoát Short' },
+                      ]
+                    : []),
+                ] as const
+              ).map((leg) => (
+                <button
+                  key={leg.id}
+                  type="button"
+                  onClick={() => setActiveRuleLeg(leg.id)}
+                  className="px-2 py-0.5 rounded text-[10.5px] font-semibold border cursor-pointer"
+                  style={{
+                    backgroundColor: activeRuleLeg === leg.id ? 'var(--tv-accent)' : 'var(--tv-bg-elevated)',
+                    borderColor: activeRuleLeg === leg.id ? 'var(--tv-accent)' : 'var(--tv-border)',
+                    color: activeRuleLeg === leg.id ? '#FFFFFF' : 'var(--tv-text-secondary)',
                   }}
-                  className="max-w-[190px] bg-transparent text-[11px] outline-none"
-                  style={{ color: 'var(--tv-text-primary)' }}
                 >
-                  {qmvCatalogSignals.length === 0 ? (
-                    <option value={clause.catalogId}>{clause.catalogId}</option>
-                  ) : (
-                    qmvCatalogSignals.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.labelVi} ({s.outputType})
-                      </option>
-                    ))
-                  )}
-                </select>
-                {floatMode ? (
-                  <>
+                  {leg.label} ({ruleLegs[leg.id].groups.reduce((s, g) => s + g.clauses.length, 0)})
+                </button>
+              ))}
+
+              {legState.groups.length > 1 && (
+                <label className="flex items-center gap-1 text-[10.5px]" style={{ color: 'var(--tv-text-secondary)' }}>
+                  <span>Liên nhóm:</span>
+                  <select
+                    value={legState.interOp}
+                    onChange={(e) => updateLeg({ ...legState, interOp: e.target.value as 'and' | 'or' })}
+                    className="px-1.5 py-0.5 rounded text-[10.5px] font-semibold outline-none"
+                    style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+                  >
+                    <option value="and">AND (Tất cả nhóm)</option>
+                    <option value="or">OR (Bất kỳ nhóm)</option>
+                  </select>
+                </label>
+              )}
+
+              {legState.groups.length < 4 && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    updateLeg({
+                      ...legState,
+                      groups: [
+                        ...legState.groups,
+                        { combinator: 'and', clauses: [{ catalogId: 'qmv.vsa_support_dry_up', boolExpected: true }] },
+                      ],
+                    })
+                  }
+                  className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10.5px] border cursor-pointer"
+                  style={{ backgroundColor: 'transparent', borderColor: 'var(--tv-border)', color: 'var(--tv-text-primary)' }}
+                >
+                  <Plus className="w-3 h-3" />
+                  <span>Nhóm ({legState.groups.length}/4)</span>
+                </button>
+              )}
+
+              <label className="flex items-center gap-1 ml-auto" style={{ color: 'var(--tv-text-secondary)' }}>
+                <span>Điểm SK ≥</span>
+                <input
+                  type="number"
+                  placeholder="Tắt"
+                  value={minHealthScore}
+                  onChange={(e) => setMinHealthScore(e.target.value)}
+                  className="w-12 px-1 py-0.5 rounded text-[10.5px] text-center tabular-nums no-spinner outline-none"
+                  style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+                />
+              </label>
+            </div>
+
+            {legState.groups.length === 0 ? (
+              <div className="text-[10.5px] italic" style={{ color: 'var(--tv-text-secondary)' }}>
+                Nhánh này chưa có nhóm điều kiện nào — nhấn "+ Nhóm" để thêm điều kiện tín hiệu.
+              </div>
+            ) : (
+              <div className="flex flex-col gap-1">
+                {legState.groups.map((grp, gIdx) => (
+                  <div
+                    key={gIdx}
+                    className="flex flex-wrap items-center gap-1.5 px-2 py-1 rounded"
+                    style={{ backgroundColor: 'var(--tv-bg-elevated)', border: '1px solid var(--tv-border)' }}
+                  >
+                    <span className="text-[10px] font-bold text-[#2962FF]">G{gIdx + 1}</span>
                     <select
-                      value={clause.op ?? '>='}
+                      aria-label={`Toán tử nhóm ${gIdx + 1}`}
+                      value={grp.combinator ?? 'and'}
                       onChange={(e) =>
-                        setEntryClauses((prev) =>
-                          prev.map((c, i) =>
-                            i === idx ? { ...c, op: e.target.value as CustomClauseInput['op'] } : c,
+                        updateLeg({
+                          ...legState,
+                          groups: legState.groups.map((g, i) =>
+                            i === gIdx ? { ...g, combinator: e.target.value as 'and' | 'or' } : g,
                           ),
-                        )
+                        })
                       }
-                      className="px-1 py-0.2 rounded text-[10.5px] outline-none"
+                      className="px-1 py-0.5 rounded text-[10px] font-semibold outline-none"
                       style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
                     >
-                      <option value=">">&gt;</option>
-                      <option value=">=">&ge;</option>
-                      <option value="<">&lt;</option>
-                      <option value="<=">&le;</option>
-                      <option value="cross_above">Cắt lên</option>
-                      <option value="cross_below">Cắt xuống</option>
+                      <option value="and">AND</option>
+                      <option value="or">OR</option>
                     </select>
-                    <input
-                      type="number"
-                      step="0.1"
-                      value={clause.threshold ?? 1.0}
-                      onChange={(e) =>
-                        setEntryClauses((prev) =>
-                          prev.map((c, i) => (i === idx ? { ...c, threshold: Number(e.target.value) } : c)),
-                        )
-                      }
-                      className="w-12 px-1 py-0.2 rounded text-[10.5px] text-center tabular-nums no-spinner outline-none"
-                      style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
-                    />
-                  </>
-                ) : (
-                  <span className="text-[10px] font-semibold text-[#089981]">Kích hoạt</span>
-                )}
-                {entryClauses.length > 1 && (
-                  <button
-                    type="button"
-                    onClick={() => setEntryClauses((prev) => prev.filter((_, i) => i !== idx))}
-                    className="p-0.5 rounded bg-transparent border-0 cursor-pointer"
-                    style={{ color: 'var(--tv-text-secondary)' }}
-                  >
-                    <Trash2 className="w-3 h-3" />
-                  </button>
-                )}
-              </div>
-            )
-          })}
 
-          {entryClauses.length < 4 && (
-            <button
-              type="button"
-              onClick={() =>
-                setEntryClauses((prev) => [...prev, { catalogId: 'qmv.vsa_support_dry_up', boolExpected: true }])
-              }
-              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10.5px] border cursor-pointer"
-              style={{ backgroundColor: 'transparent', borderColor: 'var(--tv-border)', color: 'var(--tv-text-primary)' }}
-            >
-              <Plus className="w-3 h-3" />
-              <span>Điều kiện</span>
-            </button>
-          )}
+                    {grp.clauses.map((clause, cIdx) => {
+                      const floatMode = isFloatSignal(clause.catalogId)
+                      return (
+                        <div
+                          key={cIdx}
+                          className="flex items-center gap-1 px-1.5 py-0.5 rounded"
+                          style={{ backgroundColor: 'var(--tv-bg-panel)', border: '1px solid var(--tv-border)' }}
+                        >
+                          <select
+                            aria-label={`Tín hiệu G${gIdx + 1}-${cIdx + 1}`}
+                            value={clause.catalogId}
+                            onChange={(e) => {
+                              const nextId = e.target.value
+                              const nextFloat = isFloatSignal(nextId)
+                              const nextClause: CustomClauseInput = nextFloat
+                                ? { catalogId: nextId, op: '>=', threshold: 1.3 }
+                                : { catalogId: nextId, boolExpected: true }
+                              updateLeg({
+                                ...legState,
+                                groups: legState.groups.map((g, gi) =>
+                                  gi === gIdx
+                                    ? { ...g, clauses: g.clauses.map((c, ci) => (ci === cIdx ? nextClause : c)) }
+                                    : g,
+                                ),
+                              })
+                            }}
+                            className="max-w-[185px] bg-transparent text-[10.5px] outline-none"
+                            style={{ color: 'var(--tv-text-primary)' }}
+                          >
+                            {catalogList.length === 0 ? (
+                              <option value={clause.catalogId}>{clause.catalogId}</option>
+                            ) : (
+                              catalogList.map((s) => (
+                                <option key={s.id} value={s.id}>
+                                  {s.labelVi} ({s.outputType})
+                                </option>
+                              ))
+                            )}
+                          </select>
+                          {floatMode ? (
+                            <>
+                              <select
+                                value={clause.op ?? '>='}
+                                onChange={(e) =>
+                                  updateLeg({
+                                    ...legState,
+                                    groups: legState.groups.map((g, gi) =>
+                                      gi === gIdx
+                                        ? {
+                                            ...g,
+                                            clauses: g.clauses.map((c, ci) =>
+                                              ci === cIdx ? { ...c, op: e.target.value as CustomClauseInput['op'] } : c,
+                                            ),
+                                          }
+                                        : g,
+                                    ),
+                                  })
+                                }
+                                className="px-1 py-0.2 rounded text-[10px] outline-none"
+                                style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+                              >
+                                <option value=">">&gt;</option>
+                                <option value=">=">&ge;</option>
+                                <option value="<">&lt;</option>
+                                <option value="<=">&le;</option>
+                                <option value="cross_above">Cắt lên</option>
+                                <option value="cross_below">Cắt xuống</option>
+                              </select>
+                              <input
+                                type="number"
+                                step="0.1"
+                                value={clause.threshold ?? 1.0}
+                                onChange={(e) =>
+                                  updateLeg({
+                                    ...legState,
+                                    groups: legState.groups.map((g, gi) =>
+                                      gi === gIdx
+                                        ? {
+                                            ...g,
+                                            clauses: g.clauses.map((c, ci) =>
+                                              ci === cIdx ? { ...c, threshold: Number(e.target.value) } : c,
+                                            ),
+                                          }
+                                        : g,
+                                    ),
+                                  })
+                                }
+                                className="w-11 px-1 py-0.2 rounded text-[10px] text-center tabular-nums no-spinner outline-none"
+                                style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+                              />
+                            </>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                updateLeg({
+                                  ...legState,
+                                  groups: legState.groups.map((g, gi) =>
+                                    gi === gIdx
+                                      ? {
+                                          ...g,
+                                          clauses: g.clauses.map((c, ci) =>
+                                            ci === cIdx ? { ...c, boolExpected: !(c.boolExpected ?? true) } : c,
+                                          ),
+                                        }
+                                      : g,
+                                  ),
+                                })
+                              }
+                              className="px-1 py-0 rounded text-[9.5px] font-semibold border-0 cursor-pointer"
+                              style={{
+                                backgroundColor:
+                                  (clause.boolExpected ?? true) ? 'rgba(8, 153, 129, 0.16)' : 'rgba(242, 54, 69, 0.16)',
+                                color: (clause.boolExpected ?? true) ? '#089981' : '#F23645',
+                              }}
+                              title="Nhấn để đảo TRUE / FALSE"
+                            >
+                              {(clause.boolExpected ?? true) ? 'TRUE' : 'FALSE'}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const nextGroups = legState.groups
+                                .map((g, gi) =>
+                                  gi === gIdx ? { ...g, clauses: g.clauses.filter((_, ci) => ci !== cIdx) } : g,
+                                )
+                                .filter((g) => g.clauses.length > 0)
+                              updateLeg({ ...legState, groups: nextGroups })
+                            }}
+                            className="p-0.5 rounded bg-transparent border-0 cursor-pointer"
+                            style={{ color: 'var(--tv-text-secondary)' }}
+                            aria-label="Xóa điều kiện"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </div>
+                      )
+                    })}
 
-          <label className="flex items-center gap-1 ml-1" style={{ color: 'var(--tv-text-secondary)' }}>
-            <input
-              type="checkbox"
-              checked={exitClauseEnabled}
-              onChange={(e) => setExitClauseEnabled(e.target.checked)}
-            />
-            <span>Thoát:</span>
-            {exitClauseEnabled && (
-              <select
-                value={exitClause.catalogId}
-                onChange={(e) => {
-                  const id = e.target.value
-                  setExitClause(
-                    isFloatSignal(id)
-                      ? { catalogId: id, op: '>', threshold: 70 }
-                      : { catalogId: id, boolExpected: true },
-                  )
-                }}
-                className="max-w-[170px] px-1 py-0.5 rounded text-[10.5px] outline-none"
-                style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
-              >
-                {qmvCatalogSignals.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.labelVi}
-                  </option>
+                    {grp.clauses.length < 6 && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          updateLeg({
+                            ...legState,
+                            groups: legState.groups.map((g, gi) =>
+                              gi === gIdx
+                                ? { ...g, clauses: [...g.clauses, { catalogId: 'volume.relative_volume', op: '>=', threshold: 1.3 }] }
+                                : g,
+                            ),
+                          })
+                        }
+                        className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] border cursor-pointer"
+                        style={{ backgroundColor: 'transparent', borderColor: 'var(--tv-border)', color: 'var(--tv-text-primary)' }}
+                      >
+                        <Plus className="w-2.5 h-2.5" />
+                        <span>+ Tín hiệu</span>
+                      </button>
+                    )}
+                  </div>
                 ))}
-              </select>
+              </div>
             )}
-          </label>
-
-          <label className="flex items-center gap-1" style={{ color: 'var(--tv-text-secondary)' }}>
-            <span>Điểm SK ≥</span>
-            <input
-              type="number"
-              placeholder="Tắt"
-              value={minHealthScore}
-              onChange={(e) => setMinHealthScore(e.target.value)}
-              className="w-12 px-1 py-0.5 rounded text-[10.5px] text-center tabular-nums no-spinner outline-none"
-              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
-            />
-          </label>
-        </div>
-      )}
+          </div>
+        )
+      })()}
 
       {/* Sub-view Switcher & Tearsheet Summary Strip */}
       <div
@@ -1316,81 +1672,86 @@ export const StrategyTesterTab: React.FC = () => {
       {/* Main Content */}
       <div className="flex-1 min-h-0 overflow-auto tv-scroll p-2.5">
         {view === 'overview' && (
-          <div className="grid grid-cols-1 lg:grid-cols-[1fr_285px] gap-3 h-full min-h-[150px]">
-            <div
-              className="rounded p-2 flex flex-col"
-              style={{ backgroundColor: 'var(--tv-bg-chart)', border: '1px solid var(--tv-border)' }}
-            >
-              <div className="flex items-center justify-between text-[10.5px] mb-1" style={{ color: 'var(--tv-text-secondary)' }}>
-                <span className="flex items-center gap-1">
-                  <TrendingUp className="w-3.5 h-3.5" />
-                  Đường cong vốn & Sụt giảm (Underwater Drawdown) — {activePane.ticker} ({activePane.interval})
-                </span>
-                {btResult && <span>{btResult.barCount} nến · {btResult.presetLabel}</span>}
+          <div className="space-y-2.5">
+            <div className="grid grid-cols-1 lg:grid-cols-[1fr_285px] gap-3 min-h-[150px]">
+              <div
+                className="rounded p-2 flex flex-col"
+                style={{ backgroundColor: 'var(--tv-bg-chart)', border: '1px solid var(--tv-border)' }}
+              >
+                <div className="flex items-center justify-between text-[10.5px] mb-1" style={{ color: 'var(--tv-text-secondary)' }}>
+                  <span className="flex items-center gap-1">
+                    <TrendingUp className="w-3.5 h-3.5" />
+                    Đường cong vốn & Sụt giảm (Underwater Drawdown) — {activePane.ticker} ({activePane.interval})
+                  </span>
+                  {btResult && <span>{btResult.barCount} nến · {btResult.presetLabel}</span>}
+                </div>
+                <div className="flex-1 min-h-0">
+                  <EquityAndDrawdownChart points={btResult?.equityCurve ?? []} />
+                </div>
               </div>
-              <div className="flex-1 min-h-0">
-                <EquityAndDrawdownChart points={btResult?.equityCurve ?? []} />
-              </div>
-            </div>
 
-            <div
-              className="rounded p-2.5 grid grid-cols-2 gap-2 content-start text-[11px] tabular-nums"
-              style={{ backgroundColor: 'var(--tv-bg-elevated)', border: '1px solid var(--tv-border)' }}
-            >
-              <div>
-                <div style={{ color: 'var(--tv-text-secondary)' }}>CAGR</div>
-                <div className="font-bold text-[13px]">{ts?.cagr_pct != null ? `${ts.cagr_pct.toFixed(2)}%` : '—'}</div>
-              </div>
-              <div>
-                <div style={{ color: 'var(--tv-text-secondary)' }}>Sortino / Calmar</div>
-                <div className="font-bold text-[13px]">
-                  {ts?.sortino_ratio != null ? ts.sortino_ratio.toFixed(2) : '—'} /{' '}
-                  {ts?.calmar_ratio != null ? ts.calmar_ratio.toFixed(2) : '—'}
+              <div
+                className="rounded p-2.5 grid grid-cols-2 gap-2 content-start text-[11px] tabular-nums"
+                style={{ backgroundColor: 'var(--tv-bg-elevated)', border: '1px solid var(--tv-border)' }}
+              >
+                <div>
+                  <div style={{ color: 'var(--tv-text-secondary)' }}>CAGR</div>
+                  <div className="font-bold text-[13px]">{ts?.cagr_pct != null ? `${ts.cagr_pct.toFixed(2)}%` : '—'}</div>
                 </div>
-              </div>
-              <div>
-                <div style={{ color: 'var(--tv-text-secondary)' }}>In-Sample (70%)</div>
-                <div
-                  className="font-bold text-[12.5px]"
-                  style={{
-                    color:
-                      (btResult?.inSampleTearsheet?.total_return_pct ?? 0) >= 0 ? 'var(--tv-up)' : 'var(--tv-down)',
-                  }}
-                >
-                  {btResult?.inSampleTearsheet
-                    ? `${btResult.inSampleTearsheet.total_return_pct >= 0 ? '+' : ''}${btResult.inSampleTearsheet.total_return_pct.toFixed(1)}%`
-                    : '—'}
+                <div>
+                  <div style={{ color: 'var(--tv-text-secondary)' }}>Sortino / Calmar</div>
+                  <div className="font-bold text-[13px]">
+                    {ts?.sortino_ratio != null ? ts.sortino_ratio.toFixed(2) : '—'} /{' '}
+                    {ts?.calmar_ratio != null ? ts.calmar_ratio.toFixed(2) : '—'}
+                  </div>
                 </div>
-              </div>
-              <div>
-                <div style={{ color: 'var(--tv-text-secondary)' }}>Out-of-Sample (30%)</div>
-                <div
-                  className="font-bold text-[12.5px]"
-                  style={{
-                    color:
-                      (btResult?.outOfSampleTearsheet?.total_return_pct ?? 0) >= 0 ? 'var(--tv-up)' : 'var(--tv-down)',
-                  }}
-                >
-                  {btResult?.outOfSampleTearsheet
-                    ? `${btResult.outOfSampleTearsheet.total_return_pct >= 0 ? '+' : ''}${btResult.outOfSampleTearsheet.total_return_pct.toFixed(1)}%`
-                    : '—'}
+                <div>
+                  <div style={{ color: 'var(--tv-text-secondary)' }}>In-Sample (70%)</div>
+                  <div
+                    className="font-bold text-[12.5px]"
+                    style={{
+                      color:
+                        (btResult?.inSampleTearsheet?.total_return_pct ?? 0) >= 0 ? 'var(--tv-up)' : 'var(--tv-down)',
+                    }}
+                  >
+                    {btResult?.inSampleTearsheet
+                      ? `${btResult.inSampleTearsheet.total_return_pct >= 0 ? '+' : ''}${btResult.inSampleTearsheet.total_return_pct.toFixed(1)}%`
+                      : '—'}
+                  </div>
                 </div>
-              </div>
-              <div>
-                <div style={{ color: 'var(--tv-text-secondary)' }}>Thắng / Thua (Win%)</div>
-                <div className="font-bold text-[12px]">
-                  <span style={{ color: 'var(--tv-up)' }}>{ts?.num_winners ?? 0}</span>/
-                  <span style={{ color: 'var(--tv-down)' }}>{ts?.num_losers ?? 0}</span>
-                  {ts ? ` (${ts.win_rate_pct.toFixed(0)}%)` : ''}
+                <div>
+                  <div style={{ color: 'var(--tv-text-secondary)' }}>Out-of-Sample (30%)</div>
+                  <div
+                    className="font-bold text-[12.5px]"
+                    style={{
+                      color:
+                        (btResult?.outOfSampleTearsheet?.total_return_pct ?? 0) >= 0 ? 'var(--tv-up)' : 'var(--tv-down)',
+                    }}
+                  >
+                    {btResult?.outOfSampleTearsheet
+                      ? `${btResult.outOfSampleTearsheet.total_return_pct >= 0 ? '+' : ''}${btResult.outOfSampleTearsheet.total_return_pct.toFixed(1)}%`
+                      : '—'}
+                  </div>
                 </div>
-              </div>
-              <div>
-                <div style={{ color: 'var(--tv-text-secondary)' }}>Nến giữ TB · Phí/Thuế</div>
-                <div className="font-bold text-[11.5px]">
-                  {ts ? `${ts.avg_bars_held.toFixed(1)}p · ${(ts.total_fees_and_tax / 1e6).toFixed(1)}tr` : '—'}
+                <div>
+                  <div style={{ color: 'var(--tv-text-secondary)' }}>Thắng / Thua (Win%)</div>
+                  <div className="font-bold text-[12px]">
+                    <span style={{ color: 'var(--tv-up)' }}>{ts?.num_winners ?? 0}</span>/
+                    <span style={{ color: 'var(--tv-down)' }}>{ts?.num_losers ?? 0}</span>
+                    {ts ? ` (${ts.win_rate_pct.toFixed(0)}%)` : ''}
+                  </div>
+                </div>
+                <div>
+                  <div style={{ color: 'var(--tv-text-secondary)' }}>Nến giữ TB · Phí/Thuế</div>
+                  <div className="font-bold text-[11.5px]">
+                    {ts ? `${ts.avg_bars_held.toFixed(1)}p · ${(ts.total_fees_and_tax / 1e6).toFixed(1)}tr` : '—'}
+                  </div>
                 </div>
               </div>
             </div>
+            {btResult?.monthlyReturns && btResult.monthlyReturns.length > 0 && (
+              <MonthlyReturnsHeatmap cells={btResult.monthlyReturns} />
+            )}
           </div>
         )}
 

@@ -538,7 +538,7 @@ impl StrategyParams {
     }
 }
 
-/// Protective stop-loss, take-profit, trailing-stop, and holding-period rules.
+/// Protective stop-loss, take-profit, trailing-stop, pyramiding, scale-out, and holding-period rules.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StopTakeConfig {
@@ -554,6 +554,18 @@ pub struct StopTakeConfig {
     pub support_stop_lookback: Option<usize>,
     /// Enables QMV `2/3`-Wave Trailing Stop (`anchor + 2/3 * (peak - anchor)` once wave >= `1.8 * ATR`).
     pub qmv_wave_trailing_2_3: bool,
+    /// Maximum concurrent same-direction scale-in tranches (`1` = single entry, up to `5` pyramiding tranches).
+    pub max_pyramiding: usize,
+    /// Optional partial take-profit fraction (`10.0..=90.0%` of unlocked position closed at `tp1_pct`).
+    pub scale_out_pct: Option<f64>,
+    /// Optional first partial take-profit target in `%` from average entry (`0.5..=200.0%`).
+    pub tp1_pct: Option<f64>,
+    /// Optional post-close Simple Moving Average trailing stop period (e.g. `20` for MA20 trailing).
+    pub trailing_ma_period: Option<usize>,
+    /// Optional post-close Ichimoku Kijun-sen midpoint trailing stop period (e.g. `18` or `26`).
+    pub trailing_kijun_period: Option<usize>,
+    /// When `true` and intrabar sub-bars are supplied, resolves dual-touch SL/TP bars chronologically.
+    pub use_bar_magnifier: bool,
 }
 
 impl Default for StopTakeConfig {
@@ -568,6 +580,12 @@ impl Default for StopTakeConfig {
             min_holding_bars: 0,
             support_stop_lookback: None,
             qmv_wave_trailing_2_3: false,
+            max_pyramiding: 1,
+            scale_out_pct: None,
+            tp1_pct: None,
+            trailing_ma_period: None,
+            trailing_kijun_period: None,
+            use_bar_magnifier: false,
         }
     }
 }
@@ -581,6 +599,11 @@ impl StopTakeConfig {
         self.trailing_stop_atr_mult = sanitize_opt_range(self.trailing_stop_atr_mult, 0.2, 20.0);
         self.min_holding_bars = self.min_holding_bars.min(30);
         self.support_stop_lookback = self.support_stop_lookback.map(|w| w.clamp(3, 120));
+        self.max_pyramiding = self.max_pyramiding.clamp(1, 5);
+        self.scale_out_pct = sanitize_opt_range(self.scale_out_pct, 10.0, 90.0);
+        self.tp1_pct = sanitize_opt_range(self.tp1_pct, 0.5, 200.0);
+        self.trailing_ma_period = self.trailing_ma_period.map(|p| p.clamp(5, 200));
+        self.trailing_kijun_period = self.trailing_kijun_period.map(|p| p.clamp(5, 120));
         if let Some(max_h) = self.max_holding_bars {
             let clean = max_h.clamp(1, 10_000).max(self.min_holding_bars.max(1));
             self.max_holding_bars = Some(clean);

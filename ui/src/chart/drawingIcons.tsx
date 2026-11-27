@@ -44,11 +44,12 @@ export const DRAWING_TOOL_GROUPS: DrawingToolGroup[] = [
   },
   {
     id: 'channels',
-    labelVi: 'Kênh giá & Song song',
+    labelVi: 'Kênh giá, Pitchfork & Song song',
     defaultTool: 'priceChannelLine',
     items: [
       { key: 'priceChannelLine', labelVi: 'Kênh giá song song (Price Channel)' },
       { key: 'parallelStraightLine', labelVi: 'Đường thẳng song song' },
+      { key: 'andrewsPitchfork', labelVi: 'Chĩa ba Andrews Pitchfork' },
     ],
   },
   {
@@ -59,6 +60,7 @@ export const DRAWING_TOOL_GROUPS: DrawingToolGroup[] = [
       { key: 'fibonacciLine', labelVi: 'Fibonacci Thoái lui (Retracement)', shortcut: 'Alt+F' },
       { key: 'fibonacciSegment', labelVi: 'Fibonacci Đoạn (Segment)' },
       { key: 'fibonacciExtension', labelVi: 'Fibonacci Mở rộng (Extension)' },
+      { key: 'fibTimeZones', labelVi: 'Vùng thời gian Fibonacci (Time Zones)' },
       { key: 'fibonacciCircle', labelVi: 'Vòng tròn Fibonacci' },
       { key: 'fibonacciSpiral', labelVi: 'Xoắn ốc Fibonacci' },
       { key: 'fibonacciSpeedResistanceFan', labelVi: 'Quạt kháng cự Fibonacci' },
@@ -87,7 +89,9 @@ export const DRAWING_TOOL_GROUPS: DrawingToolGroup[] = [
       { key: 'circle', labelVi: 'Hình tròn (Circle)' },
       { key: 'triangle', labelVi: 'Hình tam giác (Triangle)' },
       { key: 'parallelogram', labelVi: 'Hình bình hành (Parallelogram)' },
+      { key: 'path', labelVi: 'Đường dẫn đa đoạn (Path Arrow)' },
       { key: 'brush', labelVi: 'Cọ vẽ tự do (Brush)' },
+      { key: 'highlighter', labelVi: 'Bút dạ quang (Highlighter)' },
     ],
   },
   {
@@ -303,6 +307,38 @@ export function DrawingToolIcon({ name, className = 'w-[18px] h-[18px]' }: { nam
         <svg {...common}>
           <path d="M4 17c2-4 5-10 10-12 1.5-.6 3 .6 2.3 2.1-1.6 3.5-5.2 6.8-8.3 9.2" />
           <path d="M4 17l3 1" />
+        </svg>
+      )
+    case 'highlighter':
+      return (
+        <svg {...common}>
+          <path d="M4 16L14 6l3 3-10 10H4v-3z" fill="#FBC02D" fillOpacity="0.35" stroke="#FBC02D" />
+          <line x1="3" y1="19" x2="19" y2="19" stroke="#FBC02D" strokeWidth={2} />
+        </svg>
+      )
+    case 'path':
+      return (
+        <svg {...common}>
+          <polyline points="3,16 8,9 13,13 18,5" />
+          <polyline points="14,5 18,5 18,9" />
+        </svg>
+      )
+    case 'andrewsPitchfork':
+      return (
+        <svg {...common}>
+          <line x1="4" y1="18" x2="19" y2="6" />
+          <line x1="7" y1="9" x2="17" y2="2" />
+          <line x1="11" y1="17" x2="20" y2="10" />
+          <line x1="7" y1="9" x2="11" y2="17" strokeDasharray="2 2" />
+        </svg>
+      )
+    case 'fibTimeZones':
+      return (
+        <svg {...common}>
+          <line x1="4" y1="3" x2="4" y2="19" />
+          <line x1="7" y1="3" x2="7" y2="19" strokeDasharray="2 2" />
+          <line x1="11" y1="3" x2="11" y2="19" strokeDasharray="2 2" />
+          <line x1="17" y1="3" x2="17" y2="19" />
         </svg>
       )
     case 'simpleAnnotation':

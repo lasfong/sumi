@@ -645,6 +645,7 @@ mod tests {
                 base_candles: fpt_candles,
                 controller: ctrl,
                 speed_multiplier: 1.0,
+                blind_drill: None,
             });
         }
 

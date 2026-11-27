@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState } from 'react'
 import {
   Award,
   Bookmark,
+  Calendar,
+  Dices,
   Eye,
   EyeOff,
   FolderOpen,
@@ -27,7 +29,10 @@ export const ReplayControlBar: React.FC = () => {
   const setReplaySelectingCut = useWorkspaceStore((s) => s.setReplaySelectingCut)
   const setReplayBlindMode = useWorkspaceStore((s) => s.setReplayBlindMode)
   const startReplay = useWorkspaceStore((s) => s.startReplay)
+  const startRandomBlindDrill = useWorkspaceStore((s) => s.startRandomBlindDrill)
+  const revealBlindDrill = useWorkspaceStore((s) => s.revealBlindDrill)
   const stepReplay = useWorkspaceStore((s) => s.stepReplay)
+  const jumpReplay = useWorkspaceStore((s) => s.jumpReplay)
   const setReplaySpeed = useWorkspaceStore((s) => s.setReplaySpeed)
   const setReplayPlaying = useWorkspaceStore((s) => s.setReplayPlaying)
   const stopReplay = useWorkspaceStore((s) => s.stopReplay)
@@ -38,6 +43,7 @@ export const ReplayControlBar: React.FC = () => {
 
   const [sessionsMenuOpen, setSessionsMenuOpen] = useState(false)
   const [sessionNameDraft, setSessionNameDraft] = useState('')
+  const [jumpDateVal, setJumpDateVal] = useState('')
   const menuRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
@@ -196,6 +202,16 @@ export const ReplayControlBar: React.FC = () => {
           {renderSavedSessionsPopover(false)}
           <button
             type="button"
+            className="tv-btn text-[11.5px] font-semibold px-2.5"
+            style={{ backgroundColor: 'rgba(251, 192, 45, 0.2)', color: '#FBC02D', border: '1px solid #FBC02D' }}
+            onClick={() => void startRandomBlindDrill()}
+            title="Chọn ngẫu nhiên 1 mã QMV60 lịch sử, chuẩn hóa giá về 100.00 và ẩn danh tính + ngày tháng!"
+          >
+            <Dices className="w-3.5 h-3.5" />
+            <span>Luyện Mù Ngẫu Nhiên</span>
+          </button>
+          <button
+            type="button"
             className="tv-btn text-[11.5px] bg-[#2962FF] text-white hover:bg-[#1E53E5] px-2.5"
             onClick={() => void startReplay(null)}
             title="Cắt nhanh lùi 60 cây nến từ hiện tại"
@@ -217,27 +233,40 @@ export const ReplayControlBar: React.FC = () => {
 
   if (!replay?.active) return null
 
-  const cutoffLabel = replay.cutoffTimestampMs
-    ? new Date(replay.cutoffTimestampMs).toLocaleString('vi-VN', {
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-      })
-    : '—'
+  const isBlindDrillUnrevealed = Boolean(replay.blindDrill?.enabled && !replay.blindDrill.revealed)
+  const isBlindDrillRevealed = Boolean(replay.blindDrill?.enabled && replay.blindDrill.revealed)
+
+  const cutoffLabel = isBlindDrillUnrevealed
+    ? `Phiên #${replay.cursorIndex + 1} (Giá chuẩn hóa 100.00)`
+    : replay.cutoffTimestampMs
+      ? new Date(replay.cutoffTimestampMs).toLocaleString('vi-VN', {
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+        })
+      : '—'
 
   return (
     <div
       className="flex items-center justify-between gap-2 px-3 py-1 shrink-0"
       style={{
-        backgroundColor: 'color-mix(in srgb, var(--tv-accent) 14%, var(--tv-bg-panel))',
-        borderBottom: '1px solid var(--tv-accent)',
+        backgroundColor: isBlindDrillUnrevealed
+          ? 'color-mix(in srgb, #FBC02D 14%, var(--tv-bg-panel))'
+          : 'color-mix(in srgb, var(--tv-accent) 14%, var(--tv-bg-panel))',
+        borderBottom: `1px solid ${isBlindDrillUnrevealed ? '#FBC02D' : 'var(--tv-accent)'}`,
       }}
     >
       <div className="flex items-center gap-2 min-w-0">
-        <span className="px-2 py-0.5 rounded text-[10.5px] font-bold tracking-wide bg-[#2962FF] text-white shrink-0">
-          BAR REPLAY NHÂN QUẢ
+        <span
+          className="px-2 py-0.5 rounded text-[10.5px] font-bold tracking-wide shrink-0"
+          style={{
+            backgroundColor: isBlindDrillUnrevealed ? '#FBC02D' : '#2962FF',
+            color: isBlindDrillUnrevealed ? '#111827' : '#FFFFFF',
+          }}
+        >
+          {isBlindDrillUnrevealed ? 'LUYỆN MÙ NGẪU NHIÊN' : 'BAR REPLAY NHÂN QUẢ'}
         </span>
         <span className="text-[11.5px] font-semibold tabular-nums truncate">
           {replay.ticker} ({(replay.trackedIntervals && replay.trackedIntervals.length > 0 ? replay.trackedIntervals : [replay.interval]).join(' + ')})
@@ -245,20 +274,75 @@ export const ReplayControlBar: React.FC = () => {
         <span className="text-[11px] tabular-nums hidden md:inline" style={{ color: 'var(--tv-text-secondary)' }}>
           Nến {replay.cursorIndex + 1} / {replay.totalBars} · {cutoffLabel}
         </span>
+        {isBlindDrillRevealed && replay.blindDrill?.cutDate && (
+          <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[#089981]/20 text-[#089981] shrink-0">
+            Mã thật: {replay.blindDrill.realTicker} ({replay.blindDrill.cutDate})
+          </span>
+        )}
       </div>
 
       <div className="flex items-center gap-1 shrink-0">
-        <button
-          type="button"
-          className="tv-btn text-[11px]"
-          data-active={replayBlindMode}
-          aria-pressed={replayBlindMode}
-          onClick={() => setReplayBlindMode(!replayBlindMode)}
-          title="Chế độ Luyện tập mù (Blind Mode): ẩn giá Live ở Watchlist, Chi tiết mã và hình vẽ tương lai"
-        >
-          {replayBlindMode ? <EyeOff className="w-3.5 h-3.5" aria-hidden="true" /> : <Eye className="w-3.5 h-3.5" aria-hidden="true" />}
-          <span>{replayBlindMode ? 'Luyện mù: BẬT' : 'Luyện mù: TẮT'}</span>
-        </button>
+        {isBlindDrillUnrevealed ? (
+          <button
+            type="button"
+            className="tv-btn text-[11px] font-semibold px-2"
+            style={{ backgroundColor: '#089981', color: '#FFFFFF' }}
+            onClick={() => void revealBlindDrill()}
+            title="Kết thúc phần ẩn danh: lật mở mã cổ phiếu thật, ngày lịch sử và chấm điểm Debrief"
+          >
+            <Eye className="w-3.5 h-3.5" aria-hidden="true" />
+            <span>Lật Mở Mã Thật</span>
+          </button>
+        ) : (
+          <>
+            <button
+              type="button"
+              className="tv-btn text-[11px]"
+              style={{ color: '#FBC02D' }}
+              onClick={() => void startRandomBlindDrill()}
+              title="Bắt đầu ván Luyện Mù Ngẫu Nhiên mới (ẩn tên mã + chuẩn hóa 100.00)"
+            >
+              <Dices className="w-3.5 h-3.5" aria-hidden="true" />
+              <span className="hidden xl:inline">Mù ngẫu nhiên</span>
+            </button>
+            <button
+              type="button"
+              className="tv-btn text-[11px]"
+              data-active={replayBlindMode}
+              aria-pressed={replayBlindMode}
+              onClick={() => setReplayBlindMode(!replayBlindMode)}
+              title="Chế độ Luyện tập mù (Blind Mode): ẩn giá Live ở Watchlist, Chi tiết mã và hình vẽ tương lai"
+            >
+              {replayBlindMode ? <EyeOff className="w-3.5 h-3.5" aria-hidden="true" /> : <Eye className="w-3.5 h-3.5" aria-hidden="true" />}
+              <span>{replayBlindMode ? 'Luyện mù: BẬT' : 'Luyện mù: TẮT'}</span>
+            </button>
+
+            {/* Jump-to-Date picker (Wave 5) */}
+            <label
+              className="hidden lg:inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10.5px]"
+              style={{ backgroundColor: 'var(--tv-bg-input)', border: '1px solid var(--tv-border)', color: 'var(--tv-text-secondary)' }}
+              title="Nhảy thẳng đến ngày giao dịch bất kỳ trong quá khứ"
+            >
+              <Calendar className="w-3 h-3 shrink-0" />
+              <input
+                type="date"
+                aria-label="Nhảy tới ngày Bar Replay"
+                value={jumpDateVal}
+                onChange={(e) => {
+                  const v = e.target.value
+                  setJumpDateVal(v)
+                  const ms = Date.parse(`${v}T15:00:00Z`)
+                  if (Number.isFinite(ms)) {
+                    setReplayPlaying(false)
+                    void jumpReplay(ms)
+                  }
+                }}
+                className="bg-transparent border-0 outline-none text-[10.5px] tabular-nums w-[108px]"
+                style={{ color: 'var(--tv-text-primary)' }}
+              />
+            </label>
+          </>
+        )}
 
         {renderSavedSessionsPopover(true)}
 

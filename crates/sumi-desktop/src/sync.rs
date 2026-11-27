@@ -34,7 +34,7 @@ use crate::error::{DesktopError, DesktopResult};
 use crate::workspace_db::{
     IndicatorTemplateRecord, JournalAnnotationRecord, KvRecord, PaneIndicatorsRecord,
     PriceAlertRecord, SavedDrawingRecord, SavedLayoutRecord, SavedReplaySessionRecord,
-    SavedScreenRecord, SyncTombstoneRecord, WatchlistGroup, WorkspaceStore,
+    SavedScreenRecord, SymbolFlagRecord, SyncTombstoneRecord, WatchlistGroup, WorkspaceStore,
 };
 
 pub const SUMI_WORKSPACE_BUNDLE_SCHEMA_V1: &str = "sumi_workspace_bundle_v1";
@@ -145,6 +145,8 @@ pub struct SumiWorkspacePayloadV1 {
     pub replay_sessions: Vec<SavedReplaySessionRecord>,
     #[serde(default)]
     pub saved_screens: Vec<SavedScreenRecord>,
+    #[serde(default)]
+    pub symbol_flags: Vec<SymbolFlagRecord>,
     pub tombstones: Vec<SyncTombstoneRecord>,
 }
 
@@ -181,6 +183,7 @@ impl SumiWorkspaceBundleV1 {
             journal_annotations: store.list_all_journal_annotations()?,
             replay_sessions: store.list_replay_sessions()?,
             saved_screens: store.list_saved_screens()?,
+            symbol_flags: store.list_symbol_flags()?,
             tombstones: store.list_tombstones()?,
         };
         let payload_val = serde_json::to_value(&payload)?;
@@ -231,6 +234,8 @@ pub struct WorkspaceMergeReport {
     pub merged_replay_sessions: usize,
     #[serde(default)]
     pub merged_saved_screens: usize,
+    #[serde(default)]
+    pub merged_symbol_flags: usize,
     pub applied_tombstones: usize,
 }
 
@@ -362,6 +367,16 @@ pub fn merge_bundle_into_store(
                     report.applied_tombstones += 1;
                 }
             }
+            "symbol_flag" => {
+                let local = workspace.list_symbol_flags()?;
+                if local
+                    .iter()
+                    .any(|f| f.ticker == *key && f.updated_at_ms <= *del_ts)
+                {
+                    workspace.clear_symbol_flag(key)?;
+                    report.applied_tombstones += 1;
+                }
+            }
             _ => {}
         }
     }
@@ -470,6 +485,15 @@ pub fn merge_bundle_into_store(
         }
         workspace.save_screen_with_ts(sc)?;
         report.merged_saved_screens += 1;
+    }
+
+    // 12. Merge Symbol Color Flags (Wave 5)
+    for fl in &bundle.payload.symbol_flags {
+        if is_tombstoned("symbol_flag", &fl.ticker, fl.updated_at_ms) {
+            continue;
+        }
+        workspace.set_symbol_flag_with_ts(fl)?;
+        report.merged_symbol_flags += 1;
     }
 
     Ok(report)

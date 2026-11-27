@@ -13,6 +13,7 @@ import { TopDownContextStrip } from './components/TopDownContextStrip'
 import { TopHeader } from './components/TopHeader'
 import { IndicatorsModal } from './components/modals/IndicatorsModal'
 import { IndicatorSettingsModal } from './components/modals/IndicatorSettingsModal'
+import { CommandPaletteModal } from './components/modals/CommandPaletteModal'
 import { SessionDebriefModal } from './components/modals/SessionDebriefModal'
 import { SymbolSearchModal } from './components/modals/SymbolSearchModal'
 import { TradePlannerModal } from './components/modals/TradePlannerModal'
@@ -23,6 +24,7 @@ export const App: React.FC = () => {
   const gridLayout = useWorkspaceStore((s) => s.gridLayout)
   const panes = useWorkspaceStore((s) => s.panes)
   const activeSlotId = useWorkspaceStore((s) => s.activeSlotId)
+  const maximizedSlotId = useWorkspaceStore((s) => s.maximizedSlotId)
   const rightPanelOpen = useWorkspaceStore((s) => s.rightPanelOpen)
   const rightPanelWidth = useWorkspaceStore((s) => s.rightPanelWidth)
   const bottomDockOpen = useWorkspaceStore((s) => s.bottomDockOpen)
@@ -34,6 +36,8 @@ export const App: React.FC = () => {
   const toasts = useWorkspaceStore((s) => s.toasts)
 
   const setActiveSlotId = useWorkspaceStore((s) => s.setActiveSlotId)
+  const toggleMaximizeSlot = useWorkspaceStore((s) => s.toggleMaximizeSlot)
+  const setCommandPaletteOpen = useWorkspaceStore((s) => s.setCommandPaletteOpen)
   const setRightPanelWidth = useWorkspaceStore((s) => s.setRightPanelWidth)
   const setBottomDockHeight = useWorkspaceStore((s) => s.setBottomDockHeight)
   const applyLiveQuote = useWorkspaceStore((s) => s.applyLiveQuote)
@@ -158,11 +162,19 @@ export const App: React.FC = () => {
       if (
         inInput ||
         state.symbolSearchOpen ||
+        state.commandPaletteOpen ||
         state.indicatorsModalOpen ||
         state.editingIndicator ||
         state.tradePlannerOpen ||
         state.debriefModalOpen
       ) {
+        return
+      }
+
+      // Wave 5: Alt + Enter toggles single-pane maximize in multi-chart mode
+      if (e.altKey && !e.ctrlKey && !e.metaKey && e.key === 'Enter') {
+        e.preventDefault()
+        toggleMaximizeSlot()
         return
       }
 
@@ -210,7 +222,7 @@ export const App: React.FC = () => {
 
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault()
-        openSymbolSearch('')
+        setCommandPaletteOpen(true)
         return
       }
 
@@ -222,7 +234,7 @@ export const App: React.FC = () => {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [openSymbolSearch, setActiveDrawingTool, setReplayPlaying])
+  }, [openSymbolSearch, setActiveDrawingTool, setReplayPlaying, setCommandPaletteOpen, toggleMaximizeSlot])
 
   // 4. Smooth pointer-based Resizable Split Panes (Right Widgetbar + Bottom Dock)
   useEffect(() => {
@@ -247,13 +259,17 @@ export const App: React.FC = () => {
 
   const visiblePanes = useMemo(() => {
     if (gridLayout === '1') return panes.slice(0, 1)
+    if (maximizedSlotId) {
+      const target = panes.find((p) => p.slotId === maximizedSlotId)
+      if (target) return [target]
+    }
     if (gridLayout === '2v' || gridLayout === '2h') return panes.slice(0, 2)
     if (gridLayout === '3') return panes.slice(0, 3)
     return panes.slice(0, 4)
-  }, [gridLayout, panes])
+  }, [gridLayout, panes, maximizedSlotId])
 
-  const gridClass =
-    gridLayout === '1'
+  const effectiveGridClass =
+    gridLayout === '1' || (maximizedSlotId && visiblePanes.length === 1)
       ? 'grid-cols-1 grid-rows-1'
       : gridLayout === '2v'
         ? 'grid-cols-2 grid-rows-1'
@@ -282,19 +298,29 @@ export const App: React.FC = () => {
           {/* Yumeko Read-Only Top-Down Context Strip (VM01 -> HP01 -> DN01 -> DM01 + as_of PIT + KT01) */}
           <TopDownContextStrip />
 
-          {/* Multi-Chart Viewport Grid (1 / 2v / 2h / 3 / 4) */}
-          <div className={`grid ${gridClass} flex-1 min-w-0 min-h-0 overflow-hidden`}>
+          {/* Multi-Chart Viewport Grid (1 / 2v / 2h / 3 / 4) + Alt+Enter Single-Pane Maximize */}
+          <div className={`relative grid ${effectiveGridClass} flex-1 min-w-0 min-h-0 overflow-hidden`}>
+            {maximizedSlotId && gridLayout !== '1' && (
+              <button
+                type="button"
+                onClick={() => toggleMaximizeSlot(maximizedSlotId)}
+                className="absolute top-1.5 left-1/2 -translate-x-1/2 z-30 px-2.5 py-0.5 rounded text-[10.5px] font-semibold bg-[#2962FF] text-white border-0 shadow-lg cursor-pointer"
+                title="Thu gọn về lưới đa biểu đồ (Alt+Enter)"
+              >
+                Đang phóng to 1 ô · Nhấn để khôi phục lưới (Alt+Enter)
+              </button>
+            )}
             {visiblePanes.map((pane, idx) => (
               <div
                 key={pane.slotId}
                 className={`min-w-0 min-h-0 overflow-hidden ${
-                  gridLayout === '3' && idx === 0 ? 'row-span-2' : ''
+                  !maximizedSlotId && gridLayout === '3' && idx === 0 ? 'row-span-2' : ''
                 }`}
               >
                 <KLineViewport
                   pane={pane}
                   isActive={pane.slotId === activeSlotId}
-                  isMultiPane={visiblePanes.length > 1}
+                  isMultiPane={gridLayout !== '1'}
                   gridLayout={gridLayout}
                   onActivate={() => setActiveSlotId(pane.slotId)}
                 />
@@ -341,6 +367,7 @@ export const App: React.FC = () => {
       </div>
 
       {/* Native <dialog> Modals */}
+      <CommandPaletteModal />
       <SymbolSearchModal />
       <IndicatorsModal />
       <IndicatorSettingsModal />

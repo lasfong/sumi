@@ -166,13 +166,96 @@ pub(crate) async fn reset_replay_broker_at(
     build_broker_snapshot(state, &broker, true)
 }
 
+/// Initializes the isolated sandbox `state.replay_broker` for a True Blind Replay Drill
+/// where prices are normalized to `100.00` at the cut bar (decimal precision `0.01`, $100k virtual equity,
+/// T+2 lockup preserved).
+pub(crate) async fn reset_replay_broker_for_blind_drill(
+    state: &AppState,
+    alias_ticker: &str,
+    iv: Interval,
+    scaled_bars: Vec<OhlcvBar>,
+    scaled_candles: Vec<Candle>,
+    cut_idx: usize,
+) -> DesktopResult<BrokerStateSnapshot> {
+    let mut cfg = AccountConfig {
+        initial_cash: 100_000.0,
+        commission_bps: 15.0,
+        tax_sell_bps: 10.0,
+        slippage_bps: 2.0,
+        apply_slippage_to_limits: false,
+        allow_short: false,
+        enforce_vn_t2_lot_lock: true,
+        venue: ExchangeVenue::UsEquities,
+        base_timeframe_secs: (iv.duration_ms() / 1_000).max(1),
+        ..AccountConfig::default()
+    };
+    cfg.sanitize();
+
+    let mut broker = state.replay_broker.lock().await;
+    broker.ticker = alias_ticker.to_owned();
+    broker.interval = iv;
+    broker.base_bars = scaled_bars;
+    broker.base_candles = scaled_candles.clone();
+    broker.cursor_index = cut_idx;
+    broker.session = TradingSession::new(cfg);
+    broker.order_types_meta.clear();
+    broker.session.reset_at(&scaled_candles, cut_idx);
+    build_broker_snapshot(state, &broker, true)
+}
+
 pub(crate) async fn ensure_broker_synced(
     state: &AppState,
     ticker: &str,
     interval_str: &str,
 ) -> DesktopResult<bool> {
-    let sym = SymbolKey::parse(ticker)?;
     let iv: Interval = interval_str.parse()?;
+
+    // Check active Blind Replay Drill FIRST (handles masked alias `"MÃ ẨN #XXXX"` without `SymbolKey::parse`)
+    let blind_replay_sync = {
+        let rg = state.replay.lock().await;
+        rg.as_ref().and_then(|rt| {
+            let bd = rt.blind_drill.as_ref()?;
+            if rt.controller.is_active()
+                && bd.enabled
+                && (bd.alias_code == ticker || rt.ticker.eq_ignore_ascii_case(ticker))
+            {
+                let disp = if bd.revealed {
+                    rt.ticker.clone()
+                } else {
+                    bd.alias_code.clone()
+                };
+                Some((
+                    disp,
+                    rt.interval,
+                    rt.base_bars.clone(),
+                    rt.base_candles.clone(),
+                    rt.controller.base_cursor_index,
+                ))
+            } else {
+                None
+            }
+        })
+    };
+    if let Some((disp_ticker, base_iv, bars, candles, cursor_idx)) = blind_replay_sync {
+        let mut broker = state.replay_broker.lock().await;
+        broker.ticker = disp_ticker;
+        broker.interval = base_iv;
+        let prev_cursor = broker.cursor_index;
+        broker.base_bars = bars;
+        broker.base_candles = candles.clone();
+        broker.cursor_index = cursor_idx;
+        if cursor_idx > prev_cursor && !candles.is_empty() {
+            broker
+                .session
+                .advance_through_bars(&candles, prev_cursor + 1, cursor_idx);
+        } else if cursor_idx < prev_cursor && !candles.is_empty() {
+            let start = broker.session.session_start_base_index.min(cursor_idx);
+            broker.session.rewind_to(&candles, start, cursor_idx);
+        }
+        return Ok(true);
+    }
+
+    let sym = SymbolKey::parse(ticker)?;
     let norm_ticker = sym.ticker();
 
     // If causal Bar Replay is active on `norm_ticker` (on ANY timeframe pane!), bind to the

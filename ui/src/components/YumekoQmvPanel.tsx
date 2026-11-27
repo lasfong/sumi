@@ -61,6 +61,19 @@ export const YumekoQmvPanel: React.FC = () => {
   const [checkingDir, setCheckingDir] = useState(false)
 
   const activePane = panes.find((p) => p.slotId === activeSlotId) ?? panes[0]
+  const replay = useWorkspaceStore((s) => s.replay)
+  if (replay?.active && replay.blindDrill?.enabled && !replay.blindDrill.revealed) {
+    return (
+      <div className="flex flex-col items-center justify-center flex-1 p-4 text-center gap-2 text-[11.5px]" style={{ color: 'var(--tv-text-secondary)' }}>
+        <div className="font-semibold text-[12.5px]" style={{ color: 'var(--tv-text-primary)' }}>
+          Chế độ Luyện Mù đang ẩn ngữ cảnh Yumeko
+        </div>
+        <p className="m-0">
+          Toàn bộ dữ liệu cơ bản, Blackbox và danh tính mã đang được khóa để đảm bảo phản xạ Price Action thuần khiết. Nhấn "Lật mở mã thật" trên thanh Replay để xem kết quả.
+        </p>
+      </div>
+    )
+  }
   const bb = yumekoContext?.hp01Blackbox ?? null
   const isReal = yumekoContext?.flowProvenance === 'qmv_real' && Boolean(bb?.isProviderProprietary)
   const vm01 = yumekoContext?.vm01Market ?? null

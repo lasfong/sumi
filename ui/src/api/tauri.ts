@@ -46,6 +46,7 @@ import type {
   StrategyBacktestInput,
   StrategyBacktestResponse,
   SubmitPaperOrderInput,
+  SymbolFlagRecord,
   SymbolFundamentalsResponse,
   SymbolSearchResult,
   SyncProgressPayload,
@@ -428,6 +429,40 @@ export async function removeWatchlistSymbol(watchlistId: string, ticker: string)
   await invoke<void>('remove_watchlist_symbol', { watchlistId, ticker })
 }
 
+export async function renameWatchlist(id: string, name: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    webFallbackApi.renameWatchlist(id, name)
+    return
+  }
+  await invoke<void>('rename_watchlist', { id, name })
+}
+
+export async function reorderWatchlistSymbols(watchlistId: string, tickers: string[]): Promise<void> {
+  if (!isTauriRuntime()) {
+    webFallbackApi.reorderWatchlistSymbols(watchlistId, tickers)
+    return
+  }
+  await invoke<void>('reorder_watchlist_symbols', { watchlistId, tickers })
+}
+
+export async function listSymbolFlags(): Promise<SymbolFlagRecord[]> {
+  if (!isTauriRuntime()) return webFallbackApi.listSymbolFlags()
+  return invoke<SymbolFlagRecord[]>('list_symbol_flags')
+}
+
+export async function setSymbolFlag(ticker: string, color: string): Promise<SymbolFlagRecord> {
+  if (!isTauriRuntime()) return webFallbackApi.setSymbolFlag(ticker, color)
+  return invoke<SymbolFlagRecord>('set_symbol_flag', { ticker, color })
+}
+
+export async function clearSymbolFlag(ticker: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    webFallbackApi.clearSymbolFlag(ticker)
+    return
+  }
+  await invoke<void>('clear_symbol_flag', { ticker })
+}
+
 export async function createAlert(
   ticker: string,
   condition: string,
@@ -618,6 +653,22 @@ export async function replayStart(
     cutTimestampMs: cutTimestampMs ?? null,
     activeIntervals: activeIntervals && activeIntervals.length > 0 ? activeIntervals : null,
   })
+}
+
+export async function replayStartRandomBlindDrill(
+  interval: IntervalKey = '1D',
+  seed?: number | null,
+): Promise<ReplaySnapshotResponse> {
+  if (!isTauriRuntime()) return webFallbackApi.replayStartRandomBlindDrill(interval)
+  return invoke<ReplaySnapshotResponse>('replay_start_random_blind_drill', {
+    interval,
+    seed: seed ?? null,
+  })
+}
+
+export async function replayRevealBlindDrill(): Promise<ReplaySnapshotResponse> {
+  if (!isTauriRuntime()) return webFallbackApi.replayRevealBlindDrill()
+  return invoke<ReplaySnapshotResponse>('replay_reveal_blind_drill')
 }
 
 export async function replayGetState(): Promise<ReplaySnapshotResponse | null> {

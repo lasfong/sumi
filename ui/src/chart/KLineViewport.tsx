@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { Maximize2, Minimize2 } from 'lucide-react'
 import { dispose, init } from 'klinecharts'
 import type { Chart, KLineData, Overlay, OverlayEvent } from 'klinecharts'
 import * as api from '../api/tauri'
@@ -135,6 +136,12 @@ function extractSelectedState(ov: Overlay): SelectedDrawingState {
   if (rawStyle === 'dashed') {
     lineStyle = dash[0] !== undefined && dash[0] <= 2 ? 'dotted' : 'dashed'
   }
+  const rawText =
+    typeof ov.extendData === 'string'
+      ? ov.extendData
+      : ov.extendData && typeof ov.extendData === 'object' && typeof (ov.extendData as Record<string, unknown>).text === 'string'
+        ? String((ov.extendData as Record<string, unknown>).text)
+        : undefined
   return {
     id: ov.id,
     name: ov.name,
@@ -142,6 +149,7 @@ function extractSelectedState(ov: Overlay): SelectedDrawingState {
     size,
     lineStyle,
     lock: ov.lock,
+    text: rawText,
   }
 }
 
@@ -258,6 +266,12 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
   const [corpEvents, setCorpEvents] = useState<CorporateEventMarker[]>([])
   const [activeCorpEvent, setActiveCorpEvent] = useState<CorporateEventMarker | null>(null)
   const [dataSourceBadge, setDataSourceBadge] = useState<string>('')
+  const [quickRuler, setQuickRuler] = useState<{
+    p1: { x: number; y: number; price: number; ts: number; idx: number }
+    p2: { x: number; y: number; price: number; ts: number; idx: number } | null
+  } | null>(null)
+  const maximizedSlotId = useWorkspaceStore((s) => s.maximizedSlotId)
+  const toggleMaximizeSlot = useWorkspaceStore((s) => s.toggleMaximizeSlot)
   const [loading, setLoading] = useState<boolean>(false)
   const [dataReadyNonce, setDataReadyNonce] = useState<number>(0)
   const [selectedDrawing, setSelectedDrawing] = useState<SelectedDrawingState | null>(null)
@@ -616,6 +630,12 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
       thousandsSeparator: { sign: ',' },
       formatter: {
         formatDate: ({ dateTimeFormat, timestamp, type }) => {
+          const rep = useWorkspaceStore.getState().replay
+          if (rep?.active && rep.blindDrill?.enabled && !rep.blindDrill.revealed) {
+            const list = chartRef.current?.getDataList() ?? []
+            const idx = list.findIndex((b) => b.timestamp === timestamp)
+            return idx >= 0 ? `#${idx + 1}` : 'ẨN'
+          }
           const isDailyOrCoarser = ['1D', '1W', '1M'].includes(paneRef.current.interval)
           const parts = dateTimeFormat.formatToParts(new Date(timestamp))
           const get = (k: string) => parts.find((p) => p.type === k)?.value ?? ''
@@ -1759,6 +1779,7 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
 
       if (e.key === 'Escape') {
         setContextMenu(null)
+        setQuickRuler(null)
         if (replaySelectingCutRef.current) {
           setReplaySelectingCut(false)
         }
@@ -1779,6 +1800,8 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
         if (undoStackRef.current.length > 0) {
           e.preventDefault()
           handleUndoDrawing()
+        } else if (useWorkspaceStore.getState().undoIndicatorChange()) {
+          e.preventDefault()
         }
         return
       }
@@ -1791,6 +1814,8 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
         if (redoStackRef.current.length > 0) {
           e.preventDefault()
           handleRedoDrawing()
+        } else if (useWorkspaceStore.getState().redoIndicatorChange()) {
+          e.preventDefault()
         }
         return
       }
@@ -1845,6 +1870,62 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
         record: afterRec,
       })
     }
+  }
+
+  const handleUpdateSelectedText = (nextText: string) => {
+    const cur = selectedDrawingRef.current
+    const chart = chartRef.current
+    if (!cur || !chart) return
+    const [existing] = chart.getOverlays({ id: cur.id, groupId: 'user_drawings' })
+    const beforeRec = existing ? overlayToRecord(existing, paneRef.current.ticker) : null
+    chart.overrideOverlay({
+      id: cur.id,
+      groupId: 'user_drawings',
+      extendData: nextText,
+    })
+    setSelectedDrawing({ ...cur, text: nextText })
+    const [updated] = chart.getOverlays({ id: cur.id, groupId: 'user_drawings' })
+    if (updated) {
+      const afterRec = overlayToRecord(updated, paneRef.current.ticker)
+      if (beforeRec) {
+        undoStackRef.current = [...undoStackRef.current.slice(-29), { kind: 'modified', before: beforeRec, after: afterRec }]
+        redoStackRef.current = []
+      }
+      void api.upsertDrawing(afterRec)
+      drawingSyncBus.emit({
+        kind: 'upsert',
+        sourceSlotId: paneRef.current.slotId,
+        ticker: paneRef.current.ticker,
+        record: afterRec,
+      })
+    }
+  }
+
+  const handleShiftQuickRulerClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (replaySelectingCut) return
+    if (!e.shiftKey) {
+      if (quickRuler) setQuickRuler(null)
+      return
+    }
+    const chart = chartRef.current
+    const el = containerRef.current
+    if (!chart || !el) return
+    const rect = el.getBoundingClientRect()
+    const x = e.clientX - rect.left
+    const y = e.clientY - rect.top
+    const converted = chart.convertFromPixel([{ x, y }], { paneId: 'candle_pane' })
+    const pt = Array.isArray(converted) ? converted[0] : converted
+    const price = typeof pt?.value === 'number' && Number.isFinite(pt.value) ? pt.value : null
+    const dataList = chart.getDataList()
+    const idx =
+      typeof pt?.dataIndex === 'number' && Number.isFinite(pt.dataIndex)
+        ? Math.max(0, Math.min(dataList.length - 1, Math.round(pt.dataIndex)))
+        : dataList.length - 1
+    const ts = typeof pt?.timestamp === 'number' ? pt.timestamp : (dataList[idx]?.timestamp ?? Date.now())
+    if (price === null) return
+
+    const sample = { x, y, price, ts, idx }
+    setQuickRuler((prev) => (!prev || prev.p2 ? { p1: sample, p2: null } : { p1: prev.p1, p2: sample }))
   }
 
   const handleCloneSelectedDrawing = () => {
@@ -2085,6 +2166,22 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
                 {iv === '1h' ? '1H' : iv === '4h' ? '4H' : iv}
               </button>
             ))}
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation()
+                toggleMaximizeSlot(pane.slotId)
+              }}
+              className="ml-1 p-0.5 rounded border-0 cursor-pointer bg-transparent text-[var(--tv-text-secondary)] hover:text-[var(--tv-accent)]"
+              title={maximizedSlotId === pane.slotId ? 'Thu gọn về lưới (Alt+Enter)' : 'Phóng to ô này (Alt+Enter)'}
+              aria-label={maximizedSlotId === pane.slotId ? 'Thu gọn ô biểu đồ' : 'Phóng to ô biểu đồ'}
+            >
+              {maximizedSlotId === pane.slotId ? (
+                <Minimize2 className="w-3 h-3" />
+              ) : (
+                <Maximize2 className="w-3 h-3" />
+              )}
+            </button>
           </div>
         </div>
       )}
@@ -2092,6 +2189,7 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
       {/* Main Chart Body Container */}
       <div
         className="relative flex-1 min-w-0 min-h-0 overflow-hidden"
+        onClick={handleShiftQuickRulerClick}
         onDoubleClick={handleCanvasDoubleClick}
         onMouseLeave={() => crosshairBus.publish(pane.slotId, null)}
       >
@@ -2202,6 +2300,61 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
           )}
         </div>
 
+        {/* Ephemeral Shift+Click Quick Measure Ruler Overlay (Wave 5 — zero DB pollution!) */}
+        {quickRuler && (() => {
+          const { p1, p2 } = quickRuler
+          if (!p2) {
+            return (
+              <div
+                className="pointer-events-none absolute z-20 px-2 py-0.5 rounded text-[10px] font-semibold bg-[#2962FF] text-white shadow"
+                style={{ left: Math.max(8, p1.x + 8), top: Math.max(8, p1.y - 22) }}
+              >
+                Shift+Click điểm thứ 2 để đo (Esc để hủy)
+              </div>
+            )
+          }
+          const left = Math.min(p1.x, p2.x)
+          const top = Math.min(p1.y, p2.y)
+          const width = Math.max(2, Math.abs(p2.x - p1.x))
+          const height = Math.max(2, Math.abs(p2.y - p1.y))
+          const diff = p2.price - p1.price
+          const pct = p1.price !== 0 ? (diff / p1.price) * 100 : 0
+          const bars = Math.abs(p2.idx - p1.idx)
+          const days = Math.round(Math.abs(p2.ts - p1.ts) / 86_400_000)
+          const up = diff >= 0
+          const accent = up ? '#089981' : '#F23645'
+          const prec = guessPrecision(pane.ticker).pricePrecision
+          return (
+            <div className="pointer-events-none absolute inset-0 z-20">
+              <div
+                className="absolute"
+                style={{
+                  left,
+                  top,
+                  width,
+                  height,
+                  backgroundColor: up ? 'rgba(8, 153, 129, 0.16)' : 'rgba(242, 54, 69, 0.16)',
+                  border: `1px dashed ${accent}`,
+                }}
+              />
+              <div
+                className="absolute px-2 py-1 rounded shadow-xl text-[10.5px] font-semibold tabular-nums whitespace-nowrap"
+                style={{
+                  left: Math.max(8, left + width / 2 - 70),
+                  top: Math.max(8, top + height + 6),
+                  backgroundColor: accent,
+                  color: '#FFFFFF',
+                }}
+              >
+                {up ? '+' : ''}
+                {diff.toLocaleString('en-US', { minimumFractionDigits: prec, maximumFractionDigits: prec })} (
+                {up ? '+' : ''}
+                {pct.toFixed(2)}%) · {bars} nến · {days} ngày
+              </div>
+            </div>
+          )
+        })()}
+
         {/* Floating Drawing Toolbar (appears when a user drawing is selected, fixes BUG-008!) */}
         {isActive && selectedDrawing && !replaySelectingCut && (
           <FloatingDrawingToolbar
@@ -2211,6 +2364,7 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
             onChangeSize={(size) => updateSelectedStyle({ size })}
             onChangeLineStyle={(lineStyle) => updateSelectedStyle({ lineStyle })}
             onToggleLock={() => updateSelectedStyle({ lock: !selectedDrawing.lock })}
+            onChangeText={handleUpdateSelectedText}
             onCreateAlert={() => {
               const chart = chartRef.current
               if (!chart) return
