@@ -45,6 +45,10 @@ pub struct AccountConfig {
     pub tax_sell_bps: f64,
     /// Adverse execution slippage in basis points (`default = 2.0` bps = `0.02%`).
     pub slippage_bps: f64,
+    /// When `false` (default), `Limit` orders fill strictly at their limit price without
+    /// adverse slippage exceeding the limit. Set `true` only for conservative stress testing.
+    #[serde(default)]
+    pub apply_slippage_to_limits: bool,
     /// Point-to-currency contract multiplier (`100.0 kVND/pt` or `100_000.0 VND/pt` for `VN30F1M`, `1.0` for cash/spot).
     #[serde(default = "default_contract_multiplier_one")]
     pub contract_multiplier: f64,
@@ -73,6 +77,7 @@ impl Default for AccountConfig {
             commission_bps: 5.0,
             tax_sell_bps: 0.0,
             slippage_bps: 2.0,
+            apply_slippage_to_limits: false,
             contract_multiplier: 1.0,
             initial_margin_pct: 100.0,
             max_leverage: 1.0,

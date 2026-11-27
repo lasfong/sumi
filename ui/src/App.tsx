@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import * as api from './api/tauri'
 import { KLineViewport } from './chart/KLineViewport'
+import { timeRangeBus } from './chart/crosshairBus'
 import { drawingSyncBus, type DrawingSyncEvent } from './chart/drawingSyncBus'
 import type { ReplaySnapshotResponse } from './types/market'
 import { BottomTradingDock } from './components/BottomTradingDock'
@@ -74,6 +75,11 @@ export const App: React.FC = () => {
               panes: s.panes.map((p) => ({ ...p, ticker: ev.payload.ticker, showVnBands: isVn })),
             }))
           }
+        }
+      }),
+      listen<{ centerTimestamp: number; barSpace?: number | null }>('sumi:sync_range', (ev) => {
+        if (typeof ev.payload?.centerTimestamp === 'number') {
+          timeRangeBus.applyRemote(ev.payload.centerTimestamp, ev.payload.barSpace ?? null)
         }
       }),
     ])

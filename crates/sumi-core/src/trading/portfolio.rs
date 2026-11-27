@@ -1936,7 +1936,15 @@ impl TradingSession {
             };
             return;
         }
-        let exec_price = apply_slippage(raw_trigger_price, side, self.config.slippage_bps);
+        // Audit Fix #5: `Limit` orders must never fill worse than their limit price unless
+        // the caller explicitly enables `apply_slippage_to_limits` for stress testing.
+        let exec_price = if matches!(kind, OrderKind::Limit { .. })
+            && !self.config.apply_slippage_to_limits
+        {
+            raw_trigger_price
+        } else {
+            apply_slippage(raw_trigger_price, side, self.config.slippage_bps)
+        };
         match self.validate_execution_capacity(side, qty, exec_price) {
             Err(err) => {
                 self.orders[ord_idx].status = OrderStatus::Rejected {

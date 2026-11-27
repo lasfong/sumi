@@ -85,6 +85,9 @@ pub struct StockScreenerInput {
     pub macd_filter: Option<String>,
     #[serde(default)]
     pub min_health_score: Option<f64>,
+    /// Optional explicit opt-in to refresh up to 60 stale symbols before running the scan.
+    #[serde(default)]
+    pub auto_refresh_stale: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -128,6 +131,10 @@ pub struct StockScreenerResponse {
     pub scanned_symbols: usize,
     pub matched_symbols: usize,
     pub elapsed_ms: u64,
+    pub expected_session_date: String,
+    pub fresh_symbols_count: usize,
+    pub stale_symbols_count: usize,
+    pub median_cached_date: Option<String>,
     pub rows: Vec<ScreenerRowDto>,
 }
 
@@ -271,30 +278,41 @@ pub async fn run_stock_screener(
     .await
     .map_err(|e| DesktopError::Internal(e.to_string()))??;
 
-    // On a cold-start database (or sparse Watchlist / Crypto / US filters with <15 cached series),
-    // hydrate up to 18 candidate daily series online so the 101-signal Screener works out-of-the-box.
-    // On a warm local database (>=15 cached series), NEVER stall a 475-symbol scan on dead/uncached tickers (`BUG-023`)!
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let (expected_session_date, expected_session_ms) =
+        sumi_data::latest_expected_vn_trading_session_ms(now_ms);
+
+    // Fix Stale EOD Trap (v3.0 Wave 1):
+    // 1. On a cold-start database (<15 cached series) or Watchlist filter, hydrate missing symbols online.
+    // 2. When `auto_refresh_stale == Some(true)` (explicit user click), refresh up to 60 stale candidate
+    //    symbols whose cached `1D` latest_ms < `expected_session_ms` without ever stalling a 475-symbol scan.
     if !state.is_offline() && !candidates.is_empty() {
         let store_check = store.clone();
         let candidates_check = candidates.clone();
         let force_hydrate = ex_upper == "WATCHLIST";
-        let (cached_count, uncached): (usize, Vec<SymbolKey>) =
+        let want_refresh_stale = input.auto_refresh_stale.unwrap_or(false);
+        let (cached_count, uncached, stale_list): (usize, Vec<SymbolKey>, Vec<SymbolKey>) =
             tokio::task::spawn_blocking(move || {
                 let mut cached = 0usize;
                 let mut missing = Vec::new();
+                let mut stale = Vec::new();
                 for (k, _) in candidates_check {
                     let series = SeriesKey::new(&k, Interval::D1, Adjustment::Splits);
-                    let has_enough = store_check
-                        .query_bars(&series, BarQueryMode::Init, 55)
-                        .map(|r| r.bars.len() >= 55)
-                        .unwrap_or(false);
+                    let meta = store_check.series_meta(&series).ok().flatten();
+                    let has_enough = meta.as_ref().is_some_and(|m| m.bar_count >= 55);
                     if has_enough {
                         cached += 1;
+                        if want_refresh_stale
+                            && stale.len() < 60
+                            && meta.is_some_and(|m| m.latest_ms < expected_session_ms)
+                        {
+                            stale.push(k);
+                        }
                     } else if missing.len() < 18 {
                         missing.push(k);
                     }
                 }
-                (cached, missing)
+                (cached, missing, stale)
             })
             .await
             .unwrap_or_default();
@@ -305,6 +323,12 @@ pub async fn run_stock_screener(
                 let series = SeriesKey::new(&key, Interval::D1, Adjustment::Splits);
                 let _ = svc.get_bars(&BarsRequest::init(series, 220)).await;
             }
+        }
+        if want_refresh_stale && !stale_list.is_empty() {
+            let svc = state.active_market_service();
+            let _ = svc
+                .sync_batch(&stale_list, Interval::D1, Adjustment::Splits, 120)
+                .await;
         }
     }
 
@@ -415,6 +439,19 @@ pub async fn run_stock_screener(
         }
 
         let scanned_symbols = loaded_series.len();
+        let mut latest_ts_list: Vec<i64> = loaded_series
+            .iter()
+            .filter_map(|(_, _, cs)| cs.last().map(|c| c.timestamp.saturating_mul(1_000)))
+            .collect();
+        latest_ts_list.sort_unstable();
+        let fresh_symbols_count = latest_ts_list
+            .iter()
+            .filter(|&&ts| ts >= expected_session_ms)
+            .count();
+        let stale_symbols_count = scanned_symbols.saturating_sub(fresh_symbols_count);
+        let median_cached_date = latest_ts_list
+            .get(latest_ts_list.len() / 2)
+            .map(|&ts| sumi_data::format_ymd_utc(ts));
 
         let min_rsi = input.min_rsi.filter(|v| v.is_finite());
         let max_rsi = input.max_rsi.filter(|v| v.is_finite());
@@ -692,6 +729,10 @@ pub async fn run_stock_screener(
             scanned_symbols,
             matched_symbols,
             elapsed_ms: started.elapsed().as_millis() as u64,
+            expected_session_date,
+            fresh_symbols_count,
+            stale_symbols_count,
+            median_cached_date,
             rows,
         })
     })

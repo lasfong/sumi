@@ -1,0 +1,52 @@
+name: Cross-Platform CI (macOS + Windows)
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-and-ui:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust stable + clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo registry & target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install UI dependencies & verify typecheck + tests + build
+        working-directory: ui
+        run: |
+          npm ci --no-audit --no-fund
+          npm run typecheck
+          npm run test
+          npm run build
+
+      - name: Run Rust workspace unit & integration tests (Clean-Slate environment)
+        run: cargo test --workspace
+
+      - name: Run Rust clippy (all targets)
+        run: cargo clippy --workspace --all-targets

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -10,7 +10,8 @@ use sumi_core::replay::ReplayController;
 use sumi_core::trading::{AccountConfig, TradingSession};
 use sumi_data::{
     CachePolicy, CafeFImportConfig, CafeFImporter, Interval, MarketDataService, OhlcvBar,
-    SqliteMarketStore, TradingViewConfig, TradingViewFeed,
+    SqliteMarketStore, SqliteMigrationReceipt, TradingViewConfig, TradingViewFeed,
+    legacy_sumi_app_data_dirs, sqlite_backup_atomic, sumi_config_dir, sumi_data_dir,
 };
 use tokio::sync::{Mutex, broadcast};
 use tokio::task::JoinHandle;
@@ -62,7 +63,7 @@ pub struct PaperBrokerRuntime {
     pub base_candles: Vec<Candle>,
     pub cursor_index: usize,
     pub session: TradingSession,
-    /// Maps order_id -> VN order type label (`"LO"`, `"MP"`, `"ATO"`, `"ATC"`).
+    /// Maps order_id -> VN order type label (`"LO"`, `"MP"`, `"ATO"`, `"ATC"`, `"STOP"`).
     pub order_types_meta: HashMap<u64, String>,
 }
 
@@ -73,6 +74,7 @@ impl Default for PaperBrokerRuntime {
             commission_bps: 15.0,
             tax_sell_bps: 10.0,
             slippage_bps: 2.0,
+            apply_slippage_to_limits: false,
             allow_short: false,
             enforce_vn_t2_lot_lock: true,
             venue: sumi_core::journal::ExchangeVenue::Hose,
@@ -96,10 +98,20 @@ pub struct CachedAnalogMemoryBank {
     pub built_total_bars: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct V3MigrationBundleReceipt {
+    pub schema_version: String,
+    pub market_db: Option<SqliteMigrationReceipt>,
+    pub workspace_db: Option<SqliteMigrationReceipt>,
+}
+
 pub struct AppState {
     pub market_service: MarketDataService<TradingViewFeed>,
     pub market_store: SqliteMarketStore,
     pub workspace: WorkspaceStore,
+    pub data_dir: PathBuf,
+    pub config_dir: PathBuf,
     pub offline_mode: AtomicBool,
     pub alert_seq: AtomicU64,
     pub bar_updates_tx: broadcast::Sender<LiveBarPayload>,
@@ -121,6 +133,14 @@ pub struct AppState {
 
 impl AppState {
     pub fn initialize(market_db_path: PathBuf, workspace_db_path: PathBuf) -> DesktopResult<Self> {
+        let data_dir = market_db_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(sumi_data_dir);
+        let config_dir = sumi_config_dir();
+        let _ = std::fs::create_dir_all(&data_dir);
+        let _ = std::fs::create_dir_all(&config_dir);
+
         let market_store = SqliteMarketStore::open(&market_db_path)?;
         maybe_auto_seed_cafef(&market_store);
         let workspace = WorkspaceStore::open(&workspace_db_path)?;
@@ -133,6 +153,8 @@ impl AppState {
             market_service,
             market_store,
             workspace,
+            data_dir,
+            config_dir,
             offline_mode: AtomicBool::new(false),
             alert_seq: AtomicU64::new(1),
             bar_updates_tx,
@@ -171,10 +193,8 @@ impl AppState {
     }
 }
 
-/// Collects candidate workspace root directories from both `current_dir()` and `current_exe()`
-/// so double-clicking `dist/Sumi Supercharts.app` in macOS Finder (where `cwd` is `/`) or
-/// `dist\SumiSupercharts-win64\sumi-desktop.exe` in Windows Explorer still locates `data/cache`
-/// and `data/raw/cafef` inside the repository.
+/// Collects candidate local ancestor directories from `current_dir()` and `current_exe()` for
+/// optional cold-start seeding (never overrides canonical OS data directories).
 pub fn workspace_ancestor_dirs() -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
@@ -196,69 +216,152 @@ pub fn workspace_ancestor_dirs() -> Vec<PathBuf> {
     roots
 }
 
-/// Resolves default local paths for `sumi_market.db` and `sumi_workspace.db`.
-/// Prefers the workspace's seeded `data/cache/sumi_market.db` during dev/repo execution,
-/// falling back to the OS app data directory when packaged outside the repo.
-pub fn resolve_database_paths(app_data_dir: Option<PathBuf>) -> (PathBuf, PathBuf) {
-    for root in workspace_ancestor_dirs() {
-        let cand = root.join("data/cache");
-        let market_candidate = cand.join("sumi_market.db");
-        if market_candidate.exists() {
-            return (market_candidate, cand.join("sumi_workspace.db"));
+/// Resolves canonical cross-platform paths for `sumi_market.db` and `sumi_workspace.db`
+/// (`~/.local/share/sumi/` on macOS/Linux, `%LOCALAPPDATA%\sumi\` on Windows, or `SUMI_DATA_DIR`).
+///
+/// On first v3.0 launch, automatically and non-destructively migrates any existing v2.x databases
+/// from legacy OS app support folders (`~/Library/Application Support/com.sumi.supercharts/`,
+/// `%APPDATA%\com.sumi.supercharts\`, or the passed `legacy_app_data_dir`) using SQLite's WAL-safe
+/// Online Backup API with SHA-256 verification. Never deletes legacy files.
+pub fn resolve_database_paths(legacy_app_data_dir: Option<PathBuf>) -> (PathBuf, PathBuf) {
+    let target_dir = sumi_data_dir();
+    let _ = migrate_legacy_databases_into(&target_dir, legacy_app_data_dir.as_deref());
+    (
+        target_dir.join("sumi_market.db"),
+        target_dir.join("sumi_workspace.db"),
+    )
+}
+
+/// Performs non-destructive WAL-safe SQLite migration from legacy v2.x directories into `target_dir`.
+pub fn migrate_legacy_databases_into(
+    target_dir: &Path,
+    extra_legacy_dir: Option<&Path>,
+) -> Option<V3MigrationBundleReceipt> {
+    let target_market = target_dir.join("sumi_market.db");
+    let target_workspace = target_dir.join("sumi_workspace.db");
+    if target_market.is_file() && target_workspace.is_file() {
+        return None;
+    }
+
+    let mut legacy_candidates = Vec::new();
+    if let Some(extra) = extra_legacy_dir
+        && extra != target_dir
+    {
+        legacy_candidates.push(extra.to_path_buf());
+    }
+    for dir in legacy_sumi_app_data_dirs() {
+        if dir != target_dir && !legacy_candidates.contains(&dir) {
+            legacy_candidates.push(dir);
         }
     }
 
-    let base = app_data_dir.unwrap_or_else(|| PathBuf::from("data/cache"));
-    (base.join("sumi_market.db"), base.join("sumi_workspace.db"))
+    let mut market_receipt = None;
+    let mut workspace_receipt = None;
+
+    if !target_market.is_file() {
+        for cand_dir in &legacy_candidates {
+            let src = cand_dir.join("sumi_market.db");
+            if src.is_file() {
+                match sqlite_backup_atomic(&src, &target_market) {
+                    Ok(rec) => {
+                        info!(
+                            src = %src.display(),
+                            dst = %target_market.display(),
+                            bytes = rec.target_bytes,
+                            sha256 = %rec.target_sha256,
+                            "migrated legacy sumi_market.db non-destructively to canonical SUMI_DATA_DIR"
+                        );
+                        market_receipt = Some(rec);
+                        break;
+                    }
+                    Err(err) => {
+                        warn!(src = %src.display(), error = %err, "legacy market DB migration attempt failed");
+                    }
+                }
+            }
+        }
+    }
+
+    if !target_workspace.is_file() {
+        for cand_dir in &legacy_candidates {
+            let src = cand_dir.join("sumi_workspace.db");
+            if src.is_file() {
+                match sqlite_backup_atomic(&src, &target_workspace) {
+                    Ok(rec) => {
+                        info!(
+                            src = %src.display(),
+                            dst = %target_workspace.display(),
+                            bytes = rec.target_bytes,
+                            sha256 = %rec.target_sha256,
+                            "migrated legacy sumi_workspace.db non-destructively to canonical SUMI_DATA_DIR"
+                        );
+                        workspace_receipt = Some(rec);
+                        break;
+                    }
+                    Err(err) => {
+                        warn!(src = %src.display(), error = %err, "legacy workspace DB migration attempt failed");
+                    }
+                }
+            }
+        }
+    }
+
+    if market_receipt.is_some() || workspace_receipt.is_some() {
+        let bundle = V3MigrationBundleReceipt {
+            schema_version: "sumi_v3_migration_receipt_v1".to_owned(),
+            market_db: market_receipt,
+            workspace_db: workspace_receipt,
+        };
+        let receipt_path = target_dir.join(".migration_v3_receipt.json");
+        if let Ok(json) = serde_json::to_vec_pretty(&bundle) {
+            let _ = std::fs::write(&receipt_path, json);
+        }
+        return Some(bundle);
+    }
+
+    None
 }
 
-/// Collects candidate seed root directories from the workspace, macOS `.app` bundle resources,
-/// `SUMI_DATA_DIR`, and common local workspace locations so `/Applications/Sumi Supercharts.app`
-/// automatically hydrates historical CafeF market data on first launch.
+/// Collects candidate cold-start seed roots strictly from explicit env overrides (`SUMI_SEED_DIR`),
+/// packaged bundle `Resources/`, or active working tree (0% hardcoded personal user paths).
 fn seed_candidate_roots() -> Vec<PathBuf> {
-    let mut roots = workspace_ancestor_dirs();
+    let mut roots = Vec::new();
     let mut push_unique = |p: PathBuf| {
         if !roots.contains(&p) {
             roots.push(p);
         }
     };
 
-    if let Ok(explicit) = std::env::var("SUMI_DATA_DIR")
+    if let Ok(explicit) = std::env::var("SUMI_SEED_DIR")
         && !explicit.trim().is_empty()
     {
         push_unique(PathBuf::from(explicit.trim()));
     }
 
     // macOS bundle Resources directory: `<App>.app/Contents/MacOS/sumi-desktop` -> `../Resources`
+    // Windows portable directory: `<Portable>/sumi-desktop.exe` -> `<Portable>/seed`
     if let Ok(exe) = std::env::current_exe()
-        && let Some(contents_dir) = exe.parent().and_then(|p| p.parent())
+        && let Some(exe_dir) = exe.parent()
     {
-        push_unique(contents_dir.join("Resources"));
-        push_unique(contents_dir.join("Resources/data"));
+        push_unique(exe_dir.to_path_buf());
+        push_unique(exe_dir.join("seed"));
+        push_unique(exe_dir.join("data"));
+        if let Some(contents_dir) = exe_dir.parent() {
+            push_unique(contents_dir.join("Resources"));
+            push_unique(contents_dir.join("Resources").join("data"));
+        }
     }
 
-    if let Ok(home) = std::env::var("HOME") {
-        let h = PathBuf::from(home);
-        for rel in [
-            "workspace/sumi",
-            "Projects/sumi",
-            "Developer/sumi",
-            "Documents/sumi",
-            "Desktop/sumi",
-        ] {
-            let cand = h.join(rel);
-            if cand.exists() {
-                push_unique(cand);
-            }
-        }
+    for anc in workspace_ancestor_dirs() {
+        push_unique(anc);
     }
 
     roots
 }
 
-/// On a fresh or sparsely populated packaged install (`total_symbols < 100`), automatically merges
-/// a pre-seeded `sumi_market.db` (if found) or imports CafeF CSV archives (`data/raw/cafef` /
-/// `work/CafeFData`) so local history is immediately available offline at `< 2ms`.
+/// On a truly empty Clean-Slate install (`total_symbols < 100`), optionally hydrates from a
+/// co-located seed SQLite DB or CafeF CSV directory if present (never required on Clean-Slate
+/// Windows PCs, which hydrate directly via Yumeko Read-Only + TradingView Catalog/EOD sync!).
 fn maybe_auto_seed_cafef(market_store: &SqliteMarketStore) {
     let symbol_count = market_store.stats().map(|s| s.total_symbols).unwrap_or(0);
     if symbol_count >= 100 {
@@ -271,13 +374,12 @@ fn maybe_auto_seed_cafef(market_store: &SqliteMarketStore) {
     for root in &roots {
         for rel in ["data/cache/sumi_market.db", "sumi_market.db"] {
             let candidate = root.join(rel);
-            if !candidate.exists() {
+            if !candidate.exists() || candidate == market_store.path() {
                 continue;
             }
             let Ok(meta) = std::fs::metadata(&candidate) else {
                 continue;
             };
-            // Skip tiny/empty DBs (< 1 MB)
             if meta.len() < 1_000_000 {
                 continue;
             }
@@ -286,7 +388,7 @@ fn maybe_auto_seed_cafef(market_store: &SqliteMarketStore) {
                     info!(
                         seed = %candidate.display(),
                         inserted_bars = inserted,
-                        "auto-merged seeded SQLite market history into app database"
+                        "auto-merged seeded SQLite market history into canonical SUMI_DATA_DIR database"
                     );
                     return;
                 }
@@ -304,7 +406,7 @@ fn maybe_auto_seed_cafef(market_store: &SqliteMarketStore) {
 
     // 2. Fallback: import CafeF CSV archives directly if present.
     for root in &roots {
-        for rel in ["data/raw/cafef", "work/CafeFData", "cafef"] {
+        for rel in ["data/raw/cafef", "cafef"] {
             let candidate = root.join(rel);
             let has_csv = std::fs::read_dir(&candidate)
                 .ok()

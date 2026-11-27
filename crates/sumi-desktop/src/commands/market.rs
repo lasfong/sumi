@@ -3,8 +3,9 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use sumi_data::{
     Adjustment, BarQueryMode, BarsRequest, CafeFImportConfig, CafeFImportSummary, CafeFImporter,
-    DataSourceOrigin, Interval, LiveQuote, OhlcvBar, ResolvedSymbol, SeriesKey, StoreStats,
-    SymbolKey, SymbolSearchResult, VietnamPriceBand,
+    CorporateEventMarker, DataSourceOrigin, Interval, LiveQuote, OhlcvBar, ResolvedSymbol,
+    SeriesKey, StoreStats, SymbolKey, SymbolSearchResult, VietnamPriceBand, VnFreshnessSummary,
+    latest_expected_vn_trading_session_ms, yumeko_data_dir,
 };
 use tauri::State;
 use tauri::ipc::Channel;
@@ -66,6 +67,11 @@ pub struct WatchlistQuoteSnapshot {
     pub description: String,
     pub last_price: Option<f64>,
     pub prev_close: Option<f64>,
+    pub open: Option<f64>,
+    pub high: Option<f64>,
+    pub low: Option<f64>,
+    pub bid: Option<f64>,
+    pub ask: Option<f64>,
     pub change: Option<f64>,
     pub change_percent: Option<f64>,
     pub volume: Option<f64>,
@@ -79,6 +85,31 @@ pub struct WatchlistQuoteSnapshot {
 pub struct DataStatusResponse {
     pub stats: StoreStats,
     pub offline_mode: bool,
+    pub freshness: VnFreshnessSummary,
+    pub data_dir: String,
+    pub config_dir: String,
+    pub yumeko_db_detected: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncProgressPayload {
+    pub scope: String,
+    pub completed: usize,
+    pub total: usize,
+    pub current_ticker: String,
+    pub updated_symbols: usize,
+    pub updated_bars: usize,
+    pub failed_symbols: usize,
+    pub done: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VnUniverseSyncSummary {
+    pub discovered_symbols: usize,
+    pub upserted_symbols: usize,
+    pub elapsed_ms: u64,
 }
 
 pub(crate) fn curated_catalog() -> Vec<SymbolSearchResult> {
@@ -684,6 +715,7 @@ pub async fn subscribe_bars(
     stream_id: String,
     ticker: String,
     interval: String,
+    adjustment: Option<String>,
     on_bar: Channel<LiveBarPayload>,
 ) -> DesktopResult<bool> {
     // Bump monotonic generation and tear down any existing stream for this slot (`BUG-012` race guard!).
@@ -708,7 +740,12 @@ pub async fn subscribe_bars(
 
     let sym = SymbolKey::parse(&ticker)?;
     let iv: Interval = interval.parse()?;
-    let series = SeriesKey::new(&sym, iv, Adjustment::Splits);
+    let adj: Adjustment = adjustment
+        .as_deref()
+        .map(str::parse)
+        .transpose()?
+        .unwrap_or(Adjustment::Splits);
+    let series = SeriesKey::new(&sym, iv, adj);
     let svc = state.active_market_service();
 
     let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1016,7 +1053,7 @@ pub async fn get_watchlist_snapshots(
                 .map(|r| r.bars)
                 .unwrap_or_default();
 
-            let (last_price, prev_close, change, change_percent, volume, timestamp_ms) =
+            let (last_price, prev_close, open, high, low, change, change_percent, volume, timestamp_ms) =
                 match bars.as_slice() {
                     [.., prev, last] => {
                         let chg = last.close - prev.close;
@@ -1028,6 +1065,9 @@ pub async fn get_watchlist_snapshots(
                         (
                             Some(last.close),
                             Some(prev.close),
+                            Some(last.open),
+                            Some(last.high),
+                            Some(last.low),
                             Some(chg),
                             Some(pct),
                             Some(last.volume),
@@ -1037,6 +1077,9 @@ pub async fn get_watchlist_snapshots(
                     [only] => (
                         Some(only.close),
                         Some(only.open),
+                        Some(only.open),
+                        Some(only.high),
+                        Some(only.low),
                         Some(only.close - only.open),
                         if only.open.abs() > 1e-9 {
                             Some(((only.close - only.open) / only.open) * 100.0)
@@ -1046,7 +1089,7 @@ pub async fn get_watchlist_snapshots(
                         Some(only.volume),
                         Some(only.timestamp),
                     ),
-                    [] => (None, None, None, None, None, None),
+                    [] => (None, None, None, None, None, None, None, None, None),
                 };
 
             let vn_band = compute_vn_band_from_bars(&sym_info, &bars);
@@ -1057,6 +1100,11 @@ pub async fn get_watchlist_snapshots(
                 description: sym_info.description.clone(),
                 last_price,
                 prev_close,
+                open,
+                high,
+                low,
+                bid: None,
+                ask: None,
                 change,
                 change_percent,
                 volume,
@@ -1071,13 +1119,27 @@ pub async fn get_watchlist_snapshots(
     .map_err(|e| DesktopError::Internal(e.to_string()))?
 }
 
-#[tauri::command]
-pub async fn get_data_status(state: State<'_, AppState>) -> DesktopResult<DataStatusResponse> {
+async fn build_data_status(state: &AppState) -> DesktopResult<DataStatusResponse> {
     let stats = state.active_market_service().store_stats().await?;
+    let store = state.market_store.clone();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let freshness = tokio::task::spawn_blocking(move || store.vn_freshness_summary(now_ms))
+        .await
+        .map_err(|e| DesktopError::Internal(e.to_string()))??;
+    let yumeko_db_detected = yumeko_data_dir().join("yumeko-app.sqlite").is_file();
     Ok(DataStatusResponse {
         stats,
         offline_mode: state.is_offline(),
+        freshness,
+        data_dir: state.data_dir.display().to_string(),
+        config_dir: state.config_dir.display().to_string(),
+        yumeko_db_detected,
     })
+}
+
+#[tauri::command]
+pub async fn get_data_status(state: State<'_, AppState>) -> DesktopResult<DataStatusResponse> {
+    build_data_status(&state).await
 }
 
 #[tauri::command]
@@ -1089,19 +1151,17 @@ pub async fn set_offline_mode(
     if offline {
         unsubscribe_quotes_inner(&state).await;
     }
-    let stats = state.active_market_service().store_stats().await?;
-    Ok(DataStatusResponse {
-        stats,
-        offline_mode: state.is_offline(),
-    })
+    build_data_status(&state).await
 }
 
 #[tauri::command]
 pub async fn import_cafef_dir(
     state: State<'_, AppState>,
     dir: String,
+    include_raw: Option<bool>,
 ) -> DesktopResult<CafeFImportSummary> {
     let store = state.market_store.clone();
+    let want_raw = include_raw.unwrap_or(true);
     let summary = tokio::task::spawn_blocking(move || {
         let raw_path = std::path::PathBuf::from(dir.trim());
         let resolved_dir = if raw_path.exists() {
@@ -1113,7 +1173,11 @@ pub async fn import_cafef_dir(
                 .find(|cand| cand.exists())
                 .unwrap_or(raw_path)
         };
-        let importer = CafeFImporter::new(CafeFImportConfig::default());
+        let cfg = CafeFImportConfig {
+            include_raw: want_raw,
+            ..CafeFImportConfig::default()
+        };
+        let importer = CafeFImporter::new(cfg);
         importer
             .import_dir(resolved_dir, &store)
             .map_err(DesktopError::from)
@@ -1123,4 +1187,171 @@ pub async fn import_cafef_dir(
     state.market_service.invalidate_ram_cache();
     state.invalidate_analog_memory_bank();
     Ok(summary)
+}
+
+/// Hydrates the full Vietnam listed market catalog (`~1,600+` HOSE/HNX/UPCOM symbols) via
+/// `tradingview-rs::list_symbols` so Clean-Slate machines & Screener cover the entire VN market.
+#[tauri::command]
+pub async fn sync_vn_universe_catalog(
+    state: State<'_, AppState>,
+) -> DesktopResult<VnUniverseSyncSummary> {
+    if state.is_offline() {
+        return Err(DesktopError::Validation(
+            "Không thể đồng bộ danh mục mã VN khi đang bật chế độ Offline.".to_owned(),
+        ));
+    }
+    let started = std::time::Instant::now();
+    let symbols = state
+        .market_service
+        .provider()
+        .list_vn_universe_symbols()
+        .await?;
+    let discovered = symbols.len();
+    let store = state.market_store.clone();
+    let upserted = tokio::task::spawn_blocking(move || store.upsert_symbols_bulk(&symbols))
+        .await
+        .map_err(|e| DesktopError::Internal(e.to_string()))??;
+    Ok(VnUniverseSyncSummary {
+        discovered_symbols: discovered,
+        upserted_symbols: upserted,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+    })
+}
+
+/// Incrementally gap-fills stale Vietnam `1D` (`splits`) EOD bars across the requested scope
+/// (`"QMV30"`, `"QMV60"`, `"WATCHLIST"`, `"HOSE"`, `"HNX"`, `"UPCOM"`, `"ALL_VN"`) while streaming
+/// real-time progress over a Tauri IPC Channel (`Eliminates the Stale EOD Trap`).
+#[tauri::command]
+pub async fn sync_universe_eod(
+    state: State<'_, AppState>,
+    scope: String,
+    tickers: Option<Vec<String>>,
+    max_symbols: Option<usize>,
+    on_progress: Channel<SyncProgressPayload>,
+) -> DesktopResult<SyncProgressPayload> {
+    if state.is_offline() {
+        return Err(DesktopError::Validation(
+            "Không thể đồng bộ nến EOD khi đang bật chế độ Offline.".to_owned(),
+        ));
+    }
+
+    let scope_upper = scope.trim().to_ascii_uppercase();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let (_, expected_ms) = latest_expected_vn_trading_session_ms(now_ms);
+
+    let explicit_keys: Option<Vec<SymbolKey>> = match scope_upper.as_str() {
+        "WATCHLIST" => Some(
+            tickers
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|t| SymbolKey::parse(t).ok())
+                .collect(),
+        ),
+        "QMV30" => Some(
+            sumi_core::scanner::qmv_universe::QMV30_SYMBOLS
+                .iter()
+                .filter_map(|s| {
+                    let ex = sumi_data::infer_vn_exchange_for_ticker(s, false);
+                    SymbolKey::new(ex, s).ok()
+                })
+                .collect(),
+        ),
+        "QMV60" => Some(
+            sumi_core::scanner::qmv_universe::QMV60_SYMBOLS
+                .iter()
+                .filter_map(|s| {
+                    let ex = sumi_data::infer_vn_exchange_for_ticker(s, false);
+                    SymbolKey::new(ex, s).ok()
+                })
+                .collect(),
+        ),
+        "HOSE" | "HNX" | "UPCOM" => {
+            let ex_filter = scope_upper.clone();
+            let store = state.market_store.clone();
+            let found = tokio::task::spawn_blocking(move || {
+                store.search_local_symbols("", Some(&ex_filter), 2_000)
+            })
+            .await
+            .map_err(|e| DesktopError::Internal(e.to_string()))??;
+            Some(
+                found
+                    .into_iter()
+                    .filter_map(|h| SymbolKey::parse(&h.ticker).ok())
+                    .collect(),
+            )
+        }
+        _ => None, // ALL_VN cached symbols
+    };
+
+    let store = state.market_store.clone();
+    let mut stale_list = tokio::task::spawn_blocking(move || {
+        store.list_stale_vn_symbols(explicit_keys.as_deref(), expected_ms)
+    })
+    .await
+    .map_err(|e| DesktopError::Internal(e.to_string()))??;
+
+    let cap = max_symbols.unwrap_or(500).clamp(1, 2_000);
+    stale_list.truncate(cap);
+
+    let total = stale_list.len();
+    let mut updated_symbols = 0_usize;
+    let mut updated_bars = 0_usize;
+    let mut failed_symbols = 0_usize;
+
+    let svc = state.active_market_service();
+    for (idx, (sym_key, _latest)) in stale_list.into_iter().enumerate() {
+        let series = SeriesKey::new(&sym_key, Interval::D1, Adjustment::Splits);
+        match svc.revalidate_series(&series, 300).await {
+            Ok(delta) => {
+                updated_symbols += 1;
+                updated_bars += delta.len();
+            }
+            Err(err) => {
+                debug!(ticker = %sym_key, error = %err, "EOD sync failed for symbol");
+                failed_symbols += 1;
+            }
+        }
+        let payload = SyncProgressPayload {
+            scope: scope_upper.clone(),
+            completed: idx + 1,
+            total,
+            current_ticker: sym_key.ticker(),
+            updated_symbols,
+            updated_bars,
+            failed_symbols,
+            done: false,
+        };
+        let _ = on_progress.send(payload);
+    }
+
+    if updated_bars > 0 {
+        state.invalidate_analog_memory_bank();
+    }
+
+    let final_payload = SyncProgressPayload {
+        scope: scope_upper,
+        completed: total,
+        total,
+        current_ticker: String::new(),
+        updated_symbols,
+        updated_bars,
+        failed_symbols,
+        done: true,
+    };
+    let _ = on_progress.send(final_payload.clone());
+    Ok(final_payload)
+}
+
+/// Returns auto-detected corporate action event markers (`D` Dividend, `S` Split/Bonus) for `ticker`.
+#[tauri::command]
+pub async fn get_corporate_events(
+    state: State<'_, AppState>,
+    ticker: String,
+) -> DesktopResult<Vec<CorporateEventMarker>> {
+    let sym = SymbolKey::parse(&ticker)?;
+    let store = state.market_store.clone();
+    tokio::task::spawn_blocking(move || store.compute_corporate_events(&sym))
+        .await
+        .map_err(|e| DesktopError::Internal(e.to_string()))?
+        .map_err(DesktopError::from)
 }

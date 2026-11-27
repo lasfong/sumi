@@ -7,7 +7,9 @@ import {
   Clock,
   Columns2,
   Database,
+  Download,
   ExternalLink,
+  FolderSync,
   Globe,
   Grid2x2,
   History,
@@ -17,12 +19,14 @@ import {
   Moon,
   PanelBottom,
   PanelRight,
+  RefreshCw,
   Rows2,
   Save,
   Search,
   Square,
   Sun,
   Trash2,
+  Upload,
   Wifi,
   WifiOff,
 } from 'lucide-react'
@@ -57,7 +61,11 @@ export const TopHeader: React.FC = () => {
   const indicatorTemplates = useWorkspaceStore((s) => s.indicatorTemplates)
   const showVnSessionBreaks = useWorkspaceStore((s) => s.showVnSessionBreaks)
   const dataStatus = useWorkspaceStore((s) => s.dataStatus)
+  const syncStatus = useWorkspaceStore((s) => s.syncStatus)
   const importingCafeF = useWorkspaceStore((s) => s.importingCafeF)
+  const syncingCatalog = useWorkspaceStore((s) => s.syncingCatalog)
+  const syncingEod = useWorkspaceStore((s) => s.syncingEod)
+  const eodSyncProgress = useWorkspaceStore((s) => s.eodSyncProgress)
   const rightPanelOpen = useWorkspaceStore((s) => s.rightPanelOpen)
   const bottomDockOpen = useWorkspaceStore((s) => s.bottomDockOpen)
   const replay = useWorkspaceStore((s) => s.replay)
@@ -84,6 +92,10 @@ export const TopHeader: React.FC = () => {
   const toggleTheme = useWorkspaceStore((s) => s.toggleTheme)
   const toggleOfflineMode = useWorkspaceStore((s) => s.toggleOfflineMode)
   const importCafeFDirectory = useWorkspaceStore((s) => s.importCafeFDirectory)
+  const refreshSyncStatus = useWorkspaceStore((s) => s.refreshSyncStatus)
+  const syncVnUniverseCatalog = useWorkspaceStore((s) => s.syncVnUniverseCatalog)
+  const syncUniverseEod = useWorkspaceStore((s) => s.syncUniverseEod)
+  const bootstrap = useWorkspaceStore((s) => s.bootstrap)
   const setRightPanelOpen = useWorkspaceStore((s) => s.setRightPanelOpen)
   const setBottomDockOpen = useWorkspaceStore((s) => s.setBottomDockOpen)
   const setReplaySelectingCut = useWorkspaceStore((s) => s.setReplaySelectingCut)
@@ -97,7 +109,18 @@ export const TopHeader: React.FC = () => {
   const [layoutNameInput, setLayoutNameInput] = useState('')
   const [tplNameInput, setTplNameInput] = useState('')
   const [cafefDirInput, setCafefDirInput] = useState('data/raw/cafef')
+  const [cafefIncludeRaw, setCafefIncludeRaw] = useState(true)
+  const [dataHubTab, setDataHubTab] = useState<'market' | 'sync'>('market')
+  const [syncFolderInput, setSyncFolderInput] = useState('')
+  const [importBundlePath, setImportBundlePath] = useState('')
+  const [syncBusy, setSyncBusy] = useState(false)
   const headerRef = useRef<HTMLElement | null>(null)
+
+  useEffect(() => {
+    if (syncStatus?.syncFolder && !syncFolderInput) {
+      setSyncFolderInput(syncStatus.syncFolder)
+    }
+  }, [syncStatus?.syncFolder, syncFolderInput])
 
   useEffect(() => {
     const onPointerDown = (e: PointerEvent) => {
@@ -690,16 +713,42 @@ export const TopHeader: React.FC = () => {
 
           {openMenu === 'data' && (
             <div
-              className="absolute right-0 top-[34px] w-80 rounded-md p-3 shadow-2xl z-50 space-y-2.5"
+              className="absolute right-0 top-[34px] w-[368px] rounded-md p-3 shadow-2xl z-50 space-y-2.5 max-h-[80vh] overflow-y-auto tv-scroll"
               style={{
                 backgroundColor: 'var(--tv-bg-elevated)',
                 border: '1px solid var(--tv-border)',
               }}
             >
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--tv-text-secondary)' }}>
-                  Kho Dữ Liệu SQLite Cục Bộ
-                </span>
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setDataHubTab('market')}
+                    className="px-2 py-0.5 rounded text-[11px] font-semibold border cursor-pointer"
+                    style={{
+                      backgroundColor: dataHubTab === 'market' ? 'var(--tv-accent-soft)' : 'transparent',
+                      borderColor: dataHubTab === 'market' ? 'var(--tv-accent)' : 'var(--tv-border)',
+                      color: dataHubTab === 'market' ? 'var(--tv-accent)' : 'var(--tv-text-secondary)',
+                    }}
+                  >
+                    Kho Dữ Liệu
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDataHubTab('sync')
+                      void refreshSyncStatus()
+                    }}
+                    className="px-2 py-0.5 rounded text-[11px] font-semibold border cursor-pointer"
+                    style={{
+                      backgroundColor: dataHubTab === 'sync' ? 'var(--tv-accent-soft)' : 'transparent',
+                      borderColor: dataHubTab === 'sync' ? 'var(--tv-accent)' : 'var(--tv-border)',
+                      color: dataHubTab === 'sync' ? 'var(--tv-accent)' : 'var(--tv-text-secondary)',
+                    }}
+                  >
+                    Đồng Bộ Đa Máy
+                  </button>
+                </div>
                 <span
                   className="px-1.5 py-0.5 rounded text-[10px] font-semibold"
                   style={{
@@ -711,69 +760,337 @@ export const TopHeader: React.FC = () => {
                 </span>
               </div>
 
-              <div
-                className="grid grid-cols-2 gap-2 p-2 rounded text-[11px] tabular-nums"
-                style={{ backgroundColor: 'var(--tv-bg-panel)', border: '1px solid var(--tv-border)' }}
-              >
-                <div>
-                  <div style={{ color: 'var(--tv-text-secondary)' }}>Số mã đã lưu</div>
-                  <strong className="text-[13px]">{(dataStatus?.stats.total_symbols ?? 0).toLocaleString('en-US')}</strong>
-                </div>
-                <div>
-                  <div style={{ color: 'var(--tv-text-secondary)' }}>Tổng số nến</div>
-                  <strong className="text-[13px]">{(dataStatus?.stats.total_bars ?? 0).toLocaleString('en-US')}</strong>
-                </div>
-              </div>
+              {dataHubTab === 'market' ? (
+                <>
+                  <div
+                    className="grid grid-cols-2 gap-2 p-2 rounded text-[11px] tabular-nums"
+                    style={{ backgroundColor: 'var(--tv-bg-panel)', border: '1px solid var(--tv-border)' }}
+                  >
+                    <div>
+                      <div style={{ color: 'var(--tv-text-secondary)' }}>Số mã đã lưu</div>
+                      <strong className="text-[13px]">{(dataStatus?.stats.total_symbols ?? 0).toLocaleString('en-US')}</strong>
+                    </div>
+                    <div>
+                      <div style={{ color: 'var(--tv-text-secondary)' }}>Tổng số nến</div>
+                      <strong className="text-[13px]">{(dataStatus?.stats.total_bars ?? 0).toLocaleString('en-US')}</strong>
+                    </div>
+                    {dataStatus?.freshness && (
+                      <div className="col-span-2 pt-1.5 border-t text-[10.5px]" style={{ borderColor: 'var(--tv-border)' }}>
+                        <div className="flex items-center justify-between">
+                          <span style={{ color: 'var(--tv-text-secondary)' }}>
+                            Phiên EOD kỳ vọng: <strong>{dataStatus.freshness.expected_session_date}</strong>
+                          </span>
+                          <span
+                            className="font-semibold"
+                            style={{
+                              color: dataStatus.freshness.stale_series > 0 ? '#FBC02D' : 'var(--tv-up)',
+                            }}
+                          >
+                            {dataStatus.freshness.fresh_series}/{dataStatus.freshness.total_vn_d1_series} mới
+                          </span>
+                        </div>
+                        {dataStatus.freshness.stale_series > 0 && (
+                          <div className="text-[10px] mt-0.5" style={{ color: '#FBC02D' }}>
+                            {dataStatus.freshness.stale_series} mã VN cũ (trung vị {dataStatus.freshness.median_latest_date ?? '—'})
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
 
-              <form
-                className="space-y-1.5 border-t pt-2"
-                style={{ borderColor: 'var(--tv-border)' }}
-                onSubmit={(e) => {
-                  e.preventDefault()
-                  void importCafeFDirectory(cafefDirInput)
-                }}
-              >
-                <label
-                  htmlFor="sumi-cafef-dir-input"
-                  className="block text-[11px] font-medium"
-                  style={{ color: 'var(--tv-text-secondary)' }}
-                >
-                  Đường dẫn thư mục CSV CafeF (trên Mac / Windows)
-                </label>
-                <div className="flex gap-1 text-[10px]">
-                  {['data/raw/cafef', 'work/CafeFData'].map((preset) => (
+                  {/* 1-click VN Universe Catalog & EOD Sync */}
+                  <div className="grid grid-cols-2 gap-1.5">
                     <button
-                      key={preset}
                       type="button"
-                      className="px-1.5 py-0.5 rounded border cursor-pointer bg-transparent"
-                      style={{ borderColor: 'var(--tv-border)', color: 'var(--tv-text-secondary)' }}
-                      onClick={() => setCafefDirInput(preset)}
+                      disabled={syncingCatalog || Boolean(dataStatus?.offlineMode)}
+                      onClick={() => void syncVnUniverseCatalog()}
+                      className="flex items-center justify-center gap-1 py-1.5 px-2 rounded text-[11px] font-semibold border cursor-pointer disabled:opacity-50"
+                      style={{
+                        backgroundColor: 'var(--tv-bg-panel)',
+                        borderColor: 'var(--tv-border)',
+                        color: 'var(--tv-text-primary)',
+                      }}
+                      title="Quét danh mục ~1.600+ mã HOSE / HNX / UPCOM từ TradingView vào SQLite"
                     >
-                      {preset}
+                      <RefreshCw className={`w-3 h-3 ${syncingCatalog ? 'animate-spin' : ''}`} />
+                      <span>{syncingCatalog ? 'Đang quét...' : 'Danh mục ~1.600'}</span>
                     </button>
-                  ))}
+                    <button
+                      type="button"
+                      disabled={syncingEod || Boolean(dataStatus?.offlineMode)}
+                      onClick={() => void syncUniverseEod('ALL_VN', 150)}
+                      className="flex items-center justify-center gap-1 py-1.5 px-2 rounded text-[11px] font-semibold bg-[#089981] hover:bg-[#067f6b] text-white border-0 cursor-pointer disabled:opacity-50"
+                      title="Cập nhật nến ngày EOD cho các mã VN bị cũ hơn phiên gần nhất"
+                    >
+                      <RefreshCw className={`w-3 h-3 ${syncingEod ? 'animate-spin' : ''}`} />
+                      <span>{syncingEod ? 'Đang đồng bộ...' : 'Đồng bộ EOD VN'}</span>
+                    </button>
+                  </div>
+
+                  {eodSyncProgress && syncingEod && (
+                    <div
+                      className="p-2 rounded text-[10.5px] space-y-1"
+                      style={{ backgroundColor: 'var(--tv-bg-panel)', border: '1px solid var(--tv-border)' }}
+                    >
+                      <div className="flex justify-between tabular-nums">
+                        <span className="truncate">
+                          {eodSyncProgress.currentTicker
+                            ? `Đang đồng bộ ${eodSyncProgress.currentTicker}...`
+                            : 'Đang kiểm tra các mã VN cũ...'}
+                        </span>
+                        <span>
+                          {eodSyncProgress.completed}/{eodSyncProgress.total}
+                        </span>
+                      </div>
+                      <div className="w-full h-1.5 rounded overflow-hidden" style={{ backgroundColor: 'var(--tv-border)' }}>
+                        <div
+                          className="h-full bg-[#089981] transition-all duration-150"
+                          style={{
+                            width: `${eodSyncProgress.total > 0 ? Math.min(100, (eodSyncProgress.completed / eodSyncProgress.total) * 100) : 15}%`,
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  <form
+                    className="space-y-1.5 border-t pt-2"
+                    style={{ borderColor: 'var(--tv-border)' }}
+                    onSubmit={(e) => {
+                      e.preventDefault()
+                      void importCafeFDirectory(cafefDirInput, cafefIncludeRaw)
+                    }}
+                  >
+                    <label
+                      htmlFor="sumi-cafef-dir-input"
+                      className="block text-[11px] font-medium"
+                      style={{ color: 'var(--tv-text-secondary)' }}
+                    >
+                      Nạp thư mục CSV CafeF (Mac / Windows)
+                    </label>
+                    <div className="flex items-center justify-between gap-1 text-[10px]">
+                      <div className="flex gap-1">
+                        {['data/raw/cafef', 'work/CafeFData'].map((preset) => (
+                          <button
+                            key={preset}
+                            type="button"
+                            className="px-1.5 py-0.5 rounded border cursor-pointer bg-transparent"
+                            style={{ borderColor: 'var(--tv-border)', color: 'var(--tv-text-secondary)' }}
+                            onClick={() => setCafefDirInput(preset)}
+                          >
+                            {preset}
+                          </button>
+                        ))}
+                      </div>
+                      <label className="inline-flex items-center gap-1 cursor-pointer" style={{ color: 'var(--tv-text-secondary)' }}>
+                        <input
+                          type="checkbox"
+                          checked={cafefIncludeRaw}
+                          onChange={(e) => setCafefIncludeRaw(e.target.checked)}
+                          className="m-0"
+                        />
+                        <span>Kèm RAW (D/S)</span>
+                      </label>
+                    </div>
+                    <input
+                      id="sumi-cafef-dir-input"
+                      type="text"
+                      value={cafefDirInput}
+                      onChange={(e) => setCafefDirInput(e.target.value)}
+                      placeholder="VD: D:\CafeFData hoặc data/raw/cafef"
+                      className="w-full px-2 py-1.5 rounded text-[11.5px] outline-none"
+                      style={{
+                        backgroundColor: 'var(--tv-bg-input)',
+                        border: '1px solid var(--tv-border)',
+                        color: 'var(--tv-text-primary)',
+                      }}
+                    />
+                    <button
+                      type="submit"
+                      disabled={importingCafeF || !cafefDirInput.trim()}
+                      className="w-full py-1.5 rounded text-[11.5px] font-semibold bg-[#2962FF] hover:bg-[#1E53E5] text-white border-0 cursor-pointer disabled:opacity-50"
+                    >
+                      {importingCafeF ? 'Đang nạp CSV vào SQLite...' : 'Nạp thư mục CafeF vào SQLite'}
+                    </button>
+                  </form>
+
+                  {dataStatus?.dataDir && (
+                    <div className="text-[9.5px] font-mono truncate pt-1 border-t" style={{ borderColor: 'var(--tv-border)', color: 'var(--tv-text-muted)' }} title={dataStatus.dataDir}>
+                      Data: {dataStatus.dataDir} {dataStatus.yumekoDbDetected ? '· ✓ Yumeko DB' : ''}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="space-y-2.5 text-[11px]">
+                  <div
+                    className="p-2 rounded space-y-1"
+                    style={{ backgroundColor: 'var(--tv-bg-panel)', border: '1px solid var(--tv-border)' }}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span style={{ color: 'var(--tv-text-secondary)' }}>Thiết bị</span>
+                      <span className="font-mono text-[10px]">{syncStatus?.deviceId ?? '—'}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span style={{ color: 'var(--tv-text-secondary)' }}>Bản sao lưu (.pre_sync.bak)</span>
+                      <strong className="tabular-nums">{syncStatus?.preSyncBackupCount ?? 0} / 5</strong>
+                    </div>
+                    {syncStatus?.lastSyncedSha256 && (
+                      <div className="flex items-center justify-between">
+                        <span style={{ color: 'var(--tv-text-secondary)' }}>SHA-256 gần nhất</span>
+                        <span className="font-mono text-[10px]">{syncStatus.lastSyncedSha256.slice(0, 12)}…</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Cloud Folder Bidirectional Sync (iCloud / OneDrive / Syncthing) */}
+                  <div className="space-y-1.5">
+                    <label className="block text-[11px] font-semibold" style={{ color: 'var(--tv-text-secondary)' }}>
+                      Thư mục Đám mây 2 chiều (iCloud / OneDrive / Syncthing)
+                    </label>
+                    <div className="flex gap-1">
+                      <input
+                        type="text"
+                        value={syncFolderInput}
+                        onChange={(e) => setSyncFolderInput(e.target.value)}
+                        placeholder="VD: ~/Library/Mobile Documents/.../SumiSync"
+                        className="flex-1 px-2 py-1 rounded text-[11px] outline-none"
+                        style={{
+                          backgroundColor: 'var(--tv-bg-input)',
+                          border: '1px solid var(--tv-border)',
+                          color: 'var(--tv-text-primary)',
+                        }}
+                      />
+                      <button
+                        type="button"
+                        disabled={syncBusy}
+                        onClick={() => {
+                          setSyncBusy(true)
+                          void api
+                            .syncConfigureFolder(syncFolderInput.trim() || null)
+                            .then(() => refreshSyncStatus())
+                            .then(() => pushToast('success', 'Đã lưu cấu hình thư mục đồng bộ đám mây'))
+                            .catch((err) => pushToast('error', String(err)))
+                            .finally(() => setSyncBusy(false))
+                        }}
+                        className="px-2 py-1 rounded text-[11px] font-semibold border cursor-pointer"
+                        style={{ backgroundColor: 'var(--tv-bg-panel)', borderColor: 'var(--tv-border)', color: 'var(--tv-text-primary)' }}
+                      >
+                        Lưu
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={syncBusy || !syncStatus?.syncFolder}
+                      onClick={() => {
+                        setSyncBusy(true)
+                        void api
+                          .syncFolderNow()
+                          .then(async (res) => {
+                            await refreshSyncStatus()
+                            await bootstrap()
+                            pushToast(
+                              'success',
+                              `${res.pulledAndMerged ? 'Đã kéo gộp & đẩy' : 'Đã đẩy'} thành công tới ${res.bundlePath} (SHA ${res.pushedSha256.slice(0, 8)})`,
+                            )
+                          })
+                          .catch((err) => pushToast('error', String(err)))
+                          .finally(() => setSyncBusy(false))
+                      }}
+                      className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded text-[11.5px] font-semibold bg-[#2962FF] hover:bg-[#1E53E5] text-white border-0 cursor-pointer disabled:opacity-50"
+                    >
+                      <FolderSync className="w-3.5 h-3.5" />
+                      <span>{syncBusy ? 'Đang đồng bộ 2 chiều...' : 'Đồng bộ 2 chiều ngay (LWW + SHA-256)'}</span>
+                    </button>
+                  </div>
+
+                  {/* Export / Import Manual .sumi.json Bundle */}
+                  <div className="space-y-1.5 border-t pt-2" style={{ borderColor: 'var(--tv-border)' }}>
+                    <div className="flex gap-1.5">
+                      <button
+                        type="button"
+                        disabled={syncBusy}
+                        onClick={() => {
+                          setSyncBusy(true)
+                          void api
+                            .syncExportBundle(null)
+                            .then((res) => {
+                              void refreshSyncStatus()
+                              pushToast(
+                                'success',
+                                `Đã xuất ${res.path} (${res.drawingsCount} hình vẽ · ${res.watchlistsCount} danh mục · SHA ${res.payloadSha256.slice(0, 8)})`,
+                              )
+                            })
+                            .catch((err) => pushToast('error', String(err)))
+                            .finally(() => setSyncBusy(false))
+                        }}
+                        className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded text-[11px] font-semibold border cursor-pointer"
+                        style={{ backgroundColor: 'var(--tv-bg-panel)', borderColor: 'var(--tv-border)', color: 'var(--tv-text-primary)' }}
+                      >
+                        <Download className="w-3 h-3" />
+                        <span>Xuất .sumi.json</span>
+                      </button>
+                    </div>
+                    <div className="flex gap-1">
+                      <input
+                        type="text"
+                        value={importBundlePath}
+                        onChange={(e) => setImportBundlePath(e.target.value)}
+                        placeholder="Đường dẫn tệp .sumi.json để gộp..."
+                        className="flex-1 px-2 py-1 rounded text-[11px] outline-none"
+                        style={{
+                          backgroundColor: 'var(--tv-bg-input)',
+                          border: '1px solid var(--tv-border)',
+                          color: 'var(--tv-text-primary)',
+                        }}
+                      />
+                      <button
+                        type="button"
+                        disabled={syncBusy || !importBundlePath.trim()}
+                        onClick={() => {
+                          setSyncBusy(true)
+                          void api
+                            .syncImportBundle(importBundlePath.trim())
+                            .then(async (rep) => {
+                              await refreshSyncStatus()
+                              await bootstrap()
+                              pushToast(
+                                'success',
+                                `Đã gộp bundle (SHA ${rep.bundleSha256.slice(0, 8)}): ${rep.mergedDrawings} hình vẽ, ${rep.mergedWatchlists} WL`,
+                              )
+                              setImportBundlePath('')
+                            })
+                            .catch((err) => pushToast('error', String(err)))
+                            .finally(() => setSyncBusy(false))
+                        }}
+                        className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-semibold bg-[#089981] text-white border-0 cursor-pointer disabled:opacity-50"
+                      >
+                        <Upload className="w-3 h-3" />
+                        <span>Nhập</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Pre-wired Doraemi OAuth 2.1 + PKCE Transport Status */}
+                  {syncStatus?.doraemiTransport && (
+                    <div
+                      className="p-2 rounded text-[10px] space-y-0.5 border-t"
+                      style={{ backgroundColor: 'var(--tv-bg-panel)', borderColor: 'var(--tv-border)', color: 'var(--tv-text-secondary)' }}
+                    >
+                      <div className="flex items-center justify-between font-semibold">
+                        <span>Doraemi OAuth 2.1 + PKCE</span>
+                        <span style={{ color: syncStatus.doraemiTransport.readyForCloudPush ? 'var(--tv-up)' : '#FBC02D' }}>
+                          {syncStatus.doraemiTransport.readyForCloudPush
+                            ? 'Sẵn sàng'
+                            : syncStatus.doraemiTransport.configured
+                              ? 'Đã nhận token · Chờ Migration 0006'
+                              : 'Chờ Migration 0006'}
+                        </span>
+                      </div>
+                      <div>{syncStatus.doraemiTransport.migration0006RequiredNote}</div>
+                    </div>
+                  )}
                 </div>
-                <input
-                  id="sumi-cafef-dir-input"
-                  type="text"
-                  value={cafefDirInput}
-                  onChange={(e) => setCafefDirInput(e.target.value)}
-                  placeholder="VD: D:\CafeFData hoặc data/raw/cafef"
-                  className="w-full px-2 py-1.5 rounded text-[11.5px] outline-none"
-                  style={{
-                    backgroundColor: 'var(--tv-bg-input)',
-                    border: '1px solid var(--tv-border)',
-                    color: 'var(--tv-text-primary)',
-                  }}
-                />
-                <button
-                  type="submit"
-                  disabled={importingCafeF || !cafefDirInput.trim()}
-                  className="w-full py-1.5 rounded text-[11.5px] font-semibold bg-[#2962FF] hover:bg-[#1E53E5] text-white border-0 cursor-pointer disabled:opacity-50"
-                >
-                  {importingCafeF ? 'Đang nạp CSV vào SQLite...' : 'Nạp thư mục CafeF vào SQLite'}
-                </button>
-              </form>
+              )}
             </div>
           )}
         </div>

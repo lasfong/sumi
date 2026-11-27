@@ -135,6 +135,11 @@ export interface WatchlistQuoteSnapshot {
   change: number | null
   changePercent: number | null
   volume: number | null
+  open?: number | null
+  high?: number | null
+  low?: number | null
+  bid?: number | null
+  ask?: number | null
   pricePrecision: number
   vnBand: VnBandLevels | null
   timestampMs: number | null
@@ -147,9 +152,109 @@ export interface StoreStats {
   total_bars: number
 }
 
+export interface VnFreshnessSummary {
+  expected_session_ms: number
+  expected_session_date: string
+  total_vn_d1_series: number
+  fresh_series: number
+  stale_series: number
+  median_latest_ms: number | null
+  median_latest_date: string | null
+  newest_latest_ms: number | null
+  newest_latest_date: string | null
+  max_missing_sessions: usizeOrNum
+}
+
+type usizeOrNum = number
+
 export interface DataStatusResponse {
   stats: StoreStats
   offlineMode: boolean
+  freshness?: VnFreshnessSummary | null
+  dataDir?: string
+  configDir?: string
+  yumekoDbDetected?: boolean
+}
+
+export interface CorporateEventMarker {
+  timestamp_ms: number
+  date: string
+  kind: 'dividend' | 'split' | 'earnings' | string
+  ratio: number
+  label: string
+  detail: string
+}
+
+export interface SyncProgressPayload {
+  scope: string
+  completed: number
+  total: number
+  currentTicker: string
+  updatedSymbols: number
+  updatedBars: number
+  failedSymbols: number
+  done: boolean
+}
+
+export interface VnUniverseSyncSummary {
+  discoveredSymbols: number
+  upsertedSymbols: number
+  elapsedMs: number
+}
+
+export interface DoraemiTransportStatusDto {
+  configured: boolean
+  sourceFile: string | null
+  baseUrl: string | null
+  migration0006RequiredNote: string
+  readyForCloudPush: boolean
+}
+
+export interface SyncStatusDto {
+  deviceId: string
+  syncFolder: string | null
+  syncBundleExists: boolean
+  autoSyncOnLaunch: boolean
+  lastSyncedAtMs: number | null
+  lastSyncedSha256: string | null
+  dataDir: string
+  configDir: string
+  preSyncBackupCount: number
+  doraemiTransport: DoraemiTransportStatusDto
+}
+
+export interface ExportBundleResponse {
+  path: string
+  payloadSha256: string
+  exportedAtMs: number
+  watchlistsCount: number
+  drawingsCount: number
+  layoutsCount: number
+  alertsCount: number
+}
+
+export interface WorkspaceMergeReport {
+  bundleSha256: string
+  sourceDeviceId: string
+  backupPath: string | null
+  mergedKv: number
+  mergedWatchlists: number
+  mergedLayouts: number
+  mergedPaneIndicators: number
+  mergedTemplates: number
+  mergedDrawings: number
+  mergedAlerts: number
+  mergedJournal: number
+  mergedReplaySessions: number
+  appliedTombstones: number
+}
+
+export interface BidirectionalFolderSyncResult {
+  bundlePath: string
+  pulledAndMerged: boolean
+  mergeReport: WorkspaceMergeReport | null
+  pushedSha256: string
+  syncedAtMs: number
 }
 
 export interface CafeFImportSummary {
@@ -748,6 +853,7 @@ export interface StockScreenerInput {
   maxChangePct?: number | null
   macdFilter?: 'all' | 'positive' | 'negative' | null
   minHealthScore?: number | null
+  autoRefreshStale?: boolean | null
 }
 
 export interface ScreenerRowDto {
@@ -787,6 +893,10 @@ export interface StockScreenerResponse {
   scannedSymbols: number
   matchedSymbols: number
   elapsedMs: number
+  expectedSessionDate?: string | null
+  freshSymbolsCount?: number
+  staleSymbolsCount?: number
+  medianCachedDate?: string | null
   rows: ScreenerRowDto[]
 }
 
@@ -796,6 +906,7 @@ export interface ChartPaneConfig {
   interval: IntervalKey
   chartStyle: ChartStyleKind
   priceScale: PriceScaleKind
+  adjustment?: 'splits' | 'unadjusted'
   showVnBands: boolean
   showCountdown: boolean
   indicators: SavedIndicatorSpec[]

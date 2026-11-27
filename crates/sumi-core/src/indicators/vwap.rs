@@ -67,10 +67,13 @@ pub fn vwap_bucket_key(
     // exchange UTC offsets (`EST = -18_000`) to `00:00 UTC` would shift civil dates backward by
     // one calendar day across Monday, month-start, and Jan-1 boundaries.
     let effective_off = match timeframe {
-        Timeframe::D1 | Timeframe::W1 => 0,
-        Timeframe::M1 | Timeframe::M5 | Timeframe::M15 | Timeframe::H1 | Timeframe::H4 => {
-            utc_offset_seconds.clamp(-50_400, 50_400)
-        }
+        Timeframe::D1 | Timeframe::W1 | Timeframe::MN1 => 0,
+        Timeframe::M1
+        | Timeframe::M5
+        | Timeframe::M15
+        | Timeframe::M30
+        | Timeframe::H1
+        | Timeframe::H4 => utc_offset_seconds.clamp(-50_400, 50_400),
     };
     match anchor_mode {
         VwapAnchorMode::AutoSession => session_bucket_key(timestamp, timeframe, effective_off),
@@ -113,7 +116,12 @@ pub struct VwapBandsOutput {
 #[must_use]
 pub fn session_bucket_key(timestamp: i64, timeframe: Timeframe, utc_offset_seconds: i64) -> i64 {
     match timeframe {
-        Timeframe::M1 | Timeframe::M5 | Timeframe::M15 | Timeframe::H1 | Timeframe::H4 => {
+        Timeframe::M1
+        | Timeframe::M5
+        | Timeframe::M15
+        | Timeframe::M30
+        | Timeframe::H1
+        | Timeframe::H4 => {
             let local_ts = timestamp.saturating_add(utc_offset_seconds);
             local_ts.div_euclid(86_400)
         }
@@ -122,7 +130,7 @@ pub fn session_bucket_key(timestamp: i64, timeframe: Timeframe, utc_offset_secon
             let (year, month, _) = civil_from_days(days);
             i64::from(year).saturating_mul(16) + i64::from(month)
         }
-        Timeframe::W1 => {
+        Timeframe::W1 | Timeframe::MN1 => {
             let days = timestamp.div_euclid(86_400);
             let (year, _, _) = civil_from_days(days);
             i64::from(year)

@@ -3322,6 +3322,7 @@ fn effective_min_holding_bars(min_holding_bars: usize, timeframe: Timeframe) -> 
     }
     match timeframe {
         Timeframe::W1 => min_holding_bars.div_ceil(5),
+        Timeframe::MN1 => min_holding_bars.div_ceil(21),
         _ => min_holding_bars,
     }
 }

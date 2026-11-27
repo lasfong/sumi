@@ -3,9 +3,13 @@ import type {
   AnalogConeQueryParams,
   AnalogConeResponseDto,
   BarsPageResponse,
+  BidirectionalFolderSyncResult,
   BrokerStateSnapshot,
   CafeFImportSummary,
+  CorporateEventMarker,
   DataStatusResponse,
+  DoraemiTransportStatusDto,
+  ExportBundleResponse,
   IndicatorTemplateRecord,
   IntervalKey,
   LiveBarPayload,
@@ -27,10 +31,14 @@ import type {
   StrategyBacktestResponse,
   SubmitPaperOrderInput,
   SymbolSearchResult,
+  SyncProgressPayload,
+  SyncStatusDto,
+  VnUniverseSyncSummary,
   WalkForwardResponse,
   WatchlistGroup,
   WatchlistQuoteSnapshot,
   WorkspaceBootstrapResponse,
+  WorkspaceMergeReport,
 } from '../types/market'
 import { webFallbackApi } from './webFallback'
 
@@ -101,6 +109,7 @@ export async function subscribeBars(
   ticker: string,
   interval: IntervalKey,
   onBar: (payload: LiveBarPayload) => void,
+  adjustment?: string,
 ): Promise<boolean> {
   if (!isTauriRuntime()) return false
   const myGen = (barStreamClientGens.get(streamId) ?? 0) + 1
@@ -114,7 +123,13 @@ export async function subscribeBars(
   const channel = new Channel<LiveBarPayload>()
   channel.onmessage = onBar
   activeBarChannels.set(streamId, channel)
-  const ok = await invoke<boolean>('subscribe_bars', { streamId, ticker, interval, onBar: channel })
+  const ok = await invoke<boolean>('subscribe_bars', {
+    streamId,
+    ticker,
+    interval,
+    adjustment: adjustment ?? 'splits',
+    onBar: channel,
+  })
   // If `unsubscribeBars` or a newer `subscribeBars` ran while this invoke was in flight, tear down immediately (`BUG-012`)!
   if (barStreamClientGens.get(streamId) !== myGen) {
     channel.onmessage = () => {}
@@ -186,18 +201,105 @@ export async function setOfflineMode(offline: boolean): Promise<DataStatusRespon
   return invoke<DataStatusResponse>('set_offline_mode', { offline })
 }
 
-export async function importCafeFDir(dir: string): Promise<CafeFImportSummary> {
+export async function importCafeFDir(dir: string, includeRaw = true): Promise<CafeFImportSummary> {
   if (!isTauriRuntime()) {
     return {
       files_processed: [`${dir}/CafeF.SolieuGD.Adjusted.csv`],
       distinct_symbols: 473,
-      total_series: 473,
+      total_series: includeRaw ? 946 : 473,
       total_bars_written: 950996,
       quarantined_rows: 0,
       elapsed_ms: 420,
     }
   }
-  return invoke<CafeFImportSummary>('import_cafef_dir', { dir })
+  return invoke<CafeFImportSummary>('import_cafef_dir', { dir, includeRaw })
+}
+
+export async function syncVnUniverseCatalog(): Promise<VnUniverseSyncSummary> {
+  if (!isTauriRuntime()) {
+    return { discoveredSymbols: 1620, upsertedSymbols: 1620, elapsedMs: 120 }
+  }
+  return invoke<VnUniverseSyncSummary>('sync_vn_universe_catalog')
+}
+
+export async function syncUniverseEod(
+  opts: { scope?: string; tickers?: string[]; maxSymbols?: number },
+  onProgress: (payload: SyncProgressPayload) => void,
+): Promise<SyncProgressPayload> {
+  if (!isTauriRuntime()) {
+    const done: SyncProgressPayload = {
+      scope: opts.scope ?? 'ALL_VN',
+      completed: 10,
+      total: 10,
+      currentTicker: '',
+      updatedSymbols: 10,
+      updatedBars: 100,
+      failedSymbols: 0,
+      done: true,
+    }
+    onProgress(done)
+    return done
+  }
+  const channel = new Channel<SyncProgressPayload>()
+  channel.onmessage = onProgress
+  try {
+    return await invoke<SyncProgressPayload>('sync_universe_eod', {
+      scope: opts.scope ?? 'ALL_VN',
+      tickers: opts.tickers ?? null,
+      maxSymbols: opts.maxSymbols ?? null,
+      onProgress: channel,
+    })
+  } finally {
+    channel.onmessage = () => {}
+    cleanupTauriChannelCallback(channel as unknown as { id?: number })
+  }
+}
+
+export async function getCorporateEvents(ticker: string): Promise<CorporateEventMarker[]> {
+  if (!isTauriRuntime()) return webFallbackApi.getCorporateEvents(ticker)
+  return invoke<CorporateEventMarker[]>('get_corporate_events', { ticker })
+}
+
+// ─── Cross-Device Workspace Sync v1 ──────────────────────────────────────────
+
+export async function syncGetStatus(): Promise<SyncStatusDto> {
+  if (!isTauriRuntime()) return webFallbackApi.syncGetStatus()
+  return invoke<SyncStatusDto>('sync_get_status')
+}
+
+export async function syncExportBundle(outPath?: string | null): Promise<ExportBundleResponse> {
+  if (!isTauriRuntime()) {
+    throw new Error('Xuất gói đồng bộ .sumi.json yêu cầu Sumi Desktop runtime')
+  }
+  return invoke<ExportBundleResponse>('sync_export_bundle', { outPath: outPath ?? null })
+}
+
+export async function syncImportBundle(bundlePath: string): Promise<WorkspaceMergeReport> {
+  if (!isTauriRuntime()) {
+    throw new Error('Nhập gói đồng bộ .sumi.json yêu cầu Sumi Desktop runtime')
+  }
+  return invoke<WorkspaceMergeReport>('sync_import_bundle', { bundlePath })
+}
+
+export async function syncConfigureFolder(folderPath: string | null): Promise<SyncStatusDto> {
+  if (!isTauriRuntime()) return webFallbackApi.syncGetStatus()
+  return invoke<SyncStatusDto>('sync_configure_folder', {
+    folderPath: folderPath ?? '',
+    deviceId: null,
+    autoSyncOnLaunch: null,
+  })
+}
+
+export async function syncFolderNow(folderPath?: string | null): Promise<BidirectionalFolderSyncResult> {
+  if (!isTauriRuntime()) {
+    throw new Error('Đồng bộ thư mục 2 chiều yêu cầu Sumi Desktop runtime')
+  }
+  return invoke<BidirectionalFolderSyncResult>('sync_folder_now', { folderPath: folderPath ?? null })
+}
+
+export async function syncGetDoraemiStatus(): Promise<DoraemiTransportStatusDto> {
+  if (!isTauriRuntime()) return webFallbackApi.syncGetStatus().doraemiTransport
+  return invoke<DoraemiTransportStatusDto>('sync_get_doraemi_status')
 }
 
 // ─── Workspace, Drawings, Indicators, Watchlists, Alerts ─────────────────────
@@ -396,7 +498,7 @@ export async function openDetachedWindow(ticker: string, interval: IntervalKey):
 }
 
 export async function broadcastSyncEvent(
-  eventName: 'sumi:sync_replay' | 'sumi:sync_drawing' | 'sumi:sync_symbol',
+  eventName: 'sumi:sync_replay' | 'sumi:sync_drawing' | 'sumi:sync_symbol' | 'sumi:sync_range',
   payload: Record<string, unknown>,
 ): Promise<void> {
   if (!isTauriRuntime()) return

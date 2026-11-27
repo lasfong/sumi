@@ -343,6 +343,7 @@ fn default_account_config_for_venue(venue: ExchangeVenue, iv: Interval) -> Accou
             enforce_vn_t2_lot_lock: false,
             venue,
             base_timeframe_secs,
+            ..AccountConfig::default()
         },
         _ => AccountConfig {
             initial_cash: 100_000.0,

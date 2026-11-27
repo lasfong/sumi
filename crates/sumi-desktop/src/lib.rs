@@ -3,6 +3,7 @@
 pub mod commands;
 pub mod error;
 pub mod state;
+pub mod sync;
 pub mod workspace_db;
 
 use tauri::Manager;
@@ -39,6 +40,16 @@ pub fn run() {
             commands::market::get_data_status,
             commands::market::set_offline_mode,
             commands::market::import_cafef_dir,
+            commands::market::sync_vn_universe_catalog,
+            commands::market::sync_universe_eod,
+            commands::market::get_corporate_events,
+            // Cross-Device Workspace Sync v1 (Mac <-> Windows PC, .sumi.json + Folder Merge + Doraemi Status)
+            commands::sync::sync_get_status,
+            commands::sync::sync_export_bundle,
+            commands::sync::sync_import_bundle,
+            commands::sync::sync_configure_folder,
+            commands::sync::sync_folder_now,
+            commands::sync::sync_get_doraemi_status,
             // Workspace, Layouts, Drawings, Indicators, Watchlists, Alerts
             commands::workspace::load_workspace_bootstrap,
             commands::workspace::save_workspace_settings,
@@ -220,10 +231,65 @@ mod tests {
         assert_eq!(ann.setup_tag, "Breakout");
         assert_eq!(store.list_journal_annotations("HOSE:FPT").unwrap().len(), 1);
 
-        // Database path resolver returns coherent paths
+        // Database path resolver returns coherent canonical paths
         let (mkt, ws) = resolve_database_paths(Some(dir.path().to_path_buf()));
         assert!(mkt.ends_with("sumi_market.db"));
         assert!(ws.ends_with("sumi_workspace.db"));
+    }
+
+    #[test]
+    fn non_destructive_legacy_migration_copies_wal_databases_with_sha256_receipt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy_dir = tmp.path().join("legacy_app_support");
+        let target_dir = tmp.path().join("canonical_sumi_data");
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+
+        let legacy_mkt_path = legacy_dir.join("sumi_market.db");
+        let legacy_ws_path = legacy_dir.join("sumi_workspace.db");
+        {
+            let mkt = sumi_data::SqliteMarketStore::open(&legacy_mkt_path).unwrap();
+            let sym = sumi_data::SymbolKey::new("HOSE", "FPT").unwrap();
+            let key = sumi_data::SeriesKey::new(
+                &sym,
+                sumi_data::Interval::D1,
+                sumi_data::Adjustment::Splits,
+            );
+            mkt.upsert_bars(
+                &key,
+                &[sumi_data::OhlcvBar::new(
+                    1_700_000_000_000,
+                    100_000.0,
+                    102_000.0,
+                    99_000.0,
+                    101_000.0,
+                    1_200_000.0,
+                )],
+                "cafef_adjusted",
+                Some(true),
+            )
+            .unwrap();
+            let ws = WorkspaceStore::open(&legacy_ws_path).unwrap();
+            ws.create_watchlist("wl_legacy_test", "Legacy Test").unwrap();
+        }
+
+        let receipt = crate::state::migrate_legacy_databases_into(&target_dir, Some(&legacy_dir))
+            .expect("migration receipt emitted");
+        assert!(receipt.market_db.is_some());
+        assert!(receipt.workspace_db.is_some());
+        assert!(legacy_mkt_path.is_file(), "legacy DB must remain untouched");
+        assert!(target_dir.join(".migration_v3_receipt.json").is_file());
+
+        let migrated_mkt =
+            sumi_data::SqliteMarketStore::open(target_dir.join("sumi_market.db")).unwrap();
+        assert_eq!(migrated_mkt.stats().unwrap().total_bars, 1);
+        let migrated_ws = WorkspaceStore::open(target_dir.join("sumi_workspace.db")).unwrap();
+        assert!(
+            migrated_ws
+                .list_watchlists()
+                .unwrap()
+                .iter()
+                .any(|w| w.id == "wl_legacy_test")
+        );
     }
 
     #[test]

@@ -142,11 +142,15 @@ fn profile_session_bucket(
 ) -> i64 {
     let anchor = match period {
         ProfileSessionPeriod::Auto => match timeframe {
-            Timeframe::M1 | Timeframe::M5 | Timeframe::M15 | Timeframe::H1 | Timeframe::H4 => {
-                VwapAnchorMode::Daily
-            }
+            Timeframe::M1
+            | Timeframe::M5
+            | Timeframe::M15
+            | Timeframe::M30
+            | Timeframe::H1
+            | Timeframe::H4 => VwapAnchorMode::Daily,
             Timeframe::D1 => VwapAnchorMode::Weekly,
             Timeframe::W1 => VwapAnchorMode::Monthly,
+            Timeframe::MN1 => VwapAnchorMode::Yearly,
         },
         ProfileSessionPeriod::Daily => VwapAnchorMode::Daily,
         ProfileSessionPeriod::Weekly => VwapAnchorMode::Weekly,

@@ -163,7 +163,7 @@ impl Interval {
         }
     }
 
-    /// Maps to `sumi_core::data::Timeframe` when supported by the quantitative engine lattice.
+    /// Maps to `sumi_core::data::Timeframe` across all 9 supported intervals (`1m..1M`).
     #[inline]
     #[must_use]
     pub const fn to_core_timeframe(self) -> Option<Timeframe> {
@@ -171,11 +171,12 @@ impl Interval {
             Self::M1 => Some(Timeframe::M1),
             Self::M5 => Some(Timeframe::M5),
             Self::M15 => Some(Timeframe::M15),
+            Self::M30 => Some(Timeframe::M30),
             Self::H1 => Some(Timeframe::H1),
             Self::H4 => Some(Timeframe::H4),
             Self::D1 => Some(Timeframe::D1),
             Self::W1 => Some(Timeframe::W1),
-            Self::M30 | Self::MN1 => None,
+            Self::MN1 => Some(Timeframe::MN1),
         }
     }
 }

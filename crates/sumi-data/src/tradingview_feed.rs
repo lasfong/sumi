@@ -10,11 +10,12 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tradingview::chart::{DataPoint, OHLCV};
-use tradingview::client::misc::advanced_search_symbol;
+use tradingview::client::misc::{advanced_search_symbol, list_symbols};
 use tradingview::historical::{HistoricalClient, HistoricalRequest, PaginationStop};
 use tradingview::live::handler::Handler;
 use tradingview::live::models::{DataServer, TradingViewDataEvent};
 use tradingview::live::websocket::WebSocketClient;
+use tradingview::models::{MarketType, StocksType};
 use tradingview::quote::models::QuoteData;
 use tradingview::utils::gen_session_id;
 use url::Url;
@@ -95,6 +96,79 @@ impl TradingViewFeed {
     #[must_use]
     pub fn rate_limiter(&self) -> &TokenBucketRateLimiter {
         &self.rate_limiter
+    }
+
+    /// Fetches the complete Vietnam listed stock/index/futures catalog (`HOSE`, `HNX`, `UPCOM`,
+    /// ~1,600+ tickers) using `tradingview-rs::list_symbols` so Clean-Slate installations and
+    /// Stock Screener cover the entire market without requiring manual CafeF CSV imports.
+    pub async fn list_vn_universe_symbols(&self) -> Result<Vec<ResolvedSymbol>> {
+        let mut seen = std::collections::HashSet::<String>::new();
+        let mut out = Vec::new();
+
+        for (tv_exchange, market_type) in [
+            ("HOSE", MarketType::Stocks(StocksType::All)),
+            ("HNX", MarketType::Stocks(StocksType::All)),
+            ("UPCOM", MarketType::Stocks(StocksType::All)),
+            ("HOSE", MarketType::Indices),
+            ("HNX", MarketType::Indices),
+            ("HNX", MarketType::Futures),
+        ] {
+            let _permit = self.rate_limiter.acquire().await;
+            let req = list_symbols()
+                .exchange(tv_exchange)
+                .market_type(market_type)
+                .call();
+            let raw_list = match timeout(self.config.request_timeout, req).await {
+                Ok(Ok(items)) => items,
+                Ok(Err(err)) => {
+                    warn!(exchange = tv_exchange, error = %err, "list_symbols failed for exchange");
+                    continue;
+                }
+                Err(_) => {
+                    warn!(exchange = tv_exchange, "list_symbols timed out for exchange");
+                    continue;
+                }
+            };
+
+            for item in raw_list {
+                let ex_norm = normalize_exchange_alias(if item.exchange.is_empty() {
+                    tv_exchange
+                } else {
+                    item.exchange.as_str()
+                });
+                let sym_upper = item.symbol.trim().to_ascii_uppercase();
+                if sym_upper.is_empty() {
+                    continue;
+                }
+                let canonical_key = map_from_tv_wire_symbol(&SymbolKey {
+                    exchange: ex_norm.clone(),
+                    symbol: sym_upper,
+                });
+                let ticker = canonical_key.ticker();
+                if !seen.insert(ticker.clone()) {
+                    continue;
+                }
+                let is_index = matches!(market_type, MarketType::Indices)
+                    || item.market_type.eq_ignore_ascii_case("index");
+                let mut resolved = ResolvedSymbol::from_cafef_vn_ticker(
+                    &canonical_key.exchange,
+                    &canonical_key.symbol,
+                    is_index,
+                );
+                if !item.description.trim().is_empty() {
+                    resolved.description = item.description.trim().to_owned();
+                }
+                if !item.market_type.trim().is_empty() {
+                    resolved.market_type = item.market_type.trim().to_ascii_lowercase();
+                }
+                if !item.currency_code.trim().is_empty() {
+                    resolved.currency = item.currency_code.trim().to_owned();
+                }
+                out.push(resolved);
+            }
+        }
+
+        Ok(out)
     }
 
     fn server_candidates(&self) -> Vec<DataServer> {
@@ -817,7 +891,17 @@ impl Handler for QuoteStreamHandler {
             return;
         }
         let (exchange, symbol, ticker) = match SymbolKey::parse(raw_name) {
-            Ok(key) => (key.exchange.clone(), key.symbol.clone(), key.ticker()),
+            Ok(key) => {
+                // Audit Fix #1: Reverse-map TradingView continuous futures wire aliases
+                // (`HNX:VN301!` -> `HNX:VN30F1!`, `HNX:VN302!` -> `HNX:VN30F2!`) so Watchlist
+                // quotesMap keys match canonical Vietnamese derivatives tickers.
+                let canonical = map_from_tv_wire_symbol(&key);
+                (
+                    canonical.exchange.clone(),
+                    canonical.symbol.clone(),
+                    canonical.ticker(),
+                )
+            }
             Err(_) => {
                 let ex = qd
                     .value
@@ -829,12 +913,23 @@ impl Handler for QuoteStreamHandler {
                     .symbol
                     .map(|u| u.as_str().trim().to_ascii_uppercase())
                     .unwrap_or_else(|| raw_name.to_ascii_uppercase());
-                let t = if ex.is_empty() {
-                    sym.clone()
+                let canonical = if !ex.is_empty() {
+                    map_from_tv_wire_symbol(&SymbolKey {
+                        exchange: ex,
+                        symbol: sym,
+                    })
                 } else {
-                    format!("{ex}:{sym}")
+                    SymbolKey {
+                        exchange: ex,
+                        symbol: sym,
+                    }
                 };
-                (ex, sym, t)
+                let t = if canonical.exchange.is_empty() {
+                    canonical.symbol.clone()
+                } else {
+                    canonical.ticker()
+                };
+                (canonical.exchange, canonical.symbol, t)
             }
         };
 
@@ -1070,6 +1165,30 @@ fn map_to_tv_wire_symbol(symbol: &SymbolKey) -> SymbolKey {
     symbol.clone()
 }
 
+/// Reverse-maps TradingView's wire continuous-contract identifiers (`HNX:VN301!` / `HNX:VN302!`)
+/// back to canonical Vietnamese derivatives tickers (`HNX:VN30F1!` / `HNX:VN30F2!`) (`Audit Fix #1`).
+#[must_use]
+pub fn map_from_tv_wire_symbol(symbol: &SymbolKey) -> SymbolKey {
+    if symbol.exchange == "HNX" {
+        match symbol.symbol.as_str() {
+            "VN301!" => {
+                return SymbolKey {
+                    exchange: "HNX".to_owned(),
+                    symbol: "VN30F1!".to_owned(),
+                };
+            }
+            "VN302!" => {
+                return SymbolKey {
+                    exchange: "HNX".to_owned(),
+                    symbol: "VN30F2!".to_owned(),
+                };
+            }
+            _ => {}
+        }
+    }
+    symbol.clone()
+}
+
 fn datapoint_to_ohlcv_bar(dp: &DataPoint, interval: Interval) -> Option<OhlcvBar> {
     if dp.value.len() < 5 {
         return None;
@@ -1105,5 +1224,28 @@ fn map_tv_error(err: tradingview::Error) -> DataError {
             source: tradingview::error::TradingViewError::SymbolError,
         } => DataError::SymbolNotFound("symbol rejected by TradingView".to_owned()),
         other => DataError::Provider(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vn30_futures_wire_alias_round_trips_canonically() {
+        let f1 = SymbolKey::new("HNX", "VN30F1!").unwrap();
+        let wire1 = map_to_tv_wire_symbol(&f1);
+        assert_eq!(wire1.ticker(), "HNX:VN301!");
+        assert_eq!(map_from_tv_wire_symbol(&wire1).ticker(), "HNX:VN30F1!");
+
+        let f2 = SymbolKey::new("HNX", "VN30F2!").unwrap();
+        let wire2 = map_to_tv_wire_symbol(&f2);
+        assert_eq!(wire2.ticker(), "HNX:VN302!");
+        assert_eq!(map_from_tv_wire_symbol(&wire2).ticker(), "HNX:VN30F2!");
+
+        // Equities and non-HNX symbols pass through untouched.
+        let fpt = SymbolKey::new("HOSE", "FPT").unwrap();
+        assert_eq!(map_to_tv_wire_symbol(&fpt), fpt);
+        assert_eq!(map_from_tv_wire_symbol(&fpt), fpt);
     }
 }

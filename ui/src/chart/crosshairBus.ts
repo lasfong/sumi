@@ -1,4 +1,5 @@
 import type { Chart, KLineData } from 'klinecharts'
+import * as api from '../api/tauri'
 import { useWorkspaceStore } from '../store/workspaceStore'
 
 type KLineChartWithStore = Chart & {
@@ -111,8 +112,14 @@ class CrosshairBus {
 class TimeRangeBus {
   private readonly charts = new Map<string, Chart>()
   private readonly suppressed = new Set<string>()
-  private pending: { sourceSlotId: string; centerTimestamp: number } | null = null
+  private pending: {
+    sourceSlotId: string
+    centerTimestamp: number
+    barSpace?: number | null
+    broadcastRemote: boolean
+  } | null = null
   private rafId: number | null = null
+  private lastBroadcastMs = 0
 
   register(slotId: string, chart: Chart): void {
     this.charts.set(slotId, chart)
@@ -127,23 +134,33 @@ class TimeRangeBus {
     return this.suppressed.has(slotId)
   }
 
-  publish(sourceSlotId: string, centerTimestamp: number): void {
-    if (this.charts.size <= 1) return
+  publish(sourceSlotId: string, centerTimestamp: number, barSpace?: number | null, broadcastRemote = true): void {
     if (!useWorkspaceStore.getState().sync.dateRange) return
-    this.pending = { sourceSlotId, centerTimestamp }
+    if (this.charts.size <= 1 && !broadcastRemote) return
+    this.pending = { sourceSlotId, centerTimestamp, barSpace, broadcastRemote }
     if (this.rafId === null && typeof window !== 'undefined') {
       this.rafId = window.requestAnimationFrame(() => {
         this.rafId = null
         const evt = this.pending
         this.pending = null
         if (evt) {
-          this.flush(evt.sourceSlotId, evt.centerTimestamp)
+          this.flush(evt.sourceSlotId, evt.centerTimestamp, evt.barSpace, evt.broadcastRemote)
         }
       })
     }
   }
 
-  private flush(sourceSlotId: string, centerTimestamp: number): void {
+  applyRemote(centerTimestamp: number, barSpace?: number | null): void {
+    if (!useWorkspaceStore.getState().sync.dateRange) return
+    this.flush('__remote_window__', centerTimestamp, barSpace, false)
+  }
+
+  private flush(
+    sourceSlotId: string,
+    centerTimestamp: number,
+    barSpace?: number | null,
+    broadcastRemote = false,
+  ): void {
     if (!useWorkspaceStore.getState().sync.dateRange) return
     for (const [targetSlotId, targetChart] of this.charts.entries()) {
       if (targetSlotId === sourceSlotId) continue
@@ -153,11 +170,28 @@ class TimeRangeBus {
       if (!matched) continue
       this.suppressed.add(targetSlotId)
       try {
+        if (typeof barSpace === 'number' && Number.isFinite(barSpace) && barSpace >= 2 && barSpace <= 46) {
+          const curSpace = targetChart.getBarSpace()?.bar ?? null
+          if (curSpace === null || Math.abs(curSpace - barSpace) > 0.25) {
+            targetChart.setBarSpace(barSpace)
+          }
+        }
         targetChart.scrollToTimestamp(matched.timestamp, 0)
       } finally {
         // Release suppression on next animation frame after scroll settles
         window.requestAnimationFrame(() => {
           this.suppressed.delete(targetSlotId)
+        })
+      }
+    }
+
+    if (broadcastRemote) {
+      const now = Date.now()
+      if (now - this.lastBroadcastMs >= 60) {
+        this.lastBroadcastMs = now
+        void api.broadcastSyncEvent('sumi:sync_range', {
+          centerTimestamp,
+          barSpace: typeof barSpace === 'number' && Number.isFinite(barSpace) ? barSpace : null,
         })
       }
     }

@@ -2,7 +2,7 @@ import type { IntervalKey, OhlcvBar } from '../types/market'
 
 export type TimeframeVisibilityPreset = 'all' | 'intraday' | 'swing' | 'current'
 
-export const INTRADAY_INTERVALS: IntervalKey[] = ['1m', '5m', '15m', '1h', '4h']
+export const INTRADAY_INTERVALS: IntervalKey[] = ['1m', '5m', '15m', '30m', '1h', '4h']
 export const SWING_INTERVALS: IntervalKey[] = ['1D', '1W', '1M']
 
 /**
@@ -81,7 +81,7 @@ export function computeVnSessionBreaks(
   interval: IntervalKey,
   maxMarkers = 45,
 ): VnSessionBreakMarker[] {
-  if (!['1m', '5m', '15m', '1h'].includes(interval) || bars.length < 2) {
+  if (!['1m', '5m', '15m', '30m', '1h'].includes(interval) || bars.length < 2) {
     return []
   }
   const ICT_OFFSET_MS = 7 * 3_600_000

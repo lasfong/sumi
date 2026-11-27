@@ -582,6 +582,62 @@ export const vnSessionBreakLine: OverlayTemplate<VnSessionBreakExtendData> = {
   },
 }
 
+export interface CorporateEventExtendData {
+  kind: 'dividend' | 'split' | 'earnings' | string
+  label: string
+  detail: string
+  date: string
+}
+
+export const corporateEventMarker: OverlayTemplate<CorporateEventExtendData> = {
+  name: 'corporateEventMarker',
+  totalStep: 2,
+  lock: true,
+  needDefaultPointFigure: false,
+  needDefaultXAxisFigure: false,
+  needDefaultYAxisFigure: false,
+  createPointFigures: ({ coordinates, bounding, overlay }) => {
+    if (coordinates.length === 0) return []
+    const { x } = coordinates[0]
+    const ext = overlay.extendData
+    const kind = ext?.kind ?? 'dividend'
+    const glyph = kind === 'split' ? 'S' : kind === 'earnings' ? 'E' : 'D'
+    const color = kind === 'split' ? '#AB47BC' : kind === 'earnings' ? '#2962FF' : '#089981'
+    const y = Math.max(16, bounding.height - 16)
+
+    return [
+      {
+        type: 'circle',
+        ignoreEvent: true,
+        attrs: { x, y, r: 9 },
+        styles: {
+          style: 'stroke_fill',
+          color: 'rgba(19, 23, 34, 0.92)',
+          borderColor: color,
+          borderSize: 1.5,
+        },
+      },
+      {
+        type: 'text',
+        ignoreEvent: true,
+        attrs: {
+          x,
+          y: y + 0.5,
+          text: glyph,
+          align: 'center',
+          baseline: 'middle',
+        },
+        styles: {
+          style: 'fill',
+          color,
+          size: 10,
+          weight: '700',
+        },
+      },
+    ]
+  },
+}
+
 export const TRADINGVIEW_CUSTOM_OVERLAYS: OverlayTemplate[] = [
   longPosition,
   shortPosition,
@@ -590,4 +646,5 @@ export const TRADINGVIEW_CUSTOM_OVERLAYS: OverlayTemplate[] = [
   vnPriceBandLine as OverlayTemplate,
   backtestTradeMarker as OverlayTemplate,
   vnSessionBreakLine as OverlayTemplate,
+  corporateEventMarker as OverlayTemplate,
 ]

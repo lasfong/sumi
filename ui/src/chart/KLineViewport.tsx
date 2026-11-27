@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { dispose, init } from 'klinecharts'
 import type { Chart, KLineData, Overlay, OverlayEvent } from 'klinecharts'
 import * as api from '../api/tauri'
 import type {
   ChartPaneConfig,
+  CorporateEventMarker,
   GridLayoutKind,
   IntervalKey,
   SavedDrawingRecord,
@@ -48,9 +50,16 @@ type UndoEntry =
   | { kind: 'deleted'; record: SavedDrawingRecord }
   | { kind: 'modified'; before: SavedDrawingRecord; after: SavedDrawingRecord }
 
-function resolveEffectiveTimezone(mode: TimezoneMode, ticker: string): string {
+function resolveEffectiveTimezone(
+  mode: TimezoneMode,
+  ticker: string,
+  symbolTimezone?: string | null,
+): string {
   if (mode === 'Asia/Ho_Chi_Minh' || mode === 'Etc/UTC') return mode
   const isVn = ticker.startsWith('HOSE:') || ticker.startsWith('HNX:') || ticker.startsWith('UPCOM:')
+  if (symbolTimezone && symbolTimezone.includes('/')) {
+    return symbolTimezone
+  }
   return isVn ? 'Asia/Ho_Chi_Minh' : 'Etc/UTC'
 }
 
@@ -227,10 +236,12 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
   // never drift `HA_Open` (`BUG-015`).
   const prevClosedHaBarRef = useRef<{ timestamp: number; open: number; close: number } | undefined>(undefined)
   const currentHaBarRef = useRef<{ timestamp: number; open: number; close: number } | undefined>(undefined)
-  const appliedPaneRef = useRef<{ ticker: string; interval: string }>({
+  const appliedPaneRef = useRef<{ ticker: string; interval: string; adjustment: string }>({
     ticker: pane.ticker,
     interval: pane.interval,
+    adjustment: pane.adjustment ?? 'splits',
   })
+  const symbolTimezoneRef = useRef<string | null>(null)
   const precisionSyncedTickerRef = useRef<string | null>(null)
   const createdIndicatorIdsRef = useRef<Map<string, { klineId: string; paneId: string; signature: string }>>(
     new Map(),
@@ -243,6 +254,8 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
   const pendingScrollTsRef = useRef<number | null>(null)
 
   const [vnBand, setVnBand] = useState<VnBandLevels | null>(null)
+  const [corpEvents, setCorpEvents] = useState<CorporateEventMarker[]>([])
+  const [activeCorpEvent, setActiveCorpEvent] = useState<CorporateEventMarker | null>(null)
   const [dataSourceBadge, setDataSourceBadge] = useState<string>('')
   const [loading, setLoading] = useState<boolean>(false)
   const [dataReadyNonce, setDataReadyNonce] = useState<number>(0)
@@ -268,6 +281,7 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
   const broker = useWorkspaceStore((s) => s.broker)
 
   const setActiveInterval = useWorkspaceStore((s) => s.setActiveInterval)
+  const togglePaneAdjustment = useWorkspaceStore((s) => s.togglePaneAdjustment)
   const setActiveDrawingTool = useWorkspaceStore((s) => s.setActiveDrawingTool)
   const setReplaySelectingCut = useWorkspaceStore((s) => s.setReplaySelectingCut)
   const startReplay = useWorkspaceStore((s) => s.startReplay)
@@ -623,7 +637,16 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
     chart.setOffsetRightDistance(215)
     crosshairBus.register(initialPane.slotId, chart)
     timeRangeBus.register(initialPane.slotId, chart)
-    const streamId = `stream_${initialPane.slotId}`
+    // Namespace stream ID by OS window label (`main` vs `chart_*`) so detached windows never cancel main streams (Audit Fix #2).
+    let winLabel = 'main'
+    if (api.isTauriRuntime()) {
+      try {
+        winLabel = getCurrentWindow().label || 'main'
+      } catch {
+        winLabel = 'main'
+      }
+    }
+    const streamId = `stream_${winLabel}_${initialPane.slotId}`
 
     if (!hasVnindexBenchmarkBars()) {
       void api
@@ -656,6 +679,7 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
             mode: queryMode,
             timestamp: timestamp ?? null,
             limit: queryMode === 'init' ? historyLimitRef.current : 400,
+            adjustment: cur.adjustment ?? 'splits',
           })
           if (disposed || !chartRef.current) return
           // Update VN price band & badge ONLY on `init` loads so scrolling back in history
@@ -707,8 +731,17 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
               })
             }
 
-            // Synchronize authoritative precision once per ticker without loops
+            // Synchronize authoritative precision & exchange timezone once per ticker without loops (Audit Fix #3)
             if (page.symbolInfo && chartRef.current) {
+              if (page.symbolInfo.timezone && page.symbolInfo.timezone.includes('/')) {
+                symbolTimezoneRef.current = page.symbolInfo.timezone
+                const tzMode = useWorkspaceStore.getState().timezoneMode
+                if (tzMode === 'auto') {
+                  chartRef.current.setTimezone(
+                    resolveEffectiveTimezone('auto', cur.ticker, page.symbolInfo.timezone),
+                  )
+                }
+              }
               const realPricePrec = page.symbolInfo.price_precision
               const realVolPrec = page.symbolInfo.volume_precision
               const curSym = chartRef.current.getSymbol()
@@ -744,30 +777,36 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
         subscribeCallbackRef.current = callback
         const cur = paneRef.current
         if (replayActiveRef.current) return
-        void api.subscribeBars(streamId, cur.ticker, cur.interval, (payload) => {
-          if (payload.ticker !== paneRef.current.ticker || payload.interval !== paneRef.current.interval) {
-            return
-          }
-          if (replayActiveRef.current) return
-          let bar: KLineData = payload.bar
-          if (paneRef.current.chartStyle === 'heikin_ashi') {
-            // Keep `HA_Open` locked to `prevClosedHaBarRef` on intra-bar ticks (`BUG-015`)!
-            const curHa = currentHaBarRef.current
-            if (curHa && bar.timestamp > curHa.timestamp) {
-              prevClosedHaBarRef.current = curHa
+        void api.subscribeBars(
+          streamId,
+          cur.ticker,
+          cur.interval,
+          (payload) => {
+            if (payload.ticker !== paneRef.current.ticker || payload.interval !== paneRef.current.interval) {
+              return
             }
-            const [ha] = toHeikinAshi([bar], prevClosedHaBarRef.current)
-            if (ha) {
-              bar = ha
-              currentHaBarRef.current = { timestamp: ha.timestamp, open: ha.open, close: ha.close }
+            if (replayActiveRef.current) return
+            let bar: KLineData = payload.bar
+            if (paneRef.current.chartStyle === 'heikin_ashi') {
+              // Keep `HA_Open` locked to `prevClosedHaBarRef` on intra-bar ticks (`BUG-015`)!
+              const curHa = currentHaBarRef.current
+              if (curHa && bar.timestamp > curHa.timestamp) {
+                prevClosedHaBarRef.current = curHa
+              }
+              const [ha] = toHeikinAshi([bar], prevClosedHaBarRef.current)
+              if (ha) {
+                bar = ha
+                currentHaBarRef.current = { timestamp: ha.timestamp, open: ha.open, close: ha.close }
+              }
             }
-          }
-          callback(bar)
-          if (bar.timestamp > lastLiveAlertTsRef.current) {
-            lastLiveAlertTsRef.current = bar.timestamp
-            void checkLiveBarAlerts(payload.ticker, paneRef.current.interval)
-          }
-        })
+            callback(bar)
+            if (bar.timestamp > lastLiveAlertTsRef.current) {
+              lastLiveAlertTsRef.current = bar.timestamp
+              void checkLiveBarAlerts(payload.ticker, paneRef.current.interval)
+            }
+          },
+          cur.adjustment ?? 'splits',
+        )
       },
       unsubscribeBar: () => {
         subscribeCallbackRef.current = null
@@ -799,7 +838,7 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
       crosshairBus.publish(paneRef.current.slotId, ts)
     })
 
-    // Zero-React-re-render Time-Range sync (`Sync Date Range`, `BUG-043`)
+    // Zero-React-re-render Time-Range & Zoom (`barSpace`) sync (`Sync Date Range`, Audit Fix #2)
     chart.subscribeAction('onVisibleRangeChange', () => {
       if (timeRangeBus.isSuppressed(paneRef.current.slotId)) return
       const range = chart.getVisibleRange()
@@ -808,7 +847,8 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
       const midIdx = Math.max(0, Math.min(list.length - 1, Math.floor((range.from + range.to) / 2)))
       const midTs = list[midIdx]?.timestamp
       if (typeof midTs === 'number' && Number.isFinite(midTs)) {
-        timeRangeBus.publish(paneRef.current.slotId, midTs)
+        const barSpace = chart.getBarSpace()?.bar ?? null
+        timeRangeBus.publish(paneRef.current.slotId, midTs, barSpace)
       }
     })
 
@@ -893,20 +933,24 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // 2. React to symbol or interval changes (skipping initial mount; calling only changed setter)
+  // 2. React to symbol, interval, or adjustment (`ADJ`/`RAW`) changes
+  const curAdj = pane.adjustment ?? 'splits'
   useEffect(() => {
     const chart = chartRef.current
     if (!chart) return
     const prev = appliedPaneRef.current
     const tickerChanged = prev.ticker !== pane.ticker
     const intervalChanged = prev.interval !== pane.interval
-    if (!tickerChanged && !intervalChanged) return
+    const adjChanged = prev.adjustment !== curAdj
+    if (!tickerChanged && !intervalChanged && !adjChanged) return
 
-    appliedPaneRef.current = { ticker: pane.ticker, interval: pane.interval }
+    appliedPaneRef.current = { ticker: pane.ticker, interval: pane.interval, adjustment: curAdj }
     historyLimitRef.current = 600
 
     if (tickerChanged) {
       precisionSyncedTickerRef.current = null
+      symbolTimezoneRef.current = null
+      setActiveCorpEvent(null)
       setSelectedDrawing(null)
       undoStackRef.current = []
       redoStackRef.current = []
@@ -921,13 +965,16 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
     if (intervalChanged) {
       chart.setPeriod(intervalToKLinePeriod(pane.interval))
     }
-  }, [pane.ticker, pane.interval])
+    if (adjChanged && !tickerChanged && !intervalChanged) {
+      chart.resetData()
+    }
+  }, [pane.ticker, pane.interval, curAdj])
 
-  // 2b. React to manual Timezone switcher (`Asia/Ho_Chi_Minh` <-> `Etc/UTC`, `BUG-031`)
+  // 2b. React to manual Timezone switcher (`Auto` -> `Asia/Ho_Chi_Minh` -> `Etc/UTC`, Audit Fix #3)
   useEffect(() => {
     const chart = chartRef.current
     if (!chart) return
-    chart.setTimezone(resolveEffectiveTimezone(timezoneMode, pane.ticker))
+    chart.setTimezone(resolveEffectiveTimezone(timezoneMode, pane.ticker, symbolTimezoneRef.current))
   }, [timezoneMode, pane.ticker])
 
   // 2c. Live 1-second Bar Countdown repaint timer (`BUG-024`)
@@ -1213,13 +1260,13 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
     }
   }, [pane.showVnBands, pane.slotId, vnBand])
 
-  // 10b. Render Vietnam Intraday Session Breaks (`09:00` Morning / `13:00` Afternoon / `14:30` ATC, v2.2)
+  // 10b. Render Vietnam Intraday Session Breaks (`09:00` Morning / `13:00` Afternoon / `14:30` ATC, includes `30m` Audit Fix #3)
   useEffect(() => {
     const chart = chartRef.current
     if (!chart) return
     chart.removeOverlay({ groupId: 'vn_session_breaks' })
     if (!showVnSessionBreaks || !isVietnamTicker(pane.ticker)) return
-    if (!['1m', '5m', '15m', '1h'].includes(pane.interval)) return
+    if (!['1m', '5m', '15m', '30m', '1h'].includes(pane.interval)) return
 
     const bars = chart.getDataList()
     const markers = computeVnSessionBreaks(bars, pane.interval)
@@ -1236,6 +1283,53 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
       })
     }
   }, [showVnSessionBreaks, pane.ticker, pane.interval, pane.slotId, dataReadyNonce])
+
+  // 10c. Fetch & Render Corporate Event Markers (`D` Cash Dividend / `S` Stock Split, v3.0 Wave 1)
+  useEffect(() => {
+    let cancelled = false
+    if (!['1D', '1W', '1M'].includes(pane.interval)) {
+      setCorpEvents([])
+      return
+    }
+    void api
+      .getCorporateEvents(pane.ticker)
+      .then((events) => {
+        if (!cancelled) setCorpEvents(events)
+      })
+      .catch(() => {
+        if (!cancelled) setCorpEvents([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [pane.ticker, pane.interval, dataStatusTotalBars])
+
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart) return
+    chart.removeOverlay({ groupId: 'corp_events' })
+    if (!['1D', '1W', '1M'].includes(pane.interval) || corpEvents.length === 0) return
+
+    const cutoffTs = isThisPaneReplaying ? (replay?.cutoffTimestampMs ?? null) : null
+    const visible = (cutoffTs !== null ? corpEvents.filter((e) => e.timestamp_ms <= cutoffTs) : corpEvents).slice(-35)
+    for (let i = 0; i < visible.length; i++) {
+      const ev = visible[i]
+      chart.createOverlay({
+        id: `corp_ev_${pane.slotId}_${i}`,
+        name: 'corporateEventMarker',
+        groupId: 'corp_events',
+        paneId: 'candle_pane',
+        lock: true,
+        points: [{ timestamp: ev.timestamp_ms }],
+        extendData: {
+          kind: ev.kind,
+          label: ev.label,
+          detail: ev.detail,
+          date: ev.date,
+        },
+      })
+    }
+  }, [corpEvents, pane.interval, pane.slotId, dataReadyNonce, isThisPaneReplaying, replay?.cutoffTimestampMs])
 
   // 11. Render Paper Broker open position & interactive Drag-to-Modify SL / TP / Pending LO lines (v2.2!)
   useEffect(() => {
@@ -2071,6 +2165,104 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
             }}
           >
             Đang nạp dữ liệu {pane.ticker}...
+          </div>
+        )}
+
+        {/* Bottom-Right TradingView ADJ/RAW & Corporate Events Bar (v3.0 Wave 1) */}
+        <div className="absolute bottom-7 right-16 z-10 flex items-center gap-1 text-[10px]">
+          {corpEvents.length > 0 && ['1D', '1W', '1M'].includes(pane.interval) && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation()
+                const latest = corpEvents[corpEvents.length - 1]
+                setActiveCorpEvent((prev) => (prev ? null : latest))
+              }}
+              className="px-1.5 py-0.5 rounded font-semibold border cursor-pointer tabular-nums"
+              style={{
+                backgroundColor: 'color-mix(in srgb, var(--tv-bg-panel) 90%, transparent)',
+                borderColor: 'var(--tv-border)',
+                color: '#089981',
+              }}
+              title="Xem sự kiện quyền / cổ tức (D) và chia tách (S) đã tự động phát hiện"
+            >
+              D/S ({corpEvents.length})
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation()
+              togglePaneAdjustment(pane.slotId)
+            }}
+            className="px-1.5 py-0.5 rounded font-semibold border cursor-pointer tracking-wide"
+            style={{
+              backgroundColor:
+                curAdj === 'splits'
+                  ? 'var(--tv-accent-soft)'
+                  : 'color-mix(in srgb, var(--tv-bg-panel) 90%, transparent)',
+              borderColor: curAdj === 'splits' ? 'var(--tv-accent)' : 'var(--tv-border)',
+              color: curAdj === 'splits' ? 'var(--tv-accent)' : '#FBC02D',
+            }}
+            title={
+              curAdj === 'splits'
+                ? 'Đang xem giá ĐÃ ĐIỀU CHỈNH cổ tức & chia tách (ADJ) — Nhấn để xem giá gốc (RAW)'
+                : 'Đang xem giá GỐC chưa điều chỉnh (RAW) — Nhấn để chuyển về giá điều chỉnh (ADJ)'
+            }
+          >
+            {curAdj === 'splits' ? 'ADJ' : 'RAW'}
+          </button>
+        </div>
+
+        {activeCorpEvent && (
+          <div
+            className="absolute bottom-14 right-16 z-20 max-w-xs p-2.5 rounded-md shadow-2xl text-[11px] space-y-1"
+            style={{
+              backgroundColor: 'var(--tv-bg-elevated)',
+              border: '1px solid var(--tv-border)',
+              color: 'var(--tv-text-primary)',
+            }}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-semibold">
+                Sự kiện quyền gần nhất ({corpEvents.length})
+              </span>
+              <button
+                type="button"
+                className="border-0 bg-transparent cursor-pointer text-[var(--tv-text-secondary)]"
+                onClick={() => setActiveCorpEvent(null)}
+              >
+                ×
+              </button>
+            </div>
+            <div className="max-h-36 overflow-y-auto tv-scroll space-y-1">
+              {[...corpEvents]
+                .reverse()
+                .slice(0, 8)
+                .map((ev, idx) => (
+                  <button
+                    key={`${ev.timestamp_ms}_${idx}`}
+                    type="button"
+                    onClick={() => chartRef.current?.scrollToTimestamp(ev.timestamp_ms, 220)}
+                    className="w-full text-left px-1.5 py-1 rounded hover:bg-[var(--tv-hover)] border-0 bg-transparent cursor-pointer text-[var(--tv-text-primary)]"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span
+                        className="font-semibold"
+                        style={{ color: ev.kind === 'split' ? '#AB47BC' : '#089981' }}
+                      >
+                        [{ev.kind === 'split' ? 'S' : 'D'}] {ev.label}
+                      </span>
+                      <span className="text-[10px] tabular-nums" style={{ color: 'var(--tv-text-secondary)' }}>
+                        {ev.date}
+                      </span>
+                    </div>
+                    <div className="text-[10px]" style={{ color: 'var(--tv-text-secondary)' }}>
+                      {ev.detail}
+                    </div>
+                  </button>
+                ))}
+            </div>
           </div>
         )}
 

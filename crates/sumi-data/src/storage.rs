@@ -44,6 +44,33 @@ pub struct StoreStats {
     pub total_bars: usize,
 }
 
+/// Vietnam `1D` universe EOD freshness telemetry (eliminates the "Stale EOD Trap").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VnFreshnessSummary {
+    pub expected_session_date: String,
+    pub expected_session_ms: i64,
+    pub total_vn_d1_series: usize,
+    pub fresh_series: usize,
+    pub stale_series: usize,
+    pub newest_cached_date: Option<String>,
+    pub median_cached_date: Option<String>,
+    pub max_missing_sessions: usize,
+}
+
+/// Corporate action or earnings marker plotted on the chart bottom axis (`D` Dividend, `S` Split/Bonus, `E` Earnings).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CorporateEventMarker {
+    pub timestamp_ms: i64,
+    pub date: String,
+    /// `"D"` (Cash Dividend) | `"S"` (Stock Split / Stock Dividend) | `"E"` (Earnings Release)
+    pub kind: String,
+    pub label: String,
+    pub factor: Option<f64>,
+    pub detail: String,
+}
+
 /// Bulk-loaded Vietnam `1D` (`splits`) equity universe + `HOSE:VNINDEX` benchmark series.
 #[derive(Debug, Clone)]
 pub struct VnDailyUniverseBars {
@@ -277,16 +304,21 @@ impl SqliteMarketStore {
                     let _ = conn.execute(
                         r#"
                         UPDATE bars
-                        SET open   = open * ?1,
-                            high   = high * ?1,
-                            low    = low * ?1,
-                            close  = close * ?1,
-                            source = 'cafef_spliced'
+                        SET open     = open * ?1,
+                            high     = high * ?1,
+                            low      = low * ?1,
+                            close    = close * ?1,
+                            volume   = volume / ?1,
+                            turnover = CASE
+                                WHEN turnover > 0.0 THEN turnover
+                                ELSE (close * ?1) * (volume / ?1)
+                            END,
+                            source   = 'cafef_spliced'
                         WHERE exchange = ?2
                           AND symbol = ?3
                           AND interval = '1D'
                           AND adjustment = 'splits'
-                          AND source = 'cafef_adjusted'
+                          AND source IN ('cafef_adjusted', 'cafef_spliced')
                           AND timestamp_ms < ?4
                         "#,
                         params![ratio, ex, sym, first_tv_ts],
@@ -346,8 +378,9 @@ impl SqliteMarketStore {
         let adj_str = key.adjustment.as_str();
         let now_ms = chrono::Utc::now().timestamp_millis();
 
-        // Ratio-splice pre-existing `cafef_adjusted` history seamlessly against incoming `tradingview`
-        // bars on exact overlap dates so cash-dividend vs split-only conventions never create a step jump (`BUG-003`).
+        // Ratio-splice pre-existing `cafef_adjusted` / `cafef_spliced` history seamlessly against
+        // incoming `tradingview` bars on exact overlap dates so multiple consecutive splits/dividends
+        // never create a step jump (`BUG-003` + `Audit Fix #4`).
         if source == "tradingview"
             && interval_str == "1D"
             && adj_str == "splits"
@@ -361,7 +394,8 @@ impl SqliteMarketStore {
                         r#"
                         SELECT close FROM bars
                         WHERE exchange = ?1 AND symbol = ?2 AND interval = '1D'
-                          AND adjustment = 'splits' AND source = 'cafef_adjusted'
+                          AND adjustment = 'splits'
+                          AND source IN ('cafef_adjusted', 'cafef_spliced')
                           AND timestamp_ms = ?3
                         "#,
                         params![&key.exchange, &key.symbol, tv_bar.timestamp],
@@ -373,7 +407,7 @@ impl SqliteMarketStore {
                     && tv_bar.close > 0.0
                 {
                     let ratio = tv_bar.close / cf_c;
-                    if ratio.is_finite() && (0.25..=4.0).contains(&ratio) {
+                    if ratio.is_finite() && (0.02..=50.0).contains(&ratio) {
                         overlap_ratio = Some((ratio, earliest_tv.timestamp));
                         break;
                     }
@@ -385,13 +419,19 @@ impl SqliteMarketStore {
                 let _ = tx.execute(
                     r#"
                     UPDATE bars
-                    SET open   = open * ?1,
-                        high   = high * ?1,
-                        low    = low * ?1,
-                        close  = close * ?1,
-                        source = 'cafef_spliced'
+                    SET open     = open * ?1,
+                        high     = high * ?1,
+                        low      = low * ?1,
+                        close    = close * ?1,
+                        volume   = volume / ?1,
+                        turnover = CASE
+                            WHEN turnover > 0.0 THEN turnover
+                            ELSE (close * ?1) * (volume / ?1)
+                        END,
+                        source   = 'cafef_spliced'
                     WHERE exchange = ?2 AND symbol = ?3 AND interval = '1D'
-                      AND adjustment = 'splits' AND source = 'cafef_adjusted'
+                      AND adjustment = 'splits'
+                      AND source IN ('cafef_adjusted', 'cafef_spliced')
                       AND timestamp_ms < ?4
                     "#,
                     params![ratio, &key.exchange, &key.symbol, cutoff_ts],
@@ -544,8 +584,12 @@ impl SqliteMarketStore {
                             bar.high * scale_ratio,
                             bar.low * scale_ratio,
                             bar.close * scale_ratio,
-                            bar.volume,
-                            bar.turnover,
+                            bar.volume / scale_ratio,
+                            if bar.turnover > 0.0 {
+                                bar.turnover
+                            } else {
+                                (bar.close * scale_ratio) * (bar.volume / scale_ratio)
+                            },
                             effective_source,
                         ])?;
                         written_this_series += 1;
@@ -1178,6 +1222,252 @@ impl SqliteMarketStore {
             vnindex: vnindex_bars,
         })
     }
+
+    /// Bulk-upserts resolved symbols in a single transaction (used by `sync_vn_universe_catalog`
+    /// to hydrate ~1,600+ HOSE/HNX/UPCOM instruments cleanly on Clean-Slate machines).
+    pub fn upsert_symbols_bulk(&self, symbols: &[ResolvedSymbol]) -> Result<usize> {
+        if symbols.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| DataError::Storage("SQLite mutex poisoned".to_owned()))?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let tx = conn.transaction()?;
+        let mut written = 0_usize;
+        {
+            let mut stmt = tx.prepare_cached(
+                r#"
+                INSERT INTO symbols (
+                    exchange, symbol, ticker, description, market_type, currency, metadata_json, updated_at_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                ON CONFLICT(exchange, symbol) DO UPDATE SET
+                    ticker        = excluded.ticker,
+                    description   = CASE WHEN excluded.description != '' THEN excluded.description ELSE symbols.description END,
+                    market_type   = CASE WHEN excluded.market_type != '' THEN excluded.market_type ELSE symbols.market_type END,
+                    currency      = CASE WHEN excluded.currency != '' THEN excluded.currency ELSE symbols.currency END,
+                    metadata_json = excluded.metadata_json,
+                    updated_at_ms = excluded.updated_at_ms
+                "#,
+            )?;
+            for sym in symbols {
+                let meta_json = serde_json::to_string(sym)?;
+                stmt.execute(params![
+                    &sym.exchange,
+                    &sym.symbol,
+                    &sym.ticker,
+                    &sym.description,
+                    &sym.market_type,
+                    &sym.currency,
+                    meta_json,
+                    now_ms,
+                ])?;
+                written += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(written)
+    }
+
+    /// Computes EOD freshness across all cached Vietnam `1D` (`splits`) series relative to the
+    /// expected latest Vietnam trading session (`Eliminates the Stale EOD Trap`).
+    pub fn vn_freshness_summary(&self, now_utc_ms: i64) -> Result<VnFreshnessSummary> {
+        let (expected_date, expected_ms) = crate::paths::latest_expected_vn_trading_session_ms(now_utc_ms);
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DataError::Storage("SQLite mutex poisoned".to_owned()))?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT latest_ms
+            FROM series_meta
+            WHERE exchange IN ('HOSE', 'HNX', 'UPCOM')
+              AND interval = '1D'
+              AND adjustment = 'splits'
+              AND bar_count > 0
+            ORDER BY latest_ms ASC
+            "#,
+        )?;
+        let timestamps: Vec<i64> = stmt
+            .query_map([], |r| r.get::<_, i64>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let total = timestamps.len();
+        let mut fresh = 0_usize;
+        let mut stale = 0_usize;
+        let mut max_missing = 0_usize;
+        for &ts in &timestamps {
+            let missing = crate::paths::count_missing_vn_sessions(ts, expected_ms);
+            if missing == 0 {
+                fresh += 1;
+            } else {
+                stale += 1;
+                max_missing = max_missing.max(missing);
+            }
+        }
+        let newest_cached_date = timestamps.last().map(|&ts| crate::paths::format_ymd_utc(ts));
+        let median_cached_date = if total > 0 {
+            Some(crate::paths::format_ymd_utc(timestamps[total / 2]))
+        } else {
+            None
+        };
+
+        Ok(VnFreshnessSummary {
+            expected_session_date: expected_date,
+            expected_session_ms: expected_ms,
+            total_vn_d1_series: total,
+            fresh_series: fresh,
+            stale_series: stale,
+            newest_cached_date,
+            median_cached_date,
+            max_missing_sessions: max_missing,
+        })
+    }
+
+    /// Returns Vietnam symbols whose `1D` (`splits`) cached data is missing or older than
+    /// `expected_session_ms` (ordered most-stale / missing first so sync prioritizes gaps).
+    pub fn list_stale_vn_symbols(
+        &self,
+        scope_symbols: Option<&[SymbolKey]>,
+        expected_session_ms: i64,
+    ) -> Result<Vec<(SymbolKey, Option<i64>)>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DataError::Storage("SQLite mutex poisoned".to_owned()))?;
+        let mut meta_map = std::collections::HashMap::<(String, String), i64>::new();
+        {
+            let mut stmt = conn.prepare(
+                r#"
+                SELECT exchange, symbol, latest_ms
+                FROM series_meta
+                WHERE exchange IN ('HOSE', 'HNX', 'UPCOM')
+                  AND interval = '1D'
+                  AND adjustment = 'splits'
+                "#,
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (ex, sym, latest) = row?;
+                meta_map.insert((ex, sym), latest);
+            }
+        }
+
+        let candidates: Vec<SymbolKey> = if let Some(list) = scope_symbols {
+            list.to_vec()
+        } else {
+            let mut stmt = conn.prepare(
+                r#"
+                SELECT exchange, symbol
+                FROM symbols
+                WHERE exchange IN ('HOSE', 'HNX', 'UPCOM')
+                ORDER BY exchange ASC, symbol ASC
+                "#,
+            )?;
+            let iter = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            let mut out = Vec::new();
+            for item in iter {
+                let (ex, sym) = item?;
+                if let Ok(sk) = SymbolKey::new(&ex, &sym) {
+                    out.push(sk);
+                }
+            }
+            out
+        };
+
+        let mut stale = Vec::new();
+        for sk in candidates {
+            let latest_opt = meta_map.get(&(sk.exchange.clone(), sk.symbol.clone())).copied();
+            let is_stale = match latest_opt {
+                None => true,
+                Some(ts) => crate::paths::count_missing_vn_sessions(ts, expected_session_ms) > 0,
+            };
+            if is_stale {
+                stale.push((sk, latest_opt));
+            }
+        }
+        stale.sort_by_key(|(_, latest)| latest.unwrap_or(i64::MIN));
+        Ok(stale)
+    }
+
+    /// Automatically infers historical `D` (Cash Dividend) and `S` (Stock Split / Bonus Share)
+    /// ex-date markers on a symbol by comparing aligned `1D` `unadjusted` vs `splits` close ratios.
+    pub fn compute_corporate_events(&self, sym: &SymbolKey) -> Result<Vec<CorporateEventMarker>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DataError::Storage("SQLite mutex poisoned".to_owned()))?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT a.timestamp_ms, a.close AS adj_close, u.close AS raw_close
+            FROM bars a
+            JOIN bars u
+              ON a.exchange = u.exchange
+             AND a.symbol = u.symbol
+             AND a.interval = u.interval
+             AND a.timestamp_ms = u.timestamp_ms
+            WHERE a.exchange = ?1
+              AND a.symbol = ?2
+              AND a.interval = '1D'
+              AND a.adjustment = 'splits'
+              AND u.adjustment = 'unadjusted'
+              AND a.close > 0.0
+              AND u.close > 0.0
+            ORDER BY a.timestamp_ms ASC
+            "#,
+        )?;
+        let pairs: Vec<(i64, f64, f64)> = stmt
+            .query_map(params![&sym.exchange, &sym.symbol], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?, r.get::<_, f64>(2)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let mut events = Vec::new();
+        let mut prev_ratio: Option<f64> = None;
+        for (ts_ms, adj_c, raw_c) in pairs {
+            let ratio = adj_c / raw_c;
+            if !ratio.is_finite() || ratio <= 0.0 {
+                continue;
+            }
+            if let Some(prev_r) = prev_ratio {
+                let step_factor = ratio / prev_r;
+                let rel_jump = (step_factor - 1.0).abs();
+                // Ignore tiny floating/rounding drift (<= 1.5%) and corrupted extreme outliers
+                if rel_jump > 0.015 && (0.05..=20.0).contains(&step_factor) {
+                    let date = crate::paths::format_ymd_utc(ts_ms);
+                    let is_split = rel_jump >= 0.12;
+                    let kind = if is_split { "S" } else { "D" }.to_owned();
+                    let pct = (step_factor - 1.0) * 100.0;
+                    let label = if is_split {
+                        format!("Chia tách/Thưởng ({step_factor:.2}x)")
+                    } else {
+                        format!("Cổ tức/Điều chỉnh ({pct:+.1}%)")
+                    };
+                    let detail = format!(
+                        "Ngày GDKHQ {date}: Hệ số điều chỉnh {step_factor:.4}x (Giá gốc {:.0} / Điều chỉnh {:.0})",
+                        raw_c, adj_c
+                    );
+                    events.push(CorporateEventMarker {
+                        timestamp_ms: ts_ms,
+                        date,
+                        kind,
+                        label,
+                        factor: Some((step_factor * 10_000.0).round() / 10_000.0),
+                        detail,
+                    });
+                }
+            }
+            prev_ratio = Some(ratio);
+        }
+        Ok(events)
+    }
 }
 
 fn collect_bars(
@@ -1468,5 +1758,85 @@ mod tests {
         assert!(fpt_meta.reached_start);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn multi_split_ratio_splicing_adjusts_already_spliced_bars_and_preserves_turnover() {
+        let store = SqliteMarketStore::open_in_memory().unwrap();
+        let fpt = SymbolKey::new("HOSE", "FPT").unwrap();
+        let key = SeriesKey::new(&fpt, Interval::D1, Adjustment::Splits);
+        let t0 = 1_700_000_000_000_i64;
+        let step = 86_400_000_i64;
+
+        // Seed 3 historical CafeF bars at close = 100_000, vol = 1_000 -> turnover = 100_000_000
+        let cf_bars = vec![
+            OhlcvBar::new(t0, 100_000.0, 101_000.0, 99_000.0, 100_000.0, 1_000.0),
+            OhlcvBar::new(t0 + step, 100_000.0, 101_000.0, 99_000.0, 100_000.0, 1_000.0),
+            OhlcvBar::new(t0 + 2 * step, 100_000.0, 101_000.0, 99_000.0, 100_000.0, 1_000.0),
+        ];
+        store
+            .upsert_bars(&key, &cf_bars, "cafef_adjusted", Some(true))
+            .unwrap();
+
+        // Split #1: TradingView arrives with overlap at t0+2*step at 50_000 (0.5x split!)
+        let tv_split_1 = vec![
+            OhlcvBar::new(t0 + 2 * step, 50_000.0, 50_500.0, 49_500.0, 50_000.0, 2_000.0),
+            OhlcvBar::new(t0 + 3 * step, 50_000.0, 51_000.0, 49_000.0, 50_000.0, 2_000.0),
+        ];
+        store
+            .upsert_bars(&key, &tv_split_1, "tradingview", None)
+            .unwrap();
+
+        let after_1 = store.query_bars(&key, BarQueryMode::Init, 10).unwrap().bars;
+        assert!((after_1[0].close - 50_000.0).abs() < 1e-6);
+        assert!((after_1[0].volume - 2_000.0).abs() < 1e-6);
+        assert!((after_1[0].turnover - 100_000_000.0).abs() < 1e-3);
+
+        // Split #2: 6 months later another 0.5x split arrives overlapping already-spliced t0+step!
+        let tv_split_2 = vec![
+            OhlcvBar::new(t0 + step, 25_000.0, 25_250.0, 24_750.0, 25_000.0, 4_000.0),
+            OhlcvBar::new(t0 + 2 * step, 25_000.0, 25_250.0, 24_750.0, 25_000.0, 4_000.0),
+        ];
+        store
+            .upsert_bars(&key, &tv_split_2, "tradingview", None)
+            .unwrap();
+
+        let after_2 = store.query_bars(&key, BarQueryMode::Init, 10).unwrap().bars;
+        assert!(
+            (after_2[0].close - 25_000.0).abs() < 1e-6,
+            "Audit Fix #4: previously cafef_spliced bar must rescale cleanly on 2nd split, got {}",
+            after_2[0].close
+        );
+        assert!((after_2[0].volume - 4_000.0).abs() < 1e-6);
+        assert!((after_2[0].turnover - 100_000_000.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn detects_dividend_and_split_corporate_events_from_raw_vs_adjusted() {
+        let store = SqliteMarketStore::open_in_memory().unwrap();
+        let fpt = SymbolKey::new("HOSE", "FPT").unwrap();
+        let adj_key = SeriesKey::new(&fpt, Interval::D1, Adjustment::Splits);
+        let raw_key = SeriesKey::new(&fpt, Interval::D1, Adjustment::Unadjusted);
+        let t0 = 1_700_000_000_000_i64;
+        let step = 86_400_000_i64;
+
+        // Day 0: ratio 0.80; Day 1: 5% cash dividend -> ratio 0.84; Day 2: 20% bonus share -> ratio 1.00
+        let raw_bars = vec![
+            OhlcvBar::new(t0, 100_000.0, 100_000.0, 100_000.0, 100_000.0, 100.0),
+            OhlcvBar::new(t0 + step, 95_000.0, 95_000.0, 95_000.0, 95_000.0, 100.0),
+            OhlcvBar::new(t0 + 2 * step, 80_000.0, 80_000.0, 80_000.0, 80_000.0, 100.0),
+        ];
+        let adj_bars = vec![
+            OhlcvBar::new(t0, 80_000.0, 80_000.0, 80_000.0, 80_000.0, 100.0),
+            OhlcvBar::new(t0 + step, 80_000.0, 80_000.0, 80_000.0, 80_000.0, 100.0),
+            OhlcvBar::new(t0 + 2 * step, 80_000.0, 80_000.0, 80_000.0, 80_000.0, 100.0),
+        ];
+        store.upsert_bars(&raw_key, &raw_bars, "cafef_raw", Some(true)).unwrap();
+        store.upsert_bars(&adj_key, &adj_bars, "cafef_adjusted", Some(true)).unwrap();
+
+        let events = store.compute_corporate_events(&fpt).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, "D");
+        assert_eq!(events[1].kind, "S");
     }
 }

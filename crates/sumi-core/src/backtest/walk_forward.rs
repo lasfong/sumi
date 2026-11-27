@@ -555,10 +555,12 @@ fn constituent_annualization_root(timeframe: Timeframe) -> f64 {
         Timeframe::M1 => 98_280.0,
         Timeframe::M5 => 19_656.0,
         Timeframe::M15 => 6_552.0,
+        Timeframe::M30 => 3_276.0,
         Timeframe::H1 => 1_638.0,
         Timeframe::H4 => 409.5,
         Timeframe::D1 => 252.0,
         Timeframe::W1 => 52.0,
+        Timeframe::MN1 => 12.0,
     };
     bars_per_year.sqrt()
 }

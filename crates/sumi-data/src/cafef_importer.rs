@@ -31,7 +31,7 @@ impl Default for CafeFImportConfig {
     fn default() -> Self {
         Self {
             stock_price_multiplier: 1_000.0,
-            include_raw: false,
+            include_raw: true,
             adjusted_bucket: Adjustment::Splits,
         }
     }

@@ -55,7 +55,8 @@ pub use presets::{
 };
 pub use synthetic::generate_synthetic_ohlcv;
 pub use timeframe::{
-    AggregationError, Timeframe, aggregate_ohlcv, aggregate_ohlcv_up_to, infer_base_timeframe,
+    AggregationError, Timeframe, aggregate_ohlcv, aggregate_ohlcv_custom_seconds,
+    aggregate_ohlcv_up_to, aggregate_ohlcv_vn_session_h4, infer_base_timeframe,
     remap_timestamp_to_bar_index, resolve_anchor_timestamp, timestamp_to_bar_index,
 };
 

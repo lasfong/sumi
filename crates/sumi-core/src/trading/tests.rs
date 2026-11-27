@@ -1879,3 +1879,80 @@ impl TapLabelExt for crate::trading::SavedPracticeSession {
         self
     }
 }
+
+#[test]
+fn limit_orders_fill_at_exact_limit_price_despite_nonzero_slippage_audit_fix_5() {
+    let candles = vec![
+        candle(1_000, 100.0, 102.0, 99.0, 100.0),
+        candle(1_060, 100.0, 101.0, 94.0, 98.0), // Touches Buy Limit @ 96.0 (must fill at 96.0, not 96.48!)
+        candle(1_120, 98.0, 107.0, 97.5, 106.0), // Touches Sell Limit @ 105.0 (must fill at 105.0, not 104.475!)
+    ];
+    let mut cfg = zero_friction_config();
+    cfg.slippage_bps = 50.0; // 0.50% slippage
+    assert!(!cfg.apply_slippage_to_limits, "strict limit price guarantee must be default");
+
+    let mut session = TradingSession::new(cfg);
+    session.reset_at(&candles, 0);
+
+    session
+        .submit_order(
+            OrderRequest {
+                side: OrderSide::Buy,
+                kind: OrderKind::Limit { limit_price: 96.0 },
+                quantity: 10.0,
+                stop_loss: None,
+                take_profit: None,
+            },
+            &candles,
+            0,
+        )
+        .unwrap();
+    session.advance_through_bars(&candles, 1, 1);
+    assert_eq!(session.fills().len(), 1);
+    assert!(
+        (session.fills()[0].price - 96.0).abs() < 1e-12,
+        "Buy Limit must fill at exact limit 96.0 (got {})",
+        session.fills()[0].price
+    );
+
+    session
+        .submit_order(
+            OrderRequest {
+                side: OrderSide::Sell,
+                kind: OrderKind::Limit { limit_price: 105.0 },
+                quantity: 10.0,
+                stop_loss: None,
+                take_profit: None,
+            },
+            &candles,
+            1,
+        )
+        .unwrap();
+    session.advance_through_bars(&candles, 2, 2);
+    assert_eq!(session.fills().len(), 2);
+    assert!(
+        (session.fills()[1].price - 105.0).abs() < 1e-12,
+        "Sell Limit must fill at exact limit 105.0 (got {})",
+        session.fills()[1].price
+    );
+
+    // Explicit opt-in `apply_slippage_to_limits = true` preserves legacy adverse slippage mode.
+    cfg.apply_slippage_to_limits = true;
+    let mut opt_in = TradingSession::new(cfg);
+    opt_in.reset_at(&candles, 0);
+    opt_in
+        .submit_order(
+            OrderRequest {
+                side: OrderSide::Buy,
+                kind: OrderKind::Limit { limit_price: 96.0 },
+                quantity: 10.0,
+                stop_loss: None,
+                take_profit: None,
+            },
+            &candles,
+            0,
+        )
+        .unwrap();
+    opt_in.advance_through_bars(&candles, 1, 1);
+    assert!(opt_in.fills()[0].price > 96.0);
+}

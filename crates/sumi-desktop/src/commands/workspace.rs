@@ -673,7 +673,7 @@ pub async fn broadcast_sync_event(
     use tauri::Emitter;
     let allowed = matches!(
         event_name.as_str(),
-        "sumi:sync_replay" | "sumi:sync_drawing" | "sumi:sync_symbol"
+        "sumi:sync_replay" | "sumi:sync_drawing" | "sumi:sync_symbol" | "sumi:sync_range"
     );
     if !allowed {
         return Err(DesktopError::Validation(format!(

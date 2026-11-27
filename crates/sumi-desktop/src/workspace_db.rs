@@ -10,7 +10,7 @@ use sumi_core::scanner::qmv_universe::{
 
 use crate::error::{DesktopError, DesktopResult};
 
-const WORKSPACE_SCHEMA_VERSION: i32 = 3;
+const WORKSPACE_SCHEMA_VERSION: i32 = 4;
 const QMV_WORKSTATION_MIGRATION_KEY: &str = "qmv_workstation_v1_migrated";
 
 fn qmv_prefixed_ticker(symbol: &str) -> String {
@@ -133,6 +133,30 @@ pub struct JournalAnnotationRecord {
     pub setup_tag: String,
     pub mistake_tag: String,
     pub note: String,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncTombstoneRecord {
+    pub entity_kind: String,
+    pub entity_key: String,
+    pub deleted_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KvRecord {
+    pub key: String,
+    pub value: Value,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaneIndicatorsRecord {
+    pub slot_id: String,
+    pub indicators: Vec<SavedIndicatorSpec>,
     pub updated_at_ms: i64,
 }
 
@@ -286,15 +310,23 @@ impl WorkspaceStore {
                 broker_snapshot_json TEXT,
                 updated_at_ms        INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS sync_tombstones (
+                entity_kind   TEXT NOT NULL,
+                entity_key    TEXT NOT NULL,
+                deleted_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (entity_kind, entity_key)
+            );
             "#,
         )?;
 
-        // Idempotent additive columns for existing v1 `price_alerts` tables
+        // Idempotent additive columns for existing v1–v3 tables
         for ddl in [
             "ALTER TABLE price_alerts ADD COLUMN alert_kind TEXT NOT NULL DEFAULT 'price'",
             "ALTER TABLE price_alerts ADD COLUMN interval TEXT",
             "ALTER TABLE price_alerts ADD COLUMN params_json TEXT",
             "ALTER TABLE price_alerts ADD COLUMN sound_enabled INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE watchlists ADD COLUMN updated_at_ms INTEGER NOT NULL DEFAULT 0",
         ] {
             let _ = conn.execute(ddl, []);
         }
@@ -553,10 +585,19 @@ impl WorkspaceStore {
             .lock()
             .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
         let normalized = ticker.trim().to_ascii_uppercase();
+        let now_ms = chrono::Utc::now().timestamp_millis();
         conn.execute(
             "DELETE FROM drawings WHERE ticker = ?1 AND id = ?2",
-            params![normalized, id],
+            params![&normalized, id],
         )?;
+        let _ = conn.execute(
+            r#"
+            INSERT INTO sync_tombstones (entity_kind, entity_key, deleted_at_ms)
+            VALUES ('drawing', ?1, ?2)
+            ON CONFLICT(entity_kind, entity_key) DO UPDATE SET deleted_at_ms = MAX(deleted_at_ms, excluded.deleted_at_ms)
+            "#,
+            params![format!("{normalized}::{id}"), now_ms],
+        );
         Ok(())
     }
 
@@ -566,10 +607,27 @@ impl WorkspaceStore {
             .lock()
             .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
         let normalized = ticker.trim().to_ascii_uppercase();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let ids: Vec<String> = {
+            let mut stmt = conn.prepare("SELECT id FROM drawings WHERE ticker = ?1")?;
+            stmt.query_map(params![&normalized], |r| r.get(0))?
+                .filter_map(Result::ok)
+                .collect()
+        };
         conn.execute(
             "DELETE FROM drawings WHERE ticker = ?1",
-            params![normalized],
+            params![&normalized],
         )?;
+        for id in ids {
+            let _ = conn.execute(
+                r#"
+                INSERT INTO sync_tombstones (entity_kind, entity_key, deleted_at_ms)
+                VALUES ('drawing', ?1, ?2)
+                ON CONFLICT(entity_kind, entity_key) DO UPDATE SET deleted_at_ms = MAX(deleted_at_ms, excluded.deleted_at_ms)
+                "#,
+                params![format!("{normalized}::{id}"), now_ms],
+            );
+        }
         Ok(())
     }
 
@@ -684,7 +742,16 @@ impl WorkspaceStore {
             .conn
             .lock()
             .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
         conn.execute("DELETE FROM chart_layouts WHERE id = ?1", params![id])?;
+        let _ = conn.execute(
+            r#"
+            INSERT INTO sync_tombstones (entity_kind, entity_key, deleted_at_ms)
+            VALUES ('layout', ?1, ?2)
+            ON CONFLICT(entity_kind, entity_key) DO UPDATE SET deleted_at_ms = MAX(deleted_at_ms, excluded.deleted_at_ms)
+            "#,
+            params![id, now_ms],
+        );
         Ok(())
     }
 
@@ -747,7 +814,16 @@ impl WorkspaceStore {
             .conn
             .lock()
             .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
         conn.execute("DELETE FROM watchlists WHERE id = ?1", params![id])?;
+        let _ = conn.execute(
+            r#"
+            INSERT INTO sync_tombstones (entity_kind, entity_key, deleted_at_ms)
+            VALUES ('watchlist', ?1, ?2)
+            ON CONFLICT(entity_kind, entity_key) DO UPDATE SET deleted_at_ms = MAX(deleted_at_ms, excluded.deleted_at_ms)
+            "#,
+            params![id, now_ms],
+        );
         Ok(())
     }
 
@@ -892,7 +968,16 @@ impl WorkspaceStore {
             .conn
             .lock()
             .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
         conn.execute("DELETE FROM price_alerts WHERE id = ?1", params![id])?;
+        let _ = conn.execute(
+            r#"
+            INSERT INTO sync_tombstones (entity_kind, entity_key, deleted_at_ms)
+            VALUES ('alert', ?1, ?2)
+            ON CONFLICT(entity_kind, entity_key) DO UPDATE SET deleted_at_ms = MAX(deleted_at_ms, excluded.deleted_at_ms)
+            "#,
+            params![id, now_ms],
+        );
         Ok(())
     }
 
@@ -1334,7 +1419,16 @@ impl WorkspaceStore {
             .conn
             .lock()
             .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
         conn.execute("DELETE FROM indicator_templates WHERE id = ?1", params![id])?;
+        let _ = conn.execute(
+            r#"
+            INSERT INTO sync_tombstones (entity_kind, entity_key, deleted_at_ms)
+            VALUES ('indicator_template', ?1, ?2)
+            ON CONFLICT(entity_kind, entity_key) DO UPDATE SET deleted_at_ms = MAX(deleted_at_ms, excluded.deleted_at_ms)
+            "#,
+            params![id, now_ms],
+        );
         Ok(())
     }
 
@@ -1475,7 +1569,383 @@ impl WorkspaceStore {
             .conn
             .lock()
             .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
         conn.execute("DELETE FROM replay_sessions WHERE id = ?1", params![id])?;
+        let _ = conn.execute(
+            r#"
+            INSERT INTO sync_tombstones (entity_kind, entity_key, deleted_at_ms)
+            VALUES ('replay_session', ?1, ?2)
+            ON CONFLICT(entity_kind, entity_key) DO UPDATE SET deleted_at_ms = MAX(deleted_at_ms, excluded.deleted_at_ms)
+            "#,
+            params![id, now_ms],
+        );
+        Ok(())
+    }
+
+    // ─── Cross-Device Workspace Sync Helpers (v3.0) ──────────────────────────
+
+    pub fn list_all_kv(&self) -> DesktopResult<Vec<KvRecord>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let mut stmt = conn.prepare(
+            "SELECT key, value_json, updated_at_ms FROM kv_store ORDER BY key ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                let raw: String = r.get(1)?;
+                let value: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+                Ok(KvRecord {
+                    key: r.get(0)?,
+                    value,
+                    updated_at_ms: r.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn set_kv_with_ts(&self, key: &str, value: &Value, updated_at_ms: i64) -> DesktopResult<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let json = serde_json::to_string(value)?;
+        conn.execute(
+            r#"
+            INSERT INTO kv_store (key, value_json, updated_at_ms)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(key) DO UPDATE SET
+                value_json = excluded.value_json,
+                updated_at_ms = excluded.updated_at_ms
+            WHERE excluded.updated_at_ms >= kv_store.updated_at_ms
+            "#,
+            params![key, json, updated_at_ms],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_all_drawings(&self) -> DesktopResult<Vec<SavedDrawingRecord>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT id, ticker, name, pane_id, group_id, points_json, styles_json,
+                   extend_data_json, locked, visible, mode, updated_at_ms
+            FROM drawings
+            ORDER BY ticker ASC, id ASC
+            "#,
+        )?;
+        let iter = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, i64>(8)? != 0,
+                row.get::<_, i64>(9)? != 0,
+                row.get::<_, String>(10)?,
+                row.get::<_, i64>(11)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for item in iter {
+            let (
+                id,
+                ticker,
+                name,
+                pane_id,
+                group_id,
+                points_raw,
+                styles_raw,
+                extend_raw,
+                lock,
+                visible,
+                mode,
+                updated_at_ms,
+            ) = item?;
+            out.push(SavedDrawingRecord {
+                id,
+                ticker,
+                name,
+                pane_id,
+                group_id,
+                points: serde_json::from_str(&points_raw)?,
+                styles: styles_raw.as_deref().map(serde_json::from_str).transpose()?,
+                extend_data: extend_raw.as_deref().map(serde_json::from_str).transpose()?,
+                lock,
+                visible,
+                mode,
+                updated_at_ms,
+            });
+        }
+        Ok(out)
+    }
+
+    pub fn list_all_pane_indicators(&self) -> DesktopResult<Vec<PaneIndicatorsRecord>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let mut stmt = conn.prepare(
+            "SELECT slot_id, indicators_json, updated_at_ms FROM pane_indicators ORDER BY slot_id ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                let raw: String = r.get(1)?;
+                let indicators: Vec<SavedIndicatorSpec> =
+                    serde_json::from_str(&raw).unwrap_or_default();
+                Ok(PaneIndicatorsRecord {
+                    slot_id: r.get(0)?,
+                    indicators,
+                    updated_at_ms: r.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn save_pane_indicators_with_ts(
+        &self,
+        slot_id: &str,
+        indicators: &[SavedIndicatorSpec],
+        updated_at_ms: i64,
+    ) -> DesktopResult<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let json = serde_json::to_string(indicators)?;
+        conn.execute(
+            r#"
+            INSERT INTO pane_indicators (slot_id, indicators_json, updated_at_ms)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(slot_id) DO UPDATE SET
+                indicators_json = excluded.indicators_json,
+                updated_at_ms = excluded.updated_at_ms
+            WHERE excluded.updated_at_ms >= pane_indicators.updated_at_ms
+            "#,
+            params![slot_id, json, updated_at_ms],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_all_journal_annotations(&self) -> DesktopResult<Vec<JournalAnnotationRecord>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT trade_id, ticker, setup_tag, mistake_tag, note, updated_at_ms
+            FROM journal_annotations
+            ORDER BY ticker ASC, trade_id ASC
+            "#,
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(JournalAnnotationRecord {
+                    trade_id: r.get::<_, i64>(0)?.max(0) as u64,
+                    ticker: r.get(1)?,
+                    setup_tag: r.get(2)?,
+                    mistake_tag: r.get(3)?,
+                    note: r.get(4)?,
+                    updated_at_ms: r.get(5)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn upsert_journal_annotation_with_ts(&self, rec: &JournalAnnotationRecord) -> DesktopResult<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let normalized = rec.ticker.trim().to_ascii_uppercase();
+        conn.execute(
+            r#"
+            INSERT INTO journal_annotations (trade_id, ticker, setup_tag, mistake_tag, note, updated_at_ms)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(ticker, trade_id) DO UPDATE SET
+                setup_tag = excluded.setup_tag,
+                mistake_tag = excluded.mistake_tag,
+                note = excluded.note,
+                updated_at_ms = excluded.updated_at_ms
+            WHERE excluded.updated_at_ms >= journal_annotations.updated_at_ms
+            "#,
+            params![
+                rec.trade_id as i64,
+                normalized,
+                &rec.setup_tag,
+                &rec.mistake_tag,
+                &rec.note,
+                rec.updated_at_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn upsert_watchlist_full(&self, group: &WatchlistGroup, updated_at_ms: i64) -> DesktopResult<()> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            r#"
+            INSERT INTO watchlists (id, name, sort_order, updated_at_ms)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                sort_order = excluded.sort_order,
+                updated_at_ms = excluded.updated_at_ms
+            "#,
+            params![&group.id, &group.name, group.sort_order, updated_at_ms],
+        )?;
+        tx.execute(
+            "DELETE FROM watchlist_items WHERE watchlist_id = ?1",
+            params![&group.id],
+        )?;
+        for (idx, ticker) in group.tickers.iter().enumerate() {
+            tx.execute(
+                "INSERT OR IGNORE INTO watchlist_items (watchlist_id, ticker, sort_order) VALUES (?1, ?2, ?3)",
+                params![&group.id, ticker.trim().to_ascii_uppercase(), idx as i32],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn list_tombstones(&self) -> DesktopResult<Vec<SyncTombstoneRecord>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let mut stmt = conn.prepare(
+            "SELECT entity_kind, entity_key, deleted_at_ms FROM sync_tombstones ORDER BY entity_kind ASC, entity_key ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(SyncTombstoneRecord {
+                    entity_kind: r.get(0)?,
+                    entity_key: r.get(1)?,
+                    deleted_at_ms: r.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn upsert_tombstone(&self, rec: &SyncTombstoneRecord) -> DesktopResult<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        conn.execute(
+            r#"
+            INSERT INTO sync_tombstones (entity_kind, entity_key, deleted_at_ms)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(entity_kind, entity_key) DO UPDATE SET
+                deleted_at_ms = MAX(deleted_at_ms, excluded.deleted_at_ms)
+            "#,
+            params![&rec.entity_kind, &rec.entity_key, rec.deleted_at_ms],
+        )?;
+        Ok(())
+    }
+
+    pub fn save_layout_with_ts(&self, rec: &SavedLayoutRecord) -> DesktopResult<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let raw = serde_json::to_string(&rec.layout_json)?;
+        conn.execute(
+            r#"
+            INSERT INTO chart_layouts (id, name, layout_json, updated_at_ms)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                layout_json = excluded.layout_json,
+                updated_at_ms = excluded.updated_at_ms
+            WHERE excluded.updated_at_ms >= chart_layouts.updated_at_ms
+            "#,
+            params![&rec.id, &rec.name, raw, rec.updated_at_ms],
+        )?;
+        Ok(())
+    }
+
+    pub fn save_indicator_template_with_ts(&self, tpl: &IndicatorTemplateRecord) -> DesktopResult<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let json_str = serde_json::to_string(&tpl.indicators)?;
+        conn.execute(
+            r#"
+            INSERT INTO indicator_templates (id, name, description, indicators_json, updated_at_ms)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                description = excluded.description,
+                indicators_json = excluded.indicators_json,
+                updated_at_ms = excluded.updated_at_ms
+            WHERE excluded.updated_at_ms >= indicator_templates.updated_at_ms
+            "#,
+            params![&tpl.id, &tpl.name, &tpl.description, json_str, tpl.updated_at_ms],
+        )?;
+        Ok(())
+    }
+
+    pub fn save_replay_session_with_ts(&self, session: &SavedReplaySessionRecord) -> DesktopResult<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let ivs_json = serde_json::to_string(&session.tracked_intervals)?;
+        let broker_str = session
+            .broker_snapshot_json
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        conn.execute(
+            r#"
+            INSERT INTO replay_sessions (
+                id, name, ticker, base_interval, tracked_intervals, cursor_timestamp_ms,
+                speed_multiplier, blind_mode, broker_snapshot_json, updated_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                ticker = excluded.ticker,
+                base_interval = excluded.base_interval,
+                tracked_intervals = excluded.tracked_intervals,
+                cursor_timestamp_ms = excluded.cursor_timestamp_ms,
+                speed_multiplier = excluded.speed_multiplier,
+                blind_mode = excluded.blind_mode,
+                broker_snapshot_json = excluded.broker_snapshot_json,
+                updated_at_ms = excluded.updated_at_ms
+            WHERE excluded.updated_at_ms >= replay_sessions.updated_at_ms
+            "#,
+            params![
+                &session.id,
+                &session.name,
+                session.ticker.trim().to_ascii_uppercase(),
+                &session.base_interval,
+                ivs_json,
+                session.cursor_timestamp_ms,
+                session.speed_multiplier,
+                i64::from(session.blind_mode),
+                broker_str,
+                session.updated_at_ms,
+            ],
+        )?;
         Ok(())
     }
 }

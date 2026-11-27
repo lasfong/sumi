@@ -306,14 +306,56 @@ export const webFallbackApi = {
   },
 
   getDataStatus(): DataStatusResponse {
+    const today = new Date().toISOString().slice(0, 10)
     return {
       stats: {
-        db_path: 'data/cache/sumi_market.db (preview)',
+        db_path: '~/.local/share/sumi/sumi_market.db (preview)',
         total_symbols: 473,
         total_series: 473,
         total_bars: 951420,
       },
       offlineMode: false,
+      freshness: {
+        expected_session_ms: Date.now(),
+        expected_session_date: today,
+        total_vn_d1_series: 473,
+        fresh_series: 473,
+        stale_series: 0,
+        median_latest_ms: Date.now(),
+        median_latest_date: today,
+        newest_latest_ms: Date.now(),
+        newest_latest_date: today,
+        max_missing_sessions: 0,
+      },
+      dataDir: '~/.local/share/sumi',
+      configDir: '~/.config/sumi',
+      yumekoDbDetected: false,
+    }
+  },
+
+  getCorporateEvents(_ticker: string) {
+    return []
+  },
+
+  syncGetStatus() {
+    return {
+      deviceId: 'web-preview',
+      syncFolder: null,
+      syncBundleExists: false,
+      autoSyncOnLaunch: false,
+      lastSyncedAtMs: null,
+      lastSyncedSha256: null,
+      dataDir: '~/.local/share/sumi',
+      configDir: '~/.config/sumi',
+      preSyncBackupCount: 0,
+      doraemiTransport: {
+        configured: false,
+        sourceFile: null,
+        baseUrl: null,
+        migration0006RequiredNote:
+          'Doraemi OAuth 2.1 + PKCE transport đã sẵn sàng — dùng Local Cloud Folder Sync hoặc .sumi.json cho đến khi kích hoạt Migration 0006.',
+        readyForCloudPush: false,
+      },
     }
   },
 

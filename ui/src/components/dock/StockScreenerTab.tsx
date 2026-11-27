@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { ArrowDown, ArrowUp, Download, FilterX, Plus, Radar, Sparkles, X } from 'lucide-react'
+import { ArrowDown, ArrowUp, Download, FilterX, Plus, Radar, RefreshCw, Sparkles, X } from 'lucide-react'
 import * as api from '../../api/tauri'
 import { useWorkspaceStore } from '../../store/workspaceStore'
 import type {
@@ -65,6 +65,10 @@ const QMV_QUICK_PRESETS: Array<{ label: string; title: string; signals: string[]
 export const StockScreenerTab: React.FC = () => {
   const watchlists = useWorkspaceStore((s) => s.watchlists)
   const activeWatchlistId = useWorkspaceStore((s) => s.activeWatchlistId)
+  const dataStatus = useWorkspaceStore((s) => s.dataStatus)
+  const syncingEod = useWorkspaceStore((s) => s.syncingEod)
+  const eodSyncProgress = useWorkspaceStore((s) => s.eodSyncProgress)
+  const syncUniverseEod = useWorkspaceStore((s) => s.syncUniverseEod)
   const setActiveTicker = useWorkspaceStore((s) => s.setActiveTicker)
   const pushToast = useWorkspaceStore((s) => s.pushToast)
 
@@ -567,9 +571,34 @@ export const StockScreenerTab: React.FC = () => {
         </label>
 
         {result && (
-          <span className="ml-auto text-[10.5px] tabular-nums" style={{ color: 'var(--tv-text-secondary)' }}>
-            <strong>{result.matchedSymbols}</strong>/{result.scannedSymbols} mã · {result.elapsedMs}ms
-          </span>
+          <div className="ml-auto flex items-center gap-2 text-[10.5px] tabular-nums">
+            {(result.staleSymbolsCount ?? 0) > 0 && (
+              <button
+                type="button"
+                disabled={syncingEod || Boolean(dataStatus?.offlineMode)}
+                onClick={() => {
+                  void syncUniverseEod(exchangeFilter, 120).then(() => runScan())
+                }}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded font-semibold border cursor-pointer disabled:opacity-50"
+                style={{
+                  backgroundColor: 'rgba(251, 192, 45, 0.14)',
+                  borderColor: 'rgba(251, 192, 45, 0.45)',
+                  color: '#FBC02D',
+                }}
+                title={`Có ${result.staleSymbolsCount}/${result.scannedSymbols} mã có nến cũ hơn phiên kỳ vọng ${result.expectedSessionDate ?? ''} (trung vị ${result.medianCachedDate ?? '—'}). Nhấn để đồng bộ EOD ngay.`}
+              >
+                <RefreshCw className={`w-3 h-3 ${syncingEod ? 'animate-spin' : ''}`} />
+                <span>
+                  {syncingEod && eodSyncProgress
+                    ? `EOD ${eodSyncProgress.completed}/${eodSyncProgress.total}`
+                    : `${result.staleSymbolsCount} mã cũ (${result.medianCachedDate ?? '—'}) · Đồng bộ EOD`}
+                </span>
+              </button>
+            )}
+            <span style={{ color: 'var(--tv-text-secondary)' }}>
+              <strong>{result.matchedSymbols}</strong>/{result.scannedSymbols} mã · {result.elapsedMs}ms
+            </span>
+          </div>
         )}
       </div>
 

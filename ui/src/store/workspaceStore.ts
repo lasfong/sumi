@@ -17,6 +17,8 @@ import type {
   SavedIndicatorSpec,
   SavedLayoutRecord,
   SavedReplaySessionRecord,
+  SyncProgressPayload,
+  SyncStatusDto,
   ThemeMode,
   WatchlistGroup,
   WatchlistQuoteSnapshot,
@@ -192,7 +194,11 @@ export interface WorkspaceState {
   indicatorTemplates: IndicatorTemplateRecord[]
   replaySessions: SavedReplaySessionRecord[]
   dataStatus: DataStatusResponse | null
+  syncStatus: SyncStatusDto | null
   importingCafeF: boolean
+  syncingCatalog: boolean
+  syncingEod: boolean
+  eodSyncProgress: SyncProgressPayload | null
 
   // Causal Bar Replay state
   replay: ReplaySnapshotResponse | null
@@ -222,6 +228,7 @@ export interface WorkspaceState {
   setActiveInterval: (interval: IntervalKey, slotId?: string) => void
   setActiveChartStyle: (style: ChartStyleKind) => void
   setActivePriceScale: (scale: PriceScaleKind) => void
+  togglePaneAdjustment: (slotId?: string) => void
   toggleActiveVnBands: () => void
   toggleActiveCountdown: () => void
 
@@ -273,6 +280,11 @@ export interface WorkspaceState {
     change: number | null
     change_percent: number | null
     volume: number | null
+    open?: number | null
+    high?: number | null
+    low?: number | null
+    bid?: number | null
+    ask?: number | null
     timestamp_ms: number
   }) => void
   addSymbolToWatchlist: (ticker: string) => Promise<void>
@@ -304,7 +316,10 @@ export interface WorkspaceState {
   deleteSavedLayout: (id: string) => Promise<void>
 
   toggleOfflineMode: () => Promise<void>
-  importCafeFDirectory: (dir: string) => Promise<void>
+  importCafeFDirectory: (dir: string, includeRaw?: boolean) => Promise<void>
+  refreshSyncStatus: () => Promise<void>
+  syncVnUniverseCatalog: () => Promise<void>
+  syncUniverseEod: (scope?: string, maxSymbols?: number) => Promise<void>
 
   // Replay actions
   setReplaySelectingCut: (selecting: boolean) => void
@@ -422,7 +437,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   indicatorTemplates: [],
   replaySessions: [],
   dataStatus: null,
+  syncStatus: null,
   importingCafeF: false,
+  syncingCatalog: false,
+  syncingEod: false,
+  eodSyncProgress: null,
 
   replay: null,
   replaySelectingCut: false,
@@ -437,10 +456,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   bootstrap: async () => {
     try {
-      const [boot, status, activeReplay] = await Promise.all([
+      const [boot, status, activeReplay, syncStatus] = await Promise.all([
         api.loadWorkspaceBootstrap(),
         api.getDataStatus(),
         api.replayGetState().catch(() => null),
+        api.syncGetStatus().catch(() => null),
       ])
       const saved = boot.settings ?? {}
       const theme: ThemeMode = saved.theme === 'light' ? 'light' : 'dark'
@@ -537,6 +557,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         showVnSessionBreaks:
           typeof saved.showVnSessionBreaks === 'boolean' ? saved.showVnSessionBreaks : true,
         dataStatus: status,
+        syncStatus,
         replay: activeReplay?.active ? activeReplay : null,
       })
 
@@ -654,6 +675,18 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const slot = get().activeSlotId
     set((s) => ({
       panes: s.panes.map((p) => (p.slotId === slot ? { ...p, priceScale } : p)),
+    }))
+    schedulePersistSettings(get())
+  },
+
+  togglePaneAdjustment: (slotId) => {
+    const slot = slotId ?? get().activeSlotId
+    set((s) => ({
+      panes: s.panes.map((p) =>
+        p.slotId === slot
+          ? { ...p, adjustment: (p.adjustment ?? 'splits') === 'splits' ? 'unadjusted' : 'splits' }
+          : p,
+      ),
     }))
     schedulePersistSettings(get())
   },
@@ -950,6 +983,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         change: quote.change ?? cur?.change ?? null,
         changePercent: quote.change_percent ?? cur?.changePercent ?? null,
         volume: quote.volume ?? cur?.volume ?? null,
+        open: quote.open ?? cur?.open ?? null,
+        high: quote.high ?? cur?.high ?? null,
+        low: quote.low ?? cur?.low ?? null,
+        bid: quote.bid ?? cur?.bid ?? null,
+        ask: quote.ask ?? cur?.ask ?? null,
         pricePrecision: cur?.pricePrecision ?? 2,
         vnBand: cur?.vnBand ?? null,
         timestampMs: quote.timestamp_ms,
@@ -1135,22 +1173,89 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     get().pushToast('info', next ? 'Đã chuyển sang chế độ Offline (SQLite cục bộ)' : 'Đã bật kết nối Online Realtime')
   },
 
-  importCafeFDirectory: async (dir) => {
+  importCafeFDirectory: async (dir, includeRaw = true) => {
     const trimmed = dir.trim()
     if (!trimmed || get().importingCafeF) return
     set({ importingCafeF: true })
     try {
-      const summary = await api.importCafeFDir(trimmed)
+      const summary = await api.importCafeFDir(trimmed, includeRaw)
       const status = await api.getDataStatus()
       set({ dataStatus: status, importingCafeF: false })
       await Promise.all([get().refreshWatchlistQuotes(), get().refreshBroker()])
       get().pushToast(
         'success',
-        `Đã nạp ${summary.distinct_symbols.toLocaleString('en-US')} mã (${summary.total_bars_written.toLocaleString('en-US')} nến) vào SQLite trong ${summary.elapsed_ms}ms`,
+        `Đã nạp ${summary.distinct_symbols.toLocaleString('en-US')} mã (${summary.total_bars_written.toLocaleString('en-US')} nến${includeRaw ? ', kèm RAW' : ''}) vào SQLite trong ${summary.elapsed_ms}ms`,
       )
     } catch (err) {
       set({ importingCafeF: false })
       get().pushToast('error', `Không thể nạp thư mục CafeF: ${String(err)}`)
+    }
+  },
+
+  refreshSyncStatus: async () => {
+    try {
+      const syncStatus = await api.syncGetStatus()
+      set({ syncStatus })
+    } catch {
+      // ignore
+    }
+  },
+
+  syncVnUniverseCatalog: async () => {
+    if (get().syncingCatalog) return
+    set({ syncingCatalog: true })
+    try {
+      const res = await api.syncVnUniverseCatalog()
+      const status = await api.getDataStatus()
+      set({ dataStatus: status, syncingCatalog: false })
+      get().pushToast(
+        'success',
+        `Đã đồng bộ danh mục ${res.discoveredSymbols.toLocaleString('en-US')} mã VN (cập nhật ${res.upsertedSymbols.toLocaleString('en-US')} mã trong ${res.elapsedMs}ms)`,
+      )
+    } catch (err) {
+      set({ syncingCatalog: false })
+      get().pushToast('error', `Lỗi đồng bộ danh mục VN: ${String(err)}`)
+    }
+  },
+
+  syncUniverseEod: async (scope = 'ALL_VN', maxSymbols = 150) => {
+    if (get().syncingEod) return
+    set({
+      syncingEod: true,
+      eodSyncProgress: {
+        scope,
+        completed: 0,
+        total: 0,
+        currentTicker: '',
+        updatedSymbols: 0,
+        updatedBars: 0,
+        failedSymbols: 0,
+        done: false,
+      },
+    })
+    try {
+      const wl = get().watchlists.find((w) => w.id === get().activeWatchlistId)
+      const summary = await api.syncUniverseEod(
+        {
+          scope,
+          tickers: scope === 'WATCHLIST' ? (wl?.tickers ?? []) : undefined,
+          maxSymbols,
+        },
+        (progress) => set({ eodSyncProgress: progress }),
+      )
+      const status = await api.getDataStatus()
+      set({ dataStatus: status, syncingEod: false, eodSyncProgress: summary })
+      await Promise.all([get().refreshWatchlistQuotes(), get().refreshBroker()])
+      const stale = status.freshness?.stale_series ?? 0
+      get().pushToast(
+        'success',
+        stale === 0
+          ? `Đồng bộ EOD xong (+${summary.updatedBars.toLocaleString('en-US')} nến / ${summary.updatedSymbols} mã) — đã cập nhật tới ${status.freshness?.expected_session_date ?? 'phiên mới nhất'}`
+          : `Đồng bộ EOD xong (+${summary.updatedBars.toLocaleString('en-US')} nến / ${summary.updatedSymbols} mã) — còn ${stale} mã cũ hơn ${status.freshness?.expected_session_date ?? ''}`,
+      )
+    } catch (err) {
+      set({ syncingEod: false })
+      get().pushToast('error', `Lỗi đồng bộ EOD: ${String(err)}`)
     }
   },
 

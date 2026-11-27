@@ -278,11 +278,17 @@ impl<P: MarketDataProvider + 'static> MarketDataService<P> {
     }
 
     /// Instant RAM/disk-only bar query (`< 0.2ms` RAM hit, `< 2ms` SQLite warm) returning cached
-    /// bars immediately without awaiting upstream network I/O.
+    /// bars immediately without awaiting upstream network I/O. Automatically rolls up `1W`/`1M`/`4h`/`30m`
+    /// from finer local bars when the requested timeframe has never been cached directly.
     pub async fn get_bars_instant(&self, req: &BarsRequest) -> Result<BarsPage> {
-        let (cached, _meta, _from_ram) = self
+        let (mut cached, _meta, _from_ram) = self
             .query_cache_with_ram(&req.key, req.mode, req.limit)
             .await?;
+        if cached.bars.is_empty()
+            && let Some(rolled) = self.try_rollup_from_local_cache(&req.key, req.mode, req.limit).await?
+        {
+            cached = rolled;
+        }
         let symbol_info = self
             .get_cached_symbol(&req.key.symbol_key())
             .await?
@@ -305,8 +311,8 @@ impl<P: MarketDataProvider + 'static> MarketDataService<P> {
     /// - If RAM LRU or SQLite already holds bars for `Init` (even if stale!), returns them
     ///   **immediately (`< 2ms`)** with `needs_revalidation = true` when upstream refresh is due,
     ///   so symbol & timeframe switches never block on network round-trips.
-    /// - Only awaits upstream synchronously when local cache is completely empty (cold series)
-    ///   or when `Forward` pagination explicitly needs older bars from upstream.
+    /// - If offline (or online fetch fails) and higher timeframe (`1W`, `1M`, `4h`, `30m`) is absent,
+    ///   automatically aggregates causally from finer cached SQLite bars!
     pub async fn get_bars_stale_while_revalidate(&self, req: &BarsRequest) -> Result<BarsSwrPage> {
         let (cached, meta, from_ram) = self
             .query_cache_with_ram(&req.key, req.mode, req.limit)
@@ -317,11 +323,18 @@ impl<P: MarketDataProvider + 'static> MarketDataService<P> {
             .map(|(s, _)| s);
 
         if self.policy.offline_mode {
+            let effective = if cached.bars.is_empty() {
+                self.try_rollup_from_local_cache(&req.key, req.mode, req.limit)
+                    .await?
+                    .unwrap_or(cached)
+            } else {
+                cached
+            };
             return Ok(BarsSwrPage {
                 page: BarsPage {
-                    bars: cached.bars,
-                    has_older: cached.has_older,
-                    has_newer: cached.has_newer,
+                    bars: effective.bars,
+                    has_older: effective.has_older,
+                    has_newer: effective.has_newer,
                     source: DataSourceOrigin::OfflineCache,
                     symbol_info: cached_sym,
                 },
@@ -502,10 +515,17 @@ impl<P: MarketDataProvider + 'static> MarketDataService<P> {
             .map(|(s, _)| s);
 
         if self.policy.offline_mode {
+            let effective = if cached.bars.is_empty() {
+                self.try_rollup_from_local_cache(&req.key, req.mode, req.limit)
+                    .await?
+                    .unwrap_or(cached)
+            } else {
+                cached
+            };
             return Ok(BarsPage {
-                bars: cached.bars,
-                has_older: cached.has_older,
-                has_newer: cached.has_newer,
+                bars: effective.bars,
+                has_older: effective.has_older,
+                has_newer: effective.has_newer,
                 source: DataSourceOrigin::OfflineCache,
                 symbol_info: cached_sym,
             });
@@ -521,23 +541,50 @@ impl<P: MarketDataProvider + 'static> MarketDataService<P> {
             BarQueryMode::Init => {
                 match meta {
                     None => {
-                        // Cold cache: fetch initial window from upstream and persist.
+                        // Cold cache: fetch initial window from upstream and persist; if remote fails,
+                        // seamlessly roll up from finer local SQLite bars (`1D -> 1W/1M`, `1h -> 4h`, etc.).
                         let fetch_count = req.limit.max(self.policy.cold_fetch_min_bars);
-                        let fetched = self
+                        match self
                             .provider
                             .fetch_history(&req.key, fetch_count, None)
-                            .await?;
-                        self.persist_fetch(&req.key, &fetched, "tradingview")
-                            .await?;
-                        let fresh = self.query_cache(&req.key, req.mode, req.limit).await?;
-                        let has_older = fresh.has_older || !fetched.reached_start_of_history;
-                        Ok(BarsPage {
-                            bars: fresh.bars,
-                            has_older,
-                            has_newer: false,
-                            source: DataSourceOrigin::RemoteLive,
-                            symbol_info: fetched.symbol_info.or(cached_sym),
-                        })
+                            .await
+                        {
+                            Ok(fetched) => {
+                                self.persist_fetch(&req.key, &fetched, "tradingview")
+                                    .await?;
+                                let fresh = self.query_cache(&req.key, req.mode, req.limit).await?;
+                                let has_older =
+                                    fresh.has_older || !fetched.reached_start_of_history;
+                                Ok(BarsPage {
+                                    bars: fresh.bars,
+                                    has_older,
+                                    has_newer: false,
+                                    source: DataSourceOrigin::RemoteLive,
+                                    symbol_info: fetched.symbol_info.or(cached_sym),
+                                })
+                            }
+                            Err(err) => {
+                                if let Some(rolled) = self
+                                    .try_rollup_from_local_cache(&req.key, req.mode, req.limit)
+                                    .await?
+                                {
+                                    warn!(
+                                        series = %req.key,
+                                        error = %err,
+                                        bars = rolled.bars.len(),
+                                        "remote cold fetch failed; served causally aggregated local bars"
+                                    );
+                                    return Ok(BarsPage {
+                                        bars: rolled.bars,
+                                        has_older: rolled.has_older,
+                                        has_newer: rolled.has_newer,
+                                        source: DataSourceOrigin::OfflineCache,
+                                        symbol_info: cached_sym,
+                                    });
+                                }
+                                Err(err)
+                            }
+                        }
                     }
                     Some(series_meta) => {
                         let recently_synced = series_meta.source.starts_with("tradingview")
@@ -924,6 +971,130 @@ impl<P: MarketDataProvider + 'static> MarketDataService<P> {
         .map_err(|e| crate::error::DataError::Storage(e.to_string()))??;
 
         Ok((page, meta, false))
+    }
+
+    /// Synthesizes higher-timeframe bars (`1W`, `1M`, `4h`, `1h`, `30m`, `15m`, `5m`) causally from
+    /// finer locally cached bars in SQLite when the requested timeframe isn't stored directly.
+    /// Guarantees 100% offline chart rendering on `1W` / `1M` from `1D` CafeF history!
+    async fn try_rollup_from_local_cache(
+        &self,
+        key: &SeriesKey,
+        mode: BarQueryMode,
+        limit: usize,
+    ) -> Result<Option<CacheBarsResult>> {
+        let Some(target_tf) = key.interval.to_core_timeframe() else {
+            return Ok(None);
+        };
+        let source_candidates: &[Interval] = match key.interval {
+            Interval::MN1 => &[Interval::D1, Interval::W1],
+            Interval::W1 => &[Interval::D1],
+            Interval::D1 => &[Interval::H1, Interval::M15],
+            Interval::H4 => &[Interval::H1, Interval::M30, Interval::M15],
+            Interval::H1 => &[Interval::M30, Interval::M15, Interval::M5],
+            Interval::M30 => &[Interval::M15, Interval::M5, Interval::M1],
+            Interval::M15 => &[Interval::M5, Interval::M1],
+            Interval::M5 => &[Interval::M1],
+            Interval::M1 => &[],
+        };
+        if source_candidates.is_empty() {
+            return Ok(None);
+        }
+
+        let store = self.store.clone();
+        let sym_key = key.symbol_key();
+        let adj = key.adjustment;
+        let is_vn_exchange = matches!(key.exchange.as_str(), "HOSE" | "HNX" | "UPCOM");
+        let candidates_owned = source_candidates.to_vec();
+
+        tokio::task::spawn_blocking(move || -> Result<Option<CacheBarsResult>> {
+            for src_iv in candidates_owned {
+                let Some(src_tf) = src_iv.to_core_timeframe() else {
+                    continue;
+                };
+                if !src_tf.can_aggregate_to(target_tf) {
+                    continue;
+                }
+                let src_key = SeriesKey::new(&sym_key, src_iv, adj);
+                let raw = store.query_bars(&src_key, BarQueryMode::Init, 16_500)?;
+                if raw.bars.is_empty() {
+                    continue;
+                }
+                let candles: Vec<sumi_core::model::Candle> = raw
+                    .bars
+                    .iter()
+                    .map(|b| b.to_core_candle(src_iv))
+                    .collect();
+
+                let aggregated = if target_tf == sumi_core::data::Timeframe::H4 && is_vn_exchange {
+                    sumi_core::data::aggregate_ohlcv_vn_session_h4(&candles)
+                } else {
+                    sumi_core::data::aggregate_ohlcv(&candles, src_tf, target_tf)
+                };
+                let Ok(agg_candles) = aggregated else {
+                    continue;
+                };
+                if agg_candles.is_empty() {
+                    continue;
+                }
+
+                let all_bars: Vec<OhlcvBar> = agg_candles
+                    .iter()
+                    .map(|c| {
+                        OhlcvBar::new(
+                            c.timestamp.saturating_mul(1_000),
+                            c.open,
+                            c.high,
+                            c.low,
+                            c.close,
+                            c.volume,
+                        )
+                    })
+                    .collect();
+
+                let page = match mode {
+                    BarQueryMode::Init => {
+                        let start = all_bars.len().saturating_sub(limit.max(1));
+                        CacheBarsResult {
+                            bars: all_bars[start..].to_vec(),
+                            has_older: start > 0,
+                            has_newer: false,
+                        }
+                    }
+                    BarQueryMode::Forward { before_ms } => {
+                        let older: Vec<OhlcvBar> = all_bars
+                            .iter()
+                            .copied()
+                            .filter(|b| b.timestamp < before_ms)
+                            .collect();
+                        let start = older.len().saturating_sub(limit.max(1));
+                        let has_newer = all_bars.last().is_some_and(|b| b.timestamp >= before_ms);
+                        CacheBarsResult {
+                            bars: older[start..].to_vec(),
+                            has_older: start > 0,
+                            has_newer,
+                        }
+                    }
+                    BarQueryMode::Backward { after_ms } => {
+                        let newer: Vec<OhlcvBar> = all_bars
+                            .iter()
+                            .copied()
+                            .filter(|b| b.timestamp > after_ms)
+                            .collect();
+                        let end = newer.len().min(limit.max(1));
+                        let has_older = all_bars.first().is_some_and(|b| b.timestamp <= after_ms);
+                        CacheBarsResult {
+                            bars: newer[..end].to_vec(),
+                            has_older,
+                            has_newer: end < newer.len(),
+                        }
+                    }
+                };
+                return Ok(Some(page));
+            }
+            Ok(None)
+        })
+        .await
+        .map_err(|e| crate::error::DataError::Storage(e.to_string()))?
     }
 
     async fn query_cache(
@@ -1449,5 +1620,61 @@ mod tests {
             swr3.page.bars.last().unwrap().timestamp,
             full_series[24].timestamp
         );
+    }
+
+    #[tokio::test]
+    async fn offline_mode_causally_rolls_up_weekly_and_monthly_from_cached_daily_bars() {
+        let store = SqliteMarketStore::open_in_memory().unwrap();
+        let sym = SymbolKey::new("HOSE", "FPT").unwrap();
+        let d1_key = SeriesKey::new(&sym, Interval::D1, Adjustment::Splits);
+
+        // Seed 65 consecutive daily bars spanning ~3 calendar months (Jan–Mar 2025).
+        let base_ms = chrono::NaiveDate::from_ymd_opt(2025, 1, 2)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis();
+        let mut d1_bars = Vec::new();
+        for i in 0..65_i64 {
+            let p = 100_000.0 + (i as f64) * 500.0;
+            d1_bars.push(OhlcvBar::new(
+                base_ms + i * 86_400_000,
+                p,
+                p + 1_000.0,
+                p - 800.0,
+                p + 300.0,
+                100_000.0,
+            ));
+        }
+        store
+            .upsert_bars(&d1_key, &d1_bars, "cafef_adjusted", Some(true))
+            .unwrap();
+
+        let provider = Arc::new(MockProvider::new(Vec::new()));
+        provider.set_offline(true);
+        let policy = CachePolicy {
+            offline_mode: true,
+            ..CachePolicy::default()
+        };
+        let svc = MarketDataService::new(provider, store, policy);
+
+        let w1_key = SeriesKey::new(&sym, Interval::W1, Adjustment::Splits);
+        let w1_page = svc
+            .get_bars(&BarsRequest::init(w1_key, 100))
+            .await
+            .expect("offline 1W rollup");
+        assert!(w1_page.bars.len() >= 9 && w1_page.bars.len() <= 11);
+        assert_eq!(w1_page.source, DataSourceOrigin::OfflineCache);
+        assert!((w1_page.bars.first().unwrap().open - d1_bars.first().unwrap().open).abs() < 1e-6);
+        assert!((w1_page.bars.last().unwrap().close - d1_bars.last().unwrap().close).abs() < 1e-6);
+
+        let mn1_key = SeriesKey::new(&sym, Interval::MN1, Adjustment::Splits);
+        let mn1_page = svc
+            .get_bars(&BarsRequest::init(mn1_key, 100))
+            .await
+            .expect("offline 1M rollup");
+        assert_eq!(mn1_page.bars.len(), 3, "Jan + Feb + Mar 2025 => 3 monthly bars");
+        assert!((mn1_page.bars.last().unwrap().close - d1_bars.last().unwrap().close).abs() < 1e-6);
     }
 }
