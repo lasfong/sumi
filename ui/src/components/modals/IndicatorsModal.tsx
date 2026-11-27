@@ -6,6 +6,7 @@ import { INDICATOR_COLOR_PALETTE, useWorkspaceStore } from '../../store/workspac
 const CATEGORIES = [
   'Tất cả',
   'Yumeko QMV Thật',
+  'Cơ bản DN01',
   'QMV Cốt lõi',
   'Xu hướng',
   'Dao động',

@@ -1,5 +1,19 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { ArrowDown, ArrowUp, Download, FilterX, Plus, Radar, RefreshCw, Sparkles, X } from 'lucide-react'
+import {
+  ArrowDown,
+  ArrowUp,
+  Bookmark,
+  Download,
+  FilterX,
+  ListPlus,
+  Plus,
+  Radar,
+  RefreshCw,
+  SlidersHorizontal,
+  Sparkles,
+  Trash2,
+  X,
+} from 'lucide-react'
 import * as api from '../../api/tauri'
 import { useWorkspaceStore } from '../../store/workspaceStore'
 import type {
@@ -17,6 +31,9 @@ type SortKey =
   | 'rvol20'
   | 'qmvFlowZ50T05'
   | 'rsi14'
+  | 'pe'
+  | 'roe'
+  | 'qmvRealTmc'
   | 'healthScore'
 
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
@@ -27,6 +44,8 @@ const CATEGORY_TABS = [
   { key: 'ichimoku', label: 'Ichimoku V7 (6-18-36)' },
   { key: 'vsa', label: 'VSA & Cạn cung' },
   { key: 'sr', label: 'Hỗ trợ / Tắc nghẽn / Đỉnh 50p' },
+  { key: 'structure', label: 'Cấu trúc Đỉnh / Đáy' },
+  { key: 'pattern', label: 'Mô hình nến (12 mẫu)' },
   { key: 'divergence', label: 'Phân kỳ RSI / MACD / CCI' },
   { key: 'regime', label: 'Xu hướng & Chế độ' },
   { key: 'technical', label: 'Giao cắt MA / Bollinger' },
@@ -71,9 +90,15 @@ export const StockScreenerTab: React.FC = () => {
   const syncUniverseEod = useWorkspaceStore((s) => s.syncUniverseEod)
   const setActiveTicker = useWorkspaceStore((s) => s.setActiveTicker)
   const pushToast = useWorkspaceStore((s) => s.pushToast)
+  const savedScreens = useWorkspaceStore((s) => s.savedScreens)
+  const refreshSavedScreens = useWorkspaceStore((s) => s.refreshSavedScreens)
+  const saveScreenerPreset = useWorkspaceStore((s) => s.saveScreenerPreset)
+  const deleteScreenerPreset = useWorkspaceStore((s) => s.deleteScreenerPreset)
+  const createWatchlistWithSymbols = useWorkspaceStore((s) => s.createWatchlistWithSymbols)
 
   const [catalog, setCatalog] = useState<SignalCatalogItemDto[]>([])
   const [showAllCatalog, setShowAllCatalog] = useState(false)
+  const [showAdvancedFilters, setShowAdvancedFilters] = useState(false)
 
   // QMV Universe & Taxonomy filters
   const [exchangeFilter, setExchangeFilter] = useState<ScreenerExchangeFilter>('ALL_VN')
@@ -97,6 +122,18 @@ export const StockScreenerTab: React.FC = () => {
   const [macdFilter, setMacdFilter] = useState<'all' | 'positive' | 'negative'>('all')
   const [minHealthScore, setMinHealthScore] = useState<string>('')
 
+  // Wave 4 MTF + Fundamentals + Yumeko Blackbox + Saved Screens + Auto-Refresh
+  const [weeklyRegimeFilter, setWeeklyRegimeFilter] = useState<string>('')
+  const [enableMtf1h, setEnableMtf1h] = useState<boolean>(false)
+  const [maxPe, setMaxPe] = useState<string>('')
+  const [maxPb, setMaxPb] = useState<string>('')
+  const [minRoe, setMinRoe] = useState<string>('')
+  const [onlyMoneyInToday, setOnlyMoneyInToday] = useState<boolean>(false)
+  const [minQmvTmc, setMinQmvTmc] = useState<string>('')
+  const [autoRefreshSec, setAutoRefreshSec] = useState<0 | 30 | 60>(0)
+  const [saveScreenName, setSaveScreenName] = useState<string>('')
+  const [selectedSavedId, setSelectedSavedId] = useState<string>('')
+
   const [scanning, setScanning] = useState(false)
   const [result, setResult] = useState<StockScreenerResponse | null>(null)
   const [sortCol, setSortCol] = useState<SortKey>('healthScore')
@@ -105,7 +142,8 @@ export const StockScreenerTab: React.FC = () => {
 
   useEffect(() => {
     void api.getSignalCatalog().then(setCatalog)
-  }, [])
+    void refreshSavedScreens()
+  }, [refreshSavedScreens])
 
   const visibleCatalog = useMemo(() => {
     const base = showAllCatalog ? catalog : catalog.filter((c) => c.isQmvCore !== false)
@@ -138,7 +176,14 @@ export const StockScreenerTab: React.FC = () => {
       minRvol.trim() ||
       minChangePct.trim() ||
       macdFilter !== 'all' ||
-      minHealthScore.trim(),
+      minHealthScore.trim() ||
+      weeklyRegimeFilter ||
+      enableMtf1h ||
+      maxPe.trim() ||
+      maxPb.trim() ||
+      minRoe.trim() ||
+      onlyMoneyInToday ||
+      minQmvTmc.trim(),
   )
 
   /** Quy tắc QMV `B5`: Gỡ toàn bộ bộ lọc mặc định (gồm cả ngưỡng KLGD 50k) để quan sát toàn thị trường. */
@@ -156,6 +201,63 @@ export const StockScreenerTab: React.FC = () => {
     setMinChangePct('')
     setMacdFilter('all')
     setMinHealthScore('')
+    setWeeklyRegimeFilter('')
+    setEnableMtf1h(false)
+    setMaxPe('')
+    setMaxPb('')
+    setMinRoe('')
+    setOnlyMoneyInToday(false)
+    setMinQmvTmc('')
+  }
+
+  const snapshotCurrentFilterJson = (): Record<string, unknown> => ({
+    exchangeFilter,
+    sectorGroupFilter,
+    sectorFilter,
+    priceTierFilter,
+    defaultLiq50k,
+    categoryFilter,
+    selectedSignals,
+    regimeFilter,
+    minRsi,
+    maxRsi,
+    minRvol,
+    minChangePct,
+    macdFilter,
+    minHealthScore,
+    weeklyRegimeFilter,
+    enableMtf1h,
+    maxPe,
+    maxPb,
+    minRoe,
+    onlyMoneyInToday,
+    minQmvTmc,
+  })
+
+  const applySavedScreen = (filterJson: Record<string, unknown>) => {
+    if (typeof filterJson.exchangeFilter === 'string') {
+      setExchangeFilter(filterJson.exchangeFilter as ScreenerExchangeFilter)
+    }
+    setSectorGroupFilter(String(filterJson.sectorGroupFilter ?? ''))
+    setSectorFilter(String(filterJson.sectorFilter ?? ''))
+    setPriceTierFilter(String(filterJson.priceTierFilter ?? ''))
+    setDefaultLiq50k(Boolean(filterJson.defaultLiq50k ?? true))
+    setCategoryFilter(String(filterJson.categoryFilter ?? 'all'))
+    setSelectedSignals(Array.isArray(filterJson.selectedSignals) ? (filterJson.selectedSignals as string[]) : [])
+    setRegimeFilter(String(filterJson.regimeFilter ?? ''))
+    setMinRsi(String(filterJson.minRsi ?? ''))
+    setMaxRsi(String(filterJson.maxRsi ?? ''))
+    setMinRvol(String(filterJson.minRvol ?? ''))
+    setMinChangePct(String(filterJson.minChangePct ?? ''))
+    setMacdFilter((filterJson.macdFilter as 'all' | 'positive' | 'negative') ?? 'all')
+    setMinHealthScore(String(filterJson.minHealthScore ?? ''))
+    setWeeklyRegimeFilter(String(filterJson.weeklyRegimeFilter ?? ''))
+    setEnableMtf1h(Boolean(filterJson.enableMtf1h ?? false))
+    setMaxPe(String(filterJson.maxPe ?? ''))
+    setMaxPb(String(filterJson.maxPb ?? ''))
+    setMinRoe(String(filterJson.minRoe ?? ''))
+    setOnlyMoneyInToday(Boolean(filterJson.onlyMoneyInToday ?? false))
+    setMinQmvTmc(String(filterJson.minQmvTmc ?? ''))
   }
 
   const addSignalChip = (id: string) => {
@@ -191,6 +293,13 @@ export const StockScreenerTab: React.FC = () => {
         minChangePct: parseOptNum(minChangePct),
         macdFilter: macdFilter === 'all' ? null : macdFilter,
         minHealthScore: parseOptNum(minHealthScore),
+        weeklyRegimeFilter: weeklyRegimeFilter || null,
+        enableMtf1h,
+        maxPe: parseOptNum(maxPe),
+        maxPb: parseOptNum(maxPb),
+        minRoe: parseOptNum(minRoe),
+        onlyMoneyInToday,
+        minQmvTmc: parseOptNum(minQmvTmc),
       })
       setResult(res)
       setLiveStatus(`Đã quét ${res.scannedSymbols} mã VN, khớp ${res.matchedSymbols} mã theo chuẩn QMV`)
@@ -214,7 +323,20 @@ export const StockScreenerTab: React.FC = () => {
     categoryFilter,
     regimeFilter,
     macdFilter,
+    weeklyRegimeFilter,
+    enableMtf1h,
+    onlyMoneyInToday,
   ])
+
+  // Auto-Refresh interval timer (`Tắt / 30s / 60s`, Wave 4)
+  useEffect(() => {
+    if (autoRefreshSec === 0) return
+    const timer = window.setInterval(() => {
+      void runScan()
+    }, autoRefreshSec * 1000)
+    return () => window.clearInterval(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoRefreshSec])
 
   const handleSort = (col: SortKey) => {
     const nextDir = sortCol === col && sortDir === 'ascending' ? 'descending' : 'ascending'
@@ -455,6 +577,47 @@ export const StockScreenerTab: React.FC = () => {
           </button>
           <button
             type="button"
+            onClick={() => setShowAdvancedFilters((v) => !v)}
+            className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium border cursor-pointer"
+            style={{
+              backgroundColor: showAdvancedFilters ? 'var(--tv-accent-soft)' : 'var(--tv-bg-panel)',
+              borderColor: showAdvancedFilters ? 'var(--tv-accent)' : 'var(--tv-border)',
+              color: showAdvancedFilters ? 'var(--tv-accent)' : 'var(--tv-text-primary)',
+            }}
+            title="Mở bộ lọc nâng cao MTF 1W/1H, Cơ bản DN01 (P/E, P/B, ROE) & QMV Blackbox Thật"
+          >
+            <SlidersHorizontal className="w-3 h-3" />
+            <span>MTF / DN01</span>
+          </button>
+          <select
+            aria-label="Tự động quét lại định kỳ"
+            value={autoRefreshSec}
+            onChange={(e) => setAutoRefreshSec(Number(e.target.value) as 0 | 30 | 60)}
+            className="px-1.5 py-1 rounded text-[10.5px] outline-none"
+            style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            title="Tự động quét lại Screener theo chu kỳ"
+          >
+            <option value={0}>Auto: Tắt</option>
+            <option value={30}>Auto: 30s</option>
+            <option value={60}>Auto: 60s</option>
+          </select>
+          <button
+            type="button"
+            disabled={sortedRows.length === 0}
+            onClick={() => {
+              const topTickers = sortedRows.slice(0, 60).map((r) => r.ticker)
+              const wlName = `Lọc ${exchangeFilter} (${new Date().toISOString().slice(5, 10)})`
+              void createWatchlistWithSymbols(wlName, topTickers)
+            }}
+            className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium border cursor-pointer disabled:opacity-40"
+            style={{ backgroundColor: 'var(--tv-bg-panel)', borderColor: 'var(--tv-border)', color: 'var(--tv-text-primary)' }}
+            title="Lưu nhanh các mã lọc được (tối đa 60 mã) thành một Danh mục Watchlist mới"
+          >
+            <ListPlus className="w-3 h-3" />
+            <span>→ WL</span>
+          </button>
+          <button
+            type="button"
             onClick={handleExportCsv}
             className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium border cursor-pointer"
             style={{ backgroundColor: 'var(--tv-bg-panel)', borderColor: 'var(--tv-border)', color: 'var(--tv-text-primary)' }}
@@ -465,6 +628,212 @@ export const StockScreenerTab: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {/* Row 1b (Collapsible Wave 4): MTF 1W/1H + Fundamental DN01 + Yumeko QMV Blackbox + Saved Screens */}
+      {showAdvancedFilters && (
+        <div
+          className="flex flex-wrap items-center gap-1.5 px-3 py-1.5 shrink-0 text-[10.5px] tabular-nums"
+          style={{ borderBottom: '1px solid var(--tv-border)', backgroundColor: 'var(--tv-bg-elevated)' }}
+        >
+          <select
+            aria-label="Xu hướng khung Tuần (1W)"
+            value={weeklyRegimeFilter}
+            onChange={(e) => setWeeklyRegimeFilter(e.target.value)}
+            className="px-1.5 py-0.5 rounded outline-none"
+            style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+          >
+            <option value="">Khung Tuần 1W: Mọi</option>
+            <option value="Uptrend">1W: Uptrend</option>
+            <option value="Recovery">1W: Recovery</option>
+            <option value="Pullback">1W: Pullback</option>
+            <option value="SidewaysSqueeze">1W: Squeeze</option>
+            <option value="Downtrend">1W: Downtrend</option>
+          </select>
+
+          <label
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded cursor-pointer select-none"
+            style={{
+              backgroundColor: enableMtf1h ? 'var(--tv-accent-soft)' : 'var(--tv-bg-input)',
+              border: `1px solid ${enableMtf1h ? 'var(--tv-accent)' : 'var(--tv-border)'}`,
+              color: enableMtf1h ? 'var(--tv-accent)' : 'var(--tv-text-secondary)',
+            }}
+            title="Phễu 2 tầng MTF: Đánh giá thêm nhịp vào lệnh khung 1H cho Top 25 mã vượt qua bộ lọc 1W+1D"
+          >
+            <input type="checkbox" checked={enableMtf1h} onChange={(e) => setEnableMtf1h(e.target.checked)} className="m-0" />
+            <span className="font-semibold">Phễu 1H (Top 25)</span>
+          </label>
+
+          <label className="flex items-center gap-1" style={{ color: 'var(--tv-text-secondary)' }}>
+            <span>%Đổi ≥</span>
+            <input
+              type="number"
+              step="0.5"
+              placeholder="-"
+              value={minChangePct}
+              onChange={(e) => setMinChangePct(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && void runScan()}
+              className="w-11 px-1 py-0.5 rounded text-center no-spinner outline-none"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            />
+          </label>
+
+          <select
+            aria-label="Lọc MACD Histogram"
+            value={macdFilter}
+            onChange={(e) => setMacdFilter(e.target.value as 'all' | 'positive' | 'negative')}
+            className="px-1.5 py-0.5 rounded outline-none"
+            style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+          >
+            <option value="all">MACD: Mọi</option>
+            <option value="positive">MACD &gt; 0</option>
+            <option value="negative">MACD &lt; 0</option>
+          </select>
+
+          <label className="flex items-center gap-1" style={{ color: 'var(--tv-text-secondary)' }}>
+            <span>SK ≥</span>
+            <input
+              type="number"
+              placeholder="20"
+              value={minHealthScore}
+              onChange={(e) => setMinHealthScore(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && void runScan()}
+              className="w-11 px-1 py-0.5 rounded text-center no-spinner outline-none"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            />
+          </label>
+
+          <label className="flex items-center gap-1" style={{ color: 'var(--tv-text-secondary)' }}>
+            <span>P/E ≤</span>
+            <input
+              type="number"
+              step="1"
+              placeholder="15"
+              value={maxPe}
+              onChange={(e) => setMaxPe(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && void runScan()}
+              className="w-11 px-1 py-0.5 rounded text-center no-spinner outline-none"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            />
+          </label>
+
+          <label className="flex items-center gap-1" style={{ color: 'var(--tv-text-secondary)' }}>
+            <span>P/B ≤</span>
+            <input
+              type="number"
+              step="0.2"
+              placeholder="2.5"
+              value={maxPb}
+              onChange={(e) => setMaxPb(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && void runScan()}
+              className="w-11 px-1 py-0.5 rounded text-center no-spinner outline-none"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            />
+          </label>
+
+          <label className="flex items-center gap-1" style={{ color: 'var(--tv-text-secondary)' }}>
+            <span>ROE ≥</span>
+            <input
+              type="number"
+              step="1"
+              placeholder="15"
+              value={minRoe}
+              onChange={(e) => setMinRoe(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && void runScan()}
+              className="w-11 px-1 py-0.5 rounded text-center no-spinner outline-none"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            />
+          </label>
+
+          <label
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded cursor-pointer select-none"
+            style={{
+              backgroundColor: onlyMoneyInToday ? 'rgba(8, 153, 129, 0.16)' : 'var(--tv-bg-input)',
+              border: `1px solid ${onlyMoneyInToday ? '#089981' : 'var(--tv-border)'}`,
+              color: onlyMoneyInToday ? '#089981' : 'var(--tv-text-secondary)',
+            }}
+            title="Lọc trực tiếp cờ TIENVAO_TODAY từ Hộp đen QMV Thật trong Yumeko"
+          >
+            <input
+              type="checkbox"
+              checked={onlyMoneyInToday}
+              onChange={(e) => setOnlyMoneyInToday(e.target.checked)}
+              className="m-0"
+            />
+            <span className="font-semibold">Tiền vào QMV Thật</span>
+          </label>
+
+          <label className="flex items-center gap-1" style={{ color: 'var(--tv-text-secondary)' }}>
+            <span>TMC ≥</span>
+            <input
+              type="number"
+              step="1"
+              placeholder="-"
+              value={minQmvTmc}
+              onChange={(e) => setMinQmvTmc(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && void runScan()}
+              className="w-11 px-1 py-0.5 rounded text-center no-spinner outline-none"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            />
+          </label>
+
+          {/* Saved Screens CRUD */}
+          <div className="flex items-center gap-1 ml-auto">
+            <Bookmark className="w-3 h-3 text-[#2962FF]" />
+            <select
+              aria-label="Bộ lọc đã lưu"
+              value={selectedSavedId}
+              onChange={(e) => {
+                const id = e.target.value
+                setSelectedSavedId(id)
+                const found = savedScreens.find((s) => s.id === id)
+                if (found) applySavedScreen(found.filterJson)
+              }}
+              className="max-w-[130px] px-1.5 py-0.5 rounded outline-none"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            >
+              <option value="">Bộ lọc đã lưu ({savedScreens.length})</option>
+              {savedScreens.map((sc) => (
+                <option key={sc.id} value={sc.id}>
+                  {sc.name}
+                </option>
+              ))}
+            </select>
+            {selectedSavedId && (
+              <button
+                type="button"
+                aria-label="Xóa bộ lọc đang chọn"
+                onClick={() => {
+                  void deleteScreenerPreset(selectedSavedId)
+                  setSelectedSavedId('')
+                }}
+                className="p-0.5 border-0 bg-transparent cursor-pointer text-[#F23645]"
+                title="Xóa bộ lọc đang chọn"
+              >
+                <Trash2 className="w-3 h-3" />
+              </button>
+            )}
+            <input
+              type="text"
+              value={saveScreenName}
+              onChange={(e) => setSaveScreenName(e.target.value)}
+              placeholder="Tên bộ lọc..."
+              className="w-24 px-1.5 py-0.5 rounded outline-none"
+              style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+            />
+            <button
+              type="button"
+              onClick={() => {
+                if (!saveScreenName.trim()) return
+                void saveScreenerPreset(saveScreenName.trim(), snapshotCurrentFilterJson())
+                setSaveScreenName('')
+              }}
+              className="px-2 py-0.5 rounded font-semibold bg-[#2962FF] text-white border-0 cursor-pointer"
+            >
+              Lưu
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Row 2: Multi-Signal `AND` Builder + QMV Screener Presets + Numeric Filters */}
       <div
@@ -688,7 +1057,9 @@ export const StockScreenerTab: React.FC = () => {
                 'OHLCV Proxy Z-50 [0..100]: <=30 Duy trì (xanh) · >=70 Bão hòa (đỏ)',
               )}
               {renderSortHeader('rsi14', 'RSI(14)', true)}
-              <th scope="col">Xu hướng</th>
+              {renderSortHeader('pe', 'P/E · ROE', true, 'Định giá DN01 / TV Cache')}
+              {renderSortHeader('qmvRealTmc', 'QMV TMC', true, 'Hộp đen QMV Thật từ Yumeko')}
+              <th scope="col">1W / 1D / 1H</th>
               {renderSortHeader('healthScore', 'Điểm SK', true)}
               <th scope="col">Tín hiệu QMV kích hoạt</th>
             </tr>
@@ -696,7 +1067,7 @@ export const StockScreenerTab: React.FC = () => {
           <tbody>
             {sortedRows.length === 0 ? (
               <tr>
-                <td colSpan={12} className="text-center py-6" style={{ color: 'var(--tv-text-secondary)' }}>
+                <td colSpan={14} className="text-center py-6" style={{ color: 'var(--tv-text-secondary)' }}>
                   {scanning
                     ? 'Đang quét 475 mã Việt Nam theo bộ tiêu chí QMV...'
                     : 'Không có cổ phiếu nào khớp tổ hợp điều kiện hiện tại. Nhấn "Gỡ bộ lọc mặc định" để mở rộng.'}
@@ -815,26 +1186,108 @@ export const StockScreenerTab: React.FC = () => {
                     >
                       {row.rsi14 != null ? row.rsi14.toFixed(1) : '—'}
                     </td>
+                    <td className="text-right text-[10.5px]">
+                      {row.pe != null || row.roe != null ? (
+                        <span>
+                          <span>{row.pe != null ? `${row.pe.toFixed(1)}x` : '—'}</span>
+                          <span style={{ color: 'var(--tv-text-muted)' }}> · </span>
+                          <span style={{ color: (row.roe ?? 0) >= 15 ? 'var(--tv-up)' : 'var(--tv-text-secondary)' }}>
+                            {row.roe != null ? `${row.roe.toFixed(0)}%` : '—'}
+                          </span>
+                        </span>
+                      ) : (
+                        '—'
+                      )}
+                    </td>
+                    <td className="text-right text-[10.5px]">
+                      {row.qmvRealProvenance ? (
+                        <span className="inline-flex items-center gap-1">
+                          {row.qmvRealMoneyInToday && (
+                            <span
+                              className="w-1.5 h-1.5 rounded-full"
+                              style={{ backgroundColor: '#089981' }}
+                              title="TIENVAO_TODAY (Yumeko QMV Thật)"
+                            />
+                          )}
+                          <span
+                            className="font-semibold"
+                            style={{
+                              color:
+                                (row.qmvRealTmc ?? 0) > 0
+                                  ? 'var(--tv-up)'
+                                  : (row.qmvRealTmc ?? 0) < 0
+                                    ? 'var(--tv-down)'
+                                    : 'var(--tv-text-primary)',
+                            }}
+                          >
+                            {row.qmvRealTmc != null ? row.qmvRealTmc.toFixed(1) : '✓'}
+                          </span>
+                        </span>
+                      ) : (
+                        <span style={{ color: 'var(--tv-text-muted)' }}>—</span>
+                      )}
+                    </td>
                     <td>
-                      <span
-                        className="px-1.5 py-0.5 rounded text-[10px] font-semibold"
-                        style={{
-                          backgroundColor:
-                            row.regime === 'Uptrend' || row.regime === 'Recovery'
-                              ? 'rgba(8, 153, 129, 0.16)'
-                              : row.regime === 'Downtrend'
-                                ? 'rgba(242, 54, 69, 0.16)'
-                                : 'var(--tv-bg-elevated)',
-                          color:
-                            row.regime === 'Uptrend' || row.regime === 'Recovery'
-                              ? 'var(--tv-up)'
-                              : row.regime === 'Downtrend'
-                                ? 'var(--tv-down)'
-                                : 'var(--tv-text-secondary)',
-                        }}
-                      >
-                        {row.regimeShort}
-                      </span>
+                      <div className="flex items-center gap-1">
+                        {row.weeklyRegimeShort && (
+                          <span
+                            className="px-1 py-0 rounded text-[9.5px] font-semibold"
+                            style={{ backgroundColor: 'var(--tv-bg-elevated)', color: 'var(--tv-text-secondary)' }}
+                            title={`Khung tuần 1W: ${row.weeklyRegime ?? ''}`}
+                          >
+                            W:{row.weeklyRegimeShort}
+                          </span>
+                        )}
+                        <span
+                          className="px-1.5 py-0.5 rounded text-[10px] font-semibold"
+                          style={{
+                            backgroundColor:
+                              row.regime === 'Uptrend' || row.regime === 'Recovery'
+                                ? 'rgba(8, 153, 129, 0.16)'
+                                : row.regime === 'Downtrend'
+                                  ? 'rgba(242, 54, 69, 0.16)'
+                                  : 'var(--tv-bg-elevated)',
+                            color:
+                              row.regime === 'Uptrend' || row.regime === 'Recovery'
+                                ? 'var(--tv-up)'
+                                : row.regime === 'Downtrend'
+                                  ? 'var(--tv-down)'
+                                  : 'var(--tv-text-secondary)',
+                          }}
+                        >
+                          {row.regimeShort}
+                        </span>
+                        {row.hourlyTiming && (
+                          <span
+                            className="px-1 py-0 rounded text-[9.5px] font-bold"
+                            style={{
+                              backgroundColor:
+                                row.hourlyTiming === 'BULL_1H'
+                                  ? 'rgba(8, 153, 129, 0.18)'
+                                  : row.hourlyTiming === 'PULLBACK_1H'
+                                    ? 'rgba(41, 98, 255, 0.16)'
+                                    : 'rgba(242, 54, 69, 0.14)',
+                              color:
+                                row.hourlyTiming === 'BULL_1H'
+                                  ? '#089981'
+                                  : row.hourlyTiming === 'PULLBACK_1H'
+                                    ? '#5B8DEF'
+                                    : '#F23645',
+                            }}
+                          >
+                            {row.hourlyTiming.replace('_1H', '')}
+                          </span>
+                        )}
+                        {row.mtfAligned && (
+                          <span
+                            className="px-1 py-0 rounded text-[9px] font-bold"
+                            style={{ backgroundColor: 'rgba(8, 153, 129, 0.2)', color: '#089981' }}
+                            title="Đồng pha Đa Khung (MTF Aligned)"
+                          >
+                            MTF
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td
                       className="text-right font-bold"

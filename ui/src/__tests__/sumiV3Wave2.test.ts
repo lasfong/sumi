@@ -35,7 +35,9 @@ describe('Sumi v3.0 Wave 2 — Yumeko Read-Only Bridge, QMV Real Indicators & De
 
   it('registers all 3 authentic Yumeko QMV indicators cleanly in the yumeko tier', () => {
     const yumeko = INDICATOR_CATALOG.filter((item) => item.tier === 'yumeko')
-    expect(yumeko.map((x) => x.name)).toEqual(['QMV_STOCK_BB', 'QMV_ACTIVE_MONEY', 'QMV_FOREIGN_FLOW'])
+    const qmvFlow = yumeko.filter((item) => item.category === 'Yumeko QMV Thật')
+    expect(qmvFlow.map((x) => x.name)).toEqual(['QMV_STOCK_BB', 'QMV_ACTIVE_MONEY', 'QMV_FOREIGN_FLOW'])
+    expect(yumeko.length).toBeGreaterThanOrEqual(7)
     expect(yumeko.every((x) => !x.isOhlcvProxy && x.isYumekoReal === true)).toBe(true)
   })
 

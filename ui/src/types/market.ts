@@ -184,10 +184,12 @@ export interface DataStatusResponse {
 }
 
 export interface CorporateEventMarker {
-  timestamp_ms: number
+  timestampMs?: number
+  timestamp_ms?: number
   date: string
-  kind: 'dividend' | 'split' | 'earnings' | string
-  ratio: number
+  kind: 'D' | 'S' | 'E' | 'dividend' | 'split' | 'earnings' | string
+  factor?: number | null
+  ratio?: number
   label: string
   detail: string
 }
@@ -874,6 +876,17 @@ export interface StockScreenerInput {
   macdFilter?: 'all' | 'positive' | 'negative' | null
   minHealthScore?: number | null
   autoRefreshStale?: boolean | null
+  // Wave 4 MTF + Fundamentals + Yumeko Blackbox filters
+  weeklyRegimeFilter?: string | null
+  enableMtf1h?: boolean | null
+  maxPe?: number | null
+  maxPb?: number | null
+  minRoe?: number | null
+  minMarketCapBn?: number | null
+  onlyMoneyInToday?: boolean | null
+  minQmvTmc?: number | null
+  minQmvDspi?: number | null
+  onlyQmvReversalTPlus?: boolean | null
 }
 
 export interface ScreenerRowDto {
@@ -906,6 +919,19 @@ export interface ScreenerRowDto {
   priceTier?: string
   qmvFlowZ50T05?: number | null
   qmvFlowZ50T20?: number | null
+  // Wave 4 MTF + Fundamentals + Yumeko QMV Real columns
+  weeklyRegime?: string
+  weeklyRegimeShort?: string
+  hourlyTiming?: string | null
+  mtfAligned?: boolean
+  pe?: number | null
+  pb?: number | null
+  roe?: number | null
+  marketCapBn?: number | null
+  qmvRealTmc?: number | null
+  qmvRealDspi?: number | null
+  qmvRealMoneyInToday?: boolean
+  qmvRealProvenance?: boolean
 }
 
 export interface StockScreenerResponse {
@@ -1610,4 +1636,53 @@ export interface PresetsBattleResponseDto {
   interval: string
   rankingLabel: string
   rows: PresetBattleItemDto[]
+}
+
+// ─── Wave 4: Fundamentals (DN01/TV), Multi-Symbol Compare & Saved Screens ───
+
+export interface SymbolFundamentalsResponse {
+  ticker: string
+  symbol: string
+  exchange: string
+  source: 'yumeko_dn01' | 'tradingview_cache' | 'none' | string
+  sector: string | null
+  industry: string | null
+  marketCapBasic: number | null
+  pe: number | null
+  pb: number | null
+  ps: number | null
+  evEbitda: number | null
+  roe: number | null
+  roa: number | null
+  eps: number | null
+  bvps: number | null
+  debtToEquity: number | null
+  totalRevenue: number | null
+  totalSharesOutstanding: number | null
+  earningsReleaseDate: number | null
+  businessDescription: string | null
+  quarterlyValuations: ValuationQuarterDto[]
+}
+
+export interface ComparePointDto {
+  timestamp: number
+  pct: number
+}
+
+export interface CompareSeriesItemDto {
+  ticker: string
+  symbol: string
+  points: ComparePointDto[]
+}
+
+export interface CompareSeriesResponse {
+  baseTicker: string
+  series: CompareSeriesItemDto[]
+}
+
+export interface SavedScreenRecord {
+  id: string
+  name: string
+  filterJson: Record<string, unknown>
+  updatedAtMs: number
 }

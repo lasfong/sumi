@@ -19,6 +19,7 @@ import {
   Moon,
   PanelBottom,
   PanelRight,
+  PlusCircle,
   RefreshCw,
   Rows2,
   Save,
@@ -29,8 +30,10 @@ import {
   Upload,
   Wifi,
   WifiOff,
+  X,
 } from 'lucide-react'
 import * as api from '../api/tauri'
+import { COMPARE_COLORS } from '../chart/indicators/fundamentalIndicators'
 import { ALL_INTERVALS, QUICK_INTERVALS } from '../chart/periods'
 import { useWorkspaceStore, type TimezoneMode } from '../store/workspaceStore'
 import type { ChartStyleKind, GridLayoutKind, PriceScaleKind } from '../types/market'
@@ -101,11 +104,18 @@ export const TopHeader: React.FC = () => {
   const setReplaySelectingCut = useWorkspaceStore((s) => s.setReplaySelectingCut)
   const stopReplay = useWorkspaceStore((s) => s.stopReplay)
   const triggerExportPng = useWorkspaceStore((s) => s.triggerExportPng)
+  const compareTickersBySlot = useWorkspaceStore((s) => s.compareTickersBySlot)
+  const addCompareTicker = useWorkspaceStore((s) => s.addCompareTicker)
+  const removeCompareTicker = useWorkspaceStore((s) => s.removeCompareTicker)
+  const clearCompareTickers = useWorkspaceStore((s) => s.clearCompareTickers)
+  const setActiveTicker = useWorkspaceStore((s) => s.setActiveTicker)
 
   const activePane = panes.find((p) => p.slotId === activeSlotId) ?? panes[0]
+  const activeCompares = compareTickersBySlot[activePane.slotId] ?? []
   const [openMenu, setOpenMenu] = useState<
-    'interval' | 'style' | 'templates' | 'layout' | 'saved' | 'data' | null
+    'interval' | 'style' | 'templates' | 'layout' | 'saved' | 'data' | 'compare' | null
   >(null)
+  const [compareInput, setCompareInput] = useState('')
   const [layoutNameInput, setLayoutNameInput] = useState('')
   const [tplNameInput, setTplNameInput] = useState('')
   const [cafefDirInput, setCafefDirInput] = useState('data/raw/cafef')
@@ -180,6 +190,158 @@ export const TopHeader: React.FC = () => {
             </span>
           )}
         </button>
+
+        {/* Compare (+) & Synthetic Formula Quick Popover (Wave 4) */}
+        <div className="relative">
+          <button
+            type="button"
+            className="tv-btn px-1.5"
+            data-active={activeCompares.length > 0 || openMenu === 'compare'}
+            onClick={() => setOpenMenu(openMenu === 'compare' ? null : 'compare')}
+            title="So sánh đa mã (% quy chiếu) & Biểu đồ Công thức Tổng hợp (Ratio/Spread)"
+            aria-label="So sánh mã hoặc mở biểu đồ công thức"
+          >
+            <PlusCircle className="w-3.5 h-3.5" />
+            {activeCompares.length > 0 && (
+              <span
+                className="px-1 rounded-full text-[9.5px] font-bold"
+                style={{ backgroundColor: 'var(--tv-accent-soft)', color: 'var(--tv-accent)' }}
+              >
+                {activeCompares.length}
+              </span>
+            )}
+          </button>
+          {openMenu === 'compare' && (
+            <div
+              className="absolute left-0 top-[34px] w-80 rounded-md p-2.5 shadow-2xl z-50 space-y-2.5 text-[11.5px]"
+              style={{
+                backgroundColor: 'var(--tv-bg-elevated)',
+                border: '1px solid var(--tv-border)',
+              }}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--tv-text-secondary)' }}>
+                  So sánh mã (% quy chiếu nhân quả)
+                </span>
+                {activeCompares.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => clearCompareTickers(activePane.slotId)}
+                    className="text-[10px] border-0 bg-transparent cursor-pointer text-[#F23645]"
+                  >
+                    Xóa hết
+                  </button>
+                )}
+              </div>
+              <form
+                className="flex gap-1"
+                onSubmit={(e) => {
+                  e.preventDefault()
+                  if (!compareInput.trim()) return
+                  addCompareTicker(compareInput, activePane.slotId)
+                  setCompareInput('')
+                }}
+              >
+                <input
+                  type="text"
+                  value={compareInput}
+                  onChange={(e) => setCompareInput(e.target.value)}
+                  placeholder="Nhập mã (VD: VNINDEX, SSI, HPG)..."
+                  className="flex-1 px-2 py-1 rounded text-[11.5px] outline-none"
+                  style={{
+                    backgroundColor: 'var(--tv-bg-input)',
+                    border: '1px solid var(--tv-border)',
+                    color: 'var(--tv-text-primary)',
+                  }}
+                />
+                <button
+                  type="submit"
+                  className="px-2.5 py-1 rounded text-[11px] font-semibold bg-[#2962FF] text-white border-0 cursor-pointer"
+                >
+                  Thêm
+                </button>
+              </form>
+
+              <div className="flex flex-wrap gap-1">
+                {['HOSE:VNINDEX', 'HOSE:VN30', 'HOSE:FPT', 'HOSE:SSI', 'HOSE:HPG', 'HOSE:VCB'].map((tk) => {
+                  const active = activeCompares.includes(tk)
+                  return (
+                    <button
+                      key={tk}
+                      type="button"
+                      onClick={() =>
+                        active
+                          ? removeCompareTicker(tk, activePane.slotId)
+                          : addCompareTicker(tk, activePane.slotId)
+                      }
+                      className="px-1.5 py-0.5 rounded text-[10.5px] border cursor-pointer"
+                      style={{
+                        backgroundColor: active ? 'var(--tv-accent-soft)' : 'var(--tv-bg-panel)',
+                        borderColor: active ? 'var(--tv-accent)' : 'var(--tv-border)',
+                        color: active ? 'var(--tv-accent)' : 'var(--tv-text-primary)',
+                      }}
+                    >
+                      {active ? '✓ ' : '+ '}
+                      {tk.split(':')[1]}
+                    </button>
+                  )
+                })}
+              </div>
+
+              {activeCompares.length > 0 && (
+                <div className="space-y-1 pt-1 border-t" style={{ borderColor: 'var(--tv-border)' }}>
+                  {activeCompares.map((tk, idx) => (
+                    <div
+                      key={tk}
+                      className="flex items-center justify-between px-2 py-1 rounded"
+                      style={{ backgroundColor: 'var(--tv-bg-panel)' }}
+                    >
+                      <span className="flex items-center gap-1.5 font-semibold text-[11px]">
+                        <span
+                          className="w-2.5 h-2.5 rounded-full shrink-0"
+                          style={{ backgroundColor: COMPARE_COLORS[idx % COMPARE_COLORS.length] }}
+                        />
+                        <span>{tk}</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => removeCompareTicker(tk, activePane.slotId)}
+                        className="border-0 bg-transparent p-0.5 cursor-pointer text-[var(--tv-text-secondary)] hover:text-[#F23645]"
+                        aria-label={`Gỡ so sánh ${tk}`}
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="pt-2 border-t space-y-1" style={{ borderColor: 'var(--tv-border)' }}>
+                <div className="text-[10.5px] font-semibold uppercase tracking-wide" style={{ color: 'var(--tv-text-secondary)' }}>
+                  Biểu đồ Công thức Tổng hợp (Ratio / Spread)
+                </div>
+                {[
+                  { label: `${shortSymbol} / VNINDEX (Sức mạnh tương đối)`, expr: `${activePane.ticker} / HOSE:VNINDEX` },
+                  { label: 'VN30F1! - VN30 (Basis Phái sinh)', expr: 'HNX:VN30F1! - HOSE:VN30' },
+                  { label: 'SSI / VNINDEX (RS Chứng khoán)', expr: 'HOSE:SSI / HOSE:VNINDEX' },
+                ].map((item) => (
+                  <button
+                    key={item.expr}
+                    type="button"
+                    onClick={() => {
+                      setActiveTicker(item.expr, activePane.slotId)
+                      setOpenMenu(null)
+                    }}
+                    className="w-full text-left px-2 py-1 rounded text-[11px] border-0 bg-transparent hover:bg-[var(--tv-hover)] cursor-pointer text-[var(--tv-text-primary)] truncate"
+                  >
+                    <span className="text-[#2962FF] font-semibold">𝑓 </span>
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
 
         <div className="tv-divider-v" />
 

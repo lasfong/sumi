@@ -1,8 +1,15 @@
 export interface IndicatorCatalogEntry {
   name: string
   titleVi: string
-  category: 'QMV Cốt lõi' | 'Yumeko QMV Thật' | 'Xu hướng' | 'Dao động' | 'Khối lượng' | 'Biến động'
-  /** `'core'` = 11 chỉ báo chuẩn QMV; `'aux'` = 5 chỉ báo phụ trợ; `'yumeko'` = 3 chỉ báo dữ liệu QMV Blackbox thật từ Yumeko. */
+  category:
+    | 'QMV Cốt lõi'
+    | 'Yumeko QMV Thật'
+    | 'Cơ bản DN01'
+    | 'Xu hướng'
+    | 'Dao động'
+    | 'Khối lượng'
+    | 'Biến động'
+  /** `'core'` = 11 chỉ báo chuẩn QMV; `'aux'` = chỉ báo phụ trợ & cơ bản DN01; `'yumeko'` = 3 chỉ báo dữ liệu QMV Blackbox thật từ Yumeko. */
   tier: 'core' | 'aux' | 'yumeko'
   isMain: boolean
   defaultParams: number[]
@@ -320,6 +327,56 @@ export const INDICATOR_CATALOG: IndicatorCatalogEntry[] = [
     paramLabels: [],
     lineLabels: ['Giá trị mua/bán ròng khối ngoại'],
     description: 'Giá trị mua/bán ròng của nhà đầu tư nước ngoài đọc chỉ đọc từ Yumeko QMV (symbol_foreign_flow_current)',
+    isYumekoReal: true,
+  },
+
+  // ─── 4 Chỉ Báo Định Giá & Cơ Bản DN01 trên Biểu Đồ (Step-Line, Wave 4) ──
+  {
+    name: 'FIN_PE',
+    titleVi: 'Định Giá P/E Theo Quý (Yumeko DN01)',
+    category: 'Cơ bản DN01',
+    tier: 'yumeko',
+    isMain: false,
+    defaultParams: [],
+    paramLabels: [],
+    lineLabels: ['P/E (lần)'],
+    description: 'Đường bậc thang lịch sử hệ số P/E 8 quý đọc chỉ đọc từ kho BCTC Yumeko DN01 (không nhìn trước tương lai)',
+    isYumekoReal: true,
+  },
+  {
+    name: 'FIN_PB',
+    titleVi: 'Định Giá P/B Theo Quý (Yumeko DN01)',
+    category: 'Cơ bản DN01',
+    tier: 'yumeko',
+    isMain: false,
+    defaultParams: [],
+    paramLabels: [],
+    lineLabels: ['P/B (lần)'],
+    description: 'Đường bậc thang lịch sử hệ số P/B 8 quý đọc chỉ đọc từ kho BCTC Yumeko DN01',
+    isYumekoReal: true,
+  },
+  {
+    name: 'FIN_ROE',
+    titleVi: 'Hiệu Suất Sinh Lời ROE % Theo Quý (Yumeko DN01)',
+    category: 'Cơ bản DN01',
+    tier: 'yumeko',
+    isMain: false,
+    defaultParams: [],
+    paramLabels: [],
+    lineLabels: ['ROE (%)'],
+    description: 'Đường bậc thang lịch sử ROE 8 quý từ Yumeko DN01 giúp đối chiếu chất lượng lợi nhuận cùng xu hướng giá',
+    isYumekoReal: true,
+  },
+  {
+    name: 'FIN_EPS_YOY',
+    titleVi: 'Tăng Trưởng EPS YoY % Theo Quý (Yumeko DN01)',
+    category: 'Cơ bản DN01',
+    tier: 'yumeko',
+    isMain: false,
+    defaultParams: [],
+    paramLabels: [],
+    lineLabels: ['EPS YoY (%)'],
+    description: 'Tốc độ tăng trưởng EPS cùng kỳ năm trước (YoY %) tính nhân quả từ chuỗi BCTC quý Yumeko DN01',
     isYumekoReal: true,
   },
 ]

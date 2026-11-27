@@ -283,6 +283,19 @@ pub struct DnseLoadedSeries {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct QmvScreenerSnapshotDto {
+    pub symbol: String,
+    pub content_date: String,
+    pub tmc: Option<f64>,
+    pub dspi: Option<f64>,
+    pub trading_score: Option<f64>,
+    pub money_in_today: bool,
+    pub reversal_up_t_plus: bool,
+    pub price_trend: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResearchExportVerificationDto {
     pub export_dir: String,
     pub manifest_found: bool,
@@ -751,6 +764,134 @@ impl YumekoReadOnlyBridge {
             active_money,
             foreign_flow,
         })
+    }
+
+    /// Bulk-reads the latest DN01 quarterly valuation snapshot per symbol (read-only) for fast Screener joins.
+    pub fn read_latest_valuation_map(
+        &self,
+        as_of: Option<&str>,
+    ) -> BridgeResult<HashMap<String, ValuationQuarterDto>> {
+        let Some(conn) = self.open_readonly_conn()? else {
+            return Ok(HashMap::new());
+        };
+        if !table_exists(&conn, "symbol_valuation_snapshots")? {
+            return Ok(HashMap::new());
+        }
+        let as_of_clean = as_of
+            .map(str::trim)
+            .filter(|s| s.len() == 10 && NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok());
+        let sql = if as_of_clean.is_some() {
+            "SELECT UPPER(symbol), period, content_date, source_family, pe, pb, ps, ev_ebitda, eps, bvps, roe, roa, debt_to_equity
+             FROM symbol_valuation_snapshots
+             WHERE content_date IS NULL OR content_date <= ?1
+             ORDER BY period DESC, COALESCE(content_date, '') DESC"
+        } else {
+            "SELECT UPPER(symbol), period, content_date, source_family, pe, pb, ps, ev_ebitda, eps, bvps, roe, roa, debt_to_equity
+             FROM symbol_valuation_snapshots
+             ORDER BY period DESC, COALESCE(content_date, '') DESC"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let mut map = HashMap::new();
+        let map_row = |r: &rusqlite::Row<'_>| -> rusqlite::Result<(String, ValuationQuarterDto)> {
+            Ok((
+                r.get::<_, String>(0)?,
+                ValuationQuarterDto {
+                    period: r.get(1)?,
+                    content_date: r.get(2)?,
+                    source_family: r.get(3)?,
+                    pe: r.get(4)?,
+                    pb: r.get(5)?,
+                    ps: r.get(6)?,
+                    ev_ebitda: r.get(7)?,
+                    eps: r.get(8)?,
+                    bvps: r.get(9)?,
+                    roe: r.get(10)?,
+                    roa: r.get(11)?,
+                    debt_to_equity: r.get(12)?,
+                },
+            ))
+        };
+        if let Some(cut) = as_of_clean {
+            for item in stmt.query_map(params![cut], map_row)?.flatten() {
+                map.entry(item.0).or_insert(item.1);
+            }
+        } else {
+            for item in stmt.query_map([], map_row)?.flatten() {
+                map.entry(item.0).or_insert(item.1);
+            }
+        }
+        Ok(map)
+    }
+
+    /// Bulk-reads the latest authentic `qmv_real` Blackbox (`technical_metrics`) snapshot per symbol
+    /// (read-only) so the Stock Screener can filter on true Yumeko TMC / DSPI / `TIENVAO_TODAY` flags.
+    pub fn read_latest_qmv_screener_map(
+        &self,
+        as_of: Option<&str>,
+    ) -> BridgeResult<HashMap<String, QmvScreenerSnapshotDto>> {
+        let Some(conn) = self.open_readonly_conn()? else {
+            return Ok(HashMap::new());
+        };
+        if !table_exists(&conn, "qmv_compact_rows")? {
+            return Ok(HashMap::new());
+        }
+        let as_of_clean = as_of
+            .map(str::trim)
+            .filter(|s| s.len() == 10 && NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok());
+
+        let latest_date: Option<String> = if let Some(cut) = as_of_clean {
+            conn.query_row(
+                "SELECT MAX(content_date) FROM qmv_compact_rows
+                 WHERE family = 'technical_metrics' AND content_date IS NOT NULL AND content_date <= ?1",
+                params![cut],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten()
+        } else {
+            conn.query_row(
+                "SELECT MAX(content_date) FROM qmv_compact_rows
+                 WHERE family = 'technical_metrics' AND content_date IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten()
+        };
+
+        let Some(target_date) = latest_date else {
+            return Ok(HashMap::new());
+        };
+        let schemas = load_all_compact_schemas(&conn)?;
+        let rows = query_decoded_qmv_rows(
+            &conn,
+            &schemas,
+            "technical_metrics",
+            None,
+            Some(&target_date),
+            2_000,
+        )?;
+        let mut map = HashMap::new();
+        for row in rows {
+            if row.content_date.as_deref() != Some(target_date.as_str()) {
+                continue;
+            }
+            let Some(entity) = row.entity.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            let sym = entity.to_ascii_uppercase();
+            map.entry(sym.clone()).or_insert_with(|| QmvScreenerSnapshotDto {
+                symbol: sym,
+                content_date: target_date.clone(),
+                tmc: val_f64(&row.values, "TMC"),
+                dspi: val_f64(&row.values, "DSPI"),
+                trading_score: val_f64(&row.values, "TradingScore"),
+                money_in_today: val_truthy(&row.values, "TIENVAO_TODAY"),
+                reversal_up_t_plus: val_truthy(&row.values, "TIEN_DAO_CHIEU_TANG_T_PLUS"),
+                price_trend: val_str(&row.values, "PriceTrend"),
+            });
+        }
+        Ok(map)
     }
 
     /// Loads DNSE `price_get_history` OHLCV bars from Yumeko's `dnse_mcp_observations` with

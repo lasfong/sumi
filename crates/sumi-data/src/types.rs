@@ -751,6 +751,27 @@ pub struct ResolvedSymbol {
     pub vn_price_band: Option<VietnamPriceBand>,
     /// Mapped `sumi-core` microstructure venue when recognized.
     pub exchange_venue: Option<ExchangeVenue>,
+    /// Wave 4: Rich fundamental metadata preserved from TradingView `SymbolInfo` (`0` extra network calls).
+    #[serde(default)]
+    pub sector: Option<String>,
+    #[serde(default)]
+    pub industry: Option<String>,
+    #[serde(default)]
+    pub market_cap_basic: Option<f64>,
+    #[serde(default)]
+    pub price_earnings_ttm: Option<f64>,
+    #[serde(default)]
+    pub last_annual_eps: Option<f64>,
+    #[serde(default)]
+    pub total_shares_outstanding: Option<f64>,
+    #[serde(default)]
+    pub total_revenue: Option<f64>,
+    #[serde(default)]
+    pub earnings_release_date: Option<i64>,
+    #[serde(default)]
+    pub founded: Option<u16>,
+    #[serde(default)]
+    pub business_description: Option<String>,
 }
 
 impl ResolvedSymbol {
@@ -817,6 +838,13 @@ impl ResolvedSymbol {
         let volume_precision = compute_volume_precision(&exchange, &market_type);
         let exchange_venue = infer_exchange_venue(&exchange, &symbol, &market_type);
 
+        let non_empty = |u: &str| {
+            let t = u.trim();
+            (!t.is_empty()).then(|| t.to_owned())
+        };
+        let pos_f64 = |v: f64| (v.is_finite() && v > 0.0).then_some(v);
+        let finite_nz = |v: f64| (v.is_finite() && v.abs() > 1e-9).then_some(v);
+
         Self {
             ticker,
             exchange,
@@ -840,6 +868,17 @@ impl ResolvedSymbol {
             isin: info.isin.as_str().to_owned(),
             vn_price_band,
             exchange_venue,
+            sector: non_empty(info.sector.as_str()),
+            industry: non_empty(info.industry.as_str()),
+            market_cap_basic: pos_f64(info.market_cap_basic),
+            price_earnings_ttm: finite_nz(info.price_earnings_ttm),
+            last_annual_eps: finite_nz(info.last_annual_eps),
+            total_shares_outstanding: pos_f64(info.total_shares_outstanding_calculated),
+            total_revenue: pos_f64(info.total_revenue),
+            earnings_release_date: (info.earnings_release_date > 0)
+                .then_some(info.earnings_release_date),
+            founded: (info.founded > 0).then_some(info.founded),
+            business_description: non_empty(info.business_description.as_str()),
         }
     }
 
@@ -902,6 +941,16 @@ impl ResolvedSymbol {
             isin: String::new(),
             vn_price_band,
             exchange_venue,
+            sector: None,
+            industry: None,
+            market_cap_basic: None,
+            price_earnings_ttm: None,
+            last_annual_eps: None,
+            total_shares_outstanding: None,
+            total_revenue: None,
+            earnings_release_date: None,
+            founded: None,
+            business_description: None,
         }
     }
 

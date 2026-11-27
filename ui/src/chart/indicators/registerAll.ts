@@ -1,5 +1,6 @@
 import { getSupportedIndicators, registerIndicator } from 'klinecharts'
 import { SUMI_BUILTIN_OVERRIDES, SUMI_CUSTOM_INDICATORS } from './customIndicators'
+import { WAVE4_FUNDAMENTAL_INDICATORS } from './fundamentalIndicators'
 import { YUMEKO_REAL_INDICATORS } from './qmvRealIndicators'
 import { WAVE3_INDICATORS } from './wave3Indicators'
 
@@ -8,7 +9,12 @@ let registered = false
 export function registerAllCustomIndicators(): void {
   if (registered) return
   const existing = new Set(getSupportedIndicators())
-  for (const tpl of [...SUMI_CUSTOM_INDICATORS, ...YUMEKO_REAL_INDICATORS, ...WAVE3_INDICATORS]) {
+  for (const tpl of [
+    ...SUMI_CUSTOM_INDICATORS,
+    ...YUMEKO_REAL_INDICATORS,
+    ...WAVE3_INDICATORS,
+    ...WAVE4_FUNDAMENTAL_INDICATORS,
+  ]) {
     if (!existing.has(tpl.name) || tpl.name === 'ICHIMOKU') {
       registerIndicator(tpl as Parameters<typeof registerIndicator>[0])
     }

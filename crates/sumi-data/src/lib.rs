@@ -13,6 +13,7 @@
 pub mod cache_service;
 pub mod cafef_importer;
 pub mod error;
+pub mod expression;
 pub mod logging;
 pub mod paths;
 pub mod provider;
@@ -25,6 +26,10 @@ pub mod types;
 pub use cache_service::{BarsSwrPage, CachePolicy, MarketDataService, collect_bar_events_for};
 pub use cafef_importer::{CafeFImportConfig, CafeFImportSummary, CafeFImporter};
 pub use error::{DataError, Result};
+pub use expression::{
+    BinOp, ExprNode, ParsedExpression, compute_rebased_comparison_series,
+    evaluate_expression_ohlcv, is_synthetic_expression, parse_expression,
+};
 pub use logging::{RECOMMENDED_LOG_DIRECTIVES, build_safe_filter_spec, init_tracing};
 pub use paths::{
     SqliteMigrationReceipt, count_missing_vn_sessions, format_ymd_utc,
@@ -36,8 +41,8 @@ pub use provider::{BarSubscription, MarketDataProvider, QuoteSubscription};
 pub use ram_cache::{RamCacheStats, SeriesRamCache};
 pub use rate_limit::{RateLimitConfig, RateLimitPermit, RateLimitStats, TokenBucketRateLimiter};
 pub use storage::{
-    CacheBarsResult, CorporateEventMarker, SeriesMeta, SqliteMarketStore, StoreStats,
-    VnFreshnessSummary,
+    CacheBarsResult, CorporateEventMarker, FundamentalSnapshot, SeriesMeta, SqliteMarketStore,
+    StoreStats, VnFreshnessSummary,
 };
 pub use tradingview_feed::{TradingViewConfig, TradingViewFeed};
 pub use types::{

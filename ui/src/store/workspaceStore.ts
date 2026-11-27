@@ -21,6 +21,8 @@ import type {
   SavedIndicatorSpec,
   SavedLayoutRecord,
   SavedReplaySessionRecord,
+  SavedScreenRecord,
+  SymbolFundamentalsResponse,
   SyncProgressPayload,
   SyncStatusDto,
   ThemeMode,
@@ -30,6 +32,7 @@ import type {
   YumekoBridgeStatus,
 } from '../types/market'
 import * as api from '../api/tauri'
+import { setFundamentalsCache } from '../chart/indicators/fundamentalIndicators'
 import { setQmvRealSeriesCache } from '../chart/indicators/qmvRealIndicators'
 import { notifyAlertTriggered } from '../utils/alertSound'
 import { snapPriceToVenueTick } from '../utils/vnMarket'
@@ -205,6 +208,13 @@ export interface WorkspaceState {
   exportedVerdicts: ExportedVerdictListItem[]
   lastExportedReceipt: ExportedVerdictReceipt | null
 
+  // Wave 4: Compare (+), Fundamentals (DN01/TV) & Saved Screener Presets
+  compareTickersBySlot: Record<string, string[]>
+  compareVersion: number
+  fundamentalsByTicker: Record<string, SymbolFundamentalsResponse>
+  fundamentalsVersion: number
+  savedScreens: SavedScreenRecord[]
+
   // Modals
   symbolSearchOpen: boolean
   symbolSearchInitialQuery: string
@@ -332,6 +342,16 @@ export interface WorkspaceState {
   addSymbolToWatchlist: (ticker: string) => Promise<void>
   removeSymbolFromWatchlist: (ticker: string) => Promise<void>
   createNewWatchlist: (name: string) => Promise<void>
+  createWatchlistWithSymbols: (name: string, tickers: string[]) => Promise<void>
+
+  // Wave 4 actions: Compare (+), Fundamentals & Saved Screener Presets
+  addCompareTicker: (ticker: string, slotId?: string) => void
+  removeCompareTicker: (ticker: string, slotId?: string) => void
+  clearCompareTickers: (slotId?: string) => void
+  loadFundamentalsForTicker: (ticker: string) => Promise<SymbolFundamentalsResponse | null>
+  refreshSavedScreens: () => Promise<void>
+  saveScreenerPreset: (name: string, filterJson: Record<string, unknown>, id?: string) => Promise<void>
+  deleteScreenerPreset: (id: string) => Promise<void>
 
   createNewAlert: (
     ticker: string,
@@ -487,6 +507,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   exportingKt01: false,
   exportedVerdicts: [],
   lastExportedReceipt: null,
+
+  compareTickersBySlot: {},
+  compareVersion: 0,
+  fundamentalsByTicker: {},
+  fundamentalsVersion: 0,
+  savedScreens: [],
 
   symbolSearchOpen: false,
   symbolSearchInitialQuery: '',
@@ -1747,6 +1773,121 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   setBrokerSnapshot: (broker) => set({ broker }),
+
+  // ─── Wave 4: Compare (+), Fundamentals (DN01/TV) & Saved Screener Presets ──
+
+  addCompareTicker: (rawTicker, slotId) => {
+    const clean = rawTicker.trim().toUpperCase()
+    if (!clean) return
+    const targetSlot = slotId ?? get().activeSlotId
+    const pane = get().panes.find((p) => p.slotId === targetSlot)
+    const normalized =
+      clean.includes(':') || /[/*+()-]/.test(clean) ? clean : `HOSE:${clean}`
+    if (pane && normalized === pane.ticker.toUpperCase()) return
+    set((s) => {
+      const existing = s.compareTickersBySlot[targetSlot] ?? []
+      if (existing.includes(normalized) || existing.length >= 6) return s
+      return {
+        compareTickersBySlot: {
+          ...s.compareTickersBySlot,
+          [targetSlot]: [...existing, normalized],
+        },
+        compareVersion: s.compareVersion + 1,
+      }
+    })
+  },
+
+  removeCompareTicker: (ticker, slotId) => {
+    const targetSlot = slotId ?? get().activeSlotId
+    const up = ticker.trim().toUpperCase()
+    set((s) => {
+      const existing = s.compareTickersBySlot[targetSlot] ?? []
+      const next = existing.filter((t) => t.toUpperCase() !== up)
+      return {
+        compareTickersBySlot: { ...s.compareTickersBySlot, [targetSlot]: next },
+        compareVersion: s.compareVersion + 1,
+      }
+    })
+  },
+
+  clearCompareTickers: (slotId) => {
+    const targetSlot = slotId ?? get().activeSlotId
+    set((s) => ({
+      compareTickersBySlot: { ...s.compareTickersBySlot, [targetSlot]: [] },
+      compareVersion: s.compareVersion + 1,
+    }))
+  },
+
+  loadFundamentalsForTicker: async (ticker) => {
+    const key = ticker.trim().toUpperCase()
+    if (!key) return null
+    try {
+      const data = await api.getSymbolFundamentals(key, get().yumekoAsOf)
+      setFundamentalsCache(key, data)
+      set((s) => ({
+        fundamentalsByTicker: { ...s.fundamentalsByTicker, [key]: data },
+        fundamentalsVersion: s.fundamentalsVersion + 1,
+      }))
+      return data
+    } catch {
+      return null
+    }
+  },
+
+  refreshSavedScreens: async () => {
+    try {
+      const screens = await api.listSavedScreens()
+      set({ savedScreens: screens })
+    } catch {
+      // ignore
+    }
+  },
+
+  saveScreenerPreset: async (name, filterJson, id) => {
+    const trimmed = name.trim()
+    if (!trimmed) return
+    try {
+      const rec = await api.saveScreen(trimmed, filterJson, id ?? null)
+      set((s) => ({
+        savedScreens: [rec, ...s.savedScreens.filter((x) => x.id !== rec.id)],
+      }))
+      get().pushToast('success', `Đã lưu bộ lọc "${rec.name}"`)
+    } catch (err) {
+      get().pushToast('error', `Lỗi lưu bộ lọc: ${String(err)}`)
+    }
+  },
+
+  deleteScreenerPreset: async (id) => {
+    try {
+      await api.deleteScreen(id)
+      set((s) => ({ savedScreens: s.savedScreens.filter((x) => x.id !== id) }))
+      get().pushToast('info', 'Đã xóa bộ lọc đã lưu')
+    } catch (err) {
+      get().pushToast('error', String(err))
+    }
+  },
+
+  createWatchlistWithSymbols: async (name, tickers) => {
+    const trimmed = name.trim()
+    if (!trimmed || tickers.length === 0) return
+    const id = `wl_${Date.now()}`
+    const unique = Array.from(new Set(tickers.map((t) => t.trim().toUpperCase()).filter(Boolean)))
+    try {
+      const created = await api.createWatchlist(id, trimmed)
+      for (const tk of unique) {
+        await api.addWatchlistSymbol(created.id, tk)
+      }
+      const populated: WatchlistGroup = { ...created, tickers: unique }
+      set((s) => ({
+        watchlists: [...s.watchlists, populated],
+        activeWatchlistId: populated.id,
+      }))
+      void get().refreshWatchlistQuotes()
+      get().pushToast('success', `Đã tạo danh mục "${trimmed}" (${unique.length} mã)`)
+    } catch (err) {
+      get().pushToast('error', `Lỗi tạo danh mục: ${String(err)}`)
+    }
+  },
 
   pushToast: (kind, message) => {
     const id = `toast_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`

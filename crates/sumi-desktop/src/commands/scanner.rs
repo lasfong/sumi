@@ -1,4 +1,8 @@
+use std::collections::HashMap;
+
+use chrono::{Datelike, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sumi_core::data::Timeframe;
 use sumi_core::model::Candle;
 use sumi_core::scanner::{
@@ -8,11 +12,13 @@ use sumi_core::scanner::{
     lookup_qmv_profile,
 };
 use sumi_data::{Adjustment, BarQueryMode, BarsRequest, Interval, SeriesKey, SymbolKey};
+use sumi_yumeko_bridge::YumekoReadOnlyBridge;
 use tauri::State;
 
 use crate::commands::market::curated_catalog;
 use crate::error::{DesktopError, DesktopResult};
 use crate::state::AppState;
+use crate::workspace_db::SavedScreenRecord;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -88,6 +94,29 @@ pub struct StockScreenerInput {
     /// Optional explicit opt-in to refresh up to 60 stale symbols before running the scan.
     #[serde(default)]
     pub auto_refresh_stale: Option<bool>,
+    // === Wave 4: Multi-Timeframe (1W/1D/1H), Fundamental (DN01/TV) & Yumeko QMV Blackbox Filters ===
+    /// Optional weekly (`1W` resampled from `1D`) regime filter (`"Uptrend"`, `"Pullback"`, `"Recovery"`, ...)
+    #[serde(default)]
+    pub weekly_regime_filter: Option<String>,
+    /// Stage-2 funnel: evaluate `1H` timing on top `<= 25` Stage-1 survivors (`true`/`false`)
+    #[serde(default)]
+    pub enable_mtf_1h: Option<bool>,
+    #[serde(default)]
+    pub max_pe: Option<f64>,
+    #[serde(default)]
+    pub max_pb: Option<f64>,
+    #[serde(default)]
+    pub min_roe: Option<f64>,
+    #[serde(default)]
+    pub min_market_cap_bn: Option<f64>,
+    #[serde(default)]
+    pub only_money_in_today: Option<bool>,
+    #[serde(default)]
+    pub min_qmv_tmc: Option<f64>,
+    #[serde(default)]
+    pub min_qmv_dspi: Option<f64>,
+    #[serde(default)]
+    pub only_qmv_reversal_t_plus: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -122,6 +151,19 @@ pub struct ScreenerRowDto {
     pub price_tier: String,
     pub qmv_flow_z50_t05: Option<f64>,
     pub qmv_flow_z50_t20: Option<f64>,
+    // Wave 4 MTF + Fundamentals + Yumeko QMV Real columns
+    pub weekly_regime: String,
+    pub weekly_regime_short: String,
+    pub hourly_timing: Option<String>,
+    pub mtf_aligned: bool,
+    pub pe: Option<f64>,
+    pub pb: Option<f64>,
+    pub roe: Option<f64>,
+    pub market_cap_bn: Option<f64>,
+    pub qmv_real_tmc: Option<f64>,
+    pub qmv_real_dspi: Option<f64>,
+    pub qmv_real_money_in_today: bool,
+    pub qmv_real_provenance: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -177,6 +219,69 @@ fn parse_category_key(key: &str) -> Option<SignalCategory> {
         .copied()
         .find(|c| c.key().eq_ignore_ascii_case(key.trim()))
         .filter(|c| *c != SignalCategory::All)
+}
+
+/// Strictly causal `1D -> 1W` resampling grouped by ISO week in Vietnam time (`UTC+7`).
+fn resample_daily_to_weekly(daily: &[Candle]) -> Vec<Candle> {
+    let mut weekly: Vec<Candle> = Vec::new();
+    let mut current_week: Option<(i32, u32)> = None;
+    for c in daily {
+        let ict_secs = c.timestamp.saturating_add(7 * 3600);
+        let Some(dt) = Utc.timestamp_opt(ict_secs, 0).single() else {
+            continue;
+        };
+        let iso = dt.iso_week();
+        let wk = (iso.year(), iso.week());
+        if current_week == Some(wk)
+            && let Some(last) = weekly.last_mut()
+        {
+            if c.high > last.high {
+                last.high = c.high;
+            }
+            if c.low < last.low {
+                last.low = c.low;
+            }
+            last.close = c.close;
+            last.volume += c.volume.max(0.0);
+        } else {
+            current_week = Some(wk);
+            weekly.push(Candle {
+                timestamp: c.timestamp,
+                open: c.open,
+                high: c.high,
+                low: c.low,
+                close: c.close,
+                volume: c.volume.max(0.0),
+                date_label: c.date_label.clone(),
+            });
+        }
+    }
+    weekly
+}
+
+fn is_bullish_or_pullback_regime(r: MarketRegime) -> bool {
+    matches!(
+        r,
+        MarketRegime::Uptrend | MarketRegime::Pullback | MarketRegime::Recovery
+    )
+}
+
+fn classify_hourly_timing(h1_candles: &[Candle]) -> Option<String> {
+    if h1_candles.len() < 30 {
+        return None;
+    }
+    let last = h1_candles.last()?;
+    let n = h1_candles.len();
+    let sma20: f64 = h1_candles[n - 20..].iter().map(|c| c.close).sum::<f64>() / 20.0;
+    let sma10: f64 = h1_candles[n - 10..].iter().map(|c| c.close).sum::<f64>() / 10.0;
+    let prev_close = h1_candles[n - 2].close;
+    if last.close >= sma20 && sma10 >= sma20 {
+        Some("BULL_1H".to_owned())
+    } else if last.close >= sma20 * 0.985 && last.close >= prev_close {
+        Some("PULLBACK_1H".to_owned())
+    } else {
+        Some("BEAR_1H".to_owned())
+    }
 }
 
 #[tauri::command]
@@ -332,13 +437,34 @@ pub async fn run_stock_screener(
         }
     }
 
-    tokio::task::spawn_blocking(move || {
+    let enable_mtf_1h = input.enable_mtf_1h.unwrap_or(false);
+    let store_stage1 = store.clone();
+    let mut response = tokio::task::spawn_blocking(move || {
         let started = std::time::Instant::now();
         let regime_target = input.regime_filter.as_deref().and_then(parse_regime_name);
+        let weekly_regime_target = input
+            .weekly_regime_filter
+            .as_deref()
+            .and_then(parse_regime_name);
         let category_target = input
             .category_filter
             .as_deref()
             .and_then(parse_category_key);
+
+        // Bulk-load cached fundamentals (`sumi_market.db`) + read-only Yumeko DN01 & QMV Blackbox maps once!
+        let local_funda_map = store_stage1.list_fundamentals_map().unwrap_or_default();
+        let bridge = YumekoReadOnlyBridge::discover_default();
+        let yumeko_val_map = bridge.read_latest_valuation_map(None).unwrap_or_default();
+        let yumeko_qmv_map = bridge.read_latest_qmv_screener_map(None).unwrap_or_default();
+
+        let max_pe = input.max_pe.filter(|v| v.is_finite() && *v > 0.0);
+        let max_pb = input.max_pb.filter(|v| v.is_finite() && *v > 0.0);
+        let min_roe = input.min_roe.filter(|v| v.is_finite());
+        let min_mcap_bn = input.min_market_cap_bn.filter(|v| v.is_finite() && *v > 0.0);
+        let only_money_in_today = input.only_money_in_today.unwrap_or(false);
+        let min_qmv_tmc = input.min_qmv_tmc.filter(|v| v.is_finite());
+        let min_qmv_dspi = input.min_qmv_dspi.filter(|v| v.is_finite());
+        let only_qmv_rev_t_plus = input.only_qmv_reversal_t_plus.unwrap_or(false);
 
         let mut required_signal_indices: Vec<usize> = Vec::new();
         if let Some(c_idx) = input
@@ -424,7 +550,7 @@ pub async fn run_stock_screener(
             }
 
             let series = SeriesKey::new(&sym_key, Interval::D1, Adjustment::Splits);
-            let Ok(res) = store.query_bars(&series, BarQueryMode::Init, 300) else {
+            let Ok(res) = store_stage1.query_bars(&series, BarQueryMode::Init, 300) else {
                 continue;
             };
             if res.bars.len() < 55 {
@@ -478,6 +604,9 @@ pub async fn run_stock_screener(
         let chunk_size = scanned_symbols.div_ceil(num_workers).max(1);
         let profile = ConfluenceWeightProfile::Balanced;
         let req_indices_ref = &required_signal_indices;
+        let local_funda_ref = &local_funda_map;
+        let yumeko_val_ref = &yumeko_val_map;
+        let yumeko_qmv_ref = &yumeko_qmv_map;
 
         let mut rows: Vec<ScreenerRowDto> = std::thread::scope(|s| {
             let mut handles = Vec::new();
@@ -487,6 +616,89 @@ pub async fn run_stock_screener(
                     for (sym_key, description, candles) in chunk {
                         let last_idx = candles.len() - 1;
                         let ticker_str = sym_key.ticker();
+                        let sym_up = sym_key.symbol.to_ascii_uppercase();
+
+                        // Fundamental & Yumeko QMV Blackbox early filters before heavy catalog scan!
+                        let y_val = yumeko_val_ref.get(&sym_up);
+                        let l_funda = local_funda_ref.get(&sym_up);
+                        let y_qmv = yumeko_qmv_ref.get(&sym_up);
+
+                        let pe = y_val
+                            .and_then(|v| v.pe)
+                            .or_else(|| l_funda.and_then(|f| f.pe_ttm))
+                            .filter(|v| v.is_finite() && *v > 0.0);
+                        let pb = y_val
+                            .and_then(|v| v.pb)
+                            .or_else(|| l_funda.and_then(|f| f.pb))
+                            .filter(|v| v.is_finite() && *v > 0.0);
+                        let roe = y_val
+                            .and_then(|v| v.roe)
+                            .or_else(|| l_funda.and_then(|f| f.roe))
+                            .filter(|v| v.is_finite());
+                        let market_cap_bn = l_funda
+                            .and_then(|f| f.market_cap_basic)
+                            .filter(|v| v.is_finite() && *v > 0.0)
+                            .map(|v| v / 1_000_000_000.0);
+
+                        if let Some(cap) = max_pe
+                            && pe.is_none_or(|v| v > cap)
+                        {
+                            continue;
+                        }
+                        if let Some(cap) = max_pb
+                            && pb.is_none_or(|v| v > cap)
+                        {
+                            continue;
+                        }
+                        if let Some(lo) = min_roe
+                            && roe.is_none_or(|v| v < lo)
+                        {
+                            continue;
+                        }
+                        if let Some(lo) = min_mcap_bn
+                            && market_cap_bn.is_none_or(|v| v < lo)
+                        {
+                            continue;
+                        }
+                        if only_money_in_today && !y_qmv.is_some_and(|q| q.money_in_today) {
+                            continue;
+                        }
+                        if only_qmv_rev_t_plus && !y_qmv.is_some_and(|q| q.reversal_up_t_plus) {
+                            continue;
+                        }
+                        if let Some(lo) = min_qmv_tmc
+                            && y_qmv.and_then(|q| q.tmc).is_none_or(|v| v < lo)
+                        {
+                            continue;
+                        }
+                        if let Some(lo) = min_qmv_dspi
+                            && y_qmv.and_then(|q| q.dspi).is_none_or(|v| v < lo)
+                        {
+                            continue;
+                        }
+
+                        // Weekly (`1W`) causal resampled regime check
+                        let weekly_candles = resample_daily_to_weekly(candles);
+                        let weekly_reg = if weekly_candles.len() >= 26 {
+                            evaluate_symbol_scan(
+                                &ticker_str,
+                                &sym_key.symbol,
+                                &sym_key.exchange,
+                                Timeframe::W1,
+                                &weekly_candles,
+                                None,
+                                5,
+                            )
+                            .map_or(MarketRegime::Neutral, |r| r.regime)
+                        } else {
+                            MarketRegime::Neutral
+                        };
+                        if let Some(target_w) = weekly_regime_target
+                            && weekly_reg != target_w
+                        {
+                            continue;
+                        }
+
                         let Some(scan_row) = evaluate_symbol_scan(
                             &ticker_str,
                             &sym_key.symbol,
@@ -665,6 +877,9 @@ pub async fn run_stock_screener(
                         let qmv_flow_z50_t05 = pbb.z50_at(last_idx, BBHorizon::T05);
                         let qmv_flow_z50_t20 = pbb.z50_at(last_idx, BBHorizon::T20);
 
+                        let mtf_w_d = is_bullish_or_pullback_regime(weekly_reg)
+                            && is_bullish_or_pullback_regime(scan_row.regime);
+
                         local_rows.push(ScreenerRowDto {
                             ticker: ticker_str,
                             exchange: sym_key.exchange.clone(),
@@ -701,6 +916,18 @@ pub async fn run_stock_screener(
                             price_tier: p_tier.code().to_owned(),
                             qmv_flow_z50_t05,
                             qmv_flow_z50_t20,
+                            weekly_regime: weekly_reg.full_label().to_owned(),
+                            weekly_regime_short: weekly_reg.short_label().to_owned(),
+                            hourly_timing: None,
+                            mtf_aligned: mtf_w_d,
+                            pe,
+                            pb,
+                            roe,
+                            market_cap_bn,
+                            qmv_real_tmc: y_qmv.and_then(|q| q.tmc),
+                            qmv_real_dspi: y_qmv.and_then(|q| q.dspi),
+                            qmv_real_money_in_today: y_qmv.is_some_and(|q| q.money_in_today),
+                            qmv_real_provenance: y_qmv.is_some(),
                         });
                     }
                     local_rows
@@ -724,7 +951,7 @@ pub async fn run_stock_screener(
         });
 
         let matched_symbols = rows.len();
-        Ok(StockScreenerResponse {
+        Ok::<_, DesktopError>(StockScreenerResponse {
             total_catalog_signals: SIGNAL_CATALOG.len(),
             scanned_symbols,
             matched_symbols,
@@ -737,7 +964,108 @@ pub async fn run_stock_screener(
         })
     })
     .await
-    .map_err(|e| DesktopError::Internal(e.to_string()))?
+    .map_err(|e| DesktopError::Internal(e.to_string()))??;
+
+    // Stage-2 MTF Funnel (Wave 4): evaluate `1H` timing on top <= 25 Stage-1 survivors!
+    if enable_mtf_1h && !response.rows.is_empty() {
+        let top_n = response.rows.len().min(25);
+        let top_keys: Vec<SymbolKey> = response.rows[..top_n]
+            .iter()
+            .filter_map(|r| SymbolKey::parse(&r.ticker).ok())
+            .collect();
+
+        // Hydrate up to 12 missing `1H` series online if online
+        if !state.is_offline() {
+            let store_h1_chk = store.clone();
+            let keys_chk = top_keys.clone();
+            let missing_h1: Vec<SymbolKey> = tokio::task::spawn_blocking(move || {
+                keys_chk
+                    .into_iter()
+                    .filter(|k| {
+                        let sk = SeriesKey::new(k, Interval::H1, Adjustment::Splits);
+                        store_h1_chk
+                            .series_meta(&sk)
+                            .ok()
+                            .flatten()
+                            .is_none_or(|m| m.bar_count < 30)
+                    })
+                    .take(12)
+                    .collect()
+            })
+            .await
+            .unwrap_or_default();
+
+            if !missing_h1.is_empty() {
+                let svc = state.active_market_service();
+                for key in missing_h1 {
+                    let sk = SeriesKey::new(&key, Interval::H1, Adjustment::Splits);
+                    let _ = svc.get_bars(&BarsRequest::init(sk, 120)).await;
+                }
+            }
+        }
+
+        let store_h1 = store.clone();
+        let timing_map: HashMap<String, String> = tokio::task::spawn_blocking(move || {
+            let mut out = HashMap::new();
+            for key in top_keys {
+                let sk = SeriesKey::new(&key, Interval::H1, Adjustment::Splits);
+                if let Ok(res) = store_h1.query_bars(&sk, BarQueryMode::Init, 120)
+                    && res.bars.len() >= 30
+                {
+                    let h1_candles: Vec<Candle> = res
+                        .bars
+                        .iter()
+                        .map(|b| b.to_core_candle(Interval::H1))
+                        .collect();
+                    if let Some(label) = classify_hourly_timing(&h1_candles) {
+                        out.insert(key.ticker(), label);
+                    }
+                }
+            }
+            out
+        })
+        .await
+        .unwrap_or_default();
+
+        for row in response.rows.iter_mut().take(top_n) {
+            if let Some(h1_label) = timing_map.get(&row.ticker) {
+                row.hourly_timing = Some(h1_label.clone());
+                let h1_ok = h1_label == "BULL_1H" || h1_label == "PULLBACK_1H";
+                row.mtf_aligned = row.mtf_aligned && h1_ok;
+            }
+        }
+    }
+
+    Ok(response)
+}
+
+#[tauri::command]
+pub fn list_saved_screens(state: State<'_, AppState>) -> DesktopResult<Vec<SavedScreenRecord>> {
+    state.workspace.list_saved_screens()
+}
+
+#[tauri::command]
+pub fn save_screen(
+    state: State<'_, AppState>,
+    id: Option<String>,
+    name: String,
+    filter_json: Value,
+) -> DesktopResult<SavedScreenRecord> {
+    let clean_name = name.trim();
+    if clean_name.is_empty() {
+        return Err(DesktopError::Validation(
+            "Tên bộ lọc lưu trữ không được để trống.".to_owned(),
+        ));
+    }
+    let rec_id = id
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("scr_{}", uuid::Uuid::new_v4().simple()));
+    state.workspace.save_screen(&rec_id, clean_name, &filter_json)
+}
+
+#[tauri::command]
+pub fn delete_screen(state: State<'_, AppState>, id: String) -> DesktopResult<()> {
+    state.workspace.delete_screen(id.trim())
 }
 
 #[cfg(test)]
@@ -751,5 +1079,41 @@ mod tests {
         assert!(items.iter().any(|i| !i.label_vi.is_empty()));
         assert!(items.iter().any(|i| i.id == "qmv.ichimoku_v7_bullish" && i.is_qmv_core));
         assert!(items.iter().any(|i| i.id == "technical.psar_flip_bull" && !i.is_qmv_core));
+    }
+
+    #[test]
+    fn resample_daily_to_weekly_groups_iso_weeks_causally() {
+        // 10 consecutive weekdays (Mon..Fri x 2 weeks starting 2026-01-05)
+        let mut daily = Vec::new();
+        let base_ts = chrono::NaiveDate::from_ymd_opt(2026, 1, 5)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        for w in 0..2 {
+            for d in 0..5 {
+                let ts = base_ts + (w * 7 + d) * 86_400;
+                let base_p = 100_000.0 + (w * 10 + d) as f64 * 1_000.0;
+                daily.push(Candle {
+                    timestamp: ts,
+                    open: base_p,
+                    high: base_p + 2_000.0,
+                    low: base_p - 1_000.0,
+                    close: base_p + 500.0,
+                    volume: 100_000.0,
+                    date_label: String::new(),
+                });
+            }
+        }
+        let weekly = resample_daily_to_weekly(&daily);
+        assert_eq!(weekly.len(), 2);
+        assert_eq!(weekly[0].open, daily[0].open);
+        assert_eq!(weekly[0].close, daily[4].close);
+        assert_eq!(weekly[0].high, daily[4].high);
+        assert_eq!(weekly[0].low, daily[0].low);
+        assert!((weekly[0].volume - 500_000.0).abs() < 1e-6);
+        assert_eq!(weekly[1].open, daily[5].open);
+        assert_eq!(weekly[1].close, daily[9].close);
     }
 }

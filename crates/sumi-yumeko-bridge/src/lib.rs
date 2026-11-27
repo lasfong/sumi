@@ -20,7 +20,7 @@ pub use evidence::{
 pub use reader::{
     Dm01HoldingDto, Dm01WatchlistEntryDto, DnseLoadedSeries, EpisodicThesisDto,
     MacroObservationDto, QmvActiveMoneyPointDto, QmvForeignFlowPointDto, QmvRealChartSeriesDto,
-    QmvStockBbPointDto, QmvStockBlackboxSnapshotDto, ResearchExportVerificationDto,
-    SectorBreadthSnapshotDto, TopDownSymbolContextDto, ValuationQuarterDto, Vm01MarketContextDto,
-    YumekoBridgeStatus, YumekoReadOnlyBridge,
+    QmvScreenerSnapshotDto, QmvStockBbPointDto, QmvStockBlackboxSnapshotDto,
+    ResearchExportVerificationDto, SectorBreadthSnapshotDto, TopDownSymbolContextDto,
+    ValuationQuarterDto, Vm01MarketContextDto, YumekoBridgeStatus, YumekoReadOnlyBridge,
 };

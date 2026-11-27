@@ -4,6 +4,14 @@ import * as api from '../../api/tauri'
 import { useWorkspaceStore } from '../../store/workspaceStore'
 import type { SymbolSearchResult } from '../../types/market'
 
+export function isFormulaExpressionQuery(raw: string): boolean {
+  const t = raw.trim()
+  if (!t) return false
+  if (/[/*+()]/.test(t)) return true
+  if (t.includes(' - ') || t.includes(' -') || t.includes('- ')) return true
+  return (t.match(/:/g)?.length ?? 0) >= 2 && t.includes('-')
+}
+
 const SEARCH_TABS = [
   { id: 'all', label: 'Tất cả' },
   { id: 'hose', label: 'HOSE' },
@@ -102,8 +110,15 @@ export const SymbolSearchModal: React.FC = () => {
     }
   }, [open, query, category])
 
+  const formulaCandidate = isFormulaExpressionQuery(query) ? query.trim().toUpperCase() : null
+
   const selectItem = (item: SymbolSearchResult) => {
     setActiveTicker(item.ticker)
+    closeSymbolSearch()
+  }
+
+  const selectFormula = (formula: string) => {
+    setActiveTicker(formula)
     closeSymbolSearch()
   }
 
@@ -114,9 +129,13 @@ export const SymbolSearchModal: React.FC = () => {
     } else if (e.key === 'ArrowUp') {
       e.preventDefault()
       setHighlightIdx((i) => Math.max(0, i - 1))
-    } else if (e.key === 'Enter' && results[highlightIdx]) {
+    } else if (e.key === 'Enter') {
       e.preventDefault()
-      selectItem(results[highlightIdx])
+      if (formulaCandidate) {
+        selectFormula(formulaCandidate)
+      } else if (results[highlightIdx]) {
+        selectItem(results[highlightIdx])
+      }
     }
   }
 
@@ -157,7 +176,7 @@ export const SymbolSearchModal: React.FC = () => {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Nhập mã (VD: FPT, VCB, HPG, VN30F1!, BTCUSDT, AAPL)..."
+          placeholder="Nhập mã hoặc công thức (VD: FPT, SSI / VNINDEX, VN30F1! - VN30)..."
           className="flex-1 bg-transparent border-0 outline-none text-[14px]"
           style={{ color: 'var(--tv-text-primary)' }}
           autoFocus
@@ -197,11 +216,38 @@ export const SymbolSearchModal: React.FC = () => {
 
       {/* Results List */}
       <div className="flex-1 overflow-y-auto tv-scroll min-h-[280px] max-h-[420px]">
-        {loading && results.length === 0 ? (
+        {formulaCandidate && (
+          <button
+            type="button"
+            className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-left border-0 border-b cursor-pointer"
+            style={{
+              borderColor: 'var(--tv-border)',
+              backgroundColor: 'var(--tv-accent-soft)',
+              color: 'var(--tv-text-primary)',
+            }}
+            onClick={() => selectFormula(formulaCandidate)}
+          >
+            <div className="min-w-0">
+              <div className="font-bold text-[13px] text-[#2962FF] truncate">
+                𝑓(x) {formulaCandidate}
+              </div>
+              <div className="text-[11px]" style={{ color: 'var(--tv-text-secondary)' }}>
+                Mở biểu đồ Công thức Tổng hợp (Tỷ số / Chênh lệch OHLCV — hỗ trợ Ichimoku, Trendline, Replay)
+              </div>
+            </div>
+            <span
+              className="px-2 py-0.5 rounded text-[10px] font-bold shrink-0"
+              style={{ backgroundColor: '#2962FF', color: '#FFFFFF' }}
+            >
+              EXPR · Enter
+            </span>
+          </button>
+        )}
+        {loading && results.length === 0 && !formulaCandidate ? (
           <div className="p-6 text-center text-[12px]" style={{ color: 'var(--tv-text-secondary)' }}>
             Đang tìm kiếm trên SQLite cục bộ và TradingView...
           </div>
-        ) : results.length === 0 ? (
+        ) : results.length === 0 && !formulaCandidate ? (
           <div className="p-6 text-center text-[12px]" style={{ color: 'var(--tv-text-secondary)' }}>
             Không tìm thấy mã phù hợp với "{query}"
           </div>

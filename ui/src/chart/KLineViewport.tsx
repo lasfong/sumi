@@ -22,6 +22,7 @@ import {
   hasVnindexBenchmarkBars,
   setVnindexBenchmarkBars,
 } from './indicators/customIndicators'
+import { COMPARE_COLORS, setCompareSeriesCache } from './indicators/fundamentalIndicators'
 import { registerAllCustomIndicators } from './indicators/registerAll'
 import { registerAllCustomOverlays } from './overlays/registerAll'
 import {
@@ -281,6 +282,11 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
   const broker = useWorkspaceStore((s) => s.broker)
   const yumekoAsOf = useWorkspaceStore((s) => s.yumekoAsOf)
   const yumekoSeriesVersion = useWorkspaceStore((s) => s.yumekoSeriesVersion)
+  const fundamentalsVersion = useWorkspaceStore((s) => s.fundamentalsVersion)
+  const compareTickers = useWorkspaceStore((s) => s.compareTickersBySlot[pane.slotId])
+  const compareVersion = useWorkspaceStore((s) => s.compareVersion)
+  const removeCompareTicker = useWorkspaceStore((s) => s.removeCompareTicker)
+  const loadFundamentalsForTicker = useWorkspaceStore((s) => s.loadFundamentalsForTicker)
 
   const setActiveInterval = useWorkspaceStore((s) => s.setActiveInterval)
   const togglePaneAdjustment = useWorkspaceStore((s) => s.togglePaneAdjustment)
@@ -1066,13 +1072,18 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
         spec.name === 'QMV_STOCK_BB' ||
         spec.name === 'QMV_ACTIVE_MONEY' ||
         spec.name === 'QMV_FOREIGN_FLOW'
+      const isFinInd =
+        spec.name === 'FIN_PE' ||
+        spec.name === 'FIN_PB' ||
+        spec.name === 'FIN_ROE' ||
+        spec.name === 'FIN_EPS_YOY'
       const mergedStyles = {
         ...(spec.styles ?? {}),
         tooltip: {
           features: buildIndicatorTooltipFeatures(theme, spec.visible),
         },
       }
-      const extendData = isYumekoRealInd ? { ticker: pane.ticker } : undefined
+      const extendData = isYumekoRealInd || isFinInd ? { ticker: pane.ticker } : undefined
       const signature = JSON.stringify({
         name: spec.name,
         calcParams: spec.calcParams,
@@ -1081,6 +1092,7 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
         styles: spec.styles ?? null,
         theme,
         qmvVer: isYumekoRealInd ? `${pane.ticker}:${yumekoSeriesVersion}` : 0,
+        fundaVer: isFinInd ? `${pane.ticker}:${fundamentalsVersion}` : 0,
       })
       const existing = activeMap.get(spec.id)
       if (!existing) {
@@ -1120,7 +1132,66 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
         activeMap.set(spec.id, { ...existing, signature })
       }
     }
-  }, [pane.indicators, pane.ticker, isMultiPane, theme, yumekoSeriesVersion])
+  }, [pane.indicators, pane.ticker, isMultiPane, theme, yumekoSeriesVersion, fundamentalsVersion])
+
+  // 5a2. Ensure fundamentals cache is hydrated whenever any `FIN_*` indicator is active on this pane (Wave 4)
+  useEffect(() => {
+    const hasFin = pane.indicators.some(
+      (i) => i.name === 'FIN_PE' || i.name === 'FIN_PB' || i.name === 'FIN_ROE' || i.name === 'FIN_EPS_YOY',
+    )
+    if (hasFin && pane.ticker) {
+      void loadFundamentalsForTicker(pane.ticker)
+    }
+  }, [pane.indicators, pane.ticker, loadFundamentalsForTicker])
+
+  // 5a3. Multi-Symbol Causal Rebased Comparison Overlay (`COMPARE_OVERLAY`, Wave 4)
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart) return
+    const cmpList = compareTickers ?? []
+    const cmpIndId = `compare_overlay_${pane.slotId}`
+    if (cmpList.length === 0) {
+      setCompareSeriesCache(pane.slotId, null)
+      chart.removeIndicator({ id: cmpIndId, paneId: 'candle_pane' })
+      return
+    }
+    let cancelled = false
+    void api
+      .getCompareSeries({
+        baseTicker: pane.ticker,
+        compareTickers: cmpList,
+        interval: pane.interval,
+        limit: historyLimitRef.current,
+        asOfDate: yumekoAsOf,
+      })
+      .then((resp) => {
+        if (cancelled || !chartRef.current) return
+        setCompareSeriesCache(pane.slotId, resp)
+        const existing = chartRef.current.getIndicators({ id: cmpIndId, paneId: 'candle_pane' })
+        if (existing.length === 0) {
+          chartRef.current.createIndicator(
+            {
+              id: cmpIndId,
+              name: 'COMPARE_OVERLAY',
+              paneId: 'candle_pane',
+              extendData: { slotId: pane.slotId, nonce: Date.now() },
+            },
+            true,
+          )
+        } else {
+          chartRef.current.overrideIndicator({
+            id: cmpIndId,
+            name: 'COMPARE_OVERLAY',
+            paneId: 'candle_pane',
+            extendData: { slotId: pane.slotId, nonce: Date.now() },
+          })
+        }
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [compareTickers, compareVersion, pane.ticker, pane.interval, pane.slotId, yumekoAsOf, dataReadyNonce, replayResetNonce])
 
   // 5b. Re-measure & compact sub-pane heights whenever gridLayout changes (`1 / 2v / 2h / 3 / 4`, fixes BUG-006!)
   useEffect(() => {
@@ -1334,7 +1405,8 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
     if (!['1D', '1W', '1M'].includes(pane.interval) || corpEvents.length === 0) return
 
     const cutoffTs = isThisPaneReplaying ? (replay?.cutoffTimestampMs ?? null) : null
-    const visible = (cutoffTs !== null ? corpEvents.filter((e) => e.timestamp_ms <= cutoffTs) : corpEvents).slice(-35)
+    const getEvTs = (e: CorporateEventMarker) => e.timestampMs ?? e.timestamp_ms ?? 0
+    const visible = (cutoffTs !== null ? corpEvents.filter((e) => getEvTs(e) <= cutoffTs) : corpEvents).slice(-40)
     for (let i = 0; i < visible.length; i++) {
       const ev = visible[i]
       chart.createOverlay({
@@ -1343,7 +1415,7 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
         groupId: 'corp_events',
         paneId: 'candle_pane',
         lock: true,
-        points: [{ timestamp: ev.timestamp_ms }],
+        points: [{ timestamp: getEvTs(ev) }],
         extendData: {
           kind: ev.kind,
           label: ev.label,
@@ -2063,6 +2135,36 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
           </div>
         )}
 
+        {/* Top-Left Active Multi-Symbol Comparison Pills (Wave 4) */}
+        {(compareTickers?.length ?? 0) > 0 && (
+          <div className="absolute top-1.5 left-2 z-10 flex flex-wrap items-center gap-1 text-[10px]">
+            {(compareTickers ?? []).map((tk, idx) => (
+              <span
+                key={tk}
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-semibold"
+                style={{
+                  backgroundColor: 'color-mix(in srgb, var(--tv-bg-panel) 88%, transparent)',
+                  border: `1px solid ${COMPARE_COLORS[idx % COMPARE_COLORS.length]}`,
+                  color: COMPARE_COLORS[idx % COMPARE_COLORS.length],
+                }}
+              >
+                <span>vs {tk.includes(':') ? tk.split(':')[1] : tk}</span>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    removeCompareTicker(tk, pane.slotId)
+                  }}
+                  className="border-0 bg-transparent p-0 cursor-pointer text-current leading-none"
+                  aria-label={`Gỡ so sánh ${tk}`}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
         {/* Top-Right Status & VN Price Band Pill (formatted to ticker precision — `BUG-039`) */}
         <div className="pointer-events-none absolute top-1.5 right-16 z-10 flex items-center gap-1.5 text-[10px]">
           {!isMultiPane && vnBand && pane.showVnBands && (() => {
@@ -2235,9 +2337,9 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
                 borderColor: 'var(--tv-border)',
                 color: '#089981',
               }}
-              title="Xem sự kiện quyền / cổ tức (D) và chia tách (S) đã tự động phát hiện"
+              title="Xem sự kiện quyền / cổ tức (D), chia tách (S) và kỳ BCTC (E)"
             >
-              D/S ({corpEvents.length})
+              D/S/E ({corpEvents.length})
             </button>
           )}
           <button
@@ -2290,29 +2392,34 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
               {[...corpEvents]
                 .reverse()
                 .slice(0, 8)
-                .map((ev, idx) => (
-                  <button
-                    key={`${ev.timestamp_ms}_${idx}`}
-                    type="button"
-                    onClick={() => chartRef.current?.scrollToTimestamp(ev.timestamp_ms, 220)}
-                    className="w-full text-left px-1.5 py-1 rounded hover:bg-[var(--tv-hover)] border-0 bg-transparent cursor-pointer text-[var(--tv-text-primary)]"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span
-                        className="font-semibold"
-                        style={{ color: ev.kind === 'split' ? '#AB47BC' : '#089981' }}
-                      >
-                        [{ev.kind === 'split' ? 'S' : 'D'}] {ev.label}
-                      </span>
-                      <span className="text-[10px] tabular-nums" style={{ color: 'var(--tv-text-secondary)' }}>
-                        {ev.date}
-                      </span>
-                    </div>
-                    <div className="text-[10px]" style={{ color: 'var(--tv-text-secondary)' }}>
-                      {ev.detail}
-                    </div>
-                  </button>
-                ))}
+                .map((ev, idx) => {
+                  const ts = ev.timestampMs ?? ev.timestamp_ms ?? 0
+                  const k = (ev.kind ?? 'D').toUpperCase()
+                  const isS = k === 'S' || k === 'SPLIT'
+                  const isE = k === 'E' || k === 'EARNINGS'
+                  const tag = isS ? 'S' : isE ? 'E' : 'D'
+                  const color = isS ? '#AB47BC' : isE ? '#2962FF' : '#089981'
+                  return (
+                    <button
+                      key={`${ts}_${idx}`}
+                      type="button"
+                      onClick={() => chartRef.current?.scrollToTimestamp(ts, 220)}
+                      className="w-full text-left px-1.5 py-1 rounded hover:bg-[var(--tv-hover)] border-0 bg-transparent cursor-pointer text-[var(--tv-text-primary)]"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-semibold" style={{ color }}>
+                          [{tag}] {ev.label}
+                        </span>
+                        <span className="text-[10px] tabular-nums" style={{ color: 'var(--tv-text-secondary)' }}>
+                          {ev.date}
+                        </span>
+                      </div>
+                      <div className="text-[10px]" style={{ color: 'var(--tv-text-secondary)' }}>
+                        {ev.detail}
+                      </div>
+                    </button>
+                  )
+                })}
             </div>
           </div>
         )}

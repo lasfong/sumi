@@ -10,7 +10,28 @@ use crate::types::{
     normalize_exchange_alias,
 };
 
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
+
+/// Cached fundamental snapshot for an instrument (`fundamentals` table, Wave 4).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FundamentalSnapshot {
+    pub exchange: String,
+    pub symbol: String,
+    pub sector: Option<String>,
+    pub industry: Option<String>,
+    pub market_cap_basic: Option<f64>,
+    pub pe_ttm: Option<f64>,
+    pub pb: Option<f64>,
+    pub roe: Option<f64>,
+    pub eps: Option<f64>,
+    pub total_revenue: Option<f64>,
+    pub total_shares_outstanding: Option<f64>,
+    pub earnings_release_date: Option<i64>,
+    pub business_description: Option<String>,
+    pub source: String,
+    pub updated_at_ms: i64,
+}
 
 /// Summary statistics for a single cached `(exchange, symbol, interval, adjustment)` series.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,6 +219,25 @@ impl SqliteMarketStore {
 
             CREATE INDEX IF NOT EXISTS idx_symbols_symbol ON symbols (symbol);
             CREATE INDEX IF NOT EXISTS idx_symbols_ticker ON symbols (ticker);
+
+            CREATE TABLE IF NOT EXISTS fundamentals (
+                exchange                 TEXT NOT NULL,
+                symbol                   TEXT NOT NULL,
+                sector                   TEXT,
+                industry                 TEXT,
+                market_cap_basic         REAL,
+                pe_ttm                   REAL,
+                pb                       REAL,
+                roe                      REAL,
+                eps                      REAL,
+                total_revenue            REAL,
+                total_shares_outstanding REAL,
+                earnings_release_date    INTEGER,
+                business_description     TEXT,
+                source                   TEXT NOT NULL DEFAULT 'tradingview_symbol_info',
+                updated_at_ms            INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (exchange, symbol)
+            ) WITHOUT ROWID;
             "#,
         )?;
 
@@ -860,7 +900,110 @@ impl SqliteMarketStore {
                 now_ms,
             ],
         )?;
+        if has_fundamental_fields(resolved) {
+            upsert_fundamental_from_resolved(&conn, resolved, now_ms)?;
+        }
         Ok(())
+    }
+
+    /// Upserts a fundamental snapshot into the `fundamentals` table (`v3`, Wave 4).
+    pub fn upsert_fundamental_snapshot(&self, snap: &FundamentalSnapshot) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DataError::Storage("SQLite mutex poisoned".to_owned()))?;
+        let now_ms = if snap.updated_at_ms > 0 {
+            snap.updated_at_ms
+        } else {
+            chrono::Utc::now().timestamp_millis()
+        };
+        conn.execute(
+            r#"
+            INSERT INTO fundamentals (
+                exchange, symbol, sector, industry, market_cap_basic, pe_ttm, pb, roe, eps,
+                total_revenue, total_shares_outstanding, earnings_release_date,
+                business_description, source, updated_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+            ON CONFLICT(exchange, symbol) DO UPDATE SET
+                sector                   = COALESCE(excluded.sector, fundamentals.sector),
+                industry                 = COALESCE(excluded.industry, fundamentals.industry),
+                market_cap_basic         = COALESCE(excluded.market_cap_basic, fundamentals.market_cap_basic),
+                pe_ttm                   = COALESCE(excluded.pe_ttm, fundamentals.pe_ttm),
+                pb                       = COALESCE(excluded.pb, fundamentals.pb),
+                roe                      = COALESCE(excluded.roe, fundamentals.roe),
+                eps                      = COALESCE(excluded.eps, fundamentals.eps),
+                total_revenue            = COALESCE(excluded.total_revenue, fundamentals.total_revenue),
+                total_shares_outstanding = COALESCE(excluded.total_shares_outstanding, fundamentals.total_shares_outstanding),
+                earnings_release_date    = COALESCE(excluded.earnings_release_date, fundamentals.earnings_release_date),
+                business_description     = COALESCE(excluded.business_description, fundamentals.business_description),
+                source                   = excluded.source,
+                updated_at_ms            = excluded.updated_at_ms
+            "#,
+            params![
+                &snap.exchange,
+                &snap.symbol,
+                &snap.sector,
+                &snap.industry,
+                snap.market_cap_basic,
+                snap.pe_ttm,
+                snap.pb,
+                snap.roe,
+                snap.eps,
+                snap.total_revenue,
+                snap.total_shares_outstanding,
+                snap.earnings_release_date,
+                &snap.business_description,
+                &snap.source,
+                now_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Reads the cached fundamental snapshot for a specific instrument.
+    pub fn get_fundamental_snapshot(&self, key: &SymbolKey) -> Result<Option<FundamentalSnapshot>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DataError::Storage("SQLite mutex poisoned".to_owned()))?;
+        let row = conn
+            .query_row(
+                r#"
+                SELECT exchange, symbol, sector, industry, market_cap_basic, pe_ttm, pb, roe, eps,
+                       total_revenue, total_shares_outstanding, earnings_release_date,
+                       business_description, source, updated_at_ms
+                FROM fundamentals
+                WHERE exchange = ?1 AND symbol = ?2
+                "#,
+                params![&key.exchange, &key.symbol],
+                map_fundamental_row,
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Bulk-loads all cached fundamental snapshots keyed by uppercase symbol (for fast Screener joins).
+    pub fn list_fundamentals_map(&self) -> Result<std::collections::HashMap<String, FundamentalSnapshot>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DataError::Storage("SQLite mutex poisoned".to_owned()))?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT exchange, symbol, sector, industry, market_cap_basic, pe_ttm, pb, roe, eps,
+                   total_revenue, total_shares_outstanding, earnings_release_date,
+                   business_description, source, updated_at_ms
+            FROM fundamentals
+            ORDER BY updated_at_ms ASC
+            "#,
+        )?;
+        let iter = stmt.query_map([], map_fundamental_row)?;
+        let mut map = std::collections::HashMap::new();
+        for item in iter {
+            let snap = item?;
+            map.insert(snap.symbol.to_ascii_uppercase(), snap);
+        }
+        Ok(map)
     }
 
     /// Looks up cached [`ResolvedSymbol`] plus its last-updated Unix millisecond timestamp.
@@ -1263,6 +1406,9 @@ impl SqliteMarketStore {
                     meta_json,
                     now_ms,
                 ])?;
+                if has_fundamental_fields(sym) {
+                    upsert_fundamental_from_resolved(&tx, sym, now_ms)?;
+                }
                 written += 1;
             }
         }
@@ -1468,6 +1614,80 @@ impl SqliteMarketStore {
         }
         Ok(events)
     }
+}
+
+fn has_fundamental_fields(resolved: &ResolvedSymbol) -> bool {
+    resolved.sector.is_some()
+        || resolved.industry.is_some()
+        || resolved.market_cap_basic.is_some()
+        || resolved.price_earnings_ttm.is_some()
+        || resolved.last_annual_eps.is_some()
+        || resolved.total_revenue.is_some()
+        || resolved.total_shares_outstanding.is_some()
+        || resolved.earnings_release_date.is_some()
+        || resolved.business_description.is_some()
+}
+
+fn upsert_fundamental_from_resolved(
+    conn: &Connection,
+    resolved: &ResolvedSymbol,
+    now_ms: i64,
+) -> Result<()> {
+    conn.execute(
+        r#"
+        INSERT INTO fundamentals (
+            exchange, symbol, sector, industry, market_cap_basic, pe_ttm, eps,
+            total_revenue, total_shares_outstanding, earnings_release_date,
+            business_description, source, updated_at_ms
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'tradingview_symbol_info', ?12)
+        ON CONFLICT(exchange, symbol) DO UPDATE SET
+            sector                   = COALESCE(excluded.sector, fundamentals.sector),
+            industry                 = COALESCE(excluded.industry, fundamentals.industry),
+            market_cap_basic         = COALESCE(excluded.market_cap_basic, fundamentals.market_cap_basic),
+            pe_ttm                   = COALESCE(excluded.pe_ttm, fundamentals.pe_ttm),
+            eps                      = COALESCE(excluded.eps, fundamentals.eps),
+            total_revenue            = COALESCE(excluded.total_revenue, fundamentals.total_revenue),
+            total_shares_outstanding = COALESCE(excluded.total_shares_outstanding, fundamentals.total_shares_outstanding),
+            earnings_release_date    = COALESCE(excluded.earnings_release_date, fundamentals.earnings_release_date),
+            business_description     = COALESCE(excluded.business_description, fundamentals.business_description),
+            updated_at_ms            = excluded.updated_at_ms
+        "#,
+        params![
+            &resolved.exchange,
+            &resolved.symbol,
+            &resolved.sector,
+            &resolved.industry,
+            resolved.market_cap_basic,
+            resolved.price_earnings_ttm,
+            resolved.last_annual_eps,
+            resolved.total_revenue,
+            resolved.total_shares_outstanding,
+            resolved.earnings_release_date,
+            &resolved.business_description,
+            now_ms,
+        ],
+    )?;
+    Ok(())
+}
+
+fn map_fundamental_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FundamentalSnapshot> {
+    Ok(FundamentalSnapshot {
+        exchange: row.get(0)?,
+        symbol: row.get(1)?,
+        sector: row.get(2)?,
+        industry: row.get(3)?,
+        market_cap_basic: row.get(4)?,
+        pe_ttm: row.get(5)?,
+        pb: row.get(6)?,
+        roe: row.get(7)?,
+        eps: row.get(8)?,
+        total_revenue: row.get(9)?,
+        total_shares_outstanding: row.get(10)?,
+        earnings_release_date: row.get(11)?,
+        business_description: row.get(12)?,
+        source: row.get(13)?,
+        updated_at_ms: row.get(14)?,
+    })
 }
 
 fn collect_bars(

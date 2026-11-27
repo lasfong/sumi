@@ -204,9 +204,17 @@ export const RightWidgetBar: React.FC = () => {
   const removeIndicatorFromActivePane = useWorkspaceStore((s) => s.removeIndicatorFromActivePane)
   const openIndicatorSettings = useWorkspaceStore((s) => s.openIndicatorSettings)
   const drawingsVersion = useWorkspaceStore((s) => s.drawingsVersion)
+  const fundamentalsByTicker = useWorkspaceStore((s) => s.fundamentalsByTicker)
+  const loadFundamentalsForTicker = useWorkspaceStore((s) => s.loadFundamentalsForTicker)
 
   const activePane = panes.find((p) => p.slotId === activeSlotId) ?? panes[0]
   const activeWatchlist = watchlists.find((w) => w.id === activeWatchlistId) ?? watchlists[0]
+  const activeFunda = fundamentalsByTicker[activePane.ticker.trim().toUpperCase()]
+
+  useEffect(() => {
+    if (!activePane.ticker || /[/*+()]/.test(activePane.ticker)) return
+    void loadFundamentalsForTicker(activePane.ticker)
+  }, [activePane.ticker, loadFundamentalsForTicker])
 
   // Blind Practice Mode (`BUG-041`): when Bar Replay is active on a ticker, substitute historical
   // `cutoffBar` + `replay.vnBand` in place of live market quotes so future prices NEVER spoil practice!
@@ -766,6 +774,63 @@ export const RightWidgetBar: React.FC = () => {
                 </strong>
               </span>
             </div>
+
+            {/* Compact Fundamental & Valuation Card (DN01 / TradingView Cache, Wave 4) */}
+            {activeFunda && activeFunda.source !== 'none' && !isActiveBlindReplay && (
+              <div
+                className="pt-1.5 border-t space-y-1 text-[10.5px] tabular-nums"
+                style={{ borderColor: 'var(--tv-border)' }}
+              >
+                <div className="flex items-center justify-between gap-1">
+                  <span className="font-semibold uppercase tracking-wide text-[9.5px]" style={{ color: 'var(--tv-text-secondary)' }}>
+                    Cơ bản &amp; Định giá
+                  </span>
+                  <span
+                    className="px-1.5 py-0 rounded text-[9px] font-semibold"
+                    style={{
+                      backgroundColor:
+                        activeFunda.source === 'yumeko_dn01'
+                          ? 'rgba(8, 153, 129, 0.16)'
+                          : 'rgba(41, 98, 255, 0.14)',
+                      color: activeFunda.source === 'yumeko_dn01' ? '#089981' : '#5B8DEF',
+                    }}
+                  >
+                    {activeFunda.source === 'yumeko_dn01' ? 'Yumeko DN01' : 'TV Cache'}
+                  </span>
+                </div>
+                <div className="grid grid-cols-3 gap-1">
+                  <div className="rounded px-1.5 py-0.5" style={{ backgroundColor: 'var(--tv-bg-panel)' }}>
+                    <div className="text-[9px]" style={{ color: 'var(--tv-text-secondary)' }}>P/E</div>
+                    <div className="font-semibold">{activeFunda.pe != null ? `${activeFunda.pe.toFixed(1)}x` : '—'}</div>
+                  </div>
+                  <div className="rounded px-1.5 py-0.5" style={{ backgroundColor: 'var(--tv-bg-panel)' }}>
+                    <div className="text-[9px]" style={{ color: 'var(--tv-text-secondary)' }}>P/B</div>
+                    <div className="font-semibold">{activeFunda.pb != null ? `${activeFunda.pb.toFixed(2)}x` : '—'}</div>
+                  </div>
+                  <div className="rounded px-1.5 py-0.5" style={{ backgroundColor: 'var(--tv-bg-panel)' }}>
+                    <div className="text-[9px]" style={{ color: 'var(--tv-text-secondary)' }}>ROE</div>
+                    <div
+                      className="font-semibold"
+                      style={{ color: (activeFunda.roe ?? 0) >= 15 ? 'var(--tv-up)' : undefined }}
+                    >
+                      {activeFunda.roe != null ? `${activeFunda.roe.toFixed(1)}%` : '—'}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center justify-between text-[10px]" style={{ color: 'var(--tv-text-secondary)' }}>
+                  <span className="truncate max-w-[140px]" title={activeFunda.sector ?? ''}>
+                    {activeFunda.sector ?? '—'}
+                  </span>
+                  <span>
+                    {activeFunda.marketCapBasic != null && activeFunda.marketCapBasic > 0
+                      ? `VH: ${(activeFunda.marketCapBasic / 1e12).toFixed(1)} nghìn tỷ`
+                      : activeFunda.eps != null
+                        ? `EPS: ${Math.round(activeFunda.eps).toLocaleString('en-US')}`
+                        : ''}
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       ) : rightTab === 'alerts' ? (

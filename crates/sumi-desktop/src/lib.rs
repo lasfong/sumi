@@ -66,6 +66,8 @@ pub fn run() {
             commands::market::sync_vn_universe_catalog,
             commands::market::sync_universe_eod,
             commands::market::get_corporate_events,
+            commands::market::get_symbol_fundamentals,
+            commands::market::get_compare_series,
             // Cross-Device Workspace Sync v1 (Mac <-> Windows PC, .sumi.json + Folder Merge + Doraemi Status)
             commands::sync::sync_get_status,
             commands::sync::sync_export_bundle,
@@ -143,9 +145,12 @@ pub fn run() {
             commands::analytics::compute_dom_ladder_cmd,
             commands::analytics::broker_get_journal_analytics,
             commands::analytics::compute_replay_debrief_cmd,
-            // Stock Screener (101 Signals)
+            // Stock Screener (123 Signals + MTF 1W/1D/1H + Fundamentals + Saved Screens)
             commands::scanner::get_signal_catalog,
             commands::scanner::run_stock_screener,
+            commands::scanner::list_saved_screens,
+            commands::scanner::save_screen,
+            commands::scanner::delete_screen,
             // AFC — Analog Forecast Cone (Dual-Horizon PIT Probability Fan)
             commands::analog_cone::compute_analog_cone,
             // Yumeko v3.0 Read-Only Top-Down Bridge & KT01 Evidence Exporter (Wave 2)

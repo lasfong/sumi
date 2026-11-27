@@ -9,6 +9,7 @@ import type {
   BrokerStateSnapshot,
   CafeFImportSummary,
   ChecklistState,
+  CompareSeriesResponse,
   CorporateEventMarker,
   DataStatusResponse,
   DomLadderSnapshot,
@@ -37,6 +38,7 @@ import type {
   SavedIndicatorSpec,
   SavedLayoutRecord,
   SavedReplaySessionRecord,
+  SavedScreenRecord,
   SessionDebriefReport,
   SignalCatalogItemDto,
   StockScreenerInput,
@@ -44,6 +46,7 @@ import type {
   StrategyBacktestInput,
   StrategyBacktestResponse,
   SubmitPaperOrderInput,
+  SymbolFundamentalsResponse,
   SymbolSearchResult,
   SyncProgressPayload,
   SyncStatusDto,
@@ -972,4 +975,62 @@ export async function runStrategyPresetsBattle(
     input,
     rankingMetric,
   })
+}
+
+// ─── Wave 4: Fundamentals (DN01/TV), Multi-Symbol Compare & Saved Screens ───
+
+export async function getSymbolFundamentals(
+  ticker: string,
+  asOf?: string | null,
+): Promise<SymbolFundamentalsResponse> {
+  if (!isTauriRuntime()) return webFallbackApi.getSymbolFundamentals(ticker)
+  return invoke<SymbolFundamentalsResponse>('get_symbol_fundamentals', {
+    ticker,
+    asOf: asOf ?? null,
+  })
+}
+
+export async function getCompareSeries(params: {
+  baseTicker: string
+  compareTickers: string[]
+  interval: IntervalKey
+  limit?: number
+  asOfDate?: string | null
+}): Promise<CompareSeriesResponse> {
+  if (!isTauriRuntime()) {
+    return webFallbackApi.getCompareSeries(params.baseTicker, params.compareTickers, params.interval)
+  }
+  return invoke<CompareSeriesResponse>('get_compare_series', {
+    baseTicker: params.baseTicker,
+    compareTickers: params.compareTickers,
+    interval: params.interval,
+    limit: params.limit ?? 400,
+    asOfDate: params.asOfDate ?? null,
+  })
+}
+
+export async function listSavedScreens(): Promise<SavedScreenRecord[]> {
+  if (!isTauriRuntime()) return webFallbackApi.listSavedScreens()
+  return invoke<SavedScreenRecord[]>('list_saved_screens')
+}
+
+export async function saveScreen(
+  name: string,
+  filterJson: Record<string, unknown>,
+  id?: string | null,
+): Promise<SavedScreenRecord> {
+  if (!isTauriRuntime()) return webFallbackApi.saveScreen(name, filterJson, id ?? undefined)
+  return invoke<SavedScreenRecord>('save_screen', {
+    id: id ?? null,
+    name,
+    filterJson,
+  })
+}
+
+export async function deleteScreen(id: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    webFallbackApi.deleteScreen(id)
+    return
+  }
+  await invoke<void>('delete_screen', { id })
 }

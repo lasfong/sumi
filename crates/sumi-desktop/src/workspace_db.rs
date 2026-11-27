@@ -10,7 +10,7 @@ use sumi_core::scanner::qmv_universe::{
 
 use crate::error::{DesktopError, DesktopResult};
 
-const WORKSPACE_SCHEMA_VERSION: i32 = 5;
+const WORKSPACE_SCHEMA_VERSION: i32 = 6;
 const QMV_WORKSTATION_MIGRATION_KEY: &str = "qmv_workstation_v1_migrated";
 
 fn qmv_prefixed_ticker(symbol: &str) -> String {
@@ -60,6 +60,15 @@ pub struct SavedIndicatorSpec {
     pub calc_params: Vec<f64>,
     pub visible: bool,
     pub styles: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedScreenRecord {
+    pub id: String,
+    pub name: String,
+    pub filter_json: Value,
+    pub updated_at_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -359,6 +368,13 @@ impl WorkspaceStore {
                 delivered_channels TEXT NOT NULL DEFAULT 'in_app'
             );
             CREATE INDEX IF NOT EXISTS idx_alert_log_ts ON alert_trigger_log(triggered_at_ms DESC);
+
+            CREATE TABLE IF NOT EXISTS saved_screens (
+                id            TEXT PRIMARY KEY,
+                name          TEXT NOT NULL,
+                filter_json   TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            );
             "#,
         )?;
 
@@ -2140,6 +2156,85 @@ impl WorkspaceStore {
         )?;
         Ok(())
     }
+
+    pub fn list_saved_screens(&self) -> DesktopResult<Vec<SavedScreenRecord>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, filter_json, updated_at_ms FROM saved_screens ORDER BY updated_at_ms DESC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                let raw: String = r.get(2)?;
+                Ok(SavedScreenRecord {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    filter_json: serde_json::from_str(&raw).unwrap_or(Value::Null),
+                    updated_at_ms: r.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn save_screen(
+        &self,
+        id: &str,
+        name: &str,
+        filter_json: &Value,
+    ) -> DesktopResult<SavedScreenRecord> {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let rec = SavedScreenRecord {
+            id: id.trim().to_owned(),
+            name: name.trim().to_owned(),
+            filter_json: filter_json.clone(),
+            updated_at_ms: now_ms,
+        };
+        self.save_screen_with_ts(&rec)?;
+        Ok(rec)
+    }
+
+    pub fn save_screen_with_ts(&self, rec: &SavedScreenRecord) -> DesktopResult<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let raw = serde_json::to_string(&rec.filter_json)?;
+        conn.execute(
+            r#"
+            INSERT INTO saved_screens (id, name, filter_json, updated_at_ms)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                filter_json = excluded.filter_json,
+                updated_at_ms = excluded.updated_at_ms
+            WHERE excluded.updated_at_ms >= saved_screens.updated_at_ms
+            "#,
+            params![&rec.id, &rec.name, raw, rec.updated_at_ms],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_screen(&self, id: &str) -> DesktopResult<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        conn.execute("DELETE FROM saved_screens WHERE id = ?1", params![id])?;
+        conn.execute(
+            r#"
+            INSERT INTO sync_tombstones (entity_kind, entity_key, deleted_at_ms)
+            VALUES ('saved_screen', ?1, ?2)
+            ON CONFLICT(entity_kind, entity_key) DO UPDATE SET
+                deleted_at_ms = MAX(deleted_at_ms, excluded.deleted_at_ms)
+            "#,
+            params![id, now_ms],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -2260,5 +2355,21 @@ mod tests {
         assert!(store.get_replay_session("rep_1").unwrap().is_some());
         store.delete_replay_session("rep_1").unwrap();
         assert!(store.list_replay_sessions().unwrap().is_empty());
+
+        // Saved Screener Presets (v6, Wave 4) roundtrip + tombstone
+        let scr = store
+            .save_screen("scr_1", "QMV30 Breakout", &json!({"exchangeFilter": "QMV30", "maxPe": 15}))
+            .unwrap();
+        assert_eq!(scr.name, "QMV30 Breakout");
+        assert_eq!(store.list_saved_screens().unwrap().len(), 1);
+        store.delete_screen("scr_1").unwrap();
+        assert!(store.list_saved_screens().unwrap().is_empty());
+        assert!(
+            store
+                .list_tombstones()
+                .unwrap()
+                .iter()
+                .any(|t| t.entity_kind == "saved_screen" && t.entity_key == "scr_1")
+        );
     }
 }

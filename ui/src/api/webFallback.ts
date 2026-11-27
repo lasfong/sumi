@@ -1586,4 +1586,73 @@ export const webFallbackApi = {
       ],
     }
   },
+
+  getSymbolFundamentals(ticker: string) {
+    const clean = ticker.trim().toUpperCase()
+    const [ex, sym] = clean.includes(':') ? clean.split(':') : ['HOSE', clean]
+    return {
+      ticker: clean,
+      symbol: sym,
+      exchange: ex,
+      source: 'tradingview_cache',
+      sector: 'Công nghệ & Viễn thông',
+      industry: 'Phần mềm & Dịch vụ CNTT',
+      marketCapBasic: 185_000_000_000_000,
+      pe: 18.4,
+      pb: 4.8,
+      ps: 2.9,
+      evEbitda: 12.6,
+      roe: 26.8,
+      roa: 12.1,
+      eps: 6_850,
+      bvps: 26_200,
+      debtToEquity: 0.72,
+      totalRevenue: 62_800_000_000_000,
+      totalSharesOutstanding: 1_470_000_000,
+      earningsReleaseDate: null,
+      businessDescription: `Dữ liệu mô phỏng cơ bản cho ${sym} (Web Preview)`,
+      quarterlyValuations: [
+        { period: '2026-Q3', contentDate: '2026-10-20', sourceFamily: 'mock', pe: 18.4, pb: 4.8, ps: 2.9, evEbitda: 12.6, eps: 6850, bvps: 26200, roe: 26.8, roa: 12.1, debtToEquity: 0.72 },
+        { period: '2026-Q2', contentDate: '2026-07-20', sourceFamily: 'mock', pe: 17.9, pb: 4.6, ps: 2.8, evEbitda: 12.2, eps: 6420, bvps: 25100, roe: 26.1, roa: 11.8, debtToEquity: 0.74 },
+        { period: '2026-Q1', contentDate: '2026-04-20', sourceFamily: 'mock', pe: 17.2, pb: 4.4, ps: 2.7, evEbitda: 11.9, eps: 6100, bvps: 24300, roe: 25.5, roa: 11.5, debtToEquity: 0.76 },
+        { period: '2025-Q4', contentDate: '2026-01-25', sourceFamily: 'mock', pe: 16.8, pb: 4.2, ps: 2.6, evEbitda: 11.5, eps: 5800, bvps: 23500, roe: 25.0, roa: 11.2, debtToEquity: 0.78 },
+        { period: '2025-Q3', contentDate: '2025-10-20', sourceFamily: 'mock', pe: 16.1, pb: 4.0, ps: 2.5, evEbitda: 11.1, eps: 5400, bvps: 22800, roe: 24.4, roa: 10.9, debtToEquity: 0.8 },
+      ],
+    }
+  },
+
+  getCompareSeries(baseTicker: string, compareTickers: string[], interval: IntervalKey) {
+    const baseBars = this.getBars(baseTicker, interval, 'init', null, 180).bars
+    return {
+      baseTicker,
+      series: compareTickers.map((cmp) => {
+        const cmpBars = this.getBars(cmp, interval, 'init', null, 180).bars
+        const anchor = cmpBars[0]?.close ?? 1
+        const pts = baseBars.map((b, i) => {
+          const cb = cmpBars[Math.min(i, cmpBars.length - 1)]
+          const pct = cb && anchor > 0 ? ((cb.close - anchor) / anchor) * 100 : 0
+          return { timestamp: b.timestamp, pct }
+        })
+        const sym = cmp.includes(':') ? cmp.split(':')[1] : cmp
+        return { ticker: cmp, symbol: sym, points: pts }
+      }),
+    }
+  },
+
+  listSavedScreens() {
+    return []
+  },
+
+  saveScreen(name: string, filterJson: Record<string, unknown>, id?: string) {
+    return {
+      id: id ?? `scr_${Date.now()}`,
+      name,
+      filterJson,
+      updatedAtMs: Date.now(),
+    }
+  },
+
+  deleteScreen(_id: string) {
+    // no-op in web preview
+  },
 }

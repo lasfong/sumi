@@ -1,12 +1,15 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use sumi_data::{
     Adjustment, BarQueryMode, BarsRequest, CafeFImportConfig, CafeFImportSummary, CafeFImporter,
-    CorporateEventMarker, DataSourceOrigin, Interval, LiveQuote, OhlcvBar, ResolvedSymbol,
-    SeriesKey, StoreStats, SymbolKey, SymbolSearchResult, VietnamPriceBand, VnFreshnessSummary,
-    latest_expected_vn_trading_session_ms, yumeko_data_dir,
+    CorporateEventMarker, DataSourceOrigin, Interval, LiveQuote, OhlcvBar, ParsedExpression,
+    ResolvedSymbol, SeriesKey, StoreStats, SymbolKey, SymbolSearchResult, VietnamPriceBand,
+    VnFreshnessSummary, compute_rebased_comparison_series, evaluate_expression_ohlcv,
+    is_synthetic_expression, latest_expected_vn_trading_session_ms, parse_expression,
+    yumeko_data_dir,
 };
+use sumi_yumeko_bridge::{ValuationQuarterDto, YumekoReadOnlyBridge};
 use tauri::State;
 use tauri::ipc::Channel;
 use tracing::{debug, warn};
@@ -347,7 +350,88 @@ pub(crate) fn synthesize_fallback_symbol(key: &SymbolKey) -> ResolvedSymbol {
         isin: String::new(),
         vn_price_band: None,
         exchange_venue: None,
+        sector: None,
+        industry: None,
+        market_cap_basic: None,
+        price_earnings_ttm: None,
+        last_annual_eps: None,
+        total_shares_outstanding: None,
+        total_revenue: None,
+        earnings_release_date: None,
+        founded: None,
+        business_description: None,
     }
+}
+
+pub(crate) fn synthesize_expression_symbol(parsed: &ParsedExpression) -> ResolvedSymbol {
+    let is_ratio = parsed.canonical.contains('/');
+    let precision = if is_ratio { 4 } else { 2 };
+    let pricescale = if is_ratio { 10_000 } else { 100 };
+    ResolvedSymbol {
+        ticker: parsed.canonical.clone(),
+        exchange: "EXPR".to_owned(),
+        listed_exchange: "EXPR".to_owned(),
+        symbol: parsed.canonical.clone(),
+        description: format!("Biểu đồ Công thức Tổng hợp: {}", parsed.canonical),
+        market_type: "spread".to_owned(),
+        currency: if is_ratio { "RATIO".to_owned() } else { "PTS".to_owned() },
+        timezone: "Asia/Ho_Chi_Minh".to_owned(),
+        session: "0900-1500".to_owned(),
+        price_precision: precision,
+        volume_precision: 0,
+        pricescale,
+        minmov: 1,
+        minmove2: 0,
+        tick_size: Some(1.0 / (pricescale as f64)),
+        variable_tick_size: String::new(),
+        variable_tick_table: None,
+        point_value: 1.0,
+        delay_secs: 0,
+        isin: String::new(),
+        vn_price_band: None,
+        exchange_venue: None,
+        sector: None,
+        industry: None,
+        market_cap_basic: None,
+        price_earnings_ttm: None,
+        last_annual_eps: None,
+        total_shares_outstanding: None,
+        total_revenue: None,
+        earnings_release_date: None,
+        founded: None,
+        business_description: None,
+    }
+}
+
+async fn load_expression_bars(
+    state: &AppState,
+    parsed: &ParsedExpression,
+    iv: Interval,
+    adj: Adjustment,
+    limit: usize,
+    cutoff_ms: Option<i64>,
+) -> DesktopResult<Vec<OhlcvBar>> {
+    let svc = state.active_market_service();
+    let fetch_limit = limit.clamp(200, 3_000);
+    let mut series_map: HashMap<SymbolKey, Vec<OhlcvBar>> = HashMap::new();
+    for sym in &parsed.symbols {
+        let sk = SeriesKey::new(sym, iv, adj);
+        let req = BarsRequest::init(sk, fetch_limit);
+        let mut bars = match svc.get_bars_instant(&req).await {
+            Ok(p) if !p.bars.is_empty() => p.bars,
+            _ if !state.is_offline() => svc
+                .get_bars(&req)
+                .await
+                .map(|p| p.bars)
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        if let Some(cut) = cutoff_ms {
+            bars.retain(|b| b.timestamp <= cut);
+        }
+        series_map.insert(sym.clone(), bars);
+    }
+    Ok(evaluate_expression_ohlcv(parsed, &series_map))
 }
 
 fn matches_category(item: &SymbolSearchResult, category: Option<&str>) -> bool {
@@ -480,6 +564,34 @@ pub async fn resolve_symbol(
     state: State<'_, AppState>,
     ticker: String,
 ) -> DesktopResult<ResolvedSymbolResponse> {
+    if is_synthetic_expression(&ticker) {
+        let parsed = parse_expression(&ticker)?;
+        let resolved = synthesize_expression_symbol(&parsed);
+        let bars = load_expression_bars(&state, &parsed, Interval::D1, Adjustment::Splits, 60, None).await?;
+        let (last_price, prev_close, change, change_percent, volume) = match bars.as_slice() {
+            [.., prev, last] => {
+                let chg = last.close - prev.close;
+                let pct = if prev.close.abs() > 1e-9 {
+                    (chg / prev.close) * 100.0
+                } else {
+                    0.0
+                };
+                (Some(last.close), Some(prev.close), Some(chg), Some(pct), Some(last.volume))
+            }
+            [only] => (Some(only.close), Some(only.open), Some(only.close - only.open), Some(0.0), Some(only.volume)),
+            [] => (None, None, None, None, None),
+        };
+        return Ok(ResolvedSymbolResponse {
+            symbol_info: resolved,
+            last_price,
+            prev_close,
+            change,
+            change_percent,
+            volume,
+            vn_band: None,
+        });
+    }
+
     let key = SymbolKey::parse(&ticker)?;
     let svc = state.active_market_service();
     let resolved = match svc.resolve_symbol(&key).await {
@@ -549,7 +661,6 @@ pub async fn get_bars(
     adjustment: Option<String>,
     as_of_date: Option<String>,
 ) -> DesktopResult<BarsPageResponse> {
-    let sym = SymbolKey::parse(&ticker)?;
     let iv: Interval = interval.parse()?;
     let adj: Adjustment = adjustment
         .as_deref()
@@ -557,6 +668,76 @@ pub async fn get_bars(
         .transpose()?
         .unwrap_or(Adjustment::Splits);
     let page_limit = limit.unwrap_or(300).clamp(1, 5_000);
+
+    // Synthetic arithmetic ratio/spread expressions (`HOSE:SSI / HOSE:VNINDEX`, `HNX:VN30F1! - HOSE:VN30`, etc.)
+    if is_synthetic_expression(&ticker) {
+        let parsed = parse_expression(&ticker)?;
+        let pit_cut_ms = as_of_date
+            .as_deref()
+            .map(str::trim)
+            .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+            .and_then(|d| d.and_hms_opt(23, 59, 59))
+            .map(|dt| dt.and_utc().timestamp_millis());
+        let replay_cut_ms = {
+            let guard = state.replay.lock().await;
+            guard
+                .as_ref()
+                .filter(|rt| rt.controller.is_active())
+                .and_then(|rt| rt.controller.cutoff_timestamp(&rt.base_candles))
+                .map(|ts| ts.saturating_mul(1_000))
+        };
+        let eff_cut = match (pit_cut_ms, replay_cut_ms) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let all_bars =
+            load_expression_bars(&state, &parsed, iv, adj, page_limit.max(800), eff_cut).await?;
+        let mode_lower = mode.to_ascii_lowercase();
+        let bars: Vec<OhlcvBar> = match mode_lower.as_str() {
+            "forward" => {
+                let before = timestamp.unwrap_or(i64::MAX);
+                let older: Vec<OhlcvBar> = all_bars
+                    .iter()
+                    .copied()
+                    .filter(|b| b.timestamp < before)
+                    .collect();
+                let start = older.len().saturating_sub(page_limit);
+                older[start..].to_vec()
+            }
+            "backward" => {
+                let after = timestamp.unwrap_or(i64::MIN);
+                all_bars
+                    .iter()
+                    .copied()
+                    .filter(|b| b.timestamp > after)
+                    .take(page_limit)
+                    .collect()
+            }
+            _ => {
+                let start = all_bars.len().saturating_sub(page_limit);
+                all_bars[start..].to_vec()
+            }
+        };
+        let has_older = bars
+            .first()
+            .and_then(|first| all_bars.first().map(|v| first.timestamp > v.timestamp))
+            .unwrap_or(false);
+        let has_newer = bars
+            .last()
+            .and_then(|last| all_bars.last().map(|v| last.timestamp < v.timestamp))
+            .unwrap_or(false);
+        return Ok(BarsPageResponse {
+            bars,
+            has_older,
+            has_newer,
+            source: DataSourceOrigin::CacheHit,
+            symbol_info: Some(synthesize_expression_symbol(&parsed)),
+            vn_band: None,
+            replay_active: replay_cut_ms.is_some(),
+        });
+    }
+
+    let sym = SymbolKey::parse(&ticker)?;
 
     // Causal Multi-Timeframe Bar Replay guard (`DEF-001`, `BUG-040`):
     // If Replay is active on this ticker (on ANY timeframe!), materialize causally up to cutoff
@@ -801,7 +982,7 @@ pub async fn subscribe_bars(
         stream.forwarder.abort();
     }
 
-    if state.is_offline() {
+    if state.is_offline() || is_synthetic_expression(&ticker) {
         return Ok(false);
     }
 
@@ -1409,16 +1590,352 @@ pub async fn sync_universe_eod(
     Ok(final_payload)
 }
 
-/// Returns auto-detected corporate action event markers (`D` Dividend, `S` Split/Bonus) for `ticker`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SymbolFundamentalsResponse {
+    pub ticker: String,
+    pub symbol: String,
+    pub exchange: String,
+    pub source: String,
+    pub sector: Option<String>,
+    pub industry: Option<String>,
+    pub market_cap_basic: Option<f64>,
+    pub pe: Option<f64>,
+    pub pb: Option<f64>,
+    pub ps: Option<f64>,
+    pub ev_ebitda: Option<f64>,
+    pub roe: Option<f64>,
+    pub roa: Option<f64>,
+    pub eps: Option<f64>,
+    pub bvps: Option<f64>,
+    pub debt_to_equity: Option<f64>,
+    pub total_revenue: Option<f64>,
+    pub total_shares_outstanding: Option<f64>,
+    pub earnings_release_date: Option<i64>,
+    pub business_description: Option<String>,
+    pub quarterly_valuations: Vec<ValuationQuarterDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComparePointDto {
+    pub timestamp: i64,
+    pub pct: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompareSeriesItemDto {
+    pub ticker: String,
+    pub symbol: String,
+    pub points: Vec<ComparePointDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompareSeriesResponse {
+    pub base_ticker: String,
+    pub series: Vec<CompareSeriesItemDto>,
+}
+
+/// Returns auto-detected corporate action & earnings markers (`D` Dividend, `S` Split/Bonus, `E` Earnings/BCTC).
 #[tauri::command]
 pub async fn get_corporate_events(
     state: State<'_, AppState>,
     ticker: String,
 ) -> DesktopResult<Vec<CorporateEventMarker>> {
+    if is_synthetic_expression(&ticker) {
+        return Ok(Vec::new());
+    }
     let sym = SymbolKey::parse(&ticker)?;
     let store = state.market_store.clone();
-    tokio::task::spawn_blocking(move || store.compute_corporate_events(&sym))
-        .await
-        .map_err(|e| DesktopError::Internal(e.to_string()))?
-        .map_err(DesktopError::from)
+    tokio::task::spawn_blocking(move || {
+        let mut events = store.compute_corporate_events(&sym)?;
+        let mut seen_e_dates: HashSet<String> = HashSet::new();
+
+        // Merge `E` (Earnings / BCTC) markers from read-only Yumeko DN01 snapshots
+        let bridge = YumekoReadOnlyBridge::discover_default();
+        if let Ok(ctx) = bridge.load_topdown_context(&sym.ticker(), None) {
+            for q in ctx.dn01_valuations {
+                let Some(date_str) = q.content_date.as_deref().map(str::trim).filter(|s| s.len() >= 10) else {
+                    continue;
+                };
+                let iso = &date_str[..10];
+                if !seen_e_dates.insert(iso.to_owned()) {
+                    continue;
+                }
+                if let Ok(d) = chrono::NaiveDate::parse_from_str(iso, "%Y-%m-%d")
+                    && let Some(dt) = d.and_hms_opt(0, 0, 0)
+                {
+                    let eps_str = q.eps.map(|v| format!("EPS {v:.0}")).unwrap_or_default();
+                    let pe_str = q.pe.map(|v| format!("P/E {v:.1}x")).unwrap_or_default();
+                    let detail = format!("BCTC {} ({}) — {} {}", q.period, iso, eps_str, pe_str)
+                        .trim()
+                        .to_owned();
+                    events.push(CorporateEventMarker {
+                        timestamp_ms: dt.and_utc().timestamp_millis(),
+                        date: iso.to_owned(),
+                        kind: "E".to_owned(),
+                        label: format!("BCTC {}", q.period),
+                        factor: q.eps,
+                        detail,
+                    });
+                }
+            }
+        }
+
+        // Fallback/supplement: TradingView cached `earnings_release_date`
+        if let Ok(Some(snap)) = store.get_fundamental_snapshot(&sym)
+            && let Some(ts_sec) = snap.earnings_release_date
+            && ts_sec > 0
+        {
+            let ts_ms = if ts_sec > 10_000_000_000 {
+                ts_sec
+            } else {
+                ts_sec.saturating_mul(1_000)
+            };
+            let iso = sumi_data::format_ymd_utc(ts_ms);
+            if seen_e_dates.insert(iso.clone()) {
+                events.push(CorporateEventMarker {
+                    timestamp_ms: ts_ms,
+                    date: iso.clone(),
+                    kind: "E".to_owned(),
+                    label: "Kỳ BCTC".to_owned(),
+                    factor: snap.eps,
+                    detail: format!("Ngày công bố KQKD dự kiến/gần nhất: {iso}"),
+                });
+            }
+        }
+
+        events.sort_by_key(|e| e.timestamp_ms);
+        Ok(events)
+    })
+    .await
+    .map_err(|e| DesktopError::Internal(e.to_string()))?
+}
+
+/// Returns unified fundamental metrics & 8-quarter DN01 time series for `ticker`:
+/// Priority 1: Read-only Yumeko DN01 (`symbol_valuation_snapshots`),
+/// Priority 2: Local `sumi_market.db` `fundamentals` / `ResolvedSymbol` cache.
+#[tauri::command]
+pub async fn get_symbol_fundamentals(
+    state: State<'_, AppState>,
+    ticker: String,
+    as_of: Option<String>,
+) -> DesktopResult<SymbolFundamentalsResponse> {
+    if is_synthetic_expression(&ticker) {
+        return Ok(SymbolFundamentalsResponse {
+            ticker: ticker.clone(),
+            symbol: ticker,
+            exchange: "EXPR".to_owned(),
+            source: "none".to_owned(),
+            sector: None,
+            industry: None,
+            market_cap_basic: None,
+            pe: None,
+            pb: None,
+            ps: None,
+            ev_ebitda: None,
+            roe: None,
+            roa: None,
+            eps: None,
+            bvps: None,
+            debt_to_equity: None,
+            total_revenue: None,
+            total_shares_outstanding: None,
+            earnings_release_date: None,
+            business_description: None,
+            quarterly_valuations: Vec::new(),
+        });
+    }
+    let sym = SymbolKey::parse(&ticker)?;
+    let store = state.market_store.clone();
+    tokio::task::spawn_blocking(move || {
+        let local_snap = store.get_fundamental_snapshot(&sym).ok().flatten();
+        let sym_cached = store.get_symbol(&sym).ok().flatten().map(|(s, _)| s);
+        let qmv_prof = sumi_core::scanner::lookup_qmv_profile(&sym.symbol);
+
+        let bridge = YumekoReadOnlyBridge::discover_default();
+        let ctx_opt = bridge.load_topdown_context(&sym.ticker(), as_of.as_deref()).ok();
+        let valuations = ctx_opt
+            .as_ref()
+            .map(|c| c.dn01_valuations.clone())
+            .unwrap_or_default();
+        let latest_q = valuations.first();
+
+        let source = if latest_q.is_some() {
+            "yumeko_dn01".to_owned()
+        } else if local_snap.is_some() {
+            "tradingview_cache".to_owned()
+        } else {
+            "none".to_owned()
+        };
+
+        let sector = local_snap
+            .as_ref()
+            .and_then(|s| s.sector.clone())
+            .or_else(|| sym_cached.as_ref().and_then(|s| s.sector.clone()))
+            .or_else(|| qmv_prof.map(|p| p.sector.label_vi().to_owned()));
+        let industry = local_snap
+            .as_ref()
+            .and_then(|s| s.industry.clone())
+            .or_else(|| sym_cached.as_ref().and_then(|s| s.industry.clone()));
+        let market_cap_basic = local_snap
+            .as_ref()
+            .and_then(|s| s.market_cap_basic)
+            .or_else(|| sym_cached.as_ref().and_then(|s| s.market_cap_basic));
+        let pe = latest_q
+            .and_then(|q| q.pe)
+            .or_else(|| local_snap.as_ref().and_then(|s| s.pe_ttm))
+            .or_else(|| sym_cached.as_ref().and_then(|s| s.price_earnings_ttm));
+        let pb = latest_q
+            .and_then(|q| q.pb)
+            .or_else(|| local_snap.as_ref().and_then(|s| s.pb));
+        let roe = latest_q
+            .and_then(|q| q.roe)
+            .or_else(|| local_snap.as_ref().and_then(|s| s.roe));
+        let eps = latest_q
+            .and_then(|q| q.eps)
+            .or_else(|| local_snap.as_ref().and_then(|s| s.eps))
+            .or_else(|| sym_cached.as_ref().and_then(|s| s.last_annual_eps));
+
+        Ok(SymbolFundamentalsResponse {
+            ticker: sym.ticker(),
+            symbol: sym.symbol.clone(),
+            exchange: sym.exchange.clone(),
+            source,
+            sector,
+            industry,
+            market_cap_basic,
+            pe,
+            pb,
+            ps: latest_q.and_then(|q| q.ps),
+            ev_ebitda: latest_q.and_then(|q| q.ev_ebitda),
+            roe,
+            roa: latest_q.and_then(|q| q.roa),
+            eps,
+            bvps: latest_q.and_then(|q| q.bvps),
+            debt_to_equity: latest_q.and_then(|q| q.debt_to_equity),
+            total_revenue: local_snap
+                .as_ref()
+                .and_then(|s| s.total_revenue)
+                .or_else(|| sym_cached.as_ref().and_then(|s| s.total_revenue)),
+            total_shares_outstanding: local_snap
+                .as_ref()
+                .and_then(|s| s.total_shares_outstanding)
+                .or_else(|| sym_cached.as_ref().and_then(|s| s.total_shares_outstanding)),
+            earnings_release_date: local_snap
+                .as_ref()
+                .and_then(|s| s.earnings_release_date)
+                .or_else(|| sym_cached.as_ref().and_then(|s| s.earnings_release_date)),
+            business_description: local_snap
+                .as_ref()
+                .and_then(|s| s.business_description.clone())
+                .or_else(|| sym_cached.as_ref().and_then(|s| s.business_description.clone())),
+            quarterly_valuations: valuations,
+        })
+    })
+    .await
+    .map_err(|e| DesktopError::Internal(e.to_string()))?
+}
+
+/// Computes strictly causal `0.00%`-rebased multi-symbol comparison curves aligned to `base_ticker`
+/// (supports plain symbols, indices, and synthetic expressions; honors active Replay & PIT `as_of_date`).
+#[tauri::command]
+pub async fn get_compare_series(
+    state: State<'_, AppState>,
+    base_ticker: String,
+    compare_tickers: Vec<String>,
+    interval: String,
+    limit: Option<usize>,
+    as_of_date: Option<String>,
+) -> DesktopResult<CompareSeriesResponse> {
+    let iv: Interval = interval.parse()?;
+    let adj = Adjustment::Splits;
+    let bar_limit = limit.unwrap_or(400).clamp(30, 3_000);
+
+    let pit_cut_ms = as_of_date
+        .as_deref()
+        .map(str::trim)
+        .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+        .and_then(|d| d.and_hms_opt(23, 59, 59))
+        .map(|dt| dt.and_utc().timestamp_millis());
+    let replay_cut_ms = {
+        let guard = state.replay.lock().await;
+        guard
+            .as_ref()
+            .filter(|rt| rt.controller.is_active())
+            .and_then(|rt| rt.controller.cutoff_timestamp(&rt.base_candles))
+            .map(|ts| ts.saturating_mul(1_000))
+    };
+    let eff_cut = match (pit_cut_ms, replay_cut_ms) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+
+    let load_one = |raw: String| {
+        let svc = state.active_market_service();
+        let offline = state.is_offline();
+        async move {
+            if is_synthetic_expression(&raw) {
+                let Ok(parsed) = parse_expression(&raw) else {
+                    return Vec::new();
+                };
+                let mut map = HashMap::new();
+                for s in &parsed.symbols {
+                    let req = BarsRequest::init(SeriesKey::new(s, iv, adj), bar_limit);
+                    let mut bars = match svc.get_bars_instant(&req).await {
+                        Ok(p) if !p.bars.is_empty() => p.bars,
+                        _ if !offline => svc.get_bars(&req).await.map(|p| p.bars).unwrap_or_default(),
+                        _ => Vec::new(),
+                    };
+                    if let Some(cut) = eff_cut {
+                        bars.retain(|b| b.timestamp <= cut);
+                    }
+                    map.insert(s.clone(), bars);
+                }
+                return evaluate_expression_ohlcv(&parsed, &map);
+            }
+            let Ok(sk) = SymbolKey::parse(&raw) else {
+                return Vec::new();
+            };
+            let req = BarsRequest::init(SeriesKey::new(&sk, iv, adj), bar_limit);
+            let mut bars = match svc.get_bars_instant(&req).await {
+                Ok(p) if !p.bars.is_empty() => p.bars,
+                _ if !offline => svc.get_bars(&req).await.map(|p| p.bars).unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            if let Some(cut) = eff_cut {
+                bars.retain(|b| b.timestamp <= cut);
+            }
+            bars
+        }
+    };
+
+    let base_bars = load_one(base_ticker.clone()).await;
+    let mut series = Vec::new();
+    for raw_cmp in compare_tickers.into_iter().take(6) {
+        let trimmed = raw_cmp.trim().to_owned();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let cmp_bars = load_one(trimmed.clone()).await;
+        let pts: Vec<ComparePointDto> = compute_rebased_comparison_series(&base_bars, &cmp_bars)
+            .into_iter()
+            .map(|(timestamp, pct)| ComparePointDto { timestamp, pct })
+            .collect();
+        let sym_label = SymbolKey::parse(&trimmed)
+            .map(|k| k.symbol)
+            .unwrap_or_else(|_| trimmed.clone());
+        series.push(CompareSeriesItemDto {
+            ticker: trimmed,
+            symbol: sym_label,
+            points: pts,
+        });
+    }
+
+    Ok(CompareSeriesResponse {
+        base_ticker,
+        series,
+    })
 }

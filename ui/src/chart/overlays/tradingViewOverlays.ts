@@ -600,9 +600,11 @@ export const corporateEventMarker: OverlayTemplate<CorporateEventExtendData> = {
     if (coordinates.length === 0) return []
     const { x } = coordinates[0]
     const ext = overlay.extendData
-    const kind = ext?.kind ?? 'dividend'
-    const glyph = kind === 'split' ? 'S' : kind === 'earnings' ? 'E' : 'D'
-    const color = kind === 'split' ? '#AB47BC' : kind === 'earnings' ? '#2962FF' : '#089981'
+    const kind = (ext?.kind ?? 'D').toUpperCase()
+    const isSplit = kind === 'S' || kind === 'SPLIT'
+    const isEarnings = kind === 'E' || kind === 'EARNINGS'
+    const glyph = isSplit ? 'S' : isEarnings ? 'E' : 'D'
+    const color = isSplit ? '#AB47BC' : isEarnings ? '#2962FF' : '#089981'
     const y = Math.max(16, bounding.height - 16)
 
     return [

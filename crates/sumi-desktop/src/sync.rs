@@ -34,7 +34,7 @@ use crate::error::{DesktopError, DesktopResult};
 use crate::workspace_db::{
     IndicatorTemplateRecord, JournalAnnotationRecord, KvRecord, PaneIndicatorsRecord,
     PriceAlertRecord, SavedDrawingRecord, SavedLayoutRecord, SavedReplaySessionRecord,
-    SyncTombstoneRecord, WatchlistGroup, WorkspaceStore,
+    SavedScreenRecord, SyncTombstoneRecord, WatchlistGroup, WorkspaceStore,
 };
 
 pub const SUMI_WORKSPACE_BUNDLE_SCHEMA_V1: &str = "sumi_workspace_bundle_v1";
@@ -143,6 +143,8 @@ pub struct SumiWorkspacePayloadV1 {
     pub alerts: Vec<PriceAlertRecord>,
     pub journal_annotations: Vec<JournalAnnotationRecord>,
     pub replay_sessions: Vec<SavedReplaySessionRecord>,
+    #[serde(default)]
+    pub saved_screens: Vec<SavedScreenRecord>,
     pub tombstones: Vec<SyncTombstoneRecord>,
 }
 
@@ -178,6 +180,7 @@ impl SumiWorkspaceBundleV1 {
             alerts: store.list_alerts()?,
             journal_annotations: store.list_all_journal_annotations()?,
             replay_sessions: store.list_replay_sessions()?,
+            saved_screens: store.list_saved_screens()?,
             tombstones: store.list_tombstones()?,
         };
         let payload_val = serde_json::to_value(&payload)?;
@@ -226,6 +229,8 @@ pub struct WorkspaceMergeReport {
     pub merged_alerts: usize,
     pub merged_journal: usize,
     pub merged_replay_sessions: usize,
+    #[serde(default)]
+    pub merged_saved_screens: usize,
     pub applied_tombstones: usize,
 }
 
@@ -350,6 +355,13 @@ pub fn merge_bundle_into_store(
                     report.applied_tombstones += 1;
                 }
             }
+            "saved_screen" => {
+                let local = workspace.list_saved_screens()?;
+                if local.iter().any(|s| s.id == *key && s.updated_at_ms <= *del_ts) {
+                    workspace.delete_screen(key)?;
+                    report.applied_tombstones += 1;
+                }
+            }
             _ => {}
         }
     }
@@ -449,6 +461,15 @@ pub fn merge_bundle_into_store(
         }
         workspace.save_replay_session_with_ts(r)?;
         report.merged_replay_sessions += 1;
+    }
+
+    // 11. Merge Saved Screener Presets (Wave 4)
+    for sc in &bundle.payload.saved_screens {
+        if is_tombstoned("saved_screen", &sc.id, sc.updated_at_ms) {
+            continue;
+        }
+        workspace.save_screen_with_ts(sc)?;
+        report.merged_saved_screens += 1;
     }
 
     Ok(report)
