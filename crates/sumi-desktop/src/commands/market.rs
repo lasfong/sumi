@@ -538,6 +538,7 @@ pub async fn resolve_symbol(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn get_bars(
     state: State<'_, AppState>,
     ticker: String,
@@ -546,6 +547,7 @@ pub async fn get_bars(
     timestamp: Option<i64>,
     limit: Option<usize>,
     adjustment: Option<String>,
+    as_of_date: Option<String>,
 ) -> DesktopResult<BarsPageResponse> {
     let sym = SymbolKey::parse(&ticker)?;
     let iv: Interval = interval.parse()?;
@@ -639,7 +641,7 @@ pub async fn get_bars(
         limit: page_limit,
     };
 
-    let (page, needs_revalidation) = match svc.get_bars_stale_while_revalidate(&req).await {
+    let (mut page, needs_revalidation) = match svc.get_bars_stale_while_revalidate(&req).await {
         Ok(swr) => (swr.page, swr.needs_revalidation),
         Err(err) => {
             warn!(ticker = %sym, %interval, error = %err, "get_bars SWR failed; falling back to instant cache");
@@ -647,9 +649,74 @@ pub async fn get_bars(
         }
     };
 
-    // Non-blocking Stale-While-Revalidate: spawn background upstream refresh & push delta bars
-    // smoothly over `bar_updates_tx` so subscribed charts update without blocking symbol switches!
-    if needs_revalidation && !state.is_offline() {
+    // Decision #3 — OHLCV Priority & PIT Lock Mode (`dnse_real` + `sumi_market.db` long-history stitch):
+    // - When `as_of_date` is locked (Yumeko PIT mode) on `1D` (`splits`): prioritize verified `dnse_real`
+    //   bars from Yumeko (`kVND -> VND` via Scale Guard), stitching older `sumi_market.db` bars prior to
+    //   the DNSE window so MA200/AFC stay intact, and clip strictly `<= as_of_date`!
+    // - In normal mode (`as_of_date = None`), if `dnse_real` has fresher `1D` bars than local cache (or offline),
+    //   transparently append those fresher bars.
+    let pit_as_of = as_of_date
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| s.len() == 10 && chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok())
+        .map(ToOwned::to_owned);
+    if iv == Interval::D1 && adj == Adjustment::Splits && matches!(query_mode, BarQueryMode::Init) {
+        let ticker_clone = sym.ticker();
+        let pit_clone = pit_as_of.clone();
+        let dnse_opt = tokio::task::spawn_blocking(move || {
+            let bridge = sumi_yumeko_bridge::YumekoReadOnlyBridge::discover_default();
+            bridge
+                .load_dnse_ohlcv_series(&ticker_clone, pit_clone.as_deref())
+                .ok()
+                .flatten()
+        })
+        .await
+        .ok()
+        .flatten();
+
+        if let Some(dnse) = dnse_opt
+            && !dnse.sumi_bars.is_empty()
+        {
+            if pit_as_of.is_some() {
+                let first_dnse_ts = dnse.sumi_bars.first().unwrap().timestamp;
+                let mut stitched: Vec<OhlcvBar> = page
+                    .bars
+                    .into_iter()
+                    .filter(|b| b.timestamp < first_dnse_ts)
+                    .collect();
+                stitched.extend(dnse.sumi_bars);
+                let start = stitched.len().saturating_sub(page_limit);
+                page.bars = stitched[start..].to_vec();
+            } else if let Some(last_dnse) = dnse.sumi_bars.last()
+                && page
+                    .bars
+                    .last()
+                    .is_none_or(|b| last_dnse.timestamp > b.timestamp)
+            {
+                let last_local = page.bars.last().map_or(i64::MIN, |b| b.timestamp);
+                page.bars.extend(
+                    dnse.sumi_bars
+                        .into_iter()
+                        .filter(|b| b.timestamp > last_local),
+                );
+                let start = page.bars.len().saturating_sub(page_limit);
+                if start > 0 {
+                    page.bars.drain(..start);
+                }
+            }
+        }
+    }
+
+    if let Some(ref cut_str) = pit_as_of
+        && let Ok(cut_date) = chrono::NaiveDate::parse_from_str(cut_str, "%Y-%m-%d")
+        && let Some(cut_dt) = cut_date.and_hms_opt(23, 59, 59)
+    {
+        let cut_ms = cut_dt.and_utc().timestamp_millis();
+        page.bars.retain(|b| b.timestamp <= cut_ms);
+    }
+
+    // Non-blocking Stale-While-Revalidate: skip background live ticks while PIT `as_of_date` is locked!
+    if needs_revalidation && !state.is_offline() && pit_as_of.is_none() {
         let bg_svc = svc.clone();
         let bg_series = series.clone();
         let bg_tx = state.bar_updates_tx.clone();

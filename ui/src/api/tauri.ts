@@ -10,6 +10,8 @@ import type {
   DataStatusResponse,
   DoraemiTransportStatusDto,
   ExportBundleResponse,
+  ExportedVerdictListItem,
+  ExportedVerdictReceipt,
   IndicatorTemplateRecord,
   IntervalKey,
   LiveBarPayload,
@@ -18,7 +20,9 @@ import type {
   PortfolioBacktestInput,
   PortfolioBacktestResponse,
   PriceAlertRecord,
+  QmvRealChartSeriesDto,
   ReplaySnapshotResponse,
+  ResearchExportVerificationDto,
   ResolvedSymbolResponse,
   SavedDrawingRecord,
   SavedIndicatorSpec,
@@ -33,12 +37,14 @@ import type {
   SymbolSearchResult,
   SyncProgressPayload,
   SyncStatusDto,
+  TopDownSymbolContextDto,
   VnUniverseSyncSummary,
   WalkForwardResponse,
   WatchlistGroup,
   WatchlistQuoteSnapshot,
   WorkspaceBootstrapResponse,
   WorkspaceMergeReport,
+  YumekoBridgeStatus,
 } from '../types/market'
 import { webFallbackApi } from './webFallback'
 
@@ -69,6 +75,7 @@ export async function getBars(params: {
   timestamp?: number | null
   limit?: number
   adjustment?: string
+  asOfDate?: string | null
 }): Promise<BarsPageResponse> {
   if (!isTauriRuntime()) {
     return webFallbackApi.getBars(params.ticker, params.interval, params.mode, params.timestamp, params.limit)
@@ -80,6 +87,7 @@ export async function getBars(params: {
     timestamp: params.timestamp ?? null,
     limit: params.limit ?? 300,
     adjustment: params.adjustment ?? 'splits',
+    asOfDate: params.asOfDate ?? null,
   })
 }
 
@@ -731,4 +739,67 @@ export async function computeAnalogCone(
     useMarketContext: params.useMarketContext ?? null,
     asOfTimestampMs: params.asOfTimestampMs ?? null,
   })
+}
+
+// ─── Yumeko v3.0 Read-Only Top-Down Bridge & KT01 Evidence (Wave 2) ──────────
+
+export async function yumekoGetBridgeStatus(): Promise<YumekoBridgeStatus> {
+  if (!isTauriRuntime()) return webFallbackApi.yumekoGetBridgeStatus()
+  return invoke<YumekoBridgeStatus>('yumeko_get_bridge_status')
+}
+
+export async function yumekoGetTopdownContext(
+  ticker: string,
+  asOf?: string | null,
+): Promise<TopDownSymbolContextDto> {
+  if (!isTauriRuntime()) return webFallbackApi.yumekoGetTopdownContext(ticker, asOf ?? null)
+  return invoke<TopDownSymbolContextDto>('yumeko_get_topdown_context', {
+    ticker,
+    asOf: asOf ?? null,
+  })
+}
+
+export async function yumekoGetQmvSeries(
+  ticker: string,
+  asOf?: string | null,
+): Promise<QmvRealChartSeriesDto> {
+  if (!isTauriRuntime()) return webFallbackApi.yumekoGetQmvSeries(ticker, asOf ?? null)
+  return invoke<QmvRealChartSeriesDto>('yumeko_get_qmv_series', {
+    ticker,
+    asOf: asOf ?? null,
+  })
+}
+
+export async function yumekoExportKt01Verdict(
+  ticker: string,
+  asOf?: string | null,
+  copyToYumekoDropzone = true,
+): Promise<ExportedVerdictReceipt> {
+  if (!isTauriRuntime()) {
+    throw new Error('Xuất gói bằng chứng KT01 (SHA-256) yêu cầu Sumi Desktop runtime')
+  }
+  return invoke<ExportedVerdictReceipt>('yumeko_export_kt01_verdict', {
+    ticker,
+    asOf: asOf ?? null,
+    copyToYumekoDropzone,
+  })
+}
+
+export async function yumekoListExportedVerdicts(limit = 20): Promise<ExportedVerdictListItem[]> {
+  if (!isTauriRuntime()) return []
+  return invoke<ExportedVerdictListItem[]>('yumeko_list_exported_verdicts', { limit })
+}
+
+export async function yumekoVerifyResearchExport(dir: string): Promise<ResearchExportVerificationDto> {
+  if (!isTauriRuntime()) {
+    return {
+      exportDir: dir,
+      manifestFound: false,
+      verifiedFiles: 0,
+      failedFiles: ['Yêu cầu Sumi Desktop runtime'],
+      asOf: null,
+      valid: false,
+    }
+  }
+  return invoke<ResearchExportVerificationDto>('yumeko_verify_research_export', { dir })
 }

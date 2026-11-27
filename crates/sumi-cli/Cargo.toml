@@ -1,0 +1,26 @@
+[package]
+name = "sumi-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Headless QMV KT01 CLI and JSON-RPC 2.0 stdio MCP server (`sumi-mcp`) for Sumi Supercharts v3.0"
+
+[lib]
+name = "sumi_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sumi"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sumi-core = { path = "../sumi-core" }
+sumi-data = { path = "../sumi-data" }
+sumi-yumeko-bridge = { path = "../sumi-yumeko-bridge" }
+
+[dev-dependencies]
+tempfile = "3"

@@ -6,3 +6,4 @@ pub mod replay;
 pub mod scanner;
 pub mod sync;
 pub mod workspace;
+pub mod yumeko;

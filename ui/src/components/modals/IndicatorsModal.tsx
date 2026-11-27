@@ -3,7 +3,15 @@ import { ChevronDown, ChevronRight, Eye, EyeOff, Plus, Search, Settings, Sliders
 import { INDICATOR_CATALOG, findIndicatorMeta, type IndicatorCatalogEntry } from '../../chart/indicators/catalog'
 import { INDICATOR_COLOR_PALETTE, useWorkspaceStore } from '../../store/workspaceStore'
 
-const CATEGORIES = ['Tất cả', 'QMV Cốt lõi', 'Xu hướng', 'Dao động', 'Khối lượng', 'Biến động'] as const
+const CATEGORIES = [
+  'Tất cả',
+  'Yumeko QMV Thật',
+  'QMV Cốt lõi',
+  'Xu hướng',
+  'Dao động',
+  'Khối lượng',
+  'Biến động',
+] as const
 
 export const IndicatorsModal: React.FC = () => {
   const open = useWorkspaceStore((s) => s.indicatorsModalOpen)
@@ -82,6 +90,7 @@ export const IndicatorsModal: React.FC = () => {
     })
   }, [query, category])
 
+  const yumekoItems = useMemo(() => filteredCatalog.filter((i) => i.tier === 'yumeko'), [filteredCatalog])
   const coreItems = useMemo(() => filteredCatalog.filter((i) => i.tier === 'core'), [filteredCatalog])
   const auxItems = useMemo(() => filteredCatalog.filter((i) => i.tier === 'aux'), [filteredCatalog])
   const effectiveShowAux = showAux || query.trim().length > 0
@@ -128,6 +137,15 @@ export const IndicatorsModal: React.FC = () => {
           >
             {item.isMain ? 'Chính' : 'Phụ'} · {item.name}
           </span>
+          {item.tier === 'yumeko' && (
+            <span
+              className="text-[9.5px] px-1.5 py-0 rounded font-semibold"
+              style={{ backgroundColor: 'rgba(8, 153, 129, 0.16)', color: '#089981' }}
+              title="Đọc trực tiếp Chỉ Đọc từ Yumeko v3.0 SQLite (QMV Blackbox thật); tự động fallback OHLCV Proxy khi máy mới chưa có Yumeko DB"
+            >
+              ✓ Yumeko QMV Thật
+            </span>
+          )}
           {item.isOhlcvProxy && (
             <span
               className="text-[9.5px] px-1.5 py-0 rounded font-semibold"
@@ -176,7 +194,7 @@ export const IndicatorsModal: React.FC = () => {
       >
         <div>
           <h2 id="indicators-modal-title" className="m-0 text-[15px] font-semibold">
-            Bộ Chỉ Báo Kỹ Thuật Chuẩn QMV (11 Cốt lõi · 5 Phụ trợ)
+            Bộ Chỉ Báo Kỹ Thuật QMV (3 Yumeko Thật · 11 Cốt lõi · 5 Phụ trợ)
           </h2>
           <div className="text-[11px]" style={{ color: 'var(--tv-text-secondary)' }}>
             Đang áp dụng cho khung {activePane.ticker} ({activePane.interval}) — Tham số chuẩn QMV V7 & KT01
@@ -238,6 +256,15 @@ export const IndicatorsModal: React.FC = () => {
           className="overflow-y-auto tv-scroll p-2 space-y-1"
           style={{ borderRight: '1px solid var(--tv-border)' }}
         >
+          {yumekoItems.length > 0 && (
+            <div className="pb-1.5 mb-1 border-b" style={{ borderColor: 'var(--tv-border)' }}>
+              <div className="px-2.5 pt-1 pb-0.5 text-[10.5px] font-bold uppercase tracking-wider text-[#089981]">
+                Yumeko QMV Blackbox — Dữ liệu Thật ({yumekoItems.length})
+              </div>
+              {yumekoItems.map(renderCatalogRow)}
+            </div>
+          )}
+
           {coreItems.length > 0 && (
             <>
               <div className="px-2.5 pt-1 pb-0.5 text-[10.5px] font-bold uppercase tracking-wider text-[#2962FF]">

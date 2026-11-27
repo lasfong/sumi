@@ -3,6 +3,8 @@ resolver = "3"
 members = [
     "crates/sumi-core",
     "crates/sumi-data",
+    "crates/sumi-yumeko-bridge",
+    "crates/sumi-cli",
     "crates/sumi-desktop",
 ]
 

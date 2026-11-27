@@ -1,12 +1,13 @@
 #![warn(clippy::all, rust_2018_idioms)]
 
 pub mod commands;
+pub mod deeplink;
 pub mod error;
 pub mod state;
 pub mod sync;
 pub mod workspace_db;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 use crate::state::{AppState, resolve_database_paths};
 
@@ -16,15 +17,37 @@ use crate::state::{AppState, resolve_database_paths};
 /// Panics if the Tauri application fails to initialize or bind its native webview window.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let cli_args: Vec<String> = std::env::args().collect();
+    let initial_deeplink = deeplink::extract_deeplink_from_args(&cli_args);
+    if let Some(ref url) = initial_deeplink
+        && deeplink::try_forward_to_running_instance(url, None)
+    {
+        // Delivered to already-running Sumi instance cleanly; exit secondary process.
+        return;
+    }
+
     sumi_data::init_tracing("info");
 
     tauri::Builder::default()
-        .setup(|app| {
+        .setup(move |app| {
             let app_data_dir = app.path().app_data_dir().ok();
             let (market_db, workspace_db) = resolve_database_paths(app_data_dir);
             let app_state = AppState::initialize(market_db, workspace_db)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let data_dir_for_ipc = app_state.data_dir.clone();
             app.manage(app_state);
+
+            deeplink::start_single_instance_ipc_listener(app.handle().clone(), data_dir_for_ipc);
+
+            if let Some(ref raw_url) = initial_deeplink
+                && let Some(payload) = deeplink::parse_sumi_deeplink(raw_url)
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+                    let _ = handle.emit(deeplink::DEEPLINK_EVENT_NAME, &payload);
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -108,6 +131,13 @@ pub fn run() {
             commands::scanner::run_stock_screener,
             // AFC — Analog Forecast Cone (Dual-Horizon PIT Probability Fan)
             commands::analog_cone::compute_analog_cone,
+            // Yumeko v3.0 Read-Only Top-Down Bridge & KT01 Evidence Exporter (Wave 2)
+            commands::yumeko::yumeko_get_bridge_status,
+            commands::yumeko::yumeko_get_topdown_context,
+            commands::yumeko::yumeko_get_qmv_series,
+            commands::yumeko::yumeko_export_kt01_verdict,
+            commands::yumeko::yumeko_list_exported_verdicts,
+            commands::yumeko::yumeko_verify_research_export,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Sumi Supercharts Tauri application");

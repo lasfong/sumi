@@ -4066,6 +4066,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
+name = "sumi-cli"
+version = "3.0.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "sumi-core",
+ "sumi-data",
+ "sumi-yumeko-bridge",
+ "tempfile",
+]
+
+[[package]]
 name = "sumi-core"
 version = "3.0.0"
 dependencies = [
@@ -4112,8 +4125,10 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "sumi-cli",
  "sumi-core",
  "sumi-data",
+ "sumi-yumeko-bridge",
  "tauri",
  "tauri-build",
  "tempfile",
@@ -4123,6 +4138,23 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "sumi-yumeko-bridge"
+version = "3.0.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sumi-core",
+ "sumi-data",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
 ]
 
 [[package]]

@@ -1,9 +1,9 @@
 export interface IndicatorCatalogEntry {
   name: string
   titleVi: string
-  category: 'QMV Cốt lõi' | 'Xu hướng' | 'Dao động' | 'Khối lượng' | 'Biến động'
-  /** `'core'` = 10 chỉ báo chuẩn QMV hiện mặc định; `'aux'` = 5 chỉ báo định lượng phụ trợ (thu gọn). */
-  tier: 'core' | 'aux'
+  category: 'QMV Cốt lõi' | 'Yumeko QMV Thật' | 'Xu hướng' | 'Dao động' | 'Khối lượng' | 'Biến động'
+  /** `'core'` = 11 chỉ báo chuẩn QMV; `'aux'` = 5 chỉ báo phụ trợ; `'yumeko'` = 3 chỉ báo dữ liệu QMV Blackbox thật từ Yumeko. */
+  tier: 'core' | 'aux' | 'yumeko'
   isMain: boolean
   defaultParams: number[]
   paramLabels: string[]
@@ -11,6 +11,7 @@ export interface IndicatorCatalogEntry {
   lineLabels: string[]
   description: string
   isOhlcvProxy?: boolean
+  isYumekoReal?: boolean
 }
 
 export const INDICATOR_CATALOG: IndicatorCatalogEntry[] = [
@@ -193,6 +194,44 @@ export const INDICATOR_CATALOG: IndicatorCatalogEntry[] = [
     paramLabels: ['DI', 'ADX'],
     lineLabels: ['+DI (PDI)', '-DI (MDI)', 'ADX', 'ADXR'],
     description: 'Đo cường độ xu hướng ADX phân biệt nhịp có sóng mạnh hay đi ngang tích lũy',
+  },
+
+  // ─── 3 Chỉ Báo QMV Blackbox Thật từ Kho Yumeko (Read-Only, Wave 2) ──────
+  {
+    name: 'QMV_STOCK_BB',
+    titleVi: 'QMV Stock Blackbox Thật (TMC / TMA20 / TMA50 / DSPI)',
+    category: 'Yumeko QMV Thật',
+    tier: 'yumeko',
+    isMain: false,
+    defaultParams: [],
+    paramLabels: [],
+    lineLabels: ['TMC', 'TMA20', 'TMA50', 'DSPI'],
+    description: 'Đọc trực tiếp từ yumeko-app.sqlite (qmv_real) — tự gắn nhãn Fallback OHLCV Proxy nếu chưa có dữ liệu cho mã đang xem',
+    isYumekoReal: true,
+  },
+  {
+    name: 'QMV_ACTIVE_MONEY',
+    titleVi: 'Dòng Tiền Chủ Động Cáo – Sói – Thỏ (Yumeko QMV Thật)',
+    category: 'Yumeko QMV Thật',
+    tier: 'yumeko',
+    isMain: false,
+    defaultParams: [],
+    paramLabels: [],
+    lineLabels: ['Cáo (Shark)', 'Sói (Wolf)', 'Thỏ (Sheep)'],
+    description: 'Phân tách hành vi mua bán chủ động Cáo / Sói / Thỏ trực tiếp từ cụm dữ liệu hộp đen Yumeko QMV',
+    isYumekoReal: true,
+  },
+  {
+    name: 'QMV_FOREIGN_FLOW',
+    titleVi: 'Dòng Tiền Khối Ngoại Mua/Bán Ròng (Yumeko QMV Thật)',
+    category: 'Yumeko QMV Thật',
+    tier: 'yumeko',
+    isMain: false,
+    defaultParams: [],
+    paramLabels: [],
+    lineLabels: ['Giá trị mua/bán ròng khối ngoại'],
+    description: 'Giá trị mua/bán ròng của nhà đầu tư nước ngoài đọc chỉ đọc từ Yumeko QMV (symbol_foreign_flow_current)',
+    isYumekoReal: true,
   },
 ]
 

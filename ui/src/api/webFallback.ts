@@ -28,6 +28,9 @@ import type {
   WatchlistGroup,
   WatchlistQuoteSnapshot,
   WorkspaceBootstrapResponse,
+  QmvRealChartSeriesDto,
+  TopDownSymbolContextDto,
+  YumekoBridgeStatus,
 } from '../types/market'
 import { intervalToDurationMs } from '../chart/periods'
 
@@ -1299,6 +1302,66 @@ export const webFallbackApi = {
         fastCandidateCount: Math.min(candidates.length, 180),
         topAnalogs,
       },
+    }
+  },
+
+  yumekoGetBridgeStatus(): YumekoBridgeStatus {
+    return {
+      available: false,
+      sqlitePath: '~/.local/share/yumeko/yumeko-app.sqlite',
+      qmvSharedPath: null,
+      latestAsOfDates: [],
+      qmvTechnicalSymbols: 0,
+      qmvActiveMoneySymbols: 0,
+      qmvForeignFlowSymbols: 0,
+      valuationSymbols: 0,
+      dnseHistorySymbols: 0,
+      macroObservationsCount: 0,
+      portfolioSnapshotsCount: 0,
+      watchlistSymbolsCount: 0,
+      note: 'Chế độ xem trước web (Clean-Slate) — Sumi đang dùng OHLCV Proxy cục bộ.',
+    }
+  },
+
+  yumekoGetTopdownContext(ticker: string, asOf: string | null): TopDownSymbolContextDto {
+    const sym = ticker.includes(':') ? ticker.split(':')[1] : ticker
+    return {
+      symbol: sym.toUpperCase(),
+      requestedAsOf: asOf,
+      effectiveAsOf: asOf,
+      bridgeAvailable: false,
+      flowProvenance: 'local_proxy',
+      vm01Market: {
+        effectiveAsOf: asOf,
+        marketSentiment: null,
+        marketBbm05: null,
+        marketBbm20: null,
+        marketBbmz05: null,
+        marketBbmz20: null,
+        marketForeignNetValue: null,
+        topSectors: [],
+        macroHighlights: [],
+      },
+      hp01Blackbox: null,
+      dn01Valuations: [],
+      dm01RealHolding: null,
+      dm01YumekoWatchlist: null,
+      episodicTheses: [],
+      dnsePitAvailable: false,
+      gaps: ['Chưa kết nối Yumeko SQLite cục bộ — đang chạy chế độ độc lập (OHLCV Proxy).'],
+    }
+  },
+
+  yumekoGetQmvSeries(ticker: string, asOf: string | null): QmvRealChartSeriesDto {
+    const sym = ticker.includes(':') ? ticker.split(':')[1] : ticker
+    return {
+      symbol: sym.toUpperCase(),
+      asOf,
+      sourceProvenance: 'local_proxy',
+      isProviderProprietary: false,
+      stockBb: [],
+      activeMoney: [],
+      foreignFlow: [],
     }
   },
 }

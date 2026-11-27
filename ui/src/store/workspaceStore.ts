@@ -6,6 +6,9 @@ import type {
   ChartPaneConfig,
   ChartStyleKind,
   DataStatusResponse,
+  DeepLinkPayload,
+  ExportedVerdictListItem,
+  ExportedVerdictReceipt,
   GridLayoutKind,
   IndicatorTemplateRecord,
   IntervalKey,
@@ -13,6 +16,7 @@ import type {
   OhlcvBar,
   PriceAlertRecord,
   PriceScaleKind,
+  QmvRealChartSeriesDto,
   ReplaySnapshotResponse,
   SavedIndicatorSpec,
   SavedLayoutRecord,
@@ -20,10 +24,13 @@ import type {
   SyncProgressPayload,
   SyncStatusDto,
   ThemeMode,
+  TopDownSymbolContextDto,
   WatchlistGroup,
   WatchlistQuoteSnapshot,
+  YumekoBridgeStatus,
 } from '../types/market'
 import * as api from '../api/tauri'
+import { setQmvRealSeriesCache } from '../chart/indicators/qmvRealIndicators'
 import { notifyAlertTriggered } from '../utils/alertSound'
 import { snapPriceToVenueTick } from '../utils/vnMarket'
 
@@ -173,10 +180,22 @@ export interface WorkspaceState {
   // Panels layout
   rightPanelOpen: boolean
   rightPanelWidth: number
+  rightTab: 'watchlist' | 'alerts' | 'objects' | 'yumeko'
   bottomDockOpen: boolean
   bottomDockMaximized: boolean
   bottomDockHeight: number
   bottomDockTab: BottomDockTab
+
+  // Yumeko v3.0 Read-Only Top-Down Bridge & KT01 Evidence (Wave 2)
+  yumekoStatus: YumekoBridgeStatus | null
+  yumekoAsOf: string | null
+  yumekoContext: TopDownSymbolContextDto | null
+  yumekoQmvSeries: QmvRealChartSeriesDto | null
+  yumekoSeriesVersion: number
+  yumekoLoading: boolean
+  exportingKt01: boolean
+  exportedVerdicts: ExportedVerdictListItem[]
+  lastExportedReceipt: ExportedVerdictReceipt | null
 
   // Modals
   symbolSearchOpen: boolean
@@ -260,10 +279,19 @@ export interface WorkspaceState {
 
   setRightPanelOpen: (open: boolean) => void
   setRightPanelWidth: (width: number) => void
+  setRightTab: (tab: 'watchlist' | 'alerts' | 'objects' | 'yumeko') => void
   setBottomDockOpen: (open: boolean) => void
   setBottomDockMaximized: (max: boolean) => void
   setBottomDockHeight: (height: number) => void
   setBottomDockTab: (tab: BottomDockTab) => void
+
+  // Yumeko Top-Down Bridge & Deep-Link actions (Wave 2)
+  refreshYumekoStatus: () => Promise<void>
+  setYumekoAsOf: (asOf: string | null) => void
+  loadYumekoForActiveTicker: () => Promise<void>
+  exportActiveKt01Verdict: (copyToYumekoDropzone?: boolean) => Promise<ExportedVerdictReceipt | null>
+  refreshExportedVerdicts: () => Promise<void>
+  applyDeepLink: (payload: DeepLinkPayload) => void
 
   openSymbolSearch: (initialQuery?: string) => void
   closeSymbolSearch: () => void
@@ -418,10 +446,21 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   rightPanelOpen: true,
   rightPanelWidth: 288,
+  rightTab: 'watchlist',
   bottomDockOpen: true,
   bottomDockMaximized: false,
   bottomDockHeight: 276,
   bottomDockTab: 'paper',
+
+  yumekoStatus: null,
+  yumekoAsOf: null,
+  yumekoContext: null,
+  yumekoQmvSeries: null,
+  yumekoSeriesVersion: 0,
+  yumekoLoading: false,
+  exportingKt01: false,
+  exportedVerdicts: [],
+  lastExportedReceipt: null,
 
   symbolSearchOpen: false,
   symbolSearchInitialQuery: '',
@@ -565,7 +604,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         schedulePersistSettings(get())
       }
 
-      await Promise.all([get().refreshWatchlistQuotes(), get().refreshBroker()])
+      await Promise.all([
+        get().refreshWatchlistQuotes(),
+        get().refreshBroker(),
+        get().refreshYumekoStatus(),
+        get().loadYumekoForActiveTicker(),
+        get().refreshExportedVerdicts(),
+      ])
     } catch (err) {
       set({ initialized: true })
       get().pushToast('error', `Khởi tạo workspace lỗi: ${String(err)}`)
@@ -616,6 +661,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       return
     }
     void get().refreshBroker()
+    void get().loadYumekoForActiveTicker()
   },
 
   setActiveTicker: (ticker, slotId) => {
@@ -639,6 +685,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       void api.broadcastSyncEvent('sumi:sync_symbol', { ticker })
     }
     void get().refreshBroker()
+    void get().loadYumekoForActiveTicker()
   },
 
   setActiveInterval: (interval, slotId) => {
@@ -912,6 +959,119 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     set({ rightPanelWidth: Math.max(220, Math.min(460, Math.round(width))) })
     schedulePersistSettings(get())
   },
+  setRightTab: (rightTab) => set({ rightTab, rightPanelOpen: true }),
+
+  refreshYumekoStatus: async () => {
+    try {
+      const yumekoStatus = await api.yumekoGetBridgeStatus()
+      set({ yumekoStatus })
+    } catch {
+      // ignore on Clean-Slate machines
+    }
+  },
+
+  setYumekoAsOf: (asOf) => {
+    const clean = asOf && asOf.trim().length === 10 ? asOf.trim() : null
+    set({ yumekoAsOf: clean })
+    void get().loadYumekoForActiveTicker()
+    if (clean) {
+      get().pushToast('info', `Đã khóa mốc Point-in-Time as_of = ${clean}`)
+    } else {
+      get().pushToast('info', 'Đã mở khóa mốc thời gian — hiển thị dữ liệu mới nhất')
+    }
+  },
+
+  loadYumekoForActiveTicker: async () => {
+    const state = get()
+    const activePane = state.panes.find((p) => p.slotId === state.activeSlotId) ?? state.panes[0]
+    if (!activePane) return
+    const ticker = activePane.ticker
+    const asOf = state.yumekoAsOf
+    set({ yumekoLoading: true })
+    try {
+      const [ctx, series] = await Promise.all([
+        api.yumekoGetTopdownContext(ticker, asOf),
+        api.yumekoGetQmvSeries(ticker, asOf),
+      ])
+      setQmvRealSeriesCache(ticker, series)
+      set((s) => ({
+        yumekoContext: ctx,
+        yumekoQmvSeries: series,
+        yumekoSeriesVersion: s.yumekoSeriesVersion + 1,
+        yumekoLoading: false,
+      }))
+    } catch {
+      set({ yumekoLoading: false })
+    }
+  },
+
+  exportActiveKt01Verdict: async (copyToYumekoDropzone = true) => {
+    if (get().exportingKt01) return null
+    const state = get()
+    const activePane = state.panes.find((p) => p.slotId === state.activeSlotId) ?? state.panes[0]
+    if (!activePane) return null
+    set({ exportingKt01: true })
+    try {
+      const receipt = await api.yumekoExportKt01Verdict(
+        activePane.ticker,
+        state.yumekoAsOf,
+        copyToYumekoDropzone,
+      )
+      set({
+        exportingKt01: false,
+        lastExportedReceipt: receipt,
+        rightPanelOpen: true,
+        rightTab: 'yumeko',
+      })
+      void get().refreshExportedVerdicts()
+      get().pushToast(
+        'success',
+        `Đã xuất KT01 (${receipt.verdict.verdict} · ${receipt.verdict.confidenceScore.toFixed(0)}/100) cho ${receipt.verdict.symbol} [SHA-256 ${receipt.verdict.verdictSha256.slice(0, 8)}]`,
+      )
+      return receipt
+    } catch (err) {
+      set({ exportingKt01: false })
+      get().pushToast('error', `Không thể xuất KT01: ${String(err)}`)
+      return null
+    }
+  },
+
+  refreshExportedVerdicts: async () => {
+    try {
+      const exportedVerdicts = await api.yumekoListExportedVerdicts(20)
+      set({ exportedVerdicts })
+    } catch {
+      // ignore
+    }
+  },
+
+  applyDeepLink: (payload) => {
+    if (!payload?.ticker) return
+    const curSlot = get().activeSlotId
+    get().setActiveTicker(payload.ticker, curSlot)
+    if (payload.interval) {
+      get().setActiveInterval(payload.interval, curSlot)
+    }
+    if (payload.asOf !== undefined) {
+      set({ yumekoAsOf: payload.asOf })
+      void get().loadYumekoForActiveTicker()
+    }
+    if (payload.tab === 'yumeko' || payload.tab === 'kt01') {
+      set({ rightPanelOpen: true, rightTab: 'yumeko' })
+    } else if (payload.tab === 'screener') {
+      set({ bottomDockOpen: true, bottomDockTab: 'screener' })
+    } else if (payload.tab === 'backtest' || payload.tab === 'strategy') {
+      set({ bottomDockOpen: true, bottomDockTab: 'strategy' })
+    } else if (payload.tab === 'paper') {
+      set({ bottomDockOpen: true, bottomDockTab: 'paper' })
+    } else {
+      set({ rightPanelOpen: true, rightTab: 'yumeko' })
+    }
+    get().pushToast(
+      'info',
+      `Yumeko Deep-Link -> ${payload.ticker}${payload.interval ? ` (${payload.interval})` : ''}${payload.asOf ? ` · as_of=${payload.asOf}` : ''}`,
+    )
+  },
   setBottomDockOpen: (bottomDockOpen) => {
     set({ bottomDockOpen, bottomDockMaximized: bottomDockOpen ? get().bottomDockMaximized : false })
     schedulePersistSettings(get())
@@ -1181,7 +1341,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const summary = await api.importCafeFDir(trimmed, includeRaw)
       const status = await api.getDataStatus()
       set({ dataStatus: status, importingCafeF: false })
-      await Promise.all([get().refreshWatchlistQuotes(), get().refreshBroker()])
+      await Promise.all([
+        get().refreshWatchlistQuotes(),
+        get().refreshBroker(),
+        get().refreshYumekoStatus(),
+        get().loadYumekoForActiveTicker(),
+        get().refreshExportedVerdicts(),
+      ])
       get().pushToast(
         'success',
         `Đã nạp ${summary.distinct_symbols.toLocaleString('en-US')} mã (${summary.total_bars_written.toLocaleString('en-US')} nến${includeRaw ? ', kèm RAW' : ''}) vào SQLite trong ${summary.elapsed_ms}ms`,
@@ -1245,7 +1411,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       )
       const status = await api.getDataStatus()
       set({ dataStatus: status, syncingEod: false, eodSyncProgress: summary })
-      await Promise.all([get().refreshWatchlistQuotes(), get().refreshBroker()])
+      await Promise.all([
+        get().refreshWatchlistQuotes(),
+        get().refreshBroker(),
+        get().refreshYumekoStatus(),
+        get().loadYumekoForActiveTicker(),
+        get().refreshExportedVerdicts(),
+      ])
       const stale = status.freshness?.stale_series ?? 0
       get().pushToast(
         'success',

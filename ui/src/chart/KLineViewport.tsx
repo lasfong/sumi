@@ -279,6 +279,8 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
   const replayResetNonce = useWorkspaceStore((s) => s.replayResetNonce)
   const replayStepEvent = useWorkspaceStore((s) => s.replayStepEvent)
   const broker = useWorkspaceStore((s) => s.broker)
+  const yumekoAsOf = useWorkspaceStore((s) => s.yumekoAsOf)
+  const yumekoSeriesVersion = useWorkspaceStore((s) => s.yumekoSeriesVersion)
 
   const setActiveInterval = useWorkspaceStore((s) => s.setActiveInterval)
   const togglePaneAdjustment = useWorkspaceStore((s) => s.togglePaneAdjustment)
@@ -680,6 +682,7 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
             timestamp: timestamp ?? null,
             limit: queryMode === 'init' ? historyLimitRef.current : 400,
             adjustment: cur.adjustment ?? 'splits',
+            asOfDate: useWorkspaceStore.getState().yumekoAsOf,
           })
           if (disposed || !chartRef.current) return
           // Update VN price band & badge ONLY on `init` loads so scrolling back in history
@@ -689,11 +692,15 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
             setDataSourceBadge(
               page.replayActive
                 ? 'REPLAY'
-                : page.source === 'cache_hit'
-                  ? 'SQLite'
-                  : page.source === 'offline_cache'
-                    ? 'Offline'
-                    : 'Live',
+                : page.source === 'yumeko_dnse_pit'
+                  ? `PIT · DNSE`
+                  : page.source === 'cache_hit_dnse_fresh'
+                    ? 'SQLite+DNSE'
+                    : page.source === 'cache_hit'
+                      ? 'SQLite'
+                      : page.source === 'offline_cache'
+                        ? 'Offline'
+                        : 'Live',
             )
           }
 
@@ -1006,6 +1013,14 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
     }
   }, [dataStatusTotalBars])
 
+  // 2d. Reload bars whenever Yumeko Point-in-Time `as_of` lock changes (Decision #3)
+  const prevYumekoAsOfRef = useRef<string | null>(yumekoAsOf)
+  useEffect(() => {
+    if (prevYumekoAsOfRef.current === yumekoAsOf) return
+    prevYumekoAsOfRef.current = yumekoAsOf
+    chartRef.current?.resetData()
+  }, [yumekoAsOf])
+
   // 3. React to theme, chart style, Heikin-Ashi, interval label, and countdown toggle
   const prevStyleRef = useRef(pane.chartStyle)
   useEffect(() => {
@@ -1047,12 +1062,17 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
     }
 
     for (const spec of pane.indicators) {
+      const isYumekoRealInd =
+        spec.name === 'QMV_STOCK_BB' ||
+        spec.name === 'QMV_ACTIVE_MONEY' ||
+        spec.name === 'QMV_FOREIGN_FLOW'
       const mergedStyles = {
         ...(spec.styles ?? {}),
         tooltip: {
           features: buildIndicatorTooltipFeatures(theme, spec.visible),
         },
       }
+      const extendData = isYumekoRealInd ? { ticker: pane.ticker } : undefined
       const signature = JSON.stringify({
         name: spec.name,
         calcParams: spec.calcParams,
@@ -1060,6 +1080,7 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
         isMain: spec.isMain,
         styles: spec.styles ?? null,
         theme,
+        qmvVer: isYumekoRealInd ? `${pane.ticker}:${yumekoSeriesVersion}` : 0,
       })
       const existing = activeMap.get(spec.id)
       if (!existing) {
@@ -1071,6 +1092,7 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
             paneId: targetPaneId,
             calcParams: spec.calcParams,
             visible: spec.visible,
+            extendData,
             styles: mergedStyles as Record<string, unknown>,
           },
           spec.isMain,
@@ -1092,12 +1114,13 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
           paneId: existing.paneId,
           calcParams: spec.calcParams,
           visible: spec.visible,
+          extendData,
           styles: mergedStyles as Record<string, unknown>,
         })
         activeMap.set(spec.id, { ...existing, signature })
       }
     }
-  }, [pane.indicators, isMultiPane, theme])
+  }, [pane.indicators, pane.ticker, isMultiPane, theme, yumekoSeriesVersion])
 
   // 5b. Re-measure & compact sub-pane heights whenever gridLayout changes (`1 / 2v / 2h / 3 / 4`, fixes BUG-006!)
   useEffect(() => {

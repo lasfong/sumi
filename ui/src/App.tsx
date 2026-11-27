@@ -4,11 +4,12 @@ import * as api from './api/tauri'
 import { KLineViewport } from './chart/KLineViewport'
 import { timeRangeBus } from './chart/crosshairBus'
 import { drawingSyncBus, type DrawingSyncEvent } from './chart/drawingSyncBus'
-import type { ReplaySnapshotResponse } from './types/market'
+import type { DeepLinkPayload, ReplaySnapshotResponse } from './types/market'
 import { BottomTradingDock } from './components/BottomTradingDock'
 import { LeftDrawingRail } from './components/LeftDrawingRail'
 import { ReplayControlBar } from './components/ReplayControlBar'
 import { RightWidgetBar } from './components/RightWidgetBar'
+import { TopDownContextStrip } from './components/TopDownContextStrip'
 import { TopHeader } from './components/TopHeader'
 import { IndicatorsModal } from './components/modals/IndicatorsModal'
 import { IndicatorSettingsModal } from './components/modals/IndicatorSettingsModal'
@@ -80,6 +81,11 @@ export const App: React.FC = () => {
       listen<{ centerTimestamp: number; barSpace?: number | null }>('sumi:sync_range', (ev) => {
         if (typeof ev.payload?.centerTimestamp === 'number') {
           timeRangeBus.applyRemote(ev.payload.centerTimestamp, ev.payload.barSpace ?? null)
+        }
+      }),
+      listen<DeepLinkPayload>('sumi:deeplink', (ev) => {
+        if (ev.payload?.ticker) {
+          useWorkspaceStore.getState().applyDeepLink(ev.payload)
         }
       }),
     ])
@@ -248,6 +254,9 @@ export const App: React.FC = () => {
         <main className="flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden">
           {/* Causal Bar Replay Floating Control Strip (when active) */}
           <ReplayControlBar />
+
+          {/* Yumeko Read-Only Top-Down Context Strip (VM01 -> HP01 -> DN01 -> DM01 + as_of PIT + KT01) */}
+          <TopDownContextStrip />
 
           {/* Multi-Chart Viewport Grid (1 / 2v / 2h / 3 / 4) */}
           <div className={`grid ${gridClass} flex-1 min-w-0 min-h-0 overflow-hidden`}>

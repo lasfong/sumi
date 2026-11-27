@@ -11,6 +11,7 @@ import {
   Plus,
   RefreshCw,
   Settings,
+  Sparkles,
   Trash2,
   Unlock,
   Volume2,
@@ -20,6 +21,7 @@ import { drawingSyncBus } from '../chart/drawingSyncBus'
 import { useWorkspaceStore } from '../store/workspaceStore'
 import type { SavedDrawingRecord, WatchlistQuoteSnapshot } from '../types/market'
 import { playAlertChime } from '../utils/alertSound'
+import { YumekoQmvPanel } from './YumekoQmvPanel'
 
 const DRAWING_LABELS: Record<string, string> = {
   segment: 'Đường xu hướng',
@@ -228,7 +230,8 @@ export const RightWidgetBar: React.FC = () => {
     replayMaskTicker && activePane.ticker.toUpperCase() === replayMaskTicker,
   )
 
-  const [rightTab, setRightTab] = useState<'watchlist' | 'alerts' | 'objects'>('watchlist')
+  const rightTab = useWorkspaceStore((s) => s.rightTab)
+  const setRightTab = useWorkspaceStore((s) => s.setRightTab)
   const [addTickerInput, setAddTickerInput] = useState('')
   const [showNewListForm, setShowNewListForm] = useState(false)
   const [newListName, setNewListName] = useState('')
@@ -404,6 +407,17 @@ export const RightWidgetBar: React.FC = () => {
           >
             <Layers className="w-3 h-3 shrink-0" aria-hidden="true" />
             <span>Đối tượng</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            id="rw-tab-yumeko"
+            aria-selected={rightTab === 'yumeko'}
+            className="tv-tab px-1.5 text-[11px] gap-1 whitespace-nowrap"
+            onClick={() => setRightTab('yumeko')}
+          >
+            <Sparkles className="w-3 h-3 shrink-0" aria-hidden="true" />
+            <span>Yumeko</span>
           </button>
         </div>
 
@@ -930,6 +944,8 @@ export const RightWidgetBar: React.FC = () => {
             )}
           </div>
         </div>
+      ) : rightTab === 'yumeko' ? (
+        <YumekoQmvPanel />
       ) : (
         /* Object Tree Tab Panel (Indicators + Drawings + Timeframe Visibility, v2.2) */
         <div role="tabpanel" aria-labelledby="rw-tab-objects" className="flex flex-col flex-1 min-h-0 overflow-y-auto tv-scroll p-2 space-y-3">

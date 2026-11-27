@@ -92,7 +92,14 @@ export interface BarsPageResponse {
   bars: OhlcvBar[]
   hasOlder: boolean
   hasNewer: boolean
-  source: 'cache_hit' | 'cache_with_gap_fill' | 'remote_live' | 'offline_cache'
+  source:
+    | 'cache_hit'
+    | 'cache_hit_dnse_fresh'
+    | 'cache_with_gap_fill'
+    | 'remote_live'
+    | 'offline_cache'
+    | 'yumeko_dnse_pit'
+    | 'yumeko_dnse_pit_stitched'
   symbolInfo: ResolvedSymbol | null
   vnBand: VnBandLevels | null
   replayActive: boolean
@@ -983,4 +990,304 @@ export interface AnalogConeQueryParams {
   topK?: number
   useMarketContext?: boolean
   asOfTimestampMs?: number | null
+}
+
+// ─── Yumeko v3.0 Read-Only Top-Down Bridge & KT01 Evidence Types (Wave 2) ──
+
+export interface YumekoBridgeStatus {
+  available: boolean
+  sqlitePath: string
+  qmvSharedPath: string | null
+  latestAsOfDates: string[]
+  qmvTechnicalSymbols: number
+  qmvActiveMoneySymbols: number
+  qmvForeignFlowSymbols: number
+  valuationSymbols: number
+  dnseHistorySymbols: number
+  macroObservationsCount: number
+  portfolioSnapshotsCount: number
+  watchlistSymbolsCount: number
+  note: string
+}
+
+export interface MacroObservationDto {
+  indicatorCode: string
+  periodDate: string
+  releaseDate: string
+  value: number | null
+  valueText: string | null
+  unit: string
+  sourceName: string
+}
+
+export interface SectorBreadthSnapshotDto {
+  icb2Code: string
+  icb2Name: string
+  changePct: number | null
+  advancers: number | null
+  decliners: number | null
+  unchanged: number | null
+  totalStocks: number | null
+  advancingRatioPct: number | null
+}
+
+export interface Vm01MarketContextDto {
+  effectiveAsOf: string | null
+  marketSentiment: number | null
+  marketBbm05: number | null
+  marketBbm20: number | null
+  marketBbmz05: number | null
+  marketBbmz20: number | null
+  marketForeignNetValue: number | null
+  topSectors: SectorBreadthSnapshotDto[]
+  macroHighlights: MacroObservationDto[]
+}
+
+export interface QmvStockBlackboxSnapshotDto {
+  contentDate: string
+  sourceProvenance: 'qmv_real' | 'local_proxy' | string
+  isProviderProprietary: boolean
+  closeVnd: number | null
+  closeKvnd: number | null
+  tmc: number | null
+  tma20: number | null
+  tma50: number | null
+  dspi: number | null
+  dspiMa5: number | null
+  dspiMa20: number | null
+  mpicpAll: number | null
+  mpicpZ: number | null
+  dm: number | null
+  ds: number | null
+  tradingScore: number | null
+  priceTrend: string | null
+  stopLossVnd: number | null
+  targetPrice1Vnd: number | null
+  targetPrice2Vnd: number | null
+  moneyInToday: boolean
+  moneyIn2Sessions: boolean
+  moneyIn3Sessions: boolean
+  reversalUpTPlus: boolean
+  reversalUpSwing: boolean
+  activeFlags: string[]
+  qmvRating: string | null
+  tradingSuitability: string | null
+  divisionAllocationGroup: string | null
+  divisionMoneyFlowLabel: string | null
+  inQmv60: boolean
+}
+
+export interface ValuationQuarterDto {
+  period: string
+  contentDate: string | null
+  sourceFamily: string
+  pe: number | null
+  pb: number | null
+  ps: number | null
+  evEbitda: number | null
+  eps: number | null
+  bvps: number | null
+  roe: number | null
+  roa: number | null
+  debtToEquity: number | null
+}
+
+export interface Dm01HoldingDto {
+  asOf: string
+  effectiveAsOf: string
+  sha256Verified: boolean
+  quantity: number
+  avgCostVnd: number
+  currentPriceVnd: number
+  currentValueVnd: number
+  unrealizedPnlVnd: number
+  unrealizedPnlPct: number
+  weightPct: number
+  daysHeld: number | null
+  sector: string | null
+}
+
+export interface Dm01WatchlistEntryDto {
+  symbol: string
+  strategyTag: string
+  note: string
+  targetBuyVnd: number | null
+  invalidationLevelVnd: number | null
+  updatedAt: string
+}
+
+export interface EpisodicThesisDto {
+  decisionId: string
+  asOf: string
+  functionName: string
+  gateStep: string | null
+  stance: string
+  confidence: string
+  thesisSummary: string
+}
+
+export interface TopDownSymbolContextDto {
+  symbol: string
+  requestedAsOf: string | null
+  effectiveAsOf: string | null
+  bridgeAvailable: boolean
+  flowProvenance: 'qmv_real' | 'local_proxy' | string
+  vm01Market: Vm01MarketContextDto
+  hp01Blackbox: QmvStockBlackboxSnapshotDto | null
+  dn01Valuations: ValuationQuarterDto[]
+  dm01RealHolding: Dm01HoldingDto | null
+  dm01YumekoWatchlist: Dm01WatchlistEntryDto | null
+  episodicTheses: EpisodicThesisDto[]
+  dnsePitAvailable: boolean
+  gaps: string[]
+}
+
+export interface QmvStockBbPointDto {
+  date: string
+  timestampMs: number
+  closeVnd: number | null
+  tmc: number | null
+  tma20: number | null
+  tma50: number | null
+  dspi: number | null
+  dspiMa5: number | null
+  dspiMa20: number | null
+  mpicpAll: number | null
+  mpicpZ: number | null
+  dm: number | null
+  ds: number | null
+  stopLossVnd: number | null
+  tp1Vnd: number | null
+  tp2Vnd: number | null
+}
+
+export interface QmvActiveMoneyPointDto {
+  date: string
+  timestampMs: number
+  priceVnd: number | null
+  shark: number | null
+  wolf: number | null
+  sheep: number | null
+  trendShark: number | null
+  trendWolf: number | null
+  trendSheep: number | null
+  volume: number | null
+}
+
+export interface QmvForeignFlowPointDto {
+  date: string
+  timestampMs: number
+  priceVnd: number | null
+  buyValue: number | null
+  sellValue: number | null
+  netValue: number | null
+  buyVolume: number | null
+  sellVolume: number | null
+  netVolume: number | null
+}
+
+export interface QmvRealChartSeriesDto {
+  symbol: string
+  asOf: string | null
+  sourceProvenance: 'qmv_real' | 'local_proxy' | string
+  isProviderProprietary: boolean
+  stockBb: QmvStockBbPointDto[]
+  activeMoney: QmvActiveMoneyPointDto[]
+  foreignFlow: QmvForeignFlowPointDto[]
+}
+
+export type Kt01GateVerdict = 'PASS' | 'WATCH' | 'WAIT_PULLBACK' | 'REJECT'
+
+export interface KT01GateVerdictV1 {
+  schemaVersion: string
+  verdictId: string
+  symbol: string
+  ticker: string
+  asOf: string
+  generatedAtUtc: string
+  advisoryOnly: boolean
+  flowProvenance: string
+  verdict: Kt01GateVerdict
+  verdictLabelVi: string
+  confidenceScore: number
+  mtfAlignment: {
+    weeklyTrend: string
+    dailyRegime: string
+    dailyHealthScore: number | null
+    hourlyTiming: string | null
+    ma20Vnd: number | null
+    ma50Vnd: number | null
+    ma200Vnd: number | null
+    rsi14: number | null
+    rvol20: number | null
+    activeSignals: string[]
+  }
+  executionLevels: {
+    lastCloseVnd: number
+    lastCloseKvnd: number
+    entryZoneLowVnd: number
+    entryZoneHighVnd: number
+    stopLossVnd: number
+    stopLossKvnd: number
+    takeProfit1Vnd: number
+    takeProfit1Kvnd: number
+    takeProfit2Vnd: number
+    takeProfit2Kvnd: number
+    riskPct: number
+    rewardTp1Pct: number
+    rrRatioTp1: number
+    levelsSource: string
+  }
+  afcSummary: {
+    horizonBars: number
+    winRatePct: number
+    expectedP50Pct: number
+    p10Pct: number
+    p90Pct: number
+    probTailDrop6Pct: number
+  } | null
+  dm01IsRealHolding: boolean
+  dm01IsYumekoWatchlist: boolean
+  invalidationTriggers: string[]
+  caveats: string[]
+  verdictSha256: string
+}
+
+export interface ExportedVerdictReceipt {
+  verdict: KT01GateVerdictV1
+  jsonPath: string
+  markdownPath: string
+  yumekoDropzonePath: string | null
+  markdownSummary: string
+}
+
+export interface ExportedVerdictListItem {
+  verdictId: string
+  symbol: string
+  asOf: string
+  verdict: Kt01GateVerdict
+  confidenceScore: number
+  flowProvenance: string
+  jsonPath: string
+  markdownPath: string
+  generatedAtUtc: string
+}
+
+export interface ResearchExportVerificationDto {
+  exportDir: string
+  manifestFound: boolean
+  verifiedFiles: number
+  failedFiles: string[]
+  asOf: string | null
+  valid: boolean
+}
+
+export interface DeepLinkPayload {
+  rawUrl: string
+  action: string
+  ticker: string
+  symbol: string
+  asOf: string | null
+  interval: IntervalKey | null
+  tab: string | null
 }
