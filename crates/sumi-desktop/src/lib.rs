@@ -61,13 +61,23 @@ pub fn run() {
             commands::workspace::toggle_alert_status,
             commands::workspace::delete_alert,
             commands::workspace::check_price_alerts,
-            // Causal Bar Replay
+            commands::workspace::check_bar_alerts,
+            commands::workspace::list_indicator_templates,
+            commands::workspace::save_indicator_template,
+            commands::workspace::delete_indicator_template,
+            commands::workspace::open_detached_window,
+            commands::workspace::broadcast_sync_event,
+            // Causal Bar Replay (+ Save/Resume Sessions v2.2)
             commands::replay::replay_start,
             commands::replay::replay_step,
             commands::replay::replay_jump,
             commands::replay::replay_set_speed,
             commands::replay::replay_stop,
             commands::replay::replay_get_state,
+            commands::replay::list_replay_sessions,
+            commands::replay::save_replay_session,
+            commands::replay::resume_replay_session,
+            commands::replay::delete_replay_session,
             // Paper Broker (Vietnam VSD T+2 FIFO & Journal)
             commands::broker::broker_get_state,
             commands::broker::broker_submit_order,
@@ -77,13 +87,16 @@ pub fn run() {
             commands::broker::broker_flatten_position,
             commands::broker::broker_reset_account,
             commands::broker::broker_update_journal_note,
-            // Strategy Tester (Backtest, WFO, Monte Carlo)
+            // Strategy Tester (Backtest, Custom 101-Signal Rules, Portfolio, WFO, Monte Carlo)
             commands::backtest::run_strategy_backtest,
+            commands::backtest::run_strategy_portfolio,
             commands::backtest::run_strategy_wfo,
             commands::backtest::run_strategy_monte_carlo,
             // Stock Screener (101 Signals)
             commands::scanner::get_signal_catalog,
             commands::scanner::run_stock_screener,
+            // AFC — Analog Forecast Cone (Dual-Horizon PIT Probability Fan)
+            commands::analog_cone::compute_analog_cone,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Sumi Supercharts Tauri application");
@@ -181,8 +194,12 @@ mod tests {
             .upsert_alert(&PriceAlertRecord {
                 id: "al_99".to_owned(),
                 ticker: "HOSE:VCB".to_owned(),
+                alert_kind: "price".to_owned(),
                 condition: "cross_above".to_owned(),
                 target_price: 95_000.0,
+                interval: Some("1D".to_owned()),
+                params_json: None,
+                sound_enabled: true,
                 message: "VCB break".to_owned(),
                 status: "armed".to_owned(),
                 created_at_ms: 1700000000000,

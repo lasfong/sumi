@@ -1,9 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { Eye, EyeOff, Plus, Search, Settings, Sliders, Trash2, X } from 'lucide-react'
-import { INDICATOR_CATALOG, findIndicatorMeta } from '../../chart/indicators/catalog'
+import { ChevronDown, ChevronRight, Eye, EyeOff, Plus, Search, Settings, Sliders, Trash2, X } from 'lucide-react'
+import { INDICATOR_CATALOG, findIndicatorMeta, type IndicatorCatalogEntry } from '../../chart/indicators/catalog'
 import { INDICATOR_COLOR_PALETTE, useWorkspaceStore } from '../../store/workspaceStore'
 
-const CATEGORIES = ['Tất cả', 'Sumi Quant', 'Xu hướng', 'Dao động', 'Khối lượng', 'Biến động'] as const
+const CATEGORIES = ['Tất cả', 'QMV Cốt lõi', 'Xu hướng', 'Dao động', 'Khối lượng', 'Biến động'] as const
 
 export const IndicatorsModal: React.FC = () => {
   const open = useWorkspaceStore((s) => s.indicatorsModalOpen)
@@ -21,6 +21,7 @@ export const IndicatorsModal: React.FC = () => {
 
   const [query, setQuery] = useState('')
   const [category, setCategory] = useState<(typeof CATEGORIES)[number]>('Tất cả')
+  const [showAux, setShowAux] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draftParams, setDraftParams] = useState<string[]>([])
 
@@ -81,24 +82,90 @@ export const IndicatorsModal: React.FC = () => {
     })
   }, [query, category])
 
+  const coreItems = useMemo(() => filteredCatalog.filter((i) => i.tier === 'core'), [filteredCatalog])
+  const auxItems = useMemo(() => filteredCatalog.filter((i) => i.tier === 'aux'), [filteredCatalog])
+  const effectiveShowAux = showAux || query.trim().length > 0
+
   const startEdit = (id: string, params: number[]) => {
     setEditingId(id)
     setDraftParams(params.map(String))
   }
 
   const commitEdit = (id: string) => {
-    const parsed = draftParams.map((s) => Number(s)).filter((n) => Number.isFinite(n) && n > 0)
+    const targetInd = activePane.indicators.find((x) => x.id === id)
+    const parsed = draftParams
+      .map((s, idx) => {
+        const n = Number(s)
+        if (!Number.isFinite(n)) return null
+        if (targetInd?.name === 'AFC') {
+          if (idx === 0) return Math.max(1, Math.min(20, Math.round(n)))
+          if (idx === 1) return Math.max(10, Math.min(250, Math.round(n)))
+          if (idx === 2) return Math.round(n) <= 0 ? 0 : 1
+        }
+        return n > 0 ? n : null
+      })
+      .filter((n): n is number => n !== null)
     if (parsed.length > 0) {
       updateIndicatorInActivePane(id, { calcParams: parsed })
     }
     setEditingId(null)
   }
 
+  const renderCatalogRow = (item: IndicatorCatalogEntry) => (
+    <div
+      key={item.name}
+      className="flex items-center justify-between gap-2 px-2.5 py-2 rounded hover:bg-[var(--tv-hover)]"
+    >
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="font-semibold text-[12.5px]">{item.titleVi}</span>
+          <span
+            className="text-[10px] px-1.5 py-0 rounded font-medium"
+            style={{
+              backgroundColor: item.category === 'QMV Cốt lõi' ? 'var(--tv-accent-soft)' : 'var(--tv-bg-elevated)',
+              color: item.category === 'QMV Cốt lõi' ? 'var(--tv-accent)' : 'var(--tv-text-secondary)',
+            }}
+          >
+            {item.isMain ? 'Chính' : 'Phụ'} · {item.name}
+          </span>
+          {item.isOhlcvProxy && (
+            <span
+              className="text-[9.5px] px-1.5 py-0 rounded font-semibold"
+              style={{ backgroundColor: 'rgba(251, 192, 45, 0.16)', color: '#FBC02D' }}
+              title="Tính toán nhân quả từ dữ liệu OHLCV của Sumi (không phải Blackbox nội bộ trên QMV Webapp)"
+            >
+              OHLCV Proxy
+            </span>
+          )}
+        </div>
+        <div className="text-[11px] truncate" style={{ color: 'var(--tv-text-secondary)' }}>
+          {item.description}
+        </div>
+      </div>
+      <button
+        type="button"
+        className="flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-semibold bg-[#2962FF] hover:bg-[#1E53E5] text-white border-0 cursor-pointer shrink-0"
+        onClick={() =>
+          addIndicatorToActivePane({
+            name: item.name,
+            paneId: item.isMain ? 'candle_pane' : `pane_${item.name.toLowerCase()}`,
+            isMain: item.isMain,
+            calcParams: [...item.defaultParams],
+            visible: true,
+          })
+        }
+      >
+        <Plus className="w-3.5 h-3.5" />
+        <span>Thêm</span>
+      </button>
+    </div>
+  )
+
   return (
     <dialog
       ref={dialogRef}
       className="tv-dialog"
-      style={{ maxWidth: 'min(94vw, 860px)' }}
+      style={{ maxWidth: 'min(94vw, 880px)' }}
       aria-labelledby="indicators-modal-title"
       {...({ closedby: 'any' } as Record<string, string>)}
     >
@@ -109,10 +176,10 @@ export const IndicatorsModal: React.FC = () => {
       >
         <div>
           <h2 id="indicators-modal-title" className="m-0 text-[15px] font-semibold">
-            Chỉ báo kỹ thuật & Định lượng ({INDICATOR_CATALOG.length} chỉ báo)
+            Bộ Chỉ Báo Kỹ Thuật Chuẩn QMV (11 Cốt lõi · 5 Phụ trợ)
           </h2>
           <div className="text-[11px]" style={{ color: 'var(--tv-text-secondary)' }}>
-            Đang áp dụng cho khung {activePane.ticker} ({activePane.interval}) — Tự động lưu vào SQLite
+            Đang áp dụng cho khung {activePane.ticker} ({activePane.interval}) — Tham số chuẩn QMV V7 & KT01
           </div>
         </div>
         <button
@@ -136,7 +203,7 @@ export const IndicatorsModal: React.FC = () => {
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Tìm chỉ báo (VD: Ichimoku, SuperTrend, VWAP, ATR, StochRSI, MACD, RSI, BOLL)..."
+          placeholder="Tìm chỉ báo QMV (VD: AFC, MA 20/50/200, Ichimoku 6-18-36, QMV_FLOW, RS_VNINDEX, CCI, RSI, MACD)..."
           className="flex-1 bg-transparent border-0 outline-none text-[13px]"
           style={{ color: 'var(--tv-text-primary)' }}
           autoFocus
@@ -146,7 +213,7 @@ export const IndicatorsModal: React.FC = () => {
       {/* Category Tabs */}
       <div
         role="tablist"
-        aria-label="Nhóm chỉ báo"
+        aria-label="Nhóm chỉ báo QMV"
         className="flex items-center gap-1 px-3 overflow-x-auto shrink-0"
         style={{ height: 34, borderBottom: '1px solid var(--tv-border)' }}
       >
@@ -165,52 +232,38 @@ export const IndicatorsModal: React.FC = () => {
       </div>
 
       {/* Two-Column Body: Catalog Left + Active Indicators & Parameters Right */}
-      <div className="grid grid-cols-1 md:grid-cols-[1fr_290px] flex-1 min-h-0 overflow-hidden max-h-[460px]">
+      <div className="grid grid-cols-1 md:grid-cols-[1fr_290px] flex-1 min-h-0 overflow-hidden max-h-[480px]">
         {/* Catalog List */}
         <div
           className="overflow-y-auto tv-scroll p-2 space-y-1"
           style={{ borderRight: '1px solid var(--tv-border)' }}
         >
-          {filteredCatalog.map((item) => (
-            <div
-              key={item.name}
-              className="flex items-center justify-between gap-2 px-2.5 py-2 rounded hover:bg-[var(--tv-hover)]"
-            >
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className="font-semibold text-[12.5px]">{item.titleVi}</span>
-                  <span
-                    className="text-[10px] px-1.5 py-0 rounded font-medium"
-                    style={{
-                      backgroundColor: item.category === 'Sumi Quant' ? 'var(--tv-accent-soft)' : 'var(--tv-bg-elevated)',
-                      color: item.category === 'Sumi Quant' ? 'var(--tv-accent)' : 'var(--tv-text-secondary)',
-                    }}
-                  >
-                    {item.isMain ? 'Chính' : 'Phụ'} · {item.name}
-                  </span>
-                </div>
-                <div className="text-[11px] truncate" style={{ color: 'var(--tv-text-secondary)' }}>
-                  {item.description}
-                </div>
+          {coreItems.length > 0 && (
+            <>
+              <div className="px-2.5 pt-1 pb-0.5 text-[10.5px] font-bold uppercase tracking-wider text-[#2962FF]">
+                Trụ cột Kỹ thuật QMV ({coreItems.length})
               </div>
+              {coreItems.map(renderCatalogRow)}
+            </>
+          )}
+
+          {auxItems.length > 0 && (
+            <div className="pt-2 mt-1 border-t" style={{ borderColor: 'var(--tv-border)' }}>
               <button
                 type="button"
-                className="flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-semibold bg-[#2962FF] hover:bg-[#1E53E5] text-white border-0 cursor-pointer shrink-0"
-                onClick={() =>
-                  addIndicatorToActivePane({
-                    name: item.name,
-                    paneId: item.isMain ? 'candle_pane' : `pane_${item.name.toLowerCase()}`,
-                    isMain: item.isMain,
-                    calcParams: [...item.defaultParams],
-                    visible: true,
-                  })
-                }
+                onClick={() => setShowAux((v) => !v)}
+                className="w-full flex items-center justify-between px-2.5 py-1.5 rounded text-[11px] font-semibold bg-transparent border-0 cursor-pointer hover:bg-[var(--tv-hover)]"
+                style={{ color: 'var(--tv-text-secondary)' }}
               >
-                <Plus className="w-3.5 h-3.5" />
-                <span>Thêm</span>
+                <span className="flex items-center gap-1">
+                  {effectiveShowAux ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                  <span>Phụ trợ Định lượng — Nâng cao ({auxItems.length})</span>
+                </span>
+                <span className="text-[10px] font-normal">ATR · VRVP · VWAP · OBV · ADX</span>
               </button>
+              {effectiveShowAux && <div className="mt-1 space-y-1">{auxItems.map(renderCatalogRow)}</div>}
             </div>
-          ))}
+          )}
         </div>
 
         {/* Active Indicators & Parameter Tuning */}
@@ -219,7 +272,7 @@ export const IndicatorsModal: React.FC = () => {
             Đang bật trên biểu đồ ({activePane.indicators.length})
           </div>
           <div className="text-[10px]" style={{ color: 'var(--tv-text-muted)' }}>
-            Hỗ trợ gắn nhiều đường cùng loại (VD: EMA 20 + EMA 50 + EMA 200) và chỉnh trực tiếp trên góc biểu đồ.
+            Mẹo QMV: Dùng menu Mẫu chỉ báo trên thanh công cụ để chuyển nhanh giữa 4 bộ thiết lập QMV chuẩn.
           </div>
           {activePane.indicators.length === 0 ? (
             <div className="text-[11.5px] py-4 text-center" style={{ color: 'var(--tv-text-secondary)' }}>

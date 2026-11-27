@@ -1,19 +1,25 @@
 import { Channel, invoke } from '@tauri-apps/api/core'
 import type {
+  AnalogConeQueryParams,
+  AnalogConeResponseDto,
   BarsPageResponse,
   BrokerStateSnapshot,
   CafeFImportSummary,
   DataStatusResponse,
+  IndicatorTemplateRecord,
   IntervalKey,
   LiveBarPayload,
   LiveQuote,
   MonteCarloResponse,
+  PortfolioBacktestInput,
+  PortfolioBacktestResponse,
   PriceAlertRecord,
   ReplaySnapshotResponse,
   ResolvedSymbolResponse,
   SavedDrawingRecord,
   SavedIndicatorSpec,
   SavedLayoutRecord,
+  SavedReplaySessionRecord,
   SignalCatalogItemDto,
   StockScreenerInput,
   StockScreenerResponse,
@@ -69,6 +75,27 @@ export async function getBars(params: {
   })
 }
 
+// Track active Tauri Channel instances per stream so callbacks can be detached cleanly on unsubscribe (`BUG-012`).
+const activeBarChannels = new Map<string, Channel<LiveBarPayload>>()
+let activeQuoteChannel: Channel<LiveQuote> | null = null
+
+function cleanupTauriChannelCallback(ch: { id?: number }): void {
+  const internals = (
+    window as unknown as {
+      __TAURI_INTERNALS__?: { unregisterCallback?: (id: number) => void }
+    }
+  ).__TAURI_INTERNALS__
+  if (typeof ch.id === 'number' && typeof internals?.unregisterCallback === 'function') {
+    try {
+      internals.unregisterCallback(ch.id)
+    } catch {
+      // ignore if already released
+    }
+  }
+}
+
+const barStreamClientGens = new Map<string, number>()
+
 export async function subscribeBars(
   streamId: string,
   ticker: string,
@@ -76,13 +103,42 @@ export async function subscribeBars(
   onBar: (payload: LiveBarPayload) => void,
 ): Promise<boolean> {
   if (!isTauriRuntime()) return false
+  const myGen = (barStreamClientGens.get(streamId) ?? 0) + 1
+  barStreamClientGens.set(streamId, myGen)
+  const prev = activeBarChannels.get(streamId)
+  if (prev) {
+    prev.onmessage = () => {}
+    cleanupTauriChannelCallback(prev as unknown as { id?: number })
+    activeBarChannels.delete(streamId)
+  }
   const channel = new Channel<LiveBarPayload>()
   channel.onmessage = onBar
-  return invoke<boolean>('subscribe_bars', { streamId, ticker, interval, onBar: channel })
+  activeBarChannels.set(streamId, channel)
+  const ok = await invoke<boolean>('subscribe_bars', { streamId, ticker, interval, onBar: channel })
+  // If `unsubscribeBars` or a newer `subscribeBars` ran while this invoke was in flight, tear down immediately (`BUG-012`)!
+  if (barStreamClientGens.get(streamId) !== myGen) {
+    channel.onmessage = () => {}
+    cleanupTauriChannelCallback(channel as unknown as { id?: number })
+    if (activeBarChannels.get(streamId) === channel) {
+      activeBarChannels.delete(streamId)
+    }
+    if (barStreamClientGens.get(streamId) === myGen + 1 && !activeBarChannels.has(streamId)) {
+      void invoke<void>('unsubscribe_bars', { streamId })
+    }
+    return false
+  }
+  return ok
 }
 
 export async function unsubscribeBars(streamId: string): Promise<void> {
   if (!isTauriRuntime()) return
+  barStreamClientGens.set(streamId, (barStreamClientGens.get(streamId) ?? 0) + 1)
+  const prev = activeBarChannels.get(streamId)
+  if (prev) {
+    prev.onmessage = () => {}
+    cleanupTauriChannelCallback(prev as unknown as { id?: number })
+    activeBarChannels.delete(streamId)
+  }
   await invoke<void>('unsubscribe_bars', { streamId })
 }
 
@@ -91,13 +147,24 @@ export async function subscribeQuotes(
   onQuote: (quote: LiveQuote) => void,
 ): Promise<boolean> {
   if (!isTauriRuntime()) return false
+  if (activeQuoteChannel) {
+    activeQuoteChannel.onmessage = () => {}
+    cleanupTauriChannelCallback(activeQuoteChannel as unknown as { id?: number })
+    activeQuoteChannel = null
+  }
   const channel = new Channel<LiveQuote>()
   channel.onmessage = onQuote
+  activeQuoteChannel = channel
   return invoke<boolean>('subscribe_quotes', { tickers, onQuote: channel })
 }
 
 export async function unsubscribeQuotes(): Promise<void> {
   if (!isTauriRuntime()) return
+  if (activeQuoteChannel) {
+    activeQuoteChannel.onmessage = () => {}
+    cleanupTauriChannelCallback(activeQuoteChannel as unknown as { id?: number })
+    activeQuoteChannel = null
+  }
   await invoke<void>('unsubscribe_quotes')
 }
 
@@ -241,9 +308,24 @@ export async function createAlert(
   condition: string,
   targetPrice: number,
   message: string,
+  opts?: {
+    alertKind?: 'price' | 'drawing' | 'indicator'
+    interval?: IntervalKey | null
+    paramsJson?: Record<string, unknown> | null
+    soundEnabled?: boolean
+  },
 ): Promise<PriceAlertRecord> {
   if (!isTauriRuntime()) return webFallbackApi.createAlert(ticker, condition, targetPrice, message)
-  return invoke<PriceAlertRecord>('create_alert', { ticker, condition, targetPrice, message })
+  return invoke<PriceAlertRecord>('create_alert', {
+    ticker,
+    condition,
+    targetPrice,
+    message,
+    alertKind: opts?.alertKind ?? null,
+    interval: opts?.interval ?? null,
+    paramsJson: opts?.paramsJson ?? null,
+    soundEnabled: opts?.soundEnabled ?? true,
+  })
 }
 
 export async function toggleAlertStatus(id: string, status: string): Promise<void> {
@@ -271,19 +353,80 @@ export async function checkPriceAlerts(
   return invoke<PriceAlertRecord[]>('check_price_alerts', { ticker, prevPrice, currentPrice })
 }
 
+export async function checkBarAlerts(
+  ticker: string,
+  interval: IntervalKey,
+): Promise<PriceAlertRecord[]> {
+  if (!isTauriRuntime()) return []
+  return invoke<PriceAlertRecord[]>('check_bar_alerts', { ticker, interval })
+}
+
+// ─── Indicator Templates (v2.2) ──────────────────────────────────────────────
+
+export async function listIndicatorTemplates(): Promise<IndicatorTemplateRecord[]> {
+  if (!isTauriRuntime()) return []
+  return invoke<IndicatorTemplateRecord[]>('list_indicator_templates')
+}
+
+export async function saveIndicatorTemplate(
+  name: string,
+  indicators: SavedIndicatorSpec[],
+  description?: string,
+  id?: string,
+): Promise<IndicatorTemplateRecord> {
+  if (!isTauriRuntime()) {
+    return { id: id ?? `tpl_${Date.now()}`, name, description: description ?? '', indicators, updatedAtMs: Date.now() }
+  }
+  return invoke<IndicatorTemplateRecord>('save_indicator_template', {
+    id: id ?? null,
+    name,
+    description: description ?? null,
+    indicators,
+  })
+}
+
+export async function deleteIndicatorTemplate(id: string): Promise<void> {
+  if (!isTauriRuntime()) return
+  await invoke<void>('delete_indicator_template', { id })
+}
+
+export async function openDetachedWindow(ticker: string, interval: IntervalKey): Promise<string | null> {
+  if (!isTauriRuntime()) return null
+  return invoke<string>('open_detached_window', { ticker, interval })
+}
+
+export async function broadcastSyncEvent(
+  eventName: 'sumi:sync_replay' | 'sumi:sync_drawing' | 'sumi:sync_symbol',
+  payload: Record<string, unknown>,
+): Promise<void> {
+  if (!isTauriRuntime()) return
+  try {
+    await invoke<void>('broadcast_sync_event', { eventName, payload })
+  } catch {
+    // ignore if running outside multi-window Tauri host
+  }
+}
+
 // ─── Causal Bar Replay ───────────────────────────────────────────────────────
 
 export async function replayStart(
   ticker: string,
   interval: IntervalKey,
   cutTimestampMs?: number | null,
+  activeIntervals?: IntervalKey[],
 ): Promise<ReplaySnapshotResponse> {
   if (!isTauriRuntime()) return webFallbackApi.replayStart(ticker, interval, cutTimestampMs)
   return invoke<ReplaySnapshotResponse>('replay_start', {
     ticker,
     interval,
     cutTimestampMs: cutTimestampMs ?? null,
+    activeIntervals: activeIntervals && activeIntervals.length > 0 ? activeIntervals : null,
   })
+}
+
+export async function replayGetState(): Promise<ReplaySnapshotResponse | null> {
+  if (!isTauriRuntime()) return null
+  return invoke<ReplaySnapshotResponse>('replay_get_state')
 }
 
 export async function replayStep(delta: number): Promise<ReplaySnapshotResponse> {
@@ -307,6 +450,38 @@ export async function replayStop(): Promise<void> {
     return
   }
   await invoke<void>('replay_stop')
+}
+
+export async function listReplaySessions(): Promise<SavedReplaySessionRecord[]> {
+  if (!isTauriRuntime()) return []
+  return invoke<SavedReplaySessionRecord[]>('list_replay_sessions')
+}
+
+export async function saveReplaySession(
+  name: string,
+  blindMode = true,
+  id?: string,
+): Promise<SavedReplaySessionRecord> {
+  if (!isTauriRuntime()) {
+    throw new Error('Lưu phiên Bar Replay yêu cầu Sumi Desktop runtime')
+  }
+  return invoke<SavedReplaySessionRecord>('save_replay_session', {
+    id: id ?? null,
+    name,
+    blindMode,
+  })
+}
+
+export async function resumeReplaySession(id: string): Promise<ReplaySnapshotResponse> {
+  if (!isTauriRuntime()) {
+    throw new Error('Khôi phục phiên Bar Replay yêu cầu Sumi Desktop runtime')
+  }
+  return invoke<ReplaySnapshotResponse>('resume_replay_session', { id })
+}
+
+export async function deleteReplaySession(id: string): Promise<void> {
+  if (!isTauriRuntime()) return
+  await invoke<void>('delete_replay_session', { id })
 }
 
 // ─── Paper Broker (VN VSD T+2 FIFO) ──────────────────────────────────────────
@@ -395,6 +570,15 @@ export async function runStrategyBacktest(
   return invoke<StrategyBacktestResponse>('run_strategy_backtest', { input })
 }
 
+export async function runStrategyPortfolio(
+  input: PortfolioBacktestInput,
+): Promise<PortfolioBacktestResponse> {
+  if (!isTauriRuntime()) {
+    throw new Error('Portfolio Backtest yêu cầu lõi Rust Sumi Desktop')
+  }
+  return invoke<PortfolioBacktestResponse>('run_strategy_portfolio', { input })
+}
+
 export async function runStrategyWfo(
   backtest: StrategyBacktestInput,
   foldCount: number,
@@ -429,4 +613,20 @@ export async function getSignalCatalog(): Promise<SignalCatalogItemDto[]> {
 export async function runStockScreener(input: StockScreenerInput): Promise<StockScreenerResponse> {
   if (!isTauriRuntime()) return webFallbackApi.runScreener(input)
   return invoke<StockScreenerResponse>('run_stock_screener', { input })
+}
+
+// ─── AFC — Analog Forecast Cone (Dual-Horizon PIT Probability Fan) ───────────
+
+export async function computeAnalogCone(
+  params: AnalogConeQueryParams,
+): Promise<AnalogConeResponseDto> {
+  if (!isTauriRuntime()) return webFallbackApi.computeAnalogCone(params)
+  return invoke<AnalogConeResponseDto>('compute_analog_cone', {
+    ticker: params.ticker,
+    interval: params.interval,
+    horizon: params.horizon ?? null,
+    topK: params.topK ?? null,
+    useMarketContext: params.useMarketContext ?? null,
+    asOfTimestampMs: params.asOfTimestampMs ?? null,
+  })
 }

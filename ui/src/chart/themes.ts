@@ -99,6 +99,7 @@ export function buildSuperchartsStyles(
   theme: ThemeMode,
   chartStyle: ChartStyleKind,
   showCountdown: boolean,
+  intervalLabel?: string,
 ): DeepPartial<Styles> {
   const isDark = theme === 'dark'
 
@@ -261,7 +262,7 @@ export function buildSuperchartsStyles(
           marginTop: 2,
           marginRight: 8,
           marginBottom: 2,
-          template: '{ticker} · {period}',
+          template: intervalLabel ? `{ticker} · ${intervalLabel}` : '{ticker} · {period}',
         },
         legend: {
           size: 11,

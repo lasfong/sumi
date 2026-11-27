@@ -150,17 +150,6 @@ fn safe_typical_price(c: &Candle) -> f64 {
     c.high / 3.0 + c.low / 3.0 + c.close / 3.0
 }
 
-#[inline]
-fn candle_weight(c: &Candle, use_equal_weight: bool) -> f64 {
-    if use_equal_weight {
-        1.0
-    } else if c.volume.is_finite() && c.volume > 0.0 {
-        c.volume
-    } else {
-        0.0
-    }
-}
-
 #[derive(Clone, Copy)]
 struct WelfordVwapAcc {
     cum_w: f64,
@@ -300,9 +289,6 @@ pub fn compute_session_vwap_with_anchor(
     }
 
     let (band_1, band_2) = normalize_band_multipliers(mult_1, mult_2);
-    let use_equal_weight = !candles
-        .iter()
-        .any(|c| c.volume.is_finite() && c.volume > 0.0);
 
     let mut out = VwapBandsOutput {
         vwap: vec![None; n],
@@ -314,18 +300,33 @@ pub fn compute_session_vwap_with_anchor(
     };
 
     let mut current_bucket: Option<i64> = None;
-    let mut acc = WelfordVwapAcc::new();
+    let mut acc_vol = WelfordVwapAcc::new();
+    let mut acc_eq = WelfordVwapAcc::new();
+    // Strictly causal (`DEF-001` zero-lookahead): track positive-volume presence prefix-by-prefix
+    // rather than scanning future candles with `.iter().any(...)`.
+    let mut seen_pos_vol = false;
 
     for (i, c) in candles.iter().enumerate() {
         let bucket = vwap_bucket_key(c.timestamp, timeframe, utc_offset_seconds, anchor_mode);
         if current_bucket != Some(bucket) {
             current_bucket = Some(bucket);
-            acc = WelfordVwapAcc::new();
+            acc_vol = WelfordVwapAcc::new();
+            acc_eq = WelfordVwapAcc::new();
             out.session_starts.push(i);
         }
 
-        acc.push(safe_typical_price(c), candle_weight(c, use_equal_weight));
-        acc.write_point(&mut out, i, band_1, band_2);
+        let tp = safe_typical_price(c);
+        if c.volume.is_finite() && c.volume > 0.0 {
+            seen_pos_vol = true;
+            acc_vol.push(tp, c.volume);
+        }
+        acc_eq.push(tp, 1.0);
+
+        if seen_pos_vol {
+            acc_vol.write_point(&mut out, i, band_1, band_2);
+        } else {
+            acc_eq.write_point(&mut out, i, band_1, band_2);
+        }
     }
 
     out
@@ -372,9 +373,6 @@ pub fn compute_anchored_vwap(
     }
 
     let (band_1, band_2) = normalize_band_multipliers(mult_1, mult_2);
-    let use_equal_weight = !candles[anchor_index..]
-        .iter()
-        .any(|c| c.volume.is_finite() && c.volume > 0.0);
 
     let mut out = VwapBandsOutput {
         vwap: vec![None; n],
@@ -385,11 +383,22 @@ pub fn compute_anchored_vwap(
         session_starts: vec![anchor_index],
     };
 
-    let mut acc = WelfordVwapAcc::new();
+    let mut acc_vol = WelfordVwapAcc::new();
+    let mut acc_eq = WelfordVwapAcc::new();
+    let mut seen_pos_vol = false;
     for (offset, c) in candles[anchor_index..].iter().enumerate() {
         let i = anchor_index + offset;
-        acc.push(safe_typical_price(c), candle_weight(c, use_equal_weight));
-        acc.write_point(&mut out, i, band_1, band_2);
+        let tp = safe_typical_price(c);
+        if c.volume.is_finite() && c.volume > 0.0 {
+            seen_pos_vol = true;
+            acc_vol.push(tp, c.volume);
+        }
+        acc_eq.push(tp, 1.0);
+        if seen_pos_vol {
+            acc_vol.write_point(&mut out, i, band_1, band_2);
+        } else {
+            acc_eq.write_point(&mut out, i, band_1, band_2);
+        }
     }
 
     out

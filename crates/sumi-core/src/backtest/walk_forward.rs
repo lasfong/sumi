@@ -190,24 +190,27 @@ pub fn run_walk_forward_validation(
 
     let is_window_len = first_oos_start;
     let grid = build_preset_sweep_configs(&clean_base);
-    let shared_catalog = if clean_base.preset == StrategyPresetKind::CustomSignalRules
-        && !causal_candles.is_empty()
-    {
+    let shared_catalog = if clean_base.preset.uses_catalog_matrix() && !causal_candles.is_empty() {
         Some(std::sync::Arc::new(
             crate::scanner::PrecomputedCatalogMatrix::compute(causal_candles),
         ))
     } else {
         None
     };
+    let venue = crate::journal::ExchangeVenue::infer_from_symbol_and_preset(
+        &symbol,
+        crate::data::DataSourcePreset::CustomFile,
+    );
     // Precompute strictly prefix-causal indicator vectors once per grid variant across `causal_candles`.
     let grid_with_features: Vec<(String, BacktestConfig, PrecomputedFeatures)> = grid
         .into_iter()
         .map(|(lbl, cfg)| {
-            let feats = PrecomputedFeatures::build_with_shared_catalog(
+            let mut feats = PrecomputedFeatures::build_with_shared_catalog(
                 causal_candles,
                 &cfg,
                 shared_catalog.clone(),
             );
+            feats.venue = venue;
             (lbl, cfg, feats)
         })
         .collect();
@@ -553,7 +556,7 @@ fn constituent_annualization_root(timeframe: Timeframe) -> f64 {
         Timeframe::M5 => 19_656.0,
         Timeframe::M15 => 6_552.0,
         Timeframe::H1 => 1_638.0,
-        Timeframe::H4 => 1_512.0,
+        Timeframe::H4 => 409.5,
         Timeframe::D1 => 252.0,
         Timeframe::W1 => 52.0,
     };

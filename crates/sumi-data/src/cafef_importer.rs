@@ -174,8 +174,18 @@ impl CafeFImporter {
                     continue;
                 };
 
-                let raw_bars: Vec<OhlcvBar> =
-                    rep.candles.iter().map(OhlcvBar::from_core_candle).collect();
+                let mut raw_bars: Vec<OhlcvBar> =
+                    Vec::with_capacity(rep.candles.len());
+                for candle in &rep.candles {
+                    let bar = OhlcvBar::from_core_candle(candle);
+                    // Vietnamese exchanges (`HOSE`, `HNX`, `UPCOM`) never trade on Saturdays or Sundays;
+                    // quarantine weekend bars (e.g. inverted DD/MM rows in CafeF INDEX CSVs — BUG-001!).
+                    if is_vn_weekend_timestamp_ms(bar.timestamp) {
+                        quarantined_rows = quarantined_rows.saturating_add(1);
+                        continue;
+                    }
+                    raw_bars.push(bar);
+                }
                 let bars = normalize_bars(raw_bars);
                 if bars.is_empty() {
                     continue;
@@ -235,6 +245,12 @@ fn classify_cafef_filename(name: &str) -> Option<CafeFFileKind> {
     } else {
         None
     }
+}
+
+fn is_vn_weekend_timestamp_ms(timestamp_ms: i64) -> bool {
+    // 1970-01-01 (day 0) was Thursday (weekday = 3 in Mon=0..Sun=6); ICT = UTC+7.
+    let ict_epoch_days = (timestamp_ms.div_euclid(1_000) + 7 * 3_600).div_euclid(86_400);
+    (ict_epoch_days + 3).rem_euclid(7) >= 5
 }
 
 fn normalize_cafef_ticker(raw: &str, is_index: bool) -> String {

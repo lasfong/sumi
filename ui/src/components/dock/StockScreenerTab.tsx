@@ -1,23 +1,65 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { ArrowDown, ArrowUp, Radar, Search } from 'lucide-react'
+import { ArrowDown, ArrowUp, Download, FilterX, Plus, Radar, Sparkles, X } from 'lucide-react'
 import * as api from '../../api/tauri'
 import { useWorkspaceStore } from '../../store/workspaceStore'
-import type { ScreenerRowDto, SignalCatalogItemDto, StockScreenerResponse } from '../../types/market'
+import type {
+  ScreenerExchangeFilter,
+  ScreenerRowDto,
+  SignalCatalogItemDto,
+  StockScreenerResponse,
+} from '../../types/market'
 
-type SortKey = 'symbol' | 'lastClose' | 'changePct' | 'lastVolume' | 'rvol20' | 'rsi14' | 'healthScore'
+type SortKey =
+  | 'symbol'
+  | 'lastClose'
+  | 'changePct'
+  | 'lastVolume'
+  | 'rvol20'
+  | 'qmvFlowZ50T05'
+  | 'rsi14'
+  | 'healthScore'
 
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
 
 const CATEGORY_TABS = [
-  { key: 'all', label: 'Tất cả (101)' },
-  { key: 'health', label: 'Sức khỏe' },
-  { key: 'technical', label: 'Kỹ thuật' },
-  { key: 'ichimoku', label: 'Ichimoku' },
-  { key: 'divergence', label: 'Phân kỳ' },
-  { key: 'volume', label: 'Khối lượng' },
-  { key: 'pattern', label: 'Mô hình nến' },
-  { key: 'vsa', label: 'VSA' },
-  { key: 'flow', label: 'Dòng tiền' },
+  { key: 'all', label: 'Tất cả tín hiệu QMV' },
+  { key: 'flow', label: 'Chu kỳ Dòng tiền (Proxy)' },
+  { key: 'ichimoku', label: 'Ichimoku V7 (6-18-36)' },
+  { key: 'vsa', label: 'VSA & Cạn cung' },
+  { key: 'sr', label: 'Hỗ trợ / Tắc nghẽn / Đỉnh 50p' },
+  { key: 'divergence', label: 'Phân kỳ RSI / MACD / CCI' },
+  { key: 'regime', label: 'Xu hướng & Chế độ' },
+  { key: 'technical', label: 'Giao cắt MA / Bollinger' },
+  { key: 'volume', label: 'Đột biến Khối lượng' },
+  { key: 'health', label: 'Điểm Sức khỏe' },
+]
+
+const QMV_QUICK_PRESETS: Array<{ label: string; title: string; signals: string[] }> = [
+  {
+    label: 'Hỗ trợ cạn cung (KT01)',
+    title: 'Giá tích lũy sát hỗ trợ cứng >=2 phiên kèm tiết cung Vol < 0.75x MA20',
+    signals: ['qmv.vsa_support_dry_up'],
+  },
+  {
+    label: 'Vượt Mây V7 (6-18-36)',
+    title: 'Giá cắt lên trên đám mây Kumo chuẩn QMV V7 (6, 18, 36, dịch 18)',
+    signals: ['qmv.ichimoku_v7_kumo_break_up'],
+  },
+  {
+    label: 'Đảo chiều T+ (Proxy)',
+    title: 'Chu kỳ T+ (Z-50 OHLCV Proxy) cắt lên từ vùng Duy trì <= 35 kèm nến hồi phục',
+    signals: ['qmv.reversal_up_t_plus'],
+  },
+  {
+    label: 'Phân kỳ Đáy CCI(14)',
+    title: 'Phân kỳ dương thường trên CCI(14) tại vùng đáy (trễ nhân quả 3 nến xác nhận)',
+    signals: ['divergence.cci_regular_bullish'],
+  },
+  {
+    label: 'Vượt Đỉnh 50p + Vol',
+    title: 'Thiết lập đỉnh cao mới 50 phiên kèm khối lượng >= 1.5x MA20',
+    signals: ['qmv.new_high_50', 'volume.rvol_spike_1_5x'],
+  },
 ]
 
 export const StockScreenerTab: React.FC = () => {
@@ -27,11 +69,29 @@ export const StockScreenerTab: React.FC = () => {
   const pushToast = useWorkspaceStore((s) => s.pushToast)
 
   const [catalog, setCatalog] = useState<SignalCatalogItemDto[]>([])
-  const [exchangeFilter, setExchangeFilter] = useState<'ALL' | 'HOSE' | 'HNX' | 'UPCOM' | 'WATCHLIST'>('HOSE')
+  const [showAllCatalog, setShowAllCatalog] = useState(false)
+
+  // QMV Universe & Taxonomy filters
+  const [exchangeFilter, setExchangeFilter] = useState<ScreenerExchangeFilter>('ALL_VN')
+  const [sectorGroupFilter, setSectorGroupFilter] = useState<string>('')
+  const [sectorFilter, setSectorFilter] = useState<string>('')
+  const [priceTierFilter, setPriceTierFilter] = useState<string>('')
+  const [defaultLiq50k, setDefaultLiq50k] = useState<boolean>(true)
+
+  // Multi-Signal `AND` Builder
   const [categoryFilter, setCategoryFilter] = useState<string>('all')
-  const [signalId, setSignalId] = useState<string>('')
+  const [selectedSignals, setSelectedSignals] = useState<string[]>([])
+  const [pendingSignalId, setPendingSignalId] = useState<string>('')
   const [regimeFilter, setRegimeFilter] = useState<string>('')
   const [searchQuery, setSearchQuery] = useState<string>('')
+
+  // Numeric filters
+  const [minRsi, setMinRsi] = useState<string>('')
+  const [maxRsi, setMaxRsi] = useState<string>('')
+  const [minRvol, setMinRvol] = useState<string>('')
+  const [minChangePct, setMinChangePct] = useState<string>('')
+  const [macdFilter, setMacdFilter] = useState<'all' | 'positive' | 'negative'>('all')
+  const [minHealthScore, setMinHealthScore] = useState<string>('')
 
   const [scanning, setScanning] = useState(false)
   const [result, setResult] = useState<StockScreenerResponse | null>(null)
@@ -43,10 +103,66 @@ export const StockScreenerTab: React.FC = () => {
     void api.getSignalCatalog().then(setCatalog)
   }, [])
 
-  const filteredCatalogOptions = useMemo(() => {
-    if (categoryFilter === 'all') return catalog
-    return catalog.filter((c) => c.category === categoryFilter)
-  }, [catalog, categoryFilter])
+  const visibleCatalog = useMemo(() => {
+    const base = showAllCatalog ? catalog : catalog.filter((c) => c.isQmvCore !== false)
+    if (categoryFilter === 'all') return base
+    return base.filter((c) => c.category === categoryFilter)
+  }, [catalog, showAllCatalog, categoryFilter])
+
+  const signalLabelMap = useMemo(() => {
+    const m = new Map<string, SignalCatalogItemDto>()
+    for (const c of catalog) m.set(c.id, c)
+    return m
+  }, [catalog])
+
+  const parseOptNum = (v: string): number | null => {
+    const t = v.trim()
+    if (!t) return null
+    const n = Number(t)
+    return Number.isFinite(n) ? n : null
+  }
+
+  const hasAnyActiveFilter = Boolean(
+    defaultLiq50k ||
+      selectedSignals.length > 0 ||
+      sectorGroupFilter ||
+      sectorFilter ||
+      priceTierFilter ||
+      regimeFilter ||
+      minRsi.trim() ||
+      maxRsi.trim() ||
+      minRvol.trim() ||
+      minChangePct.trim() ||
+      macdFilter !== 'all' ||
+      minHealthScore.trim(),
+  )
+
+  /** Quy tắc QMV `B5`: Gỡ toàn bộ bộ lọc mặc định (gồm cả ngưỡng KLGD 50k) để quan sát toàn thị trường. */
+  const handleClearAllDefaultFilters = () => {
+    setDefaultLiq50k(false)
+    setSelectedSignals([])
+    setPendingSignalId('')
+    setSectorGroupFilter('')
+    setSectorFilter('')
+    setPriceTierFilter('')
+    setRegimeFilter('')
+    setMinRsi('')
+    setMaxRsi('')
+    setMinRvol('')
+    setMinChangePct('')
+    setMacdFilter('all')
+    setMinHealthScore('')
+  }
+
+  const addSignalChip = (id: string) => {
+    if (!id) return
+    setSelectedSignals((prev) => (prev.includes(id) ? prev : [...prev, id]))
+    setPendingSignalId('')
+  }
+
+  const removeSignalChip = (id: string) => {
+    setSelectedSignals((prev) => prev.filter((s) => s !== id))
+  }
 
   const runScan = async () => {
     setScanning(true)
@@ -55,16 +171,27 @@ export const StockScreenerTab: React.FC = () => {
       const res = await api.runStockScreener({
         exchangeFilter,
         tickers: exchangeFilter === 'WATCHLIST' ? (wl?.tickers ?? []) : undefined,
-        signalId: signalId || undefined,
-        categoryFilter: categoryFilter !== 'all' ? categoryFilter : undefined,
+        signalIds: selectedSignals,
+        signalId: selectedSignals.length === 1 ? selectedSignals[0] : undefined,
+        sectorGroupFilter: sectorGroupFilter || null,
+        sectorFilter: sectorFilter || null,
+        priceTierFilter: priceTierFilter || null,
+        minAvgVol20: defaultLiq50k ? 50_000 : null,
+        categoryFilter: categoryFilter !== 'all' && selectedSignals.length === 0 ? categoryFilter : undefined,
         regimeFilter: regimeFilter || undefined,
         searchQuery: searchQuery.trim() || undefined,
-        maxSymbols: 180,
+        maxSymbols: 500,
+        minRsi: parseOptNum(minRsi),
+        maxRsi: parseOptNum(maxRsi),
+        minRvol: parseOptNum(minRvol),
+        minChangePct: parseOptNum(minChangePct),
+        macdFilter: macdFilter === 'all' ? null : macdFilter,
+        minHealthScore: parseOptNum(minHealthScore),
       })
       setResult(res)
-      setLiveStatus(`Đã quét ${res.scannedSymbols} mã, tìm thấy ${res.matchedSymbols} mã phù hợp`)
+      setLiveStatus(`Đã quét ${res.scannedSymbols} mã VN, khớp ${res.matchedSymbols} mã theo chuẩn QMV`)
     } catch (err) {
-      pushToast('error', `Lỗi quét cổ phiếu: ${String(err)}`)
+      pushToast('error', `Lỗi quét QMV Screener: ${String(err)}`)
     } finally {
       setScanning(false)
     }
@@ -73,13 +200,22 @@ export const StockScreenerTab: React.FC = () => {
   useEffect(() => {
     void runScan()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [exchangeFilter, categoryFilter, signalId, regimeFilter])
+  }, [
+    exchangeFilter,
+    sectorGroupFilter,
+    sectorFilter,
+    priceTierFilter,
+    defaultLiq50k,
+    selectedSignals,
+    categoryFilter,
+    regimeFilter,
+    macdFilter,
+  ])
 
   const handleSort = (col: SortKey) => {
     const nextDir = sortCol === col && sortDir === 'ascending' ? 'descending' : 'ascending'
     setSortCol(col)
     setSortDir(nextDir)
-    setLiveStatus(`Đã sắp xếp theo ${col}, ${nextDir === 'ascending' ? 'tăng dần' : 'giảm dần'}`)
   }
 
   const sortedRows = useMemo(() => {
@@ -94,8 +230,8 @@ export const StockScreenerTab: React.FC = () => {
     return rows
   }, [result, sortCol, sortDir])
 
-  const renderSortHeader = (col: SortKey, label: string, alignRight = false) => (
-    <th scope="col" aria-sort={sortCol === col ? sortDir : undefined}>
+  const renderSortHeader = (col: SortKey, label: string, alignRight = false, title?: string) => (
+    <th scope="col" aria-sort={sortCol === col ? sortDir : undefined} title={title}>
       <button
         type="button"
         onClick={() => handleSort(col)}
@@ -111,35 +247,231 @@ export const StockScreenerTab: React.FC = () => {
     </th>
   )
 
+  const handleExportCsv = () => {
+    if (sortedRows.length === 0) {
+      pushToast('info', 'Không có dữ liệu lọc QMV để xuất CSV')
+      return
+    }
+    const headers = [
+      'Ma',
+      'San',
+      'NganhQMV',
+      'NhomDongTien',
+      'GiaDong',
+      'ThayDoiPct',
+      'KhoiLuong',
+      'KLGD20_TB',
+      'RVol20',
+      'QMV_Flow_Z50_T05_Proxy',
+      'QMV_Flow_Z50_T20_Proxy',
+      'RSI14',
+      'XuHuong',
+      'DiemSucKhoe',
+      'TinHieuQMV',
+    ]
+    const esc = (v: unknown) => {
+      const s = String(v ?? '')
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+    }
+    const lines = [
+      headers.join(','),
+      ...sortedRows.map((r) =>
+        [
+          r.symbol,
+          r.exchange,
+          r.qmvSectorLabel ?? '',
+          r.moneyTier ?? '',
+          r.lastClose,
+          r.changePct.toFixed(2),
+          Math.round(r.lastVolume),
+          r.avgVol20 != null ? Math.round(r.avgVol20) : '',
+          r.rvol20 != null ? r.rvol20.toFixed(2) : '',
+          r.qmvFlowZ50T05 != null ? r.qmvFlowZ50T05.toFixed(1) : '',
+          r.qmvFlowZ50T20 != null ? r.qmvFlowZ50T20.toFixed(1) : '',
+          r.rsi14 != null ? r.rsi14.toFixed(1) : '',
+          r.regime,
+          r.healthScore != null ? r.healthScore.toFixed(0) : '',
+          r.matchedSignals.join(' | '),
+        ]
+          .map(esc)
+          .join(','),
+      ),
+    ]
+    const blob = new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `qmv_screener_${exchangeFilter.toLowerCase()}_${new Date().toISOString().slice(0, 10)}.csv`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+    pushToast('success', `Đã xuất ${sortedRows.length} mã QMV Screener ra CSV`)
+  }
+
+  const tierBadgeStyle = (tier?: string) => {
+    if (tier === 'DT1') return { bg: 'rgba(41, 98, 255, 0.16)', fg: '#5B8DEF' }
+    if (tier === 'DT2') return { bg: 'rgba(8, 153, 129, 0.16)', fg: '#089981' }
+    if (tier === 'DT3') return { bg: 'rgba(255, 152, 0, 0.16)', fg: '#FF9800' }
+    return { bg: 'var(--tv-bg-elevated)', fg: 'var(--tv-text-secondary)' }
+  }
+
   return (
     <div className="flex flex-col h-full min-h-0 overflow-hidden">
-      {/* Screener Filter Bar */}
+      {/* Row 1: QMV Universe, Sector, Money Tier, Liquidity Gate & Quick Actions */}
       <div
-        className="flex flex-wrap items-center gap-2 px-3 py-1.5 shrink-0"
+        className="flex flex-wrap items-center gap-1.5 px-3 py-1.5 shrink-0"
         style={{ borderBottom: '1px solid var(--tv-border)', backgroundColor: 'var(--tv-bg-elevated)' }}
       >
         <select
-          aria-label="Lọc sàn"
+          aria-label="Rổ cổ phiếu & Sàn VN"
           value={exchangeFilter}
-          onChange={(e) => setExchangeFilter(e.target.value as typeof exchangeFilter)}
-          className="px-2 py-1 rounded text-[11.5px] font-medium outline-none"
+          onChange={(e) => setExchangeFilter(e.target.value as ScreenerExchangeFilter)}
+          className="px-2 py-1 rounded text-[11.5px] font-semibold outline-none"
           style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
         >
-          <option value="ALL">Tất cả sàn VN</option>
-          <option value="HOSE">HOSE</option>
-          <option value="HNX">HNX</option>
-          <option value="UPCOM">UPCOM</option>
-          <option value="WATCHLIST">Danh mục đang xem</option>
+          <option value="ALL_VN">Toàn thị trường VN (475 mã)</option>
+          <option value="QMV60">★ Rổ QMV60 (60 mã trọng điểm)</option>
+          <option value="QMV30">★ Rổ QMV30 (30 cổ phiếu trụ)</option>
+          <option value="DT1">Dòng tiền Loại 1 (DT1 · Tạo lập)</option>
+          <option value="DT2">Dòng tiền Loại 2 (DT2 · Mid-cap)</option>
+          <option value="DT3">Dòng tiền Loại 3 (DT3 · Đầu cơ)</option>
+          <option value="HOSE">Sàn HOSE</option>
+          <option value="HNX">Sàn HNX</option>
+          <option value="UPCOM">Sàn UPCOM</option>
+          <option value="WATCHLIST">Danh mục đang mở</option>
         </select>
 
         <select
-          aria-label="Nhóm tín hiệu"
-          value={categoryFilter}
+          aria-label="Nhóm ngành chu kỳ QMV"
+          value={sectorGroupFilter}
           onChange={(e) => {
-            setCategoryFilter(e.target.value)
-            setSignalId('')
+            setSectorGroupFilter(e.target.value)
+            setSectorFilter('')
           }}
-          className="px-2 py-1 rounded text-[11.5px] outline-none"
+          className="px-2 py-1 rounded text-[11px] outline-none"
+          style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+        >
+          <option value="">Mọi Nhóm ngành (1–3)</option>
+          <option value="GROUP_1">Nhóm 1: Tài chính & Đòn bẩy</option>
+          <option value="GROUP_2">Nhóm 2: Chu kỳ & Tăng trưởng</option>
+          <option value="GROUP_3">Nhóm 3: Phòng thủ & Tiện ích</option>
+        </select>
+
+        <select
+          aria-label="Ngành QMV chi tiết"
+          value={sectorFilter}
+          onChange={(e) => setSectorFilter(e.target.value)}
+          className="px-2 py-1 rounded text-[11px] outline-none"
+          style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+        >
+          <option value="">Tất cả 11 ngành QMV</option>
+          <option value="BANKING">Ngân hàng</option>
+          <option value="BROKERAGE">Chứng khoán</option>
+          <option value="REAL_ESTATE">BĐS Dân cư</option>
+          <option value="CONSTRUCTION_STEEL">XD & VLXD / Thép</option>
+          <option value="RETAIL">Bán lẻ</option>
+          <option value="TECH_TELECOM">Công nghệ & Viễn thông</option>
+          <option value="INDUSTRIAL_LOGISTICS">KCN & Cảng / Logistics</option>
+          <option value="OIL_GAS_CHEM">Dầu khí & Hóa chất</option>
+          <option value="CONSUMER_FNB">Thực phẩm & Thủy sản (F&B)</option>
+          <option value="UTILITIES_DEFENSIVE">Điện / Nước / Bảo hiểm / Dược</option>
+          <option value="OTHER_CYCLICAL">Sản xuất & Dịch vụ khác</option>
+        </select>
+
+        <select
+          aria-label="Phân tầng thị giá QMV"
+          value={priceTierFilter}
+          onChange={(e) => setPriceTierFilter(e.target.value)}
+          className="px-2 py-1 rounded text-[11px] outline-none"
+          style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+        >
+          <option value="">Mọi thị giá</option>
+          <option value="OVER_50K">Thị giá cao (≥ 50k)</option>
+          <option value="30K_50K">Thị giá vừa (30k – 50k)</option>
+          <option value="10K_30K">Thị giá 10k – 30k</option>
+          <option value="UNDER_10K">Trà đá (&lt; 10k)</option>
+        </select>
+
+        <label
+          className="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] cursor-pointer select-none"
+          style={{
+            backgroundColor: defaultLiq50k ? 'rgba(8, 153, 129, 0.14)' : 'var(--tv-bg-input)',
+            border: `1px solid ${defaultLiq50k ? 'rgba(8, 153, 129, 0.45)' : 'var(--tv-border)'}`,
+            color: defaultLiq50k ? '#089981' : 'var(--tv-text-secondary)',
+          }}
+          title="Ngưỡng thanh khoản mặc định trên QMV Screener V7: KLGD bình quân 20 phiên >= 50,000 cp"
+        >
+          <input
+            type="checkbox"
+            checked={defaultLiq50k}
+            onChange={(e) => setDefaultLiq50k(e.target.checked)}
+            className="m-0"
+          />
+          <span className="font-medium">KL20 ≥ 50k</span>
+        </label>
+
+        {hasAnyActiveFilter && (
+          <button
+            type="button"
+            onClick={handleClearAllDefaultFilters}
+            className="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium border cursor-pointer"
+            style={{
+              backgroundColor: 'rgba(242, 54, 69, 0.10)',
+              borderColor: 'rgba(242, 54, 69, 0.35)',
+              color: '#F23645',
+            }}
+            title="Quy tắc QMV B5: Gỡ bộ lọc mặc định để xem toàn bộ cổ phiếu kể cả thanh khoản thấp"
+          >
+            <FilterX className="w-3 h-3" />
+            <span>Gỡ bộ lọc mặc định</span>
+          </button>
+        )}
+
+        <div className="flex items-center gap-1.5 ml-auto">
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void runScan()
+            }}
+            placeholder="Tìm mã..."
+            className="w-20 px-2 py-1 rounded text-[11px] outline-none"
+            style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+          />
+          <button
+            type="button"
+            disabled={scanning}
+            onClick={() => void runScan()}
+            className="flex items-center gap-1 px-2.5 py-1 rounded text-[11.5px] font-semibold bg-[#2962FF] hover:bg-[#1E53E5] text-white border-0 cursor-pointer disabled:opacity-50"
+          >
+            <Radar className="w-3.5 h-3.5" />
+            <span>{scanning ? 'Đang lọc...' : 'Lọc QMV'}</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleExportCsv}
+            className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium border cursor-pointer"
+            style={{ backgroundColor: 'var(--tv-bg-panel)', borderColor: 'var(--tv-border)', color: 'var(--tv-text-primary)' }}
+            title="Xuất bảng kết quả QMV Screener ra CSV"
+          >
+            <Download className="w-3 h-3" />
+            <span>CSV</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Row 2: Multi-Signal `AND` Builder + QMV Screener Presets + Numeric Filters */}
+      <div
+        className="flex flex-wrap items-center gap-1.5 px-3 py-1 shrink-0 text-[11px]"
+        style={{ borderBottom: '1px solid var(--tv-border)', backgroundColor: 'var(--tv-bg-panel)' }}
+      >
+        <select
+          aria-label="Nhóm trụ cột tín hiệu QMV"
+          value={categoryFilter}
+          onChange={(e) => setCategoryFilter(e.target.value)}
+          className="px-1.5 py-0.5 rounded text-[11px] outline-none"
           style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
         >
           {CATEGORY_TABS.map((c) => (
@@ -150,16 +482,17 @@ export const StockScreenerTab: React.FC = () => {
         </select>
 
         <select
-          aria-label="Chọn 1 trong 101 tín hiệu định lượng"
-          value={signalId}
-          onChange={(e) => setSignalId(e.target.value)}
-          className="max-w-[230px] px-2 py-1 rounded text-[11.5px] outline-none"
+          aria-label="Thêm tín hiệu QMV kết hợp (AND)"
+          value={pendingSignalId}
+          onChange={(e) => addSignalChip(e.target.value)}
+          className="max-w-[235px] px-1.5 py-0.5 rounded text-[11px] outline-none"
           style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
         >
-          <option value="">Tất cả {catalog.length || 101} tín hiệu kỹ thuật</option>
-          {filteredCatalogOptions.map((sig) => (
+          <option value="">+ Thêm điều kiện tín hiệu QMV (AND)...</option>
+          {visibleCatalog.map((sig) => (
             <option key={sig.id} value={sig.id}>
-              {sig.labelVi} ({sig.outputType})
+              {sig.isOhlcvProxy ? '[Proxy] ' : ''}
+              {sig.labelVi}
             </option>
           ))}
         </select>
@@ -168,167 +501,331 @@ export const StockScreenerTab: React.FC = () => {
           aria-label="Lọc trạng thái xu hướng"
           value={regimeFilter}
           onChange={(e) => setRegimeFilter(e.target.value)}
-          className="px-2 py-1 rounded text-[11.5px] outline-none"
+          className="px-1.5 py-0.5 rounded text-[11px] outline-none"
           style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
         >
           <option value="">Mọi xu hướng</option>
-          <option value="Uptrend">Uptrend</option>
-          <option value="Recovery">Recovery</option>
-          <option value="Pullback">Pullback</option>
-          <option value="SidewaysSqueeze">Squeeze</option>
-          <option value="Downtrend">Downtrend</option>
+          <option value="Uptrend">Uptrend (Xu hướng lên)</option>
+          <option value="Recovery">Recovery (Hồi phục)</option>
+          <option value="Pullback">Pullback (Điều chỉnh tích lũy)</option>
+          <option value="SidewaysSqueeze">Squeeze (Nén chặt)</option>
+          <option value="Downtrend">Downtrend (Xu hướng xuống)</option>
         </select>
 
-        <div
-          className="flex items-center gap-1 px-2 py-0.5 rounded"
-          style={{ backgroundColor: 'var(--tv-bg-input)', border: '1px solid var(--tv-border)' }}
-        >
-          <Search className="w-3 h-3" style={{ color: 'var(--tv-text-secondary)' }} />
+        <label className="flex items-center gap-1 tabular-nums" style={{ color: 'var(--tv-text-secondary)' }}>
+          <span>RSI</span>
           <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Lọc mã..."
-            className="w-20 bg-transparent border-0 outline-none text-[11.5px]"
-            style={{ color: 'var(--tv-text-primary)' }}
+            aria-label="RSI tối thiểu"
+            type="number"
+            placeholder="Từ"
+            value={minRsi}
+            onChange={(e) => setMinRsi(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && void runScan()}
+            className="w-11 px-1 py-0.5 rounded text-[10.5px] text-center no-spinner outline-none"
+            style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
           />
-        </div>
+          <span>–</span>
+          <input
+            aria-label="RSI tối đa"
+            type="number"
+            placeholder="Đến"
+            value={maxRsi}
+            onChange={(e) => setMaxRsi(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && void runScan()}
+            className="w-11 px-1 py-0.5 rounded text-[10.5px] text-center no-spinner outline-none"
+            style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+          />
+        </label>
 
-        <button
-          type="button"
-          disabled={scanning}
-          onClick={() => void runScan()}
-          className="flex items-center gap-1.5 px-3 py-1 rounded text-[11.5px] font-semibold bg-[#2962FF] hover:bg-[#1E53E5] text-white border-0 cursor-pointer disabled:opacity-50"
+        <label className="flex items-center gap-1 tabular-nums" style={{ color: 'var(--tv-text-secondary)' }}>
+          <span>RVol ≥</span>
+          <input
+            aria-label="RVol tối thiểu"
+            type="number"
+            step="0.1"
+            placeholder="1.3"
+            value={minRvol}
+            onChange={(e) => setMinRvol(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && void runScan()}
+            className="w-12 px-1 py-0.5 rounded text-[10.5px] text-center no-spinner outline-none"
+            style={{ backgroundColor: 'var(--tv-bg-input)', color: 'var(--tv-text-primary)', border: '1px solid var(--tv-border)' }}
+          />
+        </label>
+
+        <label
+          className="inline-flex items-center gap-1 text-[10.5px] cursor-pointer select-none"
+          style={{ color: 'var(--tv-text-secondary)' }}
+          title="Mặc định ẩn các tín hiệu nến nhiễu ngoài QMV; bật để hiện đủ 123 tín hiệu sumi-core"
         >
-          <Radar className="w-3.5 h-3.5" />
-          <span>{scanning ? 'Đang quét...' : 'Quét 101 tín hiệu'}</span>
-        </button>
+          <input
+            type="checkbox"
+            checked={showAllCatalog}
+            onChange={(e) => setShowAllCatalog(e.target.checked)}
+            className="m-0"
+          />
+          <span>Đủ 123 TH</span>
+        </label>
 
         {result && (
-          <span className="ml-auto text-[11px] tabular-nums" style={{ color: 'var(--tv-text-secondary)' }}>
-            {result.matchedSymbols}/{result.scannedSymbols} mã · {result.totalCatalogSignals} tín hiệu · {result.elapsedMs}ms
+          <span className="ml-auto text-[10.5px] tabular-nums" style={{ color: 'var(--tv-text-secondary)' }}>
+            <strong>{result.matchedSymbols}</strong>/{result.scannedSymbols} mã · {result.elapsedMs}ms
           </span>
         )}
       </div>
 
-      {/* Live region for screen reader sort/scan status */}
+      {/* Row 3: Quick QMV Presets & Active `AND` Signal Chips */}
+      <div
+        className="flex flex-wrap items-center gap-1.5 px-3 py-1 shrink-0 text-[10.5px]"
+        style={{ borderBottom: '1px solid var(--tv-border)', backgroundColor: 'var(--tv-bg-panel)' }}
+      >
+        <span className="inline-flex items-center gap-1 font-semibold text-[#2962FF]">
+          <Sparkles className="w-3 h-3" />
+          <span>Bộ lọc nhanh QMV:</span>
+        </span>
+        {QMV_QUICK_PRESETS.map((preset) => {
+          const active =
+            preset.signals.length === selectedSignals.length &&
+            preset.signals.every((s) => selectedSignals.includes(s))
+          return (
+            <button
+              key={preset.label}
+              type="button"
+              onClick={() => setSelectedSignals(active ? [] : preset.signals)}
+              title={preset.title}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded border cursor-pointer"
+              style={{
+                backgroundColor: active ? 'var(--tv-accent-soft)' : 'var(--tv-bg-elevated)',
+                borderColor: active ? 'var(--tv-accent)' : 'var(--tv-border)',
+                color: active ? 'var(--tv-accent)' : 'var(--tv-text-primary)',
+              }}
+            >
+              <Plus className="w-2.5 h-2.5" />
+              <span>{preset.label}</span>
+            </button>
+          )
+        })}
+
+        {selectedSignals.map((sigId) => {
+          const meta = signalLabelMap.get(sigId)
+          return (
+            <span
+              key={sigId}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded font-semibold"
+              style={{
+                backgroundColor: 'rgba(41, 98, 255, 0.16)',
+                border: '1px solid rgba(41, 98, 255, 0.45)',
+                color: '#5B8DEF',
+              }}
+            >
+              <span>{meta?.labelVi ?? sigId}</span>
+              <button
+                type="button"
+                onClick={() => removeSignalChip(sigId)}
+                className="p-0 bg-transparent border-0 cursor-pointer text-current"
+                title="Gỡ điều kiện này"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </span>
+          )
+        })}
+      </div>
+
       <div role="status" className="sr-only-live">
         {liveStatus}
       </div>
 
-      {/* Semantic Sortable Screener Table */}
+      {/* Semantic Sortable QMV Screener Table */}
       <div role="region" aria-labelledby="screener-table-caption" tabIndex={0} className="flex-1 overflow-auto tv-scroll">
-        <table className="tv-table tabular-nums min-w-[780px]">
+        <table className="tv-table tabular-nums min-w-[940px]">
           <caption id="screener-table-caption" className="sr-only-live">
-            Bảng lọc cổ phiếu theo 101 tín hiệu kỹ thuật sumi-core
+            Bảng lọc kỹ thuật chuẩn QMV (475 mã Việt Nam · Phân nhóm Ngành & Dòng tiền DT1/DT2/DT3)
           </caption>
           <thead>
             <tr>
               {renderSortHeader('symbol', 'Mã')}
-              <th scope="col">Sàn</th>
+              <th scope="col">Ngành QMV</th>
+              <th scope="col" title="Phân nhóm Dòng tiền QMV: DT1 (Tạo lập/Trụ) · DT2 (Mid-cap) · DT3 (Đầu cơ)">
+                DT
+              </th>
               {renderSortHeader('lastClose', 'Giá đóng', true)}
-              {renderSortHeader('changePct', '% Thay đổi', true)}
-              {renderSortHeader('lastVolume', 'Khối lượng', true)}
+              {renderSortHeader('changePct', '% Đổi', true)}
+              {renderSortHeader('lastVolume', 'KLGD', true)}
               {renderSortHeader('rvol20', 'RVol(20)', true)}
+              {renderSortHeader(
+                'qmvFlowZ50T05',
+                'Chu kỳ Z50 (T+/Sóng)',
+                true,
+                'OHLCV Proxy Z-50 [0..100]: <=30 Duy trì (xanh) · >=70 Bão hòa (đỏ)',
+              )}
               {renderSortHeader('rsi14', 'RSI(14)', true)}
               <th scope="col">Xu hướng</th>
-              {renderSortHeader('healthScore', 'Sức khỏe', true)}
-              <th scope="col">Tín hiệu kích hoạt</th>
+              {renderSortHeader('healthScore', 'Điểm SK', true)}
+              <th scope="col">Tín hiệu QMV kích hoạt</th>
             </tr>
           </thead>
           <tbody>
             {sortedRows.length === 0 ? (
               <tr>
-                <td colSpan={10} className="text-center py-6" style={{ color: 'var(--tv-text-secondary)' }}>
-                  {scanning ? 'Đang chạy bộ quét 101 tín hiệu sumi-core...' : 'Không có mã nào khớp bộ lọc hiện tại.'}
+                <td colSpan={12} className="text-center py-6" style={{ color: 'var(--tv-text-secondary)' }}>
+                  {scanning
+                    ? 'Đang quét 475 mã Việt Nam theo bộ tiêu chí QMV...'
+                    : 'Không có cổ phiếu nào khớp tổ hợp điều kiện hiện tại. Nhấn "Gỡ bộ lọc mặc định" để mở rộng.'}
                 </td>
               </tr>
             ) : (
-              sortedRows.map((row) => (
-                <tr
-                  key={row.ticker}
-                  className="cursor-pointer"
-                  onClick={() => setActiveTicker(row.ticker)}
-                  title={`Nhấp để nạp ${row.ticker} lên biểu đồ chính`}
-                >
-                  <td className="font-bold text-[#2962FF]">{row.symbol}</td>
-                  <td style={{ color: 'var(--tv-text-secondary)' }}>{row.exchange}</td>
-                  <td className="text-right font-medium">{row.lastClose.toLocaleString('en-US')}</td>
-                  <td
-                    className="text-right font-semibold"
-                    style={{ color: row.changePct >= 0 ? 'var(--tv-up)' : 'var(--tv-down)' }}
+              sortedRows.map((row) => {
+                const tb = tierBadgeStyle(row.moneyTier)
+                const z5 = row.qmvFlowZ50T05
+                const z20 = row.qmvFlowZ50T20
+                return (
+                  <tr
+                    key={row.ticker}
+                    className="cursor-pointer"
+                    onClick={() => setActiveTicker(row.ticker)}
+                    title={`Nhấp để mở biểu đồ ${row.ticker} (${row.qmvSectorLabel ?? row.exchange})`}
                   >
-                    {row.changePct >= 0 ? '+' : ''}
-                    {row.changePct.toFixed(2)}%
-                  </td>
-                  <td className="text-right">{Math.round(row.lastVolume).toLocaleString('en-US')}</td>
-                  <td className="text-right">
-                    {row.rvol20 != null ? `${row.rvol20.toFixed(2)}x` : '—'}
-                  </td>
-                  <td
-                    className="text-right"
-                    style={{
-                      color:
-                        row.rsi14 != null && row.rsi14 <= 30
-                          ? 'var(--tv-up)'
-                          : row.rsi14 != null && row.rsi14 >= 70
-                            ? 'var(--tv-down)'
-                            : undefined,
-                    }}
-                  >
-                    {row.rsi14 != null ? row.rsi14.toFixed(1) : '—'}
-                  </td>
-                  <td>
-                    <span
-                      className="px-1.5 py-0.5 rounded text-[10px] font-semibold"
+                    <td>
+                      <div className="flex items-center gap-1">
+                        <span className="font-bold text-[#2962FF]">{row.symbol}</span>
+                        <span className="text-[9.5px]" style={{ color: 'var(--tv-text-muted)' }}>
+                          {row.exchange}
+                        </span>
+                        {row.inQmv30 ? (
+                          <span
+                            className="px-1 py-0 rounded text-[9px] font-bold"
+                            style={{ backgroundColor: 'rgba(251, 192, 45, 0.18)', color: '#FBC02D' }}
+                          >
+                            QMV30
+                          </span>
+                        ) : row.inQmv60 ? (
+                          <span
+                            className="px-1 py-0 rounded text-[9px] font-semibold"
+                            style={{ backgroundColor: 'rgba(41, 98, 255, 0.14)', color: '#5B8DEF' }}
+                          >
+                            QMV60
+                          </span>
+                        ) : null}
+                      </div>
+                    </td>
+                    <td className="text-[11px] max-w-[145px] truncate" style={{ color: 'var(--tv-text-secondary)' }}>
+                      {row.qmvSectorLabel ?? '—'}
+                    </td>
+                    <td>
+                      {row.moneyTier ? (
+                        <span
+                          className="px-1.5 py-0.5 rounded text-[10px] font-bold"
+                          style={{ backgroundColor: tb.bg, color: tb.fg }}
+                        >
+                          {row.moneyTier}
+                        </span>
+                      ) : (
+                        '—'
+                      )}
+                    </td>
+                    <td className="text-right font-medium">{row.lastClose.toLocaleString('en-US')}</td>
+                    <td
+                      className="text-right font-semibold"
+                      style={{ color: row.changePct >= 0 ? 'var(--tv-up)' : 'var(--tv-down)' }}
+                    >
+                      {row.changePct >= 0 ? '+' : ''}
+                      {row.changePct.toFixed(2)}%
+                    </td>
+                    <td className="text-right">{Math.round(row.lastVolume).toLocaleString('en-US')}</td>
+                    <td
+                      className="text-right font-medium"
                       style={{
-                        backgroundColor:
-                          row.regime === 'Uptrend' || row.regime === 'Recovery'
-                            ? 'var(--tv-up-soft)'
-                            : row.regime === 'Downtrend'
-                              ? 'var(--tv-down-soft)'
-                              : 'var(--tv-hover)',
                         color:
-                          row.regime === 'Uptrend' || row.regime === 'Recovery'
+                          row.rvol20 != null && row.rvol20 >= 1.5
                             ? 'var(--tv-up)'
-                            : row.regime === 'Downtrend'
-                              ? 'var(--tv-down)'
-                              : 'var(--tv-text-secondary)',
+                            : row.rvol20 != null && row.rvol20 <= 0.65
+                              ? '#FBC02D'
+                              : undefined,
                       }}
                     >
-                      {row.regime}
-                    </span>
-                  </td>
-                  <td className="text-right font-bold">
-                    {row.healthScore != null ? (
-                      <span style={{ color: row.healthScore >= 0 ? 'var(--tv-up)' : 'var(--tv-down)' }}>
-                        {row.healthScore >= 0 ? '+' : ''}
-                        {row.healthScore.toFixed(0)}
-                      </span>
-                    ) : (
-                      '—'
-                    )}
-                  </td>
-                  <td>
-                    <div className="flex items-center gap-1 max-w-[300px] overflow-hidden">
-                      {row.selectedSignalValue && (
-                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-[#2962FF] text-white">
-                          {row.selectedSignalValue}
+                      {row.rvol20 != null ? `${row.rvol20.toFixed(2)}x` : '—'}
+                    </td>
+                    <td className="text-right text-[11px]">
+                      {z5 != null ? (
+                        <span>
+                          <strong
+                            style={{
+                              color: z5 <= 30 ? 'var(--tv-up)' : z5 >= 70 ? 'var(--tv-down)' : 'var(--tv-text-primary)',
+                            }}
+                          >
+                            {z5.toFixed(0)}
+                          </strong>
+                          <span style={{ color: 'var(--tv-text-muted)' }}> / </span>
+                          <span
+                            style={{
+                              color:
+                                z20 != null && z20 <= 30
+                                  ? 'var(--tv-up)'
+                                  : z20 != null && z20 >= 70
+                                    ? 'var(--tv-down)'
+                                    : 'var(--tv-text-secondary)',
+                            }}
+                          >
+                            {z20 != null ? z20.toFixed(0) : '—'}
+                          </span>
                         </span>
+                      ) : (
+                        '—'
                       )}
-                      {row.matchedSignals.slice(0, 2).map((sig, idx) => (
-                        <span
-                          key={idx}
-                          className="px-1.5 py-0.5 rounded text-[10px] truncate"
-                          style={{ backgroundColor: 'var(--tv-hover)', color: 'var(--tv-text-primary)' }}
-                        >
-                          {sig}
-                        </span>
-                      ))}
-                    </div>
-                  </td>
-                </tr>
-              ))
+                    </td>
+                    <td
+                      className="text-right"
+                      style={{
+                        color:
+                          row.rsi14 != null && row.rsi14 <= 30
+                            ? 'var(--tv-up)'
+                            : row.rsi14 != null && row.rsi14 >= 70
+                              ? 'var(--tv-down)'
+                              : undefined,
+                      }}
+                    >
+                      {row.rsi14 != null ? row.rsi14.toFixed(1) : '—'}
+                    </td>
+                    <td>
+                      <span
+                        className="px-1.5 py-0.5 rounded text-[10px] font-semibold"
+                        style={{
+                          backgroundColor:
+                            row.regime === 'Uptrend' || row.regime === 'Recovery'
+                              ? 'rgba(8, 153, 129, 0.16)'
+                              : row.regime === 'Downtrend'
+                                ? 'rgba(242, 54, 69, 0.16)'
+                                : 'var(--tv-bg-elevated)',
+                          color:
+                            row.regime === 'Uptrend' || row.regime === 'Recovery'
+                              ? 'var(--tv-up)'
+                              : row.regime === 'Downtrend'
+                                ? 'var(--tv-down)'
+                                : 'var(--tv-text-secondary)',
+                        }}
+                      >
+                        {row.regimeShort}
+                      </span>
+                    </td>
+                    <td
+                      className="text-right font-bold"
+                      style={{
+                        color:
+                          (row.healthScore ?? 0) >= 25
+                            ? 'var(--tv-up)'
+                            : (row.healthScore ?? 0) <= -25
+                              ? 'var(--tv-down)'
+                              : 'var(--tv-text-primary)',
+                      }}
+                    >
+                      {row.healthScore != null ? row.healthScore.toFixed(0) : '—'}
+                    </td>
+                    <td className="max-w-[270px] truncate text-[11px]" style={{ color: 'var(--tv-text-secondary)' }}>
+                      {row.matchedSignals.length > 0 ? row.matchedSignals.join(' · ') : '—'}
+                    </td>
+                  </tr>
+                )
+              })
             )}
           </tbody>
         </table>

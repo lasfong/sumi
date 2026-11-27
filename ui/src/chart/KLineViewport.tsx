@@ -9,11 +9,17 @@ import type {
   SavedDrawingRecord,
   VnBandLevels,
 } from '../types/market'
-import { useWorkspaceStore } from '../store/workspaceStore'
-import { crosshairBus } from './crosshairBus'
+import { useWorkspaceStore, type TimezoneMode } from '../store/workspaceStore'
+import { crosshairBus, timeRangeBus } from './crosshairBus'
+import { drawingSyncBus } from './drawingSyncBus'
 import { toHeikinAshi } from './heikinAshi'
 import { formatBarCountdown, intervalToKLinePeriod } from './periods'
 import { buildIndicatorTooltipFeatures, buildSuperchartsStyles } from './themes'
+import {
+  clearAfcForecastCache,
+  hasVnindexBenchmarkBars,
+  setVnindexBenchmarkBars,
+} from './indicators/customIndicators'
 import { registerAllCustomIndicators } from './indicators/registerAll'
 import { registerAllCustomOverlays } from './overlays/registerAll'
 import {
@@ -22,6 +28,12 @@ import {
   type SelectedDrawingState,
 } from '../components/FloatingDrawingToolbar'
 import { ChartContextMenu, type ChartContextMenuState } from '../components/ChartContextMenu'
+import {
+  computeVnSessionBreaks,
+  isDrawingVisibleOnInterval,
+  isVietnamTicker,
+  snapPriceToVenueTick,
+} from '../utils/vnMarket'
 
 interface KLineViewportProps {
   pane: ChartPaneConfig
@@ -34,7 +46,13 @@ interface KLineViewportProps {
 type UndoEntry =
   | { kind: 'created'; record: SavedDrawingRecord }
   | { kind: 'deleted'; record: SavedDrawingRecord }
-  | { kind: 'modified'; before: SavedDrawingRecord }
+  | { kind: 'modified'; before: SavedDrawingRecord; after: SavedDrawingRecord }
+
+function resolveEffectiveTimezone(mode: TimezoneMode, ticker: string): string {
+  if (mode === 'Asia/Ho_Chi_Minh' || mode === 'Etc/UTC') return mode
+  const isVn = ticker.startsWith('HOSE:') || ticker.startsWith('HNX:') || ticker.startsWith('UPCOM:')
+  return isVn ? 'Asia/Ho_Chi_Minh' : 'Etc/UTC'
+}
 
 const MULTI_PANE_INTERVALS: IntervalKey[] = ['15m', '1h', '4h', '1D', '1W']
 
@@ -205,7 +223,10 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
   const curtainHoverTsRef = useRef<number | null>(null)
 
   const subscribeCallbackRef = useRef<((data: KLineData) => void) | null>(null)
-  const lastHaBarRef = useRef<{ open: number; close: number } | undefined>(undefined)
+  // Track previous CLOSED HA bar separately from the currently forming HA bar so intra-bar ticks
+  // never drift `HA_Open` (`BUG-015`).
+  const prevClosedHaBarRef = useRef<{ timestamp: number; open: number; close: number } | undefined>(undefined)
+  const currentHaBarRef = useRef<{ timestamp: number; open: number; close: number } | undefined>(undefined)
   const appliedPaneRef = useRef<{ ticker: string; interval: string }>({
     ticker: pane.ticker,
     interval: pane.interval,
@@ -215,7 +236,9 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
     new Map(),
   )
   const inProgressDrawingIdRef = useRef<string | null>(null)
+  const dragBeforeRef = useRef<Map<string, SavedDrawingRecord>>(new Map())
   const undoStackRef = useRef<UndoEntry[]>([])
+  const redoStackRef = useRef<UndoEntry[]>([])
   const historyLimitRef = useRef<number>(600)
   const pendingScrollTsRef = useRef<number | null>(null)
 
@@ -227,18 +250,21 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
   const [contextMenu, setContextMenu] = useState<ChartContextMenuState | null>(null)
 
   const theme = useWorkspaceStore((s) => s.theme)
+  const timezoneMode = useWorkspaceStore((s) => s.timezoneMode)
   const activeDrawingTool = useWorkspaceStore((s) => s.activeDrawingTool)
   const magnetMode = useWorkspaceStore((s) => s.magnetMode)
   const drawingsLocked = useWorkspaceStore((s) => s.drawingsLocked)
   const drawingsHidden = useWorkspaceStore((s) => s.drawingsHidden)
   const clearDrawingsNonce = useWorkspaceStore((s) => s.clearDrawingsNonce)
+  const showVnSessionBreaks = useWorkspaceStore((s) => s.showVnSessionBreaks)
   const exportPngNonce = useWorkspaceStore((s) => s.exportPngNonce)
   const scrollToTimestampCmd = useWorkspaceStore((s) => s.scrollToTimestampCmd)
   const backtestOverlay = useWorkspaceStore((s) => s.backtestOverlay)
   const replay = useWorkspaceStore((s) => s.replay)
   const replaySelectingCut = useWorkspaceStore((s) => s.replaySelectingCut)
+  const replayBlindMode = useWorkspaceStore((s) => s.replayBlindMode)
   const replayResetNonce = useWorkspaceStore((s) => s.replayResetNonce)
-  const replaySteppedBar = useWorkspaceStore((s) => s.replaySteppedBar)
+  const replayStepEvent = useWorkspaceStore((s) => s.replayStepEvent)
   const broker = useWorkspaceStore((s) => s.broker)
 
   const setActiveInterval = useWorkspaceStore((s) => s.setActiveInterval)
@@ -250,13 +276,21 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
   const removeIndicatorFromActivePane = useWorkspaceStore((s) => s.removeIndicatorFromActivePane)
   const openIndicatorSettings = useWorkspaceStore((s) => s.openIndicatorSettings)
   const createNewAlert = useWorkspaceStore((s) => s.createNewAlert)
+  const checkLiveBarAlerts = useWorkspaceStore((s) => s.checkLiveBarAlerts)
   const submitQuickLimitOrder = useWorkspaceStore((s) => s.submitQuickLimitOrder)
+  const submitQuickBracket = useWorkspaceStore((s) => s.submitQuickBracket)
+  const setBrokerSnapshot = useWorkspaceStore((s) => s.setBrokerSnapshot)
+  const bumpDrawingsVersion = useWorkspaceStore((s) => s.bumpDrawingsVersion)
   const pushToast = useWorkspaceStore((s) => s.pushToast)
+  const lastLiveAlertTsRef = useRef<number>(0)
 
+  const isThisPaneReplaying = Boolean(
+    replay?.active && replay.ticker.toUpperCase() === pane.ticker.toUpperCase(),
+  )
   const replaySelectingCutRef = useRef(replaySelectingCut)
   replaySelectingCutRef.current = replaySelectingCut
-  const replayActiveRef = useRef(Boolean(replay?.active))
-  replayActiveRef.current = Boolean(replay?.active)
+  const replayActiveRef = useRef(isThisPaneReplaying)
+  replayActiveRef.current = isThisPaneReplaying
   const selectedDrawingRef = useRef(selectedDrawing)
   selectedDrawingRef.current = selectedDrawing
 
@@ -274,6 +308,12 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
     if (ov.groupId !== 'user_drawings') return
     const record = overlayToRecord(ov, paneRef.current.ticker)
     void api.upsertDrawing(record)
+    drawingSyncBus.emit({
+      kind: 'upsert',
+      sourceSlotId: paneRef.current.slotId,
+      ticker: paneRef.current.ticker,
+      record,
+    })
   }, [])
 
   const attachDrawingCallbacks = useCallback(
@@ -287,7 +327,39 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
           setSelectedDrawing(null)
         }
       },
+      onPressedMoveStart: (ev: OverlayEvent<unknown>) => {
+        if (ev.overlay.groupId !== 'user_drawings') return
+        dragBeforeRef.current.set(ev.overlay.id, overlayToRecord(ev.overlay, paneRef.current.ticker))
+      },
+      onPressedPointMoveStart: (ev: OverlayEvent<unknown>) => {
+        if (ev.overlay.groupId !== 'user_drawings') return
+        dragBeforeRef.current.set(ev.overlay.id, overlayToRecord(ev.overlay, paneRef.current.ticker))
+      },
       onPressedMoveEnd: (ev: OverlayEvent<unknown>) => {
+        if (ev.overlay.groupId === 'user_drawings') {
+          const before = dragBeforeRef.current.get(ev.overlay.id)
+          dragBeforeRef.current.delete(ev.overlay.id)
+          const after = overlayToRecord(ev.overlay, paneRef.current.ticker)
+          if (before) {
+            undoStackRef.current = [...undoStackRef.current.slice(-29), { kind: 'modified', before, after }]
+            redoStackRef.current = []
+          }
+        }
+        persistOverlayToDb(ev)
+        if (selectedDrawingRef.current?.id === ev.overlay.id) {
+          setSelectedDrawing(extractSelectedState(ev.overlay))
+        }
+      },
+      onPressedPointMoveEnd: (ev: OverlayEvent<unknown>) => {
+        if (ev.overlay.groupId === 'user_drawings') {
+          const before = dragBeforeRef.current.get(ev.overlay.id)
+          dragBeforeRef.current.delete(ev.overlay.id)
+          const after = overlayToRecord(ev.overlay, paneRef.current.ticker)
+          if (before) {
+            undoStackRef.current = [...undoStackRef.current.slice(-29), { kind: 'modified', before, after }]
+            redoStackRef.current = []
+          }
+        }
         persistOverlayToDb(ev)
         if (selectedDrawingRef.current?.id === ev.overlay.id) {
           setSelectedDrawing(extractSelectedState(ev.overlay))
@@ -296,6 +368,12 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
       onRemoved: (ev: OverlayEvent<unknown>) => {
         if (ev.overlay.groupId === 'user_drawings') {
           void api.deleteDrawing(paneRef.current.ticker, ev.overlay.id)
+          drawingSyncBus.emit({
+            kind: 'delete',
+            sourceSlotId: paneRef.current.slotId,
+            ticker: paneRef.current.ticker,
+            id: ev.overlay.id,
+          })
           if (selectedDrawingRef.current?.id === ev.overlay.id) {
             setSelectedDrawing(null)
           }
@@ -307,7 +385,14 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
               inProgressDrawingIdRef.current = null
               const rec = overlayToRecord(ev.overlay, paneRef.current.ticker)
               undoStackRef.current = [...undoStackRef.current.slice(-29), { kind: 'created', record: rec }]
+              redoStackRef.current = []
               void api.upsertDrawing(rec)
+              drawingSyncBus.emit({
+                kind: 'upsert',
+                sourceSlotId: paneRef.current.slotId,
+                ticker: paneRef.current.ticker,
+                record: rec,
+              })
               setActiveDrawingTool(null)
               setSelectedDrawing(extractSelectedState(ev.overlay))
             },
@@ -344,7 +429,7 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
     chart.overrideYAxis({
       paneId: 'candle_pane',
       name: paneRef.current.priceScale,
-      gap: { top: 0.12, bottom: 0.12 },
+      gap: { top: 0.24, bottom: 0.12 },
     })
     chart.setBarSpace(8)
     chart.scrollToRealTime(200)
@@ -357,7 +442,7 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
     chart.overrideYAxis({
       paneId: 'candle_pane',
       name: paneRef.current.priceScale,
-      gap: { top: 0.12, bottom: 0.12 },
+      gap: { top: 0.24, bottom: 0.12 },
     })
     chart.resize()
   }, [])
@@ -369,9 +454,16 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
     if (existing) {
       const snap = overlayToRecord(existing, paneRef.current.ticker)
       undoStackRef.current = [...undoStackRef.current.slice(-29), { kind: 'deleted', record: snap }]
+      redoStackRef.current = []
     }
     chart.removeOverlay({ id, groupId: 'user_drawings' })
     void api.deleteDrawing(paneRef.current.ticker, id)
+    drawingSyncBus.emit({
+      kind: 'delete',
+      sourceSlotId: paneRef.current.slotId,
+      ticker: paneRef.current.ticker,
+      id,
+    })
     setSelectedDrawing(null)
   }, [])
 
@@ -381,15 +473,28 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
     if (!chart || stack.length === 0) return
     const entry = stack.pop()
     if (!entry) return
+    redoStackRef.current = [...redoStackRef.current.slice(-29), entry]
 
     if (entry.kind === 'created') {
       chart.removeOverlay({ id: entry.record.id, groupId: 'user_drawings' })
       void api.deleteDrawing(paneRef.current.ticker, entry.record.id)
+      drawingSyncBus.emit({
+        kind: 'delete',
+        sourceSlotId: paneRef.current.slotId,
+        ticker: paneRef.current.ticker,
+        id: entry.record.id,
+      })
       setSelectedDrawing(null)
       pushToast('info', 'Đã hoàn tác hình vừa vẽ (Ctrl/Cmd+Z)')
     } else if (entry.kind === 'deleted') {
       recreateOverlayFromRecord(entry.record)
       void api.upsertDrawing(entry.record)
+      drawingSyncBus.emit({
+        kind: 'upsert',
+        sourceSlotId: paneRef.current.slotId,
+        ticker: paneRef.current.ticker,
+        record: entry.record,
+      })
       pushToast('info', 'Đã khôi phục hình vừa xóa (Ctrl/Cmd+Z)')
     } else if (entry.kind === 'modified') {
       chart.overrideOverlay({
@@ -399,9 +504,64 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
         points: entry.before.points,
       })
       void api.upsertDrawing(entry.before)
+      drawingSyncBus.emit({
+        kind: 'upsert',
+        sourceSlotId: paneRef.current.slotId,
+        ticker: paneRef.current.ticker,
+        record: entry.before,
+      })
       const [restored] = chart.getOverlays({ id: entry.before.id, groupId: 'user_drawings' })
       if (restored) setSelectedDrawing(extractSelectedState(restored))
-      pushToast('info', 'Đã hoàn tác chỉnh sửa hình vẽ')
+      pushToast('info', 'Đã hoàn tác chỉnh sửa hình vẽ (Ctrl/Cmd+Z)')
+    }
+  }, [pushToast, recreateOverlayFromRecord])
+
+  const handleRedoDrawing = useCallback(() => {
+    const chart = chartRef.current
+    const stack = redoStackRef.current
+    if (!chart || stack.length === 0) return
+    const entry = stack.pop()
+    if (!entry) return
+    undoStackRef.current = [...undoStackRef.current.slice(-29), entry]
+
+    if (entry.kind === 'created') {
+      recreateOverlayFromRecord(entry.record)
+      void api.upsertDrawing(entry.record)
+      drawingSyncBus.emit({
+        kind: 'upsert',
+        sourceSlotId: paneRef.current.slotId,
+        ticker: paneRef.current.ticker,
+        record: entry.record,
+      })
+      pushToast('info', 'Đã làm lại hình vẽ (Cmd+Shift+Z)')
+    } else if (entry.kind === 'deleted') {
+      chart.removeOverlay({ id: entry.record.id, groupId: 'user_drawings' })
+      void api.deleteDrawing(paneRef.current.ticker, entry.record.id)
+      drawingSyncBus.emit({
+        kind: 'delete',
+        sourceSlotId: paneRef.current.slotId,
+        ticker: paneRef.current.ticker,
+        id: entry.record.id,
+      })
+      setSelectedDrawing(null)
+      pushToast('info', 'Đã làm lại thao tác xóa (Cmd+Shift+Z)')
+    } else if (entry.kind === 'modified') {
+      chart.overrideOverlay({
+        id: entry.after.id,
+        styles: entry.after.styles ?? undefined,
+        lock: entry.after.lock,
+        points: entry.after.points,
+      })
+      void api.upsertDrawing(entry.after)
+      drawingSyncBus.emit({
+        kind: 'upsert',
+        sourceSlotId: paneRef.current.slotId,
+        ticker: paneRef.current.ticker,
+        record: entry.after,
+      })
+      const [restored] = chart.getOverlays({ id: entry.after.id, groupId: 'user_drawings' })
+      if (restored) setSelectedDrawing(extractSelectedState(restored))
+      pushToast('info', 'Đã làm lại chỉnh sửa hình vẽ (Cmd+Shift+Z)')
     }
   }, [pushToast, recreateOverlayFromRecord])
 
@@ -415,23 +575,39 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
 
     const initialPane = paneRef.current
     const initialTheme = useWorkspaceStore.getState().theme
+    const initialTzMode = useWorkspaceStore.getState().timezoneMode
     const prec = guessPrecision(initialPane.ticker)
 
     const chart = init(el, {
-      timezone:
-        initialPane.ticker.startsWith('HOSE:') ||
-        initialPane.ticker.startsWith('HNX:') ||
-        initialPane.ticker.startsWith('UPCOM:')
-          ? 'Asia/Ho_Chi_Minh'
-          : 'Etc/UTC',
-      styles: buildSuperchartsStyles(initialTheme, initialPane.chartStyle, initialPane.showCountdown),
+      timezone: resolveEffectiveTimezone(initialTzMode, initialPane.ticker),
+      styles: buildSuperchartsStyles(
+        initialTheme,
+        initialPane.chartStyle,
+        initialPane.showCountdown,
+        initialPane.interval === '1h' ? '1H' : initialPane.interval === '4h' ? '4H' : initialPane.interval,
+      ),
       layout: {
         barSpaceLimit: { min: 2, max: 46 },
         pane: { height: 112, minHeight: 54 },
-        yAxis: { position: 'right', inside: false, scrollZoomEnabled: true },
+        yAxis: { position: 'right', inside: false, scrollZoomEnabled: true, gap: { top: 0.24, bottom: 0.12 } },
       },
       thousandsSeparator: { sign: ',' },
       formatter: {
+        formatDate: ({ dateTimeFormat, timestamp, type }) => {
+          const isDailyOrCoarser = ['1D', '1W', '1M'].includes(paneRef.current.interval)
+          const parts = dateTimeFormat.formatToParts(new Date(timestamp))
+          const get = (k: string) => parts.find((p) => p.type === k)?.value ?? ''
+          const y = get('year')
+          const m = get('month')
+          const d = get('day')
+          const hh = get('hour')
+          const mm = get('minute')
+          // Never show spurious `"07:00"` on 1D/1W/1M crosshair or drawing anchor labels (`BUG-038`)!
+          if (isDailyOrCoarser) {
+            return type === 'xAxis' ? `${m}-${d}` : `${y}-${m}-${d}`
+          }
+          return `${y}-${m}-${d} ${hh}:${mm}`
+        },
         formatExtendText: ({ data }) => {
           if (!paneRef.current.showCountdown) return ''
           if (replayActiveRef.current) return 'REPLAY'
@@ -441,9 +617,24 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
     })
 
     if (!chart) return
+    let disposed = false
     chartRef.current = chart
+    // Provide generous right-hand whitespace (~24 bars) for AFC Probability Cone & QMV Ichimoku Future Kumo
+    chart.setOffsetRightDistance(215)
     crosshairBus.register(initialPane.slotId, chart)
+    timeRangeBus.register(initialPane.slotId, chart)
     const streamId = `stream_${initialPane.slotId}`
+
+    if (!hasVnindexBenchmarkBars()) {
+      void api
+        .getBars({ ticker: 'HOSE:VNINDEX', interval: '1D', mode: 'init', limit: 2500 })
+        .then((benchPage) => {
+          if (benchPage.bars.length > 0) {
+            setVnindexBenchmarkBars(benchPage.bars)
+          }
+        })
+        .catch(() => {})
+    }
 
     chart.setSymbol({
       ticker: initialPane.ticker,
@@ -466,24 +657,38 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
             timestamp: timestamp ?? null,
             limit: queryMode === 'init' ? historyLimitRef.current : 400,
           })
-          setVnBand(page.vnBand)
-          setDataSourceBadge(
-            page.replayActive
-              ? 'REPLAY'
-              : page.source === 'cache_hit'
-                ? 'SQLite'
-                : page.source === 'offline_cache'
-                  ? 'Offline'
-                  : 'Live',
-          )
+          if (disposed || !chartRef.current) return
+          // Update VN price band & badge ONLY on `init` loads so scrolling back in history
+          // (`forward`) NEVER overwrites today's Ceiling/Reference/Floor band (`BUG-005`)!
+          if (queryMode === 'init') {
+            setVnBand(page.vnBand)
+            setDataSourceBadge(
+              page.replayActive
+                ? 'REPLAY'
+                : page.source === 'cache_hit'
+                  ? 'SQLite'
+                  : page.source === 'offline_cache'
+                    ? 'Offline'
+                    : 'Live',
+            )
+          }
 
           let bars: KLineData[] = page.bars
           if (cur.chartStyle === 'heikin_ashi') {
             bars = toHeikinAshi(page.bars)
-            const last = bars[bars.length - 1]
-            lastHaBarRef.current = last ? { open: last.open, close: last.close } : undefined
-          } else {
-            lastHaBarRef.current = undefined
+            if (queryMode === 'init') {
+              const last = bars[bars.length - 1]
+              const prev = bars[bars.length - 2]
+              currentHaBarRef.current = last
+                ? { timestamp: last.timestamp, open: last.open, close: last.close }
+                : undefined
+              prevClosedHaBarRef.current = prev
+                ? { timestamp: prev.timestamp, open: prev.open, close: prev.close }
+                : undefined
+            }
+          } else if (queryMode === 'init') {
+            currentHaBarRef.current = undefined
+            prevClosedHaBarRef.current = undefined
           }
 
           callback(bars, { forward: page.hasOlder, backward: page.hasNewer })
@@ -535,6 +740,7 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
         }
       },
       subscribeBar: ({ callback }) => {
+        if (disposed) return
         subscribeCallbackRef.current = callback
         const cur = paneRef.current
         if (replayActiveRef.current) return
@@ -545,13 +751,22 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
           if (replayActiveRef.current) return
           let bar: KLineData = payload.bar
           if (paneRef.current.chartStyle === 'heikin_ashi') {
-            const [ha] = toHeikinAshi([bar], lastHaBarRef.current)
+            // Keep `HA_Open` locked to `prevClosedHaBarRef` on intra-bar ticks (`BUG-015`)!
+            const curHa = currentHaBarRef.current
+            if (curHa && bar.timestamp > curHa.timestamp) {
+              prevClosedHaBarRef.current = curHa
+            }
+            const [ha] = toHeikinAshi([bar], prevClosedHaBarRef.current)
             if (ha) {
               bar = ha
-              lastHaBarRef.current = { open: ha.open, close: ha.close }
+              currentHaBarRef.current = { timestamp: ha.timestamp, open: ha.open, close: ha.close }
             }
           }
           callback(bar)
+          if (bar.timestamp > lastLiveAlertTsRef.current) {
+            lastLiveAlertTsRef.current = bar.timestamp
+            void checkLiveBarAlerts(payload.ticker, paneRef.current.interval)
+          }
         })
       },
       unsubscribeBar: () => {
@@ -560,11 +775,41 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
       },
     })
 
-    // Zero-React-re-render Crosshair sync via CrosshairBus (fixes BUG-001!)
+    // Zero-React-re-render Crosshair sync via CrosshairBus (`BUG-004` fixed for klinecharts@10.1.1!):
+    // `klinecharts@10.1.1` emits raw `{ x, y, paneId }` without `kLineData`, so resolve timestamp via `convertFromPixel`.
     chart.subscribeAction('onCrosshairChange', (data) => {
       if (crosshairBus.isSuppressed(paneRef.current.slotId)) return
-      const payload = data as { kLineData?: KLineData } | null
-      crosshairBus.publish(paneRef.current.slotId, payload?.kLineData?.timestamp ?? null)
+      const payload = data as { x?: number; y?: number; kLineData?: KLineData } | null
+      if (!payload) {
+        crosshairBus.publish(paneRef.current.slotId, null)
+        return
+      }
+      let ts: number | null = payload.kLineData?.timestamp ?? null
+      if (ts === null && typeof payload.x === 'number' && Number.isFinite(payload.x)) {
+        const conv = chart.convertFromPixel([{ x: payload.x }], { paneId: 'candle_pane' })
+        const pt = Array.isArray(conv) ? conv[0] : conv
+        if (typeof pt?.timestamp === 'number' && Number.isFinite(pt.timestamp)) {
+          ts = pt.timestamp
+        } else if (typeof pt?.dataIndex === 'number' && Number.isFinite(pt.dataIndex)) {
+          const list = chart.getDataList()
+          const idx = Math.max(0, Math.min(list.length - 1, Math.round(pt.dataIndex)))
+          ts = list[idx]?.timestamp ?? null
+        }
+      }
+      crosshairBus.publish(paneRef.current.slotId, ts)
+    })
+
+    // Zero-React-re-render Time-Range sync (`Sync Date Range`, `BUG-043`)
+    chart.subscribeAction('onVisibleRangeChange', () => {
+      if (timeRangeBus.isSuppressed(paneRef.current.slotId)) return
+      const range = chart.getVisibleRange()
+      const list = chart.getDataList()
+      if (!list.length) return
+      const midIdx = Math.max(0, Math.min(list.length - 1, Math.floor((range.from + range.to) / 2)))
+      const midTs = list[midIdx]?.timestamp
+      if (typeof midTs === 'number' && Number.isFinite(midTs)) {
+        timeRangeBus.publish(paneRef.current.slotId, midTs)
+      }
     })
 
     // On-chart TradingView Study Legend Action Buttons (👁 Hide / ⚙ Settings / ✕ Delete) (fixes BUG-010!)
@@ -635,8 +880,10 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
     ro.observe(el)
 
     return () => {
+      disposed = true
       ro.disconnect()
       crosshairBus.unregister(initialPane.slotId)
+      timeRangeBus.unregister(initialPane.slotId)
       void api.unsubscribeBars(streamId)
       subscribeCallbackRef.current = null
       createdIndicatorIdsRef.current.clear()
@@ -662,12 +909,9 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
       precisionSyncedTickerRef.current = null
       setSelectedDrawing(null)
       undoStackRef.current = []
+      redoStackRef.current = []
       const prec = guessPrecision(pane.ticker)
-      const isVn =
-        pane.ticker.startsWith('HOSE:') ||
-        pane.ticker.startsWith('HNX:') ||
-        pane.ticker.startsWith('UPCOM:')
-      chart.setTimezone(isVn ? 'Asia/Ho_Chi_Minh' : 'Etc/UTC')
+      chart.setTimezone(resolveEffectiveTimezone(useWorkspaceStore.getState().timezoneMode, pane.ticker))
       chart.setSymbol({
         ticker: pane.ticker,
         pricePrecision: prec.pricePrecision,
@@ -679,19 +923,56 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
     }
   }, [pane.ticker, pane.interval])
 
-  // 3. React to theme, chart style, Heikin-Ashi, and countdown toggle
+  // 2b. React to manual Timezone switcher (`Asia/Ho_Chi_Minh` <-> `Etc/UTC`, `BUG-031`)
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart) return
+    chart.setTimezone(resolveEffectiveTimezone(timezoneMode, pane.ticker))
+  }, [timezoneMode, pane.ticker])
+
+  // 2c. Live 1-second Bar Countdown repaint timer (`BUG-024`)
+  // Uses `UpdateLevel.Drawer = 3` on `candle_pane` so the Y-axis last-price countdown badge redraws every second.
+  useEffect(() => {
+    if (!pane.showCountdown || isThisPaneReplaying) return
+    const timer = window.setInterval(() => {
+      const chart = chartRef.current as
+        | (Chart & { updatePane?: (level?: number, paneId?: string) => void })
+        | null
+      if (!chart) return
+      if (typeof chart.updatePane === 'function') {
+        chart.updatePane(3, 'candle_pane')
+      }
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [pane.showCountdown, isThisPaneReplaying])
+
+  const dataStatusTotalBars = useWorkspaceStore((s) => s.dataStatus?.stats.total_bars ?? 0)
+  const prevTotalBarsRef = useRef<number>(dataStatusTotalBars)
+  useEffect(() => {
+    if (prevTotalBarsRef.current !== dataStatusTotalBars) {
+      prevTotalBarsRef.current = dataStatusTotalBars
+      clearAfcForecastCache()
+      const chart = chartRef.current as
+        | (Chart & { updatePane?: (level?: number, paneId?: string) => void })
+        | null
+      chart?.updatePane?.(3, 'candle_pane')
+    }
+  }, [dataStatusTotalBars])
+
+  // 3. React to theme, chart style, Heikin-Ashi, interval label, and countdown toggle
   const prevStyleRef = useRef(pane.chartStyle)
   useEffect(() => {
     const chart = chartRef.current
     if (!chart) return
-    chart.setStyles(buildSuperchartsStyles(theme, pane.chartStyle, pane.showCountdown))
+    const ivLabel = pane.interval === '1h' ? '1H' : pane.interval === '4h' ? '4H' : pane.interval
+    chart.setStyles(buildSuperchartsStyles(theme, pane.chartStyle, pane.showCountdown, ivLabel))
     const toggledHeikin =
       (prevStyleRef.current === 'heikin_ashi') !== (pane.chartStyle === 'heikin_ashi')
     prevStyleRef.current = pane.chartStyle
     if (toggledHeikin) {
       chart.resetData()
     }
-  }, [theme, pane.chartStyle, pane.showCountdown])
+  }, [theme, pane.chartStyle, pane.showCountdown, pane.interval])
 
   // 4. React to Y-axis scale mode (Normal / % / Logarithm)
   useEffect(() => {
@@ -787,23 +1068,75 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
     scheduleSafeResize()
   }, [isMultiPane, gridLayout, scheduleSafeResize])
 
-  // 6. Load & restore persistent SQLite drawings whenever ticker changes
+  // 6. Load & restore persistent SQLite drawings (filtering future-anchored drawings in Blind Replay — `BUG-042`).
+  // Depends on `replayResetNonce` (start/cut/rewind/stop) instead of per-step `cutoffTimestampMs` so
+  // stepping forward at 20x NEVER flickers or tears down drawings on every bar.
   useEffect(() => {
     const chart = chartRef.current
     if (!chart) return
     let cancelled = false
+    const repState = useWorkspaceStore.getState().replay
+    const cutoffTs =
+      isThisPaneReplaying && replayBlindMode ? (repState?.cutoffTimestampMs ?? null) : null
     chart.removeOverlay({ groupId: 'user_drawings' })
 
     void api.getDrawings(pane.ticker).then((records) => {
       if (cancelled || !chartRef.current) return
       for (const rec of records) {
+        if (!isDrawingVisibleOnInterval(rec.extendData, pane.interval)) {
+          continue
+        }
+        if (cutoffTs !== null) {
+          const hasFuturePoint = rec.points.some(
+            (pt) => typeof pt.timestamp === 'number' && pt.timestamp > cutoffTs,
+          )
+          if (hasFuturePoint) continue
+        }
         recreateOverlayFromRecord(rec)
       }
     })
     return () => {
       cancelled = true
     }
-  }, [pane.ticker, recreateOverlayFromRecord])
+  }, [pane.ticker, pane.interval, isThisPaneReplaying, replayBlindMode, replayResetNonce, recreateOverlayFromRecord])
+
+  // 6b. Real-time Multi-Pane & Multi-Window Drawing Sync (`BUG-027` + `BUG-043` + Object Tree v2.2)
+  useEffect(() => {
+    return drawingSyncBus.subscribe(pane.slotId, (ev) => {
+      const chart = chartRef.current
+      if (!chart || ev.ticker.toUpperCase() !== paneRef.current.ticker.toUpperCase()) return
+      if (ev.kind === 'upsert') {
+        const visibleOnTf = isDrawingVisibleOnInterval(ev.record.extendData, paneRef.current.interval)
+        const [existing] = chart.getOverlays({ id: ev.record.id, groupId: 'user_drawings' })
+        if (!visibleOnTf) {
+          if (existing) {
+            chart.removeOverlay({ id: ev.record.id, groupId: 'user_drawings' })
+          }
+          return
+        }
+        if (existing) {
+          chart.overrideOverlay({
+            id: ev.record.id,
+            points: ev.record.points,
+            styles: ev.record.styles ?? undefined,
+            extendData: ev.record.extendData ?? undefined,
+            lock: ev.record.lock || useWorkspaceStore.getState().drawingsLocked,
+            visible: useWorkspaceStore.getState().drawingsHidden ? false : ev.record.visible,
+          })
+        } else {
+          recreateOverlayFromRecord(ev.record)
+        }
+      } else if (ev.kind === 'delete') {
+        chart.removeOverlay({ id: ev.id, groupId: 'user_drawings' })
+        if (selectedDrawingRef.current?.id === ev.id) {
+          setSelectedDrawing(null)
+        }
+      } else if (ev.kind === 'clear') {
+        chart.removeOverlay({ groupId: 'user_drawings' })
+        setSelectedDrawing(null)
+      }
+    })
+  }, [pane.slotId, recreateOverlayFromRecord])
 
   // 7. Trigger interactive drawing tool when selected in Left Drawing Rail (active pane only)
   useEffect(() => {
@@ -842,13 +1175,15 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
     prevDrawFlagsRef.current = { drawingsLocked, drawingsHidden, magnetMode }
   }, [drawingsLocked, drawingsHidden, magnetMode])
 
-  // 9. Clear all user drawings on active pane
+  // 9. Clear all user drawings on active pane (and mirror to sibling panes via drawingSyncBus)
   useEffect(() => {
     if (clearDrawingsNonce === 0 || !isActive || !chartRef.current) return
     chartRef.current.removeOverlay({ groupId: 'user_drawings' })
     setSelectedDrawing(null)
     undoStackRef.current = []
+    redoStackRef.current = []
     void api.clearDrawings(pane.ticker)
+    drawingSyncBus.emit({ kind: 'clear', sourceSlotId: pane.slotId, ticker: pane.ticker })
     pushToast('info', `Đã xóa toàn bộ hình vẽ trên ${pane.ticker}`)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clearDrawingsNonce])
@@ -878,16 +1213,44 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
     }
   }, [pane.showVnBands, pane.slotId, vnBand])
 
-  // 11. Render Paper Broker open position & pending order lines on matching chart
+  // 10b. Render Vietnam Intraday Session Breaks (`09:00` Morning / `13:00` Afternoon / `14:30` ATC, v2.2)
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart) return
+    chart.removeOverlay({ groupId: 'vn_session_breaks' })
+    if (!showVnSessionBreaks || !isVietnamTicker(pane.ticker)) return
+    if (!['1m', '5m', '15m', '1h'].includes(pane.interval)) return
+
+    const bars = chart.getDataList()
+    const markers = computeVnSessionBreaks(bars, pane.interval)
+    for (let i = 0; i < markers.length; i++) {
+      const m = markers[i]
+      chart.createOverlay({
+        id: `vn_sess_${pane.slotId}_${i}`,
+        name: 'vnSessionBreakLine',
+        groupId: 'vn_session_breaks',
+        paneId: 'candle_pane',
+        lock: true,
+        points: [{ timestamp: m.timestamp }],
+        extendData: { label: m.label, kind: m.kind },
+      })
+    }
+  }, [showVnSessionBreaks, pane.ticker, pane.interval, pane.slotId, dataReadyNonce])
+
+  // 11. Render Paper Broker open position & interactive Drag-to-Modify SL / TP / Pending LO lines (v2.2!)
   useEffect(() => {
     const chart = chartRef.current
     if (!chart) return
     chart.removeOverlay({ groupId: 'broker_orders' })
     if (!broker || broker.ticker !== pane.ticker) return
 
+    const brokerIv = (broker.interval as IntervalKey) || pane.interval
+    const isVnd = ['Hose', 'Hnx', 'Upcom', 'Vn30Futures'].includes(broker.venue)
+
     if (broker.openPosition) {
       const pos = broker.openPosition
-      const unreal = (broker.markPrice - pos.avg_entry_price) * pos.quantity * (pos.side === 'Long' ? 1 : -1)
+      const mult = pos.contract_multiplier || broker.contractMultiplier || 1
+      const unreal = (broker.markPrice - pos.avg_entry_price) * pos.quantity * mult * (pos.side === 'Long' ? 1 : -1)
       const sign = unreal >= 0 ? '+' : ''
       chart.createOverlay({
         id: `pos_entry_${pane.slotId}`,
@@ -903,25 +1266,85 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
         },
       })
       if (pos.stop_loss) {
+        const origSl = pos.stop_loss
+        const curTp = pos.take_profit ?? null
         chart.createOverlay({
           id: `pos_sl_${pane.slotId}`,
           name: 'brokerOrderLine',
           groupId: 'broker_orders',
           paneId: 'candle_pane',
-          lock: true,
-          points: [{ value: pos.stop_loss }],
-          extendData: { label: `SL ${pos.stop_loss.toLocaleString('vi-VN')}`, color: '#F23645', dashed: true },
+          lock: false,
+          points: [{ value: origSl }],
+          extendData: {
+            label: `⋮⋮ SL ${origSl.toLocaleString('en-US')}`,
+            color: '#F23645',
+            dashed: true,
+            draggable: true,
+            prefix: 'SL',
+            entryPrice: pos.avg_entry_price,
+            side: pos.side,
+            qty: pos.quantity,
+            mult,
+            isVnd,
+          },
+          onPressedMoveEnd: (ev) => {
+            const rawVal = ev.overlay.points[0]?.value
+            if (typeof rawVal !== 'number' || !Number.isFinite(rawVal)) return false
+            const snapped = snapPriceToVenueTick(broker.ticker, rawVal)
+            if (Math.abs(snapped - origSl) < 1e-9) return false
+            void api
+              .brokerUpdateBrackets(broker.ticker, brokerIv, snapped, curTp)
+              .then((updated) => {
+                setBrokerSnapshot(updated)
+                pushToast('success', `Đã kéo Cắt lỗ (SL) → ${snapped.toLocaleString('en-US')}`)
+              })
+              .catch((err) => {
+                chartRef.current?.overrideOverlay({ id: `pos_sl_${pane.slotId}`, points: [{ value: origSl }] })
+                pushToast('error', String(err))
+              })
+            return false
+          },
         })
       }
       if (pos.take_profit) {
+        const origTp = pos.take_profit
+        const curSl = pos.stop_loss ?? null
         chart.createOverlay({
           id: `pos_tp_${pane.slotId}`,
           name: 'brokerOrderLine',
           groupId: 'broker_orders',
           paneId: 'candle_pane',
-          lock: true,
-          points: [{ value: pos.take_profit }],
-          extendData: { label: `TP ${pos.take_profit.toLocaleString('vi-VN')}`, color: '#089981', dashed: true },
+          lock: false,
+          points: [{ value: origTp }],
+          extendData: {
+            label: `⋮⋮ TP ${origTp.toLocaleString('en-US')}`,
+            color: '#089981',
+            dashed: true,
+            draggable: true,
+            prefix: 'TP',
+            entryPrice: pos.avg_entry_price,
+            side: pos.side,
+            qty: pos.quantity,
+            mult,
+            isVnd,
+          },
+          onPressedMoveEnd: (ev) => {
+            const rawVal = ev.overlay.points[0]?.value
+            if (typeof rawVal !== 'number' || !Number.isFinite(rawVal)) return false
+            const snapped = snapPriceToVenueTick(broker.ticker, rawVal)
+            if (Math.abs(snapped - origTp) < 1e-9) return false
+            void api
+              .brokerUpdateBrackets(broker.ticker, brokerIv, curSl, snapped)
+              .then((updated) => {
+                setBrokerSnapshot(updated)
+                pushToast('success', `Đã kéo Chốt lời (TP) → ${snapped.toLocaleString('en-US')}`)
+              })
+              .catch((err) => {
+                chartRef.current?.overrideOverlay({ id: `pos_tp_${pane.slotId}`, points: [{ value: origTp }] })
+                pushToast('error', String(err))
+              })
+            return false
+          },
         })
       }
     }
@@ -935,21 +1358,46 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
             ? item.order.kind.Stop.stop_price
             : null
       if (price === null) continue
+      const origPrice = price
+      const orderId = item.order.id
+      const prefix = `${item.vnOrderType} ${item.order.side === 'Buy' ? 'MUA' : 'BÁN'} ${item.order.quantity.toLocaleString('en-US')}`
       chart.createOverlay({
-        id: `ord_${item.order.id}_${pane.slotId}`,
+        id: `ord_${orderId}_${pane.slotId}`,
         name: 'brokerOrderLine',
         groupId: 'broker_orders',
         paneId: 'candle_pane',
-        lock: true,
-        points: [{ value: price }],
+        lock: false,
+        points: [{ value: origPrice }],
         extendData: {
-          label: `${item.vnOrderType} ${item.order.side === 'Buy' ? 'MUA' : 'BÁN'} ${item.order.quantity.toLocaleString('vi-VN')} @ ${price.toLocaleString('vi-VN')}`,
+          label: `⋮⋮ ${prefix} @ ${origPrice.toLocaleString('en-US')}`,
           color: item.order.side === 'Buy' ? '#2962FF' : '#FF9800',
           dashed: true,
+          draggable: true,
+          prefix,
+        },
+        onPressedMoveEnd: (ev) => {
+          const rawVal = ev.overlay.points[0]?.value
+          if (typeof rawVal !== 'number' || !Number.isFinite(rawVal)) return false
+          const snapped = snapPriceToVenueTick(broker.ticker, rawVal)
+          if (Math.abs(snapped - origPrice) < 1e-9) return false
+          void api
+            .brokerModifyOrder(broker.ticker, brokerIv, orderId, snapped)
+            .then((updated) => {
+              setBrokerSnapshot(updated)
+              pushToast('success', `Đã dời lệnh #${orderId} → ${snapped.toLocaleString('en-US')}`)
+            })
+            .catch((err) => {
+              chartRef.current?.overrideOverlay({
+                id: `ord_${orderId}_${pane.slotId}`,
+                points: [{ value: origPrice }],
+              })
+              pushToast('error', String(err))
+            })
+          return false
         },
       })
     }
-  }, [broker, pane.ticker, pane.slotId])
+  }, [broker, pane.ticker, pane.interval, pane.slotId, setBrokerSnapshot, pushToast])
 
   // 11b. Plot Strategy Backtest Buy (▲) & Sell (▼) Markers directly on candlesticks (fixes BUG-018!)
   useEffect(() => {
@@ -972,7 +1420,11 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
     }
 
     // Limit visual density smoothly to at most 80 trades (160 markers) so canvas stays 120 FPS
-    const trades = backtestOverlay.trades.slice(-80)
+    // AND causally hide future backtest markers during Bar Replay (`BUG-042`)!
+    const cutoffTs = isThisPaneReplaying ? (replay?.cutoffTimestampMs ?? null) : null
+    const rawTrades = backtestOverlay.trades.slice(-80)
+    const trades =
+      cutoffTs !== null ? rawTrades.filter((tr) => tr.entryTimestampMs <= cutoffTs) : rawTrades
     for (const tr of trades) {
       const isShort = tr.side === 'SHORT'
       const entryBar = barByTs.get(tr.entryTimestampMs)
@@ -998,41 +1450,74 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
         },
       })
 
-      const sign = tr.returnPct >= 0 ? '+' : ''
-      chart.createOverlay({
-        id: `bt_out_${tr.tradeId}_${pane.slotId}`,
-        name: 'backtestTradeMarker',
-        groupId: 'backtest_signals',
-        paneId: 'candle_pane',
-        lock: true,
-        points: [{ timestamp: tr.exitTimestampMs, value: exitValue }],
-        extendData: {
-          kind: isShort ? 'buy' : 'sell',
-          label: `${tr.exitReason} ${sign}${tr.returnPct.toFixed(1)}%`,
-          color: tr.netPnl >= 0 ? '#2962FF' : '#F23645',
-        },
-      })
+      if (cutoffTs === null || tr.exitTimestampMs <= cutoffTs) {
+        const sign = tr.returnPct >= 0 ? '+' : ''
+        chart.createOverlay({
+          id: `bt_out_${tr.tradeId}_${pane.slotId}`,
+          name: 'backtestTradeMarker',
+          groupId: 'backtest_signals',
+          paneId: 'candle_pane',
+          lock: true,
+          points: [{ timestamp: tr.exitTimestampMs, value: exitValue }],
+          extendData: {
+            kind: isShort ? 'buy' : 'sell',
+            label: `${tr.exitReason} ${sign}${tr.returnPct.toFixed(1)}%`,
+            color: tr.netPnl >= 0 ? '#2962FF' : '#F23645',
+          },
+        })
+      }
     }
-  }, [backtestOverlay, pane.ticker, pane.interval, pane.slotId, dataReadyNonce])
+  }, [backtestOverlay, pane.ticker, pane.interval, pane.slotId, dataReadyNonce, isThisPaneReplaying, replay?.cutoffTimestampMs])
 
-  // 12. Bar Replay resetData() & single-bar subscribeBar push
+  // 12. Multi-Pane / Multi-Timeframe Causal Bar Replay Sync (`BUG-040` P0 FIXED!):
+  // NEVER gate on `!isActive` and NEVER include `isActive` in dependency arrays — every pane
+  // sharing `replay.ticker` (e.g. `1h` AND `4h` simultaneously) resets and steps in lockstep!
+  const lastHandledReplayResetRef = useRef<number>(0)
   useEffect(() => {
-    if (replayResetNonce === 0 || !isActive || !chartRef.current) return
-    chartRef.current.resetData()
-  }, [replayResetNonce, isActive])
+    if (replayResetNonce === 0 || replayResetNonce === lastHandledReplayResetRef.current || !chartRef.current) {
+      return
+    }
+    lastHandledReplayResetRef.current = replayResetNonce
+    const rep = useWorkspaceStore.getState().replay
+    // Reset if Replay exited (restore full history) OR if this pane displays the replayed ticker!
+    if (!rep?.active || rep.ticker.toUpperCase() === paneRef.current.ticker.toUpperCase()) {
+      chartRef.current.resetData()
+    }
+  }, [replayResetNonce])
 
+  const lastHandledStepNonceRef = useRef<number>(0)
   useEffect(() => {
-    if (!replaySteppedBar?.bar || !isActive || !subscribeCallbackRef.current) return
-    let bar: KLineData = replaySteppedBar.bar
+    if (!replayStepEvent || replayStepEvent.nonce === lastHandledStepNonceRef.current || !chartRef.current) {
+      return
+    }
+    lastHandledStepNonceRef.current = replayStepEvent.nonce
+    if (replayStepEvent.ticker.toUpperCase() !== paneRef.current.ticker.toUpperCase()) {
+      return
+    }
+    const rawBar = replayStepEvent.barsByInterval[paneRef.current.interval]
+    if (!rawBar) {
+      // Fallback: pane interval wasn't pre-tracked yet; pull fresh causal slice from backend
+      chartRef.current.resetData()
+      return
+    }
+    if (!subscribeCallbackRef.current) {
+      chartRef.current.resetData()
+      return
+    }
+    let bar: KLineData = rawBar
     if (paneRef.current.chartStyle === 'heikin_ashi') {
-      const [ha] = toHeikinAshi([bar], lastHaBarRef.current)
+      const curHa = currentHaBarRef.current
+      if (curHa && bar.timestamp > curHa.timestamp) {
+        prevClosedHaBarRef.current = curHa
+      }
+      const [ha] = toHeikinAshi([bar], prevClosedHaBarRef.current)
       if (ha) {
         bar = ha
-        lastHaBarRef.current = { open: ha.open, close: ha.close }
+        currentHaBarRef.current = { timestamp: ha.timestamp, open: ha.open, close: ha.close }
       }
     }
     subscribeCallbackRef.current(bar)
-  }, [replaySteppedBar, isActive])
+  }, [replayStepEvent])
 
   // 13. Scroll to specific trade timestamp (auto-widens history if trade is older than loaded window, fixes BUG-019!)
   useEffect(() => {
@@ -1101,7 +1586,7 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
         return
       }
 
-      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 'z') {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && (e.code === 'KeyZ' || e.key.toLowerCase() === 'z')) {
         if (undoStackRef.current.length > 0) {
           e.preventDefault()
           handleUndoDrawing()
@@ -1109,14 +1594,35 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
         return
       }
 
-      if (e.altKey && !e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'r') {
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        ((e.shiftKey && (e.code === 'KeyZ' || e.key.toLowerCase() === 'z')) ||
+          (!e.shiftKey && (e.code === 'KeyY' || e.key.toLowerCase() === 'y')))
+      ) {
+        if (redoStackRef.current.length > 0) {
+          e.preventDefault()
+          handleRedoDrawing()
+        }
+        return
+      }
+
+      // Use `e.code === 'KeyR'` so macOS `Option+R` (which produces `®`) works reliably (`BUG-021`)!
+      if (e.altKey && !e.ctrlKey && !e.metaKey && (e.code === 'KeyR' || e.key.toLowerCase() === 'r')) {
         e.preventDefault()
         handleResetView()
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [isActive, deleteSelectedDrawingById, handleResetView, handleUndoDrawing, setActiveDrawingTool, setReplaySelectingCut])
+  }, [
+    isActive,
+    deleteSelectedDrawingById,
+    handleResetView,
+    handleUndoDrawing,
+    handleRedoDrawing,
+    setActiveDrawingTool,
+    setReplaySelectingCut,
+  ])
 
   // ─── Floating Drawing Toolbar Handlers ────────────────────────────────────
 
@@ -1125,12 +1631,7 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
     const chart = chartRef.current
     if (!cur || !chart) return
     const [existing] = chart.getOverlays({ id: cur.id, groupId: 'user_drawings' })
-    if (existing) {
-      undoStackRef.current = [
-        ...undoStackRef.current.slice(-29),
-        { kind: 'modified', before: overlayToRecord(existing, paneRef.current.ticker) },
-      ]
-    }
+    const beforeRec = existing ? overlayToRecord(existing, paneRef.current.ticker) : null
     const next: SelectedDrawingState = { ...cur, ...patch }
     const styles = buildDrawingStylesPatch(next.color, next.size, next.lineStyle)
     chart.overrideOverlay({
@@ -1142,7 +1643,18 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
     setSelectedDrawing(next)
     const [updated] = chart.getOverlays({ id: cur.id, groupId: 'user_drawings' })
     if (updated) {
-      void api.upsertDrawing(overlayToRecord(updated, paneRef.current.ticker))
+      const afterRec = overlayToRecord(updated, paneRef.current.ticker)
+      if (beforeRec) {
+        undoStackRef.current = [...undoStackRef.current.slice(-29), { kind: 'modified', before: beforeRec, after: afterRec }]
+        redoStackRef.current = []
+      }
+      void api.upsertDrawing(afterRec)
+      drawingSyncBus.emit({
+        kind: 'upsert',
+        sourceSlotId: paneRef.current.slotId,
+        ticker: paneRef.current.ticker,
+        record: afterRec,
+      })
     }
   }
 
@@ -1175,7 +1687,14 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
       if (ov) {
         const rec = overlayToRecord(ov, paneRef.current.ticker)
         undoStackRef.current = [...undoStackRef.current.slice(-29), { kind: 'created', record: rec }]
+        redoStackRef.current = []
         void api.upsertDrawing(rec)
+        drawingSyncBus.emit({
+          kind: 'upsert',
+          sourceSlotId: paneRef.current.slotId,
+          ticker: paneRef.current.ticker,
+          record: rec,
+        })
         setSelectedDrawing(extractSelectedState(ov))
       }
     }
@@ -1316,6 +1835,7 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
   return (
     <div
       ref={rootRef}
+      data-slot-id={pane.slotId}
       onMouseDown={onActivate}
       onContextMenu={handleContextMenu}
       className="relative flex flex-col w-full h-full min-w-0 min-h-0 overflow-hidden"
@@ -1381,22 +1901,71 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
       )}
 
       {/* Main Chart Body Container */}
-      <div className="relative flex-1 min-w-0 min-h-0 overflow-hidden" onDoubleClick={handleCanvasDoubleClick}>
-        {/* Top-Right Status & VN Price Band Pill */}
+      <div
+        className="relative flex-1 min-w-0 min-h-0 overflow-hidden"
+        onDoubleClick={handleCanvasDoubleClick}
+        onMouseLeave={() => crosshairBus.publish(pane.slotId, null)}
+      >
+        {/* Keyboard-accessible Indicator Legend Controls (visually hidden until focused, fixes `BUG-035`) */}
+        {pane.indicators.length > 0 && (
+          <div
+            role="region"
+            aria-label={`Chỉ báo trên ${pane.ticker}`}
+            className="sr-only focus-within:not-sr-only focus-within:absolute focus-within:top-1 focus-within:left-2 focus-within:z-30 focus-within:flex focus-within:flex-wrap focus-within:gap-1 focus-within:p-1 focus-within:rounded"
+            style={{ backgroundColor: 'var(--tv-bg-panel)', border: '1px solid var(--tv-border)' }}
+          >
+            {pane.indicators.map((ind) => (
+              <span key={ind.id} className="inline-flex items-center gap-0.5 text-[10.5px]">
+                <span className="font-semibold px-1">{ind.name}</span>
+                <button
+                  type="button"
+                  className="tv-btn h-5 px-1 text-[10px]"
+                  aria-label={`${ind.visible ? 'Ẩn' : 'Hiện'} chỉ báo ${ind.name}`}
+                  onClick={() => updateIndicatorInActivePane(ind.id, { visible: !ind.visible }, pane.slotId)}
+                >
+                  {ind.visible ? 'Ẩn' : 'Hiện'}
+                </button>
+                <button
+                  type="button"
+                  className="tv-btn h-5 px-1 text-[10px]"
+                  aria-label={`Cài đặt chỉ báo ${ind.name}`}
+                  onClick={() => openIndicatorSettings(pane.slotId, ind.id)}
+                >
+                  Cài đặt
+                </button>
+                <button
+                  type="button"
+                  className="tv-btn h-5 px-1 text-[10px]"
+                  aria-label={`Xóa chỉ báo ${ind.name}`}
+                  onClick={() => removeIndicatorFromActivePane(ind.id, pane.slotId)}
+                >
+                  Xóa
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        {/* Top-Right Status & VN Price Band Pill (formatted to ticker precision — `BUG-039`) */}
         <div className="pointer-events-none absolute top-1.5 right-16 z-10 flex items-center gap-1.5 text-[10px]">
-          {!isMultiPane && vnBand && pane.showVnBands && (
-            <div
-              className="flex items-center gap-2 px-2 py-0.5 rounded tabular-nums"
-              style={{
-                backgroundColor: 'color-mix(in srgb, var(--tv-bg-panel) 84%, transparent)',
-                border: '1px solid var(--tv-border)',
-              }}
-            >
-              <span style={{ color: 'var(--tv-vn-ceil)' }}>Trần {vnBand.ceiling.toLocaleString('en-US')}</span>
-              <span style={{ color: 'var(--tv-vn-ref)' }}>TC {vnBand.reference.toLocaleString('en-US')}</span>
-              <span style={{ color: 'var(--tv-vn-floor)' }}>Sàn {vnBand.floor.toLocaleString('en-US')}</span>
-            </div>
-          )}
+          {!isMultiPane && vnBand && pane.showVnBands && (() => {
+            const prec = guessPrecision(pane.ticker).pricePrecision
+            const fmtBand = (val: number) =>
+              val.toLocaleString('en-US', { minimumFractionDigits: prec, maximumFractionDigits: prec })
+            return (
+              <div
+                className="flex items-center gap-2 px-2 py-0.5 rounded tabular-nums"
+                style={{
+                  backgroundColor: 'color-mix(in srgb, var(--tv-bg-panel) 84%, transparent)',
+                  border: '1px solid var(--tv-border)',
+                }}
+              >
+                <span style={{ color: 'var(--tv-vn-ceil)' }}>Trần {fmtBand(vnBand.ceiling)}</span>
+                <span style={{ color: 'var(--tv-vn-ref)' }}>TC {fmtBand(vnBand.reference)}</span>
+                <span style={{ color: 'var(--tv-vn-floor)' }}>Sàn {fmtBand(vnBand.floor)}</span>
+              </div>
+            )
+          })()}
           {dataSourceBadge && (
             <span
               className="px-1.5 py-0.5 rounded font-medium"
@@ -1423,6 +1992,29 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
             onChangeSize={(size) => updateSelectedStyle({ size })}
             onChangeLineStyle={(lineStyle) => updateSelectedStyle({ lineStyle })}
             onToggleLock={() => updateSelectedStyle({ lock: !selectedDrawing.lock })}
+            onCreateAlert={() => {
+              const chart = chartRef.current
+              if (!chart) return
+              const [ov] = chart.getOverlays({ id: selectedDrawing.id, groupId: 'user_drawings' })
+              if (!ov || !ov.points.length) return
+              const p0Val = ov.points[0]?.value ?? 0
+              void createNewAlert(
+                pane.ticker,
+                'cross_any',
+                Number(p0Val.toFixed(2)),
+                `Cắt đường vẽ ${selectedDrawing.name} (${pane.ticker})`,
+                {
+                  alertKind: 'drawing',
+                  interval: pane.interval,
+                  paramsJson: {
+                    drawingId: ov.id,
+                    drawingName: ov.name,
+                    points: ov.points.map((pt) => ({ timestamp: pt.timestamp, value: pt.value })),
+                  },
+                  soundEnabled: true,
+                },
+              )
+            }}
             onClone={handleCloneSelectedDrawing}
             onDelete={() => deleteSelectedDrawingById(selectedDrawing.id)}
           />
@@ -1486,11 +2078,12 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
         <div ref={containerRef} className="w-full h-full min-w-0 min-h-0" />
       </div>
 
-      {/* Custom Right-Click Context Menu (fixes BUG-012!) */}
+      {/* Custom Right-Click Context Menu (fixes BUG-012 + Chart Trading SL/TP v2.2!) */}
       {contextMenu && (
         <ChartContextMenu
           menu={contextMenu}
           ticker={pane.ticker}
+          hasOpenPosition={Boolean(broker?.openPosition && broker.ticker === pane.ticker)}
           onClose={() => setContextMenu(null)}
           onResetView={handleResetView}
           onReplayCutHere={() => {
@@ -1518,6 +2111,14 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
             if (contextMenu.price === null) return
             void submitQuickLimitOrder(pane.ticker, pane.interval, 'SELL', contextMenu.price)
           }}
+          onSetStopLossAtPrice={() => {
+            if (contextMenu.price === null) return
+            void submitQuickBracket('sl', contextMenu.price)
+          }}
+          onSetTakeProfitAtPrice={() => {
+            if (contextMenu.price === null) return
+            void submitQuickBracket('tp', contextMenu.price)
+          }}
           onDeleteSelectedDrawing={() => {
             if (selectedDrawingRef.current) {
               deleteSelectedDrawingById(selectedDrawingRef.current.id)
@@ -1527,7 +2128,10 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
             chartRef.current?.removeOverlay({ groupId: 'user_drawings' })
             setSelectedDrawing(null)
             undoStackRef.current = []
+            redoStackRef.current = []
             void api.clearDrawings(pane.ticker)
+            drawingSyncBus.emit({ kind: 'clear', sourceSlotId: pane.slotId, ticker: pane.ticker })
+            bumpDrawingsVersion()
             pushToast('info', `Đã xóa toàn bộ hình vẽ trên ${pane.ticker}`)
           }}
         />

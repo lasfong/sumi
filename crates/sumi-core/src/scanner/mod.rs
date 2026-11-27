@@ -10,6 +10,7 @@ pub mod breadth;
 pub mod catalog;
 pub mod engine;
 pub mod proxy_bb;
+pub mod qmv_universe;
 #[cfg(test)]
 mod tests;
 pub mod universe;
@@ -31,7 +32,7 @@ pub use catalog::{
     SignalQuality, SignalStatus, TechnicalHealthBreakdown, catalog_entry_index,
     evaluate_causal_confluence, evaluate_signal_catalog_at_bar, explain_historical_signal,
     filter_signal_catalog, find_catalog_entry, find_catalog_entry_for_scan_kind,
-    is_bidirectional_bool_signal,
+    is_bidirectional_bool_signal, is_qmv_screener_signal,
 };
 pub use engine::{
     DEFAULT_BLIND_PRACTICE_LOOKBACK_BARS, INSTITUTIONAL_BLIND_PRACTICE_PRE_ROLL_BARS,
@@ -45,6 +46,11 @@ pub use proxy_bb::{
     MarketBBSessionPoint, MarketPublicationStatus, PROXY_BB_FIXED_BOUNDS_HINT,
     PROXY_BB_METHODOLOGY_VERSION, PROXY_BB_REFERENCE_LEVELS, ProxyBBBarPoint, ProxyBBHorizonPoint,
     ProxyBBSeriesOutput, compute_proxy_bb_series, decompose_bar_ohlcv_proxy,
+};
+pub use qmv_universe::{
+    QMV_DT1_SUMI_SYMBOLS, QMV_SYMBOL_PROFILES, QMV30_SYMBOLS, QMV60_SYMBOLS, QmvLiquidityTier,
+    QmvMoneyTier, QmvPriceTier, QmvSector, QmvSectorGroup, QmvSymbolProfile, YUMEKO_CORE10_SYMBOLS,
+    is_vn_exchange, lookup_qmv_profile,
 };
 pub use universe::{
     CoverageStatus, MemberStatus, SessionDate, UniverseCoverageReport, UniverseDefinition,

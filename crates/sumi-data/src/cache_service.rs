@@ -245,24 +245,22 @@ impl<P: MarketDataProvider + 'static> MarketDataService<P> {
 
         match self.provider.resolve_symbol(symbol).await {
             Ok(resolved) => {
+                let mut canonical = resolved.clone();
+                if canonical.exchange != symbol.exchange || canonical.symbol != symbol.symbol {
+                    canonical.exchange = symbol.exchange.clone();
+                    canonical.symbol = symbol.symbol.clone();
+                    canonical.ticker = symbol.ticker();
+                }
                 let store = self.store.clone();
-                let to_save = resolved.clone();
-                let req_sym = symbol.clone();
+                let to_save = canonical.clone();
                 let now_save = chrono::Utc::now().timestamp_millis();
                 self.ram_cache
-                    .put_symbol(symbol.clone(), resolved.clone(), now_save);
+                    .put_symbol(symbol.clone(), canonical.clone(), now_save);
                 let _ = tokio::task::spawn_blocking(move || {
                     let _ = store.upsert_symbol(&to_save);
-                    if to_save.exchange != req_sym.exchange || to_save.symbol != req_sym.symbol {
-                        let mut alias = to_save;
-                        alias.exchange = req_sym.exchange;
-                        alias.symbol = req_sym.symbol;
-                        alias.ticker = format!("{}:{}", alias.exchange, alias.symbol);
-                        let _ = store.upsert_symbol(&alias);
-                    }
                 })
                 .await;
-                Ok(resolved)
+                Ok(canonical)
             }
             Err(err) => {
                 if let Some((stale_info, _)) = cached {
@@ -982,7 +980,14 @@ impl<P: MarketDataProvider + 'static> MarketDataService<P> {
         let store = self.store.clone();
         let key_owned = key.clone();
         let bars = fetched.bars.clone();
-        let sym_info = fetched.symbol_info.clone();
+        let sym_info = fetched.symbol_info.clone().map(|mut info| {
+            if info.exchange != key.exchange || info.symbol != key.symbol {
+                info.exchange = key.exchange.clone();
+                info.symbol = key.symbol.clone();
+                info.ticker = key.ticker();
+            }
+            info
+        });
         let src = source.to_owned();
         let bars_for_ram = bars.clone();
         let sym_for_ram = sym_info.clone();

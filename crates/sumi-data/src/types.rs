@@ -922,14 +922,21 @@ pub fn compute_price_precision(
     variable_table: Option<&VariableTickTable>,
 ) -> u32 {
     if let Some(tbl) = variable_table {
-        let max_tier_decimals = tbl
+        // Use the primary unbounded tier (e.g., `0.01` for US equities `"0.0001 1 0.01"`,
+        // `100` for HOSE `"10 10000 50 50000 100"`) rather than `max()` over sub-$1 penny tiers!
+        let primary_tier = tbl
             .tiers
             .iter()
-            .map(|t| decimals_for_step(t.tick))
-            .max()
-            .unwrap_or(0);
-        if pricescale <= 1 || max_tier_decimals > 0 {
-            return max_tier_decimals;
+            .find(|t| t.upper_bound.is_none())
+            .or_else(|| tbl.tiers.last());
+        if let Some(tier) = primary_tier {
+            let tier_decimals = decimals_for_step(tier.tick);
+            if pricescale <= 1 || tier_decimals > 0 {
+                return tier_decimals;
+            }
+            if tbl.tiers.iter().all(|t| decimals_for_step(t.tick) == 0) {
+                return 0;
+            }
         }
     }
     if pricescale <= 1 {

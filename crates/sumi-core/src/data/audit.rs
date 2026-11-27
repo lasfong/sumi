@@ -741,7 +741,10 @@ pub fn audit_ohlcv_series_with_venue(
                         }
                     }
                 }
-                cur_w = cur_w.saturating_add(604_800);
+                let Some(next_w) = cur_w.checked_add(604_800) else {
+                    break;
+                };
+                cur_w = next_w;
             }
             expected_sessions = exp.max(1);
             observed_sessions = obs_valid;

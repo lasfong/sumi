@@ -717,6 +717,62 @@ const PARAMS_PERIOD_14: &[SignalParamSpec] = &[SignalParamSpec {
     description: "Indicator smoothing period",
 }];
 
+const PARAMS_PERIOD_50: &[SignalParamSpec] = &[SignalParamSpec {
+    name: "period",
+    default_value: 50.0,
+    min_value: 10.0,
+    max_value: 252.0,
+    description: "QMV V7 50-bar prior lookback window [t-50..t)",
+}];
+
+const PARAMS_ICHIMOKU_QMV: &[SignalParamSpec] = &[
+    SignalParamSpec {
+        name: "tenkan",
+        default_value: 6.0,
+        min_value: 2.0,
+        max_value: 60.0,
+        description: "QMV V7 Tenkan-sen period (6)",
+    },
+    SignalParamSpec {
+        name: "kijun",
+        default_value: 18.0,
+        min_value: 5.0,
+        max_value: 120.0,
+        description: "QMV V7 Kijun-sen & displacement period (18)",
+    },
+    SignalParamSpec {
+        name: "senkou_b",
+        default_value: 36.0,
+        min_value: 10.0,
+        max_value: 250.0,
+        description: "QMV V7 Senkou Span B period (36)",
+    },
+];
+
+const PARAMS_QMV_FLOW_Z50: &[SignalParamSpec] = &[
+    SignalParamSpec {
+        name: "norm_window",
+        default_value: 50.0,
+        min_value: 20.0,
+        max_value: 200.0,
+        description: "Causal Z-50 rolling normalization window (OHLCV Proxy)",
+    },
+    SignalParamSpec {
+        name: "low_zone",
+        default_value: 30.0,
+        min_value: 10.0,
+        max_value: 45.0,
+        description: "QMV Duy trì / Cạn cung turn-up zone (20-30)",
+    },
+    SignalParamSpec {
+        name: "high_zone",
+        default_value: 70.0,
+        min_value: 55.0,
+        max_value: 90.0,
+        description: "QMV Bão hòa turn-down zone (70-80)",
+    },
+];
+
 macro_rules! sig_entry {
     (
         $id:expr, $alias:expr, $en:expr, $vi:expr, $desc:expr,
@@ -742,8 +798,8 @@ macro_rules! sig_entry {
     };
 }
 
-/// Canonical `101`-entry Explainable Signal Catalog (`17` R15 + `72` exact Legacy `SignalRegistry` + `12` `B2` indicator triggers).
-pub static SIGNAL_CATALOG: [SignalCatalogEntry; 101] = [
+/// Canonical `123`-entry Explainable Signal Catalog (`101` baseline entries + `22` QMV V7 / KT01 canonical signals).
+pub static SIGNAL_CATALOG: [SignalCatalogEntry; 123] = [
     // =========================================================================
     // [0..17] Preserved R15/R16 Canonical Entries (`0` Breaking ID Changes)
     // =========================================================================
@@ -2295,7 +2351,385 @@ pub static SIGNAL_CATALOG: [SignalCatalogEntry; 101] = [
         None,
         PARAMS_PERIOD_14
     ),
+    // =========================================================================
+    // [101..123] QMV V7 / KT01 Canonical Signal Extensions (`22` entries)
+    // =========================================================================
+    sig_entry!(
+        "qmv.ichimoku_v7_score",
+        "QMV_ICHI_SCORE",
+        "QMV Ichimoku(6,18,36) 4-Factor Score",
+        "Điểm Ichimoku Chuẩn QMV (6-18-36)",
+        "4-factor causal QMV V7 Ichimoku(6,18,36, shift=18) score [-100, +100]: Close vs Kumo(t-18), Tenkan(6) vs Kijun(18), Chikou vs Close(t-18), and future Kumo.",
+        Ichimoku,
+        Float,
+        Active,
+        53,
+        0,
+        false,
+        None,
+        PARAMS_ICHIMOKU_QMV
+    ),
+    sig_entry!(
+        "qmv.ichimoku_v7_bullish",
+        "QMV_ICHI_BULL",
+        "QMV Ichimoku(6,18,36) Good / Bullish",
+        "Ichimoku Tốt — Chuẩn QMV (6-18-36)",
+        "QMV V7 Ichimoku(6,18,36) 4-factor score >= +50 (giá trên mây, TK thuận xu hướng).",
+        Ichimoku,
+        Bool,
+        Active,
+        53,
+        0,
+        false,
+        None,
+        PARAMS_ICHIMOKU_QMV
+    ),
+    sig_entry!(
+        "qmv.ichimoku_v7_bearish",
+        "QMV_ICHI_BEAR",
+        "QMV Ichimoku(6,18,36) Bad / Bearish",
+        "Ichimoku Xấu — Chuẩn QMV (6-18-36)",
+        "QMV V7 Ichimoku(6,18,36) 4-factor score <= -50 (giá dưới mây, TK suy yếu).",
+        Ichimoku,
+        Bool,
+        Active,
+        53,
+        0,
+        false,
+        None,
+        PARAMS_ICHIMOKU_QMV
+    ),
+    sig_entry!(
+        "qmv.ichimoku_v7_kumo_break_up",
+        "QMV_ICHI_KUMO_BRK_UP",
+        "QMV Ichimoku(6,18,36) Kumo Breakout Up",
+        "Vượt Mây Kumo Tăng Chuẩn QMV (6-18-36)",
+        "Close crosses strictly above visible QMV Kumo(6,18,36, shift=18) cloud top.",
+        Ichimoku,
+        Bool,
+        Active,
+        54,
+        0,
+        false,
+        None,
+        PARAMS_ICHIMOKU_QMV
+    ),
+    sig_entry!(
+        "qmv.ichimoku_v7_tk_cross_up",
+        "QMV_ICHI_TK_UP",
+        "QMV Tenkan(6) Cross Above Kijun(18)",
+        "Giao Cắt Tenkan(6) Lên Kijun(18) QMV",
+        "QMV Tenkan-sen(6) crosses strictly above Kijun-sen(18) at bar close.",
+        Ichimoku,
+        Bool,
+        Active,
+        18,
+        0,
+        false,
+        None,
+        PARAMS_ICHIMOKU_QMV
+    ),
+    sig_entry!(
+        "qmv.new_high_50",
+        "QMV_NEW_HIGH_50",
+        "QMV 50-Bar New High",
+        "Đỉnh Mới 50 Phiên (Chuẩn QMV V7)",
+        "High[t] > max(High[t-50..t)) strictly excluding bar t (tiêu chí Đỉnh mới QMV V7).",
+        Regime,
+        Bool,
+        Active,
+        50,
+        0,
+        false,
+        None,
+        PARAMS_PERIOD_50
+    ),
+    sig_entry!(
+        "qmv.new_low_50",
+        "QMV_NEW_LOW_50",
+        "QMV 50-Bar New Low",
+        "Đáy Mới 50 Phiên (Chuẩn QMV V7)",
+        "Low[t] < min(Low[t-50..t)) strictly excluding bar t (tiêu chí Đáy mới QMV V7).",
+        Regime,
+        Bool,
+        Active,
+        50,
+        0,
+        false,
+        None,
+        PARAMS_PERIOD_50
+    ),
+    sig_entry!(
+        "qmv.congestion_zone",
+        "QMV_CONGESTION",
+        "QMV Price Congestion / Tight Box",
+        "Vùng Tắc Nghẽn QMV (Nén Biên Độ)",
+        "Bollinger(20,2) bandwidth <= 12% combined with tight 10-bar price box <= 9% (Vùng tắc nghẽn QMV).",
+        Regime,
+        Bool,
+        Active,
+        20,
+        0,
+        false,
+        None,
+        PARAMS_BB_SQUEEZE
+    ),
+    sig_entry!(
+        "qmv.vsa_withholding_supply",
+        "QMV_TIET_CUNG",
+        "QMV Supply Withholding (Price Up + Low Vol)",
+        "Tiết Cung KT01 (Giá Tăng + Lượng Thấp)",
+        "3-bar net price advance with >= 2 non-bearish closes while RVOL(20) <= 0.68 (Cáo găm hàng không bán).",
+        Vsa,
+        Bool,
+        Active,
+        20,
+        0,
+        true,
+        None,
+        PARAMS_PERIOD_20
+    ),
+    sig_entry!(
+        "qmv.vsa_support_dry_up",
+        "QMV_HO_TRO_CAN_CUNG",
+        "QMV Support Supply Dry-Up (>= 2 Bars)",
+        "Hỗ Trợ Cạn Cung KT01 (Dừng Giảm >= 2 Phiên)",
+        "Near support with price & volume stopping decline for >= 2 sessions (RVOL20 <= 0.85, quy tắc kt01-011).",
+        Vsa,
+        Bool,
+        Active,
+        21,
+        0,
+        true,
+        None,
+        PARAMS_SR_PROXIMITY
+    ),
+    sig_entry!(
+        "qmv.flow_turn_up_t_plus",
+        "QMV_FLOW_TURN_UP_T1",
+        "QMV Flow Proxy Turn Up 20-30 (T+ 03/05)",
+        "Uốn Lên 20-30 Ngắn Hạn T+ (OHLCV Proxy 03-05)",
+        "OHLCV_PROXY Z-50 normalized T03/T05 turns upward from <= 30 zone with non-falling short flow.",
+        Flow,
+        Bool,
+        Active,
+        25,
+        0,
+        true,
+        None,
+        PARAMS_QMV_FLOW_Z50
+    ),
+    sig_entry!(
+        "qmv.flow_turn_up_t_plus2",
+        "QMV_FLOW_TURN_UP_T2",
+        "QMV Flow Proxy Turn Up 20-30 (T++ 05/10)",
+        "Uốn Lên 20-30 Trung Ngắn T++ (OHLCV Proxy 05-10)",
+        "OHLCV_PROXY Z-50 normalized T05 & T10 turn upward together from <= 32 zone.",
+        Flow,
+        Bool,
+        Active,
+        30,
+        0,
+        true,
+        None,
+        PARAMS_QMV_FLOW_Z50
+    ),
+    sig_entry!(
+        "qmv.flow_turn_up_swing",
+        "QMV_FLOW_TURN_UP_SW",
+        "QMV Flow Proxy Turn Up 20-30 (Swing 10/20)",
+        "Uốn Lên 20-30 Sóng SW (OHLCV Proxy 10-20)",
+        "OHLCV_PROXY Z-50 normalized T20 turns upward from <= 30 zone (vòng quay sóng).",
+        Flow,
+        Bool,
+        Active,
+        40,
+        0,
+        true,
+        None,
+        PARAMS_QMV_FLOW_Z50
+    ),
+    sig_entry!(
+        "qmv.flow_below_30_duy_tri",
+        "QMV_FLOW_BELOW_30",
+        "QMV Flow Proxy Below 30 (Low Supply Zone)",
+        "Chu Kỳ Dưới 30 — Vùng Duy Trì / Cạn Cung (OHLCV Proxy)",
+        "OHLCV_PROXY Z-50 normalized T20 <= 30.0 (cạn cung / chờ dòng tiền quay lại).",
+        Flow,
+        Bool,
+        Active,
+        40,
+        0,
+        true,
+        None,
+        PARAMS_QMV_FLOW_Z50
+    ),
+    sig_entry!(
+        "qmv.flow_turn_down_70_80",
+        "QMV_FLOW_TURN_DN_70_80",
+        "QMV Flow Proxy Turn Down 80-70 (Saturation)",
+        "Uốn Xuống 80-70 Vùng Bão Hòa (OHLCV Proxy)",
+        "OHLCV_PROXY Z-50 normalized T05 or T20 turns downward from >= 70 saturation zone.",
+        Flow,
+        Bool,
+        Active,
+        40,
+        0,
+        true,
+        None,
+        PARAMS_QMV_FLOW_Z50
+    ),
+    sig_entry!(
+        "qmv.flow_above_70_bao_hoa",
+        "QMV_FLOW_ABOVE_70",
+        "QMV Flow Proxy Above 70 (Saturation Zone)",
+        "Chu Kỳ Trên 70 — Vùng Bão Hòa (OHLCV Proxy)",
+        "OHLCV_PROXY Z-50 normalized T20 >= 70.0 (cảnh báo vùng bão hòa ngắn/trung hạn).",
+        Flow,
+        Bool,
+        Active,
+        40,
+        0,
+        true,
+        None,
+        PARAMS_QMV_FLOW_Z50
+    ),
+    sig_entry!(
+        "qmv.money_in_streak_2d",
+        "QMV_MONEY_IN_2D",
+        "QMV Active Flow In >= 2 Sessions (OHLCV Proxy)",
+        "Tiền Vào Liên Tiếp >= 2 Phiên (OHLCV Proxy)",
+        "OHLCV_PROXY net buying pressure > 0 with non-negative close change for >= 2 consecutive sessions and RVOL20 >= 0.85.",
+        Flow,
+        Bool,
+        Active,
+        20,
+        0,
+        true,
+        None,
+        PARAMS_PERIOD_20
+    ),
+    sig_entry!(
+        "qmv.reversal_up_t_plus",
+        "QMV_REV_UP_T_PLUS",
+        "QMV T+ Flow Reversal Up After >= 2 Down Bars",
+        "Đảo Chiều Tăng T+ Sau >= 2 Phiên Giảm (OHLCV Proxy)",
+        "OHLCV_PROXY flips strongly positive today after >= 2 consecutive negative/down sessions.",
+        Flow,
+        Bool,
+        Active,
+        20,
+        0,
+        true,
+        None,
+        PARAMS_PERIOD_20
+    ),
+    sig_entry!(
+        "divergence.cci_regular_bullish",
+        "QMV_CCI_DIV_REG_BULL",
+        "CCI(14) Regular Bullish Divergence (+3B)",
+        "Phân Kỳ Thường Tăng CCI(14) (Đáy QMV)",
+        "Confirmed pivot lows (p = t - 3): Price Lower Low + CCI(14) Higher Low.",
+        Divergence,
+        Bool,
+        Active,
+        20,
+        3,
+        false,
+        None,
+        PARAMS_CONFIRMED_DIV
+    ),
+    sig_entry!(
+        "divergence.cci_regular_bearish",
+        "QMV_CCI_DIV_REG_BEAR",
+        "CCI(14) Regular Bearish Divergence (+3B)",
+        "Phân Kỳ Thường Giảm CCI(14) (Đỉnh QMV)",
+        "Confirmed pivot highs (p = t - 3): Price Higher High + CCI(14) Lower High.",
+        Divergence,
+        Bool,
+        Active,
+        20,
+        3,
+        false,
+        None,
+        PARAMS_CONFIRMED_DIV
+    ),
+    sig_entry!(
+        "divergence.cci_hidden_bullish",
+        "QMV_CCI_DIV_HID_BULL",
+        "CCI(14) Hidden Bullish Divergence (+3B)",
+        "Phân Kỳ Ẩn Tăng CCI(14) (Tiếp Diễn Sóng)",
+        "Confirmed pivot lows (p = t - 3): Price Higher Low + CCI(14) Lower Low.",
+        Divergence,
+        Bool,
+        Active,
+        20,
+        3,
+        false,
+        None,
+        PARAMS_CONFIRMED_DIV
+    ),
+    sig_entry!(
+        "divergence.cci_hidden_bearish",
+        "QMV_CCI_DIV_HID_BEAR",
+        "CCI(14) Hidden Bearish Divergence (+3B)",
+        "Phân Kỳ Ẩn Giảm CCI(14)",
+        "Confirmed pivot highs (p = t - 3): Price Lower High + CCI(14) Higher High.",
+        Divergence,
+        Bool,
+        Active,
+        20,
+        3,
+        false,
+        None,
+        PARAMS_CONFIRMED_DIV
+    ),
 ];
+
+/// Returns `true` if `id` belongs to the streamlined QMV V7 / KT01 Screener catalog
+/// (hiding non-QMV indicators like PSAR/SuperTrend/Keltner/ADX/Stoch/MFI and legacy duplicate aliases).
+#[must_use]
+pub fn is_qmv_screener_signal(id: &str) -> bool {
+    !matches!(
+        id,
+        // Non-QMV indicator triggers
+        "technical.adx_strong_trend"
+            | "technical.di_bull_cross"
+            | "technical.di_bear_cross"
+            | "technical.stoch_bull_cross"
+            | "technical.stoch_bear_cross"
+            | "technical.supertrend_flip_bull"
+            | "technical.supertrend_flip_bear"
+            | "technical.psar_flip_bull"
+            | "technical.psar_flip_bear"
+            | "technical.keltner_upper_breakout"
+            | "technical.mfi_oversold_cross"
+            | "divergence.stoch_regular_bullish"
+            | "divergence.stoch_regular_bearish"
+            | "divergence.stoch_hidden_bullish"
+            | "divergence.stoch_hidden_bearish"
+            // Classic Ichimoku (9,26,52) superseded by QMV V7 (6,18,36) in QMV Screener
+            | "ichimoku.tk_kumo_alignment"
+            | "ichimoku.score"
+            | "ichimoku.bullish"
+            | "ichimoku.bearish"
+            | "ichimoku.tk_cross_bullish"
+            | "ichimoku.tk_cross_bearish"
+            | "ichimoku.kumo_breakout_bullish"
+            | "ichimoku.kumo_breakout_bearish"
+            // Duplicate legacy aliases or 20-bar New High/Low / shallow 40-60 BB turns superseded by QMV V7
+            | "health.score"
+            | "tech.rsi_level_cross"
+            | "tech.macd_signal_cross"
+            | "volume.spike"
+            | "vsa.climax_up"
+            | "divergence.rsi_hidden_or_classic"
+            | "regime.new_high"
+            | "regime.new_low"
+            | "bb.turn_up"
+            | "bb.turn_down"
+    )
+}
 
 /// Looks up a catalog definition by `id`.
 #[must_use]
@@ -2667,12 +3101,16 @@ struct ConfluenceSeriesBundle {
     ichimoku: IchimokuOutput,
     ichi_raw_sa: Vec<Option<f64>>,
     ichi_raw_sb: Vec<Option<f64>>,
+    ichimoku_qmv: IchimokuOutput,
+    ichi_qmv_raw_sa: Vec<Option<f64>>,
+    ichi_qmv_raw_sb: Vec<Option<f64>>,
     cvd_values: Vec<Option<f64>>,
     adx_14: AdxOutput,
     stoch_14: StochasticOutput,
     supertrend_10: SuperTrendOutput,
     psar: PsarOutput,
     keltner_20: KeltnerOutput,
+    cci_14: Vec<Option<f64>>,
     cci_20: Vec<Option<f64>>,
     mfi_14: Vec<Option<f64>>,
     candle_geoms: Vec<CandleGeometry>,
@@ -2705,6 +3143,18 @@ impl ConfluenceSeriesBundle {
             };
             ichi_raw_sa.push(sa);
         }
+        let ichimoku_qmv = compute_ichimoku(candles, IchimokuConfig::qmv_v7());
+        let ichi_qmv_raw_sb = donchian_midpoint_series(candles, 36);
+        let mut ichi_qmv_raw_sa = Vec::with_capacity(n);
+        for t in 0..n {
+            let sa = match (ichimoku_qmv.tenkan[t], ichimoku_qmv.kijun[t]) {
+                (Some(tk), Some(kj)) if tk.is_finite() && kj.is_finite() => {
+                    Some(0.5 * tk + 0.5 * kj)
+                }
+                _ => None,
+            };
+            ichi_qmv_raw_sa.push(sa);
+        }
         let cvd_values = compute_cvd(
             candles,
             CvdConfig {
@@ -2718,6 +3168,7 @@ impl ConfluenceSeriesBundle {
         let supertrend_10 = compute_supertrend(candles, 10, 3.0);
         let psar = compute_psar(candles, 0.02, 0.02, 0.20);
         let keltner_20 = compute_keltner_channels(candles, 20, 10, 2.0);
+        let cci_14 = compute_cci(candles, 14);
         let cci_20 = compute_cci(candles, 20);
         let mfi_14 = compute_mfi(candles, 14);
         let (candle_geoms, candle_patterns) =
@@ -2737,12 +3188,16 @@ impl ConfluenceSeriesBundle {
             ichimoku,
             ichi_raw_sa,
             ichi_raw_sb,
+            ichimoku_qmv,
+            ichi_qmv_raw_sa,
+            ichi_qmv_raw_sb,
             cvd_values,
             adx_14,
             stoch_14,
             supertrend_10,
             psar,
             keltner_20,
+            cci_14,
             cci_20,
             mfi_14,
             candle_geoms,
@@ -3231,6 +3686,54 @@ fn eval_ichimoku_4factor_score(
     let raw_sa = bundle.ichi_raw_sa.get(t).copied().flatten()?;
     let raw_sb = bundle.ichi_raw_sb.get(t).copied().flatten()?;
     let past_close = candles[t - 26].close;
+    if !past_close.is_finite() {
+        return None;
+    }
+    let c = &candles[t];
+    let top = vis_sa.max(vis_sb);
+    let bot = vis_sa.min(vis_sb);
+
+    let mut bull = 0_i32;
+    let mut bear = 0_i32;
+    if c.close > top {
+        bull += 1;
+    } else if c.close < bot {
+        bear += 1;
+    }
+    if tk > kj {
+        bull += 1;
+    } else if tk < kj {
+        bear += 1;
+    }
+    if c.close > past_close {
+        bull += 1;
+    } else if c.close < past_close {
+        bear += 1;
+    }
+    if raw_sa > raw_sb {
+        bull += 1;
+    } else if raw_sa < raw_sb {
+        bear += 1;
+    }
+    let score = 25.0 * f64::from(bull - bear);
+    Some((score, bull, bear))
+}
+
+fn eval_ichimoku_qmv_4factor_score(
+    candles: &[Candle],
+    bundle: &ConfluenceSeriesBundle,
+    t: usize,
+) -> Option<(f64, i32, i32)> {
+    if t < 18 {
+        return None;
+    }
+    let tk = bundle.ichimoku_qmv.tenkan.get(t).copied().flatten()?;
+    let kj = bundle.ichimoku_qmv.kijun.get(t).copied().flatten()?;
+    let vis_sa = bundle.ichimoku_qmv.senkou_a.get(t).copied().flatten()?;
+    let vis_sb = bundle.ichimoku_qmv.senkou_b.get(t).copied().flatten()?;
+    let raw_sa = bundle.ichi_qmv_raw_sa.get(t).copied().flatten()?;
+    let raw_sb = bundle.ichi_qmv_raw_sb.get(t).copied().flatten()?;
+    let past_close = candles[t - 18].close;
     if !past_close.is_finite() {
         return None;
     }
@@ -4843,6 +5346,428 @@ fn evaluate_compact_entry_at(
                 float_value: Some(m1),
                 direction: fired.then_some(SignalDirection::Bullish),
             }
+        }
+        // =====================================================================
+        // QMV V7 / KT01 Canonical Extensions (`22` entries)
+        // =====================================================================
+        "qmv.ichimoku_v7_score" => {
+            let Some((score, _, _)) = eval_ichimoku_qmv_4factor_score(candles, bundle, t) else {
+                return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+            };
+            CompactSignalPoint {
+                quality: SignalQuality::Valid,
+                bool_value: None,
+                float_value: Some(score),
+                direction: if score >= 50.0 {
+                    Some(SignalDirection::Bullish)
+                } else if score <= -50.0 {
+                    Some(SignalDirection::Bearish)
+                } else {
+                    None
+                },
+            }
+        }
+        "qmv.ichimoku_v7_bullish" | "qmv.ichimoku_v7_bearish" => {
+            let Some((score, _, _)) = eval_ichimoku_qmv_4factor_score(candles, bundle, t) else {
+                return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+            };
+            let is_bull = entry.id == "qmv.ichimoku_v7_bullish";
+            let fired = if is_bull {
+                score >= 50.0
+            } else {
+                score <= -50.0
+            };
+            CompactSignalPoint {
+                quality: SignalQuality::Valid,
+                bool_value: Some(fired),
+                float_value: Some(score),
+                direction: fired.then_some(if is_bull {
+                    SignalDirection::Bullish
+                } else {
+                    SignalDirection::Bearish
+                }),
+            }
+        }
+        "qmv.ichimoku_v7_kumo_break_up" => {
+            let (Some(sa0), Some(sb0), Some(sa1), Some(sb1)) = (
+                bundle.ichimoku_qmv.senkou_a.get(t - 1).copied().flatten(),
+                bundle.ichimoku_qmv.senkou_b.get(t - 1).copied().flatten(),
+                bundle.ichimoku_qmv.senkou_a.get(t).copied().flatten(),
+                bundle.ichimoku_qmv.senkou_b.get(t).copied().flatten(),
+            ) else {
+                return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+            };
+            let prev_c = candles[t - 1].close;
+            if !prev_c.is_finite() {
+                return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+            }
+            let top0 = sa0.max(sb0);
+            let top1 = sa1.max(sb1);
+            let fired = prev_c <= top0 && c.close > top1;
+            CompactSignalPoint {
+                quality: SignalQuality::Valid,
+                bool_value: Some(fired),
+                float_value: Some(top1),
+                direction: fired.then_some(SignalDirection::Bullish),
+            }
+        }
+        "qmv.ichimoku_v7_tk_cross_up" => {
+            let (Some(tk0), Some(kj0), Some(tk1), Some(kj1)) = (
+                bundle.ichimoku_qmv.tenkan[t - 1],
+                bundle.ichimoku_qmv.kijun[t - 1],
+                bundle.ichimoku_qmv.tenkan[t],
+                bundle.ichimoku_qmv.kijun[t],
+            ) else {
+                return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+            };
+            let fired = tk0 <= kj0 && tk1 > kj1;
+            CompactSignalPoint {
+                quality: SignalQuality::Valid,
+                bool_value: Some(fired),
+                float_value: Some(tk1 - kj1),
+                direction: fired.then_some(SignalDirection::Bullish),
+            }
+        }
+        "qmv.new_high_50" => {
+            let Some((prior_hi, _)) = prior_window_high_low(candles, t, 50) else {
+                return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+            };
+            let fired = c.high > prior_hi;
+            CompactSignalPoint {
+                quality: SignalQuality::Valid,
+                bool_value: Some(fired),
+                float_value: Some(prior_hi),
+                direction: fired.then_some(SignalDirection::Bullish),
+            }
+        }
+        "qmv.new_low_50" => {
+            let Some((_, prior_lo)) = prior_window_high_low(candles, t, 50) else {
+                return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+            };
+            let fired = c.low < prior_lo;
+            CompactSignalPoint {
+                quality: SignalQuality::Valid,
+                bool_value: Some(fired),
+                float_value: Some(prior_lo),
+                direction: fired.then_some(SignalDirection::Bearish),
+            }
+        }
+        "qmv.congestion_zone" => {
+            let Some(bw) = bb_bandwidth_ratio_at(&bundle.bb, t) else {
+                return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+            };
+            let Some((hi9, lo9)) = prior_window_high_low(candles, t, 9) else {
+                return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+            };
+            let box_hi = hi9.max(c.high);
+            let box_lo = lo9.min(c.low);
+            let box_pct = if c.close.abs() > 1.0e-12 {
+                (box_hi - box_lo) / c.close.abs()
+            } else {
+                return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+            };
+            let fired = bw <= 0.12 && box_pct <= 0.09;
+            CompactSignalPoint {
+                quality: SignalQuality::Valid,
+                bool_value: Some(fired),
+                float_value: Some(box_pct * 100.0),
+                direction: None,
+            }
+        }
+        "qmv.vsa_withholding_supply" => match rvol20 {
+            PriorRvolCheck::Valid { rvol, .. } => {
+                if t < 3 {
+                    return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+                }
+                let c_m3 = candles[t - 3].close;
+                if !c_m3.is_finite() || c_m3 <= 0.0 {
+                    return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+                }
+                let mut non_down = 0_u8;
+                for k in (t - 2)..=t {
+                    if !candles[k].close.is_finite() || !candles[k - 1].close.is_finite() {
+                        return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+                    }
+                    if candles[k].close >= candles[k - 1].close {
+                        non_down += 1;
+                    }
+                }
+                let fired = c.close > c_m3
+                    && non_down >= 2
+                    && rvol <= 0.68
+                    && close_location_01(c) >= 0.50;
+                CompactSignalPoint {
+                    quality: SignalQuality::Valid,
+                    bool_value: Some(fired),
+                    float_value: Some(rvol),
+                    direction: fired.then_some(SignalDirection::Bullish),
+                }
+            }
+            PriorRvolCheck::InvalidVolume => {
+                CompactSignalPoint::non_valid(SignalQuality::InvalidVolume)
+            }
+            PriorRvolCheck::ZeroBaseline => {
+                CompactSignalPoint::non_valid(SignalQuality::ZeroBaseline)
+            }
+            PriorRvolCheck::InsufficientHistory => {
+                CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory)
+            }
+        },
+        "qmv.vsa_support_dry_up" => {
+            let rvol_prev = inspect_prior_rvol_at(candles, t - 1, 20);
+            match (
+                rvol20,
+                rvol_prev,
+                bundle.atr_14[t],
+                eval_sr_proximity(candles, bundle, t, true),
+            ) {
+                (
+                    PriorRvolCheck::Valid { rvol: rv_curr, .. },
+                    PriorRvolCheck::Valid { rvol: rv_prev, .. },
+                    Some(atr),
+                    Some((near_sup, sup_lvl, _)),
+                ) if atr > atr_floor && candles[t - 1].low.is_finite() => {
+                    let near_sup_prev = eval_sr_proximity(candles, bundle, t - 1, true)
+                        .is_some_and(|(ok, _, _)| ok);
+                    let price_stopped_falling = c.low >= candles[t - 1].low - 0.15 * atr
+                        && c.close >= candles[t - 1].low;
+                    let vol_dried = rv_curr <= 0.85 && rv_prev <= 0.90;
+                    let fired = (near_sup || near_sup_prev) && price_stopped_falling && vol_dried;
+                    CompactSignalPoint {
+                        quality: SignalQuality::Valid,
+                        bool_value: Some(fired),
+                        float_value: Some(sup_lvl),
+                        direction: fired.then_some(SignalDirection::Bullish),
+                    }
+                }
+                (PriorRvolCheck::InvalidVolume, _, _, _)
+                | (_, PriorRvolCheck::InvalidVolume, _, _) => {
+                    CompactSignalPoint::non_valid(SignalQuality::InvalidVolume)
+                }
+                (PriorRvolCheck::ZeroBaseline, _, _, _)
+                | (_, PriorRvolCheck::ZeroBaseline, _, _) => {
+                    CompactSignalPoint::non_valid(SignalQuality::ZeroBaseline)
+                }
+                _ => CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory),
+            }
+        }
+        "qmv.flow_turn_up_t_plus"
+        | "qmv.flow_turn_up_t_plus2"
+        | "qmv.flow_turn_up_swing"
+        | "qmv.flow_below_30_duy_tri"
+        | "qmv.flow_turn_down_70_80"
+        | "qmv.flow_above_70_bao_hoa" => {
+            let pt_curr = &bundle.proxy_bb.points[t];
+            let pt_prev = &bundle.proxy_bb.points[t - 1];
+            let check_h = match entry.id {
+                "qmv.flow_turn_up_t_plus" => BBHorizon::T05,
+                "qmv.flow_turn_up_t_plus2" => BBHorizon::T10,
+                _ => BBHorizon::T20,
+            };
+            let hc = pt_curr.horizon(check_h);
+            let hp = pt_prev.horizon(check_h);
+            if hc.is_invalid || hp.is_invalid {
+                return CompactSignalPoint::non_valid(SignalQuality::InvalidVolume);
+            }
+            if hc.is_zero_activity || hp.is_zero_activity {
+                return CompactSignalPoint::non_valid(SignalQuality::ZeroBaseline);
+            }
+            let z03_c = bundle.proxy_bb.z50_at(t, BBHorizon::T03);
+            let z03_p = bundle.proxy_bb.z50_at(t - 1, BBHorizon::T03);
+            let z05_c = bundle.proxy_bb.z50_at(t, BBHorizon::T05);
+            let z05_p = bundle.proxy_bb.z50_at(t - 1, BBHorizon::T05);
+            let z10_c = bundle.proxy_bb.z50_at(t, BBHorizon::T10);
+            let z10_p = bundle.proxy_bb.z50_at(t - 1, BBHorizon::T10);
+            let z20_c = bundle.proxy_bb.z50_at(t, BBHorizon::T20);
+            let z20_p = bundle.proxy_bb.z50_at(t - 1, BBHorizon::T20);
+
+            match entry.id {
+                "qmv.flow_turn_up_t_plus" => {
+                    let (Some(c03), Some(p03), Some(c05), Some(p05)) = (z03_c, z03_p, z05_c, z05_p)
+                    else {
+                        return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+                    };
+                    let fired = ((p03 <= 30.0 && c03 > p03) || (p05 <= 30.0 && c05 > p05))
+                        && c03 >= p03
+                        && c05 >= p05;
+                    CompactSignalPoint {
+                        quality: SignalQuality::Valid,
+                        bool_value: Some(fired),
+                        float_value: Some(0.5 * (c03 + c05)),
+                        direction: fired.then_some(SignalDirection::Bullish),
+                    }
+                }
+                "qmv.flow_turn_up_t_plus2" => {
+                    let (Some(c05), Some(p05), Some(c10), Some(p10)) = (z05_c, z05_p, z10_c, z10_p)
+                    else {
+                        return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+                    };
+                    let fired = p05 <= 32.0 && p10 <= 32.0 && c05 > p05 && c10 > p10;
+                    CompactSignalPoint {
+                        quality: SignalQuality::Valid,
+                        bool_value: Some(fired),
+                        float_value: Some(0.5 * (c05 + c10)),
+                        direction: fired.then_some(SignalDirection::Bullish),
+                    }
+                }
+                "qmv.flow_turn_up_swing" => {
+                    let (Some(c20), Some(p20)) = (z20_c, z20_p) else {
+                        return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+                    };
+                    let fired = p20 <= 30.0 && c20 > p20;
+                    CompactSignalPoint {
+                        quality: SignalQuality::Valid,
+                        bool_value: Some(fired),
+                        float_value: Some(c20),
+                        direction: fired.then_some(SignalDirection::Bullish),
+                    }
+                }
+                "qmv.flow_below_30_duy_tri" => {
+                    let Some(c20) = z20_c else {
+                        return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+                    };
+                    let fired = c20 <= 30.0;
+                    CompactSignalPoint {
+                        quality: SignalQuality::Valid,
+                        bool_value: Some(fired),
+                        float_value: Some(c20),
+                        direction: fired.then_some(SignalDirection::Bullish),
+                    }
+                }
+                "qmv.flow_turn_down_70_80" => {
+                    let (Some(c05), Some(p05), Some(c20), Some(p20)) = (z05_c, z05_p, z20_c, z20_p)
+                    else {
+                        return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+                    };
+                    let fired = (p20 >= 70.0 && c20 < p20) || (p05 >= 75.0 && c05 < p05 && c20 >= 65.0);
+                    CompactSignalPoint {
+                        quality: SignalQuality::Valid,
+                        bool_value: Some(fired),
+                        float_value: Some(c20),
+                        direction: fired.then_some(SignalDirection::Bearish),
+                    }
+                }
+                _ => {
+                    let Some(c20) = z20_c else {
+                        return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+                    };
+                    let fired = c20 >= 70.0;
+                    CompactSignalPoint {
+                        quality: SignalQuality::Valid,
+                        bool_value: Some(fired),
+                        float_value: Some(c20),
+                        direction: fired.then_some(SignalDirection::Bearish),
+                    }
+                }
+            }
+        }
+        "qmv.money_in_streak_2d" => match rvol20 {
+            PriorRvolCheck::Valid { rvol, .. } => {
+                if t < 2
+                    || !bundle.proxy_bb.points[t].is_bar_valid
+                    || !bundle.proxy_bb.points[t - 1].is_bar_valid
+                    || !candles[t - 2].close.is_finite()
+                {
+                    return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+                }
+                let p0 = bundle.proxy_bb.points[t].daily_pressure;
+                let p1 = bundle.proxy_bb.points[t - 1].daily_pressure;
+                let fired = p0 > 0.05
+                    && p1 > 0.05
+                    && c.close >= candles[t - 1].close
+                    && candles[t - 1].close >= candles[t - 2].close
+                    && rvol >= 0.85;
+                CompactSignalPoint {
+                    quality: SignalQuality::Valid,
+                    bool_value: Some(fired),
+                    float_value: Some(p0),
+                    direction: fired.then_some(SignalDirection::Bullish),
+                }
+            }
+            PriorRvolCheck::InvalidVolume => {
+                CompactSignalPoint::non_valid(SignalQuality::InvalidVolume)
+            }
+            PriorRvolCheck::ZeroBaseline => {
+                CompactSignalPoint::non_valid(SignalQuality::ZeroBaseline)
+            }
+            PriorRvolCheck::InsufficientHistory => {
+                CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory)
+            }
+        },
+        "qmv.reversal_up_t_plus" => match rvol20 {
+            PriorRvolCheck::Valid { rvol, .. } => {
+                if t < 3
+                    || !bundle.proxy_bb.points[t].is_bar_valid
+                    || !bundle.proxy_bb.points[t - 1].is_bar_valid
+                    || !bundle.proxy_bb.points[t - 2].is_bar_valid
+                    || !candles[t - 3].close.is_finite()
+                {
+                    return CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory);
+                }
+                let down_prev2 = (candles[t - 1].close < candles[t - 2].close
+                    || bundle.proxy_bb.points[t - 1].daily_pressure < 0.0)
+                    && (candles[t - 2].close < candles[t - 3].close
+                        || bundle.proxy_bb.points[t - 2].daily_pressure < 0.0);
+                let up_today = c.close > candles[t - 1].close
+                    && bundle.proxy_bb.points[t].daily_pressure >= 0.25
+                    && rvol >= 0.90;
+                let fired = down_prev2 && up_today;
+                CompactSignalPoint {
+                    quality: SignalQuality::Valid,
+                    bool_value: Some(fired),
+                    float_value: Some(bundle.proxy_bb.points[t].daily_pressure),
+                    direction: fired.then_some(SignalDirection::Bullish),
+                }
+            }
+            PriorRvolCheck::InvalidVolume => {
+                CompactSignalPoint::non_valid(SignalQuality::InvalidVolume)
+            }
+            PriorRvolCheck::ZeroBaseline => {
+                CompactSignalPoint::non_valid(SignalQuality::ZeroBaseline)
+            }
+            PriorRvolCheck::InsufficientHistory => {
+                CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory)
+            }
+        },
+        "divergence.cci_regular_bullish" => {
+            eval_confirmed_divergence(
+                candles,
+                &bundle.pivots,
+                &bundle.cci_14,
+                DivergenceKind::RegularBullish,
+                t,
+            )
+            .0
+        }
+        "divergence.cci_regular_bearish" => {
+            eval_confirmed_divergence(
+                candles,
+                &bundle.pivots,
+                &bundle.cci_14,
+                DivergenceKind::RegularBearish,
+                t,
+            )
+            .0
+        }
+        "divergence.cci_hidden_bullish" => {
+            eval_confirmed_divergence(
+                candles,
+                &bundle.pivots,
+                &bundle.cci_14,
+                DivergenceKind::HiddenBullish,
+                t,
+            )
+            .0
+        }
+        "divergence.cci_hidden_bearish" => {
+            eval_confirmed_divergence(
+                candles,
+                &bundle.pivots,
+                &bundle.cci_14,
+                DivergenceKind::HiddenBearish,
+                t,
+            )
+            .0
         }
         _ => CompactSignalPoint::non_valid(SignalQuality::InsufficientHistory),
     }

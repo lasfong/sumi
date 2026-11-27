@@ -4,6 +4,7 @@
 //! `ta_MACD.c`, `ta_ATR.c`) and legacy Sumi (`indicatorDomain.ts` / `IndicatorRenderRegistry.ts`).
 //! Contains zero UI or OS-specific dependencies.
 
+pub mod analog_cone;
 pub mod bands;
 pub mod cvd;
 pub mod extended;
@@ -28,6 +29,14 @@ use crate::data::Timeframe;
 use crate::model::Candle;
 use crate::viewport::iter_conflated_candles;
 
+pub use analog_cone::{
+    ANALOG_CONE_DIM, ANALOG_CONE_WARMUP_BARS, AnalogBankConfig, AnalogConeConfig, AnalogConeError,
+    AnalogConeForecast, AnalogConeStep, AnalogMatchCase, AnalogMemoryBank, AnalogSymbolInput,
+    AnalogWeightProfile, DEFAULT_ANALOG_HORIZON, DEFAULT_ANALOG_TOP_K,
+    DEFAULT_MIN_MEDIAN_TURNOVER_VND, MAX_ANALOG_HORIZON, MIN_YANG_ZHANG_VOL,
+    compute_causal_20d_features, compute_yang_zhang_vol, project_ohlc_paths_to_venue,
+    weighted_quantiles_1d,
+};
 pub use bands::{
     BollingerBandsIndicator, BollingerOutput, compute_bollinger_bands, compute_bollinger_slices,
 };

@@ -299,6 +299,30 @@ pub fn decompose_bar_ohlcv_proxy(bar: &Candle, prev_close: Option<f64>) -> Decom
     }
 }
 
+/// Reference guides for QMV normalized Money-Flow Cycle Proxy (`[20, 30, 50, 70, 80]`).
+pub const PROXY_BB_QMV_REFERENCE_LEVELS: [ReferenceLevel; 5] = [
+    ReferenceLevel {
+        value: 20.0,
+        label: "20",
+    },
+    ReferenceLevel {
+        value: 30.0,
+        label: "30",
+    },
+    ReferenceLevel {
+        value: 50.0,
+        label: "50",
+    },
+    ReferenceLevel {
+        value: 70.0,
+        label: "70",
+    },
+    ReferenceLevel {
+        value: 80.0,
+        label: "80",
+    },
+];
+
 /// Complete multi-horizon `ProxyBB` output cached in [`super::IndicatorCache`] and consumed by UI / Scanner.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProxyBBSeriesOutput {
@@ -306,6 +330,19 @@ pub struct ProxyBBSeriesOutput {
     pub t05_values: Vec<Option<f64>>,
     pub t20_values: Vec<Option<f64>>,
     pub t50_values: Vec<Option<f64>>,
+    /// Strictly causal 50-bar min-max normalized (`Z-50`) `[0.0, 100.0]` scores per horizon (`OHLCV Proxy`),
+    /// mapping local cycle troughs/peaks into QMV's `20–30` (Duy trì) and `70–80` (Bão hòa) zones.
+    pub z50_horizons: Vec<[Option<f64>; 6]>,
+}
+
+impl ProxyBBSeriesOutput {
+    #[inline]
+    #[must_use]
+    pub fn z50_at(&self, bar_index: usize, horizon: BBHorizon) -> Option<f64> {
+        self.z50_horizons
+            .get(bar_index)
+            .and_then(|arr| arr[horizon.index()])
+    }
 }
 
 /// Computes all `6` horizons (`T03, T05, T10, T20, T50, T200`) across `candles` in $O(N)$ linear time
@@ -503,10 +540,45 @@ pub fn compute_proxy_bb_series(candles: &[Candle]) -> ProxyBBSeriesOutput {
         });
     }
 
+    let mut z50_horizons = Vec::with_capacity(n);
+    const Z50_WINDOW: usize = 50;
+    const Z50_MIN_VALID: usize = 15;
+    for t in 0..n {
+        let win_start = (t + 1).saturating_sub(Z50_WINDOW);
+        let mut row = [None; 6];
+        for h in BBHorizon::ALL {
+            let hi = h.index();
+            let Some(curr) = points[t].horizons[hi].bb_value else {
+                continue;
+            };
+            let mut lo = f64::INFINITY;
+            let mut hi_v = f64::NEG_INFINITY;
+            let mut cnt = 0usize;
+            for pt in &points[win_start..=t] {
+                if let Some(v) = pt.horizons[hi].bb_value.filter(|x| x.is_finite()) {
+                    lo = lo.min(v);
+                    hi_v = hi_v.max(v);
+                    cnt += 1;
+                }
+            }
+            if cnt >= Z50_MIN_VALID && hi_v >= lo {
+                let span = hi_v - lo;
+                let z = if span <= 1.0e-9 {
+                    curr.clamp(0.0, 100.0)
+                } else {
+                    (100.0 * (curr - lo) / span).clamp(0.0, 100.0)
+                };
+                row[hi] = Some(z);
+            }
+        }
+        z50_horizons.push(row);
+    }
+
     ProxyBBSeriesOutput {
         points,
         t05_values,
         t20_values,
         t50_values,
+        z50_horizons,
     }
 }

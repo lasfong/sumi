@@ -289,6 +289,13 @@ export interface BrokerOrderExtendData {
   label: string
   color: string
   dashed?: boolean
+  draggable?: boolean
+  prefix?: string
+  entryPrice?: number
+  side?: 'Long' | 'Short'
+  qty?: number
+  mult?: number
+  isVnd?: boolean
 }
 
 export const brokerOrderLine: OverlayTemplate<BrokerOrderExtendData> = {
@@ -303,9 +310,31 @@ export const brokerOrderLine: OverlayTemplate<BrokerOrderExtendData> = {
     const ext = overlay.extendData
     const color = ext?.color ?? '#2962FF'
     const priceVal = overlay.points[0]?.value
-    const label =
+
+    let label =
       ext?.label ??
       (typeof priceVal === 'number' ? `LỆNH ${formatChartPrice(chart, priceVal)}` : 'LỆNH CHỜ')
+
+    // Dynamically update label with real-time price & projected PnL while dragging SL / TP / LO (v2.2)!
+    if (ext?.draggable && typeof priceVal === 'number' && Number.isFinite(priceVal)) {
+      const priceText = formatChartPrice(chart, priceVal)
+      if (
+        typeof ext.entryPrice === 'number' &&
+        typeof ext.qty === 'number' &&
+        ext.side
+      ) {
+        const mult = ext.mult ?? 1
+        const dir = ext.side === 'Long' ? 1 : -1
+        const projPnl = (priceVal - ext.entryPrice) * ext.qty * mult * dir
+        const sign = projPnl >= 0 ? '+' : ''
+        const pnlStr = ext.isVnd
+          ? `${sign}${Math.round(projPnl).toLocaleString('en-US')} đ`
+          : `${sign}$${projPnl.toFixed(2)}`
+        label = `⋮⋮ ${ext.prefix ?? 'MỨC'} ${priceText} (${pnlStr})`
+      } else if (ext.prefix) {
+        label = `⋮⋮ ${ext.prefix} @ ${priceText}`
+      }
+    }
 
     return [
       {
@@ -319,7 +348,7 @@ export const brokerOrderLine: OverlayTemplate<BrokerOrderExtendData> = {
         styles: {
           style: ext?.dashed ? 'dashed' : 'solid',
           color,
-          size: 1.5,
+          size: ext?.draggable ? 1.8 : 1.5,
           dashedValue: [5, 3],
         },
       },
@@ -483,6 +512,76 @@ export const backtestTradeMarker: OverlayTemplate<BacktestTradeMarkerExtendData>
   },
 }
 
+export interface VnSessionBreakExtendData {
+  label: string
+  kind: 'morning' | 'afternoon' | 'atc'
+}
+
+export const vnSessionBreakLine: OverlayTemplate<VnSessionBreakExtendData> = {
+  name: 'vnSessionBreakLine',
+  totalStep: 2,
+  lock: true,
+  needDefaultPointFigure: false,
+  needDefaultXAxisFigure: false,
+  needDefaultYAxisFigure: false,
+  createPointFigures: ({ coordinates, bounding, overlay }) => {
+    if (coordinates.length === 0) return []
+    const { x } = coordinates[0]
+    const ext = overlay.extendData
+    const kind = ext?.kind ?? 'morning'
+    const lineColor =
+      kind === 'morning'
+        ? 'rgba(41, 98, 255, 0.28)'
+        : kind === 'afternoon'
+          ? 'rgba(251, 192, 45, 0.28)'
+          : 'rgba(171, 71, 188, 0.30)'
+    const textColor =
+      kind === 'morning' ? '#6B9BFF' : kind === 'afternoon' ? '#FBC02D' : '#CE93D8'
+
+    return [
+      {
+        type: 'line',
+        ignoreEvent: true,
+        attrs: {
+          coordinates: [
+            { x, y: 0 },
+            { x, y: bounding.height },
+          ],
+        },
+        styles: {
+          style: 'dashed',
+          color: lineColor,
+          size: 1,
+          dashedValue: kind === 'morning' ? [4, 4] : [2, 4],
+        },
+      },
+      {
+        type: 'text',
+        ignoreEvent: true,
+        attrs: {
+          x: x + 3,
+          y: Math.max(20, bounding.height - 8),
+          text: ext?.label ?? '',
+          align: 'left',
+          baseline: 'bottom',
+        },
+        styles: {
+          style: 'fill',
+          color: textColor,
+          backgroundColor: 'rgba(19, 23, 34, 0.65)',
+          borderRadius: 2,
+          paddingLeft: 3,
+          paddingRight: 3,
+          paddingTop: 1,
+          paddingBottom: 1,
+          size: 9,
+          weight: '500',
+        },
+      },
+    ]
+  },
+}
+
 export const TRADINGVIEW_CUSTOM_OVERLAYS: OverlayTemplate[] = [
   longPosition,
   shortPosition,
@@ -490,4 +589,5 @@ export const TRADINGVIEW_CUSTOM_OVERLAYS: OverlayTemplate[] = [
   brokerOrderLine as OverlayTemplate,
   vnPriceBandLine as OverlayTemplate,
   backtestTradeMarker as OverlayTemplate,
+  vnSessionBreakLine as OverlayTemplate,
 ]

@@ -14,7 +14,7 @@ function extractLineStyles(styles: Record<string, unknown> | null | undefined, c
   const rawLines = Array.isArray((styles as { lines?: unknown } | null)?.lines)
     ? ((styles as { lines: Array<{ color?: string; size?: number }> }).lines)
     : []
-  const n = Math.max(1, count, rawLines.length)
+  const n = Math.max(1, count)
   return Array.from({ length: n }, (_, i) => ({
     color: rawLines[i]?.color ?? INDICATOR_COLOR_PALETTE[i % INDICATOR_COLOR_PALETTE.length],
     size: typeof rawLines[i]?.size === 'number' ? rawLines[i].size! : 1.6,
@@ -42,13 +42,22 @@ export const IndicatorSettingsModal: React.FC = () => {
   const [draftLines, setDraftLines] = useState<LineStyleDraft[]>([])
   const [draftVisible, setDraftVisible] = useState(true)
 
+  const expectedLineCount = (() => {
+    if (!indicator) return 1
+    // Multi-series indicators (`MA`, `EMA`, `RSI`, `VOL`, `QMV_FLOW`) match their param count;
+    // fixed-figure indicators (`BOLL` 3, `ICHIMOKU` 5, `RS_VNINDEX` 2, `VWAP` 5, `MACD` 2) use `lineLabels.length` (`BUG-019`)!
+    if (['MA', 'EMA', 'RSI', 'VOL', 'QMV_FLOW'].includes(indicator.name)) {
+      return Math.max(1, indicator.calcParams.length)
+    }
+    return Math.max(1, meta?.lineLabels?.length ?? indicator.calcParams.length ?? 1)
+  })()
+
   useEffect(() => {
     if (!indicator) return
     setDraftParams(indicator.calcParams.map(String))
-    const lineCount = Math.max(1, indicator.calcParams.length || 1)
-    setDraftLines(extractLineStyles(indicator.styles, lineCount))
+    setDraftLines(extractLineStyles(indicator.styles, expectedLineCount))
     setDraftVisible(indicator.visible)
-  }, [indicator?.id, indicator])
+  }, [indicator?.id, indicator, expectedLineCount])
 
   useEffect(() => {
     const dlg = dialogRef.current
@@ -99,7 +108,13 @@ export const IndicatorSettingsModal: React.FC = () => {
       draftParams.length > 0
         ? draftParams.map((v, idx) => {
             const n = Number(v)
-            return Number.isFinite(n) && n > 0 ? n : (indicator.calcParams[idx] ?? 14)
+            if (!Number.isFinite(n)) return indicator.calcParams[idx] ?? 14
+            if (indicator.name === 'AFC') {
+              if (idx === 0) return Math.max(1, Math.min(20, Math.round(n)))
+              if (idx === 1) return Math.max(10, Math.min(250, Math.round(n)))
+              if (idx === 2) return Math.round(n) <= 0 ? 0 : 1
+            }
+            return n > 0 ? n : (indicator.calcParams[idx] ?? 14)
           })
         : []
     const nextStyles: Record<string, unknown> = {
@@ -126,7 +141,8 @@ export const IndicatorSettingsModal: React.FC = () => {
   const handleReset = () => {
     if (!meta) return
     setDraftParams(meta.defaultParams.map(String))
-    setDraftLines(extractLineStyles(null, Math.max(1, meta.defaultParams.length)))
+    const resetCount = Math.max(1, meta.lineLabels?.length ?? meta.defaultParams.length)
+    setDraftLines(extractLineStyles(null, resetCount))
     setDraftVisible(true)
   }
 
@@ -185,8 +201,9 @@ export const IndicatorSettingsModal: React.FC = () => {
                       </span>
                       <input
                         type="number"
-                        step="any"
-                        min="0.1"
+                        step={indicator.name === 'AFC' ? '1' : 'any'}
+                        min={indicator.name === 'AFC' && idx === 2 ? '0' : '0.1'}
+                        max={indicator.name === 'AFC' && idx === 2 ? '1' : undefined}
                         value={val}
                         onChange={(e) => {
                           const next = [...draftParams]
@@ -219,7 +236,7 @@ export const IndicatorSettingsModal: React.FC = () => {
                     style={{ backgroundColor: 'var(--tv-bg-elevated)', border: '1px solid var(--tv-border)' }}
                   >
                     <span className="text-[11.5px] font-medium">
-                      {meta?.paramLabels[idx] ?? `Đường #${idx + 1}`}
+                      {meta?.lineLabels?.[idx] ?? meta?.paramLabels[idx] ?? `Đường #${idx + 1}`}
                     </span>
                     <div className="flex items-center gap-2">
                       {/* Quick Swatches */}

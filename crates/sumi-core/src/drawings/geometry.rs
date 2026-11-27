@@ -1437,7 +1437,7 @@ pub fn compute_price_date_range_metrics(
     };
     let elapsed_secs = resolve_ts(start)
         .zip(resolve_ts(end))
-        .map(|(t0, t1)| (t1.saturating_sub(t0)).abs());
+        .map(|(t0, t1)| t1.abs_diff(t0).min(i64::MAX as u64) as i64);
 
     let total_volume = candles.and_then(|cs| {
         if cs.is_empty() || !b0.is_finite() || !b1.is_finite() {

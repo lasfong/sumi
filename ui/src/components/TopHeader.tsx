@@ -7,8 +7,11 @@ import {
   Clock,
   Columns2,
   Database,
+  ExternalLink,
+  Globe,
   Grid2x2,
   History,
+  Layers,
   LayoutGrid,
   LayoutPanelLeft,
   Moon,
@@ -23,8 +26,9 @@ import {
   Wifi,
   WifiOff,
 } from 'lucide-react'
+import * as api from '../api/tauri'
 import { ALL_INTERVALS, QUICK_INTERVALS } from '../chart/periods'
-import { useWorkspaceStore } from '../store/workspaceStore'
+import { useWorkspaceStore, type TimezoneMode } from '../store/workspaceStore'
 import type { ChartStyleKind, GridLayoutKind, PriceScaleKind } from '../types/market'
 
 const CHART_STYLE_OPTIONS: Array<{ key: ChartStyleKind; label: string }> = [
@@ -44,11 +48,14 @@ const SCALE_OPTIONS: Array<{ key: PriceScaleKind; short: string; label: string }
 
 export const TopHeader: React.FC = () => {
   const theme = useWorkspaceStore((s) => s.theme)
+  const timezoneMode = useWorkspaceStore((s) => s.timezoneMode)
   const gridLayout = useWorkspaceStore((s) => s.gridLayout)
   const sync = useWorkspaceStore((s) => s.sync)
   const activeSlotId = useWorkspaceStore((s) => s.activeSlotId)
   const panes = useWorkspaceStore((s) => s.panes)
   const layouts = useWorkspaceStore((s) => s.layouts)
+  const indicatorTemplates = useWorkspaceStore((s) => s.indicatorTemplates)
+  const showVnSessionBreaks = useWorkspaceStore((s) => s.showVnSessionBreaks)
   const dataStatus = useWorkspaceStore((s) => s.dataStatus)
   const importingCafeF = useWorkspaceStore((s) => s.importingCafeF)
   const rightPanelOpen = useWorkspaceStore((s) => s.rightPanelOpen)
@@ -57,12 +64,18 @@ export const TopHeader: React.FC = () => {
   const replaySelectingCut = useWorkspaceStore((s) => s.replaySelectingCut)
 
   const openSymbolSearch = useWorkspaceStore((s) => s.openSymbolSearch)
+  const setTimezoneMode = useWorkspaceStore((s) => s.setTimezoneMode)
+  const pushToast = useWorkspaceStore((s) => s.pushToast)
   const setActiveInterval = useWorkspaceStore((s) => s.setActiveInterval)
   const setActiveChartStyle = useWorkspaceStore((s) => s.setActiveChartStyle)
   const setActivePriceScale = useWorkspaceStore((s) => s.setActivePriceScale)
   const toggleActiveVnBands = useWorkspaceStore((s) => s.toggleActiveVnBands)
+  const toggleVnSessionBreaks = useWorkspaceStore((s) => s.toggleVnSessionBreaks)
   const toggleActiveCountdown = useWorkspaceStore((s) => s.toggleActiveCountdown)
   const setIndicatorsModalOpen = useWorkspaceStore((s) => s.setIndicatorsModalOpen)
+  const saveCurrentIndicatorTemplate = useWorkspaceStore((s) => s.saveCurrentIndicatorTemplate)
+  const applyIndicatorTemplate = useWorkspaceStore((s) => s.applyIndicatorTemplate)
+  const deleteIndicatorTemplate = useWorkspaceStore((s) => s.deleteIndicatorTemplate)
   const setGridLayout = useWorkspaceStore((s) => s.setGridLayout)
   const setSyncOption = useWorkspaceStore((s) => s.setSyncOption)
   const saveCurrentLayout = useWorkspaceStore((s) => s.saveCurrentLayout)
@@ -78,8 +91,11 @@ export const TopHeader: React.FC = () => {
   const triggerExportPng = useWorkspaceStore((s) => s.triggerExportPng)
 
   const activePane = panes.find((p) => p.slotId === activeSlotId) ?? panes[0]
-  const [openMenu, setOpenMenu] = useState<'interval' | 'style' | 'layout' | 'saved' | 'data' | null>(null)
+  const [openMenu, setOpenMenu] = useState<
+    'interval' | 'style' | 'templates' | 'layout' | 'saved' | 'data' | null
+  >(null)
   const [layoutNameInput, setLayoutNameInput] = useState('')
+  const [tplNameInput, setTplNameInput] = useState('')
   const [cafefDirInput, setCafefDirInput] = useState('data/raw/cafef')
   const headerRef = useRef<HTMLElement | null>(null)
 
@@ -257,6 +273,89 @@ export const TopHeader: React.FC = () => {
           )}
         </button>
 
+        {/* Indicator Templates Dropdown (v2.2) */}
+        <div className="relative">
+          <button
+            type="button"
+            className="tv-icon-btn"
+            onClick={() => setOpenMenu(openMenu === 'templates' ? null : 'templates')}
+            title="Mẫu chỉ báo (Indicator Templates — áp dụng nhanh 1-click)"
+            aria-label="Mẫu chỉ báo"
+          >
+            <Layers className="w-3.5 h-3.5" />
+          </button>
+          {openMenu === 'templates' && (
+            <div
+              className="absolute left-0 top-[34px] w-72 rounded-md p-2.5 shadow-2xl z-50 space-y-2"
+              style={{
+                backgroundColor: 'var(--tv-bg-elevated)',
+                border: '1px solid var(--tv-border)',
+              }}
+            >
+              <div className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--tv-text-secondary)' }}>
+                Mẫu chỉ báo ({indicatorTemplates.length})
+              </div>
+              <div className="flex gap-1">
+                <input
+                  type="text"
+                  value={tplNameInput}
+                  onChange={(e) => setTplNameInput(e.target.value)}
+                  placeholder="Lưu bộ hiện tại (VD: Swing FPT)..."
+                  className="flex-1 px-2 py-1 rounded text-[11.5px] outline-none"
+                  style={{
+                    backgroundColor: 'var(--tv-bg-input)',
+                    border: '1px solid var(--tv-border)',
+                    color: 'var(--tv-text-primary)',
+                  }}
+                />
+                <button
+                  type="button"
+                  className="px-2 py-1 rounded text-[11px] font-semibold bg-[#2962FF] text-white border-0 cursor-pointer"
+                  onClick={() => {
+                    if (!tplNameInput.trim()) return
+                    void saveCurrentIndicatorTemplate(tplNameInput.trim())
+                    setTplNameInput('')
+                  }}
+                >
+                  Lưu
+                </button>
+              </div>
+              <div className="max-h-56 overflow-y-auto tv-scroll space-y-1">
+                {indicatorTemplates.map((tpl) => (
+                  <div
+                    key={tpl.id}
+                    className="flex items-center justify-between gap-1 px-2 py-1.5 rounded hover:bg-[var(--tv-hover)]"
+                  >
+                    <button
+                      type="button"
+                      className="flex-1 min-w-0 text-left border-0 bg-transparent p-0 cursor-pointer"
+                      onClick={() => {
+                        applyIndicatorTemplate(tpl)
+                        setOpenMenu(null)
+                      }}
+                    >
+                      <div className="text-[11.5px] font-semibold truncate text-[var(--tv-text-primary)]">
+                        {tpl.name}
+                      </div>
+                      <div className="text-[10px] truncate" style={{ color: 'var(--tv-text-secondary)' }}>
+                        {tpl.indicators.map((i) => i.name).join(' + ')}
+                      </div>
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`Xóa mẫu ${tpl.name}`}
+                      className="border-0 bg-transparent p-1 cursor-pointer text-[var(--tv-text-secondary)] hover:text-[#F23645]"
+                      onClick={() => void deleteIndicatorTemplate(tpl.id)}
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
         {/* Causal Bar Replay Button — opens Interactive Scissor Curtain immediately like TradingView */}
         <button
           type="button"
@@ -293,19 +392,31 @@ export const TopHeader: React.FC = () => {
           ))}
         </div>
 
-        {/* VN Ceiling/Ref/Floor Band Toggle & Countdown Toggle */}
+        {/* VN Ceiling/Ref/Floor Band Toggle & VN Intraday Session Breaks Toggle */}
         {isVn && (
-          <button
-            type="button"
-            className="hidden xl:inline-flex tv-btn px-1.5 text-[11px]"
-            data-active={activePane.showVnBands}
-            onClick={toggleActiveVnBands}
-            title="Hiện/Ẩn biên độ Trần / Tham chiếu / Sàn Việt Nam"
-          >
-            <span style={{ color: 'var(--tv-vn-ceil)' }}>T</span>/
-            <span style={{ color: 'var(--tv-vn-ref)' }}>TC</span>/
-            <span style={{ color: 'var(--tv-vn-floor)' }}>S</span>
-          </button>
+          <>
+            <button
+              type="button"
+              className="hidden xl:inline-flex tv-btn px-1.5 text-[11px]"
+              data-active={activePane.showVnBands}
+              onClick={toggleActiveVnBands}
+              title="Hiện/Ẩn biên độ Trần / Tham chiếu / Sàn Việt Nam"
+            >
+              <span style={{ color: 'var(--tv-vn-ceil)' }}>T</span>/
+              <span style={{ color: 'var(--tv-vn-ref)' }}>TC</span>/
+              <span style={{ color: 'var(--tv-vn-floor)' }}>S</span>
+            </button>
+            <button
+              type="button"
+              className="hidden xl:inline-flex tv-btn px-1.5 text-[10.5px]"
+              data-active={showVnSessionBreaks}
+              aria-pressed={showVnSessionBreaks}
+              onClick={toggleVnSessionBreaks}
+              title="Hiện/Ẩn vạch tách phiên Sáng 09:00 / Chiều 13:00 / ATC 14:30 trên khung Intraday VN"
+            >
+              Phiên
+            </button>
+          </>
         )}
 
         <button
@@ -362,7 +473,10 @@ export const TopHeader: React.FC = () => {
                       borderColor: gridLayout === key ? 'var(--tv-accent)' : 'var(--tv-border)',
                       color: gridLayout === key ? 'var(--tv-accent)' : 'var(--tv-text-primary)',
                     }}
-                    onClick={() => setGridLayout(key)}
+                    onClick={() => {
+                      setGridLayout(key)
+                      setOpenMenu(null)
+                    }}
                   >
                     <Icon className="w-4 h-4 shrink-0" />
                     <span className="whitespace-nowrap">{label}</span>
@@ -378,6 +492,8 @@ export const TopHeader: React.FC = () => {
                     { key: 'symbol', label: 'Đồng bộ Mã (Symbol)' },
                     { key: 'interval', label: 'Đồng bộ Khung giờ' },
                     { key: 'crosshair', label: 'Đồng bộ Con trỏ chữ thập' },
+                    { key: 'dateRange', label: 'Đồng bộ Vùng thời gian (Time)' },
+                    { key: 'drawings', label: 'Đồng bộ Hình vẽ cùng mã' },
                   ] as const
                 ).map((item) => (
                   <label key={item.key} className="flex items-center justify-between text-[12px] cursor-pointer py-0.5">
@@ -389,6 +505,29 @@ export const TopHeader: React.FC = () => {
                     />
                   </label>
                 ))}
+              </div>
+              <div className="border-t pt-2" style={{ borderColor: 'var(--tv-border)' }}>
+                <button
+                  type="button"
+                  className="w-full tv-btn justify-center text-[11.5px] py-1"
+                  onClick={() => {
+                    const nextIv = activePane.interval === '1h' ? '4h' : activePane.interval === '4h' ? '1h' : '4h'
+                    void api
+                      .openDetachedWindow(activePane.ticker, nextIv)
+                      .then((label) => {
+                        if (label) {
+                          pushToast('success', `Đã mở cửa sổ rời ${activePane.ticker} (${nextIv}) — đồng bộ Replay & Hình vẽ`)
+                        } else {
+                          pushToast('info', 'Tính năng mở cửa sổ rời khả dụng trên ứng dụng Desktop Tauri')
+                        }
+                      })
+                      .catch((err) => pushToast('error', String(err)))
+                    setOpenMenu(null)
+                  }}
+                >
+                  <ExternalLink className="w-3.5 h-3.5" aria-hidden="true" />
+                  <span>Mở cửa sổ biểu đồ rời (Đa màn hình)</span>
+                </button>
               </div>
             </div>
           )}
@@ -479,6 +618,32 @@ export const TopHeader: React.FC = () => {
         </div>
 
         <div className="tv-divider-v" />
+
+        {/* Timezone Switcher (`Auto` -> `UTC+7 VN` -> `UTC`, fixes `BUG-031`) */}
+        <button
+          type="button"
+          className="tv-btn px-1.5 text-[10.5px] tabular-nums"
+          aria-label="Chuyển đổi múi giờ biểu đồ"
+          onClick={() => {
+            const order: TimezoneMode[] = ['auto', 'Asia/Ho_Chi_Minh', 'Etc/UTC']
+            const next = order[(order.indexOf(timezoneMode) + 1) % order.length]
+            setTimezoneMode(next)
+            pushToast(
+              'info',
+              next === 'Asia/Ho_Chi_Minh'
+                ? 'Múi giờ biểu đồ: UTC+7 (Giờ Việt Nam)'
+                : next === 'Etc/UTC'
+                  ? 'Múi giờ biểu đồ: UTC (Quốc tế)'
+                  : 'Múi giờ biểu đồ: Tự động theo sàn',
+            )
+          }}
+          title="Đổi múi giờ biểu đồ (Tự động / UTC+7 Việt Nam / UTC)"
+        >
+          <Globe className="w-3.5 h-3.5" aria-hidden="true" />
+          <span className="hidden xl:inline">
+            {timezoneMode === 'Asia/Ho_Chi_Minh' ? 'UTC+7' : timezoneMode === 'Etc/UTC' ? 'UTC' : 'Auto TZ'}
+          </span>
+        </button>
 
         {/* Export PNG */}
         <button

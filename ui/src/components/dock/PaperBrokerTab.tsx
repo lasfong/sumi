@@ -25,6 +25,7 @@ function fmtTs(secs: number): string {
 export const PaperBrokerTab: React.FC = () => {
   const panes = useWorkspaceStore((s) => s.panes)
   const activeSlotId = useWorkspaceStore((s) => s.activeSlotId)
+  const initialized = useWorkspaceStore((s) => s.initialized)
   const broker = useWorkspaceStore((s) => s.broker)
   const setBrokerSnapshot = useWorkspaceStore((s) => s.setBrokerSnapshot)
   const refreshBroker = useWorkspaceStore((s) => s.refreshBroker)
@@ -44,19 +45,48 @@ export const PaperBrokerTab: React.FC = () => {
   const [bracketDraft, setBracketDraft] = useState<{ sl: string; tp: string }>({ sl: '', tp: '' })
   const [orderPriceDrafts, setOrderPriceDrafts] = useState<Record<number, string>>({})
 
-  useEffect(() => {
-    void refreshBroker()
-  }, [activePane.ticker, activePane.interval, refreshBroker])
+  const isIndexTicker = (() => {
+    const sym = (activePane.ticker.split(':')[1] ?? activePane.ticker).toUpperCase()
+    return ['VNINDEX', 'HNXINDEX', 'UPCOMINDEX', 'VN30', 'HNX30', 'SPX', 'NDX', 'DJI', 'DXY'].includes(sym)
+  })()
 
+  // Avoid duplicate `broker_get_state` during initial bootstrap (`BUG-035`)
   useEffect(() => {
-    if (broker && broker.markPrice > 0) {
-      setPrice(String(broker.markPrice))
-      if (broker.boardLot === 100 && Number(qty) % 100 !== 0) {
-        setQty('1000')
-      }
+    if (!initialized) return
+    if (
+      broker &&
+      broker.ticker.toUpperCase() === activePane.ticker.toUpperCase() &&
+      (broker.interval === activePane.interval || broker.replayLinked)
+    ) {
+      return
+    }
+    void refreshBroker()
+  }, [initialized, activePane.ticker, activePane.interval, broker, refreshBroker])
+
+  // Reset default order quantity per asset class AND sync `Giá LO` when switching ticker or
+  // entering/stepping/jumping Bar Replay (`BUG-034` + `BUG-041`)!
+  useEffect(() => {
+    if (!broker || broker.markPrice <= 0) return
+    setPrice(String(broker.markPrice))
+    const upper = broker.ticker.toUpperCase()
+    if (upper.includes('VN30F') || upper.includes('VN301!')) {
+      setQty('1')
+    } else if (broker.boardLot === 100) {
+      setQty('1000')
+    } else if (upper.startsWith('BINANCE:') || upper.startsWith('OKX:') || upper.startsWith('BYBIT:')) {
+      setQty(broker.markPrice >= 1000 ? '0.01' : '1')
+    } else {
+      setQty('10')
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [broker?.ticker])
+  }, [broker?.ticker, broker?.boardLot])
+
+  useEffect(() => {
+    if (!broker || broker.markPrice <= 0) return
+    if (broker.replayLinked) {
+      setPrice(String(broker.markPrice))
+    }
+  }, [broker?.replayLinked, broker?.markPrice, broker?.markTimestampMs])
 
   const isVnd = ['HOSE', 'HNX', 'UPCOM', 'VN30F', 'Hose', 'Hnx', 'Upcom', 'Vn30Futures'].includes(
     broker?.venue ?? 'Hose',
@@ -185,7 +215,12 @@ export const PaperBrokerTab: React.FC = () => {
     pushToast('success', `Đã lưu ghi chú nhật ký cho lệnh #${tradeId}`)
   }
 
-  const estNotional = Number.isFinite(numericQty) && Number.isFinite(numericPrice) ? numericQty * numericPrice : 0
+  const contractMult =
+    broker?.contractMultiplier ?? broker?.config.contract_multiplier ?? 1
+  const estNotional =
+    Number.isFinite(numericQty) && Number.isFinite(numericPrice)
+      ? numericQty * numericPrice * (contractMult > 0 ? contractMult : 1)
+      : 0
   const openPosNotional = broker?.openPosition
     ? broker.openPosition.avg_entry_price *
       broker.openPosition.quantity *
@@ -398,15 +433,23 @@ export const PaperBrokerTab: React.FC = () => {
           <strong style={{ color: 'var(--tv-text-primary)' }}>{fmtMoney(estNotional, isVnd)}</strong>
         </div>
 
+        {isIndexTicker && (
+          <div className="text-[10px] leading-tight text-[#FBC02D]">
+            Chỉ số thị trường không thể giao dịch trực tiếp — hãy chọn HNX:VN30F1! hoặc cổ phiếu cơ sở.
+          </div>
+        )}
+
         <button
           type="submit"
-          disabled={submitting || lotInvalid || bandInvalid}
+          disabled={isIndexTicker || submitting || lotInvalid || bandInvalid}
           className="w-full py-1.5 rounded text-[11.5px] font-bold text-white border-0 cursor-pointer disabled:opacity-50"
           style={{ backgroundColor: side === 'BUY' ? '#089981' : '#F23645' }}
         >
-          {submitting
-            ? 'Đang gửi lệnh...'
-            : `${side === 'BUY' ? 'Đặt Mua' : 'Đặt Bán'} ${vnOrderType} · ${Number.isFinite(numericQty) ? numericQty.toLocaleString('en-US') : 0}`}
+          {isIndexTicker
+            ? 'Chỉ số (Không đặt lệnh)'
+            : submitting
+              ? 'Đang gửi lệnh...'
+              : `${side === 'BUY' ? 'Đặt Mua' : 'Đặt Bán'} ${vnOrderType} · ${Number.isFinite(numericQty) ? numericQty.toLocaleString('en-US') : 0}`}
         </button>
       </form>
 
@@ -495,7 +538,9 @@ export const PaperBrokerTab: React.FC = () => {
                 ) : (
                   (() => {
                     const p = broker.openPosition
-                    const unreal = (broker.markPrice - p.avg_entry_price) * p.quantity * (p.side === 'Long' ? 1 : -1)
+                    const posMult = p.contract_multiplier || contractMult || 1
+                    const unreal =
+                      (broker.markPrice - p.avg_entry_price) * p.quantity * posMult * (p.side === 'Long' ? 1 : -1)
                     const pct = p.avg_entry_price > 0 ? ((broker.markPrice - p.avg_entry_price) / p.avg_entry_price) * 100 * (p.side === 'Long' ? 1 : -1) : 0
                     return (
                       <tr>
@@ -757,82 +802,148 @@ export const PaperBrokerTab: React.FC = () => {
             </div>
           )}
 
-          {subTab === 'journal' && (
-            <table className="tv-table tabular-nums">
-              <caption className="sr-only-live">Nhật ký giao dịch MAE và MFE</caption>
-              <thead>
-                <tr>
-                  <th scope="col">#</th>
-                  <th scope="col">Chiều</th>
-                  <th scope="col">KL</th>
-                  <th scope="col">Vào / Ra</th>
-                  <th scope="col">Net PnL (%)</th>
-                  <th scope="col">R</th>
-                  <th scope="col">MAE %</th>
-                  <th scope="col">MFE %</th>
-                  <th scope="col">Ghi chú & Setup</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(broker?.closedTrades ?? []).length === 0 ? (
-                  <tr>
-                    <td colSpan={9} className="text-center py-6" style={{ color: 'var(--tv-text-secondary)' }}>
-                      Chưa có giao dịch đã đóng nào trong nhật ký.
-                    </td>
-                  </tr>
-                ) : (
-                  broker!.closedTrades.map((item) => {
-                    const t = item.trade
-                    const draft = noteDrafts[t.trade_id] ?? { setup: item.setupTag, note: item.note }
-                    return (
-                      <tr key={t.trade_id}>
-                        <td>#{t.trade_id}</td>
-                        <td>{t.side}</td>
-                        <td>{t.quantity.toLocaleString('en-US')}</td>
-                        <td>
-                          {t.entry_price.toLocaleString('en-US')} → {t.exit_price.toLocaleString('en-US')}
-                        </td>
-                        <td style={{ color: t.net_pnl >= 0 ? 'var(--tv-up)' : 'var(--tv-down)', fontWeight: 600 }}>
-                          {fmtMoney(t.net_pnl, isVnd)} ({t.return_pct >= 0 ? '+' : ''}{t.return_pct.toFixed(2)}%)
-                        </td>
-                        <td>{t.r_multiple != null ? `${t.r_multiple.toFixed(2)}R` : '—'}</td>
-                        <td style={{ color: 'var(--tv-down)' }}>{item.maePct.toFixed(2)}%</td>
-                        <td style={{ color: 'var(--tv-up)' }}>+{item.mfePct.toFixed(2)}%</td>
-                        <td>
-                          <div className="flex items-center gap-1">
-                            <input
-                              type="text"
-                              value={draft.note}
-                              placeholder="Ghi chú bài học..."
-                              onChange={(e) =>
-                                setNoteDrafts((m) => ({
-                                  ...m,
-                                  [t.trade_id]: { ...draft, note: e.target.value },
-                                }))
-                              }
-                              className="px-1.5 py-0.5 rounded text-[11px] w-36 outline-none"
-                              style={{
-                                backgroundColor: 'var(--tv-bg-input)',
-                                color: 'var(--tv-text-primary)',
-                                border: '1px solid var(--tv-border)',
-                              }}
-                            />
-                            <button
-                              type="button"
-                              className="px-1.5 py-0.5 rounded text-[10px] bg-[#2962FF] text-white border-0 cursor-pointer"
-                              onClick={() => void saveJournalNote(t.trade_id)}
-                            >
-                              Lưu
-                            </button>
-                          </div>
+          {subTab === 'journal' && (() => {
+            const partialFills = (broker?.fills ?? [])
+              .filter((f) => f.realized_net_pnl !== null && f.realized_net_pnl !== undefined)
+              .slice()
+              .reverse()
+            const closedList = broker?.closedTrades ?? []
+            return (
+              <div className="space-y-2">
+                <table className="tv-table tabular-nums">
+                  <caption className="sr-only-live">Nhật ký giao dịch MAE và MFE</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">#</th>
+                      <th scope="col">Chiều</th>
+                      <th scope="col">KL</th>
+                      <th scope="col">Vào / Ra</th>
+                      <th scope="col">Net PnL (%)</th>
+                      <th scope="col">R</th>
+                      <th scope="col">MAE %</th>
+                      <th scope="col">MFE %</th>
+                      <th scope="col">Ghi chú & Setup</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {closedList.length === 0 && partialFills.length === 0 ? (
+                      <tr>
+                        <td colSpan={9} className="text-center py-6" style={{ color: 'var(--tv-text-secondary)' }}>
+                          Chưa có giao dịch đã đóng hoặc chốt một phần nào trong nhật ký.
                         </td>
                       </tr>
-                    )
-                  })
-                )}
-              </tbody>
-            </table>
-          )}
+                    ) : (
+                      <>
+                        {closedList.map((item) => {
+                          const t = item.trade
+                          const draft = noteDrafts[t.trade_id] ?? { setup: item.setupTag, note: item.note }
+                          return (
+                            <tr key={`closed_${t.trade_id}`}>
+                              <td>#{t.trade_id}</td>
+                              <td>{t.side}</td>
+                              <td>{t.quantity.toLocaleString('en-US')}</td>
+                              <td>
+                                {t.entry_price.toLocaleString('en-US')} → {t.exit_price.toLocaleString('en-US')}
+                              </td>
+                              <td style={{ color: t.net_pnl >= 0 ? 'var(--tv-up)' : 'var(--tv-down)', fontWeight: 600 }}>
+                                {fmtMoney(t.net_pnl, isVnd)} ({t.return_pct >= 0 ? '+' : ''}{t.return_pct.toFixed(2)}%)
+                              </td>
+                              <td>{t.r_multiple != null ? `${t.r_multiple.toFixed(2)}R` : '—'}</td>
+                              <td style={{ color: 'var(--tv-down)' }}>{item.maePct.toFixed(2)}%</td>
+                              <td style={{ color: 'var(--tv-up)' }}>+{item.mfePct.toFixed(2)}%</td>
+                              <td>
+                                <div className="flex items-center gap-1">
+                                  <input
+                                    type="text"
+                                    value={draft.note}
+                                    placeholder="Ghi chú bài học..."
+                                    onChange={(e) =>
+                                      setNoteDrafts((m) => ({
+                                        ...m,
+                                        [t.trade_id]: { ...draft, note: e.target.value },
+                                      }))
+                                    }
+                                    className="px-1.5 py-0.5 rounded text-[11px] w-36 outline-none"
+                                    style={{
+                                      backgroundColor: 'var(--tv-bg-input)',
+                                      color: 'var(--tv-text-primary)',
+                                      border: '1px solid var(--tv-border)',
+                                    }}
+                                  />
+                                  <button
+                                    type="button"
+                                    className="px-1.5 py-0.5 rounded text-[10px] bg-[#2962FF] text-white border-0 cursor-pointer"
+                                    onClick={() => void saveJournalNote(t.trade_id)}
+                                  >
+                                    Lưu
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          )
+                        })}
+                        {/* Show realized partial-close FIFO fills immediately even while position remains open (`BUG-026`)! */}
+                        {broker?.openPosition &&
+                          partialFills.map((f) => {
+                            const pnl = f.realized_net_pnl ?? 0
+                            const pseudoId = 100_000 + f.fill_id
+                            const draft = noteDrafts[pseudoId] ?? { setup: 'Chốt phần', note: '' }
+                            return (
+                              <tr key={`partial_${f.fill_id}`}>
+                                <td>
+                                  <span className="px-1 py-0.5 rounded text-[9.5px] font-semibold bg-[#2962FF]/20 text-[#2962FF]">
+                                    Chốt phần #{f.fill_id}
+                                  </span>
+                                </td>
+                                <td>{f.side}</td>
+                                <td>{f.quantity.toLocaleString('en-US')}</td>
+                                <td>
+                                  @ {f.price.toLocaleString('en-US')} ({fmtTs(f.timestamp)})
+                                </td>
+                                <td style={{ color: pnl >= 0 ? 'var(--tv-up)' : 'var(--tv-down)', fontWeight: 600 }}>
+                                  {fmtMoney(pnl, isVnd)} (Phí {fmtMoney(f.fee, isVnd)})
+                                </td>
+                                <td>—</td>
+                                <td>—</td>
+                                <td>—</td>
+                                <td>
+                                  <div className="flex items-center gap-1">
+                                    <input
+                                      type="text"
+                                      value={draft.note}
+                                      placeholder="Ghi chú chốt phần..."
+                                      onChange={(e) =>
+                                        setNoteDrafts((m) => ({
+                                          ...m,
+                                          [pseudoId]: { ...draft, note: e.target.value },
+                                        }))
+                                      }
+                                      className="px-1.5 py-0.5 rounded text-[11px] w-36 outline-none"
+                                      style={{
+                                        backgroundColor: 'var(--tv-bg-input)',
+                                        color: 'var(--tv-text-primary)',
+                                        border: '1px solid var(--tv-border)',
+                                      }}
+                                    />
+                                    <button
+                                      type="button"
+                                      className="px-1.5 py-0.5 rounded text-[10px] bg-[#2962FF] text-white border-0 cursor-pointer"
+                                      onClick={() => void saveJournalNote(pseudoId)}
+                                    >
+                                      Lưu
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            )
+                          })}
+                      </>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )
+          })()}
         </div>
       </div>
     </div>

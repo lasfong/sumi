@@ -1,14 +1,18 @@
 use serde::{Deserialize, Serialize};
 use sumi_core::backtest::{
     BacktestConfig, BacktestEquityPoint, BacktestRunOptions, BacktestTearsheet, BacktestTrade,
-    DEFAULT_MONTE_CARLO_SEED, MonteCarloConfig, MonteCarloRiskMetrics, MonteCarloValidity,
-    OpenBacktestPosition, PositionSizingMode, QuantileEnvelope5, RobustnessVerdict, StopTakeConfig,
-    StrategyDirectionMode, StrategyParams, StrategyPresetKind, SweepRankingMetric,
-    WalkForwardConfig, WalkForwardFoldResult, WalkForwardVerdict, run_backtest_with_options,
-    run_monte_carlo_bootstrap, run_walk_forward_validation,
+    ConfluenceThresholdGate, CustomSignalRuleSpec, DEFAULT_MONTE_CARLO_SEED, DirectionalRuleLeg,
+    FloatCmpOp, LogicalCombinator, MonteCarloConfig, MonteCarloRiskMetrics, MonteCarloValidity,
+    OpenBacktestPosition, PortfolioConstituentAttribution, PortfolioUniverseFilter,
+    PortfolioWeightingMode, PositionSizingMode, QuantileEnvelope5, RobustnessVerdict, SignalClause,
+    SignalClauseGroup, SignalPredicate, StopTakeConfig, StrategyDirectionMode, StrategyParams,
+    StrategyPresetKind, SweepRankingMetric, WalkForwardConfig, WalkForwardFoldResult,
+    WalkForwardVerdict, run_backtest_with_options, run_monte_carlo_bootstrap,
+    run_portfolio_backtest, run_walk_forward_validation,
 };
-use sumi_core::data::Timeframe;
+use sumi_core::data::{DataSourcePreset, Timeframe, WatchlistFeedEntry};
 use sumi_core::model::Candle;
+use sumi_core::scanner::{SignalOutputType, find_catalog_entry};
 use sumi_data::{Adjustment, BarsRequest, Interval, OhlcvBar, SeriesKey, SymbolKey};
 use tauri::State;
 
@@ -17,10 +21,33 @@ use crate::state::AppState;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CustomClauseInput {
+    pub catalog_id: String,
+    /// For Float signals: `">" | ">=" | "<" | "<=" | "cross_above" | "cross_below"`
+    pub op: Option<String>,
+    pub threshold: Option<f64>,
+    /// For Bool signals: `true` (default) or `false`
+    pub bool_expected: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomRulesInput {
+    pub name: Option<String>,
+    /// `"and"` | `"or"`
+    pub entry_combinator: Option<String>,
+    pub entry_clauses: Vec<CustomClauseInput>,
+    pub exit_combinator: Option<String>,
+    pub exit_clauses: Option<Vec<CustomClauseInput>>,
+    pub min_health_score: Option<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StrategyBacktestInput {
     pub ticker: String,
     pub interval: String,
-    /// `"sma_ema"` | `"rsi_mean_rev"` | `"macd"` | `"bb_squeeze"` | `"donchian_atr"` | `"rsi_bb"`
+    /// `"sma_ema"` | `"rsi_mean_rev"` | `"macd"` | `"bb_squeeze"` | `"donchian_atr"` | `"rsi_bb"` | `"custom"`
     pub preset: String,
     /// `"long"` | `"short"` | `"both"`
     pub direction: String,
@@ -53,6 +80,37 @@ pub struct StrategyBacktestInput {
     pub max_bars: Option<usize>,
     pub from_timestamp_ms: Option<i64>,
     pub to_timestamp_ms: Option<i64>,
+    #[serde(default)]
+    pub max_leverage: Option<f64>,
+    #[serde(default)]
+    pub custom_rules: Option<CustomRulesInput>,
+    // QMV Strategy Parameters (`S1..S6` & QMV Risk Management)
+    #[serde(default)]
+    pub qmv_support_window: Option<usize>,
+    #[serde(default)]
+    pub qmv_rvol_confirm: Option<f64>,
+    #[serde(default)]
+    pub qmv_trail_mode: Option<u8>,
+    #[serde(default)]
+    pub qmv_div_osc: Option<u8>,
+    #[serde(default)]
+    pub qmv_confirm_mode: Option<u8>,
+    #[serde(default)]
+    pub qmv_ichi_variant: Option<u8>,
+    #[serde(default)]
+    pub qmv_flow_horizon_pair: Option<u8>,
+    #[serde(default)]
+    pub qmv_flow_low_zone: Option<f64>,
+    #[serde(default)]
+    pub qmv_flow_high_zone: Option<f64>,
+    #[serde(default)]
+    pub qmv_use_vnindex_gate: Option<bool>,
+    #[serde(default)]
+    pub qmv_min_pillars: Option<u8>,
+    #[serde(default)]
+    pub support_stop_lookback: Option<usize>,
+    #[serde(default)]
+    pub qmv_wave_trailing_2_3: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -151,13 +209,132 @@ pub struct MonteCarloResponse {
     pub checkpoint_envelopes: Vec<QuantileEnvelope5>,
 }
 
+fn parse_combinator(raw: Option<&str>) -> LogicalCombinator {
+    match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("or" | "any") => LogicalCombinator::AnyOr,
+        _ => LogicalCombinator::AllAnd,
+    }
+}
+
+fn parse_float_op(raw: Option<&str>) -> FloatCmpOp {
+    match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("gt" | ">") => FloatCmpOp::Gt,
+        Some("lt" | "<") => FloatCmpOp::Lt,
+        Some("lte" | "<=") => FloatCmpOp::Lte,
+        Some("cross_above") => FloatCmpOp::CrossAbove,
+        Some("cross_below") => FloatCmpOp::CrossBelow,
+        _ => FloatCmpOp::Gte,
+    }
+}
+
+fn build_clause_from_input(c: &CustomClauseInput) -> SignalClause {
+    let mut cl = SignalClause::default_for_catalog(&c.catalog_id, None);
+    if let Some(entry) = find_catalog_entry(&c.catalog_id) {
+        match entry.output_type {
+            SignalOutputType::Bool => {
+                cl.predicate = SignalPredicate::BoolIs(c.bool_expected.unwrap_or(true));
+            }
+            SignalOutputType::Float => {
+                cl.predicate = SignalPredicate::FloatCmp {
+                    op: parse_float_op(c.op.as_deref()),
+                    threshold: c.threshold.unwrap_or(0.0),
+                };
+            }
+            SignalOutputType::Enum => {}
+        }
+    }
+    cl.sanitize();
+    cl
+}
+
+fn build_custom_rule_spec(custom: &CustomRulesInput) -> CustomSignalRuleSpec {
+    let entry_clauses: Vec<SignalClause> = custom
+        .entry_clauses
+        .iter()
+        .filter(|c| !c.catalog_id.trim().is_empty())
+        .map(build_clause_from_input)
+        .collect();
+    let exit_clauses: Vec<SignalClause> = custom
+        .exit_clauses
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .filter(|c| !c.catalog_id.trim().is_empty())
+        .map(build_clause_from_input)
+        .collect();
+
+    let mut gate = ConfluenceThresholdGate::default();
+    if let Some(min_h) = custom.min_health_score.filter(|v| v.is_finite()) {
+        gate.enabled = true;
+        gate.min_score = Some(min_h);
+    }
+
+    let long_entry = DirectionalRuleLeg {
+        enabled: !entry_clauses.is_empty() || gate.enabled,
+        inter_group_op: LogicalCombinator::AllAnd,
+        groups: if entry_clauses.is_empty() {
+            Vec::new()
+        } else {
+            vec![SignalClauseGroup {
+                intra_op: parse_combinator(custom.entry_combinator.as_deref()),
+                clauses: entry_clauses,
+            }]
+        },
+        confluence_gate: gate,
+    };
+    let long_exit = DirectionalRuleLeg {
+        enabled: !exit_clauses.is_empty(),
+        inter_group_op: LogicalCombinator::AllAnd,
+        groups: if exit_clauses.is_empty() {
+            Vec::new()
+        } else {
+            vec![SignalClauseGroup {
+                intra_op: parse_combinator(custom.exit_combinator.as_deref()),
+                clauses: exit_clauses,
+            }]
+        },
+        confluence_gate: ConfluenceThresholdGate::default(),
+    };
+
+    let mut spec = CustomSignalRuleSpec {
+        name: custom
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("Chiến lược tự thiết kế (101 Tín hiệu)")
+            .to_owned(),
+        long_entry,
+        long_exit,
+        short_entry: DirectionalRuleLeg::default(),
+        short_exit: DirectionalRuleLeg::default(),
+    };
+    spec.sanitize();
+    spec
+}
+
 fn build_backtest_config(input: &StrategyBacktestInput) -> BacktestConfig {
     let preset = match input.preset.trim().to_ascii_lowercase().as_str() {
+        "qmv_s1" | "qmv_s1_support_vpa" | "qmv_support_vpa" => StrategyPresetKind::QmvSupportVpa,
+        "qmv_s2" | "qmv_s2_safe_bottom" | "qmv_safe_bottom_div" => {
+            StrategyPresetKind::QmvSafeBottomDiv
+        }
+        "qmv_s3" | "qmv_s3_ichimoku_v7" | "qmv_ichimoku_v7" => StrategyPresetKind::QmvIchimokuV7,
+        "qmv_s4" | "qmv_s4_dual_cycle_flow" | "qmv_dual_cycle_flow" => {
+            StrategyPresetKind::QmvDualCycleFlow
+        }
+        "qmv_s5" | "qmv_s5_congestion_breakout" | "qmv_congestion_breakout" => {
+            StrategyPresetKind::QmvCongestionBreakout
+        }
+        "qmv_s6" | "qmv_s6_multigate" | "qmv_multigate_confluence" => {
+            StrategyPresetKind::QmvMultiGateConfluence
+        }
         "rsi_mean_rev" | "rsi" => StrategyPresetKind::RsiMeanReversion,
         "macd" => StrategyPresetKind::MacdMomentum,
         "bb_squeeze" | "bb" => StrategyPresetKind::BollingerSqueezeBreakout,
         "donchian_atr" | "donchian" => StrategyPresetKind::DonchianAtrBreakout,
         "rsi_bb" | "confluence" => StrategyPresetKind::RsiBollingerConfluence,
+        "custom" | "custom_rules" => StrategyPresetKind::CustomSignalRules,
         _ => StrategyPresetKind::SmaEmaTrendCross,
     };
     let direction_mode = match input.direction.trim().to_ascii_lowercase().as_str() {
@@ -215,17 +392,76 @@ fn build_backtest_config(input: &StrategyBacktestInput) -> BacktestConfig {
     if let Some(v) = input.donchian_exit {
         params.donchian_exit_period = v;
     }
+    if let Some(v) = input.qmv_support_window {
+        params.qmv_support_window = v;
+    }
+    if let Some(v) = input.qmv_rvol_confirm {
+        params.qmv_rvol_confirm = v;
+    }
+    if let Some(v) = input.qmv_trail_mode {
+        params.qmv_trail_mode = v;
+    }
+    if let Some(v) = input.qmv_div_osc {
+        params.qmv_div_osc = v;
+    }
+    if let Some(v) = input.qmv_confirm_mode {
+        params.qmv_confirm_mode = v;
+    }
+    if let Some(v) = input.qmv_ichi_variant {
+        params.qmv_ichi_variant = v;
+    }
+    if let Some(v) = input.qmv_flow_horizon_pair {
+        params.qmv_flow_horizon_pair = v;
+    }
+    if let Some(v) = input.qmv_flow_low_zone {
+        params.qmv_flow_low_zone = v;
+    }
+    if let Some(v) = input.qmv_flow_high_zone {
+        params.qmv_flow_high_zone = v;
+    }
+    if let Some(v) = input.qmv_use_vnindex_gate {
+        params.qmv_use_vnindex_gate = v;
+    }
+    if let Some(v) = input.qmv_min_pillars {
+        params.qmv_min_pillars = v;
+    }
+
+    let is_qmv_preset = StrategyPresetKind::QMV_PLAYBOOKS.contains(&preset);
+    let default_sup_lb = is_qmv_preset.then_some(18);
+    let default_wave_trail = is_qmv_preset && params.qmv_trail_mode == 0;
 
     let risk = StopTakeConfig {
         stop_loss_pct: input.stop_loss_pct.filter(|v| v.is_finite() && *v > 0.0),
         take_profit_pct: input.take_profit_pct.filter(|v| v.is_finite() && *v > 0.0),
         min_holding_bars: input.min_holding_bars.unwrap_or(0),
+        support_stop_lookback: input.support_stop_lookback.or(default_sup_lb),
+        qmv_wave_trailing_2_3: input.qmv_wave_trailing_2_3.unwrap_or(default_wave_trail),
+        max_holding_bars: is_qmv_preset.then_some(25),
         ..StopTakeConfig::default()
     };
+
+    let upper_ticker = input.ticker.to_ascii_uppercase();
+    let is_vn30f = upper_ticker.contains("VN30F") || upper_ticker.contains("VN301!");
+    let venue = sumi_core::journal::ExchangeVenue::infer_from_symbol_and_preset(
+        &input.ticker,
+        DataSourcePreset::CustomFile,
+    );
+    let max_leverage = input
+        .max_leverage
+        .filter(|v| v.is_finite() && *v >= 1.0)
+        .unwrap_or(if is_vn30f { 5.88 } else { 1.0 })
+        .clamp(1.0, 20.0);
+
+    let custom_rules = input
+        .custom_rules
+        .as_ref()
+        .map(build_custom_rule_spec)
+        .unwrap_or_default();
 
     let mut cfg = BacktestConfig {
         preset,
         params,
+        custom_rules,
         direction_mode,
         sizing: PositionSizingMode::PercentEquity(input.position_size_pct.clamp(1.0, 100.0)),
         risk,
@@ -233,13 +469,46 @@ fn build_backtest_config(input: &StrategyBacktestInput) -> BacktestConfig {
         commission_bps: input.commission_bps,
         tax_sell_bps: input.tax_sell_bps,
         slippage_bps: input.slippage_bps,
-        max_leverage: 1.0,
+        max_leverage,
         lot_step: input.lot_step.max(0.0),
         in_sample_split_pct: input.in_sample_split_pct,
-        ..BacktestConfig::default()
+        enforce_vn_microstructure: venue.is_vn_cash_equity(),
+        min_entry_avg_vol_20: if venue.is_vn_cash_equity() && is_qmv_preset {
+            10_000.0
+        } else {
+            0.0
+        },
+        benchmark_non_downtrend_days: None,
     };
     cfg.sanitize();
     cfg
+}
+
+fn load_vnindex_non_downtrend_days(state: &AppState) -> Option<std::sync::Arc<std::collections::BTreeSet<i64>>> {
+    let key = SymbolKey::parse("HOSE:VNINDEX").ok()?;
+    let series = SeriesKey::new(&key, Interval::D1, Adjustment::Splits);
+    let res = state
+        .market_store
+        .query_bars(&series, sumi_data::BarQueryMode::Init, 8_000)
+        .ok()?;
+    if res.bars.len() < 60 {
+        return None;
+    }
+    let candles: Vec<Candle> = res
+        .bars
+        .iter()
+        .map(|b| b.to_core_candle(Interval::D1))
+        .collect();
+    let regimes = sumi_core::scanner::compute_regime_series(&candles);
+    let mut set = std::collections::BTreeSet::new();
+    for (c, reg) in candles.iter().zip(regimes) {
+        if reg != sumi_core::scanner::MarketRegime::Downtrend
+            && reg != sumi_core::scanner::MarketRegime::InsufficientHistory
+        {
+            set.insert(c.timestamp.div_euclid(86_400));
+        }
+    }
+    Some(std::sync::Arc::new(set))
 }
 
 pub(crate) fn filter_bars_by_range(
@@ -372,7 +641,10 @@ pub async fn run_strategy_backtest(
         input.to_timestamp_ms,
     )
     .await?;
-    let cfg = build_backtest_config(&input);
+    let mut cfg = build_backtest_config(&input);
+    if cfg.enforce_vn_microstructure {
+        cfg.benchmark_non_downtrend_days = load_vnindex_non_downtrend_days(&state);
+    }
 
     let report = tokio::task::spawn_blocking(move || {
         run_backtest_with_options(
@@ -386,10 +658,18 @@ pub async fn run_strategy_backtest(
     .await
     .map_err(|e| DesktopError::Internal(e.to_string()))?;
 
+    let preset_label = if report.config.preset == StrategyPresetKind::CustomSignalRules
+        && !report.config.custom_rules.name.trim().is_empty()
+    {
+        report.config.custom_rules.name.clone()
+    } else {
+        report.config.preset.full_label().to_owned()
+    };
+
     Ok(StrategyBacktestResponse {
         ticker: report.symbol,
         interval: iv.as_str().to_owned(),
-        preset_label: report.config.preset.full_label().to_owned(),
+        preset_label,
         bar_count: report.bar_count,
         tearsheet: report.tearsheet,
         in_sample_tearsheet: report.in_sample_tearsheet,
@@ -416,7 +696,10 @@ pub async fn run_strategy_wfo(
         input.backtest.to_timestamp_ms,
     )
     .await?;
-    let cfg = build_backtest_config(&input.backtest);
+    let mut cfg = build_backtest_config(&input.backtest);
+    if cfg.enforce_vn_microstructure {
+        cfg.benchmark_non_downtrend_days = load_vnindex_non_downtrend_days(&state);
+    }
     let wf_cfg = WalkForwardConfig {
         fold_count: input.fold_count.clamp(2, 8),
         in_sample_ratio: input.in_sample_ratio.clamp(0.50, 0.85),
@@ -468,7 +751,10 @@ pub async fn run_strategy_monte_carlo(
         input.backtest.to_timestamp_ms,
     )
     .await?;
-    let cfg = build_backtest_config(&input.backtest);
+    let mut cfg = build_backtest_config(&input.backtest);
+    if cfg.enforce_vn_microstructure {
+        cfg.benchmark_non_downtrend_days = load_vnindex_non_downtrend_days(&state);
+    }
     let mc_cfg = MonteCarloConfig {
         simulations: input.simulations,
         seed: input.seed.unwrap_or(DEFAULT_MONTE_CARLO_SEED),
@@ -502,6 +788,173 @@ pub async fn run_strategy_monte_carlo(
         status_reason: report.status_reason,
         metrics: report.metrics,
         checkpoint_envelopes: report.checkpoint_envelopes,
+    })
+}
+
+// ─── Portfolio Multi-Symbol Backtest (v2.2) ──────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PortfolioBacktestInput {
+    pub backtest: StrategyBacktestInput,
+    pub tickers: Vec<String>,
+    /// Optional QMV basket shortcut (`"QMV30"`, `"QMV60"`, `"CORE10"`, `"DT1"`, `"DT2"`, `"SECTOR:BANKING"`, ...).
+    #[serde(default)]
+    pub qmv_group: Option<String>,
+    /// `"equal"` (default 1/N) | `"inverse_vol"`
+    pub weighting: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PortfolioBacktestResponse {
+    pub preset_label: String,
+    pub interval: String,
+    pub weighting_label: String,
+    pub constituent_count: usize,
+    pub initial_capital: f64,
+    pub tearsheet: BacktestTearsheet,
+    pub avg_constituent_max_dd_pct: f64,
+    pub diversification_dd_reduction_pct: f64,
+    pub equity_curve: Vec<StrategyEquityPointDto>,
+    pub constituents: Vec<PortfolioConstituentAttribution>,
+    pub survivor_bias_caveat: Option<String>,
+}
+
+#[tauri::command]
+pub async fn run_strategy_portfolio(
+    state: State<'_, AppState>,
+    input: PortfolioBacktestInput,
+) -> DesktopResult<PortfolioBacktestResponse> {
+    let mut resolved_tickers = input.tickers.clone();
+    if let Some(ref grp_raw) = input.qmv_group {
+        let grp = grp_raw.trim().to_ascii_uppercase();
+        if !grp.is_empty() && grp != "CUSTOM" {
+            let hits = state
+                .market_store
+                .search_local_symbols("", None, 2_000)
+                .unwrap_or_default();
+            let mut matched = Vec::new();
+            for h in hits {
+                if !matches!(h.exchange.as_str(), "HOSE" | "HNX" | "UPCOM")
+                    || h.market_type == "index"
+                    || h.symbol.ends_with("F1!")
+                {
+                    continue;
+                }
+                let Some(prof) = sumi_core::scanner::lookup_qmv_profile(&h.symbol) else {
+                    continue;
+                };
+                let ok = match grp.as_str() {
+                    "QMV30" => prof.in_qmv30,
+                    "QMV60" => prof.in_qmv60,
+                    "CORE10" => prof.in_yumeko_core10,
+                    "DT1" => prof.money_tier == sumi_core::scanner::QmvMoneyTier::Dt1,
+                    "DT2" => prof.money_tier == sumi_core::scanner::QmvMoneyTier::Dt2,
+                    "DT3" => prof.money_tier == sumi_core::scanner::QmvMoneyTier::Dt3,
+                    s if s.starts_with("SECTOR:") => {
+                        sumi_core::scanner::QmvSector::parse_str(&s[7..])
+                            .is_some_and(|sec| prof.sector == sec)
+                    }
+                    s if s.starts_with("GROUP:") => {
+                        sumi_core::scanner::QmvSectorGroup::parse_str(&s[6..])
+                            .is_some_and(|sg| prof.sector_group == sg)
+                    }
+                    _ => false,
+                };
+                if ok {
+                    matched.push(h.ticker);
+                }
+            }
+            if !matched.is_empty() {
+                resolved_tickers = matched;
+            }
+        }
+    }
+
+    if resolved_tickers.is_empty() {
+        return Err(DesktopError::Validation(
+            "Cần tối thiểu 1 mã trong danh mục để chạy Portfolio Backtest".to_owned(),
+        ));
+    }
+
+    let max_bars = input.backtest.max_bars.unwrap_or(1_200).clamp(60, 5_000);
+    let iv: Interval = input.backtest.interval.parse()?;
+    let tf = iv.to_core_timeframe().unwrap_or(Timeframe::D1);
+    let mut cfg = build_backtest_config(&input.backtest);
+    cfg.enforce_vn_microstructure = true;
+    cfg.benchmark_non_downtrend_days = load_vnindex_non_downtrend_days(&state);
+    let weighting = match input
+        .weighting
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("inverse_vol" | "inv_vol") => PortfolioWeightingMode::CausalInverseVolatility {
+            lookback_bars: 20,
+        },
+        _ => PortfolioWeightingMode::EqualWeight,
+    };
+
+    let mut feeds: Vec<WatchlistFeedEntry> = Vec::new();
+    for raw_ticker in resolved_tickers.iter().take(80) {
+        if let Ok((norm_ticker, _, _, candles)) = load_backtest_candles(
+            &state,
+            raw_ticker,
+            &input.backtest.interval,
+            max_bars,
+            input.backtest.from_timestamp_ms,
+            input.backtest.to_timestamp_ms,
+        )
+        .await
+        {
+            let short_sym = norm_ticker
+                .split_once(':')
+                .map_or(norm_ticker.as_str(), |(_, s)| s)
+                .to_owned();
+            feeds.push(WatchlistFeedEntry {
+                instrument_id: norm_ticker,
+                preset: DataSourcePreset::CustomFile,
+                symbol: short_sym,
+                base_timeframe: tf,
+                candles,
+            });
+        }
+    }
+
+    if feeds.is_empty() {
+        return Err(DesktopError::Validation(
+            "Không có mã nào trong danh mục có đủ tối thiểu 30 cây nến để kiểm định".to_owned(),
+        ));
+    }
+
+    let report = tokio::task::spawn_blocking(move || {
+        run_portfolio_backtest(
+            &feeds,
+            tf,
+            &cfg,
+            PortfolioUniverseFilter::AllUniverseFeeds,
+            weighting,
+            None,
+        )
+    })
+    .await
+    .map_err(|e| DesktopError::Internal(e.to_string()))?;
+
+    let equity_curve = map_equity_points(&report.portfolio_equity_curve);
+
+    Ok(PortfolioBacktestResponse {
+        preset_label: report.preset.full_label().to_owned(),
+        interval: iv.as_str().to_owned(),
+        weighting_label: report.weighting.short_label().to_owned(),
+        constituent_count: report.constituents.len(),
+        initial_capital: report.initial_capital,
+        tearsheet: report.portfolio_tearsheet,
+        avg_constituent_max_dd_pct: report.avg_constituent_max_dd_pct,
+        diversification_dd_reduction_pct: report.diversification_dd_reduction_pct,
+        equity_curve,
+        constituents: report.constituents,
+        survivor_bias_caveat: report.survivor_bias_caveat,
     })
 }
 
@@ -544,6 +997,21 @@ mod tests {
             max_bars: Some(500),
             from_timestamp_ms: None,
             to_timestamp_ms: None,
+            max_leverage: None,
+            custom_rules: None,
+            qmv_support_window: None,
+            qmv_rvol_confirm: None,
+            qmv_trail_mode: None,
+            qmv_div_osc: None,
+            qmv_confirm_mode: None,
+            qmv_ichi_variant: None,
+            qmv_flow_horizon_pair: None,
+            qmv_flow_low_zone: None,
+            qmv_flow_high_zone: None,
+            qmv_use_vnindex_gate: None,
+            qmv_min_pillars: None,
+            support_stop_lookback: None,
+            qmv_wave_trailing_2_3: None,
         }
     }
 
@@ -582,5 +1050,44 @@ mod tests {
 
         let err = filter_bars_by_range(bars, Some(base + 60 * step), Some(base + 10 * step), 500);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn custom_signal_rules_and_vn30f_leverage_wire_cleanly() {
+        let mut inp = sample_input("custom");
+        inp.ticker = "HNX:VN30F1!".to_owned();
+        inp.custom_rules = Some(CustomRulesInput {
+            name: Some("MACD + RVOL".to_owned()),
+            entry_combinator: Some("and".to_owned()),
+            entry_clauses: vec![
+                CustomClauseInput {
+                    catalog_id: "technical.macd_bull_cross".to_owned(),
+                    op: None,
+                    threshold: None,
+                    bool_expected: Some(true),
+                },
+                CustomClauseInput {
+                    catalog_id: "volume.relative_volume".to_owned(),
+                    op: Some(">=".to_owned()),
+                    threshold: Some(1.5),
+                    bool_expected: None,
+                },
+            ],
+            exit_combinator: Some("or".to_owned()),
+            exit_clauses: Some(vec![CustomClauseInput {
+                catalog_id: "technical.macd_bear_cross".to_owned(),
+                op: None,
+                threshold: None,
+                bool_expected: Some(true),
+            }]),
+            min_health_score: Some(10.0),
+        });
+        let cfg = build_backtest_config(&inp);
+        assert_eq!(cfg.preset, StrategyPresetKind::CustomSignalRules);
+        assert!((cfg.max_leverage - 5.88).abs() < 0.01);
+        assert!(cfg.custom_rules.long_entry.enabled);
+        assert_eq!(cfg.custom_rules.long_entry.clause_count(), 2);
+        assert!(cfg.custom_rules.long_entry.confluence_gate.enabled);
+        assert!(cfg.custom_rules.long_exit.enabled);
     }
 }

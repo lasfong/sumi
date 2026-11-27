@@ -7,9 +7,9 @@ import { StockScreenerTab } from './dock/StockScreenerTab'
 import { StrategyTesterTab } from './dock/StrategyTesterTab'
 
 const DOCK_TABS: Array<{ id: BottomDockTab; label: string; Icon: React.ComponentType<{ className?: string }> }> = [
-  { id: 'paper', label: 'Paper Trading (VN T+2)', Icon: Briefcase },
-  { id: 'strategy', label: 'Strategy Tester (Backtest / WFO / MC)', Icon: FlaskConical },
-  { id: 'screener', label: 'Stock Screener (101 Tín hiệu)', Icon: Radar },
+  { id: 'paper', label: 'Giao dịch Giả lập (VN T+2)', Icon: Briefcase },
+  { id: 'strategy', label: 'Kiểm định Chiến lược QMV (WFO / MC)', Icon: FlaskConical },
+  { id: 'screener', label: 'Bộ lọc Kỹ thuật QMV (Screener)', Icon: Radar },
 ]
 
 export const BottomTradingDock: React.FC = () => {

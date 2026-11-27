@@ -5,12 +5,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::data::{DataSourcePreset, Timeframe, WatchlistFeedEntry, aggregate_ohlcv};
 use crate::indicators::{
-    BollingerOutput, MacdOutput, SeriesBlockIndex, compute_atr, compute_bollinger_slices,
-    compute_ema_slices, compute_macd_slices, compute_rsi_slices, compute_sma_slices,
+    BBHorizon, BollingerOutput, CandleGeometry, IchimokuConfig, IchimokuOutput, MacdOutput,
+    ProxyBBSeriesOutput, SeriesBlockIndex, compute_atr, compute_bollinger_slices,
+    compute_ema_slices, compute_ichimoku, compute_macd_slices, compute_proxy_bb_series,
+    compute_rsi_slices, compute_sma_slices, donchian_midpoint_series,
+};
+use crate::journal::{
+    DailyPriceBand, ExchangeVenue, VnPriceUnit, compute_daily_price_band, round_down_to_tick,
+    round_up_to_tick,
 };
 use crate::model::Candle;
 use crate::scanner::{
-    PrecomputedCatalogMatrix, SessionDate, UniverseDefinition, UniverseMode, UniverseResolver,
+    MarketRegime, PrecomputedCatalogMatrix, SessionDate, UniverseDefinition, UniverseMode,
+    UniverseResolver, catalog_entry_index,
 };
 use crate::trading::{
     MAX_ORDER_NOTIONAL, MAX_ORDER_PRICE, MAX_ORDER_QUANTITY, MIN_ORDER_QUANTITY, OrderSide,
@@ -270,8 +277,12 @@ impl ActivePositionState {
 }
 
 pub(crate) struct PrecomputedFeatures {
+    pub(crate) venue: ExchangeVenue,
     sma_fast: Vec<Option<f64>>,
     ema_slow: Vec<Option<f64>>,
+    sma_20: Vec<Option<f64>>,
+    sma_50: Vec<Option<f64>>,
+    ema_200: Vec<Option<f64>>,
     rsi: Vec<Option<f64>>,
     macd: MacdOutput,
     macd_trend_ema: Vec<Option<f64>>,
@@ -280,6 +291,13 @@ pub(crate) struct PrecomputedFeatures {
     donchian_entry_low: Vec<Option<f64>>,
     donchian_exit_high: Vec<Option<f64>>,
     donchian_exit_low: Vec<Option<f64>>,
+    prior_support_low: Vec<Option<f64>>,
+    prior_box_high_15: Vec<Option<f64>>,
+    prior_box_low_15: Vec<Option<f64>>,
+    ichimoku_s3: IchimokuOutput,
+    ichi_s3_raw_sa: Vec<Option<f64>>,
+    ichi_s3_raw_sb: Vec<Option<f64>>,
+    proxy_bb: Option<ProxyBBSeriesOutput>,
     atr: Vec<Option<f64>>,
     catalog_matrix: Option<Arc<PrecomputedCatalogMatrix>>,
 }
@@ -293,9 +311,13 @@ impl PrecomputedFeatures {
         let len = candles.len();
         let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
         let p = &config.params;
+        let is_qmv = StrategyPresetKind::QMV_PLAYBOOKS.contains(&config.preset);
 
-        let need_atr = config.risk.stop_loss_atr_mult.is_some()
+        let need_atr = is_qmv
+            || config.risk.stop_loss_atr_mult.is_some()
             || config.risk.trailing_stop_atr_mult.is_some()
+            || config.risk.support_stop_lookback.is_some()
+            || config.risk.qmv_wave_trailing_2_3
             || config.preset == StrategyPresetKind::DonchianAtrBreakout;
 
         let sma_fast = if config.preset == StrategyPresetKind::SmaEmaTrendCross {
@@ -308,9 +330,26 @@ impl PrecomputedFeatures {
         } else {
             Vec::new()
         };
+        let sma_20 = if is_qmv {
+            compute_sma_slices(&closes, 20)
+        } else {
+            Vec::new()
+        };
+        let sma_50 = if is_qmv {
+            compute_sma_slices(&closes, 50)
+        } else {
+            Vec::new()
+        };
+        let ema_200 = if is_qmv {
+            compute_ema_slices(&closes, 200)
+        } else {
+            Vec::new()
+        };
         let rsi = if matches!(
             config.preset,
-            StrategyPresetKind::RsiMeanReversion | StrategyPresetKind::RsiBollingerConfluence
+            StrategyPresetKind::RsiMeanReversion
+                | StrategyPresetKind::RsiBollingerConfluence
+                | StrategyPresetKind::QmvSafeBottomDiv
         ) {
             compute_rsi_slices(&closes, p.rsi_period)
         } else {
@@ -331,6 +370,7 @@ impl PrecomputedFeatures {
             config.preset,
             StrategyPresetKind::BollingerSqueezeBreakout
                 | StrategyPresetKind::RsiBollingerConfluence
+                | StrategyPresetKind::QmvCongestionBreakout
         ) {
             compute_bollinger_slices(&closes, p.bb_period, p.bb_std_mult)
         } else {
@@ -351,13 +391,73 @@ impl PrecomputedFeatures {
                 (Vec::new(), Vec::new(), Vec::new(), Vec::new())
             };
 
+        let sup_lookback = config
+            .risk
+            .support_stop_lookback
+            .or_else(|| {
+                (config.preset == StrategyPresetKind::QmvSupportVpa)
+                    .then_some(p.qmv_support_window)
+            });
+        let prior_support_low = if let Some(w) = sup_lookback.filter(|_| len > 0) {
+            let lows: Vec<f64> = candles.iter().map(|c| c.low).collect();
+            compute_prior_window_min(&lows, w)
+        } else {
+            Vec::new()
+        };
+
+        let (prior_box_high_15, prior_box_low_15) =
+            if config.preset == StrategyPresetKind::QmvCongestionBreakout && len > 0 {
+                let highs: Vec<f64> = candles.iter().map(|c| c.high).collect();
+                let lows: Vec<f64> = candles.iter().map(|c| c.low).collect();
+                (
+                    compute_prior_window_max(&highs, 15),
+                    compute_prior_window_min(&lows, 15),
+                )
+            } else {
+                (Vec::new(), Vec::new())
+            };
+
+        let (ichimoku_s3, ichi_s3_raw_sa, ichi_s3_raw_sb) =
+            if config.preset == StrategyPresetKind::QmvIchimokuV7 && len > 0 {
+                let icfg = match p.qmv_ichi_variant {
+                    1 => IchimokuConfig::qmv_short(),
+                    2 => IchimokuConfig::default(),
+                    _ => IchimokuConfig::qmv_v7(),
+                };
+                let out = compute_ichimoku(candles, icfg);
+                let r_sb = donchian_midpoint_series(candles, icfg.senkou_b_period);
+                let mut r_sa = Vec::with_capacity(len);
+                for idx in 0..len {
+                    let sa = match (out.tenkan[idx], out.kijun[idx]) {
+                        (Some(tk), Some(kj)) if tk.is_finite() && kj.is_finite() => {
+                            Some(0.5 * tk + 0.5 * kj)
+                        }
+                        _ => None,
+                    };
+                    r_sa.push(sa);
+                }
+                (out, r_sa, r_sb)
+            } else {
+                (IchimokuOutput::default(), Vec::new(), Vec::new())
+            };
+
+        let proxy_bb = if matches!(
+            config.preset,
+            StrategyPresetKind::QmvDualCycleFlow | StrategyPresetKind::QmvMultiGateConfluence
+        ) && len > 0
+        {
+            Some(compute_proxy_bb_series(candles))
+        } else {
+            None
+        };
+
         let atr = if need_atr {
             compute_atr(candles, p.atr_period)
         } else {
             Vec::new()
         };
 
-        let catalog_matrix = if config.preset == StrategyPresetKind::CustomSignalRules && len > 0 {
+        let catalog_matrix = if config.preset.uses_catalog_matrix() && len > 0 {
             match shared_catalog {
                 Some(arc) if arc.bar_count == len => Some(arc),
                 _ => Some(Arc::new(PrecomputedCatalogMatrix::compute(candles))),
@@ -367,8 +467,12 @@ impl PrecomputedFeatures {
         };
 
         Self {
+            venue: ExchangeVenue::Hose,
             sma_fast,
             ema_slow,
+            sma_20,
+            sma_50,
+            ema_200,
             rsi,
             macd,
             macd_trend_ema,
@@ -377,6 +481,13 @@ impl PrecomputedFeatures {
             donchian_entry_low,
             donchian_exit_high,
             donchian_exit_low,
+            prior_support_low,
+            prior_box_high_15,
+            prior_box_low_15,
+            ichimoku_s3,
+            ichi_s3_raw_sa,
+            ichi_s3_raw_sb,
+            proxy_bb,
             atr,
             catalog_matrix,
         }
@@ -479,8 +590,12 @@ fn run_backtest_with_shared_catalog(
         };
     }
 
-    let features =
+    let mut features =
         PrecomputedFeatures::build_with_shared_catalog(causal_candles, &clean_cfg, shared_catalog);
+    if !symbol.trim().is_empty() {
+        features.venue =
+            ExchangeVenue::infer_from_symbol_and_preset(&symbol, DataSourcePreset::CustomFile);
+    }
     let full_sim = simulate_window_with_features(
         causal_candles,
         0,
@@ -611,9 +726,7 @@ pub fn run_parameter_sweep(
         slice_causal_series_for_symbol_and_options(Some(&symbol), candles, timeframe, options);
 
     let grid = build_preset_sweep_configs(&clean_base);
-    let shared_catalog = if clean_base.preset == StrategyPresetKind::CustomSignalRules
-        && !causal_candles.is_empty()
-    {
+    let shared_catalog = if clean_base.preset.uses_catalog_matrix() && !causal_candles.is_empty() {
         Some(Arc::new(PrecomputedCatalogMatrix::compute(causal_candles)))
     } else {
         None
@@ -1050,7 +1163,11 @@ pub fn run_pit_episodes_backtest(
         );
     }
 
-    let features = PrecomputedFeatures::build_with_shared_catalog(causal_candles, &clean_cfg, None);
+    let mut features = PrecomputedFeatures::build_with_shared_catalog(causal_candles, &clean_cfg, None);
+    if !symbol.trim().is_empty() {
+        features.venue =
+            ExchangeVenue::infer_from_symbol_and_preset(&symbol, DataSourcePreset::CustomFile);
+    }
     let mut carry = SimulationCarryState::new(clean_cfg.initial_cash);
     let mut all_equity_curve: Vec<BacktestEquityPoint> = Vec::with_capacity(causal_candles.len());
     let mut all_trades: Vec<BacktestTrade> = Vec::new();
@@ -1517,39 +1634,67 @@ pub(crate) fn simulate_window_with_carry(
         let out_bar_idx = if use_absolute_indices { i } else { i - start };
         let valid_open = candle.open.is_finite() && candle.open > 0.0;
         let valid_close = candle.close.is_finite() && candle.close > 0.0;
+        let vn_band = causal_daily_band(features.venue, candles, i, config.enforce_vn_microstructure);
+        let locked_floor_no_bid = vn_band
+            .is_some_and(|b| is_session_locked_floor_no_bid(candle, b));
 
         // STEP A: Execute pending close-of-bar signal from `i - 1` at `Open[i]` (`BT-TIME-001`).
         if let Some(order) = pending_order.take() {
             match order {
                 PendingStrategyOrder::Exit {
-                    signal_bar: _,
+                    signal_bar,
                     reason,
                 } => {
                     if let Some(mut pos) = active_pos.take() {
-                        let exit_side = pos.side.exit_order_side();
-                        let raw_px = if valid_open {
-                            candle.open
-                        } else if valid_close {
-                            candle.close
+                        if pos.side == PositionSide::Long && locked_floor_no_bid {
+                            // Vietnam `trắng bên mua`: cannot sell into a locked-floor session; defer to next bar!
+                            active_pos = Some(pos);
+                            if i + 1 < end || allow_handoff_at_end {
+                                pending_order = Some(PendingStrategyOrder::Exit {
+                                    signal_bar,
+                                    reason,
+                                });
+                            } else {
+                                unexecuted_signals.push(UnexecutedSignal {
+                                    signal_bar_index: out_bar_idx,
+                                    timestamp: candle.timestamp,
+                                    side: PositionSide::Long,
+                                    is_exit: true,
+                                    reason: UnfilledReason::LimitLocked,
+                                });
+                            }
                         } else {
-                            pos.entry_price
-                        };
-                        let exec_price = apply_slippage(raw_px, exit_side, config.slippage_bps);
-                        pos.observe_price(raw_px);
-                        pos.observe_price(exec_price);
-                        close_position_into_trade(
-                            pos,
-                            i,
-                            out_bar_idx,
-                            use_absolute_indices,
-                            candle.timestamp,
-                            exec_price,
-                            reason,
-                            config,
-                            &mut cash,
-                            &mut next_trade_id,
-                            &mut trades,
-                        );
+                            let exit_side = pos.side.exit_order_side();
+                            let raw_px = if valid_open {
+                                candle.open
+                            } else if valid_close {
+                                candle.close
+                            } else {
+                                pos.entry_price
+                            };
+                            let exec_price = quantize_vn_exec_price(
+                                apply_slippage(raw_px, exit_side, config.slippage_bps),
+                                exit_side,
+                                features.venue,
+                                vn_band,
+                                config.enforce_vn_microstructure,
+                            );
+                            pos.observe_price(raw_px);
+                            pos.observe_price(exec_price);
+                            close_position_into_trade(
+                                pos,
+                                i,
+                                out_bar_idx,
+                                use_absolute_indices,
+                                candle.timestamp,
+                                exec_price,
+                                reason,
+                                config,
+                                &mut cash,
+                                &mut next_trade_id,
+                                &mut trades,
+                            );
+                        }
                     }
                 }
                 PendingStrategyOrder::Reverse {
@@ -1557,34 +1702,50 @@ pub(crate) fn simulate_window_with_carry(
                     signal_bar,
                 } => {
                     if let Some(mut pos) = active_pos.take() {
-                        let exit_side = pos.side.exit_order_side();
-                        let raw_px = if valid_open {
-                            candle.open
-                        } else if valid_close {
-                            candle.close
+                        if pos.side == PositionSide::Long && locked_floor_no_bid {
+                            active_pos = Some(pos);
+                            if i + 1 < end || allow_handoff_at_end {
+                                pending_order = Some(PendingStrategyOrder::Reverse {
+                                    new_side,
+                                    signal_bar,
+                                });
+                            }
                         } else {
-                            pos.entry_price
-                        };
-                        let exec_price = apply_slippage(raw_px, exit_side, config.slippage_bps);
-                        pos.observe_price(raw_px);
-                        pos.observe_price(exec_price);
-                        close_position_into_trade(
-                            pos,
-                            i,
-                            out_bar_idx,
-                            use_absolute_indices,
-                            candle.timestamp,
-                            exec_price,
-                            BacktestExitReason::SignalReversal,
-                            config,
-                            &mut cash,
-                            &mut next_trade_id,
-                            &mut trades,
-                        );
+                            let exit_side = pos.side.exit_order_side();
+                            let raw_px = if valid_open {
+                                candle.open
+                            } else if valid_close {
+                                candle.close
+                            } else {
+                                pos.entry_price
+                            };
+                            let exec_price = quantize_vn_exec_price(
+                                apply_slippage(raw_px, exit_side, config.slippage_bps),
+                                exit_side,
+                                features.venue,
+                                vn_band,
+                                config.enforce_vn_microstructure,
+                            );
+                            pos.observe_price(raw_px);
+                            pos.observe_price(exec_price);
+                            close_position_into_trade(
+                                pos,
+                                i,
+                                out_bar_idx,
+                                use_absolute_indices,
+                                candle.timestamp,
+                                exec_price,
+                                BacktestExitReason::SignalReversal,
+                                config,
+                                &mut cash,
+                                &mut next_trade_id,
+                                &mut trades,
+                            );
+                        }
                     }
                     let side_permitted = config.direction_mode.allows_side(new_side)
                         && (venue_allows_short || new_side == PositionSide::Long);
-                    if side_permitted {
+                    if active_pos.is_none() && side_permitted {
                         let sig_out = if use_absolute_indices {
                             signal_bar
                         } else {
@@ -1595,7 +1756,9 @@ pub(crate) fn simulate_window_with_carry(
                             sig_out,
                             i,
                             start,
+                            candles,
                             candle,
+                            vn_band,
                             config,
                             features,
                             &mut cash,
@@ -1618,7 +1781,9 @@ pub(crate) fn simulate_window_with_carry(
                             sig_out,
                             i,
                             start,
+                            candles,
                             candle,
+                            vn_band,
                             config,
                             features,
                             &mut cash,
@@ -1635,8 +1800,17 @@ pub(crate) fn simulate_window_with_carry(
             let bars_held_so_far = i.saturating_sub(pos.entry_bar_abs);
             let is_after_entry_bar = i > pos.entry_bar_abs;
             let exit_side = pos.side.exit_order_side();
-            let voluntary_unlocked = bars_held_so_far >= min_hold_bars;
-            let eff_stop = if voluntary_unlocked {
+            let req_hold = effective_pit_min_hold_bars(
+                min_hold_bars,
+                pos.entry_timestamp,
+                timeframe,
+                features.venue,
+                config.enforce_vn_microstructure,
+            );
+            let voluntary_unlocked = bars_held_so_far >= req_hold;
+            let suppress_long_exit_locked_floor =
+                pos.side == PositionSide::Long && locked_floor_no_bid;
+            let eff_stop = if voluntary_unlocked && !suppress_long_exit_locked_floor {
                 pos.effective_stop()
             } else {
                 None
@@ -1646,7 +1820,11 @@ pub(crate) fn simulate_window_with_carry(
             } else {
                 None
             };
-            let liq_raw_opt = compute_bankruptcy_raw_price(&pos, cash, config);
+            let liq_raw_opt = if suppress_long_exit_locked_floor {
+                None
+            } else {
+                compute_bankruptcy_raw_price(&pos, cash, config)
+            };
 
             // Combine protective `eff_stop` and involuntary `MarginLiquidation` into the tighter adverse stop!
             let effective_adverse_stop: Option<(f64, BacktestExitReason)> =
@@ -1720,7 +1898,13 @@ pub(crate) fn simulate_window_with_carry(
             };
 
             if let Some((gap_raw_px, reason)) = gap_trigger {
-                let exec_price = apply_slippage(gap_raw_px, exit_side, config.slippage_bps);
+                let exec_price = quantize_vn_exec_price(
+                    apply_slippage(gap_raw_px, exit_side, config.slippage_bps),
+                    exit_side,
+                    features.venue,
+                    vn_band,
+                    config.enforce_vn_microstructure,
+                );
                 pos.observe_price(candle.open);
                 pos.observe_price(exec_price);
                 close_position_into_trade(
@@ -1778,7 +1962,13 @@ pub(crate) fn simulate_window_with_carry(
                         }
                     }
                     pos.observe_price(raw_px);
-                    let exec_price = apply_slippage(raw_px, exit_side, config.slippage_bps);
+                    let exec_price = quantize_vn_exec_price(
+                        apply_slippage(raw_px, exit_side, config.slippage_bps),
+                        exit_side,
+                        features.venue,
+                        vn_band,
+                        config.enforce_vn_microstructure,
+                    );
                     pos.observe_price(exec_price);
                     let final_reason =
                         if net_equity_after_exit(&pos, cash, exec_price, config) <= 0.0 {
@@ -1851,6 +2041,7 @@ pub(crate) fn simulate_window_with_carry(
         let desired_order = evaluate_close_of_bar_order(
             i,
             min_hold_bars,
+            timeframe,
             candles,
             config,
             features,
@@ -1925,13 +2116,99 @@ const fn final_reason_or_liq() -> BacktestExitReason {
     BacktestExitReason::MarginLiquidation
 }
 
+/// Official VSD Vietnam `T+2` settlement cutover (`2022-08-29 00:00:00 UTC`).
+/// Trades opened before this date were subject to `T+3` (`3` sessions); on/after `2022-08-29`, `T+2` (`2` sessions).
+const VN_T2_SETTLEMENT_CUTOVER_UTC: i64 = 1_661_731_200;
+
+#[inline]
+fn effective_pit_min_hold_bars(
+    base_min_hold: usize,
+    entry_timestamp: i64,
+    timeframe: Timeframe,
+    venue: ExchangeVenue,
+    enforce_vn: bool,
+) -> usize {
+    if enforce_vn && venue.is_vn_cash_equity() && timeframe == Timeframe::D1 {
+        let pit_bars = if entry_timestamp < VN_T2_SETTLEMENT_CUTOVER_UTC {
+            3
+        } else {
+            2
+        };
+        base_min_hold.max(pit_bars)
+    } else {
+        base_min_hold
+    }
+}
+
+#[inline]
+fn causal_daily_band(
+    venue: ExchangeVenue,
+    candles: &[Candle],
+    i: usize,
+    enforce_vn: bool,
+) -> Option<DailyPriceBand> {
+    if !enforce_vn || !venue.is_vn_cash_equity() || i == 0 {
+        return None;
+    }
+    let prev_close = candles.get(i - 1)?.close;
+    if !prev_close.is_finite() || prev_close <= 0.0 {
+        return None;
+    }
+    compute_daily_price_band(venue, prev_close, VnPriceUnit::Auto)
+}
+
+#[inline]
+fn is_session_locked_ceiling_no_ask(candle: &Candle, band: DailyPriceBand) -> bool {
+    if !candle.volume.is_finite() || candle.volume <= 0.0 {
+        return true;
+    }
+    let tol = (band.tick_at_ref * 0.05).max(1.0e-6);
+    band.is_locked_ceiling(candle.close, candle.high) && candle.low >= band.ceiling_price - tol
+}
+
+#[inline]
+fn is_session_locked_floor_no_bid(candle: &Candle, band: DailyPriceBand) -> bool {
+    if !candle.volume.is_finite() || candle.volume <= 0.0 {
+        return true;
+    }
+    let tol = (band.tick_at_ref * 0.05).max(1.0e-6);
+    band.is_locked_floor(candle.close, candle.low) && candle.high <= band.floor_price + tol
+}
+
+#[inline]
+fn quantize_vn_exec_price(
+    raw_exec: f64,
+    side: OrderSide,
+    venue: ExchangeVenue,
+    band_opt: Option<DailyPriceBand>,
+    enforce_vn: bool,
+) -> f64 {
+    if !enforce_vn || !venue.is_vn_cash_equity() || !raw_exec.is_finite() || raw_exec <= 0.0 {
+        return raw_exec;
+    }
+    let unit = VnPriceUnit::Auto.resolve_for_venue(venue, raw_exec);
+    let mut px = match side {
+        OrderSide::Buy => round_up_to_tick(raw_exec, venue, unit),
+        OrderSide::Sell => round_down_to_tick(raw_exec, venue, unit),
+    };
+    if px <= 0.0 {
+        px = raw_exec;
+    }
+    if let Some(band) = band_opt {
+        px = px.clamp(band.floor_price, band.ceiling_price);
+    }
+    px
+}
+
 #[allow(clippy::too_many_arguments)]
 fn try_open_position_at_open(
     side: PositionSide,
     signal_bar_local: usize,
     fill_bar_abs: usize,
     window_start: usize,
+    candles: &[Candle],
     candle: &Candle,
+    vn_band: Option<DailyPriceBand>,
     config: &BacktestConfig,
     features: &PrecomputedFeatures,
     cash: &mut f64,
@@ -1950,6 +2227,52 @@ fn try_open_position_at_open(
         });
         return;
     }
+
+    // Vietnam Market Microstructure Rule 1: Block Buy fills on locked-ceiling sessions (`trắng bên bán`)!
+    if config.enforce_vn_microstructure
+        && features.venue.is_vn_cash_equity()
+        && side == PositionSide::Long
+        && vn_band.is_some_and(|b| is_session_locked_ceiling_no_ask(candle, b))
+    {
+        unexecuted_signals.push(UnexecutedSignal {
+            signal_bar_index: signal_bar,
+            timestamp: candle.timestamp,
+            side,
+            is_exit: false,
+            reason: UnfilledReason::LimitLocked,
+        });
+        return;
+    }
+
+    // Causal minimum 20-bar liquidity filter (`QMV V7` illiquid penny guard).
+    if config.min_entry_avg_vol_20 > 0.0 {
+        if fill_bar < 20 {
+            unexecuted_signals.push(UnexecutedSignal {
+                signal_bar_index: signal_bar,
+                timestamp: candle.timestamp,
+                side,
+                is_exit: false,
+                reason: UnfilledReason::IlliquidBar,
+            });
+            return;
+        }
+        let avg_vol_20: f64 = candles[fill_bar - 20..fill_bar]
+            .iter()
+            .map(|b| if b.volume.is_finite() { b.volume.max(0.0) } else { 0.0 })
+            .sum::<f64>()
+            / 20.0;
+        if avg_vol_20 < config.min_entry_avg_vol_20 {
+            unexecuted_signals.push(UnexecutedSignal {
+                signal_bar_index: signal_bar,
+                timestamp: candle.timestamp,
+                side,
+                is_exit: false,
+                reason: UnfilledReason::IlliquidBar,
+            });
+            return;
+        }
+    }
+
     if *cash <= 0.0 || !cash.is_finite() {
         unexecuted_signals.push(UnexecutedSignal {
             signal_bar_index: signal_bar,
@@ -1965,7 +2288,13 @@ fn try_open_position_at_open(
         PositionSide::Long => OrderSide::Buy,
         PositionSide::Short => OrderSide::Sell,
     };
-    let exec_price = apply_slippage(candle.open, order_side, config.slippage_bps);
+    let exec_price = quantize_vn_exec_price(
+        apply_slippage(candle.open, order_side, config.slippage_bps),
+        order_side,
+        features.venue,
+        vn_band,
+        config.enforce_vn_microstructure,
+    );
     if !exec_price.is_finite() || exec_price <= 0.0 || exec_price > MAX_ORDER_PRICE {
         unexecuted_signals.push(UnexecutedSignal {
             signal_bar_index: signal_bar,
@@ -1983,6 +2312,25 @@ fn try_open_position_at_open(
         .and_then(|pi| features.atr.get(pi).copied().flatten())
         .filter(|v| v.is_finite() && *v > 0.0);
 
+    // Optional QMV Support-Zone Stop Loss (`min(Low[fill_bar - lookback .. fill_bar]) - 0.35 * ATR`).
+    let prior_sup_low = features
+        .prior_support_low
+        .get(fill_bar)
+        .copied()
+        .flatten()
+        .filter(|v| v.is_finite() && *v > 0.0);
+    let support_sl = if config.risk.support_stop_lookback.is_some() && side == PositionSide::Long {
+        prior_sup_low.map(|sup_lo| {
+            let buf = prev_atr.map_or(exec_price * 0.01, |a| 0.35 * a);
+            let raw_sup_sl = (sup_lo - buf).max(1.0e-8);
+            // Ensure stop is strictly below `exec_price` by at least `0.8 * ATR` (or `1.5%`).
+            let max_sl = prev_atr.map_or(exec_price * 0.985, |a| exec_price - 0.8 * a);
+            raw_sup_sl.min(max_sl).max(1.0e-8)
+        })
+    } else {
+        None
+    };
+
     // Compute fixed SL and initial trailing stop at `Open[fill_bar]`.
     let pct_sl = config.risk.stop_loss_pct.map(|pct| match side {
         PositionSide::Long => (exec_price * (1.0 - pct * 0.01)).max(1.0e-8),
@@ -1996,7 +2344,16 @@ fn try_open_position_at_open(
             PositionSide::Long => (exec_price - mult * atr_v).max(1.0e-8),
             PositionSide::Short => exec_price + mult * atr_v,
         });
-    let fixed_stop_loss = match (pct_sl, atr_sl) {
+    let base_fixed_sl = match (pct_sl, atr_sl) {
+        (Some(a), Some(b)) => Some(match side {
+            PositionSide::Long => a.max(b),
+            PositionSide::Short => a.min(b),
+        }),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+    let fixed_stop_loss = match (base_fixed_sl, support_sl) {
         (Some(a), Some(b)) => Some(match side {
             PositionSide::Long => a.max(b),
             PositionSide::Short => a.min(b),
@@ -2137,13 +2494,15 @@ fn ratchet_trailing_stop_post_close(
     if candle.low.is_finite() {
         pos.lowest_since_entry = pos.lowest_since_entry.min(candle.low);
     }
+    let atr_opt = features
+        .atr
+        .get(bar_idx)
+        .copied()
+        .flatten()
+        .filter(|v| v.is_finite() && *v > 0.0);
+
     if let Some(trail_mult) = config.risk.trailing_stop_atr_mult
-        && let Some(atr_val) = features
-            .atr
-            .get(bar_idx)
-            .copied()
-            .flatten()
-            .filter(|v| v.is_finite() && *v > 0.0)
+        && let Some(atr_val) = atr_opt
     {
         match pos.side {
             PositionSide::Long => {
@@ -2154,6 +2513,20 @@ fn ratchet_trailing_stop_post_close(
                 let cand = pos.lowest_since_entry + trail_mult * atr_val;
                 pos.trailing_stop = Some(pos.trailing_stop.map_or(cand, |prev| prev.min(cand)));
             }
+        }
+    }
+
+    // QMV `KT01T3` `2/3`-Wave Profit-Locking Stop: once unrealized profit wave from `entry_price`
+    // reaches a genuine impulse (`>= max(3.5 * ATR, 14% of entry)`), lock at least `2/3` of the
+    // realized wave gain (`entry_price + 2/3 * (highest_since_entry - entry_price)`).
+    if config.risk.qmv_wave_trailing_2_3 && pos.side == PositionSide::Long {
+        let min_profit_wave = atr_opt
+            .map(|a| (3.5 * a).max(pos.entry_price * 0.14))
+            .unwrap_or(pos.entry_price * 0.14);
+        let profit_span = pos.highest_since_entry - pos.entry_price;
+        if profit_span >= min_profit_wave {
+            let cand_2_3 = (pos.entry_price + (2.0 / 3.0) * profit_span).max(1.0e-8);
+            pos.trailing_stop = Some(pos.trailing_stop.map_or(cand_2_3, |prev| prev.max(cand_2_3)));
         }
     }
 }
@@ -2307,9 +2680,11 @@ fn close_position_into_trade(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn evaluate_close_of_bar_order(
     i: usize,
     min_hold_bars: usize,
+    timeframe: Timeframe,
     candles: &[Candle],
     config: &BacktestConfig,
     features: &PrecomputedFeatures,
@@ -2322,7 +2697,14 @@ fn evaluate_close_of_bar_order(
     if let Some(pos) = active_pos {
         // Notice: at `Close[i]`, if the exit fills at `Open[i + 1]`, `exit_bar - entry_bar == (i + 1) - entry_bar_abs`.
         let bars_held_at_next_open = (i + 1).saturating_sub(pos.entry_bar_abs);
-        if bars_held_at_next_open < min_hold_bars {
+        let req_hold = effective_pit_min_hold_bars(
+            min_hold_bars,
+            pos.entry_timestamp,
+            timeframe,
+            features.venue,
+            config.enforce_vn_microstructure,
+        );
+        if bars_held_at_next_open < req_hold {
             return None;
         }
 
@@ -2521,7 +2903,354 @@ fn evaluate_preset_signals_at_bar(
             };
             evaluate_custom_rules_at_bar(&config.custom_rules, matrix, i)
         }
+        StrategyPresetKind::QmvSupportVpa => {
+            let Some(ref matrix) = features.catalog_matrix else {
+                return (false, false, false, false);
+            };
+            if !qmv_vnindex_gate_ok(candles, i, config) {
+                return (false, false, false, false);
+            }
+            let regime = matrix.regime_at(i);
+            let e200_ok = features
+                .ema_200
+                .get(i)
+                .copied()
+                .flatten()
+                .is_some_and(|e| close >= e);
+            if regime == MarketRegime::Downtrend && !e200_ok {
+                return (false, false, false, false);
+            }
+            let rvol = causal_rvol_20_at(candles, i).unwrap_or(0.0);
+            let atr = features.atr.get(i).copied().flatten().unwrap_or(0.0);
+            let near_sup = catalog_bool_recent(matrix, "sr.near_support", i, 3)
+                || features
+                    .prior_support_low
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|lo| candles[i].low <= lo + 0.65 * atr && close >= lo);
+            let dry_up = catalog_bool_recent(matrix, "qmv.vsa_support_dry_up", i, 3);
+            let spring = catalog_bool_at(matrix, "vsa.spring", i);
+            let strong_sup = catalog_bool_at(matrix, "vsa.strong_demand_at_support", i);
+            let demand_return = close > candles[i].open
+                && close > prev_close
+                && rvol >= p.qmv_rvol_confirm
+                && CandleGeometry::from_candle(&candles[i]).close_location >= 0.55;
+
+            let bull = near_sup && ((dry_up && demand_return) || spring || strong_sup);
+            let m50_break = features
+                .sma_50
+                .get(i)
+                .copied()
+                .flatten()
+                .is_some_and(|m| close < m && close < candles[i].open);
+            let m20_climax_exit = p.qmv_trail_mode == 1
+                && features
+                    .sma_20
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|m| close < m && close < candles[i].open && rvol >= 1.2);
+            let climax_upthrust = catalog_bool_at(matrix, "vsa.upthrust", i) && rvol >= 1.8;
+            let long_exit = m50_break || m20_climax_exit || climax_upthrust;
+            (bull, false, long_exit, false)
+        }
+        StrategyPresetKind::QmvSafeBottomDiv => {
+            let Some(ref matrix) = features.catalog_matrix else {
+                return (false, false, false, false);
+            };
+            let rsi_div = catalog_bool_recent(matrix, "divergence.rsi_regular_bullish", i, 3);
+            let macd_div = catalog_bool_recent(matrix, "divergence.macd_regular_bullish", i, 3);
+            let cci_div = catalog_bool_recent(matrix, "divergence.cci_regular_bullish", i, 3);
+            let div_ok = match p.qmv_div_osc {
+                1 => rsi_div,
+                2 => macd_div,
+                3 => cci_div,
+                _ => rsi_div || macd_div || cci_div,
+            };
+            let confirm_ok = if p.qmv_confirm_mode == 0 {
+                close > prev_close && close >= candles[i].open
+            } else {
+                let rvol = causal_rvol_20_at(candles, i).unwrap_or(0.0);
+                (catalog_bool_at(matrix, "pattern.any_bullish", i)
+                    || catalog_bool_at(matrix, "vsa.spring", i))
+                    && (rvol >= 1.05 || close > prev_close)
+            };
+            let bull = div_ok && confirm_ok;
+            let rsi_ob = features
+                .rsi
+                .get(i)
+                .copied()
+                .flatten()
+                .is_some_and(|r| r >= 70.0);
+            let long_exit = rsi_ob
+                || catalog_bool_at(matrix, "vsa.strong_supply_at_resistance", i)
+                || catalog_bool_at(matrix, "vsa.upthrust", i);
+            (bull, false, long_exit, false)
+        }
+        StrategyPresetKind::QmvIchimokuV7 => {
+            let disp = features.ichimoku_s3.displacement;
+            if i < disp.max(1) {
+                return (false, false, false, false);
+            }
+            let (Some(tk), Some(kj), Some(sa), Some(sb), Some(sa_p), Some(sb_p), Some(m50)) = (
+                features.ichimoku_s3.tenkan.get(i).copied().flatten(),
+                features.ichimoku_s3.kijun.get(i).copied().flatten(),
+                features.ichimoku_s3.senkou_a.get(i).copied().flatten(),
+                features.ichimoku_s3.senkou_b.get(i).copied().flatten(),
+                features.ichimoku_s3.senkou_a.get(i - 1).copied().flatten(),
+                features.ichimoku_s3.senkou_b.get(i - 1).copied().flatten(),
+                features.sma_50.get(i).copied().flatten(),
+            ) else {
+                return (false, false, false, false);
+            };
+            let tk_p = features
+                .ichimoku_s3
+                .tenkan
+                .get(i - 1)
+                .copied()
+                .flatten()
+                .unwrap_or(tk);
+            let kj_p = features
+                .ichimoku_s3
+                .kijun
+                .get(i - 1)
+                .copied()
+                .flatten()
+                .unwrap_or(kj);
+            let raw_sa = features.ichi_s3_raw_sa.get(i).copied().flatten().unwrap_or(sa);
+            let raw_sb = features.ichi_s3_raw_sb.get(i).copied().flatten().unwrap_or(sb);
+            let past_c = candles[i - disp].close;
+            let top = sa.max(sb);
+            let bot = sa.min(sb);
+            let top_p = sa_p.max(sb_p);
+            let rvol = causal_rvol_20_at(candles, i).unwrap_or(0.0);
+
+            let kumo_break = prev_close <= top_p && close > top;
+            let tk_cross_above_cloud = close > top && tk_p <= kj_p && tk > kj;
+            let bull = close > m50
+                && (kumo_break || tk_cross_above_cloud)
+                && tk >= kj
+                && past_c.is_finite()
+                && close > past_c
+                && raw_sa >= raw_sb
+                && rvol >= p.qmv_rvol_confirm;
+
+            let exit_line = if p.qmv_ichi_variant == 1 {
+                // Short 3-6-18 cloud uses Span B (18) or SMA50 as structural trend stop rather than 6-bar Kijun
+                bot
+            } else if p.qmv_trail_mode == 1 {
+                bot
+            } else {
+                kj.min(bot)
+            };
+            let long_exit = (close < exit_line && close < candles[i].open) || close < m50 * 0.97;
+            (bull, false, long_exit, false)
+        }
+        StrategyPresetKind::QmvDualCycleFlow => {
+            let Some(ref pbb) = features.proxy_bb else {
+                return (false, false, false, false);
+            };
+            if !qmv_vnindex_gate_ok(candles, i, config) {
+                return (false, false, false, false);
+            }
+            let (h_fast, h_slow) = match p.qmv_flow_horizon_pair {
+                0 => (BBHorizon::T05, BBHorizon::T20),
+                1 => (BBHorizon::T03, BBHorizon::T10),
+                _ => (BBHorizon::T10, BBHorizon::T50),
+            };
+            let (Some(cf), Some(pf), Some(cs), Some(ps)) = (
+                pbb.z50_at(i, h_fast),
+                pbb.z50_at(i - 1, h_fast),
+                pbb.z50_at(i, h_slow),
+                pbb.z50_at(i - 1, h_slow),
+            ) else {
+                return (false, false, false, false);
+            };
+            let (Some(m20), Some(m50)) = (
+                features.sma_20.get(i).copied().flatten(),
+                features.sma_50.get(i).copied().flatten(),
+            ) else {
+                return (false, false, false, false);
+            };
+            let trend_ok = close >= m50 && m20 >= m50 * 0.99;
+            let turn_up = pf <= p.qmv_flow_low_zone
+                && cf > pf + 2.0
+                && cs >= ps
+                && cs >= 35.0;
+            let bull = trend_ok && turn_up && close > prev_close && close >= candles[i].open;
+
+            let swing_exhausted =
+                ps >= p.qmv_flow_high_zone && cs < ps && close < m20 && close < candles[i].open;
+            let trend_break = close < m50 && close < candles[i].open;
+            let long_exit = swing_exhausted || trend_break;
+            (bull, false, long_exit, false)
+        }
+        StrategyPresetKind::QmvCongestionBreakout => {
+            let Some(ref matrix) = features.catalog_matrix else {
+                return (false, false, false, false);
+            };
+            if !qmv_vnindex_gate_ok(candles, i, config) {
+                return (false, false, false, false);
+            }
+            let regime = matrix.regime_at(i);
+            if regime == MarketRegime::Downtrend {
+                return (false, false, false, false);
+            }
+            let (Some(u_prev), Some(m_prev), Some(l_prev), Some(box_hi), Some(box_lo)) = (
+                features.bb.upper.get(i - 1).copied().flatten(),
+                features.bb.middle.get(i - 1).copied().flatten(),
+                features.bb.lower.get(i - 1).copied().flatten(),
+                features.prior_box_high_15.get(i).copied().flatten(),
+                features.prior_box_low_15.get(i).copied().flatten(),
+            ) else {
+                return (false, false, false, false);
+            };
+            if m_prev <= 0.0 {
+                return (false, false, false, false);
+            }
+            let bw_prev_pct = ((u_prev - l_prev) / m_prev) * 100.0;
+            let was_tight = bw_prev_pct <= p.max_squeeze_bw_pct
+                || catalog_bool_recent(matrix, "qmv.vsa_withholding_supply", i - 1, 3)
+                || catalog_bool_recent(matrix, "qmv.congestion_zone", i - 1, 2);
+            let rvol = causal_rvol_20_at(candles, i).unwrap_or(0.0);
+            let geom = CandleGeometry::from_candle(&candles[i]);
+            let bull = was_tight
+                && prev_close <= box_hi
+                && close > box_hi
+                && rvol >= p.qmv_rvol_confirm
+                && geom.close_location >= 0.65;
+
+            // Allow normal retests of `box_hi`; exit only on failed base breakdown (`< box_lo`) or SMA50 break!
+            let m50_break = features
+                .sma_50
+                .get(i)
+                .copied()
+                .flatten()
+                .is_some_and(|m| close < m && close < candles[i].open);
+            let dist_climax = rvol >= 2.5 && geom.close_location <= 0.25 && close < candles[i].open;
+            let long_exit = (close < box_lo && close < candles[i].open) || m50_break || dist_climax;
+            (bull, false, long_exit, false)
+        }
+        StrategyPresetKind::QmvMultiGateConfluence => {
+            let (Some(matrix), Some(pbb)) = (&features.catalog_matrix, &features.proxy_bb)
+            else {
+                return (false, false, false, false);
+            };
+            let vnidx_ok = if p.qmv_use_vnindex_gate {
+                qmv_vnindex_gate_ok(candles, i, config)
+            } else {
+                true
+            };
+            let regime = matrix.regime_at(i);
+            let (Some(m20), Some(m50)) = (
+                features.sma_20.get(i).copied().flatten(),
+                features.sma_50.get(i).copied().flatten(),
+            ) else {
+                return (false, false, false, false);
+            };
+            let pillar1_trend = vnidx_ok
+                && matches!(
+                    regime,
+                    MarketRegime::Uptrend | MarketRegime::Pullback | MarketRegime::Recovery
+                )
+                && close >= m50
+                && m20 >= m50 * 0.99;
+
+            let t20_pos = pbb
+                .points
+                .get(i)
+                .and_then(|pt| pt.horizon(BBHorizon::T20).bb_value)
+                .is_some_and(|v| v >= 50.5);
+            let pillar2_flow = t20_pos
+                && (catalog_bool_at(matrix, "qmv.flow_turn_up_t_plus", i)
+                    || catalog_bool_at(matrix, "qmv.flow_turn_up_t_plus2", i)
+                    || catalog_bool_at(matrix, "qmv.money_in_streak_2d", i));
+
+            let pillar3_setup = catalog_bool_at(matrix, "qmv.ichimoku_v7_kumo_break_up", i)
+                || catalog_bool_at(matrix, "qmv.ichimoku_v7_tk_cross_up", i)
+                || catalog_bool_at(matrix, "qmv.new_high_50", i)
+                || (catalog_bool_recent(matrix, "qmv.vsa_support_dry_up", i - 1, 3)
+                    && causal_rvol_20_at(candles, i).unwrap_or(0.0) >= 1.25);
+
+            let pillar4_rvol = causal_rvol_20_at(candles, i).unwrap_or(0.0) >= 1.2
+                && close > prev_close
+                && close > candles[i].open;
+
+            let score = u8::from(pillar1_trend)
+                + u8::from(pillar2_flow)
+                + u8::from(pillar3_setup)
+                + u8::from(pillar4_rvol);
+            let req = p.qmv_min_pillars.clamp(3, 4);
+            let bull = pillar1_trend && score >= req && close > candles[i].open;
+
+            let vnidx_bear_shock = p.qmv_use_vnindex_gate
+                && !vnidx_ok
+                && close < m20
+                && close < candles[i].open;
+            let trend_lost = close < m50 && close < candles[i].open;
+            let climax_top = catalog_bool_at(matrix, "vsa.upthrust", i)
+                && causal_rvol_20_at(candles, i).unwrap_or(0.0) >= 2.2;
+            let long_exit = trend_lost || vnidx_bear_shock || climax_top;
+            (bull, false, long_exit, false)
+        }
     }
+}
+
+#[inline]
+fn catalog_bool_at(matrix: &PrecomputedCatalogMatrix, id: &str, bar_idx: usize) -> bool {
+    let Some(c_idx) = catalog_entry_index(id) else {
+        return false;
+    };
+    matrix
+        .point_at(c_idx, bar_idx)
+        .is_some_and(|pt| pt.quality.is_valid() && pt.bool_value == Some(true))
+}
+
+#[inline]
+fn catalog_bool_recent(
+    matrix: &PrecomputedCatalogMatrix,
+    id: &str,
+    bar_idx: usize,
+    window: usize,
+) -> bool {
+    let Some(c_idx) = catalog_entry_index(id) else {
+        return false;
+    };
+    let start = bar_idx.saturating_sub(window.saturating_sub(1));
+    (start..=bar_idx).any(|k| {
+        matrix
+            .point_at(c_idx, k)
+            .is_some_and(|pt| pt.quality.is_valid() && pt.bool_value == Some(true))
+    })
+}
+
+#[inline]
+fn causal_rvol_20_at(candles: &[Candle], i: usize) -> Option<f64> {
+    if i < 20 || i >= candles.len() {
+        return None;
+    }
+    let v = candles[i].volume;
+    if !v.is_finite() || v < 0.0 {
+        return None;
+    }
+    let sum: f64 = candles[i - 20..i]
+        .iter()
+        .map(|b| if b.volume.is_finite() { b.volume.max(0.0) } else { 0.0 })
+        .sum();
+    if sum <= 0.0 {
+        return None;
+    }
+    Some(v / (sum / 20.0))
+}
+
+#[inline]
+fn qmv_vnindex_gate_ok(candles: &[Candle], i: usize, config: &BacktestConfig) -> bool {
+    let Some(ref ok_days) = config.benchmark_non_downtrend_days else {
+        return true;
+    };
+    let day = candles[i].timestamp.div_euclid(86_400);
+    ok_days.contains(&day)
 }
 
 /// $O(N)$ monotonic-deque prior-window maximum: `out[i] = max(values[i - window .. i])` (`TEST-CAUSAL-003`).

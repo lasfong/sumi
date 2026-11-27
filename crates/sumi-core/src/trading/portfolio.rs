@@ -1016,7 +1016,12 @@ impl TradingSession {
         }
 
         let reference_price = match req.kind {
-            OrderKind::Market => apply_slippage(candle.close, req.side, self.config.slippage_bps),
+            OrderKind::Market => {
+                if !candle.close.is_finite() || candle.close <= 0.0 || candle.close > MAX_ORDER_PRICE {
+                    return Err(TradingError::InvalidPrice(candle.close));
+                }
+                apply_slippage(candle.close, req.side, self.config.slippage_bps)
+            }
             OrderKind::Limit { limit_price } => {
                 if !limit_price.is_finite() || limit_price <= 0.0 || limit_price > MAX_ORDER_PRICE {
                     return Err(TradingError::InvalidPrice(limit_price));
@@ -1166,31 +1171,44 @@ impl TradingSession {
         if !new_price.is_finite() || new_price <= 0.0 || new_price > MAX_ORDER_PRICE {
             return Err(TradingError::InvalidPrice(new_price));
         }
-        let Some(order) = self.orders.iter_mut().find(|o| o.id == order_id) else {
-            return Err(TradingError::OrderNotFound(order_id));
+        let (order_idx, order_side, order_qty, order_sl, order_tp, next_kind) = {
+            let Some((idx, order)) = self.orders.iter().enumerate().find(|(_, o)| o.id == order_id)
+            else {
+                return Err(TradingError::OrderNotFound(order_id));
+            };
+            if order.status != OrderStatus::Pending {
+                return Err(TradingError::OrderNotPending(order_id));
+            }
+            let next_kind = match order.kind {
+                OrderKind::Limit { .. } => OrderKind::Limit {
+                    limit_price: new_price,
+                },
+                OrderKind::Stop { .. } => OrderKind::Stop {
+                    stop_price: new_price,
+                },
+                OrderKind::Market => return Err(TradingError::OrderNotPending(order_id)),
+            };
+            (
+                idx,
+                order.side,
+                order.quantity,
+                order.stop_loss,
+                order.take_profit,
+                next_kind,
+            )
         };
-        if order.status != OrderStatus::Pending {
-            return Err(TradingError::OrderNotPending(order_id));
-        }
-        let next_kind = match order.kind {
-            OrderKind::Limit { .. } => OrderKind::Limit {
-                limit_price: new_price,
-            },
-            OrderKind::Stop { .. } => OrderKind::Stop {
-                stop_price: new_price,
-            },
-            OrderKind::Market => return Err(TradingError::OrderNotPending(order_id)),
-        };
-        let notional = new_price * order.quantity * self.config.contract_multiplier.max(1.0);
+        let notional = new_price * order_qty * self.config.effective_contract_multiplier();
         if !notional.is_finite() || notional > super::orders::MAX_ORDER_NOTIONAL {
             return Err(TradingError::NotionalOverflow);
         }
-        let bracket_side = match order.side {
+        let est_exec = apply_slippage(new_price, order_side, self.config.slippage_bps);
+        self.validate_execution_capacity(order_side, order_qty, est_exec)?;
+        let bracket_side = match order_side {
             OrderSide::Buy => PositionSide::Long,
             OrderSide::Sell => PositionSide::Short,
         };
-        validate_brackets_for_side(bracket_side, new_price, order.stop_loss, order.take_profit)?;
-        order.kind = next_kind;
+        validate_brackets_for_side(bracket_side, new_price, order_sl, order_tp)?;
+        self.orders[order_idx].kind = next_kind;
         Ok(())
     }
 
@@ -1753,6 +1771,7 @@ impl TradingSession {
                         trigger_price,
                         reason,
                     } => {
+                        let had_position_before = self.open_position.is_some();
                         self.try_fill_pending_order_at(
                             ord_idx,
                             trigger_price,
@@ -1760,6 +1779,33 @@ impl TradingSession {
                             base_index,
                             candle.timestamp,
                         );
+                        // Re-evaluate pessimistic SL-before-TP (`DEF-005`) if a pending order
+                        // opened a new position mid-bar whose SL & TP are BOTH touched by this bar!
+                        if !had_position_before
+                            && let Some((sl, tp, pos_side)) = self.open_position.as_ref().and_then(|p| {
+                                Some((p.stop_loss?, p.take_profit?, p.side))
+                            })
+                        {
+                            let dual_hit = match pos_side {
+                                PositionSide::Long => {
+                                    candle.low <= sl && candle.high >= tp && seg_end >= tp
+                                }
+                                PositionSide::Short => {
+                                    candle.high >= sl && candle.low <= tp && seg_end <= tp
+                                }
+                            };
+                            if dual_hit
+                                && let Some((b_reason, raw_exit)) =
+                                    self.check_position_bracket_at_price(candle.timestamp, sl)
+                            {
+                                self.execute_bracket_exit_at(
+                                    base_index,
+                                    candle.timestamp,
+                                    b_reason,
+                                    raw_exit,
+                                );
+                            }
+                        }
                         cur_px = trigger_price;
                     }
                 }

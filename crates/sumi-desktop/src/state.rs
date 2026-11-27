@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
+use sumi_core::indicators::AnalogMemoryBank;
 use sumi_core::model::Candle;
 use sumi_core::replay::ReplayController;
 use sumi_core::trading::{AccountConfig, TradingSession};
@@ -40,10 +41,13 @@ pub struct PersistedBrokerSnapshot {
     pub order_types_meta: HashMap<u64, String>,
 }
 
-/// Active causal Bar Replay + linked Paper Broker session (`sumi-core` `ReplayController` + `TradingSession`).
+/// Active causal Multi-Timeframe Bar Replay session (`sumi-core` `ReplayController`).
 pub struct ReplayRuntime {
     pub ticker: String,
+    /// Finest timeframe driving causal replay stepping (e.g. `1h` when observing `1h` + `4h`).
     pub interval: Interval,
+    /// All active timeframes tracked for synchronized multi-pane MTF stepping (e.g. `["1h", "4h", "1D"]`).
+    pub tracked_intervals: Vec<Interval>,
     pub base_bars: Vec<OhlcvBar>,
     pub base_candles: Vec<Candle>,
     pub controller: ReplayController,
@@ -86,16 +90,33 @@ impl Default for PaperBrokerRuntime {
     }
 }
 
+pub struct CachedAnalogMemoryBank {
+    pub bank: Arc<AnalogMemoryBank>,
+    pub built_epoch: u64,
+    pub built_total_bars: usize,
+}
+
 pub struct AppState {
     pub market_service: MarketDataService<TradingViewFeed>,
     pub market_store: SqliteMarketStore,
     pub workspace: WorkspaceStore,
     pub offline_mode: AtomicBool,
+    pub alert_seq: AtomicU64,
     pub bar_updates_tx: broadcast::Sender<LiveBarPayload>,
     pub bar_streams: Mutex<HashMap<String, ActiveBarStream>>,
+    pub bar_stream_generations: Mutex<HashMap<String, u64>>,
     pub quote_stream: Mutex<Option<ActiveQuoteStream>>,
     pub replay: Mutex<Option<ReplayRuntime>>,
+    /// Live Paper Broker (persisted per `(ticker, interval)` in SQLite — never overwritten by Replay!).
     pub broker: Mutex<PaperBrokerRuntime>,
+    /// Isolated sandbox Paper Broker used strictly while Bar Replay is active (`BUG-006`).
+    pub replay_broker: Mutex<PaperBrokerRuntime>,
+    /// Lazy in-RAM cross-market `AnalogMemoryBank` cache (`AFC — Analog Forecast Cone`).
+    pub analog_bank: std::sync::RwLock<Option<CachedAnalogMemoryBank>>,
+    /// Serializes cold-start `AnalogMemoryBank` builds so concurrent chart panes share one build.
+    pub analog_build_lock: Mutex<()>,
+    /// Monotonic invalidation counter bumped whenever CafeF archives are imported.
+    pub analog_cache_epoch: AtomicU64,
 }
 
 impl AppState {
@@ -113,12 +134,27 @@ impl AppState {
             market_store,
             workspace,
             offline_mode: AtomicBool::new(false),
+            alert_seq: AtomicU64::new(1),
             bar_updates_tx,
             bar_streams: Mutex::new(HashMap::new()),
+            bar_stream_generations: Mutex::new(HashMap::new()),
             quote_stream: Mutex::new(None),
             replay: Mutex::new(None),
             broker: Mutex::new(PaperBrokerRuntime::default()),
+            replay_broker: Mutex::new(PaperBrokerRuntime::default()),
+            analog_bank: std::sync::RwLock::new(None),
+            analog_build_lock: Mutex::new(()),
+            analog_cache_epoch: AtomicU64::new(1),
         })
+    }
+
+    /// Invalidates the cached `AnalogMemoryBank` so the next `compute_analog_cone` call rebuilds
+    /// cleanly from the updated `SqliteMarketStore` (e.g. after `import_cafef_dir`).
+    pub fn invalidate_analog_memory_bank(&self) {
+        self.analog_cache_epoch.fetch_add(1, Ordering::SeqCst);
+        if let Ok(mut guard) = self.analog_bank.write() {
+            *guard = None;
+        }
     }
 
     pub fn active_market_service(&self) -> MarketDataService<TradingViewFeed> {

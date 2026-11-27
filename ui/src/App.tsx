@@ -1,6 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { listen } from '@tauri-apps/api/event'
 import * as api from './api/tauri'
 import { KLineViewport } from './chart/KLineViewport'
+import { drawingSyncBus, type DrawingSyncEvent } from './chart/drawingSyncBus'
+import type { ReplaySnapshotResponse } from './types/market'
 import { BottomTradingDock } from './components/BottomTradingDock'
 import { LeftDrawingRail } from './components/LeftDrawingRail'
 import { ReplayControlBar } from './components/ReplayControlBar'
@@ -38,10 +41,58 @@ export const App: React.FC = () => {
   const [draggingHandle, setDraggingHandle] = useState<'right' | 'bottom' | null>(null)
   const dragStartRef = useRef<{ x: number; y: number; startSize: number }>({ x: 0, y: 0, startSize: 0 })
 
-  // 1. Bootstrap SQLite workspace state on startup
+  // 1. Bootstrap SQLite workspace state on startup + listen for cross-window sync events (`BUG-043`)
   useEffect(() => {
     void bootstrap()
   }, [bootstrap])
+
+  useEffect(() => {
+    if (!api.isTauriRuntime()) return
+    const unlisteners: Array<() => void> = []
+    let disposed = false
+
+    void Promise.all([
+      listen<{ action: 'start' | 'step' | 'jump' | 'stop'; snapshot?: ReplaySnapshotResponse | null }>(
+        'sumi:sync_replay',
+        (ev) => {
+          useWorkspaceStore.getState().applyRemoteReplaySync(ev.payload)
+        },
+      ),
+      listen<DrawingSyncEvent>('sumi:sync_drawing', (ev) => {
+        drawingSyncBus.emit(ev.payload, false)
+      }),
+      listen<{ ticker: string }>('sumi:sync_symbol', (ev) => {
+        const st = useWorkspaceStore.getState()
+        if (st.sync.symbol && ev.payload?.ticker) {
+          const cur = st.panes[0]?.ticker
+          if (cur?.toUpperCase() !== ev.payload.ticker.toUpperCase()) {
+            const isVn =
+              ev.payload.ticker.startsWith('HOSE:') ||
+              ev.payload.ticker.startsWith('HNX:') ||
+              ev.payload.ticker.startsWith('UPCOM:')
+            useWorkspaceStore.setState((s) => ({
+              panes: s.panes.map((p) => ({ ...p, ticker: ev.payload.ticker, showVnBands: isVn })),
+            }))
+          }
+        }
+      }),
+    ])
+      .then((fns) => {
+        if (disposed) {
+          for (const fn of fns) fn()
+        } else {
+          unlisteners.push(...fns)
+        }
+      })
+      .catch(() => {
+        // Ignore in single-window or headless harness environments without native event plugin internals
+      })
+
+    return () => {
+      disposed = true
+      for (const fn of unlisteners) fn()
+    }
+  }, [])
 
   // 2. Live Quote streaming for active watchlist symbols via Tauri Channel
   const activeWatchlistTickersKey = useMemo(() => {
@@ -79,30 +130,30 @@ export const App: React.FC = () => {
       const state = useWorkspaceStore.getState()
       if (inInput || state.symbolSearchOpen || state.indicatorsModalOpen || state.editingIndicator) return
 
-      // Drawing hotkeys
+      // Drawing hotkeys — match `e.code` so macOS Option+T/H/J/V/F (`†/˙/∆/√/ƒ`) work on physical keyboards (`BUG-021`)!
       if (e.altKey && !e.ctrlKey && !e.metaKey) {
         const k = e.key.toLowerCase()
-        if (k === 't') {
+        if (e.code === 'KeyT' || k === 't') {
           e.preventDefault()
           setActiveDrawingTool('segment')
           return
         }
-        if (k === 'h') {
+        if (e.code === 'KeyH' || k === 'h') {
           e.preventDefault()
           setActiveDrawingTool('horizontalStraightLine')
           return
         }
-        if (k === 'j') {
+        if (e.code === 'KeyJ' || k === 'j') {
           e.preventDefault()
           setActiveDrawingTool('horizontalRayLine')
           return
         }
-        if (k === 'v') {
+        if (e.code === 'KeyV' || k === 'v') {
           e.preventDefault()
           setActiveDrawingTool('verticalStraightLine')
           return
         }
-        if (k === 'f') {
+        if (e.code === 'KeyF' || k === 'f') {
           e.preventDefault()
           setActiveDrawingTool('fibonacciLine')
           return

@@ -106,6 +106,10 @@ pub enum UnfilledReason {
     ZeroSizedLot,
     /// Target open price was non-finite or `<= 0.0`.
     InvalidCandlePrice,
+    /// Session opened and stayed pinned at statutory price limit (`trắng bên bán` on ceiling / `trắng bên mua` on floor).
+    LimitLocked,
+    /// 20-session average liquidity was below `min_entry_avg_vol_20` threshold.
+    IlliquidBar,
 }
 
 impl UnfilledReason {
@@ -117,6 +121,8 @@ impl UnfilledReason {
             Self::InsufficientEquity => "NoEquity",
             Self::ZeroSizedLot => "MinLot",
             Self::InvalidCandlePrice => "BadPrice",
+            Self::LimitLocked => "LimitLock",
+            Self::IlliquidBar => "LowLiq",
         }
     }
 }
@@ -499,7 +505,7 @@ fn effective_bars_per_year(timeframe: Timeframe, n_intervals: usize, elapsed_yea
             Timeframe::M5 => 19_656.0,
             Timeframe::M15 => 6_552.0,
             Timeframe::H1 => 1_638.0,
-            Timeframe::H4 => 1_512.0,
+            Timeframe::H4 => 409.5,
             Timeframe::D1 => 252.0,
             Timeframe::W1 => 52.0,
         }

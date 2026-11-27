@@ -4,10 +4,30 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sumi_core::scanner::qmv_universe::{
+    QMV_DT1_SUMI_SYMBOLS, QMV30_SYMBOLS, QMV60_SYMBOLS, YUMEKO_CORE10_SYMBOLS,
+};
 
 use crate::error::{DesktopError, DesktopResult};
 
-const WORKSPACE_SCHEMA_VERSION: i32 = 1;
+const WORKSPACE_SCHEMA_VERSION: i32 = 3;
+const QMV_WORKSTATION_MIGRATION_KEY: &str = "qmv_workstation_v1_migrated";
+
+fn qmv_prefixed_ticker(symbol: &str) -> String {
+    match symbol {
+        "IDC" | "MBS" | "PVS" | "SHS" | "HNXINDEX" | "VN30F1!" => format!("HNX:{symbol}"),
+        "BSR" | "DDV" | "STH" | "VGI" => format!("UPCOM:{symbol}"),
+        _ => format!("HOSE:{symbol}"),
+    }
+}
+
+fn default_alert_kind() -> String {
+    "price".to_owned()
+}
+
+fn default_sound_enabled() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,14 +81,48 @@ pub struct WatchlistGroup {
 pub struct PriceAlertRecord {
     pub id: String,
     pub ticker: String,
-    /// `"cross_above"` | `"cross_below"` | `"cross_any"`
+    /// `"price"` (default) | `"drawing"` (trendline/ray/horizontal) | `"indicator"` (RSI/MACD/EMA/Signal)
+    #[serde(default = "default_alert_kind")]
+    pub alert_kind: String,
+    /// `"cross_above"` | `"cross_below"` | `"cross_any"` | indicator-specific condition
     pub condition: String,
     pub target_price: f64,
+    #[serde(default)]
+    pub interval: Option<String>,
+    #[serde(default)]
+    pub params_json: Option<Value>,
+    #[serde(default = "default_sound_enabled")]
+    pub sound_enabled: bool,
     pub message: String,
     /// `"armed"` | `"triggered"` | `"paused"`
     pub status: String,
     pub created_at_ms: i64,
     pub triggered_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndicatorTemplateRecord {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub indicators: Vec<SavedIndicatorSpec>,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedReplaySessionRecord {
+    pub id: String,
+    pub name: String,
+    pub ticker: String,
+    pub base_interval: String,
+    pub tracked_intervals: Vec<String>,
+    pub cursor_timestamp_ms: i64,
+    pub speed_multiplier: f64,
+    pub blind_mode: bool,
+    pub broker_snapshot_json: Option<Value>,
+    pub updated_at_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +157,8 @@ impl WorkspaceStore {
             db_path: path_buf,
         };
         store.seed_default_watchlists()?;
+        store.seed_default_indicator_templates()?;
+        store.migrate_qmv_workstation_v1()?;
         Ok(store)
     }
 
@@ -114,6 +170,8 @@ impl WorkspaceStore {
             db_path: PathBuf::from(":memory:"),
         };
         store.seed_default_watchlists()?;
+        store.seed_default_indicator_templates()?;
+        store.migrate_qmv_workstation_v1()?;
         Ok(store)
     }
 
@@ -185,8 +243,12 @@ impl WorkspaceStore {
             CREATE TABLE IF NOT EXISTS price_alerts (
                 id              TEXT PRIMARY KEY,
                 ticker          TEXT NOT NULL,
+                alert_kind      TEXT NOT NULL DEFAULT 'price',
                 condition       TEXT NOT NULL,
                 target_price    REAL NOT NULL,
+                interval        TEXT,
+                params_json     TEXT,
+                sound_enabled   INTEGER NOT NULL DEFAULT 1,
                 message         TEXT NOT NULL,
                 status          TEXT NOT NULL DEFAULT 'armed',
                 created_at_ms   INTEGER NOT NULL,
@@ -203,10 +265,85 @@ impl WorkspaceStore {
                 updated_at_ms INTEGER NOT NULL,
                 PRIMARY KEY (ticker, trade_id)
             );
+
+            CREATE TABLE IF NOT EXISTS indicator_templates (
+                id              TEXT PRIMARY KEY,
+                name            TEXT NOT NULL,
+                description     TEXT NOT NULL DEFAULT '',
+                indicators_json TEXT NOT NULL,
+                updated_at_ms   INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS replay_sessions (
+                id                   TEXT PRIMARY KEY,
+                name                 TEXT NOT NULL,
+                ticker               TEXT NOT NULL,
+                base_interval        TEXT NOT NULL,
+                tracked_intervals    TEXT NOT NULL,
+                cursor_timestamp_ms  INTEGER NOT NULL,
+                speed_multiplier     REAL NOT NULL DEFAULT 1.0,
+                blind_mode           INTEGER NOT NULL DEFAULT 1,
+                broker_snapshot_json TEXT,
+                updated_at_ms        INTEGER NOT NULL
+            );
             "#,
         )?;
+
+        // Idempotent additive columns for existing v1 `price_alerts` tables
+        for ddl in [
+            "ALTER TABLE price_alerts ADD COLUMN alert_kind TEXT NOT NULL DEFAULT 'price'",
+            "ALTER TABLE price_alerts ADD COLUMN interval TEXT",
+            "ALTER TABLE price_alerts ADD COLUMN params_json TEXT",
+            "ALTER TABLE price_alerts ADD COLUMN sound_enabled INTEGER NOT NULL DEFAULT 1",
+        ] {
+            let _ = conn.execute(ddl, []);
+        }
+
         conn.pragma_update(None, "user_version", WORKSPACE_SCHEMA_VERSION)?;
         Ok(())
+    }
+
+    fn default_qmv_watchlists() -> Vec<(&'static str, &'static str, i32, Vec<String>)> {
+        let qmv30: Vec<String> = QMV30_SYMBOLS.iter().map(|s| qmv_prefixed_ticker(s)).collect();
+        let qmv60: Vec<String> = QMV60_SYMBOLS.iter().map(|s| qmv_prefixed_ticker(s)).collect();
+        let core10: Vec<String> = YUMEKO_CORE10_SYMBOLS
+            .iter()
+            .map(|s| qmv_prefixed_ticker(s))
+            .collect();
+        let dt1: Vec<String> = QMV_DT1_SUMI_SYMBOLS
+            .iter()
+            .map(|s| qmv_prefixed_ticker(s))
+            .collect();
+        let indices = vec![
+            "HOSE:VNINDEX".to_owned(),
+            "HOSE:VN30".to_owned(),
+            "HNX:HNXINDEX".to_owned(),
+            "HOSE:VNXALL".to_owned(),
+            "HNX:VN30F1!".to_owned(),
+        ];
+
+        vec![
+            ("wl_qmv30", "QMV30 — 30 Cổ Phiếu Trụ Cột", 0, qmv30),
+            ("wl_qmv60", "QMV60 — Rổ Theo Dõi Trọng Điểm", 1, qmv60),
+            (
+                "wl_yumeko_core",
+                "Danh Mục Tham Chiếu Yumeko Core 10",
+                2,
+                core10,
+            ),
+            (
+                "wl_qmv_dt1",
+                "Dòng Tiền Loại 1 (DT1 — Tạo Lập)",
+                3,
+                dt1,
+            ),
+            (
+                "wl_vn_indices",
+                "Chỉ Số & Rào Chắn Thị Trường VN",
+                4,
+                indices,
+            ),
+        ]
     }
 
     fn seed_default_watchlists(&self) -> DesktopResult<()> {
@@ -219,58 +356,7 @@ impl WorkspaceStore {
             return Ok(());
         }
 
-        let defaults: [(&str, &str, i32, &[&str]); 4] = [
-            (
-                "wl_vn30",
-                "VN30 Bluechips",
-                0,
-                &[
-                    "HOSE:FPT", "HOSE:VCB", "HOSE:HPG", "HOSE:MWG", "HOSE:TCB", "HOSE:MBB",
-                    "HOSE:SSI", "HOSE:VHM", "HOSE:VNM", "HOSE:VIC", "HOSE:ACB", "HOSE:MSN",
-                ],
-            ),
-            (
-                "wl_vn_indices",
-                "Chỉ số & Phái sinh",
-                1,
-                &[
-                    "HOSE:VNINDEX",
-                    "HOSE:VN30",
-                    "HNX:HNXINDEX",
-                    "HNX:VN30F1!",
-                    "HNX:SHS",
-                    "HNX:PVS",
-                    "HNX:CEO",
-                    "UPCOM:ACV",
-                ],
-            ),
-            (
-                "wl_crypto",
-                "Crypto Realtime",
-                2,
-                &[
-                    "BINANCE:BTCUSDT",
-                    "BINANCE:ETHUSDT",
-                    "BINANCE:SOLUSDT",
-                    "BINANCE:BNBUSDT",
-                    "BINANCE:XRPUSDT",
-                ],
-            ),
-            (
-                "wl_global",
-                "Quốc tế & FX",
-                3,
-                &[
-                    "NASDAQ:AAPL",
-                    "NASDAQ:NVDA",
-                    "NASDAQ:MSFT",
-                    "AMEX:SPY",
-                    "FX_IDC:USDVND",
-                    "OANDA:XAUUSD",
-                ],
-            ),
-        ];
-
+        let defaults = Self::default_qmv_watchlists();
         let tx = conn.transaction()?;
         for (id, name, sort_order, tickers) in defaults {
             tx.execute(
@@ -696,7 +782,7 @@ impl WorkspaceStore {
         Ok(())
     }
 
-    // ─── Price Alerts ────────────────────────────────────────────────────────
+    // ─── Price / Drawing / Indicator Alerts ──────────────────────────────────
 
     pub fn list_alerts(&self) -> DesktopResult<Vec<PriceAlertRecord>> {
         let conn = self
@@ -705,22 +791,29 @@ impl WorkspaceStore {
             .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT id, ticker, condition, target_price, message, status, created_at_ms, triggered_at_ms
+            SELECT id, ticker, alert_kind, condition, target_price, interval, params_json,
+                   sound_enabled, message, status, created_at_ms, triggered_at_ms
             FROM price_alerts
             ORDER BY created_at_ms DESC
             "#,
         )?;
         let rows = stmt
             .query_map([], |r| {
+                let params_raw: Option<String> = r.get(6)?;
+                let params_json = params_raw.and_then(|s| serde_json::from_str::<Value>(&s).ok());
                 Ok(PriceAlertRecord {
                     id: r.get(0)?,
                     ticker: r.get(1)?,
-                    condition: r.get(2)?,
-                    target_price: r.get(3)?,
-                    message: r.get(4)?,
-                    status: r.get(5)?,
-                    created_at_ms: r.get(6)?,
-                    triggered_at_ms: r.get(7)?,
+                    alert_kind: r.get::<_, Option<String>>(2)?.unwrap_or_else(default_alert_kind),
+                    condition: r.get(3)?,
+                    target_price: r.get(4)?,
+                    interval: r.get(5)?,
+                    params_json,
+                    sound_enabled: r.get::<_, Option<i64>>(7)?.unwrap_or(1) != 0,
+                    message: r.get(8)?,
+                    status: r.get(9)?,
+                    created_at_ms: r.get(10)?,
+                    triggered_at_ms: r.get(11)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -732,14 +825,29 @@ impl WorkspaceStore {
             .conn
             .lock()
             .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let params_str = alert
+            .params_json
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        let kind = if alert.alert_kind.trim().is_empty() {
+            "price"
+        } else {
+            alert.alert_kind.trim()
+        };
         conn.execute(
             r#"
             INSERT INTO price_alerts (
-                id, ticker, condition, target_price, message, status, created_at_ms, triggered_at_ms
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                id, ticker, alert_kind, condition, target_price, interval, params_json,
+                sound_enabled, message, status, created_at_ms, triggered_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
             ON CONFLICT(id) DO UPDATE SET
+                alert_kind = excluded.alert_kind,
                 condition = excluded.condition,
                 target_price = excluded.target_price,
+                interval = excluded.interval,
+                params_json = excluded.params_json,
+                sound_enabled = excluded.sound_enabled,
                 message = excluded.message,
                 status = excluded.status,
                 triggered_at_ms = excluded.triggered_at_ms
@@ -747,8 +855,12 @@ impl WorkspaceStore {
             params![
                 alert.id,
                 alert.ticker.trim().to_ascii_uppercase(),
+                kind,
                 alert.condition,
                 alert.target_price,
+                alert.interval,
+                params_str,
+                i64::from(alert.sound_enabled),
                 alert.message,
                 alert.status,
                 alert.created_at_ms,
@@ -853,6 +965,519 @@ impl WorkspaceStore {
             updated_at_ms: now_ms,
         })
     }
+
+    // ─── Indicator Templates (QMV Workstation v2.2) ──────────────────────────
+
+    fn default_qmv_indicator_templates(now_ms: i64) -> Vec<IndicatorTemplateRecord> {
+        vec![
+            IndicatorTemplateRecord {
+                id: "tpl_qmv_core_kt01".to_owned(),
+                name: "1. QMV Cốt Lõi — Giá Lượng & Xu Hướng (KT01)".to_owned(),
+                description:
+                    "MA (20, 50, 100, 200) + Bollinger (20, 2) + Khối lượng (MA5, MA20) + RSI (14)"
+                        .to_owned(),
+                indicators: vec![
+                    SavedIndicatorSpec {
+                        id: "tpl_ma_kt01".to_owned(),
+                        name: "MA".to_owned(),
+                        pane_id: "candle_pane".to_owned(),
+                        is_main: true,
+                        calc_params: vec![20.0, 50.0, 100.0, 200.0],
+                        visible: true,
+                        styles: None,
+                    },
+                    SavedIndicatorSpec {
+                        id: "tpl_boll_kt01".to_owned(),
+                        name: "BOLL".to_owned(),
+                        pane_id: "candle_pane".to_owned(),
+                        is_main: true,
+                        calc_params: vec![20.0, 2.0],
+                        visible: true,
+                        styles: None,
+                    },
+                    SavedIndicatorSpec {
+                        id: "tpl_vol_kt01".to_owned(),
+                        name: "VOL".to_owned(),
+                        pane_id: "pane_vol".to_owned(),
+                        is_main: false,
+                        calc_params: vec![5.0, 20.0],
+                        visible: true,
+                        styles: None,
+                    },
+                    SavedIndicatorSpec {
+                        id: "tpl_rsi_kt01".to_owned(),
+                        name: "RSI".to_owned(),
+                        pane_id: "pane_rsi".to_owned(),
+                        is_main: false,
+                        calc_params: vec![14.0],
+                        visible: true,
+                        styles: None,
+                    },
+                ],
+                updated_at_ms: now_ms + 4,
+            },
+            IndicatorTemplateRecord {
+                id: "tpl_qmv_ichimoku_v7".to_owned(),
+                name: "2. QMV Ichimoku V7 & Phân Kỳ".to_owned(),
+                description:
+                    "Mây Ichimoku chuẩn QMV V7 (6, 18, 36, 18) + MA (50, 200) + VOL (5, 20) + CCI (14) + MACD (12, 26, 9)"
+                        .to_owned(),
+                indicators: vec![
+                    SavedIndicatorSpec {
+                        id: "tpl_ichi_v7".to_owned(),
+                        name: "ICHIMOKU".to_owned(),
+                        pane_id: "candle_pane".to_owned(),
+                        is_main: true,
+                        calc_params: vec![6.0, 18.0, 36.0, 18.0],
+                        visible: true,
+                        styles: None,
+                    },
+                    SavedIndicatorSpec {
+                        id: "tpl_ma_v7".to_owned(),
+                        name: "MA".to_owned(),
+                        pane_id: "candle_pane".to_owned(),
+                        is_main: true,
+                        calc_params: vec![50.0, 200.0],
+                        visible: true,
+                        styles: None,
+                    },
+                    SavedIndicatorSpec {
+                        id: "tpl_vol_v7".to_owned(),
+                        name: "VOL".to_owned(),
+                        pane_id: "pane_vol".to_owned(),
+                        is_main: false,
+                        calc_params: vec![5.0, 20.0],
+                        visible: true,
+                        styles: None,
+                    },
+                    SavedIndicatorSpec {
+                        id: "tpl_cci_v7".to_owned(),
+                        name: "CCI".to_owned(),
+                        pane_id: "pane_cci".to_owned(),
+                        is_main: false,
+                        calc_params: vec![14.0],
+                        visible: true,
+                        styles: None,
+                    },
+                    SavedIndicatorSpec {
+                        id: "tpl_macd_v7".to_owned(),
+                        name: "MACD".to_owned(),
+                        pane_id: "pane_macd".to_owned(),
+                        is_main: false,
+                        calc_params: vec![12.0, 26.0, 9.0],
+                        visible: true,
+                        styles: None,
+                    },
+                ],
+                updated_at_ms: now_ms + 3,
+            },
+            IndicatorTemplateRecord {
+                id: "tpl_qmv_flow_cycle".to_owned(),
+                name: "3. QMV Chu Kỳ Dòng Tiền T+ / Sóng (OHLCV Proxy)".to_owned(),
+                description:
+                    "MA (20, 50) + VOL (5, 20) + Chu kỳ Dòng tiền QMV Proxy (3, 5, 10, 20) + Sức mạnh RS vs VNINDEX"
+                        .to_owned(),
+                indicators: vec![
+                    SavedIndicatorSpec {
+                        id: "tpl_ma_flow".to_owned(),
+                        name: "MA".to_owned(),
+                        pane_id: "candle_pane".to_owned(),
+                        is_main: true,
+                        calc_params: vec![20.0, 50.0],
+                        visible: true,
+                        styles: None,
+                    },
+                    SavedIndicatorSpec {
+                        id: "tpl_vol_flow".to_owned(),
+                        name: "VOL".to_owned(),
+                        pane_id: "pane_vol".to_owned(),
+                        is_main: false,
+                        calc_params: vec![5.0, 20.0],
+                        visible: true,
+                        styles: None,
+                    },
+                    SavedIndicatorSpec {
+                        id: "tpl_qmv_flow".to_owned(),
+                        name: "QMV_FLOW".to_owned(),
+                        pane_id: "pane_qmv_flow".to_owned(),
+                        is_main: false,
+                        calc_params: vec![3.0, 5.0, 10.0, 20.0],
+                        visible: true,
+                        styles: None,
+                    },
+                    SavedIndicatorSpec {
+                        id: "tpl_rs_vnindex".to_owned(),
+                        name: "RS_VNINDEX".to_owned(),
+                        pane_id: "pane_rs".to_owned(),
+                        is_main: false,
+                        calc_params: vec![20.0],
+                        visible: true,
+                        styles: None,
+                    },
+                ],
+                updated_at_ms: now_ms + 2,
+            },
+            IndicatorTemplateRecord {
+                id: "tpl_qmv_safe_bottom".to_owned(),
+                name: "4. QMV Bắt Đáy An Toàn & Tái Cân Bằng (DT1/DT2)".to_owned(),
+                description:
+                    "Bollinger (20, 2) + MA (20, 50, 200) + VOL (5, 20) + RSI (14) + MACD (12, 26, 9) tìm phân kỳ đáy"
+                        .to_owned(),
+                indicators: vec![
+                    SavedIndicatorSpec {
+                        id: "tpl_boll_bot".to_owned(),
+                        name: "BOLL".to_owned(),
+                        pane_id: "candle_pane".to_owned(),
+                        is_main: true,
+                        calc_params: vec![20.0, 2.0],
+                        visible: true,
+                        styles: None,
+                    },
+                    SavedIndicatorSpec {
+                        id: "tpl_ma_bot".to_owned(),
+                        name: "MA".to_owned(),
+                        pane_id: "candle_pane".to_owned(),
+                        is_main: true,
+                        calc_params: vec![20.0, 50.0, 200.0],
+                        visible: true,
+                        styles: None,
+                    },
+                    SavedIndicatorSpec {
+                        id: "tpl_vol_bot".to_owned(),
+                        name: "VOL".to_owned(),
+                        pane_id: "pane_vol".to_owned(),
+                        is_main: false,
+                        calc_params: vec![5.0, 20.0],
+                        visible: true,
+                        styles: None,
+                    },
+                    SavedIndicatorSpec {
+                        id: "tpl_rsi_bot".to_owned(),
+                        name: "RSI".to_owned(),
+                        pane_id: "pane_rsi".to_owned(),
+                        is_main: false,
+                        calc_params: vec![14.0],
+                        visible: true,
+                        styles: None,
+                    },
+                    SavedIndicatorSpec {
+                        id: "tpl_macd_bot".to_owned(),
+                        name: "MACD".to_owned(),
+                        pane_id: "pane_macd".to_owned(),
+                        is_main: false,
+                        calc_params: vec![12.0, 26.0, 9.0],
+                        visible: true,
+                        styles: None,
+                    },
+                ],
+                updated_at_ms: now_ms + 1,
+            },
+        ]
+    }
+
+    fn seed_default_indicator_templates(&self) -> DesktopResult<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM indicator_templates", [], |r| r.get(0))?;
+        if count > 0 {
+            return Ok(());
+        }
+        drop(conn);
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        for tpl in Self::default_qmv_indicator_templates(now_ms) {
+            let conn = self.conn.lock().map_err(|_| {
+                DesktopError::Internal("workspace sqlite mutex poisoned".to_owned())
+            })?;
+            let json_str = serde_json::to_string(&tpl.indicators)?;
+            conn.execute(
+                r#"
+                INSERT INTO indicator_templates (id, name, description, indicators_json, updated_at_ms)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    description = excluded.description,
+                    indicators_json = excluded.indicators_json,
+                    updated_at_ms = excluded.updated_at_ms
+                "#,
+                params![tpl.id, tpl.name, tpl.description, json_str, tpl.updated_at_ms],
+            )?;
+            drop(conn);
+        }
+        Ok(())
+    }
+
+    /// One-time non-destructive upgrade for existing desktop workspaces so legacy non-QMV
+    /// default watchlists (`wl_crypto`, `wl_global`, `wl_vn30`) and templates (`tpl_vn30f_scalp`, etc.)
+    /// are upgraded to the canonical QMV workstation defaults while preserving user custom records.
+    fn migrate_qmv_workstation_v1(&self) -> DesktopResult<()> {
+        if self.get_kv(QMV_WORKSTATION_MIGRATION_KEY)?.is_some() {
+            return Ok(());
+        }
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        {
+            let mut conn = self.conn.lock().map_err(|_| {
+                DesktopError::Internal("workspace sqlite mutex poisoned".to_owned())
+            })?;
+            let tx = conn.transaction()?;
+            tx.execute(
+                "DELETE FROM watchlists WHERE id IN ('wl_crypto', 'wl_global', 'wl_vn30')",
+                [],
+            )?;
+            for (id, name, sort_order, tickers) in Self::default_qmv_watchlists() {
+                tx.execute(
+                    r#"
+                    INSERT INTO watchlists (id, name, sort_order)
+                    VALUES (?1, ?2, ?3)
+                    ON CONFLICT(id) DO UPDATE SET
+                        name = excluded.name,
+                        sort_order = excluded.sort_order
+                    "#,
+                    params![id, name, sort_order],
+                )?;
+                tx.execute(
+                    "DELETE FROM watchlist_items WHERE watchlist_id = ?1",
+                    params![id],
+                )?;
+                for (idx, ticker) in tickers.iter().enumerate() {
+                    tx.execute(
+                        "INSERT INTO watchlist_items (watchlist_id, ticker, sort_order) VALUES (?1, ?2, ?3)",
+                        params![id, ticker, idx as i32],
+                    )?;
+                }
+            }
+
+            tx.execute(
+                "DELETE FROM indicator_templates WHERE id IN ('tpl_vn_price_action', 'tpl_ichimoku_pro', 'tpl_vn30f_scalp')",
+                [],
+            )?;
+            for tpl in Self::default_qmv_indicator_templates(now_ms) {
+                let json_str = serde_json::to_string(&tpl.indicators)?;
+                tx.execute(
+                    r#"
+                    INSERT INTO indicator_templates (id, name, description, indicators_json, updated_at_ms)
+                    VALUES (?1, ?2, ?3, ?4, ?5)
+                    ON CONFLICT(id) DO UPDATE SET
+                        name = excluded.name,
+                        description = excluded.description,
+                        indicators_json = excluded.indicators_json,
+                        updated_at_ms = excluded.updated_at_ms
+                    "#,
+                    params![tpl.id, tpl.name, tpl.description, json_str, tpl.updated_at_ms],
+                )?;
+            }
+            tx.commit()?;
+        }
+
+        self.set_kv(QMV_WORKSTATION_MIGRATION_KEY, &serde_json::json!(true))?;
+        Ok(())
+    }
+
+    pub fn list_indicator_templates(&self) -> DesktopResult<Vec<IndicatorTemplateRecord>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, indicators_json, updated_at_ms FROM indicator_templates ORDER BY updated_at_ms DESC, name ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                let raw: String = r.get(3)?;
+                let indicators: Vec<SavedIndicatorSpec> =
+                    serde_json::from_str(&raw).unwrap_or_default();
+                Ok(IndicatorTemplateRecord {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    description: r.get(2)?,
+                    indicators,
+                    updated_at_ms: r.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn save_indicator_template(
+        &self,
+        tpl: &IndicatorTemplateRecord,
+    ) -> DesktopResult<IndicatorTemplateRecord> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let json_str = serde_json::to_string(&tpl.indicators)?;
+        conn.execute(
+            r#"
+            INSERT INTO indicator_templates (id, name, description, indicators_json, updated_at_ms)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                description = excluded.description,
+                indicators_json = excluded.indicators_json,
+                updated_at_ms = excluded.updated_at_ms
+            "#,
+            params![tpl.id, tpl.name, tpl.description, json_str, now_ms],
+        )?;
+        let mut saved = tpl.clone();
+        saved.updated_at_ms = now_ms;
+        Ok(saved)
+    }
+
+    pub fn delete_indicator_template(&self, id: &str) -> DesktopResult<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        conn.execute("DELETE FROM indicator_templates WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    // ─── Saved Bar Replay Sessions (v2.2) ────────────────────────────────────
+
+    pub fn list_replay_sessions(&self) -> DesktopResult<Vec<SavedReplaySessionRecord>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT id, name, ticker, base_interval, tracked_intervals, cursor_timestamp_ms,
+                   speed_multiplier, blind_mode, broker_snapshot_json, updated_at_ms
+            FROM replay_sessions
+            ORDER BY updated_at_ms DESC
+            "#,
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                let ivs_raw: String = r.get(4)?;
+                let tracked_intervals: Vec<String> =
+                    serde_json::from_str(&ivs_raw).unwrap_or_default();
+                let broker_raw: Option<String> = r.get(8)?;
+                let broker_snapshot_json =
+                    broker_raw.and_then(|s| serde_json::from_str::<Value>(&s).ok());
+                Ok(SavedReplaySessionRecord {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    ticker: r.get(2)?,
+                    base_interval: r.get(3)?,
+                    tracked_intervals,
+                    cursor_timestamp_ms: r.get(5)?,
+                    speed_multiplier: r.get(6)?,
+                    blind_mode: r.get::<_, i64>(7)? != 0,
+                    broker_snapshot_json,
+                    updated_at_ms: r.get(9)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn get_replay_session(
+        &self,
+        id: &str,
+    ) -> DesktopResult<Option<SavedReplaySessionRecord>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let row = conn
+            .query_row(
+                r#"
+                SELECT id, name, ticker, base_interval, tracked_intervals, cursor_timestamp_ms,
+                       speed_multiplier, blind_mode, broker_snapshot_json, updated_at_ms
+                FROM replay_sessions
+                WHERE id = ?1
+                "#,
+                params![id],
+                |r| {
+                    let ivs_raw: String = r.get(4)?;
+                    let tracked_intervals: Vec<String> =
+                        serde_json::from_str(&ivs_raw).unwrap_or_default();
+                    let broker_raw: Option<String> = r.get(8)?;
+                    let broker_snapshot_json =
+                        broker_raw.and_then(|s| serde_json::from_str::<Value>(&s).ok());
+                    Ok(SavedReplaySessionRecord {
+                        id: r.get(0)?,
+                        name: r.get(1)?,
+                        ticker: r.get(2)?,
+                        base_interval: r.get(3)?,
+                        tracked_intervals,
+                        cursor_timestamp_ms: r.get(5)?,
+                        speed_multiplier: r.get(6)?,
+                        blind_mode: r.get::<_, i64>(7)? != 0,
+                        broker_snapshot_json,
+                        updated_at_ms: r.get(9)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    pub fn save_replay_session(
+        &self,
+        session: &SavedReplaySessionRecord,
+    ) -> DesktopResult<SavedReplaySessionRecord> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let ivs_json = serde_json::to_string(&session.tracked_intervals)?;
+        let broker_str = session
+            .broker_snapshot_json
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        conn.execute(
+            r#"
+            INSERT INTO replay_sessions (
+                id, name, ticker, base_interval, tracked_intervals, cursor_timestamp_ms,
+                speed_multiplier, blind_mode, broker_snapshot_json, updated_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                ticker = excluded.ticker,
+                base_interval = excluded.base_interval,
+                tracked_intervals = excluded.tracked_intervals,
+                cursor_timestamp_ms = excluded.cursor_timestamp_ms,
+                speed_multiplier = excluded.speed_multiplier,
+                blind_mode = excluded.blind_mode,
+                broker_snapshot_json = excluded.broker_snapshot_json,
+                updated_at_ms = excluded.updated_at_ms
+            "#,
+            params![
+                session.id,
+                session.name,
+                session.ticker.trim().to_ascii_uppercase(),
+                session.base_interval,
+                ivs_json,
+                session.cursor_timestamp_ms,
+                session.speed_multiplier,
+                i64::from(session.blind_mode),
+                broker_str,
+                now_ms,
+            ],
+        )?;
+        let mut saved = session.clone();
+        saved.updated_at_ms = now_ms;
+        Ok(saved)
+    }
+
+    pub fn delete_replay_session(&self, id: &str) -> DesktopResult<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        conn.execute("DELETE FROM replay_sessions WHERE id = ?1", params![id])?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -864,10 +1489,16 @@ mod tests {
     fn workspace_store_crud_drawings_indicators_watchlists_alerts() {
         let store = WorkspaceStore::open_in_memory().unwrap();
 
-        // Default watchlists seeded automatically
+        // Default QMV watchlists seeded automatically
         let lists = store.list_watchlists().unwrap();
-        assert_eq!(lists.len(), 4);
+        assert_eq!(lists.len(), 5);
+        assert_eq!(lists[0].id, "wl_qmv30");
+        assert_eq!(lists[0].tickers.len(), 30);
         assert!(lists[0].tickers.contains(&"HOSE:FPT".to_owned()));
+        assert!(lists[0].tickers.contains(&"UPCOM:BSR".to_owned()));
+        assert!(lists[0].tickers.contains(&"HNX:IDC".to_owned()));
+        assert_eq!(lists[1].id, "wl_qmv60");
+        assert_eq!(lists[1].tickers.len(), 60);
 
         // Drawings roundtrip
         store
@@ -909,13 +1540,17 @@ mod tests {
         assert_eq!(inds.len(), 1);
         assert_eq!(inds[0].name, "ICHIMOKU");
 
-        // Alerts
+        // Alerts (price + drawing + indicator)
         store
             .upsert_alert(&PriceAlertRecord {
                 id: "al_1".to_owned(),
                 ticker: "HOSE:FPT".to_owned(),
+                alert_kind: "price".to_owned(),
                 condition: "cross_above".to_owned(),
                 target_price: 135_000.0,
+                interval: Some("1D".to_owned()),
+                params_json: None,
+                sound_enabled: true,
                 message: "FPT breakout".to_owned(),
                 status: "armed".to_owned(),
                 created_at_ms: 1_700_000_000_000,
@@ -923,5 +1558,42 @@ mod tests {
             })
             .unwrap();
         assert_eq!(store.list_alerts().unwrap().len(), 1);
+
+        // Indicator templates seeded + CRUD
+        let tpls = store.list_indicator_templates().unwrap();
+        assert_eq!(tpls.len(), 4);
+        assert!(tpls.iter().any(|t| t.id == "tpl_qmv_ichimoku_v7"));
+        store
+            .save_indicator_template(&IndicatorTemplateRecord {
+                id: "tpl_custom".to_owned(),
+                name: "My Custom Setup".to_owned(),
+                description: "EMA + RSI".to_owned(),
+                indicators: inds.clone(),
+                updated_at_ms: 0,
+            })
+            .unwrap();
+        assert_eq!(store.list_indicator_templates().unwrap().len(), 5);
+        store.delete_indicator_template("tpl_custom").unwrap();
+        assert_eq!(store.list_indicator_templates().unwrap().len(), 4);
+
+        // Saved Replay Sessions roundtrip
+        store
+            .save_replay_session(&SavedReplaySessionRecord {
+                id: "rep_1".to_owned(),
+                name: "FPT 1h+4h Q3/2026".to_owned(),
+                ticker: "HOSE:FPT".to_owned(),
+                base_interval: "1h".to_owned(),
+                tracked_intervals: vec!["1h".to_owned(), "4h".to_owned()],
+                cursor_timestamp_ms: 1_790_000_000_000,
+                speed_multiplier: 2.0,
+                blind_mode: true,
+                broker_snapshot_json: Some(json!({"initial_cash": 500_000_000.0})),
+                updated_at_ms: 0,
+            })
+            .unwrap();
+        assert_eq!(store.list_replay_sessions().unwrap().len(), 1);
+        assert!(store.get_replay_session("rep_1").unwrap().is_some());
+        store.delete_replay_session("rep_1").unwrap();
+        assert!(store.list_replay_sessions().unwrap().is_empty());
     }
 }

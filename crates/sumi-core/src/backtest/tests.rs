@@ -465,6 +465,7 @@ fn backtest_config_sanitize_clamps_nan_infinity_and_inverted_periods() {
             donchian_entry_period: 0,
             donchian_exit_period: 9999,
             atr_period: 0,
+            ..StrategyParams::default()
         },
         direction_mode: StrategyDirectionMode::LongShort,
         sizing: PositionSizingMode::PercentEquity(f64::NAN),
@@ -476,6 +477,7 @@ fn backtest_config_sanitize_clamps_nan_infinity_and_inverted_periods() {
             trailing_stop_atr_mult: Some(999.0),
             max_holding_bars: Some(0),
             min_holding_bars: 500,
+            ..StopTakeConfig::default()
         },
         initial_cash: f64::NAN,
         commission_bps: f64::INFINITY,
@@ -485,6 +487,7 @@ fn backtest_config_sanitize_clamps_nan_infinity_and_inverted_periods() {
         lot_step: f64::NAN,
         in_sample_split_pct: Some(0.99),
         custom_rules: CustomSignalRuleSpec::default(),
+        ..BacktestConfig::default()
     };
     cfg.sanitize();
 
@@ -2299,7 +2302,11 @@ fn r17_multistrategy_pct_utc_alignment_and_intraday_vs_daily_benchmark_causality
         None,
         false,
     );
-    assert_eq!(rep.curves.len(), 9, "7 presets + B&H + SPY benchmark");
+    assert_eq!(
+        rep.curves.len(),
+        StrategyPresetKind::ALL.len() + 2,
+        "13 presets + B&H + SPY benchmark"
+    );
     let bh = rep
         .curves
         .iter()
@@ -3615,4 +3622,101 @@ fn wave3_regression_monotonic_cutoff_no_vn_short_outlier_yearly_breadth_pit_and_
         "BUG-034: symbol newlines must be stripped in Markdown table"
     );
     assert!(md.contains("FPT INJECTED"));
+}
+
+#[test]
+fn qmv_vn_microstructure_enforces_locked_ceiling_locked_floor_and_pit_t3_t2() {
+    use crate::journal::{ExchangeVenue, VnPriceUnit, compute_daily_price_band};
+
+    // Build a pre-2022-08-29 daily series (`T+3` settlement lock!) on `HOSE:FPT` in raw VND.
+    let base_ts = 1_640_995_200_i64; // 2022-01-01 UTC (< 2022-08-29 -> T+3!)
+    let mut bars: Vec<Candle> = (0..30)
+        .map(|i| {
+            let px = 20_000.0;
+            Candle {
+                timestamp: base_ts + (i as i64) * 86_400,
+                date_label: String::new(),
+                open: px,
+                high: px + 200.0,
+                low: px - 200.0,
+                close: px,
+                volume: 100_000.0,
+            }
+        })
+        .collect();
+
+    // Trigger Donchian(5/3) breakout at bar 10 (`close = 20,500 > 20,200`) -> pending Buy at bar 11!
+    bars[10].high = 20_600.0;
+    bars[10].close = 20_500.0;
+    // Bar 11: Locked Ceiling (`trắng bên bán`: Open = High = Low = Close = Ceiling)!
+    let b11 = compute_daily_price_band(ExchangeVenue::Hose, 20_500.0, VnPriceUnit::RawVnd).unwrap();
+    bars[11].open = b11.ceiling_price;
+    bars[11].high = b11.ceiling_price;
+    bars[11].low = b11.ceiling_price;
+    bars[11].close = b11.ceiling_price;
+
+    let cfg = BacktestConfig {
+        preset: StrategyPresetKind::DonchianAtrBreakout,
+        params: StrategyParams {
+            donchian_entry_period: 5,
+            donchian_exit_period: 3,
+            ..StrategyParams::default()
+        },
+        initial_cash: 500_000_000.0,
+        commission_bps: 15.0,
+        tax_sell_bps: 10.0,
+        slippage_bps: 0.0,
+        lot_step: 100.0,
+        enforce_vn_microstructure: true,
+        risk: StopTakeConfig {
+            stop_loss_pct: Some(4.0),
+            take_profit_pct: None,
+            ..StopTakeConfig::default()
+        },
+        ..BacktestConfig::default()
+    };
+
+    let res_locked = run_backtest("HOSE:FPT", Timeframe::D1, &bars, &cfg, None);
+    assert!(
+        res_locked
+            .unexecuted_signals
+            .iter()
+            .any(|u| u.signal_bar_index == 10 && u.reason == UnfilledReason::LimitLocked),
+        "Locked-ceiling session must reject unrealistic buy fill with LimitLocked"
+    );
+
+    // Now let bar 11 trade normally (`20,600`), then check:
+    // - Bar 12 (`held = 1 < T+3`) & Bar 13 (`held = 2 < T+3`): stop-loss CANNOT fire yet (`T+3` pre-2022)!
+    // - Bar 14 (`held = 3 >= T+3`): stock locks at Floor (`trắng bên mua`) -> SL deferred to Bar 15!
+    bars[11] = Candle {
+        timestamp: base_ts + 11 * 86_400,
+        date_label: String::new(),
+        open: 20_600.0,
+        high: 20_700.0,
+        low: 20_500.0,
+        close: 20_600.0,
+        volume: 150_000.0,
+    };
+    bars[12].low = 19_200.0; // Below -4% SL (19,776), but T+1 locked!
+    bars[12].close = 20_000.0;
+    bars[13].low = 19_200.0; // Below -4% SL, but T+2 locked (pre-2022-08-29 requires T+3)!
+    bars[13].close = 20_000.0;
+    let b14 = compute_daily_price_band(ExchangeVenue::Hose, 20_000.0, VnPriceUnit::RawVnd).unwrap();
+    bars[14].open = b14.floor_price;
+    bars[14].high = b14.floor_price;
+    bars[14].low = b14.floor_price;
+    bars[14].close = b14.floor_price; // Locked floor (`trắng bên mua`) on T+3!
+    bars[15].open = 18_200.0;
+    bars[15].high = 18_500.0;
+    bars[15].low = 18_000.0;
+    bars[15].close = 18_300.0; // Liquidity returns on Bar 15!
+
+    let res_floor = run_backtest("HOSE:FPT", Timeframe::D1, &bars, &cfg, None);
+    let first_trade = res_floor.trades.first().expect("must execute deferred exit");
+    assert_eq!(first_trade.entry_bar_index, 11);
+    assert_eq!(
+        first_trade.exit_bar_index, 15,
+        "Pre-2022 T+3 + Bar 14 locked floor must defer stop exit until Bar 15"
+    );
+    assert_eq!(first_trade.exit_price % 50.0, 0.0);
 }

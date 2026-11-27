@@ -201,7 +201,16 @@ impl KineticAnimation {
             return false;
         }
 
+        if !self.damping_coeff.is_finite()
+            || self.damping_coeff <= 0.0
+            || self.damping_coeff >= 1.0
+        {
+            return false;
+        }
         let ln_k = self.damping_coeff.ln();
+        if !ln_k.is_finite() || ln_k.abs() <= 1e-12 {
+            return false;
+        }
         let arg = (self.epsilon_distance * ln_k) / -result_speed.abs();
         if arg <= 0.0 || !arg.is_finite() {
             return false;
@@ -224,8 +233,19 @@ impl KineticAnimation {
         if !time_ms.is_finite() {
             return Some(start.position);
         }
+        if !self.duration_ms.is_finite()
+            || self.duration_ms < 0.0
+            || !self.damping_coeff.is_finite()
+            || self.damping_coeff <= 0.0
+            || self.damping_coeff >= 1.0
+        {
+            return Some(start.position);
+        }
         let elapsed = (time_ms - start.time_ms).clamp(0.0, self.duration_ms);
         let ln_k = self.damping_coeff.ln();
+        if !ln_k.is_finite() || ln_k.abs() <= 1e-12 {
+            return Some(start.position);
+        }
         let pos = start.position
             + self.speed_units_per_ms * (self.damping_coeff.powf(elapsed) - 1.0) / ln_k;
         pos.is_finite().then_some(pos)

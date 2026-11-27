@@ -3,6 +3,8 @@ import {
   BellPlus,
   RotateCcw,
   Scissors,
+  ShieldAlert,
+  Target,
   Trash2,
   TrendingDown,
   TrendingUp,
@@ -20,12 +22,15 @@ export interface ChartContextMenuState {
 interface ChartContextMenuProps {
   menu: ChartContextMenuState
   ticker: string
+  hasOpenPosition?: boolean
   onClose: () => void
   onResetView: () => void
   onReplayCutHere: () => void
   onCreateAlertAtPrice: () => void
   onBuyLimitAtPrice: () => void
   onSellLimitAtPrice: () => void
+  onSetStopLossAtPrice?: () => void
+  onSetTakeProfitAtPrice?: () => void
   onDeleteSelectedDrawing: () => void
   onClearAllDrawings: () => void
 }
@@ -33,12 +38,15 @@ interface ChartContextMenuProps {
 export const ChartContextMenu: React.FC<ChartContextMenuProps> = ({
   menu,
   ticker,
+  hasOpenPosition = false,
   onClose,
   onResetView,
   onReplayCutHere,
   onCreateAlertAtPrice,
   onBuyLimitAtPrice,
   onSellLimitAtPrice,
+  onSetStopLossAtPrice,
+  onSetTakeProfitAtPrice,
   onDeleteSelectedDrawing,
   onClearAllDrawings,
 }) => {
@@ -201,6 +209,41 @@ export const ChartContextMenu: React.FC<ChartContextMenuProps> = ({
           <span className="truncate">Đặt lệnh BÁN (LO) @ {menu.priceLabel}</span>
         </span>
       </button>
+
+      {hasOpenPosition && onSetStopLossAtPrice && onSetTakeProfitAtPrice && (
+        <>
+          <button
+            type="button"
+            role={itemRole}
+            disabled={menu.price === null}
+            className={itemCls}
+            onClick={() => {
+              onSetStopLossAtPrice()
+              onClose()
+            }}
+          >
+            <span className="flex items-center gap-2 truncate">
+              <ShieldAlert aria-hidden="true" className="w-3.5 h-3.5 text-[#F23645] shrink-0" />
+              <span className="truncate">Đặt Cắt lỗ (SL) @ {menu.priceLabel}</span>
+            </span>
+          </button>
+          <button
+            type="button"
+            role={itemRole}
+            disabled={menu.price === null}
+            className={itemCls}
+            onClick={() => {
+              onSetTakeProfitAtPrice()
+              onClose()
+            }}
+          >
+            <span className="flex items-center gap-2 truncate">
+              <Target aria-hidden="true" className="w-3.5 h-3.5 text-[#089981] shrink-0" />
+              <span className="truncate">Đặt Chốt lời (TP) @ {menu.priceLabel}</span>
+            </span>
+          </button>
+        </>
+      )}
 
       <hr className="my-1 border-0 h-px" style={{ backgroundColor: 'var(--tv-border)' }} />
 

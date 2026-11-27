@@ -1,4 +1,8 @@
 import type {
+  AnalogConeQueryParams,
+  AnalogConeResponseDto,
+  AnalogConeStepDto,
+  AnalogMatchCaseDto,
   BarsPageResponse,
   BrokerStateSnapshot,
   DataStatusResponse,
@@ -152,27 +156,27 @@ function makeResolvedSymbol(ticker: string): ResolvedSymbol {
 
 const DEFAULT_WATCHLISTS: WatchlistGroup[] = [
   {
-    id: 'wl_vn30',
-    name: 'VN30 Bluechips',
-    tickers: ['HOSE:FPT', 'HOSE:VCB', 'HOSE:HPG', 'HOSE:MWG', 'HOSE:TCB', 'HOSE:MBB', 'HOSE:SSI', 'HOSE:VHM', 'HOSE:VNM', 'HOSE:VIC', 'HOSE:ACB', 'HOSE:MSN'],
+    id: 'wl_qmv30',
+    name: 'QMV30 — 30 Cổ Phiếu Trụ Cột',
+    tickers: ['HOSE:FPT', 'HOSE:VCB', 'HOSE:HPG', 'HOSE:MWG', 'HOSE:TCB', 'HOSE:MBB', 'HOSE:SSI', 'HOSE:VHM', 'HOSE:VNM', 'HOSE:VIC', 'HOSE:BID', 'HOSE:CTG', 'UPCOM:BSR', 'HNX:IDC'],
     sortOrder: 0,
   },
   {
-    id: 'wl_vn_indices',
-    name: 'Chỉ số & Phái sinh',
-    tickers: ['HOSE:VNINDEX', 'HOSE:VN30', 'HNX:VN30F1!', 'HNX:SHS', 'HNX:PVS', 'UPCOM:ACV'],
+    id: 'wl_qmv60',
+    name: 'QMV60 — Rổ Theo Dõi Trọng Điểm',
+    tickers: ['HOSE:ACB', 'HOSE:BID', 'HOSE:CTG', 'HOSE:FPT', 'HOSE:HPG', 'HOSE:MBB', 'HOSE:MWG', 'HOSE:SSI', 'HOSE:STB', 'HOSE:TCB', 'HOSE:VCB', 'HOSE:VCI', 'HOSE:VNM', 'HOSE:VPB'],
     sortOrder: 1,
   },
   {
-    id: 'wl_crypto',
-    name: 'Crypto Realtime',
-    tickers: ['BINANCE:BTCUSDT', 'BINANCE:ETHUSDT', 'BINANCE:SOLUSDT'],
+    id: 'wl_yumeko_core',
+    name: 'Danh Mục Tham Chiếu Yumeko Core 10',
+    tickers: ['HOSE:BID', 'HOSE:FPT', 'HOSE:MBB', 'HOSE:SAB', 'HOSE:SSI', 'HOSE:TCX', 'HOSE:VCB', 'HOSE:VCI', 'HOSE:VNM', 'HOSE:VTP'],
     sortOrder: 2,
   },
   {
-    id: 'wl_global',
-    name: 'Quốc tế & FX',
-    tickers: ['NASDAQ:AAPL', 'NASDAQ:NVDA', 'AMEX:SPY', 'FX_IDC:USDVND'],
+    id: 'wl_vn_indices',
+    name: 'Chỉ Số & Rào Chắn Thị Trường VN',
+    tickers: ['HOSE:VNINDEX', 'HOSE:VN30', 'HNX:HNXINDEX', 'HOSE:VNXALL', 'HNX:VN30F1!'],
     sortOrder: 3,
   },
 ]
@@ -736,12 +740,19 @@ export const webFallbackApi = {
 
   runBacktest(input: StrategyBacktestInput): StrategyBacktestResponse {
     const presetLabels: Record<StrategyBacktestInput['preset'], string> = {
+      qmv_s1: 'QMV S1 — Hỗ Trợ Cứng + Cạn Cung & Nổ Vol (KT01)',
+      qmv_s2: 'QMV S2 — Bắt Đáy An Toàn & Phân Kỳ Đáy (DT1/DT2)',
+      qmv_s3: 'QMV S3 — Xu Hướng Mây Ichimoku V7 (6-18-36)',
+      qmv_s4: 'QMV S4 — Đồng Pha Chu Kỳ Dòng Tiền T+ & Sóng (Proxy)',
+      qmv_s5: 'QMV S5 — Vượt Vùng Tắc Nghẽn & Đỉnh 50 Phiên',
+      qmv_s6: 'QMV S6 — Hợp Lưu Đa Trụ Cột QMV (Multi-Gate)',
       sma_ema: 'SMA/EMA Trend Crossover',
       rsi_mean_rev: 'RSI Mean Reversion',
       macd: 'MACD Momentum',
       bb_squeeze: 'Bollinger Squeeze Breakout',
       donchian_atr: 'Donchian ATR Breakout',
       rsi_bb: 'RSI + Bollinger Confluence',
+      custom: input.customRules?.name || 'Tự thiết kế QMV Signal Rules',
     }
     let bars = generateSeries(input.ticker, input.interval as IntervalKey, 480)
     if (input.fromTimestampMs != null && input.toTimestampMs != null && input.fromTimestampMs > input.toTimestampMs) {
@@ -975,6 +986,277 @@ export const webFallbackApi = {
       matchedSymbols: rows.length,
       elapsedMs: 14,
       rows,
+    }
+  },
+
+  computeAnalogCone(params: AnalogConeQueryParams): AnalogConeResponseDto {
+    const info = makeResolvedSymbol(params.ticker)
+    const horizon = Math.max(1, Math.min(20, Math.round(params.horizon ?? 10)))
+    const topK = Math.max(10, Math.min(250, Math.round(params.topK ?? 100)))
+    const useMkt = params.useMarketContext !== false
+    const isVnAsset = ['HOSE', 'HNX', 'UPCOM'].includes(info.exchange)
+    const weightProfile = useMkt && isVnAsset ? 'MarketAware' : 'EndogenousOnly'
+
+    if (params.interval !== '1D') {
+      return {
+        ticker: info.ticker,
+        exchange: info.exchange,
+        symbol: info.symbol,
+        venue: info.exchange,
+        interval: String(params.interval),
+        supportedInterval: false,
+        replayLocked: false,
+        asOfTimestampMs: null,
+        asOfDate: null,
+        anchorClose: null,
+        horizon,
+        topK,
+        weightProfile,
+        queryLatencyUs: 0,
+        statusMessage: 'AFC hiệu lực trên khung 1D',
+        forecast: null,
+      }
+    }
+
+    const replayActive = Boolean(
+      webReplay && webReplay.ticker.toUpperCase() === info.ticker.toUpperCase(),
+    )
+    let allBars = generateSeries(info.ticker, '1D', 480)
+    let cutMs = params.asOfTimestampMs ?? null
+    if (replayActive && webReplay) {
+      const repCut = webReplay.bars[webReplay.cursor]?.timestamp ?? null
+      cutMs = cutMs !== null && repCut !== null ? Math.min(cutMs, repCut) : (repCut ?? cutMs)
+    }
+    if (cutMs !== null) {
+      allBars = allBars.filter((b) => b.timestamp <= cutMs!)
+    }
+
+    if (allBars.length <= 65) {
+      return {
+        ticker: info.ticker,
+        exchange: info.exchange,
+        symbol: info.symbol,
+        venue: info.exchange,
+        interval: '1D',
+        supportedInterval: true,
+        replayLocked: replayActive,
+        asOfTimestampMs: allBars[allBars.length - 1]?.timestamp ?? null,
+        asOfDate: null,
+        anchorClose: allBars[allBars.length - 1]?.close ?? null,
+        horizon,
+        topK,
+        weightProfile,
+        queryLatencyUs: 120,
+        statusMessage: `Cần tối thiểu 66 phiên lịch sử 1D để mã hóa trạng thái AFC (hiện có ${allBars.length})`,
+        forecast: null,
+      }
+    }
+
+    const snapTick = (p: number): number => {
+      if (!isVnAsset || info.market_type === 'index') {
+        const sc = Math.pow(10, info.price_precision)
+        return Math.round(p * sc) / sc
+      }
+      const tick = info.exchange === 'HOSE' ? (p < 10_000 ? 10 : p < 50_000 ? 50 : 100) : 100
+      return Math.max(tick, Math.round(p / tick) * tick)
+    }
+
+    const anchorBar = allBars[allBars.length - 1]
+    const anchorClose = snapTick(anchorBar.close)
+    const asOfMs = anchorBar.timestamp
+    const asOfDate = new Date(asOfMs).toISOString().slice(0, 10)
+    const qRet5 = Math.log(anchorBar.close / Math.max(1, allBars[allBars.length - 6].close))
+    const qRet20 = Math.log(anchorBar.close / Math.max(1, allBars[allBars.length - 21].close))
+
+    // Gather strictly PIT-settled historical analogs (`settleTs <= asOfMs`) across curated VN equities
+    const vnStocks = CURATED_SYMBOLS.filter(
+      (s) => s.marketType === 'stock' && ['HOSE', 'HNX', 'UPCOM'].includes(s.exchange),
+    )
+    const candidates: Array<{
+      ticker: string
+      symbol: string
+      entryTs: number
+      dist: number
+      bars: OhlcvBar[]
+      idx: number
+    }> = []
+
+    for (const stock of vnStocks) {
+      const sBars = generateSeries(stock.ticker, '1D', 480)
+      for (let t = 65; t + horizon < sBars.length; t++) {
+        const settleTs = sBars[t + horizon].timestamp
+        if (settleTs > asOfMs) break
+        if (stock.ticker === info.ticker && t + 20 >= allBars.length) continue
+        const r5 = Math.log(sBars[t].close / Math.max(1, sBars[t - 5].close))
+        const r20 = Math.log(sBars[t].close / Math.max(1, sBars[t - 20].close))
+        const d = Math.hypot((r5 - qRet5) * 28, (r20 - qRet20) * 18)
+        candidates.push({
+          ticker: stock.ticker,
+          symbol: stock.symbol,
+          entryTs: sBars[t].timestamp,
+          dist: d,
+          bars: sBars,
+          idx: t,
+        })
+      }
+    }
+
+    candidates.sort((a, b) => a.dist - b.dist)
+    const selected = candidates.slice(0, Math.min(topK, candidates.length))
+    const medD = selected[Math.floor(selected.length / 2)]?.dist ?? 1
+    const scaleD = medD + 1e-4
+    const rawW = selected.map((c) => Math.exp((-1.5 * c.dist) / scaleD))
+    const sumW = rawW.reduce((a, b) => a + b, 0) || 1
+    const weights = rawW.map((w) => w / sumW)
+
+    const bandPct =
+      info.market_type === 'index' || !isVnAsset
+        ? null
+        : info.exchange === 'HOSE'
+          ? 0.07
+          : info.exchange === 'HNX'
+            ? 0.1
+            : 0.15
+
+    const pathsClose: number[][] = selected.map(() => new Array<number>(horizon).fill(anchorClose))
+    const pathsLow: number[][] = selected.map(() => new Array<number>(horizon).fill(anchorClose))
+
+    for (let j = 0; j < selected.length; j++) {
+      const c = selected[j]
+      const baseC = c.bars[c.idx].close
+      let prevRef = anchorClose
+      for (let h = 0; h < horizon; h++) {
+        const fut = c.bars[c.idx + 1 + h]
+        let simC = anchorClose * (fut.close / baseC)
+        let simL = anchorClose * (fut.low / baseC)
+        if (bandPct !== null) {
+          const tick = info.exchange === 'HOSE' ? (prevRef < 10_000 ? 10 : prevRef < 50_000 ? 50 : 100) : 100
+          const ceil = Math.floor((prevRef * (1 + bandPct)) / tick) * tick
+          const flr = Math.max(tick, Math.ceil((prevRef * (1 - bandPct)) / tick) * tick)
+          simC = Math.min(ceil, Math.max(flr, snapTick(simC)))
+          simL = Math.min(simC, Math.max(flr, snapTick(simL)))
+        } else {
+          simC = snapTick(simC)
+          simL = Math.min(simC, snapTick(simL))
+        }
+        pathsClose[j][h] = simC
+        pathsLow[j][h] = simL
+        prevRef = simC
+      }
+    }
+
+    const quantileAt = (vals: number[], q: number): number => {
+      const pairs = vals.map((v, idx) => ({ v, w: weights[idx] })).sort((a, b) => a.v - b.v)
+      let cum = 0
+      for (const p of pairs) {
+        cum += p.w
+        if (cum >= q) return p.v
+      }
+      return pairs[pairs.length - 1]?.v ?? anchorClose
+    }
+
+    let cumFloorRef = anchorClose
+    let cumCeilRef = anchorClose
+    const steps: AnalogConeStepDto[] = []
+
+    for (let h = 0; h < horizon; h++) {
+      if (bandPct !== null) {
+        const tickF = info.exchange === 'HOSE' ? (cumFloorRef < 10_000 ? 10 : cumFloorRef < 50_000 ? 50 : 100) : 100
+        const tickC = info.exchange === 'HOSE' ? (cumCeilRef < 10_000 ? 10 : cumCeilRef < 50_000 ? 50 : 100) : 100
+        cumFloorRef = Math.max(tickF, Math.ceil((cumFloorRef * (1 - bandPct)) / tickF) * tickF)
+        cumCeilRef = Math.max(cumFloorRef, Math.floor((cumCeilRef * (1 + bandPct)) / tickC) * tickC)
+      }
+      const col = pathsClose.map((p) => p[h])
+      const rawQs = [0.1, 0.25, 0.5, 0.75, 0.9].map((q) => snapTick(quantileAt(col, q)))
+      for (let qi = 0; qi < 5; qi++) {
+        if (bandPct !== null) {
+          rawQs[qi] = Math.min(cumCeilRef, Math.max(cumFloorRef, rawQs[qi]))
+        }
+        if (qi > 0 && rawQs[qi] < rawQs[qi - 1]) rawQs[qi] = rawQs[qi - 1]
+      }
+      const [p10, p25, p50, p75, p90] = rawQs
+      steps.push({
+        step: h + 1,
+        projectedTimestampMs: asOfMs + (h + 1) * 86_400_000,
+        p10,
+        p25,
+        p50,
+        p75,
+        p90,
+        p10RetPct: ((p10 / anchorClose) - 1) * 100,
+        p25RetPct: ((p25 / anchorClose) - 1) * 100,
+        p50RetPct: ((p50 / anchorClose) - 1) * 100,
+        p75RetPct: ((p75 / anchorClose) - 1) * 100,
+        p90RetPct: ((p90 / anchorClose) - 1) * 100,
+        cumulativeFloor: bandPct !== null ? cumFloorRef : null,
+        cumulativeCeiling: bandPct !== null ? cumCeilRef : null,
+      })
+    }
+
+    let winW = 0
+    let gain3W = 0
+    let tail6W = 0
+    let meanRet = 0
+    for (let j = 0; j < selected.length; j++) {
+      const termC = pathsClose[j][horizon - 1]
+      const retPct = ((termC / anchorClose) - 1) * 100
+      meanRet += weights[j] * retPct
+      if (termC > anchorClose) winW += weights[j]
+      if (retPct > 3) gain3W += weights[j]
+      const minL = Math.min(...pathsLow[j])
+      if (((minL / anchorClose) - 1) * 100 <= -6) tail6W += weights[j]
+    }
+
+    const lastStep = steps[steps.length - 1]
+    const upside = Math.max(0, lastStep.p90 - anchorClose)
+    const downside = Math.max(anchorClose * 0.0025, anchorClose - lastStep.p10)
+
+    const topAnalogs: AnalogMatchCaseDto[] = selected.slice(0, 10).map((c, idx) => {
+      const c0 = c.bars[c.idx].close
+      const b5 = c.bars[c.idx + 5]
+      const b10 = c.bars[c.idx + 10]
+      return {
+        ticker: c.ticker,
+        symbol: c.symbol,
+        entryTimestampMs: c.entryTs,
+        entryDate: new Date(c.entryTs).toISOString().slice(0, 10),
+        similarityPct: Math.min(100, Math.max(0, 100 * Math.exp(-c.dist / (2.5 * scaleD)))),
+        distance: c.dist,
+        weight: weights[idx],
+        realizedT5RetPct: b5 && b5.timestamp <= asOfMs ? ((b5.close / c0) - 1) * 100 : null,
+        realizedT10RetPct: b10 && b10.timestamp <= asOfMs ? ((b10.close / c0) - 1) * 100 : null,
+      }
+    })
+
+    return {
+      ticker: info.ticker,
+      exchange: info.exchange,
+      symbol: info.symbol,
+      venue: info.exchange,
+      interval: '1D',
+      supportedInterval: true,
+      replayLocked: replayActive,
+      asOfTimestampMs: asOfMs,
+      asOfDate,
+      anchorClose,
+      horizon,
+      topK: selected.length,
+      weightProfile,
+      queryLatencyUs: 240,
+      statusMessage: null,
+      forecast: {
+        steps,
+        winRatePct: winW * 100,
+        probGainGt3Pct: gain3W * 100,
+        probTailDrop6Pct: tail6W * 100,
+        skewRatio: Math.min(20, upside / downside),
+        expectedReturnP50Pct: lastStep.p50RetPct,
+        expectedReturnMeanPct: meanRet,
+        queryYz20Vol: 0.019,
+        pitCandidateCount: candidates.length,
+        fastCandidateCount: Math.min(candidates.length, 180),
+        topAnalogs,
+      },
     }
   },
 }

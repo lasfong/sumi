@@ -511,7 +511,7 @@ fn r15_signal_catalog_schema_quality_gate_and_bb_absent_neutral() {
         find_catalog_entry_for_scan_kind,
     };
 
-    assert_eq!(SIGNAL_CATALOG.len(), 101);
+    assert_eq!(SIGNAL_CATALOG.len(), 123);
     for cat in SignalCategory::ALL_TABS {
         if cat != SignalCategory::All {
             let matches = filter_signal_catalog(cat, "");
@@ -1051,7 +1051,7 @@ fn r18_b3_signal_catalog_72_legacy_superset_causal_pivots_and_12_divergences() {
         "bb.turn_up",
         "bb.turn_down",
     ];
-    assert_eq!(SIGNAL_CATALOG.len(), 101);
+    assert_eq!(SIGNAL_CATALOG.len(), 123);
     for id in LEGACY_72_IDS {
         let entry = find_catalog_entry(id);
         assert!(entry.is_some(), "missing legacy SignalRegistry ID: {id}");
@@ -1081,7 +1081,7 @@ fn r18_b3_signal_catalog_72_legacy_superset_causal_pivots_and_12_divergences() {
     let mat_prefix = PrecomputedCatalogMatrix::compute(&bars[..90]);
     let rep_89_clean =
         evaluate_causal_confluence(&bars[..90], None, false, ConfluenceWeightProfile::Balanced);
-    assert_eq!(rep_89_clean.evaluations.len(), 101);
+    assert_eq!(rep_89_clean.evaluations.len(), 123);
     for (e_idx, ev) in rep_89_clean.evaluations.iter().enumerate() {
         assert_eq!(
             ev.available_at_index, 89,

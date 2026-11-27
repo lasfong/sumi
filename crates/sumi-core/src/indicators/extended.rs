@@ -534,8 +534,8 @@ pub fn compute_psar(candles: &[Candle], af_start: f64, af_step: f64, af_max: f64
             af = init_af;
             ep = if is_long { c.high } else { c.low };
             sar = if is_long { prev_c.low } else { prev_c.high };
-            new_low = c.low;
-            new_high = c.high;
+            new_low = prev_c.low;
+            new_high = prev_c.high;
         }
 
         let prev_low = new_low;

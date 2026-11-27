@@ -7,18 +7,23 @@ import type {
   ChartStyleKind,
   DataStatusResponse,
   GridLayoutKind,
+  IndicatorTemplateRecord,
   IntervalKey,
   MagnetMode,
+  OhlcvBar,
   PriceAlertRecord,
   PriceScaleKind,
   ReplaySnapshotResponse,
   SavedIndicatorSpec,
   SavedLayoutRecord,
+  SavedReplaySessionRecord,
   ThemeMode,
   WatchlistGroup,
   WatchlistQuoteSnapshot,
 } from '../types/market'
 import * as api from '../api/tauri'
+import { notifyAlertTriggered } from '../utils/alertSound'
+import { snapPriceToVenueTick } from '../utils/vnMarket'
 
 const SETTINGS_SCHEMA_VERSION = 2
 
@@ -33,10 +38,14 @@ export const INDICATOR_COLOR_PALETTE = [
   '#AB47BC',
 ] as const
 
+export type TimezoneMode = 'auto' | 'Asia/Ho_Chi_Minh' | 'Etc/UTC'
+
 export interface SyncOptions {
   symbol: boolean
   interval: boolean
   crosshair: boolean
+  dateRange: boolean
+  drawings: boolean
 }
 
 export interface ToastNotice {
@@ -49,6 +58,8 @@ export const DEFAULT_SYNC: SyncOptions = {
   symbol: true,
   interval: false,
   crosshair: true,
+  dateRange: false,
+  drawings: true,
 }
 
 const DEFAULT_PANES: ChartPaneConfig[] = [
@@ -61,24 +72,14 @@ const DEFAULT_PANES: ChartPaneConfig[] = [
     showVnBands: true,
     showCountdown: true,
     indicators: [
-      { id: 'ind_vol_0', name: 'VOL', paneId: 'pane_vol_0', isMain: false, calcParams: [5, 10, 20], visible: true },
+      { id: 'ind_vol_0', name: 'VOL', paneId: 'pane_vol_0', isMain: false, calcParams: [5, 20], visible: true },
       {
-        id: 'ind_ema20_0',
-        name: 'EMA',
+        id: 'ind_ma_qmv_0',
+        name: 'MA',
         paneId: 'candle_pane',
         isMain: true,
-        calcParams: [20],
+        calcParams: [20, 50, 200],
         visible: true,
-        styles: { lines: [{ color: '#2962FF', size: 1.6 }] },
-      },
-      {
-        id: 'ind_ema50_0',
-        name: 'EMA',
-        paneId: 'candle_pane',
-        isMain: true,
-        calcParams: [50],
-        visible: true,
-        styles: { lines: [{ color: '#FF9800', size: 1.6 }] },
       },
     ],
   },
@@ -91,15 +92,14 @@ const DEFAULT_PANES: ChartPaneConfig[] = [
     showVnBands: true,
     showCountdown: true,
     indicators: [
-      { id: 'ind_vol_1', name: 'VOL', paneId: 'pane_vol_1', isMain: false, calcParams: [5, 10, 20], visible: true },
+      { id: 'ind_vol_1', name: 'VOL', paneId: 'pane_vol_1', isMain: false, calcParams: [5, 20], visible: true },
       {
-        id: 'ind_ema20_1',
-        name: 'EMA',
+        id: 'ind_ma_qmv_1',
+        name: 'MA',
         paneId: 'candle_pane',
         isMain: true,
-        calcParams: [20],
+        calcParams: [20, 50],
         visible: true,
-        styles: { lines: [{ color: '#2962FF', size: 1.5 }] },
       },
     ],
   },
@@ -112,15 +112,14 @@ const DEFAULT_PANES: ChartPaneConfig[] = [
     showVnBands: true,
     showCountdown: true,
     indicators: [
-      { id: 'ind_vol_2', name: 'VOL', paneId: 'pane_vol_2', isMain: false, calcParams: [5, 10, 20], visible: true },
+      { id: 'ind_vol_2', name: 'VOL', paneId: 'pane_vol_2', isMain: false, calcParams: [5, 20], visible: true },
       {
-        id: 'ind_ema20_2',
-        name: 'EMA',
+        id: 'ind_ma_qmv_2',
+        name: 'MA',
         paneId: 'candle_pane',
         isMain: true,
-        calcParams: [20],
+        calcParams: [20, 50],
         visible: true,
-        styles: { lines: [{ color: '#2962FF', size: 1.5 }] },
       },
     ],
   },
@@ -133,15 +132,14 @@ const DEFAULT_PANES: ChartPaneConfig[] = [
     showVnBands: true,
     showCountdown: true,
     indicators: [
-      { id: 'ind_vol_3', name: 'VOL', paneId: 'pane_vol_3', isMain: false, calcParams: [5, 10, 20], visible: true },
+      { id: 'ind_vol_3', name: 'VOL', paneId: 'pane_vol_3', isMain: false, calcParams: [5, 20], visible: true },
       {
-        id: 'ind_ema20_3',
-        name: 'EMA',
+        id: 'ind_ma_qmv_3',
+        name: 'MA',
         paneId: 'candle_pane',
         isMain: true,
-        calcParams: [20],
+        calcParams: [20, 50],
         visible: true,
-        styles: { lines: [{ color: '#2962FF', size: 1.5 }] },
       },
     ],
   },
@@ -150,6 +148,7 @@ const DEFAULT_PANES: ChartPaneConfig[] = [
 export interface WorkspaceState {
   initialized: boolean
   theme: ThemeMode
+  timezoneMode: TimezoneMode
   gridLayout: GridLayoutKind
   sync: SyncOptions
   activeSlotId: string
@@ -160,6 +159,8 @@ export interface WorkspaceState {
   magnetMode: MagnetMode
   drawingsLocked: boolean
   drawingsHidden: boolean
+  showVnSessionBreaks: boolean
+  drawingsVersion: number
   clearDrawingsNonce: number
   exportPngNonce: number
 
@@ -188,6 +189,8 @@ export interface WorkspaceState {
   quoteFlashMap: Record<string, { dir: 'up' | 'down'; nonce: number }>
   alerts: PriceAlertRecord[]
   layouts: SavedLayoutRecord[]
+  indicatorTemplates: IndicatorTemplateRecord[]
+  replaySessions: SavedReplaySessionRecord[]
   dataStatus: DataStatusResponse | null
   importingCafeF: boolean
 
@@ -195,8 +198,10 @@ export interface WorkspaceState {
   replay: ReplaySnapshotResponse | null
   replaySelectingCut: boolean
   replayPlaying: boolean
+  replayBlindMode: boolean
   replayResetNonce: number
   replaySteppedBar: { bar: ReplaySnapshotResponse['steppedBar']; nonce: number } | null
+  replayStepEvent: { ticker: string; barsByInterval: Record<string, OhlcvBar>; nonce: number } | null
 
   // Paper Broker state (synced with active chart & replay)
   broker: BrokerStateSnapshot | null
@@ -208,6 +213,7 @@ export interface WorkspaceState {
   bootstrap: () => Promise<void>
   setTheme: (theme: ThemeMode) => void
   toggleTheme: () => void
+  setTimezoneMode: (tz: TimezoneMode) => void
   setGridLayout: (layout: GridLayoutKind) => void
   setSyncOption: (key: keyof SyncOptions, value: boolean) => void
   setActiveSlotId: (slotId: string) => void
@@ -229,6 +235,8 @@ export interface WorkspaceState {
   setMagnetMode: (mode: MagnetMode) => void
   toggleDrawingsLocked: () => void
   toggleDrawingsHidden: () => void
+  toggleVnSessionBreaks: () => void
+  bumpDrawingsVersion: () => void
   triggerClearDrawings: () => void
   triggerExportPng: () => void
 
@@ -241,6 +249,7 @@ export interface WorkspaceState {
     side: 'BUY' | 'SELL',
     price: number,
   ) => Promise<void>
+  submitQuickBracket: (kind: 'sl' | 'tp', rawPrice: number) => Promise<void>
 
   setRightPanelOpen: (open: boolean) => void
   setRightPanelWidth: (width: number) => void
@@ -270,9 +279,25 @@ export interface WorkspaceState {
   removeSymbolFromWatchlist: (ticker: string) => Promise<void>
   createNewWatchlist: (name: string) => Promise<void>
 
-  createNewAlert: (ticker: string, condition: string, targetPrice: number, message: string) => Promise<void>
+  createNewAlert: (
+    ticker: string,
+    condition: string,
+    targetPrice: number,
+    message: string,
+    opts?: {
+      alertKind?: 'price' | 'drawing' | 'indicator'
+      interval?: IntervalKey | null
+      paramsJson?: Record<string, unknown> | null
+      soundEnabled?: boolean
+    },
+  ) => Promise<void>
   toggleAlert: (id: string, status: string) => Promise<void>
   removeAlert: (id: string) => Promise<void>
+  checkLiveBarAlerts: (ticker: string, interval: IntervalKey) => Promise<void>
+
+  saveCurrentIndicatorTemplate: (name: string, description?: string) => Promise<void>
+  applyIndicatorTemplate: (tpl: IndicatorTemplateRecord) => void
+  deleteIndicatorTemplate: (id: string) => Promise<void>
 
   saveCurrentLayout: (name: string) => Promise<void>
   applySavedLayout: (layout: SavedLayoutRecord) => void
@@ -283,12 +308,20 @@ export interface WorkspaceState {
 
   // Replay actions
   setReplaySelectingCut: (selecting: boolean) => void
+  setReplayBlindMode: (blind: boolean) => void
   startReplay: (cutTimestampMs?: number | null) => Promise<void>
   stepReplay: (delta: number) => Promise<void>
   jumpReplay: (targetTimestampMs: number) => Promise<void>
   setReplaySpeed: (mult: number) => Promise<void>
   setReplayPlaying: (playing: boolean) => void
   stopReplay: () => Promise<void>
+  saveCurrentReplaySession: (name: string) => Promise<void>
+  resumeSavedReplaySession: (id: string) => Promise<void>
+  deleteSavedReplaySession: (id: string) => Promise<void>
+  applyRemoteReplaySync: (payload: {
+    action: 'start' | 'step' | 'jump' | 'stop'
+    snapshot?: ReplaySnapshotResponse | null
+  }) => void
 
   // Broker actions
   refreshBroker: () => Promise<void>
@@ -314,9 +347,12 @@ function applyThemeToDocument(theme: ThemeMode): void {
 }
 
 let persistTimer: number | null = null
+const lastFlashTsByTicker = new Map<string, number>()
 
 function schedulePersistSettings(state: WorkspaceState): void {
   if (typeof window === 'undefined') return
+  // Detached auxiliary monitor windows don't overwrite the main workstation layout
+  if (window.location.search.includes('detached=1')) return
   if (persistTimer !== null) {
     window.clearTimeout(persistTimer)
   }
@@ -324,6 +360,7 @@ function schedulePersistSettings(state: WorkspaceState): void {
     const payload = {
       settingsVersion: SETTINGS_SCHEMA_VERSION,
       theme: state.theme,
+      timezoneMode: state.timezoneMode,
       gridLayout: state.gridLayout,
       sync: state.sync,
       activeSlotId: state.activeSlotId,
@@ -334,14 +371,19 @@ function schedulePersistSettings(state: WorkspaceState): void {
       bottomDockHeight: state.bottomDockHeight,
       bottomDockTab: state.bottomDockTab,
       activeWatchlistId: state.activeWatchlistId,
+      showVnSessionBreaks: state.showVnSessionBreaks,
     }
     void api.saveWorkspaceSettings(payload)
   }, 350)
 }
 
+let inFlightBrokerKey: string | null = null
+let inFlightBrokerPromise: Promise<void> | null = null
+
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   initialized: false,
   theme: 'dark',
+  timezoneMode: 'auto',
   gridLayout: '1',
   sync: DEFAULT_SYNC,
   activeSlotId: 'pane-0',
@@ -351,6 +393,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   magnetMode: 'weak_magnet',
   drawingsLocked: false,
   drawingsHidden: false,
+  showVnSessionBreaks: true,
+  drawingsVersion: 0,
   clearDrawingsNonce: 0,
   exportPngNonce: 0,
 
@@ -370,29 +414,41 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   editingIndicator: null,
 
   watchlists: [],
-  activeWatchlistId: 'wl_vn30',
+  activeWatchlistId: 'wl_qmv30',
   quotesMap: {},
   quoteFlashMap: {},
   alerts: [],
   layouts: [],
+  indicatorTemplates: [],
+  replaySessions: [],
   dataStatus: null,
   importingCafeF: false,
 
   replay: null,
   replaySelectingCut: false,
   replayPlaying: false,
+  replayBlindMode: true,
   replayResetNonce: 0,
   replaySteppedBar: null,
+  replayStepEvent: null,
 
   broker: null,
   toasts: [],
 
   bootstrap: async () => {
     try {
-      const [boot, status] = await Promise.all([api.loadWorkspaceBootstrap(), api.getDataStatus()])
+      const [boot, status, activeReplay] = await Promise.all([
+        api.loadWorkspaceBootstrap(),
+        api.getDataStatus(),
+        api.replayGetState().catch(() => null),
+      ])
       const saved = boot.settings ?? {}
       const theme: ThemeMode = saved.theme === 'light' ? 'light' : 'dark'
       applyThemeToDocument(theme)
+      const timezoneMode: TimezoneMode =
+        saved.timezoneMode === 'Asia/Ho_Chi_Minh' || saved.timezoneMode === 'Etc/UTC'
+          ? saved.timezoneMode
+          : 'auto'
 
       const savedVersion = typeof saved.settingsVersion === 'number' ? saved.settingsVersion : 1
       let panes: ChartPaneConfig[] =
@@ -400,11 +456,19 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
           ? (saved.panes as ChartPaneConfig[])
           : DEFAULT_PANES
 
+      // Hydrate per-pane indicators from dedicated `pane_indicators` table if saved (`BUG-038`)
+      const hydratedInds = await Promise.all(
+        panes.map((p) => api.getPaneIndicators(p.slotId).catch(() => [])),
+      )
+      panes = panes.map((p, idx) =>
+        hydratedInds[idx] && hydratedInds[idx].length > 0 ? { ...p, indicators: hydratedInds[idx] } : p,
+      )
+
       // Migrate v2.0.0 workspace settings to v2.1.0 Multi-Timeframe TradingView defaults:
       // sync.symbol = true, sync.interval = false, and multi-timeframe intervals (1D / 4h / 1h / 15m).
       let sync: SyncOptions =
         savedVersion >= SETTINGS_SCHEMA_VERSION && saved.sync
-          ? (saved.sync as SyncOptions)
+          ? { ...DEFAULT_SYNC, ...(saved.sync as Partial<SyncOptions>) }
           : DEFAULT_SYNC
 
       if (savedVersion < SETTINGS_SCHEMA_VERSION) {
@@ -423,6 +487,28 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         sync = DEFAULT_SYNC
       }
 
+      // Support detached auxiliary OS window (`?detached=1&ticker=...&interval=...`, `BUG-043`)
+      let gridLayout: GridLayoutKind = (saved.gridLayout as GridLayoutKind) ?? '1'
+      let rightPanelOpen = typeof saved.rightPanelOpen === 'boolean' ? saved.rightPanelOpen : true
+      let bottomDockOpen = typeof saved.bottomDockOpen === 'boolean' ? saved.bottomDockOpen : true
+      if (typeof window !== 'undefined' && window.location.search.includes('detached=1')) {
+        const params = new URLSearchParams(window.location.search)
+        const dTicker = params.get('ticker')
+        const dInterval = params.get('interval') as IntervalKey | null
+        gridLayout = '1'
+        rightPanelOpen = false
+        bottomDockOpen = false
+        if (dTicker || dInterval) {
+          const t = dTicker || panes[0].ticker
+          const isVn = t.startsWith('HOSE:') || t.startsWith('HNX:') || t.startsWith('UPCOM:')
+          panes = panes.map((p, idx) =>
+            idx === 0
+              ? { ...p, ticker: t, interval: dInterval || p.interval, showVnBands: isVn }
+              : p,
+          )
+        }
+      }
+
       const watchlists = boot.watchlists
       const activeWatchlistId =
         typeof saved.activeWatchlistId === 'string' && watchlists.some((w) => w.id === saved.activeWatchlistId)
@@ -432,20 +518,26 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       set({
         initialized: true,
         theme,
-        gridLayout: (saved.gridLayout as GridLayoutKind) ?? '1',
+        timezoneMode,
+        gridLayout,
         sync,
         activeSlotId: typeof saved.activeSlotId === 'string' ? saved.activeSlotId : 'pane-0',
         panes,
-        rightPanelOpen: typeof saved.rightPanelOpen === 'boolean' ? saved.rightPanelOpen : true,
+        rightPanelOpen,
         rightPanelWidth: typeof saved.rightPanelWidth === 'number' ? saved.rightPanelWidth : 288,
-        bottomDockOpen: typeof saved.bottomDockOpen === 'boolean' ? saved.bottomDockOpen : true,
+        bottomDockOpen,
         bottomDockHeight: typeof saved.bottomDockHeight === 'number' ? saved.bottomDockHeight : 276,
         bottomDockTab: (saved.bottomDockTab as BottomDockTab) ?? 'paper',
         watchlists,
         activeWatchlistId,
         alerts: boot.alerts,
         layouts: boot.layouts,
+        indicatorTemplates: boot.indicatorTemplates ?? [],
+        replaySessions: boot.replaySessions ?? [],
+        showVnSessionBreaks:
+          typeof saved.showVnSessionBreaks === 'boolean' ? saved.showVnSessionBreaks : true,
         dataStatus: status,
+        replay: activeReplay?.active ? activeReplay : null,
       })
 
       if (savedVersion < SETTINGS_SCHEMA_VERSION) {
@@ -470,6 +562,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     get().setTheme(next)
   },
 
+  setTimezoneMode: (timezoneMode) => {
+    set({ timezoneMode })
+    schedulePersistSettings(get())
+  },
+
   setGridLayout: (gridLayout) => {
     const visibleCount =
       gridLayout === '1' ? 1 : gridLayout === '2v' || gridLayout === '2h' ? 2 : gridLayout === '3' ? 3 : 4
@@ -486,8 +583,17 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   setActiveSlotId: (activeSlotId) => {
+    const prev = get().activeSlotId
+    if (prev === activeSlotId) return
     set({ activeSlotId })
     schedulePersistSettings(get())
+    const nextPane = get().panes.find((p) => p.slotId === activeSlotId)
+    const activeRep = get().replay
+    // During Multi-Timeframe Replay on the same ticker, clicking Pane 2 (e.g. `4h` while replaying `1h`)
+    // MUST NOT clobber or desync the isolated Replay Broker (`BUG-040`)!
+    if (activeRep?.active && nextPane && nextPane.ticker.toUpperCase() === activeRep.ticker.toUpperCase()) {
+      return
+    }
     void get().refreshBroker()
   },
 
@@ -495,7 +601,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const targetSlot = slotId ?? get().activeSlotId
     const syncSymbol = get().sync.symbol
     const isVn = ticker.startsWith('HOSE:') || ticker.startsWith('HNX:') || ticker.startsWith('UPCOM:')
-    if (get().replay?.active && targetSlot === get().activeSlotId) {
+    const activeRep = get().replay
+    if (activeRep?.active && activeRep.ticker.toUpperCase() !== ticker.toUpperCase()) {
       void get().stopReplay()
     }
     set((s) => ({
@@ -507,21 +614,32 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       ),
     }))
     schedulePersistSettings(get())
+    if (syncSymbol) {
+      void api.broadcastSyncEvent('sumi:sync_symbol', { ticker })
+    }
     void get().refreshBroker()
   },
 
   setActiveInterval: (interval, slotId) => {
     const targetSlot = slotId ?? get().activeSlotId
     const syncIv = get().sync.interval
-    if (get().replay?.active && targetSlot === get().activeSlotId) {
-      void get().stopReplay()
-    }
+    const activeRep = get().replay
+    const targetPane = get().panes.find((p) => p.slotId === targetSlot)
+    // Multi-Timeframe Bar Replay (`BUG-040`): changing timeframe on a pane sharing `replay.ticker`
+    // MUST keep Bar Replay active and causally aggregate via `get_bars` instead of stopping Replay!
+    const keepReplayAlive = Boolean(
+      activeRep?.active &&
+        targetPane &&
+        targetPane.ticker.toUpperCase() === activeRep.ticker.toUpperCase(),
+    )
     set((s) => ({
       replaySelectingCut: false,
       panes: s.panes.map((p) => (syncIv || p.slotId === targetSlot ? { ...p, interval } : p)),
     }))
     schedulePersistSettings(get())
-    void get().refreshBroker()
+    if (!keepReplayAlive) {
+      void get().refreshBroker()
+    }
   },
 
   setActiveChartStyle: (chartStyle) => {
@@ -649,6 +767,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   setMagnetMode: (magnetMode) => set({ magnetMode }),
   toggleDrawingsLocked: () => set((s) => ({ drawingsLocked: !s.drawingsLocked })),
   toggleDrawingsHidden: () => set((s) => ({ drawingsHidden: !s.drawingsHidden })),
+  toggleVnSessionBreaks: () => {
+    set((s) => ({ showVnSessionBreaks: !s.showVnSessionBreaks }))
+    schedulePersistSettings(get())
+  },
+  bumpDrawingsVersion: () => set((s) => ({ drawingsVersion: s.drawingsVersion + 1 })),
   triggerClearDrawings: () => set((s) => ({ clearDrawingsNonce: s.clearDrawingsNonce + 1 })),
   triggerExportPng: () => set((s) => ({ exportPngNonce: s.exportPngNonce + 1 })),
 
@@ -672,10 +795,35 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     ),
 
   submitQuickLimitOrder: async (ticker, interval, side, price) => {
-    const isVn = ticker.startsWith('HOSE:') || ticker.startsWith('HNX:') || ticker.startsWith('UPCOM:')
-    const tick = isVn ? (price >= 50000 ? 100 : price >= 10000 ? 50 : 10) : 0.01
-    const snapped = isVn ? Math.round(price / tick) * tick : Number(price.toFixed(2))
-    const qty = isVn ? 1000 : 1
+    const upper = ticker.toUpperCase()
+    const isVn30f = upper.includes('VN30F') || upper.includes('VN301!')
+    const isHose = upper.startsWith('HOSE:')
+    const isHnxOrUpcom = (upper.startsWith('HNX:') || upper.startsWith('UPCOM:')) && !isVn30f
+    const isCrypto = upper.startsWith('BINANCE:') || upper.startsWith('OKX:') || upper.startsWith('BYBIT:')
+
+    // Exact per-venue statutory tick & default order quantity (`BUG-008`)!
+    let tick = 0.01
+    let qty = 1
+    let decimals = 2
+    if (isVn30f) {
+      tick = 0.1
+      qty = 1
+      decimals = 1
+    } else if (isHnxOrUpcom) {
+      tick = 100
+      qty = 100
+      decimals = 0
+    } else if (isHose) {
+      tick = price >= 50000 ? 100 : price >= 10000 ? 50 : 10
+      qty = 100
+      decimals = 0
+    } else if (isCrypto) {
+      tick = price >= 100 ? 0.01 : 0.0001
+      qty = price >= 1000 ? 0.01 : 1
+      decimals = price >= 100 ? 2 : 4
+    }
+
+    const snapped = Number((Math.round(price / tick) * tick).toFixed(decimals))
     try {
       const snap = await api.brokerSubmitOrder({
         ticker,
@@ -692,6 +840,34 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       )
     } catch (err) {
       get().pushToast('error', String(err))
+    }
+  },
+
+  submitQuickBracket: async (kind, rawPrice) => {
+    const state = get()
+    const broker = state.broker
+    const activePane = state.panes.find((p) => p.slotId === state.activeSlotId) ?? state.panes[0]
+    if (!broker?.openPosition) {
+      state.pushToast('warning', 'Chưa có vị thế mở để đặt Cắt lỗ (SL) / Chốt lời (TP)')
+      return
+    }
+    const snapped = snapPriceToVenueTick(broker.ticker, rawPrice)
+    const nextSl = kind === 'sl' ? snapped : (broker.openPosition.stop_loss ?? null)
+    const nextTp = kind === 'tp' ? snapped : (broker.openPosition.take_profit ?? null)
+    try {
+      const updated = await api.brokerUpdateBrackets(
+        broker.ticker,
+        (broker.interval as IntervalKey) || activePane.interval,
+        nextSl,
+        nextTp,
+      )
+      set({ broker: updated })
+      state.pushToast(
+        'success',
+        `Đã cập nhật ${kind === 'sl' ? 'Cắt lỗ (SL)' : 'Chốt lời (TP)'} @ ${snapped.toLocaleString('en-US')}`,
+      )
+    } catch (err) {
+      state.pushToast('error', String(err))
     }
   },
 
@@ -779,7 +955,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         timestampMs: quote.timestamp_ms,
       }
       const nextFlash = { ...s.quoteFlashMap }
-      if (flashDir) {
+      const nowMs = Date.now()
+      const lastFlash = lastFlashTsByTicker.get(quote.ticker) ?? 0
+      // Throttle flash triggers to >= 400ms per symbol (<= 2.5Hz, WCAG 2.3.1 safe, `BUG-030`).
+      if (flashDir && nowMs - lastFlash >= 400) {
+        lastFlashTsByTicker.set(quote.ticker, nowMs)
         nextFlash[quote.ticker] = {
           dir: flashDir,
           nonce: (nextFlash[quote.ticker]?.nonce ?? 0) + 1,
@@ -799,6 +979,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
             alerts: s.alerts.map((a) => fired.find((f) => f.id === a.id) ?? a),
           }))
           for (const f of fired) {
+            notifyAlertTriggered(f)
             get().pushToast('warning', `🔔 Cảnh báo ${f.ticker}: ${f.message || `Chạm mốc ${f.targetPrice}`}`)
           }
         }
@@ -838,10 +1019,16 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }))
   },
 
-  createNewAlert: async (ticker, condition, targetPrice, message) => {
-    const rec = await api.createAlert(ticker, condition, targetPrice, message)
+  createNewAlert: async (ticker, condition, targetPrice, message, opts) => {
+    const rec = await api.createAlert(ticker, condition, targetPrice, message, opts)
     set((s) => ({ alerts: [rec, ...s.alerts] }))
-    get().pushToast('success', `Đã tạo cảnh báo ${ticker} @ ${targetPrice.toLocaleString('vi-VN')}`)
+    const kindLabel =
+      opts?.alertKind === 'drawing'
+        ? 'đường vẽ'
+        : opts?.alertKind === 'indicator'
+          ? 'chỉ báo'
+          : `@ ${targetPrice.toLocaleString('en-US')}`
+    get().pushToast('success', `Đã tạo cảnh báo ${ticker} (${kindLabel})`)
   },
 
   toggleAlert: async (id, status) => {
@@ -852,6 +1039,64 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   removeAlert: async (id) => {
     await api.deleteAlert(id)
     set((s) => ({ alerts: s.alerts.filter((a) => a.id !== id) }))
+  },
+
+  checkLiveBarAlerts: async (ticker, interval) => {
+    const hasArmed = get().alerts.some(
+      (a) =>
+        a.status === 'armed' &&
+        a.ticker.toUpperCase() === ticker.toUpperCase() &&
+        (a.alertKind === 'drawing' || a.alertKind === 'indicator'),
+    )
+    if (!hasArmed) return
+    try {
+      const fired = await api.checkBarAlerts(ticker, interval)
+      if (fired.length > 0) {
+        set((s) => ({
+          alerts: s.alerts.map((a) => fired.find((f) => f.id === a.id) ?? a),
+        }))
+        for (const f of fired) {
+          notifyAlertTriggered(f)
+          get().pushToast('warning', `🔔 Cảnh báo ${f.ticker}: ${f.message || f.condition}`)
+        }
+      }
+    } catch {
+      // ignore transient eval failures
+    }
+  },
+
+  saveCurrentIndicatorTemplate: async (name, description) => {
+    const activePane = get().panes.find((p) => p.slotId === get().activeSlotId) ?? get().panes[0]
+    try {
+      const saved = await api.saveIndicatorTemplate(name, activePane.indicators, description)
+      set((s) => ({
+        indicatorTemplates: [saved, ...s.indicatorTemplates.filter((t) => t.id !== saved.id)],
+      }))
+      get().pushToast('success', `Đã lưu mẫu chỉ báo "${saved.name}"`)
+    } catch (err) {
+      get().pushToast('error', String(err))
+    }
+  },
+
+
+  applyIndicatorTemplate: (tpl) => {
+    const slot = get().activeSlotId
+    const freshIndicators = tpl.indicators.map((ind, idx) => ({
+      ...ind,
+      id: `${ind.name.toLowerCase()}_${Date.now()}_${idx}`,
+      paneId: ind.isMain ? 'candle_pane' : `pane_${ind.name.toLowerCase()}_${Date.now()}_${idx}`,
+    }))
+    set((s) => ({
+      panes: s.panes.map((p) => (p.slotId === slot ? { ...p, indicators: freshIndicators } : p)),
+    }))
+    void api.savePaneIndicators(slot, freshIndicators)
+    schedulePersistSettings(get())
+    get().pushToast('info', `Đã áp dụng mẫu chỉ báo "${tpl.name}" (${freshIndicators.length} chỉ báo)`)
+  },
+
+  deleteIndicatorTemplate: async (id) => {
+    await api.deleteIndicatorTemplate(id)
+    set((s) => ({ indicatorTemplates: s.indicatorTemplates.filter((t) => t.id !== id) }))
   },
 
   saveCurrentLayout: async (name) => {
@@ -909,39 +1154,88 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }
   },
 
-  // ─── Causal Bar Replay ─────────────────────────────────────────────────────
+  // ─── Causal Multi-Timeframe Bar Replay ─────────────────────────────────────
 
   setReplaySelectingCut: (replaySelectingCut) => set({ replaySelectingCut }),
+  setReplayBlindMode: (replayBlindMode) => set({ replayBlindMode }),
 
   startReplay: async (cutTimestampMs) => {
-    const activePane = get().panes.find((p) => p.slotId === get().activeSlotId) ?? get().panes[0]
+    const state = get()
+    const activePane = state.panes.find((p) => p.slotId === state.activeSlotId) ?? state.panes[0]
+    const visibleCount =
+      state.gridLayout === '1' ? 1 : state.gridLayout === '2v' || state.gridLayout === '2h' ? 2 : state.gridLayout === '3' ? 3 : 4
+    // Collect ALL open visible panes sharing `activePane.ticker` so backend picks the finest TF (e.g. `1h` for `1h`+`4h` MTF Replay, `BUG-040`)!
+    const siblingIntervals = Array.from(
+      new Set(
+        state.panes
+          .slice(0, visibleCount)
+          .filter((p) => p.ticker.toUpperCase() === activePane.ticker.toUpperCase())
+          .map((p) => p.interval),
+      ),
+    )
+    if (!siblingIntervals.includes(activePane.interval)) {
+      siblingIntervals.push(activePane.interval)
+    }
+
     try {
-      const snap = await api.replayStart(activePane.ticker, activePane.interval, cutTimestampMs)
+      const snap = await api.replayStart(activePane.ticker, activePane.interval, cutTimestampMs, siblingIntervals)
       set((s) => ({
         replay: snap,
         replaySelectingCut: false,
         replayPlaying: false,
+        replaySteppedBar: null,
+        replayStepEvent: null,
         replayResetNonce: s.replayResetNonce + 1,
         broker: snap.broker ?? s.broker,
       }))
-      get().pushToast('info', `Bar Replay nhân quả kích hoạt (${snap.cursorIndex + 1}/${snap.totalBars} nến)`)
+      void api.broadcastSyncEvent('sumi:sync_replay', { action: 'start', snapshot: snap })
+      const tfList = (snap.trackedIntervals ?? [snap.interval]).join(' + ')
+      get().pushToast(
+        'info',
+        `Bar Replay nhân quả kích hoạt (${tfList} · nến ${snap.cursorIndex + 1}/${snap.totalBars})`,
+      )
     } catch (err) {
       get().pushToast('error', String(err))
     }
   },
 
+
   stepReplay: async (delta) => {
     try {
       const snap = await api.replayStep(delta)
+      const barsMap: Record<string, OhlcvBar> = { ...(snap.steppedBarsByInterval ?? {}) }
+      if (snap.steppedBar && !barsMap[snap.interval]) {
+        barsMap[snap.interval] = snap.steppedBar
+      }
+      const hasSteppedMap = Object.keys(barsMap).length > 0
+      const firedAlerts = snap.triggeredAlerts ?? []
+
       set((s) => ({
         replay: snap,
         replayPlaying: snap.status === 'Completed' ? false : s.replayPlaying,
         broker: snap.broker ?? s.broker,
-        replayResetNonce: snap.steppedBar ? s.replayResetNonce : s.replayResetNonce + 1,
+        alerts:
+          firedAlerts.length > 0
+            ? s.alerts.map((a) => firedAlerts.find((f) => f.id === a.id) ?? a)
+            : s.alerts,
+        replayResetNonce: hasSteppedMap ? s.replayResetNonce : s.replayResetNonce + 1,
         replaySteppedBar: snap.steppedBar
           ? { bar: snap.steppedBar, nonce: (s.replaySteppedBar?.nonce ?? 0) + 1 }
-          : s.replaySteppedBar,
+          : null,
+        replayStepEvent: hasSteppedMap
+          ? {
+              ticker: snap.ticker,
+              barsByInterval: barsMap,
+              nonce: (s.replayStepEvent?.nonce ?? 0) + 1,
+            }
+          : null,
       }))
+
+      for (const f of firedAlerts) {
+        notifyAlertTriggered(f)
+        get().pushToast('warning', `🔔 Cảnh báo Replay ${f.ticker}: ${f.message || `Chạm mốc ${f.targetPrice}`}`)
+      }
+      void api.broadcastSyncEvent('sumi:sync_replay', { action: 'step', snapshot: snap })
     } catch (err) {
       set({ replayPlaying: false })
       get().pushToast('error', String(err))
@@ -955,13 +1249,17 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         replay: snap,
         replaySelectingCut: false,
         replayPlaying: false,
+        replaySteppedBar: null,
+        replayStepEvent: null,
         replayResetNonce: s.replayResetNonce + 1,
         broker: snap.broker ?? s.broker,
       }))
+      void api.broadcastSyncEvent('sumi:sync_replay', { action: 'jump', snapshot: snap })
     } catch (err) {
       get().pushToast('error', String(err))
     }
   },
+
 
   setReplaySpeed: async (mult) => {
     const clamped = await api.replaySetSpeed(mult)
@@ -976,22 +1274,137 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       replay: null,
       replaySelectingCut: false,
       replayPlaying: false,
+      replaySteppedBar: null,
+      replayStepEvent: null,
       replayResetNonce: s.replayResetNonce + 1,
     }))
+    void api.broadcastSyncEvent('sumi:sync_replay', { action: 'stop', snapshot: null })
     await get().refreshBroker()
-    get().pushToast('info', 'Đã thoát Bar Replay — khôi phục dữ liệu đầy đủ')
+    get().pushToast('info', 'Đã thoát Bar Replay — khôi phục dữ liệu đầy đủ & sổ lệnh Live nguyên vẹn')
+  },
+
+  saveCurrentReplaySession: async (name) => {
+    const trimmed = name.trim()
+    if (!trimmed) return
+    try {
+      const saved = await api.saveReplaySession(trimmed, get().replayBlindMode)
+      set((s) => ({
+        replaySessions: [saved, ...s.replaySessions.filter((r) => r.id !== saved.id)],
+      }))
+      get().pushToast('success', `Đã lưu phiên Bar Replay "${saved.name}" (kèm sổ lệnh luyện tập)`)
+    } catch (err) {
+      get().pushToast('error', String(err))
+    }
+  },
+
+
+  resumeSavedReplaySession: async (id) => {
+    try {
+      const savedMeta = get().replaySessions.find((r) => r.id === id)
+      const snap = await api.resumeReplaySession(id)
+      const tracked = (snap.trackedIntervals ?? [snap.interval]) as IntervalKey[]
+      const isVn =
+        snap.ticker.startsWith('HOSE:') || snap.ticker.startsWith('HNX:') || snap.ticker.startsWith('UPCOM:')
+      set((s) => {
+        // Auto-configure 2v layout if the saved session tracked 2+ timeframes (e.g. `1h + 4h`)!
+        let nextLayout = s.gridLayout
+        let nextPanes = s.panes
+        if (tracked.length >= 2) {
+          nextLayout = s.gridLayout === '1' ? '2v' : s.gridLayout
+          nextPanes = s.panes.map((p, idx) =>
+            idx < tracked.length
+              ? { ...p, ticker: snap.ticker, interval: tracked[idx], showVnBands: isVn }
+              : p,
+          )
+        } else {
+          nextPanes = s.panes.map((p) =>
+            p.slotId === s.activeSlotId
+              ? { ...p, ticker: snap.ticker, interval: snap.interval as IntervalKey, showVnBands: isVn }
+              : p,
+          )
+        }
+        return {
+          gridLayout: nextLayout,
+          panes: nextPanes,
+          replay: snap,
+          replayBlindMode: savedMeta?.blindMode ?? true,
+          replaySelectingCut: false,
+          replayPlaying: false,
+          replaySteppedBar: null,
+          replayStepEvent: null,
+          replayResetNonce: s.replayResetNonce + 1,
+          broker: snap.broker ?? s.broker,
+        }
+      })
+      void api.broadcastSyncEvent('sumi:sync_replay', { action: 'start', snapshot: snap })
+      get().pushToast(
+        'success',
+        `Đã khôi phục phiên "${savedMeta?.name ?? snap.ticker}" (${tracked.join(' + ')} · nến ${snap.cursorIndex + 1}/${snap.totalBars})`,
+      )
+    } catch (err) {
+      get().pushToast('error', String(err))
+    }
+  },
+
+
+  deleteSavedReplaySession: async (id) => {
+    await api.deleteReplaySession(id)
+    set((s) => ({ replaySessions: s.replaySessions.filter((r) => r.id !== id) }))
+  },
+
+  applyRemoteReplaySync: (payload) => {
+    if (payload.action === 'stop' || !payload.snapshot) {
+      set((s) => ({
+        replay: null,
+        replaySelectingCut: false,
+        replayPlaying: false,
+        replaySteppedBar: null,
+        replayStepEvent: null,
+        replayResetNonce: s.replayResetNonce + 1,
+      }))
+      return
+    }
+    const snap = payload.snapshot
+    const barsMap: Record<string, OhlcvBar> = { ...(snap.steppedBarsByInterval ?? {}) }
+    if (snap.steppedBar && !barsMap[snap.interval]) {
+      barsMap[snap.interval] = snap.steppedBar
+    }
+    const isStep = payload.action === 'step' && Object.keys(barsMap).length > 0
+    set((s) => ({
+      replay: snap,
+      replaySelectingCut: false,
+      replayResetNonce: isStep ? s.replayResetNonce : s.replayResetNonce + 1,
+      replayStepEvent: isStep
+        ? { ticker: snap.ticker, barsByInterval: barsMap, nonce: (s.replayStepEvent?.nonce ?? 0) + 1 }
+        : null,
+      broker: snap.broker ?? s.broker,
+    }))
   },
 
   // ─── Paper Broker ──────────────────────────────────────────────────────────
 
   refreshBroker: async () => {
     const activePane = get().panes.find((p) => p.slotId === get().activeSlotId) ?? get().panes[0]
-    try {
-      const snap = await api.brokerGetState(activePane.ticker, activePane.interval)
-      set({ broker: snap })
-    } catch {
-      // ignore if chart has no cached bars yet
+    const key = `${activePane.ticker.toUpperCase()}|${activePane.interval}`
+    if (inFlightBrokerKey === key && inFlightBrokerPromise) {
+      return inFlightBrokerPromise
     }
+    inFlightBrokerKey = key
+    const p = (async () => {
+      try {
+        const snap = await api.brokerGetState(activePane.ticker, activePane.interval)
+        set({ broker: snap })
+      } catch {
+        // ignore if chart has no cached bars yet
+      } finally {
+        if (inFlightBrokerKey === key) {
+          inFlightBrokerKey = null
+          inFlightBrokerPromise = null
+        }
+      }
+    })()
+    inFlightBrokerPromise = p
+    return p
   },
 
   setBrokerSnapshot: (broker) => set({ broker }),

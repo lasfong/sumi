@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Copy, GripVertical, Lock, Trash2, Unlock } from 'lucide-react'
+import { BellPlus, Copy, GripVertical, Lock, Trash2, Unlock } from 'lucide-react'
 
 export type DrawingLineStyleKind = 'solid' | 'dashed' | 'dotted'
 
@@ -19,6 +19,7 @@ interface FloatingDrawingToolbarProps {
   onChangeSize: (size: number) => void
   onChangeLineStyle: (style: DrawingLineStyleKind) => void
   onToggleLock: () => void
+  onCreateAlert?: () => void
   onClone: () => void
   onDelete: () => void
 }
@@ -41,11 +42,13 @@ export const FloatingDrawingToolbar: React.FC<FloatingDrawingToolbarProps> = ({
   onChangeSize,
   onChangeLineStyle,
   onToggleLock,
+  onCreateAlert,
   onClone,
   onDelete,
 }) => {
   const toolbarRef = useRef<HTMLDivElement | null>(null)
-  const [pos, setPos] = useState<{ x: number; y: number }>({ x: 260, y: 14 })
+  const [pos, setPos] = useState<{ x: number; y: number }>({ x: 260, y: 360 })
+  const hasUserDraggedRef = useRef(false)
   const [colorMenuOpen, setColorMenuOpen] = useState(false)
   const dragRef = useRef<{ active: boolean; offsetX: number; offsetY: number }>({
     active: false,
@@ -53,15 +56,24 @@ export const FloatingDrawingToolbar: React.FC<FloatingDrawingToolbarProps> = ({
     offsetY: 0,
   })
 
-  // Clamp initial position cleanly inside the chart pane
+  // Anchor bottom-center on initial selection so it NEVER overlaps the top-left OHLC & EMA legend (`BUG-036`)!
   useEffect(() => {
     const parent = boundsRef.current
     if (!parent) return
     const rect = parent.getBoundingClientRect()
-    setPos((prev) => ({
-      x: Math.max(8, Math.min(prev.x, Math.max(8, rect.width - 340))),
-      y: Math.max(8, Math.min(prev.y, Math.max(8, rect.height - 56))),
-    }))
+    const barW = toolbarRef.current?.offsetWidth ?? 330
+    setPos((prev) => {
+      if (!hasUserDraggedRef.current) {
+        return {
+          x: Math.max(8, Math.round((rect.width - barW) / 2)),
+          y: Math.max(64, Math.round(rect.height - 62)),
+        }
+      }
+      return {
+        x: Math.max(8, Math.min(prev.x, Math.max(8, rect.width - barW - 8))),
+        y: Math.max(8, Math.min(prev.y, Math.max(8, rect.height - 56))),
+      }
+    })
   }, [boundsRef, selected.id])
 
   // Pointer dragging for repositioning anywhere on chart
@@ -73,6 +85,7 @@ export const FloatingDrawingToolbar: React.FC<FloatingDrawingToolbarProps> = ({
       const barH = toolbarRef.current?.offsetHeight ?? 36
       const nextX = e.clientX - parentRect.left - dragRef.current.offsetX
       const nextY = e.clientY - parentRect.top - dragRef.current.offsetY
+      hasUserDraggedRef.current = true
       setPos({
         x: Math.max(6, Math.min(nextX, Math.max(6, parentRect.width - barW - 6))),
         y: Math.max(6, Math.min(nextY, Math.max(6, parentRect.height - barH - 6))),
@@ -296,6 +309,24 @@ export const FloatingDrawingToolbar: React.FC<FloatingDrawingToolbarProps> = ({
       >
         {selected.lock ? <Lock aria-hidden="true" className="w-3.5 h-3.5" /> : <Unlock aria-hidden="true" className="w-3.5 h-3.5" />}
       </button>
+
+      {/* Attach Alert to Drawing Line (v2.2) */}
+      {onCreateAlert &&
+        ['segment', 'rayLine', 'straightLine', 'horizontalStraightLine', 'horizontalRayLine', 'horizontalSegment'].includes(
+          selected.name,
+        ) && (
+          <button
+            type="button"
+            data-tb-item="true"
+            tabIndex={hasNativeFocusGroup ? undefined : -1}
+            aria-label="Đặt cảnh báo cắt đường vẽ này"
+            onClick={onCreateAlert}
+            className="tv-icon-btn w-7 h-7 text-[#FBC02D]"
+            title="Đặt cảnh báo giá cắt đường vẽ này"
+          >
+            <BellPlus aria-hidden="true" className="w-3.5 h-3.5" />
+          </button>
+        )}
 
       {/* Clone */}
       <button

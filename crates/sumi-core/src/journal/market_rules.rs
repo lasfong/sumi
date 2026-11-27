@@ -65,7 +65,12 @@ impl ExchangeVenue {
     /// Infers the default [`ExchangeVenue`] for a loaded instrument symbol and [`DataSourcePreset`].
     #[must_use]
     pub fn infer_from_symbol_and_preset(symbol: &str, preset: DataSourcePreset) -> Self {
-        let upper = symbol.trim().to_ascii_uppercase();
+        let raw_upper = symbol.trim().to_ascii_uppercase();
+        let (prefix_opt, bare_upper) = match raw_upper.split_once(':') {
+            Some((ex, sym)) => (Some(ex.trim()), sym.trim()),
+            None => (None, raw_upper.as_str()),
+        };
+        let upper = bare_upper.to_owned();
         let is_vn_index_ticker = matches!(
             upper.as_str(),
             "VNINDEX"
@@ -85,6 +90,26 @@ impl ExchangeVenue {
                 | "UPCOM-INDEX"
                 | "UPCOMINDEX"
         );
+        if preset == DataSourcePreset::CustomFile
+            && let Some(ex) = prefix_opt
+        {
+            if upper.starts_with("VN30F") {
+                return Self::Vn30Futures;
+            }
+            if is_vn_index_ticker {
+                return Self::VnIndexBenchmark;
+            }
+            match ex {
+                "HOSE" | "HSX" => return Self::Hose,
+                "HNX" => return Self::Hnx,
+                "UPCOM" => return Self::Upcom,
+                "BINANCE" | "OKX" | "BYBIT" | "COINBASE" | "KRAKEN" => {
+                    return Self::CryptoSpotPerp;
+                }
+                "NASDAQ" | "NYSE" | "AMEX" => return Self::UsEquities,
+                _ => {}
+            }
+        }
         match preset {
             DataSourcePreset::IntradayVn30F1m => Self::Vn30Futures,
             DataSourcePreset::BtcUsdt15mJson => Self::CryptoSpotPerp,
@@ -634,7 +659,7 @@ pub const HNX_LISTED_SYMBOLS: &[&str] = &[
 /// Strictly sorted official `UPCOM` (`±15%` daily band, `0.10 kVND` flat tick) ticker registry (`BUG-021`).
 pub const UPCOM_LISTED_SYMBOLS: &[&str] = &[
     "AAH", "AAS", "ABB", "ABI", "ABW", "ACM", "ACV", "AFX", "AGM", "AMS", "ATG", "AVG", "BCR",
-    "BGE", "BIG", "BMS", "BOT", "BSR", "C4G", "CKA", "CLI", "CTX", "DCS", "DDG", "DDV", "DFF",
+    "BGE", "BIG", "BMS", "BOT", "C4G", "CKA", "CLI", "CTX", "DCS", "DDG", "DDV", "DFF",
     "DGT", "DHB", "DIC", "DRI", "DTI", "DTP", "DVN", "F88", "FOX", "FTM", "G20", "G36", "GCF",
     "GDA", "GPC", "HBC", "HHG", "HIO", "HKB", "HNG", "HNM", "HSV", "HU4", "HVA", "HWS", "KHD",
     "KLB", "KSV", "KVC", "LCM", "LMH", "LSG", "LTG", "MCH", "MEC", "MKP", "MML", "MPC", "MPT",
@@ -767,17 +792,29 @@ pub fn is_vn_exchange_trading_day_days(ict_epoch_days: i64) -> bool {
 /// to the next valid trading day if `start_ict_days` falls on a weekend/holiday).
 #[must_use]
 pub fn add_vn_trading_days(start_ict_days: i64, delta_days: i32) -> i64 {
-    let mut cur = start_ict_days;
+    let min_day = MIN_SUPPORTED_EPOCH_SECS.div_euclid(86_400);
+    let max_day = MAX_SUPPORTED_EPOCH_SECS.div_euclid(86_400);
+    let mut cur = start_ict_days.clamp(min_day, max_day);
     if delta_days == 0 {
-        while !is_vn_exchange_trading_day_days(cur) {
-            cur = cur.saturating_add(1);
+        while !is_vn_exchange_trading_day_days(cur) && cur < max_day {
+            let Some(next) = cur.checked_add(1) else {
+                break;
+            };
+            cur = next;
         }
         return cur;
     }
     let step = if delta_days > 0 { 1_i64 } else { -1_i64 };
     let mut rem = delta_days.unsigned_abs();
     while rem > 0 {
-        cur = cur.saturating_add(step);
+        let Some(next) = cur.checked_add(step) else {
+            break;
+        };
+        if next < min_day || next > max_day {
+            cur = next.clamp(min_day, max_day);
+            break;
+        }
+        cur = next;
         if is_vn_exchange_trading_day_days(cur) {
             rem -= 1;
         }
@@ -788,16 +825,23 @@ pub fn add_vn_trading_days(start_ict_days: i64, delta_days: i32) -> i64 {
 /// Counts signed Vietnam exchange trading days in `(start_ict_days, end_ict_days]` (`0` when equal).
 #[must_use]
 pub fn vn_trading_days_between(start_ict_days: i64, end_ict_days: i64) -> i32 {
-    if start_ict_days == end_ict_days {
+    let min_day = MIN_SUPPORTED_EPOCH_SECS.div_euclid(86_400);
+    let max_day = MAX_SUPPORTED_EPOCH_SECS.div_euclid(86_400);
+    let s = start_ict_days.clamp(min_day, max_day);
+    let e = end_ict_days.clamp(min_day, max_day);
+    if s == e {
         return 0;
     }
-    if end_ict_days < start_ict_days {
-        return -vn_trading_days_between(end_ict_days, start_ict_days);
+    if e < s {
+        return -vn_trading_days_between(e, s);
     }
     let mut count = 0_i32;
-    let mut cur = start_ict_days;
-    while cur < end_ict_days {
-        cur = cur.saturating_add(1);
+    let mut cur = s;
+    while cur < e {
+        let Some(next) = cur.checked_add(1) else {
+            break;
+        };
+        cur = next;
         if is_vn_exchange_trading_day_days(cur) {
             count = count.saturating_add(1);
         }

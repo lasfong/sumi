@@ -203,12 +203,37 @@ export interface WatchlistGroup {
 export interface PriceAlertRecord {
   id: string
   ticker: string
+  alertKind?: 'price' | 'drawing' | 'indicator' | string
   condition: 'cross_above' | 'cross_below' | 'cross_any' | string
   targetPrice: number
+  interval?: string | null
+  paramsJson?: Record<string, unknown> | null
+  soundEnabled?: boolean
   message: string
   status: 'armed' | 'triggered' | 'paused' | string
   createdAtMs: number
   triggeredAtMs: number | null
+}
+
+export interface IndicatorTemplateRecord {
+  id: string
+  name: string
+  description: string
+  indicators: SavedIndicatorSpec[]
+  updatedAtMs: number
+}
+
+export interface SavedReplaySessionRecord {
+  id: string
+  name: string
+  ticker: string
+  baseInterval: IntervalKey
+  trackedIntervals: IntervalKey[]
+  cursorTimestampMs: number
+  speedMultiplier: number
+  blindMode: boolean
+  brokerSnapshotJson: Record<string, unknown> | null
+  updatedAtMs: number
 }
 
 export interface WorkspaceBootstrapResponse {
@@ -216,6 +241,8 @@ export interface WorkspaceBootstrapResponse {
   layouts: SavedLayoutRecord[]
   watchlists: WatchlistGroup[]
   alerts: PriceAlertRecord[]
+  indicatorTemplates?: IndicatorTemplateRecord[]
+  replaySessions?: SavedReplaySessionRecord[]
 }
 
 // ─── Paper Broker Types ────────────────────────────────────────────────────
@@ -347,11 +374,25 @@ export interface EnrichedClosedTrade {
   note: string
 }
 
+export interface ExecutionFill {
+  fill_id: number
+  order_id: number
+  side: 'Buy' | 'Sell'
+  reason: string
+  quantity: number
+  price: number
+  fee: number
+  realized_net_pnl: number | null
+  base_index: number
+  timestamp: number
+}
+
 export interface BrokerStateSnapshot {
   ticker: string
   interval: string
   venue: string
   boardLot: number
+  contractMultiplier?: number
   allowsShort: boolean
   enforceVnT2LotLock: boolean
   markPrice: number
@@ -361,6 +402,7 @@ export interface BrokerStateSnapshot {
   metrics: PortfolioMetrics
   openPosition: Position | null
   orders: EnrichedOrder[]
+  fills?: ExecutionFill[]
   fifoSummary: FifoSettlementSummary
   closedTrades: EnrichedClosedTrade[]
   replayLinked: boolean
@@ -384,21 +426,58 @@ export interface ReplaySnapshotResponse {
   status: 'Inactive' | 'Paused' | 'Playing' | 'Completed'
   ticker: string
   interval: string
+  trackedIntervals?: string[]
   cursorIndex: number
   totalBars: number
   cutoffTimestampMs: number | null
   speedMultiplier: number
   visibleBars: OhlcvBar[]
   steppedBar: OhlcvBar | null
+  steppedBarsByInterval?: Record<string, OhlcvBar>
+  cutoffBar?: OhlcvBar | null
+  prevCutoffClose?: number | null
+  vnBand?: VnBandLevels | null
+  triggeredAlerts?: PriceAlertRecord[]
   broker: BrokerStateSnapshot | null
 }
 
 // ─── Strategy Tester Types ─────────────────────────────────────────────────
 
+export interface CustomClauseInput {
+  catalogId: string
+  op?: '>' | '>=' | '<' | '<=' | 'cross_above' | 'cross_below'
+  threshold?: number
+  boolExpected?: boolean
+}
+
+export interface CustomRulesInput {
+  name?: string
+  entryCombinator?: 'and' | 'or'
+  entryClauses: CustomClauseInput[]
+  exitCombinator?: 'and' | 'or'
+  exitClauses?: CustomClauseInput[]
+  minHealthScore?: number | null
+}
+
+export type StrategyPresetSlug =
+  | 'qmv_s1'
+  | 'qmv_s2'
+  | 'qmv_s3'
+  | 'qmv_s4'
+  | 'qmv_s5'
+  | 'qmv_s6'
+  | 'sma_ema'
+  | 'rsi_mean_rev'
+  | 'macd'
+  | 'bb_squeeze'
+  | 'donchian_atr'
+  | 'rsi_bb'
+  | 'custom'
+
 export interface StrategyBacktestInput {
   ticker: string
   interval: string
-  preset: 'sma_ema' | 'rsi_mean_rev' | 'macd' | 'bb_squeeze' | 'donchian_atr' | 'rsi_bb'
+  preset: StrategyPresetSlug
   direction: 'long' | 'short' | 'both'
   initialCash: number
   commissionBps: number
@@ -429,6 +508,54 @@ export interface StrategyBacktestInput {
   maxBars?: number | null
   fromTimestampMs?: number | null
   toTimestampMs?: number | null
+  maxLeverage?: number | null
+  customRules?: CustomRulesInput | null
+  // QMV Strategy Parameters (S1..S6 & QMV Risk Management)
+  qmvSupportWindow?: number | null
+  qmvRvolConfirm?: number | null
+  qmvTrailMode?: number | null
+  qmvDivOsc?: number | null
+  qmvConfirmMode?: number | null
+  qmvIchiVariant?: number | null
+  qmvFlowHorizonPair?: number | null
+  qmvFlowLowZone?: number | null
+  qmvFlowHighZone?: number | null
+  qmvUseVnindexGate?: boolean | null
+  qmvMinPillars?: number | null
+  supportStopLookback?: number | null
+  qmvWaveTrailing23?: boolean | null
+}
+
+export interface PortfolioConstituentAttribution {
+  symbol: string
+  instrument_id: string
+  timeframe: string
+  final_weight_pct: number
+  standalone_return_pct: number
+  standalone_max_dd_pct: number
+  weighted_return_contribution_pct: number
+  num_trades: number
+}
+
+export interface PortfolioBacktestInput {
+  backtest: StrategyBacktestInput
+  tickers: string[]
+  qmvGroup?: string | null
+  weighting?: 'equal' | 'inverse_vol'
+}
+
+export interface PortfolioBacktestResponse {
+  presetLabel: string
+  interval: string
+  weightingLabel: string
+  constituentCount: number
+  initialCapital: number
+  tearsheet: BacktestTearsheet
+  avgConstituentMaxDdPct: number
+  diversificationDdReductionPct: number
+  equityCurve: StrategyEquityPointDto[]
+  constituents: PortfolioConstituentAttribution[]
+  survivorBiasCaveat: string | null
 }
 
 export interface BacktestChartOverlayState {
@@ -569,7 +696,7 @@ export interface MonteCarloResponse {
   checkpointEnvelopes: QuantileEnvelope5[]
 }
 
-// ─── Stock Screener (101 Signals) Types ────────────────────────────────────
+// ─── QMV Stock Screener (123 Signals) Types ────────────────────────────────
 
 export interface SignalCatalogItemDto {
   id: string
@@ -582,16 +709,45 @@ export interface SignalCatalogItemDto {
   outputType: string
   status: string
   warmupBars: number
+  isQmvCore?: boolean
+  isOhlcvProxy?: boolean
 }
 
+export type ScreenerExchangeFilter =
+  | 'ALL'
+  | 'ALL_VN'
+  | 'HOSE'
+  | 'HNX'
+  | 'UPCOM'
+  | 'QMV30'
+  | 'QMV60'
+  | 'DT1'
+  | 'DT2'
+  | 'DT3'
+  | 'WATCHLIST'
+
 export interface StockScreenerInput {
-  exchangeFilter: 'ALL' | 'HOSE' | 'HNX' | 'UPCOM' | 'WATCHLIST'
+  exchangeFilter: ScreenerExchangeFilter
   tickers?: string[]
   signalId?: string
+  signalIds?: string[]
+  qmvBasket?: string | null
+  sectorGroupFilter?: string | null
+  sectorFilter?: string | null
+  moneyTierFilter?: string | null
+  priceTierFilter?: string | null
+  minAvgVol20?: number | null
   categoryFilter?: string
   regimeFilter?: string
   searchQuery?: string
   maxSymbols?: number
+  minRsi?: number | null
+  maxRsi?: number | null
+  minRvol?: number | null
+  minChangePct?: number | null
+  maxChangePct?: number | null
+  macdFilter?: 'all' | 'positive' | 'negative' | null
+  minHealthScore?: number | null
 }
 
 export interface ScreenerRowDto {
@@ -602,6 +758,7 @@ export interface ScreenerRowDto {
   lastClose: number
   changePct: number
   lastVolume: number
+  avgVol20?: number | null
   rvol20: number | null
   rsi14: number | null
   macdHist: number | null
@@ -614,6 +771,15 @@ export interface ScreenerRowDto {
   matchedSignals: string[]
   selectedSignalValue: string | null
   lastTimestampMs: number
+  qmvSectorGroup?: string
+  qmvSector?: string
+  qmvSectorLabel?: string
+  moneyTier?: string
+  inQmv30?: boolean
+  inQmv60?: boolean
+  priceTier?: string
+  qmvFlowZ50T05?: number | null
+  qmvFlowZ50T20?: number | null
 }
 
 export interface StockScreenerResponse {
@@ -633,4 +799,77 @@ export interface ChartPaneConfig {
   showVnBands: boolean
   showCountdown: boolean
   indicators: SavedIndicatorSpec[]
+}
+
+// ─── AFC — Analog Forecast Cone Types (SPEC-SUMI-AFC-V1) ──────────────────
+
+export interface AnalogConeStepDto {
+  step: number
+  projectedTimestampMs: number
+  p10: number
+  p25: number
+  p50: number
+  p75: number
+  p90: number
+  p10RetPct: number
+  p25RetPct: number
+  p50RetPct: number
+  p75RetPct: number
+  p90RetPct: number
+  cumulativeFloor: number | null
+  cumulativeCeiling: number | null
+}
+
+export interface AnalogMatchCaseDto {
+  ticker: string
+  symbol: string
+  entryTimestampMs: number
+  entryDate: string
+  similarityPct: number
+  distance: number
+  weight: number
+  realizedT5RetPct: number | null
+  realizedT10RetPct: number | null
+}
+
+export interface AnalogConeForecastDto {
+  steps: AnalogConeStepDto[]
+  winRatePct: number
+  probGainGt3Pct: number
+  probTailDrop6Pct: number
+  skewRatio: number
+  expectedReturnP50Pct: number
+  expectedReturnMeanPct: number
+  queryYz20Vol: number
+  pitCandidateCount: number
+  fastCandidateCount: number
+  topAnalogs: AnalogMatchCaseDto[]
+}
+
+export interface AnalogConeResponseDto {
+  ticker: string
+  exchange: string
+  symbol: string
+  venue: string
+  interval: string
+  supportedInterval: boolean
+  replayLocked: boolean
+  asOfTimestampMs: number | null
+  asOfDate: string | null
+  anchorClose: number | null
+  horizon: number
+  topK: number
+  weightProfile: 'MarketAware' | 'EndogenousOnly' | string
+  queryLatencyUs: number
+  statusMessage: string | null
+  forecast: AnalogConeForecastDto | null
+}
+
+export interface AnalogConeQueryParams {
+  ticker: string
+  interval: IntervalKey | string
+  horizon?: number
+  topK?: number
+  useMarketContext?: boolean
+  asOfTimestampMs?: number | null
 }

@@ -181,14 +181,18 @@ pub fn run_multi_strategy_comparison(
         let (stamped_pct, max_dd, num_trades, sharpe) = if causal_candles.is_empty() {
             (Vec::new(), 0.0, 0, None)
         } else {
-            let feats = PrecomputedFeatures::build_with_shared_catalog(
+            let mut feats = PrecomputedFeatures::build_with_shared_catalog(
                 causal_candles,
                 &cfg,
-                if preset == StrategyPresetKind::CustomSignalRules {
+                if preset.uses_catalog_matrix() {
                     shared_catalog.clone()
                 } else {
                     None
                 },
+            );
+            feats.venue = crate::journal::ExchangeVenue::infer_from_symbol_and_preset(
+                &symbol,
+                crate::data::DataSourcePreset::CustomFile,
             );
             let sim = simulate_window_with_features(
                 causal_candles,
@@ -1039,7 +1043,7 @@ fn run_multi_phase_batch_internal(
         }
     };
 
-    let shared_catalog = if clean_cfg.preset == StrategyPresetKind::CustomSignalRules {
+    let shared_catalog = if clean_cfg.preset.uses_catalog_matrix() {
         Some(Arc::new(PrecomputedCatalogMatrix::compute(causal_candles)))
     } else {
         None

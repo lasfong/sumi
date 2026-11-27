@@ -474,7 +474,14 @@ impl std::error::Error for TradingError {}
 #[inline]
 #[must_use]
 pub fn apply_slippage(raw_price: f64, side: OrderSide, slippage_bps: f64) -> f64 {
-    let s = (slippage_bps.clamp(0.0, 500.0)) * 1.0e-4;
+    if !raw_price.is_finite() || raw_price <= 0.0 {
+        return f64::NAN;
+    }
+    let s = if slippage_bps.is_finite() {
+        slippage_bps.clamp(0.0, 500.0) * 1.0e-4
+    } else {
+        0.0
+    };
     let factor = match side {
         OrderSide::Buy => 1.0 + s,
         OrderSide::Sell => (1.0 - s).max(1.0e-6),

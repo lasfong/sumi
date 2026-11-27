@@ -525,20 +525,23 @@ pub async fn get_bars(
         .unwrap_or(Adjustment::Splits);
     let page_limit = limit.unwrap_or(300).clamp(1, 5_000);
 
-    // Causal Bar Replay guard (DEF-001): if Replay is active on this ticker+interval, never leak future bars!
+    // Causal Multi-Timeframe Bar Replay guard (`DEF-001`, `BUG-040`):
+    // If Replay is active on this ticker (on ANY timeframe!), materialize causally up to cutoff
+    // so higher-TF panes (e.g. `4h` alongside `1h`) NEVER leak future candles!
     {
-        let replay_guard = state.replay.lock().await;
-        if let Some(rt) = replay_guard.as_ref()
+        let mut replay_guard = state.replay.lock().await;
+        if let Some(rt) = replay_guard.as_mut()
             && rt.controller.is_active()
             && rt.ticker.eq_ignore_ascii_case(&sym.ticker())
-            && rt.interval == iv
         {
-            let cutoff_idx = rt
-                .controller
-                .base_cursor_index
-                .min(rt.base_bars.len().saturating_sub(1));
-            let visible = &rt.base_bars[..=cutoff_idx];
-            let bars: Vec<OhlcvBar> = match mode.to_ascii_lowercase().as_str() {
+            if !rt.tracked_intervals.contains(&iv) {
+                rt.tracked_intervals.push(iv);
+                rt.tracked_intervals.sort_by_key(|i| i.duration_ms());
+            }
+            let visible =
+                crate::commands::replay::materialize_replay_bars(rt, iv, &state.market_store);
+            let mode_lower = mode.to_ascii_lowercase();
+            let bars: Vec<OhlcvBar> = match mode_lower.as_str() {
                 "forward" => {
                     let before = timestamp.unwrap_or(i64::MAX);
                     let older: Vec<OhlcvBar> = visible
@@ -566,7 +569,11 @@ pub async fn get_bars(
                 .flatten()
                 .map(|(s, _)| s)
                 .unwrap_or_else(|| synthesize_fallback_symbol(&sym));
-            let vn_band = compute_vn_band_from_bars(&sym_info, visible);
+            let vn_band = if mode_lower == "init" {
+                compute_vn_band_from_bars(&sym_info, &visible)
+            } else {
+                None
+            };
             return Ok(BarsPageResponse {
                 bars,
                 has_older,
@@ -641,19 +648,24 @@ pub async fn get_bars(
         .clone()
         .unwrap_or_else(|| synthesize_fallback_symbol(&sym));
 
-    // Compute Vietnam price band against latest D1 bars for consistent daily ceiling/floor lines.
-    let d1_bars = if iv == Interval::D1 && !page.bars.is_empty() {
-        page.bars.clone()
+    // Compute Vietnam price band ONLY for `init` loads (`BUG-005`: forward historical pagination must
+    // never overwrite today's live Ceiling/Reference/Floor band!).
+    let vn_band = if matches!(query_mode, BarQueryMode::Init) {
+        let d1_bars = if iv == Interval::D1 && !page.bars.is_empty() {
+            page.bars.clone()
+        } else {
+            svc.get_bars_instant(&BarsRequest::init(
+                SeriesKey::new(&sym, Interval::D1, adj),
+                2,
+            ))
+            .await
+            .map(|p| p.bars)
+            .unwrap_or_default()
+        };
+        compute_vn_band_from_bars(&sym_info, &d1_bars)
     } else {
-        svc.get_bars_instant(&BarsRequest::init(
-            SeriesKey::new(&sym, Interval::D1, adj),
-            2,
-        ))
-        .await
-        .map(|p| p.bars)
-        .unwrap_or_default()
+        None
     };
-    let vn_band = compute_vn_band_from_bars(&sym_info, &d1_bars);
 
     Ok(BarsPageResponse {
         bars: page.bars,
@@ -674,8 +686,21 @@ pub async fn subscribe_bars(
     interval: String,
     on_bar: Channel<LiveBarPayload>,
 ) -> DesktopResult<bool> {
-    // Tear down any existing stream for this slot first so subscriptions never leak.
-    unsubscribe_bars_inner(&state, &stream_id).await;
+    // Bump monotonic generation and tear down any existing stream for this slot (`BUG-012` race guard!).
+    let my_gen = {
+        let mut gens = state.bar_stream_generations.lock().await;
+        let entry = gens.entry(stream_id.clone()).or_insert(0);
+        *entry = entry.saturating_add(1);
+        *entry
+    };
+    let prev_stream = {
+        let mut guard = state.bar_streams.lock().await;
+        guard.remove(&stream_id)
+    };
+    if let Some(stream) = prev_stream {
+        let _ = stream.cancel_tx.send(());
+        stream.forwarder.abort();
+    }
 
     if state.is_offline() {
         return Ok(false);
@@ -797,18 +822,37 @@ pub async fn subscribe_bars(
         }
     });
 
+    // Re-check monotonic generation under lock so an interleaved `unsubscribe_bars` never leaves a zombie stream (`BUG-012`).
+    let still_current = {
+        let gens = state.bar_stream_generations.lock().await;
+        gens.get(&stream_id).copied() == Some(my_gen)
+    };
+    if !still_current {
+        let _ = cancel_tx.send(());
+        forwarder.abort();
+        return Ok(false);
+    }
+
     let mut guard = state.bar_streams.lock().await;
-    guard.insert(
+    if let Some(old) = guard.insert(
         stream_id,
         ActiveBarStream {
             cancel_tx,
             forwarder,
         },
-    );
+    ) {
+        let _ = old.cancel_tx.send(());
+        old.forwarder.abort();
+    }
     Ok(true)
 }
 
 async fn unsubscribe_bars_inner(state: &AppState, stream_id: &str) {
+    {
+        let mut gens = state.bar_stream_generations.lock().await;
+        let entry = gens.entry(stream_id.to_owned()).or_insert(0);
+        *entry = entry.saturating_add(1);
+    }
     let existing = {
         let mut guard = state.bar_streams.lock().await;
         guard.remove(stream_id)
@@ -833,11 +877,30 @@ pub async fn subscribe_quotes(
 ) -> DesktopResult<bool> {
     unsubscribe_quotes_inner(&state).await;
 
-    if state.is_offline() || tickers.is_empty() {
+    if state.is_offline() {
         return Ok(false);
     }
 
-    let keys: Vec<SymbolKey> = tickers
+    // Union requested Watchlist tickers with all `armed` alert tickers so alerts on symbols
+    // outside the currently viewed Watchlist still receive live quotes and fire (`BUG-017`)!
+    let mut merged_tickers = tickers;
+    if let Ok(armed_alerts) = state.workspace.list_alerts() {
+        for a in armed_alerts {
+            if a.status == "armed"
+                && !merged_tickers
+                    .iter()
+                    .any(|t| t.eq_ignore_ascii_case(&a.ticker))
+            {
+                merged_tickers.push(a.ticker);
+            }
+        }
+    }
+
+    if merged_tickers.is_empty() {
+        return Ok(false);
+    }
+
+    let keys: Vec<SymbolKey> = merged_tickers
         .iter()
         .filter_map(|t| SymbolKey::parse(t).ok())
         .collect();
@@ -1058,5 +1121,6 @@ pub async fn import_cafef_dir(
     .await
     .map_err(|e| DesktopError::Internal(e.to_string()))??;
     state.market_service.invalidate_ram_cache();
+    state.invalidate_analog_memory_bank();
     Ok(summary)
 }

@@ -45,6 +45,32 @@ impl Default for IchimokuConfig {
 }
 
 impl IchimokuConfig {
+    /// Canonical QMV V7 Ichimoku configuration (`Tenkan=6, Kijun=18, SenkouB=36, Displacement=18`).
+    #[inline]
+    #[must_use]
+    pub const fn qmv_v7() -> Self {
+        Self {
+            tenkan_period: 6,
+            kijun_period: 18,
+            senkou_b_period: 36,
+            displacement: 18,
+            show_chikou: true,
+        }
+    }
+
+    /// Short-horizon QMV Ichimoku variant (`Tenkan=3, Kijun=6, SenkouB=18, Displacement=18`).
+    #[inline]
+    #[must_use]
+    pub const fn qmv_short() -> Self {
+        Self {
+            tenkan_period: 3,
+            kijun_period: 6,
+            senkou_b_period: 18,
+            displacement: 18,
+            show_chikou: true,
+        }
+    }
+
     /// Clamps configuration fields into valid mathematical domains (`1..=500` periods, `0..=250` shift).
     #[must_use]
     pub fn sanitized(self) -> Self {

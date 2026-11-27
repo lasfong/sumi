@@ -1,3 +1,6 @@
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use crate::alerts::truncate_utf8_bytes;
@@ -20,7 +23,7 @@ pub const MAX_CLAUSES_PER_GROUP: usize = 8;
 /// Maximum UTF-8 byte length of [`CustomSignalRuleSpec::name`].
 pub const MAX_RULE_NAME_BYTES: usize = 64;
 
-/// Canonical rule-based strategy presets available in Sumi Strategy Lab (`Milestone R09 / R16`).
+/// Canonical rule-based strategy presets available in Sumi Strategy Lab (`Milestone R09 / R16 / QMV Workstation`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum StrategyPresetKind {
     #[default]
@@ -31,10 +34,22 @@ pub enum StrategyPresetKind {
     DonchianAtrBreakout,
     RsiBollingerConfluence,
     CustomSignalRules,
+    /// S1: QMV Mua Hỗ Trợ KT01 (Cạn cung / Spring + Cầu quay lại).
+    QmvSupportVpa,
+    /// S2: QMV Bắt Đáy An Toàn Đáy 2 Phân Kỳ Dương (`qmv-kt01-bot-010`).
+    QmvSafeBottomDiv,
+    /// S3: QMV Ichimoku V7 (`6-18-36`) Thuận Xu Hướng.
+    QmvIchimokuV7,
+    /// S4: QMV Vòng Quay Kép Dòng Tiền (`ProxyBB Z-50` `T+/T++/SW` Uốn 20–30).
+    QmvDualCycleFlow,
+    /// S5: QMV Tiết Cung & Vùng Tắc Nghẽn Bứt Phá (`Congestion Breakout`).
+    QmvCongestionBreakout,
+    /// S6: QMV Hội Tụ Đa Cổng 3 Trụ Cột (`Xu hướng + Dòng tiền Proxy + VPA/Ichimoku/Phân kỳ`).
+    QmvMultiGateConfluence,
 }
 
 impl StrategyPresetKind {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 13] = [
         Self::SmaEmaTrendCross,
         Self::RsiMeanReversion,
         Self::MacdMomentum,
@@ -42,7 +57,38 @@ impl StrategyPresetKind {
         Self::DonchianAtrBreakout,
         Self::RsiBollingerConfluence,
         Self::CustomSignalRules,
+        Self::QmvSupportVpa,
+        Self::QmvSafeBottomDiv,
+        Self::QmvIchimokuV7,
+        Self::QmvDualCycleFlow,
+        Self::QmvCongestionBreakout,
+        Self::QmvMultiGateConfluence,
     ];
+
+    /// The 6 canonical QMV trading methodology strategies (`S1..S6`).
+    pub const QMV_PLAYBOOKS: [Self; 6] = [
+        Self::QmvSupportVpa,
+        Self::QmvSafeBottomDiv,
+        Self::QmvIchimokuV7,
+        Self::QmvDualCycleFlow,
+        Self::QmvCongestionBreakout,
+        Self::QmvMultiGateConfluence,
+    ];
+
+    /// Returns `true` when this preset evaluates [`PrecomputedCatalogMatrix`] signals.
+    #[inline]
+    #[must_use]
+    pub const fn uses_catalog_matrix(self) -> bool {
+        matches!(
+            self,
+            Self::CustomSignalRules
+                | Self::QmvSupportVpa
+                | Self::QmvSafeBottomDiv
+                | Self::QmvDualCycleFlow
+                | Self::QmvCongestionBreakout
+                | Self::QmvMultiGateConfluence
+        )
+    }
 
     #[inline]
     #[must_use]
@@ -55,6 +101,12 @@ impl StrategyPresetKind {
             Self::DonchianAtrBreakout => "Donchian ATR",
             Self::RsiBollingerConfluence => "RSI + BB Conf",
             Self::CustomSignalRules => "Custom Rules",
+            Self::QmvSupportVpa => "S1 · Mua Hỗ Trợ KT01",
+            Self::QmvSafeBottomDiv => "S2 · Đáy 2 Phân Kỳ",
+            Self::QmvIchimokuV7 => "S3 · Ichimoku 6-18-36",
+            Self::QmvDualCycleFlow => "S4 · Chu Kỳ Dòng Tiền",
+            Self::QmvCongestionBreakout => "S5 · Tắc Nghẽn Bứt Phá",
+            Self::QmvMultiGateConfluence => "S6 · Hội Tụ Đa Cổng",
         }
     }
 
@@ -69,6 +121,12 @@ impl StrategyPresetKind {
             Self::DonchianAtrBreakout => "Donchian Channel + ATR Breakout",
             Self::RsiBollingerConfluence => "RSI + Bollinger Band Confluence",
             Self::CustomSignalRules => "Composable Signal-Catalog Rule Builder",
+            Self::QmvSupportVpa => "S1 · QMV Mua Hỗ Trợ KT01 (Cạn Cung / Spring)",
+            Self::QmvSafeBottomDiv => "S2 · QMV Bắt Đáy An Toàn Đáy 2 Phân Kỳ Dương",
+            Self::QmvIchimokuV7 => "S3 · QMV Ichimoku V7 (6-18-36) Thuận Xu Hướng",
+            Self::QmvDualCycleFlow => "S4 · QMV Vòng Quay Kép Dòng Tiền (OHLCV Proxy)",
+            Self::QmvCongestionBreakout => "S5 · QMV Tiết Cung & Tắc Nghẽn Bứt Phá",
+            Self::QmvMultiGateConfluence => "S6 · QMV Hội Tụ Đa Cổng 3 Trụ Cột",
         }
     }
 
@@ -90,6 +148,24 @@ impl StrategyPresetKind {
             }
             Self::CustomSignalRules => {
                 "2-Level AND/OR Signal-Catalog Clauses + Confluence Gate -> Open[T+1]"
+            }
+            Self::QmvSupportVpa => {
+                "Gần Hỗ trợ + Cạn cung >=2p / Spring + Cầu quay lại -> Trailing 2/3 sóng"
+            }
+            Self::QmvSafeBottomDiv => {
+                "Đáy 2 Phân kỳ Dương xác nhận (RSI/MACD/CCI) + Nến đảo chiều -> SL đáy Pivot"
+            }
+            Self::QmvIchimokuV7 => {
+                "Trên MA50 & Mây Kumo QMV (6-18-36) + TK thuận + Chikou thoáng -> Thoát Kijun(18)"
+            }
+            Self::QmvDualCycleFlow => {
+                "ProxyBB Z-50 (T+/T++/SW) uốn lên từ vùng 20-30 -> Chốt vùng bão hòa 75-80"
+            }
+            Self::QmvCongestionBreakout => {
+                "Vùng tắc nghẽn / Tiết cung bứt phá hộp tích lũy kèm RVOL -> SL giữa hộp"
+            }
+            Self::QmvMultiGateConfluence => {
+                "Hội tụ Chế độ TT VNINDEX + Dòng tiền Proxy + Tín hiệu VPA/Ichimoku/Phân kỳ"
             }
         }
     }
@@ -212,6 +288,30 @@ pub struct StrategyParams {
     pub donchian_entry_period: usize,
     pub donchian_exit_period: usize,
     pub atr_period: usize,
+
+    // QMV Strategy Family Parameters (`S1..S6` — low-dimensional to prevent overfitting)
+    /// S1 support window (`20` or `40` bars).
+    pub qmv_support_window: usize,
+    /// Minimum relative volume confirmation (`1.0..=2.5`).
+    pub qmv_rvol_confirm: f64,
+    /// Trailing mode (`0 = QMV 2/3 Wave`, `1 = MA20/Kijun Close Break`).
+    pub qmv_trail_mode: u8,
+    /// S2 oscillator (`0 = Any RSI/MACD/CCI`, `1 = RSI14`, `2 = MACD`, `3 = CCI14`).
+    pub qmv_div_osc: u8,
+    /// S2 candle confirmation (`0 = Close > PrevClose`, `1 = Bullish Pattern / Spring`).
+    pub qmv_confirm_mode: u8,
+    /// S3 Ichimoku variant (`0 = QMV V7 6-18-36`, `1 = QMV Short 3-6-18`, `2 = Classic 9-26-52`).
+    pub qmv_ichi_variant: u8,
+    /// S4 ProxyBB Z-50 horizon pair (`0 = T+ 03+05`, `1 = T++ 05+10`, `2 = Swing 10+20`).
+    pub qmv_flow_horizon_pair: u8,
+    /// S4 low turn-up zone (`20..=35`).
+    pub qmv_flow_low_zone: f64,
+    /// S4 high saturation turn-down zone (`65..=85`).
+    pub qmv_flow_high_zone: f64,
+    /// S6 / S1 / S5 market regime gate against `VNINDEX` (`true` = block entries when VNINDEX is Downtrend).
+    pub qmv_use_vnindex_gate: bool,
+    /// S6 minimum confluence pillars (`2` or `3` out of 3).
+    pub qmv_min_pillars: u8,
 }
 
 impl Default for StrategyParams {
@@ -235,6 +335,17 @@ impl Default for StrategyParams {
             donchian_entry_period: 20,
             donchian_exit_period: 10,
             atr_period: 14,
+            qmv_support_window: 20,
+            qmv_rvol_confirm: 1.15,
+            qmv_trail_mode: 0,
+            qmv_div_osc: 0,
+            qmv_confirm_mode: 0,
+            qmv_ichi_variant: 0,
+            qmv_flow_horizon_pair: 1,
+            qmv_flow_low_zone: 30.0,
+            qmv_flow_high_zone: 75.0,
+            qmv_use_vnindex_gate: true,
+            qmv_min_pillars: 2,
         }
     }
 }
@@ -304,6 +415,26 @@ impl StrategyParams {
         self.donchian_entry_period = self.donchian_entry_period.clamp(2, 250);
         self.donchian_exit_period = self.donchian_exit_period.clamp(2, 250);
         self.atr_period = self.atr_period.clamp(2, 200);
+
+        self.qmv_support_window = self.qmv_support_window.clamp(5, 120);
+        if !self.qmv_rvol_confirm.is_finite() {
+            self.qmv_rvol_confirm = 1.15;
+        }
+        self.qmv_rvol_confirm = self.qmv_rvol_confirm.clamp(0.5, 5.0);
+        self.qmv_trail_mode = self.qmv_trail_mode.min(2);
+        self.qmv_div_osc = self.qmv_div_osc.min(3);
+        self.qmv_confirm_mode = self.qmv_confirm_mode.min(1);
+        self.qmv_ichi_variant = self.qmv_ichi_variant.min(2);
+        self.qmv_flow_horizon_pair = self.qmv_flow_horizon_pair.min(2);
+        if !self.qmv_flow_low_zone.is_finite() {
+            self.qmv_flow_low_zone = 30.0;
+        }
+        self.qmv_flow_low_zone = self.qmv_flow_low_zone.clamp(10.0, 48.0);
+        if !self.qmv_flow_high_zone.is_finite() {
+            self.qmv_flow_high_zone = 75.0;
+        }
+        self.qmv_flow_high_zone = self.qmv_flow_high_zone.clamp(52.0, 95.0);
+        self.qmv_min_pillars = self.qmv_min_pillars.clamp(2, 4);
     }
 
     #[must_use]
@@ -346,6 +477,63 @@ impl StrategyParams {
                 self.bb_std_mult
             ),
             StrategyPresetKind::CustomSignalRules => "Custom Signal Rules".to_owned(),
+            StrategyPresetKind::QmvSupportVpa => format!(
+                "HT({})·RVOL>={:.2}·{}",
+                self.qmv_support_window,
+                self.qmv_rvol_confirm,
+                if self.qmv_trail_mode == 0 {
+                    "Trail 2/3"
+                } else {
+                    "MA20"
+                }
+            ),
+            StrategyPresetKind::QmvSafeBottomDiv => {
+                let osc = match self.qmv_div_osc {
+                    1 => "RSI14",
+                    2 => "MACD",
+                    3 => "CCI14",
+                    _ => "AnyDiv",
+                };
+                let cfm = if self.qmv_confirm_mode == 0 {
+                    "CloseUp"
+                } else {
+                    "Pattern"
+                };
+                format!("{osc}+{cfm}")
+            }
+            StrategyPresetKind::QmvIchimokuV7 => {
+                let v = match self.qmv_ichi_variant {
+                    1 => "Ichi(3-6-18)",
+                    2 => "Ichi(9-26-52)",
+                    _ => "IchiQMV(6-18-36)",
+                };
+                format!("{v}·RVOL>={:.1}", self.qmv_rvol_confirm)
+            }
+            StrategyPresetKind::QmvDualCycleFlow => {
+                let hp = match self.qmv_flow_horizon_pair {
+                    0 => "T+2(05/20)",
+                    1 => "T+(03/10)",
+                    _ => "SW(10/50)",
+                };
+                format!(
+                    "{hp} {:.0}->{:.0}",
+                    self.qmv_flow_low_zone, self.qmv_flow_high_zone
+                )
+            }
+            StrategyPresetKind::QmvCongestionBreakout => format!(
+                "Sqz<={:.0}%·RVOL>={:.1}",
+                self.max_squeeze_bw_pct, self.qmv_rvol_confirm
+            ),
+            StrategyPresetKind::QmvMultiGateConfluence => format!(
+                "{}/4 Trụ·VNIDX={}·{}",
+                self.qmv_min_pillars,
+                if self.qmv_use_vnindex_gate { "ON" } else { "OFF" },
+                if self.qmv_trail_mode == 0 {
+                    "SL HỗTrợ+2/3"
+                } else {
+                    "FixedSL"
+                }
+            ),
         }
     }
 }
@@ -362,6 +550,10 @@ pub struct StopTakeConfig {
     pub max_holding_bars: Option<usize>,
     /// Minimum bars held before exits can trigger (`0` general, `2` for Vietnam `T+2` spot).
     pub min_holding_bars: usize,
+    /// Optional QMV Support-Zone Stop Loss lookback (`min(Low[t-N..t]) - 0.35 * ATR`).
+    pub support_stop_lookback: Option<usize>,
+    /// Enables QMV `2/3`-Wave Trailing Stop (`anchor + 2/3 * (peak - anchor)` once wave >= `1.8 * ATR`).
+    pub qmv_wave_trailing_2_3: bool,
 }
 
 impl Default for StopTakeConfig {
@@ -374,6 +566,8 @@ impl Default for StopTakeConfig {
             trailing_stop_atr_mult: None,
             max_holding_bars: None,
             min_holding_bars: 0,
+            support_stop_lookback: None,
+            qmv_wave_trailing_2_3: false,
         }
     }
 }
@@ -386,6 +580,7 @@ impl StopTakeConfig {
         self.take_profit_rr_mult = sanitize_opt_range(self.take_profit_rr_mult, 0.2, 20.0);
         self.trailing_stop_atr_mult = sanitize_opt_range(self.trailing_stop_atr_mult, 0.2, 20.0);
         self.min_holding_bars = self.min_holding_bars.min(30);
+        self.support_stop_lookback = self.support_stop_lookback.map(|w| w.clamp(3, 120));
         if let Some(max_h) = self.max_holding_bars {
             let clean = max_h.clamp(1, 10_000).max(self.min_holding_bars.max(1));
             self.max_holding_bars = Some(clean);
@@ -1109,6 +1304,16 @@ pub struct BacktestConfig {
     pub lot_step: f64,
     /// Optional In-Sample split ratio (`0.50..=0.90`, e.g. `Some(0.70)` = `70% IS / 30% OOS`).
     pub in_sample_split_pct: Option<f64>,
+    /// Enforces Vietnam exchange microstructure (`HOSE ±7% / HNX ±10% / UPCOM ±15%` locked ceiling/floor,
+    /// `10/50/100đ` tick ladder, and historical `T+3` pre-`2022-08-29` / `T+2` post-`2022-08-29` settlement).
+    #[serde(default)]
+    pub enforce_vn_microstructure: bool,
+    /// Minimum causal 20-bar average volume required to open a position (`0.0` = disabled; `10_000.0` for QMV VN).
+    #[serde(default)]
+    pub min_entry_avg_vol_20: f64,
+    /// Optional shared set of UTC day indices (`timestamp.div_euclid(86_400)`) where `VNINDEX` is NOT in `Downtrend`.
+    #[serde(skip)]
+    pub benchmark_non_downtrend_days: Option<Arc<BTreeSet<i64>>>,
 }
 
 impl Default for BacktestConfig {
@@ -1127,6 +1332,9 @@ impl Default for BacktestConfig {
             max_leverage: 1.0,
             lot_step: 0.0,
             in_sample_split_pct: Some(0.70),
+            enforce_vn_microstructure: false,
+            min_entry_avg_vol_20: 0.0,
+            benchmark_non_downtrend_days: None,
         }
     }
 }
@@ -1173,6 +1381,9 @@ impl BacktestConfig {
             .in_sample_split_pct
             .filter(|v| v.is_finite())
             .map(|v| v.clamp(0.50, 0.90));
+        if !self.min_entry_avg_vol_20.is_finite() || self.min_entry_avg_vol_20 < 0.0 {
+            self.min_entry_avg_vol_20 = 0.0;
+        }
     }
 
     #[must_use]
@@ -1359,6 +1570,119 @@ pub fn build_preset_sweep_configs(base: &BacktestConfig) -> Vec<(String, Backtes
                     }
                     cfg.sanitize();
                     out.push((format!("{g_lbl}·{r_lbl}"), cfg));
+                }
+            }
+        }
+        StrategyPresetKind::QmvSupportVpa => {
+            for &sup_w in &[20_usize, 40] {
+                for &rv in &[1.15_f64, 1.35] {
+                    for &tm in &[0_u8, 1] {
+                        let mut cfg = clean_base.clone();
+                        cfg.params.qmv_support_window = sup_w;
+                        cfg.params.qmv_rvol_confirm = rv;
+                        cfg.params.qmv_trail_mode = tm;
+                        cfg.risk.support_stop_lookback = Some(sup_w.min(25));
+                        cfg.risk.qmv_wave_trailing_2_3 = tm == 0;
+                        cfg.risk.stop_loss_pct = Some(8.0);
+                        cfg.risk.take_profit_pct = None;
+                        cfg.risk.max_holding_bars = None;
+                        cfg.sanitize();
+                        out.push((cfg.param_summary(), cfg));
+                    }
+                }
+            }
+        }
+        StrategyPresetKind::QmvSafeBottomDiv => {
+            for &osc in &[0_u8, 1, 2, 3] {
+                for &cfm in &[0_u8, 1] {
+                    let mut cfg = clean_base.clone();
+                    cfg.params.qmv_div_osc = osc;
+                    cfg.params.qmv_confirm_mode = cfm;
+                    cfg.risk.support_stop_lookback = Some(10);
+                    cfg.risk.qmv_wave_trailing_2_3 = true;
+                    cfg.risk.stop_loss_pct = Some(7.0);
+                    cfg.risk.take_profit_pct = Some(18.0);
+                    cfg.risk.max_holding_bars = Some(28);
+                    cfg.sanitize();
+                    out.push((cfg.param_summary(), cfg));
+                }
+            }
+        }
+        StrategyPresetKind::QmvIchimokuV7 => {
+            for &variant in &[0_u8, 1, 2] {
+                for &rv in &[1.0_f64, 1.25] {
+                    for &tm in &[0_u8, 1] {
+                        let mut cfg = clean_base.clone();
+                        cfg.params.qmv_ichi_variant = variant;
+                        cfg.params.qmv_rvol_confirm = rv;
+                        cfg.params.qmv_trail_mode = tm;
+                        cfg.risk.support_stop_lookback = Some(18);
+                        cfg.risk.qmv_wave_trailing_2_3 = tm == 0;
+                        cfg.risk.stop_loss_pct = Some(8.5);
+                        cfg.risk.take_profit_pct = None;
+                        cfg.risk.max_holding_bars = None;
+                        cfg.sanitize();
+                        out.push((format!("{}·T{tm}", cfg.param_summary()), cfg));
+                    }
+                }
+            }
+        }
+        StrategyPresetKind::QmvDualCycleFlow => {
+            for &hp in &[0_u8, 1, 2] {
+                for &(lo_z, hi_z) in &[(25.0_f64, 78.0_f64), (32.0, 75.0)] {
+                    let mut cfg = clean_base.clone();
+                    cfg.params.qmv_flow_horizon_pair = hp;
+                    cfg.params.qmv_flow_low_zone = lo_z;
+                    cfg.params.qmv_flow_high_zone = hi_z;
+                    cfg.risk.support_stop_lookback = Some(15);
+                    cfg.risk.qmv_wave_trailing_2_3 = true;
+                    cfg.risk.stop_loss_pct = Some(7.5);
+                    cfg.risk.take_profit_pct = None;
+                    cfg.risk.max_holding_bars = None;
+                    cfg.sanitize();
+                    out.push((cfg.param_summary(), cfg));
+                }
+            }
+        }
+        StrategyPresetKind::QmvCongestionBreakout => {
+            for &bw in &[9.0_f64, 12.0, 15.0] {
+                for &rv in &[1.3_f64, 1.6, 2.0] {
+                    let mut cfg = clean_base.clone();
+                    cfg.params.max_squeeze_bw_pct = bw;
+                    cfg.params.qmv_rvol_confirm = rv;
+                    cfg.risk.support_stop_lookback = Some(15);
+                    cfg.risk.qmv_wave_trailing_2_3 = true;
+                    cfg.risk.stop_loss_pct = Some(8.0);
+                    cfg.risk.take_profit_pct = None;
+                    cfg.risk.max_holding_bars = None;
+                    cfg.sanitize();
+                    out.push((cfg.param_summary(), cfg));
+                }
+            }
+        }
+        StrategyPresetKind::QmvMultiGateConfluence => {
+            for &vgate in &[true, false] {
+                for &pillars in &[3_u8, 4] {
+                    for &tm in &[0_u8, 1] {
+                        let mut cfg = clean_base.clone();
+                        cfg.params.qmv_use_vnindex_gate = vgate;
+                        cfg.params.qmv_min_pillars = pillars;
+                        cfg.params.qmv_trail_mode = tm;
+                        if tm == 0 {
+                            cfg.risk.support_stop_lookback = Some(20);
+                            cfg.risk.qmv_wave_trailing_2_3 = true;
+                            cfg.risk.stop_loss_pct = Some(8.0);
+                            cfg.risk.take_profit_pct = None;
+                        } else {
+                            cfg.risk.support_stop_lookback = None;
+                            cfg.risk.qmv_wave_trailing_2_3 = false;
+                            cfg.risk.stop_loss_pct = Some(7.0);
+                            cfg.risk.take_profit_pct = None;
+                        }
+                        cfg.risk.max_holding_bars = None;
+                        cfg.sanitize();
+                        out.push((cfg.param_summary(), cfg));
+                    }
                 }
             }
         }
