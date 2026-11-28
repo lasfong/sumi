@@ -1006,7 +1006,14 @@ pub async fn scan_watchlist_alerts(
             }
             let bar = page.bars[page.bars.len() - 1];
             let prev_close = page.bars[page.bars.len() - 2].close;
-            let hits = evaluate_bar_alerts_slice(&ws, &ticker, prev_close, &bar, &page.bars);
+            let hits = evaluate_bar_alerts_slice(
+                &ws,
+                &ticker,
+                prev_close,
+                &bar,
+                &page.bars,
+                Some(iv_str.as_str()),
+            );
             all_fired.extend(hits);
         }
         Ok::<Vec<PriceAlertRecord>, DesktopError>(all_fired)
@@ -1028,7 +1035,9 @@ pub async fn scan_watchlist_alerts(
     Ok(fired)
 }
 
-/// Evaluates armed price, drawing-line, AND indicator (`RSI`/`MACD`/`EMA`) alerts on live bar arrival (v2.2).
+/// Evaluates armed price, drawing-line, AND indicator (`RSI`/`MACD`/`EMA`/`SIGNAL`/`CONFLUENCE`)
+/// alerts on live bar arrival, filtering strictly by `interval` and dispatching external
+/// Telegram/Webhook channels asynchronously (`W6-09`).
 #[tauri::command]
 pub async fn check_bar_alerts(
     state: State<'_, AppState>,
@@ -1042,7 +1051,7 @@ pub async fn check_bar_alerts(
     let norm = sym.ticker();
     let iv_str = iv.as_str().to_owned();
 
-    tokio::task::spawn_blocking(move || {
+    let fired = tokio::task::spawn_blocking(move || -> DesktopResult<Vec<PriceAlertRecord>> {
         let alerts = ws.list_alerts()?;
         let relevant: Vec<PriceAlertRecord> = alerts
             .into_iter()
@@ -1064,27 +1073,58 @@ pub async fn check_bar_alerts(
         }
         let bar = page.bars[page.bars.len() - 1];
         let prev_close = page.bars[page.bars.len() - 2].close;
-        Ok(evaluate_bar_alerts_slice(&ws, &norm, prev_close, &bar, &page.bars))
+        Ok(evaluate_bar_alerts_slice(
+            &ws,
+            &norm,
+            prev_close,
+            &bar,
+            &page.bars,
+            Some(iv_str.as_str()),
+        ))
     })
     .await
-    .map_err(|e| DesktopError::Internal(e.to_string()))?
+    .map_err(|e| DesktopError::Internal(e.to_string()))??;
+
+    // Async non-blocking Telegram / Webhook delivery (parity with `check_price_alerts` & `scan_watchlist_alerts`, `W6-09`)
+    if !fired.is_empty() {
+        let cfg = load_alert_delivery_config_from(&alerts_secrets_path());
+        if !cfg.telegram_bot_token.trim().is_empty() || !cfg.webhook_url.trim().is_empty() {
+            let to_send = fired.clone();
+            tauri::async_runtime::spawn(async move {
+                for al in &to_send {
+                    let _ = dispatch_external_alert_channels(&cfg, al).await;
+                }
+            });
+        }
+    }
+
+    Ok(fired)
 }
 
-/// Shared causal evaluator for Price, Drawing-Line & Indicator alerts across both Live bars and Bar Replay (`v2.2`).
+/// Shared causal evaluator for Price, Drawing-Line & Indicator alerts across both Live bars and Bar Replay (`v2.2` + `W6-09`).
+/// Enforces `a.interval` matching against `interval_filter` and sloped trendline `prev_bar_ts` interpolation.
 pub(crate) fn evaluate_bar_alerts_slice(
     ws: &crate::workspace_db::WorkspaceStore,
     ticker: &str,
     prev_close: f64,
     bar: &OhlcvBar,
     causal_bars: &[OhlcvBar],
+    interval_filter: Option<&str>,
 ) -> Vec<PriceAlertRecord> {
     let Ok(alerts) = ws.list_alerts() else {
         return Vec::new();
     };
     let norm = ticker.trim().to_ascii_uppercase();
+    let prev_bar_ts = (causal_bars.len() >= 2).then(|| causal_bars[causal_bars.len() - 2].timestamp);
     let mut fired = Vec::new();
     for mut a in alerts {
         if a.ticker != norm || a.status != "armed" {
+            continue;
+        }
+        // Strict interval isolation: never allow a 1H bar to trigger a 1D alert (`W6-09`)!
+        if let (Some(a_iv), Some(req_iv)) = (a.interval.as_deref(), interval_filter)
+            && !a_iv.eq_ignore_ascii_case(req_iv)
+        {
             continue;
         }
         if !alert_cooldown_elapsed(&a, bar.timestamp, causal_bars) {
@@ -1094,8 +1134,15 @@ pub(crate) fn evaluate_bar_alerts_slice(
         let dir = parse_cross_dir(&a.condition);
         let crossed = match a.alert_kind.as_str() {
             "drawing" => {
-                if let Some(target) = evaluate_drawing_line_price_at(&a, bar.timestamp) {
-                    evaluate_4_waypoint_cross(Some(prev_close), &core_bar, target, dir).is_some()
+                if let Some(curr_target) = evaluate_drawing_line_price_at(&a, bar.timestamp) {
+                    // Interpolate the sloped line at `prev_bar_ts` so relative offset (`prev_close - prev_target`)
+                    // is preserved accurately without false crossings on steep slopes (`W6-09`).
+                    let prev_target = prev_bar_ts
+                        .and_then(|pts| evaluate_drawing_line_price_at(&a, pts))
+                        .unwrap_or(curr_target);
+                    let adjusted_prev_close = curr_target + (prev_close - prev_target);
+                    evaluate_4_waypoint_cross(Some(adjusted_prev_close), &core_bar, curr_target, dir)
+                        .is_some()
                 } else {
                     false
                 }
@@ -1119,18 +1166,19 @@ pub(crate) fn evaluate_bar_alerts_slice(
     fired
 }
 
-/// Backward-compatible wrapper called from `replay_step`.
+/// Replay wrapper called from `replay_step` with strict `interval` filtering (`W6-09`).
 pub(crate) fn evaluate_replay_bar_alerts(
     ws: &crate::workspace_db::WorkspaceStore,
     ticker: &str,
     prev_close: f64,
     bar: &OhlcvBar,
     causal_bars: &[OhlcvBar],
+    interval_filter: Option<&str>,
 ) -> Vec<PriceAlertRecord> {
-    evaluate_bar_alerts_slice(ws, ticker, prev_close, bar, causal_bars)
+    evaluate_bar_alerts_slice(ws, ticker, prev_close, bar, causal_bars, interval_filter)
 }
 
-/// Opens a synchronized detached OS window for multi-monitor setups (`BUG-043`).
+/// Opens a synchronized detached OS window for multi-monitor setups (`BUG-043`, URL-encoded `W6-02`).
 #[tauri::command]
 pub async fn open_detached_window(
     app: tauri::AppHandle,
@@ -1141,12 +1189,17 @@ pub async fn open_detached_window(
 
     let now_ms = chrono::Utc::now().timestamp_millis();
     let label = format!("chart_{now_ms}");
-    let clean_ticker = ticker.trim().to_ascii_uppercase();
+    let trimmed = ticker.trim();
+    let clean_ticker = if sumi_data::is_synthetic_expression(trimmed) || trimmed.starts_with("MÃ ẨN") {
+        trimmed.to_owned()
+    } else {
+        trimmed.to_ascii_uppercase()
+    };
     let clean_iv = interval.trim().to_owned();
+    let encoded_ticker: String = url::form_urlencoded::byte_serialize(clean_ticker.as_bytes()).collect();
+    let encoded_iv: String = url::form_urlencoded::byte_serialize(clean_iv.as_bytes()).collect();
     let url = format!(
-        "index.html?detached=1&ticker={}&interval={}",
-        clean_ticker.replace(':', "%3A"),
-        clean_iv
+        "index.html?detached=1&ticker={encoded_ticker}&interval={encoded_iv}"
     );
 
     WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
@@ -1158,6 +1211,22 @@ pub async fn open_detached_window(
         .map_err(|e| DesktopError::Internal(format!("Không thể mở cửa sổ mới: {e}")))?;
 
     Ok(label)
+}
+
+/// Drains any cold-start `sumi://` deep-link payload queued before React mounted and marks the
+/// frontend ready to receive live `sumi:deeplink` events (`W6-01`).
+#[tauri::command]
+pub async fn take_pending_deeplink(
+    state: State<'_, AppState>,
+) -> DesktopResult<Option<crate::deeplink::DeepLinkPayload>> {
+    state
+        .frontend_ready
+        .store(true, std::sync::atomic::Ordering::Release);
+    let mut guard = state
+        .pending_deeplink
+        .lock()
+        .map_err(|_| DesktopError::Internal("pending_deeplink mutex poisoned".to_owned()))?;
+    Ok(guard.take())
 }
 
 /// Broadcasts a real-time sync event (Replay step/cut, Drawing update, Symbol change) across all OS windows (`BUG-043`).
@@ -1222,7 +1291,41 @@ mod tests {
         .unwrap();
 
         let bar_at_20 = OhlcvBar::new(t0 + 20 * step, 118.0, 121.0, 117.0, 120.5, 1_000.0);
-        let fired = evaluate_bar_alerts_slice(&ws, "HOSE:FPT", 118.0, &bar_at_20, &[bar_at_20]);
+        // 1H bar MUST NOT trigger a 1D alert (`W6-09`)!
+        let wrong_iv = evaluate_bar_alerts_slice(
+            &ws,
+            "HOSE:FPT",
+            118.0,
+            &bar_at_20,
+            &[bar_at_20],
+            Some("1h"),
+        );
+        assert!(wrong_iv.is_empty(), "1h bar must not trigger 1D alert");
+
+        // Price staying strictly ABOVE a steeply rising trendline (119->120) must NOT falsely fire cross_above!
+        let prev_above = OhlcvBar::new(t0 + 19 * step, 121.0, 122.0, 120.0, 121.5, 1_000.0);
+        let curr_above = OhlcvBar::new(t0 + 20 * step, 121.5, 123.0, 120.8, 122.0, 1_000.0);
+        let no_false_cross = evaluate_bar_alerts_slice(
+            &ws,
+            "HOSE:FPT",
+            prev_above.close,
+            &curr_above,
+            &[prev_above, curr_above],
+            Some("1D"),
+        );
+        assert!(
+            no_false_cross.is_empty(),
+            "Price staying above rising sloped trendline must not trigger false cross_above"
+        );
+
+        let fired = evaluate_bar_alerts_slice(
+            &ws,
+            "HOSE:FPT",
+            118.0,
+            &bar_at_20,
+            &[bar_at_20],
+            Some("1D"),
+        );
         assert_eq!(fired.len(), 1);
         assert_eq!(fired[0].id, "al_draw");
 
@@ -1254,14 +1357,14 @@ mod tests {
             .collect();
         bars.push(OhlcvBar::new(t0 + 25 * step, 101.0, 115.0, 100.5, 114.0, 2_000.0));
         let last = *bars.last().unwrap();
-        let fired_ind = evaluate_bar_alerts_slice(&ws, "HOSE:FPT", 100.5, &last, &bars);
+        let fired_ind = evaluate_bar_alerts_slice(&ws, "HOSE:FPT", 100.5, &last, &bars, Some("1D"));
         assert_eq!(fired_ind.len(), 1);
         assert_eq!(fired_ind[0].id, "al_rsi");
         // `once_per_bar_close` remains armed AND logs trigger history!
         assert_eq!(fired_ind[0].status, "armed");
         assert!(ws.list_alert_trigger_logs(10).unwrap().len() >= 2);
         // Same bar must NOT re-fire due to cooldown
-        let repeat = evaluate_bar_alerts_slice(&ws, "HOSE:FPT", 100.5, &last, &bars);
+        let repeat = evaluate_bar_alerts_slice(&ws, "HOSE:FPT", 100.5, &last, &bars, Some("1D"));
         assert!(repeat.is_empty());
     }
 }

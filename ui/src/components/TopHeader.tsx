@@ -1128,7 +1128,7 @@ export const TopHeader: React.FC = () => {
                         onClick={() => {
                           setSyncBusy(true)
                           void api
-                            .syncConfigureFolder(syncFolderInput.trim() || null)
+                            .syncConfigureFolder(syncFolderInput.trim() || null, syncStatus?.autoSyncOnLaunch ?? false)
                             .then(() => refreshSyncStatus())
                             .then(() => pushToast('success', 'Đã lưu cấu hình thư mục đồng bộ đám mây'))
                             .catch((err) => pushToast('error', String(err)))
@@ -1140,6 +1140,34 @@ export const TopHeader: React.FC = () => {
                         Lưu
                       </button>
                     </div>
+                    <label
+                      className="flex items-center gap-1.5 text-[10.5px] cursor-pointer select-none"
+                      style={{ color: 'var(--tv-text-secondary)' }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={Boolean(syncStatus?.autoSyncOnLaunch)}
+                        disabled={syncBusy}
+                        onChange={(e) => {
+                          const nextVal = e.target.checked
+                          setSyncBusy(true)
+                          void api
+                            .syncConfigureFolder(syncFolderInput.trim() || null, nextVal)
+                            .then(() => refreshSyncStatus())
+                            .then(() =>
+                              pushToast(
+                                'success',
+                                nextVal
+                                  ? 'Đã bật tự động đồng bộ 2 chiều khi mở Sumi'
+                                  : 'Đã tắt tự động đồng bộ khi khởi động',
+                              ),
+                            )
+                            .catch((err) => pushToast('error', String(err)))
+                            .finally(() => setSyncBusy(false))
+                        }}
+                      />
+                      <span>Tự động đồng bộ 2 chiều khi khởi động ứng dụng</span>
+                    </label>
                     <button
                       type="button"
                       disabled={syncBusy || !syncStatus?.syncFolder}

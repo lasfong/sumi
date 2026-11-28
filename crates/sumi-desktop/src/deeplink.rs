@@ -9,6 +9,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,8 @@ use sumi_data::{infer_vn_exchange_for_ticker, sumi_data_dir, write_private_file_
 use tauri::{AppHandle, Emitter, Manager};
 use url::Url;
 use uuid::Uuid;
+
+use crate::state::AppState;
 
 pub const DEEPLINK_EVENT_NAME: &str = "sumi:deeplink";
 const RUNTIME_LOCK_FILE: &str = "runtime.lock";
@@ -199,6 +202,25 @@ pub fn start_single_instance_ipc_listener(app: AppHandle, data_dir: PathBuf) {
         .ok();
 }
 
+/// Delivers a parsed deep-link payload to the running frontend (or queues it in `pending_deeplink`
+/// when received during cold-start before React attaches its event listener) and focuses `"main"`.
+pub fn dispatch_deeplink_payload(app: &AppHandle, payload: DeepLinkPayload) {
+    if let Some(state) = app.try_state::<AppState>() {
+        if state.frontend_ready.load(Ordering::Acquire) {
+            let _ = app.emit(DEEPLINK_EVENT_NAME, &payload);
+        } else if let Ok(mut pending) = state.pending_deeplink.lock() {
+            *pending = Some(payload);
+        }
+    } else {
+        let _ = app.emit(DEEPLINK_EVENT_NAME, &payload);
+    }
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+}
+
 fn handle_ipc_connection(mut stream: TcpStream, expected_nonce: &str, app: &AppHandle) {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(800)));
     let mut reader = BufReader::new(match stream.try_clone() {
@@ -250,12 +272,7 @@ fn handle_ipc_connection(mut stream: TcpStream, expected_nonce: &str, app: &AppH
     if let Some(raw_url) = url_str
         && let Some(payload) = parse_sumi_deeplink(&raw_url)
     {
-        let _ = app.emit(DEEPLINK_EVENT_NAME, &payload);
-        if let Some(win) = app.get_webview_window("main") {
-            let _ = win.unminimize();
-            let _ = win.show();
-            let _ = win.set_focus();
-        }
+        dispatch_deeplink_payload(app, payload);
         let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
     } else {
         let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");

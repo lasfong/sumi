@@ -203,6 +203,90 @@ pub(crate) async fn reset_replay_broker_for_blind_drill(
     build_broker_snapshot(state, &broker, true)
 }
 
+/// Rescales an active Blind Drill sandbox broker back to real VND prices & venue rules upon reveal,
+/// preserving every closed trade, open position, and R-multiple faithfully (`W6-03`).
+pub(crate) async fn rescale_replay_broker_on_blind_reveal(
+    state: &AppState,
+    real_ticker: &str,
+    iv: Interval,
+    raw_bars: Vec<OhlcvBar>,
+    raw_candles: Vec<Candle>,
+    cursor_idx: usize,
+    price_scale: f64,
+) -> DesktopResult<BrokerStateSnapshot> {
+    use sumi_core::trading::{OrderKind, RecordedCommand, RecordedCommandKind};
+
+    let inv_scale = if price_scale.is_finite() && price_scale > 1e-12 {
+        1.0 / price_scale
+    } else {
+        1.0
+    };
+    let venue = infer_venue_for_ticker(real_ticker);
+
+    let mut broker = state.replay_broker.lock().await;
+    let mut cfg = broker.session.config;
+    cfg.venue = venue;
+    cfg.initial_cash *= inv_scale;
+    cfg.base_timeframe_secs = (iv.duration_ms() / 1_000).max(1);
+    if venue == ExchangeVenue::Vn30Futures {
+        cfg.contract_multiplier = 100_000.0;
+        cfg.initial_margin_pct = 17.0;
+        cfg.max_leverage = 1.0;
+    }
+    cfg.sanitize();
+
+    let start_idx = broker.session.session_start_base_index.min(cursor_idx);
+    let rescaled_commands: Vec<RecordedCommand> = broker
+        .session
+        .commands
+        .iter()
+        .cloned()
+        .map(|mut cmd| {
+            match &mut cmd.kind {
+                RecordedCommandKind::SubmitOrder(req) => {
+                    req.kind = match req.kind {
+                        OrderKind::Market => OrderKind::Market,
+                        OrderKind::Limit { limit_price } => OrderKind::Limit {
+                            limit_price: limit_price * inv_scale,
+                        },
+                        OrderKind::Stop { stop_price } => OrderKind::Stop {
+                            stop_price: stop_price * inv_scale,
+                        },
+                    };
+                    req.stop_loss = req.stop_loss.map(|v| v * inv_scale);
+                    req.take_profit = req.take_profit.map(|v| v * inv_scale);
+                }
+                RecordedCommandKind::ModifyOrderPrice { new_price, .. } => {
+                    *new_price *= inv_scale;
+                }
+                RecordedCommandKind::UpdateBrackets {
+                    stop_loss,
+                    take_profit,
+                } => {
+                    *stop_loss = stop_loss.map(|v| v * inv_scale);
+                    *take_profit = take_profit.map(|v| v * inv_scale);
+                }
+                RecordedCommandKind::CancelOrder { .. } | RecordedCommandKind::FlattenPosition => {}
+            }
+            cmd
+        })
+        .collect();
+
+    broker.ticker = real_ticker.to_owned();
+    broker.interval = iv;
+    broker.base_bars = raw_bars;
+    broker.base_candles = raw_candles.clone();
+    broker.cursor_index = cursor_idx;
+    broker.session.restore_session(
+        cfg,
+        start_idx,
+        rescaled_commands,
+        &raw_candles,
+        cursor_idx,
+    );
+    build_broker_snapshot(state, &broker, true)
+}
+
 pub(crate) async fn ensure_broker_synced(
     state: &AppState,
     ticker: &str,
@@ -210,22 +294,18 @@ pub(crate) async fn ensure_broker_synced(
 ) -> DesktopResult<bool> {
     let iv: Interval = interval_str.parse()?;
 
-    // Check active Blind Replay Drill FIRST (handles masked alias `"MÃ ẨN #XXXX"` without `SymbolKey::parse`)
+    // Check active unrevealed Blind Replay Drill FIRST (handles masked alias `"MÃ ẨN #XXXX"` without `SymbolKey::parse`)
     let blind_replay_sync = {
         let rg = state.replay.lock().await;
         rg.as_ref().and_then(|rt| {
             let bd = rt.blind_drill.as_ref()?;
             if rt.controller.is_active()
                 && bd.enabled
+                && !bd.revealed
                 && (bd.alias_code == ticker || rt.ticker.eq_ignore_ascii_case(ticker))
             {
-                let disp = if bd.revealed {
-                    rt.ticker.clone()
-                } else {
-                    bd.alias_code.clone()
-                };
                 Some((
-                    disp,
+                    bd.alias_code.clone(),
                     rt.interval,
                     rt.base_bars.clone(),
                     rt.base_candles.clone(),

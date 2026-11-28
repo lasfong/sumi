@@ -34,12 +34,26 @@ pub struct Kt01AnalyzeOutput {
     pub topdown_context: TopDownSymbolContextDto,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScreenCliParams {
     pub scope: String,
+    #[serde(default)]
     pub signal_ids: Vec<String>,
+    #[serde(default)]
     pub min_health_score: Option<f64>,
+    #[serde(default)]
+    pub as_of: Option<String>,
+    #[serde(default)]
+    pub weekly_regime: Option<String>,
+    #[serde(default)]
+    pub only_money_in: bool,
+    #[serde(default)]
+    pub min_tmc: Option<f64>,
+    #[serde(default)]
+    pub max_pe: Option<f64>,
+    #[serde(default)]
+    pub min_roe: Option<f64>,
     pub limit: usize,
 }
 
@@ -56,6 +70,18 @@ pub struct ScreenRowOut {
     pub weekly_trend: String,
     pub health_score: Option<f64>,
     pub matched_signals: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pe: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pb: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub roe: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qmv_real_tmc: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qmv_real_dspi: Option<f64>,
+    pub qmv_real_money_in_today: bool,
+    pub qmv_real_provenance: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,11 +157,18 @@ fn load_daily_bars_with_dnse_stitch(
     sym: &SymbolKey,
     as_of: Option<&str>,
 ) -> Vec<OhlcvBar> {
+    let cutoff_ms = as_of.and_then(sumi_yumeko_bridge::vn_as_of_end_of_day_ms);
+    let query_mode = match cutoff_ms {
+        Some(cut) => BarQueryMode::Forward {
+            before_ms: cut.saturating_add(1),
+        },
+        None => BarQueryMode::Init,
+    };
     let mut bars = store
         .and_then(|s| {
             s.query_bars(
                 &SeriesKey::new(sym, Interval::D1, Adjustment::Splits),
-                BarQueryMode::Init,
+                query_mode,
                 600,
             )
             .ok()
@@ -191,12 +224,18 @@ pub fn analyze_kt01_headless(
         .load_topdown_context(&sym.ticker(), as_of)
         .map_err(|e| e.to_string())?;
     let daily_bars = load_daily_bars_with_dnse_stitch(store.as_ref(), &bridge, &sym, as_of);
+    let h1_query_mode = match as_of.and_then(sumi_yumeko_bridge::vn_as_of_end_of_day_ms) {
+        Some(cut) => BarQueryMode::Forward {
+            before_ms: cut.saturating_add(1),
+        },
+        None => BarQueryMode::Init,
+    };
     let hourly_bars = store
         .as_ref()
         .and_then(|s| {
             s.query_bars(
                 &SeriesKey::new(&sym, Interval::H1, Adjustment::Splits),
-                BarQueryMode::Init,
+                h1_query_mode,
                 200,
             )
             .ok()
@@ -248,6 +287,30 @@ pub fn run_mtf_screen_headless(
         });
     }
     let store = SqliteMarketStore::open(&market_path).map_err(|e| e.to_string())?;
+    let local_funda_map = store.list_fundamentals_map().unwrap_or_default();
+    let bridge = YumekoReadOnlyBridge::discover_default();
+    let yumeko_val_map = bridge
+        .read_latest_valuation_map(params.as_of.as_deref())
+        .unwrap_or_default();
+    let yumeko_qmv_map = bridge
+        .read_latest_qmv_screener_map(params.as_of.as_deref())
+        .unwrap_or_default();
+    let cutoff_ms = params
+        .as_of
+        .as_deref()
+        .and_then(sumi_yumeko_bridge::vn_as_of_end_of_day_ms);
+    let query_mode = match cutoff_ms {
+        Some(cut) => BarQueryMode::Forward {
+            before_ms: cut.saturating_add(1),
+        },
+        None => BarQueryMode::Init,
+    };
+    let weekly_target = params
+        .weekly_regime
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty());
+
     let scope_upper = params.scope.trim().to_ascii_uppercase();
     let ex_filter = match scope_upper.as_str() {
         "HOSE" | "HNX" | "UPCOM" => Some(scope_upper.as_str()),
@@ -282,9 +345,48 @@ pub fn run_mtf_screen_headless(
         let Ok(sym) = SymbolKey::parse(&h.ticker) else {
             continue;
         };
+
+        // Early QMV Blackbox (`qmv_real`) & Fundamental (`DN01` / TV cache) filters (`W6-10`)
+        let sym_up = sym.symbol.to_ascii_uppercase();
+        let y_val = yumeko_val_map.get(&sym_up);
+        let l_funda = local_funda_map.get(&sym_up);
+        let y_qmv = yumeko_qmv_map.get(&sym_up);
+
+        let pe = y_val
+            .and_then(|v| v.pe)
+            .or_else(|| l_funda.and_then(|f| f.pe_ttm))
+            .filter(|v| v.is_finite() && *v > 0.0);
+        let pb = y_val
+            .and_then(|v| v.pb)
+            .or_else(|| l_funda.and_then(|f| f.pb))
+            .filter(|v| v.is_finite() && *v > 0.0);
+        let roe = y_val
+            .and_then(|v| v.roe)
+            .or_else(|| l_funda.and_then(|f| f.roe))
+            .filter(|v| v.is_finite());
+
+        if params.only_money_in && !y_qmv.is_some_and(|q| q.money_in_today) {
+            continue;
+        }
+        if let Some(lo_tmc) = params.min_tmc
+            && y_qmv.and_then(|q| q.tmc).is_none_or(|v| v < lo_tmc)
+        {
+            continue;
+        }
+        if let Some(cap_pe) = params.max_pe
+            && pe.is_none_or(|v| v > cap_pe)
+        {
+            continue;
+        }
+        if let Some(lo_roe) = params.min_roe
+            && roe.is_none_or(|v| v < lo_roe)
+        {
+            continue;
+        }
+
         let Ok(page) = store.query_bars(
             &SeriesKey::new(&sym, Interval::D1, Adjustment::Splits),
-            BarQueryMode::Init,
+            query_mode,
             300,
         ) else {
             continue;
@@ -336,7 +438,7 @@ pub fn run_mtf_screen_headless(
             continue;
         }
 
-        let weekly_trend = aggregate_ohlcv(&candles, Timeframe::D1, Timeframe::W1)
+        let (weekly_trend, weekly_regime_slug) = aggregate_ohlcv(&candles, Timeframe::D1, Timeframe::W1)
             .ok()
             .and_then(|w| {
                 if w.len() < 10 {
@@ -344,9 +446,24 @@ pub fn run_mtf_screen_headless(
                 }
                 let last_c = w.last()?.close;
                 let ma10: f64 = w[w.len() - 10..].iter().map(|b| b.close).sum::<f64>() / 10.0;
-                Some(if last_c >= ma10 { "1W Tăng/Tích lũy" } else { "1W Điều chỉnh" }.to_owned())
+                if last_c >= ma10 {
+                    Some(("1W Tăng/Tích lũy".to_owned(), "uptrend"))
+                } else {
+                    Some(("1W Điều chỉnh".to_owned(), "downtrend"))
+                }
             })
-            .unwrap_or_else(|| "—".to_owned());
+            .unwrap_or_else(|| ("—".to_owned(), "neutral"));
+
+        if let Some(ref target_w) = weekly_target {
+            let matched_w = match target_w.as_str() {
+                "uptrend" | "bull" | "tang" => weekly_regime_slug == "uptrend",
+                "downtrend" | "bear" | "giam" => weekly_regime_slug == "downtrend",
+                _ => true,
+            };
+            if !matched_w {
+                continue;
+            }
+        }
 
         let mut matched_signals = Vec::new();
         for (idx, entry) in SIGNAL_CATALOG.iter().enumerate().rev() {
@@ -375,6 +492,13 @@ pub fn run_mtf_screen_headless(
             weekly_trend,
             health_score: health.map(|v| (v * 10.0).round() / 10.0),
             matched_signals,
+            pe,
+            pb,
+            roe,
+            qmv_real_tmc: y_qmv.and_then(|q| q.tmc),
+            qmv_real_dspi: y_qmv.and_then(|q| q.dspi),
+            qmv_real_money_in_today: y_qmv.is_some_and(|q| q.money_in_today),
+            qmv_real_provenance: y_qmv.is_some(),
         });
     }
 

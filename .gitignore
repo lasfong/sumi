@@ -2,6 +2,8 @@
 /target/
 target/
 dist/
+dist-macos/
+dist-windows/
 build/
 exports/
 ui/node_modules/

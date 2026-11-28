@@ -41,8 +41,8 @@ pub use provider::{BarSubscription, MarketDataProvider, QuoteSubscription};
 pub use ram_cache::{RamCacheStats, SeriesRamCache};
 pub use rate_limit::{RateLimitConfig, RateLimitPermit, RateLimitStats, TokenBucketRateLimiter};
 pub use storage::{
-    CacheBarsResult, CorporateEventMarker, FundamentalSnapshot, SeriesMeta, SqliteMarketStore,
-    StoreStats, VnFreshnessSummary,
+    CacheBarsResult, CorporateEventMarker, FundamentalSnapshot, QuarterlyFundamentalRow,
+    SeriesMeta, SqliteMarketStore, StoreStats, VnFreshnessSummary,
 };
 pub use tradingview_feed::{TradingViewConfig, TradingViewFeed};
 pub use types::{

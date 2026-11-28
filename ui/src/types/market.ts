@@ -312,6 +312,7 @@ export interface WatchlistGroup {
   name: string
   tickers: string[]
   sortOrder: number
+  updatedAtMs?: number
 }
 
 export interface PriceAlertRecord {
@@ -835,6 +836,7 @@ export interface WalkForwardResponse {
   stitchedOosTearsheet: BacktestTearsheet
   stitchedOosCurve: StrategyEquityPointDto[]
   folds: WalkForwardFoldResult[]
+  barMagnifierBars?: number
 }
 
 export interface QuantileEnvelope5 {
@@ -1493,6 +1495,7 @@ export interface TradePlanRequestDto {
   commissionBps?: number | null
   taxSellBps?: number | null
   slippageBps?: number | null
+  entryTimestampMs?: number | null
 }
 
 export interface TradePlanResponseDto {

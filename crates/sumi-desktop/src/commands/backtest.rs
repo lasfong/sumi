@@ -10,8 +10,8 @@ use sumi_core::backtest::{
     StrategyDirectionMode, StrategyParams, StrategyPresetKind, SweepRankingMetric, SweepVariantRow,
     WalkForwardConfig, WalkForwardFoldResult, WalkForwardVerdict,
     compute_advanced_tearsheet_analytics, render_backtest_report_html, run_all_presets_battle,
-    run_backtest_with_magnifier, run_backtest_with_options, run_monte_carlo_bootstrap,
-    run_parameter_sweep, run_portfolio_backtest, run_walk_forward_validation,
+    run_backtest_with_magnifier, run_monte_carlo_bootstrap,
+    run_parameter_sweep, run_portfolio_backtest, run_walk_forward_validation_with_magnifier,
 };
 use sumi_core::data::{DataSourcePreset, Timeframe, WatchlistFeedEntry};
 use sumi_core::model::Candle;
@@ -239,6 +239,7 @@ pub struct WalkForwardResponse {
     pub stitched_oos_tearsheet: BacktestTearsheet,
     pub stitched_oos_curve: Vec<StrategyEquityPointDto>,
     pub folds: Vec<WalkForwardFoldResult>,
+    pub bar_magnifier_bars: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -910,6 +911,12 @@ pub async fn run_strategy_wfo(
     if cfg.enforce_vn_microstructure {
         cfg.benchmark_non_downtrend_days = load_vnindex_non_downtrend_days(&state);
     }
+    let intrabar_candles = if cfg.risk.use_bar_magnifier {
+        load_intrabar_magnifier_candles(&state, &ticker, iv, &candles)
+    } else {
+        Vec::new()
+    };
+    let magnifier_bars = intrabar_candles.len();
     let wf_cfg = WalkForwardConfig {
         fold_count: input.fold_count.clamp(2, 8),
         in_sample_ratio: input.in_sample_ratio.clamp(0.50, 0.85),
@@ -918,13 +925,15 @@ pub async fn run_strategy_wfo(
     };
 
     let report = tokio::task::spawn_blocking(move || {
-        run_walk_forward_validation(
+        let sub_slice = (!intrabar_candles.is_empty()).then_some(intrabar_candles.as_slice());
+        run_walk_forward_validation_with_magnifier(
             ticker,
             tf,
             &candles,
             &cfg,
             wf_cfg,
             BacktestRunOptions::default(),
+            sub_slice,
         )
     })
     .await
@@ -943,6 +952,7 @@ pub async fn run_strategy_wfo(
         stitched_oos_tearsheet: report.stitched_oos_tearsheet,
         stitched_oos_curve: map_equity_points(&report.stitched_oos_curve),
         folds: report.folds,
+        bar_magnifier_bars: magnifier_bars,
     })
 }
 
@@ -952,7 +962,7 @@ pub async fn run_strategy_monte_carlo(
     input: MonteCarloInput,
 ) -> DesktopResult<MonteCarloResponse> {
     let max_bars = input.backtest.max_bars.unwrap_or(2_500).clamp(60, 10_000);
-    let (ticker, _iv, tf, candles) = load_backtest_candles(
+    let (ticker, iv, tf, candles) = load_backtest_candles(
         &state,
         &input.backtest.ticker,
         &input.backtest.interval,
@@ -965,6 +975,11 @@ pub async fn run_strategy_monte_carlo(
     if cfg.enforce_vn_microstructure {
         cfg.benchmark_non_downtrend_days = load_vnindex_non_downtrend_days(&state);
     }
+    let intrabar_candles = if cfg.risk.use_bar_magnifier {
+        load_intrabar_magnifier_candles(&state, &ticker, iv, &candles)
+    } else {
+        Vec::new()
+    };
     let mc_cfg = MonteCarloConfig {
         simulations: input.simulations,
         seed: input.seed.unwrap_or(DEFAULT_MONTE_CARLO_SEED),
@@ -974,8 +989,15 @@ pub async fn run_strategy_monte_carlo(
     .sanitized();
 
     let report = tokio::task::spawn_blocking(move || {
-        let bt =
-            run_backtest_with_options(ticker, tf, &candles, &cfg, BacktestRunOptions::default());
+        let sub_slice = (!intrabar_candles.is_empty()).then_some(intrabar_candles.as_slice());
+        let bt = run_backtest_with_magnifier(
+            ticker,
+            tf,
+            &candles,
+            &cfg,
+            BacktestRunOptions::default(),
+            sub_slice,
+        );
         run_monte_carlo_bootstrap(
             cfg.initial_cash,
             &bt.trades,
@@ -1210,6 +1232,11 @@ pub async fn export_backtest_report_html(
     if cfg.enforce_vn_microstructure {
         cfg.benchmark_non_downtrend_days = load_vnindex_non_downtrend_days(&state);
     }
+    let intrabar_candles = if cfg.risk.use_bar_magnifier {
+        load_intrabar_magnifier_candles(&state, &ticker, iv, &candles)
+    } else {
+        Vec::new()
+    };
     let venue = sumi_core::journal::ExchangeVenue::infer_from_symbol_and_preset(
         &ticker,
         DataSourcePreset::CustomFile,
@@ -1217,12 +1244,14 @@ pub async fn export_backtest_report_html(
     let data_dir = state.data_dir.clone();
 
     tokio::task::spawn_blocking(move || {
-        let res = run_backtest_with_options(
+        let sub_slice = (!intrabar_candles.is_empty()).then_some(intrabar_candles.as_slice());
+        let res = run_backtest_with_magnifier(
             ticker.clone(),
             tf,
             &candles,
             &cfg,
             BacktestRunOptions::default(),
+            sub_slice,
         );
         let analytics = compute_advanced_tearsheet_analytics(
             &candles,
@@ -1545,5 +1574,111 @@ mod tests {
         assert_eq!(cfg.custom_rules.long_entry.clause_count(), 2);
         assert!(cfg.custom_rules.long_entry.confluence_gate.enabled);
         assert!(cfg.custom_rules.long_exit.enabled);
+    }
+
+    #[test]
+    fn wave6_bar_magnifier_parity_across_backtest_monte_carlo_wfo_and_html_report() {
+        let mut inp = sample_input("sma_ema");
+        inp.direction = "long".to_owned();
+        inp.stop_loss_pct = Some(3.0);
+        inp.take_profit_pct = Some(3.0);
+        inp.min_holding_bars = Some(0);
+        inp.fast_sma = Some(3);
+        inp.slow_ema = Some(5);
+        inp.use_bar_magnifier = Some(true);
+        let cfg = build_backtest_config(&inp);
+        assert!(cfg.risk.use_bar_magnifier);
+
+        // Synthetic 1D candles with a dual-touch bar where intrabar 1H hits TP (+5%) BEFORE SL (-5%)!
+        let day0 = 1_710_000_000_i64;
+        let mut candles = Vec::new();
+        let mut sub_bars = Vec::new();
+        for i in 0..80_i64 {
+            let ts = day0 + i * 86_400;
+            let base = if i < 10 {
+                100.0 - (i as f64) * 0.5
+            } else {
+                95.0 + ((i - 10) as f64) * 0.8
+            };
+            let is_dual_touch = i == 25 || i == 45 || i == 65;
+            let (o, h, l, c) = if is_dual_touch {
+                (base, base * 1.07, base * 0.93, base * 1.01)
+            } else {
+                (base, base * 1.01, base * 0.99, base * 1.005)
+            };
+            candles.push(Candle {
+                timestamp: ts,
+                date_label: format!("2024-D{i:03}"),
+                open: o,
+                high: h,
+                low: l,
+                close: c,
+                volume: 500_000.0,
+            });
+            if is_dual_touch {
+                // Hour 1 surges to TP (+7%) FIRST; Hour 2 drops to SL (-7%) AFTER
+                sub_bars.push(Candle {
+                    timestamp: ts + 3_600,
+                    date_label: format!("2024-D{i:03}-H1"),
+                    open: o,
+                    high: h,
+                    low: o,
+                    close: h * 0.99,
+                    volume: 250_000.0,
+                });
+                sub_bars.push(Candle {
+                    timestamp: ts + 7_200,
+                    date_label: format!("2024-D{i:03}-H2"),
+                    open: h * 0.99,
+                    high: h * 0.99,
+                    low: l,
+                    close: c,
+                    volume: 250_000.0,
+                });
+            }
+        }
+
+        let bt_mag = run_backtest_with_magnifier(
+            "NASDAQ:TEST",
+            Timeframe::D1,
+            &candles,
+            &cfg,
+            BacktestRunOptions::default(),
+            Some(&sub_bars),
+        );
+        // Same magnified backtest feeds Monte Carlo & HTML report -> 100% identical PnL & trades!
+        let mc = run_monte_carlo_bootstrap(
+            cfg.initial_cash,
+            &bt_mag.trades,
+            &bt_mag.equity_curve,
+            candles.len(),
+            None,
+            MonteCarloConfig::default().sanitized(),
+        );
+        let html = render_backtest_report_html(
+            &bt_mag,
+            &candles,
+            sumi_core::journal::ExchangeVenue::UsEquities,
+            None,
+        );
+        assert_eq!(mc.sample_count, bt_mag.trades.len());
+        assert!(html.contains("NASDAQ:TEST"));
+
+        // Verify WFO with magnifier executes cleanly with sub-bars wired
+        let wf = run_walk_forward_validation_with_magnifier(
+            "NASDAQ:TEST",
+            Timeframe::D1,
+            &candles,
+            &cfg,
+            WalkForwardConfig {
+                fold_count: 2,
+                in_sample_ratio: 0.65,
+                anchored: false,
+                ranking_metric: SweepRankingMetric::SharpeRatio,
+            },
+            BacktestRunOptions::default(),
+            Some(&sub_bars),
+        );
+        assert_eq!(wf.total_bars, candles.len());
     }
 }

@@ -44,19 +44,38 @@ export function playAlertChime(): void {
   }
 }
 
+let osNotificationEnabledPref = true
+
+export function setOsNotificationEnabled(enabled: boolean): void {
+  osNotificationEnabledPref = Boolean(enabled)
+}
+
+export function isOsNotificationEnabled(): boolean {
+  return osNotificationEnabledPref
+}
+
 /**
- * Triggers audio chime and optional OS/Web Notification when an alert fires.
+ * Triggers audio chime and optional native OS Notification when an alert fires (`W6-09`).
  */
 export function notifyAlertTriggered(alert: PriceAlertRecord): void {
   if (alert.soundEnabled !== false) {
     playAlertChime()
   }
+  if (!osNotificationEnabledPref) return
   if (typeof window === 'undefined' || !('Notification' in window)) return
   try {
     const title = `Sumi Alert · ${alert.ticker}`
     const body = alert.message || `${alert.condition} @ ${alert.targetPrice.toLocaleString('en-US')}`
     if (Notification.permission === 'granted') {
       new Notification(title, { body })
+    } else if (Notification.permission === 'default' && typeof Notification.requestPermission === 'function') {
+      void Notification.requestPermission()
+        .then((perm) => {
+          if (perm === 'granted') {
+            new Notification(title, { body })
+          }
+        })
+        .catch(() => {})
     }
   } catch {
     // Notification API unavailable in embedded webview; toast already surfaced.

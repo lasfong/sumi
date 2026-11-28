@@ -4070,6 +4070,7 @@ name = "sumi-cli"
 version = "3.0.0"
 dependencies = [
  "chrono",
+ "rusqlite",
  "serde",
  "serde_json",
  "sumi-core",

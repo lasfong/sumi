@@ -291,6 +291,23 @@ fn collect_symbols(node: &ExprNode, out: &mut Vec<SymbolKey>) {
     }
 }
 
+fn op_precedence(op: BinOp) -> u8 {
+    match op {
+        BinOp::Add | BinOp::Sub => 1,
+        BinOp::Mul | BinOp::Div => 2,
+    }
+}
+
+fn node_precedence(node: &ExprNode) -> u8 {
+    match node {
+        ExprNode::Binary { op, .. } => op_precedence(*op),
+        ExprNode::Neg(_) => 3,
+        ExprNode::Number(_) | ExprNode::Symbol(_) => 4,
+    }
+}
+
+/// Formats `node` into canonical syntax while preserving all parentheses required by operator
+/// precedence & non-commutativity (`Sub`/`Div`) so `parse_expression(&format_canonical(&ast)).ast == ast` (`W6-05`).
 fn format_canonical(node: &ExprNode) -> String {
     match node {
         ExprNode::Number(v) => {
@@ -301,15 +318,42 @@ fn format_canonical(node: &ExprNode) -> String {
             }
         }
         ExprNode::Symbol(k) => k.ticker(),
-        ExprNode::Neg(inner) => format!("-{}", format_canonical(inner)),
+        ExprNode::Neg(inner) => {
+            let s = format_canonical(inner);
+            if node_precedence(inner) < 3 {
+                format!("-({s})")
+            } else {
+                format!("-{s}")
+            }
+        }
         ExprNode::Binary { op, left, right } => {
+            let parent_prec = op_precedence(*op);
+            let left_str = {
+                let s = format_canonical(left);
+                if node_precedence(left) < parent_prec {
+                    format!("({s})")
+                } else {
+                    s
+                }
+            };
+            let right_str = {
+                let s = format_canonical(right);
+                let rp = node_precedence(right);
+                let needs_parens =
+                    rp < parent_prec || (rp == parent_prec && matches!(op, BinOp::Sub | BinOp::Div));
+                if needs_parens {
+                    format!("({s})")
+                } else {
+                    s
+                }
+            };
             let sym = match op {
                 BinOp::Add => "+",
                 BinOp::Sub => "-",
                 BinOp::Mul => "*",
                 BinOp::Div => "/",
             };
-            format!("{} {sym} {}", format_canonical(left), format_canonical(right))
+            format!("{left_str} {sym} {right_str}")
         }
     }
 }
@@ -373,6 +417,46 @@ fn eval_scalar(node: &ExprNode, vals: &HashMap<&SymbolKey, f64>) -> Option<f64> 
     }
 }
 
+/// Exact interval arithmetic over `[low, high]` bounds so synthetic wicks always satisfy
+/// `low <= min(open, close) <= max(open, close) <= high` even for subtractions, ratios, and negatives (`W6-05`).
+fn eval_interval(node: &ExprNode, bounds: &HashMap<&SymbolKey, (f64, f64)>) -> Option<(f64, f64)> {
+    match node {
+        ExprNode::Number(v) => v.is_finite().then_some((*v, *v)),
+        ExprNode::Symbol(k) => bounds.get(k).copied().filter(|(lo, hi)| lo.is_finite() && hi.is_finite()),
+        ExprNode::Neg(inner) => {
+            let (lo, hi) = eval_interval(inner, bounds)?;
+            Some((-hi, -lo))
+        }
+        ExprNode::Binary { op, left, right } => {
+            let (a, b) = eval_interval(left, bounds)?;
+            let (c, d) = eval_interval(right, bounds)?;
+            let (lo, hi) = match op {
+                BinOp::Add => (a + c, b + d),
+                BinOp::Sub => (a - d, b - c),
+                BinOp::Mul => {
+                    let p1 = a * c;
+                    let p2 = a * d;
+                    let p3 = b * c;
+                    let p4 = b * d;
+                    (p1.min(p2).min(p3).min(p4), p1.max(p2).max(p3).max(p4))
+                }
+                BinOp::Div => {
+                    // If denominator interval straddles zero, bail out cleanly rather than producing ±∞
+                    if (c <= 1e-12 && d >= -1e-12) || c.abs() <= 1e-12 || d.abs() <= 1e-12 {
+                        return None;
+                    }
+                    let q1 = a / c;
+                    let q2 = a / d;
+                    let q3 = b / c;
+                    let q4 = b / d;
+                    (q1.min(q2).min(q3).min(q4), q1.max(q2).max(q3).max(q4))
+                }
+            };
+            (lo.is_finite() && hi.is_finite()).then_some((lo.min(hi), lo.max(hi)))
+        }
+    }
+}
+
 /// Evaluates `parsed` across aligned timestamps of all referenced symbols, synthesizing full
 /// valid OHLCV bars (`low <= min(open, close) <= max(open, close) <= high`) so all indicators,
 /// Trendlines, Ichimoku, AVWAP, and Bar Replay work seamlessly on ratio/spread charts!
@@ -417,19 +501,24 @@ pub fn evaluate_expression_ohlcv(
     let mut highs: HashMap<&SymbolKey, f64> = HashMap::with_capacity(maps.len());
     let mut lows: HashMap<&SymbolKey, f64> = HashMap::with_capacity(maps.len());
     let mut closes: HashMap<&SymbolKey, f64> = HashMap::with_capacity(maps.len());
+    let mut intervals: HashMap<&SymbolKey, (f64, f64)> = HashMap::with_capacity(maps.len());
 
     for ts in timestamps {
         opens.clear();
         highs.clear();
         lows.clear();
         closes.clear();
+        intervals.clear();
         let mut vol_sum = 0.0_f64;
         for (sym, map) in &maps {
             if let Some(b) = map.get(&ts) {
+                let lo = b.low.min(b.open).min(b.close).min(b.high);
+                let hi = b.high.max(b.open).max(b.close).max(b.low);
                 opens.insert(*sym, b.open);
-                highs.insert(*sym, b.high);
-                lows.insert(*sym, b.low);
+                highs.insert(*sym, hi);
+                lows.insert(*sym, lo);
                 closes.insert(*sym, b.close);
+                intervals.insert(*sym, (lo, hi));
                 vol_sum += b.volume.max(0.0);
             }
         }
@@ -439,10 +528,13 @@ pub fn evaluate_expression_ohlcv(
         ) else {
             continue;
         };
-        let h_eval = eval_scalar(&parsed.ast, &highs).unwrap_or(o.max(c));
-        let l_eval = eval_scalar(&parsed.ast, &lows).unwrap_or(o.min(c));
-        let high = o.max(c).max(h_eval).max(l_eval);
-        let low = o.min(c).min(h_eval).min(l_eval);
+        let (iv_lo, iv_hi) = eval_interval(&parsed.ast, &intervals).unwrap_or_else(|| {
+            let h_eval = eval_scalar(&parsed.ast, &highs).unwrap_or(o.max(c));
+            let l_eval = eval_scalar(&parsed.ast, &lows).unwrap_or(o.min(c));
+            (l_eval.min(h_eval), l_eval.max(h_eval))
+        });
+        let high = o.max(c).max(iv_hi);
+        let low = o.min(c).min(iv_lo);
         let avg_vol = vol_sum / (maps.len().max(1) as f64);
         out.push(OhlcvBar::new(ts, o, high, low, c, avg_vol));
     }
@@ -554,5 +646,44 @@ mod tests {
         assert!((pts[0].1 - 0.0).abs() < 1e-9);
         assert!((pts[1].1 - 0.0).abs() < 1e-9); // causal carry-forward from ts=1_000
         assert!((pts[2].1 - 10.0).abs() < 1e-9); // (55-50)/50 * 100
+    }
+
+    #[test]
+    fn wave6_expression_canonical_preserves_parens_roundtrip_and_negative_spread_ohlc() {
+        for formula in [
+            "(HOSE:FPT + HOSE:MWG) / 2",
+            "HOSE:FPT - (HOSE:MWG - HOSE:VCB)",
+            "HOSE:FPT / (HOSE:MWG * HOSE:VCB)",
+            "-(HOSE:FPT - HOSE:MWG)",
+            "(HOSE:FPT + HOSE:MWG) * (HOSE:VCB - 1000)",
+        ] {
+            let parsed = parse_expression(formula).unwrap();
+            let reparsed = parse_expression(&parsed.canonical).unwrap();
+            assert_eq!(
+                parsed.ast, reparsed.ast,
+                "Canonical '{}' must round-trip to identical AST for '{}'",
+                parsed.canonical, formula
+            );
+        }
+
+        let avg = parse_expression("(HOSE:FPT + HOSE:MWG) / 2").unwrap();
+        assert_eq!(avg.canonical, "(HOSE:FPT + HOSE:MWG) / 2");
+        let sub_r = parse_expression("HOSE:FPT - (HOSE:MWG - HOSE:VCB)").unwrap();
+        assert_eq!(sub_r.canonical, "HOSE:FPT - (HOSE:MWG - HOSE:VCB)");
+
+        // Verify interval-arithmetic wicks on negative spread (A - B where B > A)
+        let fpt = SymbolKey::new("HOSE", "FPT").unwrap();
+        let mwg = SymbolKey::new("HOSE", "MWG").unwrap();
+        let mut map = HashMap::new();
+        map.insert(fpt, vec![mk_bar(1_000, 50.0, 55.0, 48.0, 52.0, 100.0)]);
+        map.insert(mwg, vec![mk_bar(1_000, 70.0, 80.0, 65.0, 72.0, 100.0)]);
+        let neg_spread = parse_expression("HOSE:FPT - HOSE:MWG").unwrap();
+        let bars = evaluate_expression_ohlcv(&neg_spread, &map);
+        assert_eq!(bars.len(), 1);
+        let b = bars[0];
+        // open = -20, close = -20, high = 55 - 65 = -10, low = 48 - 80 = -32
+        assert!((b.high - (-10.0)).abs() < 1e-9);
+        assert!((b.low - (-32.0)).abs() < 1e-9);
+        assert!(b.low <= b.open.min(b.close) && b.open.max(b.close) <= b.high);
     }
 }

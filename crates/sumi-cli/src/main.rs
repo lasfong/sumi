@@ -2,11 +2,16 @@
 //!
 //! Usage:
 //!   sumi mcp | --mcp-serve
+//!   sumi bridge status [--json]
+//!   sumi sync [--status | --now [--folder <dir>] | --export <path> | --import <path>] [--json]
 //!   sumi kt01 --symbol HOSE:FPT [--as-of YYYY-MM-DD] [--export] [--json]
-//!   sumi screen [--scope ALL_VN|QMV60|QMV30] [--signal <id>] [--min-health <f64>] [--limit <N>]
+//!   sumi screen [--scope ALL_VN|QMV60|QMV30] [--signal <id>] [--min-health <f64>]
+//!               [--only-money-in] [--min-tmc <f64>] [--max-pe <f64>] [--min-roe <f64>]
+//!               [--weekly-regime uptrend|downtrend] [--as-of YYYY-MM-DD] [--limit <N>]
 //!   sumi backtest --symbol HOSE:FPT [--preset qmv_s1] [--interval 1D] [--cash 500000000]
 //!   sumi breadth [--as-of YYYY-MM-DD]
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use sumi_cli::engine::{
@@ -14,7 +19,10 @@ use sumi_cli::engine::{
     export_kt01_headless, run_backtest_headless, run_mtf_screen_headless,
 };
 use sumi_cli::mcp::run_stdio_mcp_server;
-use sumi_yumeko_bridge::render_kt01_markdown;
+use sumi_cli::sync_cmd::{
+    sync_export_headless, sync_folder_now_headless, sync_import_headless, sync_status_headless,
+};
+use sumi_yumeko_bridge::{YumekoReadOnlyBridge, render_kt01_markdown};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -39,6 +47,8 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        "bridge" => run_bridge_cmd(&args[2..]),
+        "sync" => run_sync_cmd(&args[2..]),
         "kt01" => run_kt01_cmd(&args[2..]),
         "screen" => run_screen_cmd(&args[2..]),
         "backtest" => run_backtest_cmd(&args[2..]),
@@ -49,6 +59,143 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn run_bridge_cmd(args: &[String]) -> ExitCode {
+    let sub = args.first().map(String::as_str).unwrap_or("status");
+    if sub != "status" && !sub.starts_with("--") {
+        eprintln!("Unknown bridge subcommand: {sub} (expected: `sumi bridge status [--json]`)");
+        return ExitCode::FAILURE;
+    }
+    let want_json = has_flag(args, &["--json"]);
+    let bridge = match flag_val(args, &["--yumeko-db"]) {
+        Some(p) => YumekoReadOnlyBridge::new(PathBuf::from(p), None),
+        None => YumekoReadOnlyBridge::discover_default(),
+    };
+    let status = match bridge.get_status() {
+        Ok(s) => s,
+        Err(err) => {
+            eprintln!("Yumeko bridge status error: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if want_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&status).unwrap_or_default()
+        );
+    } else {
+        println!(
+            "Yumeko Bridge (READ-ONLY): {}",
+            if status.available {
+                "CONNECTED"
+            } else {
+                "OFFLINE / CLEAN-SLATE"
+            }
+        );
+        println!("  SQLite path:       {}", status.sqlite_path);
+        if let Some(qmv_path) = status.qmv_shared_path.as_deref() {
+            println!("  QMV shared path:   {qmv_path}");
+        }
+        println!(
+            "  QMV symbols:       tech={} | active_money={} | foreign_flow={}",
+            status.qmv_technical_symbols,
+            status.qmv_active_money_symbols,
+            status.qmv_foreign_flow_symbols
+        );
+        println!(
+            "  DN01 / DNSE / VM:  valuations={} | dnse_history={} | macro_obs={} | portfolios={}",
+            status.valuation_symbols,
+            status.dnse_history_symbols,
+            status.macro_observations_count,
+            status.portfolio_snapshots_count
+        );
+        println!(
+            "  Latest as_of:      {}",
+            status
+                .latest_as_of_dates
+                .first()
+                .map(String::as_str)
+                .unwrap_or("—")
+        );
+        if !status.latest_as_of_dates.is_empty() {
+            let preview: Vec<&str> = status
+                .latest_as_of_dates
+                .iter()
+                .take(8)
+                .map(String::as_str)
+                .collect();
+            println!("  Available as_of:   {}", preview.join(", "));
+        }
+        if !status.note.is_empty() {
+            println!("  Note:              {}", status.note);
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+fn run_sync_cmd(args: &[String]) -> ExitCode {
+    let want_json = has_flag(args, &["--json"]);
+    if let Some(out_str) = flag_val(args, &["--export"]) {
+        let p = PathBuf::from(out_str);
+        return match sync_export_headless(Some(&p), None, None) {
+            Ok(res) => {
+                println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("Sync export error: {err}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if let Some(in_str) = flag_val(args, &["--import"]) {
+        let p = PathBuf::from(in_str);
+        return match sync_import_headless(&p, None, None) {
+            Ok(res) => {
+                println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("Sync import error: {err}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if has_flag(args, &["--now"]) {
+        let folder = flag_val(args, &["--folder"]).map(PathBuf::from);
+        return match sync_folder_now_headless(folder.as_deref(), None, None, None) {
+            Ok(res) => {
+                println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("Sync folder error: {err}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    let status = sync_status_headless(None, None);
+    if want_json {
+        println!("{}", serde_json::to_string_pretty(&status).unwrap_or_default());
+    } else {
+        println!("Sumi Workspace Sync Status");
+        println!("  Device ID:         {}", status.device_id);
+        println!(
+            "  Sync folder:       {}",
+            status.sync_folder.as_deref().unwrap_or("(chưa cấu hình)")
+        );
+        println!("  Bundle exists:     {}", status.sync_bundle_exists);
+        println!("  Auto-sync launch:  {}", status.auto_sync_on_launch);
+        println!(
+            "  Last SHA-256:      {}",
+            status.last_synced_sha256.as_deref().unwrap_or("—")
+        );
+        println!("  Workspace DB:      {} (exists={})", status.workspace_db_path, status.workspace_db_exists);
+        println!("  Pre-sync backups:  {}", status.pre_sync_backup_count);
+    }
+    ExitCode::SUCCESS
 }
 
 fn flag_val(args: &[String], names: &[&str]) -> Option<String> {
@@ -126,6 +273,12 @@ fn run_screen_cmd(args: &[String]) -> ExitCode {
         })
         .unwrap_or_default();
     let min_health_score = flag_val(args, &["--min-health"]).and_then(|s| s.parse::<f64>().ok());
+    let as_of = flag_val(args, &["--as-of", "--as_of"]);
+    let weekly_regime = flag_val(args, &["--weekly-regime"]);
+    let only_money_in = has_flag(args, &["--only-money-in"]);
+    let min_tmc = flag_val(args, &["--min-tmc"]).and_then(|s| s.parse::<f64>().ok());
+    let max_pe = flag_val(args, &["--max-pe"]).and_then(|s| s.parse::<f64>().ok());
+    let min_roe = flag_val(args, &["--min-roe"]).and_then(|s| s.parse::<f64>().ok());
     let limit = flag_val(args, &["--limit"])
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(25);
@@ -135,6 +288,12 @@ fn run_screen_cmd(args: &[String]) -> ExitCode {
             scope,
             signal_ids,
             min_health_score,
+            as_of,
+            weekly_regime,
+            only_money_in,
+            min_tmc,
+            max_pe,
+            min_roe,
             limit,
         },
         None,
@@ -204,10 +363,15 @@ fn print_help() {
          \n\
          COMMANDS:\n\
            sumi mcp | --mcp-serve                                Start JSON-RPC 2.0 stdio MCP server (5 tools)\n\
+           sumi bridge status [--json]                           Inspect read-only Yumeko SQLite bridge & as_of dates\n\
+           sumi sync [--status | --now [--folder <dir>]          Cross-device Workspace Sync (.sumi.json LWW + SHA-256)\n\
+                     | --export <path> | --import <path>] [--json]\n\
            sumi kt01 --symbol <TICKER> [--as-of YYYY-MM-DD]      Evaluate KT01 Confirmation Gate\n\
                      [--export] [--json] [--no-dropzone]\n\
-           sumi screen [--scope ALL_VN|QMV60|QMV30]              Run MTF 1W+1D 123-signal screener\n\
-                       [--signal id1,id2] [--min-health 20] [--limit 25]\n\
+           sumi screen [--scope ALL_VN|QMV60|QMV30]              Run MTF 1W+1D 123-signal + QMV Blackbox + DN01 screener\n\
+                       [--signal id1,id2] [--min-health 20] [--only-money-in]\n\
+                       [--min-tmc <f64>] [--max-pe <f64>] [--min-roe <f64>]\n\
+                       [--weekly-regime uptrend|downtrend] [--as-of YYYY-MM-DD] [--limit 25]\n\
            sumi backtest --symbol <TICKER> [--preset qmv_s1]     Run VN T+2 quantitative backtest\n\
                          [--interval 1D] [--cash 500000000]\n\
            sumi breadth [--as-of YYYY-MM-DD]                     Compute Market Breadth & 4-Quadrant RRG",

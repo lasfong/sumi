@@ -3,19 +3,23 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use chrono::{Datelike, TimeZone, Utc};
 use serde::Deserialize;
 use serde_json::Value;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{OnceCell, broadcast, mpsc, oneshot};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tradingview::chart::{DataPoint, OHLCV};
 use tradingview::client::misc::{advanced_search_symbol, list_symbols};
+use tradingview::fundamental::{
+    FundamentalRegistry, fetch_fundamental_registry, get_fundamental_data,
+};
 use tradingview::historical::{HistoricalClient, HistoricalRequest, PaginationStop};
 use tradingview::live::handler::Handler;
 use tradingview::live::models::{DataServer, TradingViewDataEvent};
 use tradingview::live::websocket::WebSocketClient;
-use tradingview::models::{MarketType, StocksType};
+use tradingview::models::{FinancialPeriod, MarketType, StocksType};
 use tradingview::quote::models::QuoteData;
 use tradingview::utils::gen_session_id;
 use url::Url;
@@ -23,6 +27,7 @@ use url::Url;
 use crate::error::{DataError, Result};
 use crate::provider::{BarSubscription, MarketDataProvider, QuoteSubscription};
 use crate::rate_limit::{RateLimitConfig, TokenBucketRateLimiter};
+use crate::storage::QuarterlyFundamentalRow;
 use crate::types::{
     Adjustment, BatchBarsResult, HistoryFetchOutput, Interval, LiveBarEvent, LiveQuote, OhlcvBar,
     ResolvedSymbol, SeriesKey, SymbolKey, SymbolSearchResult, canonicalize_bar_timestamp_ms,
@@ -78,6 +83,7 @@ pub struct TradingViewFeed {
     config: Arc<TradingViewConfig>,
     rate_limiter: TokenBucketRateLimiter,
     symbol_cache: Arc<RwLock<HashMap<SymbolKey, (ResolvedSymbol, Instant)>>>,
+    fundamental_registry: Arc<OnceCell<Arc<FundamentalRegistry>>>,
 }
 
 impl TradingViewFeed {
@@ -89,7 +95,166 @@ impl TradingViewFeed {
             config: Arc::new(config),
             rate_limiter,
             symbol_cache: Arc::new(RwLock::new(HashMap::new())),
+            fundamental_registry: Arc::new(OnceCell::new()),
         }
+    }
+
+    async fn get_or_fetch_fundamental_registry(&self) -> Result<Arc<FundamentalRegistry>> {
+        let res = self
+            .fundamental_registry
+            .get_or_try_init(|| async {
+                let reg = timeout(Duration::from_secs(15), fetch_fundamental_registry())
+                    .await
+                    .map_err(|_| DataError::Timeout("tradingview fundamental registry".to_owned()))?
+                    .map_err(|e| DataError::Provider(format!("fundamental registry: {e}")))?;
+                Ok::<Arc<FundamentalRegistry>, DataError>(Arc::new(reg))
+            })
+            .await?;
+        Ok(Arc::clone(res))
+    }
+
+    /// Fetches historical quarterly fundamental series (`EPS TTM`, `BVPS`, `ROE`, `P/E`, `P/B`,
+    /// `Net Income YoY`) via `tradingview-rs::fundamental` (`STD;Fund_*` Pine studies, 100% guest-accessible)
+    /// as the Point-in-Time fallback for symbols outside Yumeko's 54 `CSTC` stocks (`W6-06`).
+    pub async fn fetch_quarterly_fundamentals(
+        &self,
+        key: &SymbolKey,
+    ) -> Result<Vec<QuarterlyFundamentalRow>> {
+        let registry = self.get_or_fetch_fundamental_registry().await?;
+        let wire_symbol = map_to_tv_wire_symbol(key);
+        let tv_exchange = wire_symbol.exchange.as_str();
+        let tv_symbol = wire_symbol.symbol.as_str();
+        let auth = Some(self.config.auth_token.as_str());
+        let server = self.config.primary_server;
+
+        let metric_specs: &[(&str, &[(&str, FinancialPeriod)])] = &[
+            (
+                "eps_ttm",
+                &[
+                    ("earnings_per_share_diluted", FinancialPeriod::TrailingTwelveMonths),
+                    ("earnings_per_share_basic", FinancialPeriod::TrailingTwelveMonths),
+                    ("earnings_per_share_diluted", FinancialPeriod::FiscalQuarter),
+                ],
+            ),
+            (
+                "bvps",
+                &[
+                    ("book_value_per_share", FinancialPeriod::FiscalQuarter),
+                    ("book_value_per_share", FinancialPeriod::FiscalYear),
+                ],
+            ),
+            (
+                "roe_pct",
+                &[
+                    ("return_on_equity", FinancialPeriod::FiscalQuarter),
+                    ("return_on_equity", FinancialPeriod::TrailingTwelveMonths),
+                ],
+            ),
+            (
+                "pe",
+                &[
+                    ("price_earnings", FinancialPeriod::TrailingTwelveMonths),
+                    ("price_earnings", FinancialPeriod::FiscalQuarter),
+                ],
+            ),
+            (
+                "pb",
+                &[("price_book", FinancialPeriod::FiscalQuarter)],
+            ),
+            (
+                "net_income",
+                &[("net_income", FinancialPeriod::FiscalQuarter)],
+            ),
+        ];
+
+        // Quarter bucket keyed by `(year, quarter)` -> `(period_end_ms, metric map)`
+        type QuarterBucket = (i64, HashMap<&'static str, f64>);
+        let mut buckets: std::collections::BTreeMap<(i32, u32), QuarterBucket> =
+            std::collections::BTreeMap::new();
+
+        for &(slot, candidates) in metric_specs {
+            let mut fetched_pts: Option<Vec<DataPoint>> = None;
+            for &(fund_id, ref period) in candidates {
+                if registry.lookup(fund_id, Some(period)).is_none() {
+                    continue;
+                }
+                let _permit = self.rate_limiter.acquire().await;
+                let fut = get_fundamental_data(
+                    &registry,
+                    fund_id,
+                    Some(period),
+                    tv_symbol,
+                    tv_exchange,
+                    tradingview::models::Interval::OneDay,
+                    1_200,
+                    auth,
+                    server,
+                );
+                if let Ok(Ok(study)) = timeout(Duration::from_secs(12), fut).await
+                    && !study.data.is_empty()
+                {
+                    fetched_pts = Some(study.data);
+                    break;
+                }
+            }
+            let Some(pts) = fetched_pts else {
+                continue;
+            };
+            for dp in pts {
+                if dp.value.len() < 2 {
+                    continue;
+                }
+                let ts_sec = dp.value[0] as i64;
+                let val = dp.value[1];
+                if ts_sec <= 0 || !val.is_finite() || val.abs() >= 1e50 {
+                    continue;
+                }
+                let Some(dt) = Utc.timestamp_opt(ts_sec, 0).single() else {
+                    continue;
+                };
+                let q = ((dt.month() - 1) / 3) + 1;
+                let ts_ms = ts_sec.saturating_mul(1_000);
+                let entry = buckets
+                    .entry((dt.year(), q))
+                    .or_insert_with(|| (ts_ms, HashMap::new()));
+                if ts_ms >= entry.0 {
+                    entry.0 = ts_ms;
+                }
+                entry.1.insert(slot, val);
+            }
+        }
+
+        let now_ms = Utc::now().timestamp_millis();
+        let sym_canonical = key.ticker();
+        let mut rows = Vec::with_capacity(buckets.len());
+        for (&(year, q), (period_end_ms, map)) in &buckets {
+            let net_income_yoy_pct = map.get("net_income").and_then(|&cur_ni| {
+                let prev_ni = buckets
+                    .get(&(year - 1, q))
+                    .and_then(|(_, pm)| pm.get("net_income"))
+                    .copied()?;
+                if prev_ni.abs() < 1e-6 {
+                    return None;
+                }
+                let pct = ((cur_ni - prev_ni) / prev_ni.abs()) * 100.0;
+                pct.is_finite().then_some(pct)
+            });
+            rows.push(QuarterlyFundamentalRow {
+                symbol: sym_canonical.clone(),
+                period_end_ms: *period_end_ms,
+                period_label: format!("{year}-Q{q}"),
+                eps_ttm: map.get("eps_ttm").copied(),
+                bvps: map.get("bvps").copied(),
+                pe: map.get("pe").copied(),
+                pb: map.get("pb").copied(),
+                roe_pct: map.get("roe_pct").copied(),
+                net_income_yoy_pct,
+                source: "tradingview_fundamental".to_owned(),
+                updated_at_ms: now_ms,
+            });
+        }
+        rows.sort_by_key(|r| std::cmp::Reverse(r.period_end_ms));
+        Ok(rows)
     }
 
     /// Returns a reference to the shared rate limiter for observability and testing.

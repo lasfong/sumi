@@ -59,5 +59,5 @@ pub use walk_forward::{
     PortfolioConstituentAttribution, PortfolioUniverseFilter, PortfolioWeightingMode,
     WalkForwardConfig, WalkForwardFoldResult, WalkForwardReport, WalkForwardVerdict,
     map_equity_curve_to_candles, run_portfolio_backtest, run_portfolio_backtest_with_universe,
-    run_walk_forward_validation,
+    run_walk_forward_validation, run_walk_forward_validation_with_magnifier,
 };

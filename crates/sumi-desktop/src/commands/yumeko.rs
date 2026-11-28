@@ -111,9 +111,19 @@ pub async fn yumeko_export_kt01_verdict(
             .load_topdown_context(&canonical_ticker, as_of.as_deref())
             .ok();
 
+        let cutoff_ms = as_of
+            .as_deref()
+            .and_then(sumi_yumeko_bridge::vn_as_of_end_of_day_ms);
+        let pit_query_mode = match cutoff_ms {
+            Some(cut) => BarQueryMode::Forward {
+                before_ms: cut.saturating_add(1),
+            },
+            None => BarQueryMode::Init,
+        };
+
         let d1_key = SeriesKey::new(&sym_key, Interval::D1, Adjustment::Splits);
         let mut daily_bars = store
-            .query_bars(&d1_key, BarQueryMode::Init, 600)
+            .query_bars(&d1_key, pit_query_mode, 600)
             .map(|r| r.bars)
             .unwrap_or_default();
 
@@ -134,7 +144,7 @@ pub async fn yumeko_export_kt01_verdict(
 
         let h1_key = SeriesKey::new(&sym_key, Interval::H1, Adjustment::Splits);
         let hourly_bars = store
-            .query_bars(&h1_key, BarQueryMode::Init, 200)
+            .query_bars(&h1_key, pit_query_mode, 200)
             .ok()
             .map(|r| r.bars)
             .filter(|v| v.len() >= 20);

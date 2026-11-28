@@ -160,16 +160,24 @@ pub struct SumiWorkspaceBundleV1 {
     pub payload: SumiWorkspacePayloadV1,
 }
 
+fn is_secret_kv_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    lower.contains("secret")
+        || lower.contains("token")
+        || lower.contains("password")
+        || lower.contains("credential")
+        || lower.contains("api_key")
+        || lower.contains("cookie")
+        || lower.contains("oauth")
+}
+
 impl SumiWorkspaceBundleV1 {
     pub fn build_from_store(store: &WorkspaceStore, device_id: &str) -> DesktopResult<Self> {
         // Filter out any secret/ephemeral keys so credentials never enter sync bundles.
         let kv_entries: Vec<KvRecord> = store
             .list_all_kv()?
             .into_iter()
-            .filter(|kv| {
-                let lower = kv.key.to_ascii_lowercase();
-                !lower.contains("secret") && !lower.contains("token") && !lower.contains("password")
-            })
+            .filter(|kv| !is_secret_kv_key(&kv.key))
             .collect();
 
         let payload = SumiWorkspacePayloadV1 {
@@ -333,7 +341,16 @@ pub fn merge_bundle_into_store(
             }
             "watchlist" => {
                 let local = workspace.list_watchlists()?;
-                if local.iter().any(|w| w.id == *key) && !bundle.payload.watchlists.iter().any(|w| w.id == *key) {
+                let recreated_newer_in_bundle = bundle
+                    .payload
+                    .watchlists
+                    .iter()
+                    .any(|w| w.id == *key && w.updated_at_ms > *del_ts);
+                if !recreated_newer_in_bundle
+                    && local
+                        .iter()
+                        .any(|w| w.id == *key && w.updated_at_ms <= *del_ts)
+                {
                     workspace.delete_watchlist(key)?;
                     report.applied_tombstones += 1;
                 }
@@ -383,21 +400,29 @@ pub fn merge_bundle_into_store(
 
     // 2. Merge KV entries (excluding secrets)
     for kv in &bundle.payload.kv_entries {
-        let lower = kv.key.to_ascii_lowercase();
-        if lower.contains("secret") || lower.contains("token") || lower.contains("password") {
+        if is_secret_kv_key(&kv.key) {
             continue;
         }
         workspace.set_kv_with_ts(&kv.key, &kv.value, kv.updated_at_ms)?;
         report.merged_kv += 1;
     }
 
-    // 3. Merge Watchlists (LWW; respect tombstones)
+    // 3. Merge Watchlists (strict per-watchlist LWW using `wl.updated_at_ms`, NEVER `bundle.exported_at_ms`!)
+    let existing_watchlists: HashMap<String, i64> = workspace
+        .list_watchlists()?
+        .into_iter()
+        .map(|w| (w.id, w.updated_at_ms))
+        .collect();
     for wl in &bundle.payload.watchlists {
-        if is_tombstoned("watchlist", &wl.id, bundle.exported_at_ms) {
+        if is_tombstoned("watchlist", &wl.id, wl.updated_at_ms) {
             continue;
         }
-        workspace.upsert_watchlist_full(wl, bundle.exported_at_ms)?;
-        report.merged_watchlists += 1;
+        let local_ts = existing_watchlists.get(&wl.id).copied();
+        if local_ts.is_none_or(|lt| wl.updated_at_ms >= lt)
+            && workspace.upsert_watchlist_full(wl, wl.updated_at_ms)?
+        {
+            report.merged_watchlists += 1;
+        }
     }
 
     // 4. Merge Layouts
@@ -613,6 +638,51 @@ pub fn sync_bidirectional_folder(
         pushed_sha256: merged_local.payload_sha256,
         synced_at_ms: now_ms,
     })
+}
+
+/// Runs bidirectional Cloud Folder sync automatically on application startup when
+/// `sync_config.json` has `auto_sync_on_launch = true` and a valid mounted folder (`W6-02`).
+/// Never crashes startup if the cloud drive is temporarily unavailable.
+pub fn maybe_run_auto_sync_on_launch(
+    workspace: &WorkspaceStore,
+    data_dir: &Path,
+    config_dir: &Path,
+) -> Option<BidirectionalFolderSyncResult> {
+    let cfg = load_sync_config(config_dir);
+    if !cfg.auto_sync_on_launch {
+        return None;
+    }
+    let folder_str = cfg.sync_folder.as_deref()?.trim();
+    if folder_str.is_empty() {
+        return None;
+    }
+    let folder = PathBuf::from(folder_str);
+    if !folder.is_dir() {
+        tracing::warn!(
+            folder = %folder.display(),
+            "auto_sync_on_launch skipped: cloud sync folder is currently unavailable"
+        );
+        return None;
+    }
+    match sync_bidirectional_folder(workspace, data_dir, config_dir, &folder) {
+        Ok(res) => {
+            tracing::info!(
+                bundle = %res.bundle_path,
+                pulled = res.pulled_and_merged,
+                sha256 = %res.pushed_sha256,
+                "auto_sync_on_launch completed cleanly"
+            );
+            Some(res)
+        }
+        Err(err) => {
+            tracing::warn!(
+                folder = %folder.display(),
+                error = %err,
+                "auto_sync_on_launch failed (non-fatal)"
+            );
+            None
+        }
+    }
 }
 
 // ============================================================================
@@ -1036,5 +1106,126 @@ mod tests {
         assert!(pkce.code_verifier.len() >= 43);
         assert!(!pkce.code_challenge.is_empty());
         assert!(!pkce.state.is_empty());
+    }
+
+    #[test]
+    fn wave6_watchlist_lww_preserves_machine_a_edits_and_unicode_section_headers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mac_data = tmp.path().join("mac_data");
+        let mac_cfg = tmp.path().join("mac_cfg");
+        let win_data = tmp.path().join("win_data");
+        let win_cfg = tmp.path().join("win_cfg");
+        let cloud_folder = tmp.path().join("cloud_sync");
+
+        let mac_ws = WorkspaceStore::open(mac_data.join("sumi_workspace.db")).unwrap();
+        let win_ws = WorkspaceStore::open(win_data.join("sumi_workspace.db")).unwrap();
+
+        // T1: Initial shared watchlist synced to both Machine A (Mac) and Machine B (Windows)
+        mac_ws.create_watchlist("wl_focus", "Rổ Trọng Điểm").unwrap();
+        mac_ws.add_watchlist_symbol("wl_focus", "###SECTION:Ngân Hàng").unwrap();
+        mac_ws.add_watchlist_symbol("wl_focus", "HOSE:VCB").unwrap();
+        sync_bidirectional_folder(&mac_ws, &mac_data, &mac_cfg, &cloud_folder).unwrap();
+        sync_bidirectional_folder(&win_ws, &win_data, &win_cfg, &cloud_folder).unwrap();
+
+        // Verify Unicode section header casing survived sync intact on Machine B
+        let win_wl_t1 = win_ws
+            .list_watchlists()
+            .unwrap()
+            .into_iter()
+            .find(|w| w.id == "wl_focus")
+            .unwrap();
+        assert_eq!(
+            win_wl_t1.tickers,
+            vec!["###SECTION:Ngân Hàng".to_owned(), "HOSE:VCB".to_owned()]
+        );
+
+        // T2: Machine A adds HOSE:MBB to watchlist (newer watchlist updated_at_ms)
+        std::thread::sleep(std::time::Duration::from_millis(12));
+        mac_ws.add_watchlist_symbol("wl_focus", "HOSE:MBB").unwrap();
+
+        // T3 > T2: Machine B ONLY draws a trendline (does NOT touch watchlist), then exports/pushes!
+        std::thread::sleep(std::time::Duration::from_millis(12));
+        win_ws
+            .upsert_drawing(SavedDrawingRecord {
+                id: "draw_win_only".to_owned(),
+                ticker: "HOSE:VCB".to_owned(),
+                name: "segment".to_owned(),
+                pane_id: "candle_pane".to_owned(),
+                group_id: "user_drawings".to_owned(),
+                points: json!([{"timestamp": 1_700_000_000_000_i64, "value": 92_000.0}]),
+                styles: None,
+                extend_data: None,
+                lock: false,
+                visible: true,
+                mode: "normal".to_owned(),
+                updated_at_ms: Utc::now().timestamp_millis(),
+            })
+            .unwrap();
+        // Machine B pushes at T3 with stale watchlist updated_at_ms == T1 < T2
+        sync_bidirectional_folder(&win_ws, &win_data, &win_cfg, &cloud_folder).unwrap();
+
+        // Machine A pulls Machine B's bundle (exported_at_ms == T3) -> MUST NOT clobber HOSE:MBB!
+        sync_bidirectional_folder(&mac_ws, &mac_data, &mac_cfg, &cloud_folder).unwrap();
+        let mac_wl_after = mac_ws
+            .list_watchlists()
+            .unwrap()
+            .into_iter()
+            .find(|w| w.id == "wl_focus")
+            .unwrap();
+        assert_eq!(
+            mac_wl_after.tickers,
+            vec![
+                "###SECTION:Ngân Hàng".to_owned(),
+                "HOSE:VCB".to_owned(),
+                "HOSE:MBB".to_owned()
+            ],
+            "Machine B's older watchlist must NOT overwrite Machine A's newer watchlist edit!"
+        );
+        assert_eq!(
+            mac_ws.list_drawings("HOSE:VCB").unwrap().len(),
+            1,
+            "Machine A still receives Machine B's newer drawing!"
+        );
+
+        // Verify `auto_sync_on_launch` executes on Machine B and pulls HOSE:MBB automatically
+        let mut win_sync_cfg = load_sync_config(&win_cfg);
+        win_sync_cfg.auto_sync_on_launch = true;
+        win_sync_cfg.sync_folder = Some(cloud_folder.display().to_string());
+        save_sync_config(&win_cfg, &win_sync_cfg).unwrap();
+
+        let auto_res = maybe_run_auto_sync_on_launch(&win_ws, &win_data, &win_cfg);
+        assert!(auto_res.is_some());
+        let win_wl_after = win_ws
+            .list_watchlists()
+            .unwrap()
+            .into_iter()
+            .find(|w| w.id == "wl_focus")
+            .unwrap();
+        assert!(win_wl_after.tickers.contains(&"HOSE:MBB".to_owned()));
+
+        // Verify removing a Unicode section header works cleanly
+        mac_ws
+            .remove_watchlist_symbol("wl_focus", "###SECTION:Ngân Hàng")
+            .unwrap();
+        let after_rm = mac_ws
+            .list_watchlists()
+            .unwrap()
+            .into_iter()
+            .find(|w| w.id == "wl_focus")
+            .unwrap();
+        assert!(!after_rm.tickers.iter().any(|t| t.starts_with("###SECTION:")));
+
+        // Verify sensitive KV keys are stripped from sync bundles
+        mac_ws
+            .set_kv("oauth_session_cookie", &json!({"api_key": "secret"}))
+            .unwrap();
+        let bundle = SumiWorkspaceBundleV1::build_from_store(&mac_ws, "mac-test").unwrap();
+        assert!(
+            !bundle
+                .payload
+                .kv_entries
+                .iter()
+                .any(|kv| kv.key == "oauth_session_cookie")
+        );
     }
 }

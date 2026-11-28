@@ -12,8 +12,8 @@ use sumi_data::{
 use tauri::State;
 
 use crate::commands::broker::{
-    BrokerStateSnapshot, build_broker_snapshot, reset_replay_broker_at,
-    reset_replay_broker_for_blind_drill, restore_replay_broker_from_json,
+    BrokerStateSnapshot, build_broker_snapshot, rescale_replay_broker_on_blind_reveal,
+    reset_replay_broker_at, reset_replay_broker_for_blind_drill, restore_replay_broker_from_json,
     snapshot_replay_broker_json,
 };
 use crate::commands::market::{
@@ -79,11 +79,21 @@ fn splitmix64_next(state: &mut u64) -> u64 {
     z ^ (z >> 31)
 }
 
-fn scale_ohlcv_bars(bars: &[OhlcvBar], scale: f64) -> Vec<OhlcvBar> {
+/// Synthetic fixed epoch (`2000-01-03T00:00:00Z`, Monday) used to strip historical calendar dates
+/// from Blind Drill candles while preserving weekday & `1W` bucket alignment (`W6-03`).
+const BLIND_EPOCH_START_MS: i64 = 946_857_600_000;
+const WEEK_DURATION_MS: i64 = 7 * 86_400_000;
+
+fn compute_blind_time_shift_ms(first_bar_timestamp_ms: i64) -> i64 {
+    let raw_delta = first_bar_timestamp_ms.saturating_sub(BLIND_EPOCH_START_MS);
+    (raw_delta / WEEK_DURATION_MS) * WEEK_DURATION_MS
+}
+
+fn scale_and_shift_ohlcv_bars(bars: &[OhlcvBar], scale: f64, time_shift_ms: i64) -> Vec<OhlcvBar> {
     let round2 = |v: f64| (v * scale * 100.0).round() / 100.0;
     bars.iter()
         .map(|b| OhlcvBar {
-            timestamp: b.timestamp,
+            timestamp: b.timestamp.saturating_sub(time_shift_ms),
             open: round2(b.open),
             high: round2(b.high),
             low: round2(b.low),
@@ -92,6 +102,11 @@ fn scale_ohlcv_bars(bars: &[OhlcvBar], scale: f64) -> Vec<OhlcvBar> {
             turnover: b.turnover * scale,
         })
         .collect()
+}
+
+#[cfg(test)]
+fn scale_ohlcv_bars(bars: &[OhlcvBar], scale: f64) -> Vec<OhlcvBar> {
+    scale_and_shift_ohlcv_bars(bars, scale, 0)
 }
 
 fn map_speed(mult: f64) -> ReplaySpeed {
@@ -137,6 +152,11 @@ pub(crate) fn materialize_replay_bars(
         .min(rt.base_bars.len().saturating_sub(1));
     let cutoff_ms = rt.base_bars[cutoff_idx].timestamp;
 
+    let active_blind = rt
+        .blind_drill
+        .as_ref()
+        .filter(|b| b.enabled && !b.revealed);
+
     if target_iv == rt.interval {
         return rt.base_bars[..=cutoff_idx].to_vec();
     }
@@ -161,18 +181,27 @@ pub(crate) fn materialize_replay_bars(
         if !aggregated.is_empty() {
             // Seamlessly prepend older cached target_iv bars strictly before the aggregated window
             // so higher-TF panes retain deep multi-year context with zero future leakage.
+            // When Blind Drill is active, convert back to real timestamps for SQLite lookup and
+            // apply `bd.price_scale` + `bd.time_shift_ms` identically (`W6-03`)!
             let first_agg_ts = aggregated[0].timestamp;
+            let real_before_ms =
+                first_agg_ts.saturating_add(active_blind.map_or(0, |b| b.time_shift_ms));
             if let Ok(sym) = SymbolKey::parse(&rt.ticker) {
                 let series = SeriesKey::new(&sym, target_iv, Adjustment::Splits);
                 if let Ok(older) = store.query_bars(
                     &series,
                     BarQueryMode::Forward {
-                        before_ms: first_agg_ts,
+                        before_ms: real_before_ms,
                     },
                     2_500,
                 ) && !older.bars.is_empty()
                 {
-                    let mut combined = older.bars;
+                    let mut combined = match active_blind {
+                        Some(bd) => {
+                            scale_and_shift_ohlcv_bars(&older.bars, bd.price_scale, bd.time_shift_ms)
+                        }
+                        None => older.bars,
+                    };
                     combined.extend(aggregated);
                     return combined;
                 }
@@ -185,14 +214,18 @@ pub(crate) fn materialize_replay_bars(
     // Load cached target_iv bars and strictly slice `timestamp <= cutoff_ms` (DEF-001 zero lookahead).
     if let Ok(sym) = SymbolKey::parse(&rt.ticker) {
         let series = SeriesKey::new(&sym, target_iv, Adjustment::Splits);
+        let real_cutoff_ms = cutoff_ms.saturating_add(active_blind.map_or(0, |b| b.time_shift_ms));
         if let Ok(res) = store.query_bars(
             &series,
             BarQueryMode::Forward {
-                before_ms: cutoff_ms.saturating_add(1),
+                before_ms: real_cutoff_ms.saturating_add(1),
             },
             4_000,
         ) {
-            return res.bars;
+            return match active_blind {
+                Some(bd) => scale_and_shift_ohlcv_bars(&res.bars, bd.price_scale, bd.time_shift_ms),
+                None => res.bars,
+            };
         }
     }
 
@@ -401,6 +434,7 @@ pub async fn replay_start(
             tracked_intervals,
             base_bars: bars.clone(),
             base_candles: base_candles.clone(),
+            raw_base_bars: None,
             controller,
             speed_multiplier: 1.0,
             blind_drill: None,
@@ -520,7 +554,8 @@ pub async fn replay_start_random_blind_drill(
     } else {
         1.0
     };
-    let scaled_bars = scale_ohlcv_bars(&raw_bars, price_scale);
+    let time_shift_ms = compute_blind_time_shift_ms(raw_bars[0].timestamp);
+    let scaled_bars = scale_and_shift_ohlcv_bars(&raw_bars, price_scale, time_shift_ms);
     let base_candles: Vec<Candle> = scaled_bars
         .iter()
         .map(|b| b.to_core_candle(chosen_iv))
@@ -540,6 +575,7 @@ pub async fn replay_start_random_blind_drill(
         revealed: false,
         real_ticker: real_ticker.clone(),
         cut_date,
+        time_shift_ms,
     };
 
     let mut controller = ReplayController::new();
@@ -563,6 +599,7 @@ pub async fn replay_start_random_blind_drill(
             tracked_intervals: vec![chosen_iv],
             base_bars: scaled_bars.clone(),
             base_candles: base_candles.clone(),
+            raw_base_bars: Some(raw_bars),
             controller,
             speed_multiplier: 1.0,
             blind_drill: Some(drill_meta.clone()),
@@ -601,21 +638,72 @@ pub async fn replay_start_random_blind_drill(
     })
 }
 
-/// Reveals the hidden real ticker & historical cut date for an active Blind Replay Drill!
+/// Reveals the hidden real ticker, restores unscaled real VND bars & timestamps, and rescales
+/// the isolated Replay Broker cleanly so Debrief & subsequent orders match real market prices (`W6-03`).
 #[tauri::command]
 pub async fn replay_reveal_blind_drill(
     state: State<'_, AppState>,
 ) -> DesktopResult<ReplaySnapshotResponse> {
-    {
+    type BlindRevealRestore = (String, Interval, Vec<OhlcvBar>, Vec<Candle>, usize, f64);
+    let reveal_restore: Option<BlindRevealRestore> = {
         let mut rg = state.replay.lock().await;
         let rt = rg.as_mut().ok_or_else(|| {
             DesktopError::NotFound("Phiên Bar Replay chưa được khởi động".to_owned())
         })?;
+        let mut restore = None;
         if let Some(bd) = rt.blind_drill.as_mut() {
+            let was_unrevealed = bd.enabled && !bd.revealed;
             bd.revealed = true;
+            if was_unrevealed
+                && let Some(raw_bars) = rt.raw_base_bars.take()
+                && !raw_bars.is_empty()
+            {
+                let raw_candles: Vec<Candle> = raw_bars
+                    .iter()
+                    .map(|b| b.to_core_candle(rt.interval))
+                    .collect();
+                let cursor_idx = rt
+                    .controller
+                    .base_cursor_index
+                    .min(raw_bars.len().saturating_sub(1));
+                rt.base_bars = raw_bars.clone();
+                rt.base_candles = raw_candles.clone();
+                rt.controller.jump_to_base_index(&rt.base_candles, cursor_idx);
+                restore = Some((
+                    rt.ticker.clone(),
+                    rt.interval,
+                    raw_bars,
+                    raw_candles,
+                    cursor_idx,
+                    bd.price_scale,
+                ));
+            }
         }
-    }
-    replay_get_state(state).await
+        restore
+    };
+
+    let broker_snapshot = if let Some((real_ticker, iv, raw_bars, raw_candles, cursor_idx, scale)) =
+        reveal_restore
+    {
+        Some(
+            rescale_replay_broker_on_blind_reveal(
+                &state,
+                &real_ticker,
+                iv,
+                raw_bars,
+                raw_candles,
+                cursor_idx,
+                scale,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    let mut snap = replay_get_state(state).await?;
+    snap.broker = broker_snapshot;
+    Ok(snap)
 }
 
 #[tauri::command]
@@ -744,14 +832,17 @@ pub async fn replay_step(
         build_broker_snapshot(&state, &broker, true)?
     };
 
-    // Evaluate armed Price + Drawing-Line + Indicator (`RSI`/`MACD`/`EMA`) alerts causally during Replay (`BUG-017` + v2.2!).
+    // Evaluate armed Price + Drawing-Line + Indicator (`RSI`/`MACD`/`EMA`) alerts causally during Replay.
+    // During an unrevealed Blind Drill, NEVER evaluate alerts belonging to `rt.ticker` — only `display_ticker` (`alias_code`, `W6-03`)!
+    let _ = ticker;
     let triggered_alerts = if new_idx > prev_idx
         && let (Some(bar), Some(prev_c)) = (cutoff_bar, prev_cutoff_close)
     {
         let ws = state.workspace.clone();
-        let t = ticker.clone();
+        let t = display_ticker.clone();
+        let iv_str = iv.as_str().to_owned();
         tokio::task::spawn_blocking(move || {
-            evaluate_replay_bar_alerts(&ws, &t, prev_c, &bar, &causal_alert_bars)
+            evaluate_replay_bar_alerts(&ws, &t, prev_c, &bar, &causal_alert_bars, Some(&iv_str))
         })
         .await
         .unwrap_or_default()
@@ -985,6 +1076,20 @@ pub async fn replay_get_state(state: State<'_, AppState>) -> DesktopResult<Repla
 
 // ─── Save / Resume Bar Replay Practice Sessions (v2.2) ───────────────────────
 
+pub(crate) fn guard_save_replay_session_allowed(rt: &ReplayRuntime) -> DesktopResult<()> {
+    if rt
+        .blind_drill
+        .as_ref()
+        .is_some_and(|b| b.enabled && !b.revealed)
+    {
+        return Err(DesktopError::Validation(
+            "Không thể lưu phiên khi đang ở chế độ Luyện Mù chưa lật mở mã — hãy bấm 'Lật Mở Mã Thật' trước khi lưu."
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn list_replay_sessions(
     state: State<'_, AppState>,
@@ -1016,6 +1121,7 @@ pub async fn save_replay_session(
                 "Chưa có phiên Bar Replay đang hoạt động để lưu".to_owned(),
             )
         })?;
+        guard_save_replay_session_allowed(rt)?;
         let idx = rt
             .controller
             .base_cursor_index
@@ -1136,6 +1242,7 @@ pub async fn resume_replay_session(
             tracked_intervals,
             base_bars: bars.clone(),
             base_candles: base_candles.clone(),
+            raw_base_bars: None,
             controller,
             speed_multiplier: clamped_speed,
             blind_drill: None,
@@ -1242,6 +1349,7 @@ mod tests {
             tracked_intervals: vec![Interval::H1, Interval::H4],
             base_bars,
             base_candles,
+            raw_base_bars: None,
             controller: ctrl,
             speed_multiplier: 1.0,
             blind_drill: None,
@@ -1276,10 +1384,146 @@ mod tests {
             revealed: false,
             real_ticker: "HOSE:FPT".to_owned(),
             cut_date: "2024-03-15".to_owned(),
+            time_shift_ms: 604_800_000 * 100,
         };
         let masked = meta.masked_for_ui();
         assert_eq!(masked.alias_code, "MÃ ẨN #4242");
         assert!(masked.real_ticker.is_empty());
         assert!(masked.cut_date.is_empty());
+        assert_eq!(masked.time_shift_ms, 0);
+    }
+
+    #[test]
+    fn wave6_blind_drill_scales_1w_and_1h_shifts_timestamps_suppresses_real_alerts_and_blocks_save() {
+        let store = SqliteMarketStore::open_in_memory().unwrap();
+        let sym = SymbolKey::new("HOSE", "FPT").unwrap();
+        let d1_key = SeriesKey::new(&sym, Interval::D1, Adjustment::Splits);
+        let w1_key = SeriesKey::new(&sym, Interval::W1, Adjustment::Splits);
+        let h1_key = SeriesKey::new(&sym, Interval::H1, Adjustment::Splits);
+
+        // Historical 2024 bars in real VND (~125,000 VND)
+        let start_2024_ms = Utc
+            .with_ymd_and_hms(2024, 1, 8, 0, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis();
+        // Seed older 1W bar in 2023 (prior to base_bars window)
+        store
+            .upsert_bars(
+                &w1_key,
+                &[OhlcvBar::new(
+                    start_2024_ms - 14 * 86_400_000,
+                    120_000.0,
+                    126_000.0,
+                    119_000.0,
+                    125_000.0,
+                    1_000_000.0,
+                )],
+                "test",
+                Some(true),
+            )
+            .unwrap();
+        // Seed 1D bars (20 sessions)
+        let raw_d1: Vec<OhlcvBar> = (0..20_i64)
+            .map(|i| {
+                let ts = start_2024_ms + i * 86_400_000;
+                OhlcvBar::new(ts, 124_000.0, 126_000.0, 123_000.0, 125_000.0, 500_000.0)
+            })
+            .collect();
+        store.upsert_bars(&d1_key, &raw_d1, "test", Some(true)).unwrap();
+        // Seed 1H bar inside the replay window AND 1 future 1H bar beyond cutoff
+        let cut_idx = 10_usize;
+        let cut_real_ts = raw_d1[cut_idx].timestamp;
+        store
+            .upsert_bars(
+                &h1_key,
+                &[
+                    OhlcvBar::new(cut_real_ts - 3_600_000, 124_500.0, 125_500.0, 124_000.0, 125_000.0, 80_000.0),
+                    OhlcvBar::new(cut_real_ts + 2 * 86_400_000, 150_000.0, 155_000.0, 149_000.0, 152_000.0, 90_000.0),
+                ],
+                "test",
+                Some(true),
+            )
+            .unwrap();
+
+        let price_scale = 100.0 / raw_d1[cut_idx].close; // 0.0008
+        let time_shift_ms = compute_blind_time_shift_ms(raw_d1[0].timestamp);
+        let scaled_d1 = scale_and_shift_ohlcv_bars(&raw_d1, price_scale, time_shift_ms);
+        assert!(
+            scaled_d1[cut_idx].timestamp < Utc.with_ymd_and_hms(2005, 1, 1, 0, 0, 0).single().unwrap().timestamp_millis(),
+            "Blind Drill timestamps must be shifted away from 2024 history"
+        );
+        assert!((scaled_d1[cut_idx].close - 100.0).abs() < 1e-6);
+
+        let base_candles: Vec<Candle> = scaled_d1.iter().map(|b| b.to_core_candle(Interval::D1)).collect();
+        let mut ctrl = ReplayController::new();
+        ctrl.start_at_base_index(&base_candles, cut_idx);
+
+        let rt = ReplayRuntime {
+            ticker: "HOSE:FPT".to_owned(),
+            interval: Interval::D1,
+            tracked_intervals: vec![Interval::D1],
+            base_bars: scaled_d1.clone(),
+            base_candles,
+            raw_base_bars: Some(raw_d1),
+            controller: ctrl,
+            speed_multiplier: 1.0,
+            blind_drill: Some(BlindDrillMeta {
+                enabled: true,
+                alias_code: "MÃ ẨN #7777".to_owned(),
+                price_scale,
+                revealed: false,
+                real_ticker: "HOSE:FPT".to_owned(),
+                cut_date: "2024-01-18".to_owned(),
+                time_shift_ms,
+            }),
+        };
+
+        // 1. Save session MUST be blocked while unrevealed
+        assert!(guard_save_replay_session_allowed(&rt).is_err());
+
+        // 2. Coarser 1W materialization MUST scale prepended older bars to ~100.0 (never raw 125,000!)
+        let w1_bars = materialize_replay_bars(&rt, Interval::W1, &store);
+        assert!(w1_bars.len() >= 2);
+        assert!(
+            w1_bars.iter().all(|b| b.close > 80.0 && b.close < 120.0),
+            "All 1W bars including prepended older history must be scaled to ~100.0, got: {:?}",
+            w1_bars.iter().map(|b| b.close).collect::<Vec<_>>()
+        );
+
+        // 3. Finer 1H materialization MUST scale bars to ~100.0 AND cut future 1H bar strictly!
+        let h1_bars = materialize_replay_bars(&rt, Interval::H1, &store);
+        assert_eq!(h1_bars.len(), 1, "Future 1H bar must be cut strictly");
+        assert!((h1_bars[0].close - 100.0).abs() < 1e-6);
+
+        // 4. Armed alert on real ticker HOSE:FPT MUST NOT fire when evaluating with display_ticker ("MÃ ẨN #7777")
+        let ws = crate::workspace_db::WorkspaceStore::open_in_memory().unwrap();
+        ws.upsert_alert(&PriceAlertRecord {
+            id: "al_real_fpt".to_owned(),
+            ticker: "HOSE:FPT".to_owned(),
+            alert_kind: "price".to_owned(),
+            condition: "cross_below".to_owned(),
+            target_price: 50_000.0,
+            interval: Some("1D".to_owned()),
+            params_json: None,
+            sound_enabled: true,
+            message: "SPOILER FPT".to_owned(),
+            status: "armed".to_owned(),
+            frequency: "once".to_owned(),
+            cooldown_bars: 0,
+            last_fired_bar_ts: None,
+            created_at_ms: 0,
+            triggered_at_ms: None,
+        })
+        .unwrap();
+        let fired = evaluate_replay_bar_alerts(
+            &ws,
+            &display_ticker_for_runtime(&rt),
+            99.0,
+            &scaled_d1[cut_idx],
+            &scaled_d1[..=cut_idx],
+            Some("1D"),
+        );
+        assert!(fired.is_empty(), "Real ticker alert must NEVER fire during unrevealed Blind Drill!");
     }
 }

@@ -3,11 +3,20 @@ import { describe, expect, it, vi } from 'vitest'
 vi.mock('klinecharts', () => ({
   utils: {
     formatPrecision: (v: number | string, p = 2) => Number(v).toFixed(p),
+    getLinearYFromCoordinates: (
+      c1: { x: number; y: number },
+      c2: { x: number; y: number },
+      target: { x: number; y: number },
+    ) => {
+      if (Math.abs(c2.x - c1.x) < 1e-12) return c1.y
+      return c1.y + ((target.x - c1.x) / (c2.x - c1.x)) * (c2.y - c1.y)
+    },
   },
 }))
 
 import { ALL_DRAWING_TOOLS_COUNT, DRAWING_TOOL_GROUPS } from '../chart/drawingIcons'
-import { PRO_UPGRADED_OVERLAYS } from '../chart/overlays/proOverlays'
+import { buildQuarterlyStepSeries } from '../chart/indicators/fundamentalIndicators'
+import { PRO_UPGRADED_OVERLAYS, andrewsPitchfork } from '../chart/overlays/proOverlays'
 import { filterPaletteCommands, type PaletteCommandItem } from '../components/modals/CommandPaletteModal'
 import { useWorkspaceStore } from '../store/workspaceStore'
 
@@ -94,5 +103,61 @@ describe('Sumi v3.0 Wave 5 — Strategy 2.0, True Blind Drill & Workspace UX Pro
     expect(useWorkspaceStore.getState().symbolFlags['HOSE:FPT']).toBe('green')
     await store.setSymbolFlag('HOSE:FPT', null)
     expect(useWorkspaceStore.getState().symbolFlags['HOSE:FPT']).toBeUndefined()
+  })
+
+  it('Wave 6 W6-08: andrewsPitchfork projects all 3 parallel tines to bounding right edge x=800', () => {
+    const figures = andrewsPitchfork.createPointFigures!({
+      coordinates: [
+        { x: 10, y: 100 },
+        { x: 40, y: 60 },
+        { x: 50, y: 140 },
+      ],
+      bounding: { width: 800, height: 500, left: 0, right: 800, top: 0, bottom: 500 },
+    } as never) as Array<{ type: string; attrs?: { coordinates?: Array<{ x: number; y: number }> } }>
+
+    const lineFigs = figures.filter((f) => f.type === 'line')
+    // Expect base dashed p1-p2 + 3 projected tines (median, upper, lower) = 4 lines
+    expect(lineFigs.length).toBe(4)
+    const tines = lineFigs.slice(1)
+    for (const tine of tines) {
+      const coords = tine.attrs?.coordinates ?? []
+      expect(coords.length).toBe(2)
+      const [start, end] = coords
+      const len = Math.hypot(end.x - start.x, end.y - start.y)
+      expect(len).toBeGreaterThan(500)
+      expect(end.x).toBe(800)
+    }
+  })
+
+  it('Wave 6 W6-06: FIN_PE computes dynamic daily Close[t]/EPS_TTM[q(t)] with zero pre-quarter lookahead', () => {
+    const tPre = Date.UTC(2024, 0, 15)
+    const tQ1 = Date.UTC(2024, 2, 31)
+    const tDay1 = Date.UTC(2024, 3, 5)
+    const tDay2 = Date.UTC(2024, 3, 10)
+    const bars = [
+      { timestamp: tPre, close: 90_000 },
+      { timestamp: tDay1, close: 100_000 },
+      { timestamp: tDay2, close: 120_000 },
+    ]
+    const vals = [
+      {
+        period: '2024-Q1',
+        contentDate: new Date(tQ1).toISOString().slice(0, 10),
+        sourceFamily: 'tradingview_fundamental',
+        pe: 20.0,
+        pb: 4.0,
+        ps: null,
+        evEbitda: null,
+        eps: 5_000,
+        bvps: 25_000,
+        roe: 22.5,
+        roa: null,
+        debtToEquity: null,
+      },
+    ]
+    const peSeries = buildQuarterlyStepSeries(bars, vals, 'pe')
+    expect(peSeries[0]).toBeUndefined()
+    expect(peSeries[1]).toBeCloseTo(20.0, 5) // 100,000 / 5,000
+    expect(peSeries[2]).toBeCloseTo(24.0, 5) // 120,000 / 5,000 (dynamic daily move!)
   })
 })

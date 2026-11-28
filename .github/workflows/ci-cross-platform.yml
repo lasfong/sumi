@@ -48,5 +48,8 @@ jobs:
       - name: Run Rust workspace unit & integration tests (Clean-Slate environment)
         run: cargo test --workspace
 
-      - name: Run Rust clippy (all targets)
-        run: cargo clippy --workspace --all-targets
+      - name: Run Rust clippy (all targets, zero warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Verify Tauri desktop build with custom-protocol asset embedding (W6-01)
+        run: cargo check -p sumi-desktop --features custom-protocol

@@ -52,10 +52,13 @@ pub struct BlindDrillMeta {
     pub revealed: bool,
     pub real_ticker: String,
     pub cut_date: String,
+    /// Constant week-aligned epoch shift subtracted from bar timestamps while `!revealed` (`W6-03`).
+    #[serde(default)]
+    pub time_shift_ms: i64,
 }
 
 impl BlindDrillMeta {
-    /// Returns a spoiler-free copy with `real_ticker` and `cut_date` masked while `!revealed`.
+    /// Returns a spoiler-free copy with `real_ticker`, `cut_date`, and `time_shift_ms` masked while `!revealed`.
     #[must_use]
     pub fn masked_for_ui(&self) -> Self {
         if self.revealed {
@@ -68,6 +71,7 @@ impl BlindDrillMeta {
                 revealed: false,
                 real_ticker: String::new(),
                 cut_date: String::new(),
+                time_shift_ms: 0,
             }
         }
     }
@@ -82,6 +86,9 @@ pub struct ReplayRuntime {
     pub tracked_intervals: Vec<Interval>,
     pub base_bars: Vec<OhlcvBar>,
     pub base_candles: Vec<Candle>,
+    /// Original unscaled, unshifted bars kept strictly server-side during Blind Drill so reveal
+    /// restores true VND scale & timestamps cleanly without precision drift (`W6-03`).
+    pub raw_base_bars: Option<Vec<OhlcvBar>>,
     pub controller: ReplayController,
     pub speed_multiplier: f64,
     pub blind_drill: Option<BlindDrillMeta>,
@@ -161,6 +168,10 @@ pub struct AppState {
     pub analog_build_lock: Mutex<()>,
     /// Monotonic invalidation counter bumped whenever CafeF archives are imported.
     pub analog_cache_epoch: AtomicU64,
+    /// Queued cold-start deep-link (`sumi://...`) held until React mounts and drains it (`W6-01`).
+    pub pending_deeplink: std::sync::Mutex<Option<crate::deeplink::DeepLinkPayload>>,
+    /// Flipped to `true` once the frontend attaches its `sumi:deeplink` listener and calls `take_pending_deeplink`.
+    pub frontend_ready: AtomicBool,
 }
 
 impl AppState {
@@ -199,6 +210,8 @@ impl AppState {
             analog_bank: std::sync::RwLock::new(None),
             analog_build_lock: Mutex::new(()),
             analog_cache_epoch: AtomicU64::new(1),
+            pending_deeplink: std::sync::Mutex::new(None),
+            frontend_ready: AtomicBool::new(false),
         })
     }
 
@@ -250,17 +263,32 @@ pub fn workspace_ancestor_dirs() -> Vec<PathBuf> {
 
 /// Resolves canonical cross-platform paths for `sumi_market.db` and `sumi_workspace.db`
 /// (`~/.local/share/sumi/` on macOS/Linux, `%LOCALAPPDATA%\sumi\` on Windows, or `SUMI_DATA_DIR`).
+/// Explicit file overrides via `SUMI_MARKET_DB` and `SUMI_WORKSPACE_DB` take highest precedence
+/// (consistent with `sumi-cli` and `WINDOWS_INSTALL_AND_SYNC_GUIDE.md`).
 ///
 /// On first v3.0 launch, automatically and non-destructively migrates any existing v2.x databases
 /// from legacy OS app support folders (`~/Library/Application Support/com.sumi.supercharts/`,
 /// `%APPDATA%\com.sumi.supercharts\`, or the passed `legacy_app_data_dir`) using SQLite's WAL-safe
 /// Online Backup API with SHA-256 verification. Never deletes legacy files.
 pub fn resolve_database_paths(legacy_app_data_dir: Option<PathBuf>) -> (PathBuf, PathBuf) {
+    let env_market = std::env::var("SUMI_MARKET_DB")
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+    let env_workspace = std::env::var("SUMI_WORKSPACE_DB")
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+
     let target_dir = sumi_data_dir();
-    let _ = migrate_legacy_databases_into(&target_dir, legacy_app_data_dir.as_deref());
+    if env_market.is_none() || env_workspace.is_none() {
+        let _ = migrate_legacy_databases_into(&target_dir, legacy_app_data_dir.as_deref());
+    }
     (
-        target_dir.join("sumi_market.db"),
-        target_dir.join("sumi_workspace.db"),
+        env_market.unwrap_or_else(|| target_dir.join("sumi_market.db")),
+        env_workspace.unwrap_or_else(|| target_dir.join("sumi_workspace.db")),
     )
 }
 

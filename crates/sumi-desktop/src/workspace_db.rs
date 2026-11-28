@@ -95,6 +95,20 @@ pub struct WatchlistGroup {
     pub name: String,
     pub tickers: Vec<String>,
     pub sort_order: i32,
+    #[serde(default)]
+    pub updated_at_ms: i64,
+}
+
+/// Normalizes a watchlist entry: preserves Unicode casing for `###SECTION:...` headers,
+/// and uppercases regular ticker / expression items (`W6-02`).
+#[must_use]
+pub fn normalize_watchlist_item(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.starts_with("###") {
+        trimmed.to_owned()
+    } else {
+        trimmed.to_ascii_uppercase()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -296,9 +310,10 @@ impl WorkspaceStore {
             );
 
             CREATE TABLE IF NOT EXISTS watchlists (
-                id         TEXT PRIMARY KEY,
-                name       TEXT NOT NULL,
-                sort_order INTEGER NOT NULL DEFAULT 0
+                id            TEXT PRIMARY KEY,
+                name          TEXT NOT NULL,
+                sort_order    INTEGER NOT NULL DEFAULT 0,
+                updated_at_ms INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS watchlist_items (
@@ -839,17 +854,19 @@ impl WorkspaceStore {
             .lock()
             .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, sort_order FROM watchlists ORDER BY sort_order ASC, name ASC",
+            "SELECT id, name, sort_order, updated_at_ms FROM watchlists ORDER BY sort_order ASC, name ASC",
         )?;
-        let groups: Vec<(String, String, i32)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        let groups: Vec<(String, String, i32, i64)> = stmt
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
             .collect::<Result<_, _>>()?;
 
         let mut item_stmt = conn.prepare(
             "SELECT ticker FROM watchlist_items WHERE watchlist_id = ?1 ORDER BY sort_order ASC, ticker ASC",
         )?;
         let mut out = Vec::with_capacity(groups.len());
-        for (id, name, sort_order) in groups {
+        for (id, name, sort_order, updated_at_ms) in groups {
             let tickers: Vec<String> = item_stmt
                 .query_map(params![&id], |r| r.get(0))?
                 .collect::<Result<_, _>>()?;
@@ -858,6 +875,7 @@ impl WorkspaceStore {
                 name,
                 tickers,
                 sort_order,
+                updated_at_ms,
             });
         }
         Ok(out)
@@ -868,20 +886,22 @@ impl WorkspaceStore {
             .conn
             .lock()
             .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
         let next_order: i32 = conn.query_row(
             "SELECT COALESCE(MAX(sort_order) + 1, 0) FROM watchlists",
             [],
             |r| r.get(0),
         )?;
         conn.execute(
-            "INSERT INTO watchlists (id, name, sort_order) VALUES (?1, ?2, ?3)",
-            params![id, name, next_order],
+            "INSERT INTO watchlists (id, name, sort_order, updated_at_ms) VALUES (?1, ?2, ?3, ?4)",
+            params![id, name, next_order, now_ms],
         )?;
         Ok(WatchlistGroup {
             id: id.to_owned(),
             name: name.to_owned(),
             tickers: Vec::new(),
             sort_order: next_order,
+            updated_at_ms: now_ms,
         })
     }
 
@@ -908,11 +928,8 @@ impl WorkspaceStore {
             .conn
             .lock()
             .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
-        let normalized = if ticker.trim().starts_with("###") {
-            ticker.trim().to_owned()
-        } else {
-            ticker.trim().to_ascii_uppercase()
-        };
+        let normalized = normalize_watchlist_item(ticker);
+        let now_ms = chrono::Utc::now().timestamp_millis();
         let next_order: i32 = conn.query_row(
             "SELECT COALESCE(MAX(sort_order) + 1, 0) FROM watchlist_items WHERE watchlist_id = ?1",
             params![watchlist_id],
@@ -922,6 +939,10 @@ impl WorkspaceStore {
             "INSERT OR IGNORE INTO watchlist_items (watchlist_id, ticker, sort_order) VALUES (?1, ?2, ?3)",
             params![watchlist_id, normalized, next_order],
         )?;
+        conn.execute(
+            "UPDATE watchlists SET updated_at_ms = MAX(updated_at_ms, ?2) WHERE id = ?1",
+            params![watchlist_id, now_ms],
+        )?;
         Ok(())
     }
 
@@ -930,10 +951,15 @@ impl WorkspaceStore {
             .conn
             .lock()
             .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
-        let normalized = ticker.trim().to_ascii_uppercase();
+        let normalized = normalize_watchlist_item(ticker);
+        let now_ms = chrono::Utc::now().timestamp_millis();
         conn.execute(
             "DELETE FROM watchlist_items WHERE watchlist_id = ?1 AND ticker = ?2",
             params![watchlist_id, normalized],
+        )?;
+        conn.execute(
+            "UPDATE watchlists SET updated_at_ms = MAX(updated_at_ms, ?2) WHERE id = ?1",
+            params![watchlist_id, now_ms],
         )?;
         Ok(())
     }
@@ -951,7 +977,7 @@ impl WorkspaceStore {
             .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
         let now_ms = chrono::Utc::now().timestamp_millis();
         conn.execute(
-            "UPDATE watchlists SET name = ?2, updated_at_ms = ?3 WHERE id = ?1",
+            "UPDATE watchlists SET name = ?2, updated_at_ms = MAX(updated_at_ms, ?3) WHERE id = ?1",
             params![id, clean, now_ms],
         )?;
         Ok(())
@@ -977,18 +1003,14 @@ impl WorkspaceStore {
             if trimmed.is_empty() {
                 continue;
             }
-            let normalized = if trimmed.starts_with("###") {
-                trimmed.to_owned()
-            } else {
-                trimmed.to_ascii_uppercase()
-            };
+            let normalized = normalize_watchlist_item(trimmed);
             tx.execute(
                 "INSERT OR IGNORE INTO watchlist_items (watchlist_id, ticker, sort_order) VALUES (?1, ?2, ?3)",
                 params![watchlist_id, normalized, idx as i32],
             )?;
         }
         tx.execute(
-            "UPDATE watchlists SET updated_at_ms = ?2 WHERE id = ?1",
+            "UPDATE watchlists SET updated_at_ms = MAX(updated_at_ms, ?2) WHERE id = ?1",
             params![watchlist_id, now_ms],
         )?;
         tx.commit()?;
@@ -2157,12 +2179,26 @@ impl WorkspaceStore {
         Ok(())
     }
 
-    pub fn upsert_watchlist_full(&self, group: &WatchlistGroup, updated_at_ms: i64) -> DesktopResult<()> {
+    /// LWW-guarded full watchlist upsert preserving Unicode `###SECTION:...` casing (`W6-02`).
+    /// Returns `Ok(true)` if inserted/updated, or `Ok(false)` if local `updated_at_ms` is strictly newer.
+    pub fn upsert_watchlist_full(&self, group: &WatchlistGroup, updated_at_ms: i64) -> DesktopResult<bool> {
         let mut conn = self
             .conn
             .lock()
             .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
         let tx = conn.transaction()?;
+        let local_ts: Option<i64> = tx
+            .query_row(
+                "SELECT updated_at_ms FROM watchlists WHERE id = ?1",
+                params![&group.id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(lt) = local_ts
+            && updated_at_ms < lt
+        {
+            return Ok(false);
+        }
         tx.execute(
             r#"
             INSERT INTO watchlists (id, name, sort_order, updated_at_ms)
@@ -2171,6 +2207,7 @@ impl WorkspaceStore {
                 name = excluded.name,
                 sort_order = excluded.sort_order,
                 updated_at_ms = excluded.updated_at_ms
+            WHERE excluded.updated_at_ms >= watchlists.updated_at_ms
             "#,
             params![&group.id, &group.name, group.sort_order, updated_at_ms],
         )?;
@@ -2179,13 +2216,18 @@ impl WorkspaceStore {
             params![&group.id],
         )?;
         for (idx, ticker) in group.tickers.iter().enumerate() {
+            let trimmed = ticker.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let normalized = normalize_watchlist_item(trimmed);
             tx.execute(
                 "INSERT OR IGNORE INTO watchlist_items (watchlist_id, ticker, sort_order) VALUES (?1, ?2, ?3)",
-                params![&group.id, ticker.trim().to_ascii_uppercase(), idx as i32],
+                params![&group.id, normalized, idx as i32],
             )?;
         }
         tx.commit()?;
-        Ok(())
+        Ok(true)
     }
 
     pub fn list_tombstones(&self) -> DesktopResult<Vec<SyncTombstoneRecord>> {

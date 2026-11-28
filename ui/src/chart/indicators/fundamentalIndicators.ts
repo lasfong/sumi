@@ -74,11 +74,14 @@ export function resolveValuationQuarterTimestampMs(q: ValuationQuarterDto): numb
 }
 
 /**
- * Strictly causal quarterly step-line builder (`zero future lookahead`):
- * each bar receives the latest quarterly metric whose effective date `<= bar.timestamp`.
+ * Strictly causal Point-in-Time quarterly fundamental series builder (`zero future lookahead`, `W6-06`):
+ * - NEVER backfills bars prior to the first available quarter with future/current ratios!
+ * - Computes **dynamic daily P/E (`Close[t] / EPS_TTM[q(t)]`)** and **dynamic daily P/B
+ *   (`Close[t] / BVPS[q(t)]`)** so valuation lines move accurately with every daily price bar
+ *   while remaining strictly PIT-locked to the latest published quarter `q(t)`.
  */
 export function buildQuarterlyStepSeries(
-  bars: Array<{ timestamp: number }>,
+  bars: Array<{ timestamp: number; close?: number }>,
   valuations: ValuationQuarterDto[],
   metric: 'pe' | 'pb' | 'roe' | 'epsYoy',
 ): Array<number | undefined> {
@@ -93,15 +96,100 @@ export function buildQuarterlyStepSeries(
 
   if (stamped.length === 0) return bars.map(() => undefined)
 
-  const points: Array<{ ts: number; val: number }> = []
+  // Locate each quarter's contemporaneous chart close (nearest bar <= quarter end, else first bar >= quarter end)
+  // solely for unit normalization (VND vs kVND) or inferring implied EPS/BVPS when only `pe`/`pb` was supplied.
+  const findCloseAtOrBefore = (ts: number): number | null => {
+    let best: number | null = null
+    for (let i = 0; i < bars.length; i++) {
+      const c = bars[i].close
+      if (typeof c !== 'number' || !Number.isFinite(c) || c <= 0) continue
+      if (bars[i].timestamp <= ts) {
+        best = c
+      } else {
+        return best ?? c
+      }
+    }
+    return best
+  }
+
+  interface QuarterEntry {
+    ts: number
+    staticVal?: number
+    effectiveEps?: number
+    effectiveBvps?: number
+  }
+
+  const entries: QuarterEntry[] = []
   for (let i = 0; i < stamped.length; i++) {
     const cur = stamped[i]
-    let val: number | null | undefined = null
-    if (metric === 'pe') val = cur.q.pe
-    else if (metric === 'pb') val = cur.q.pb
-    else if (metric === 'roe') val = cur.q.roe
-    else if (metric === 'epsYoy') {
-      // Match quarter ~4 steps earlier (~300..430 days prior) for YoY EPS growth %
+    if (metric === 'pe') {
+      const refClose = findCloseAtOrBefore(cur.ts)
+      let effEps: number | undefined
+      if (typeof cur.q.eps === 'number' && Number.isFinite(cur.q.eps) && cur.q.eps > 0) {
+        effEps = cur.q.eps
+        // Unit guard: if chart is in Raw VND (e.g. 132,500) while EPS is in kVND (e.g. 5.2), scale by 1,000x
+        if (
+          refClose !== null &&
+          typeof cur.q.pe === 'number' &&
+          Number.isFinite(cur.q.pe) &&
+          cur.q.pe > 0
+        ) {
+          const rawRatio = refClose / effEps
+          const factor = rawRatio / cur.q.pe
+          if (factor > 200 && factor < 5000) {
+            effEps *= 1000
+          } else if (factor > 0.0002 && factor < 0.005) {
+            effEps /= 1000
+          }
+        }
+      } else if (
+        refClose !== null &&
+        typeof cur.q.pe === 'number' &&
+        Number.isFinite(cur.q.pe) &&
+        cur.q.pe > 0
+      ) {
+        effEps = refClose / cur.q.pe
+      }
+      const staticPe = typeof cur.q.pe === 'number' && Number.isFinite(cur.q.pe) ? cur.q.pe : undefined
+      if (effEps !== undefined || staticPe !== undefined) {
+        entries.push({ ts: cur.ts, effectiveEps: effEps, staticVal: staticPe })
+      }
+    } else if (metric === 'pb') {
+      const refClose = findCloseAtOrBefore(cur.ts)
+      let effBvps: number | undefined
+      if (typeof cur.q.bvps === 'number' && Number.isFinite(cur.q.bvps) && cur.q.bvps > 0) {
+        effBvps = cur.q.bvps
+        if (
+          refClose !== null &&
+          typeof cur.q.pb === 'number' &&
+          Number.isFinite(cur.q.pb) &&
+          cur.q.pb > 0
+        ) {
+          const rawRatio = refClose / effBvps
+          const factor = rawRatio / cur.q.pb
+          if (factor > 200 && factor < 5000) {
+            effBvps *= 1000
+          } else if (factor > 0.0002 && factor < 0.005) {
+            effBvps /= 1000
+          }
+        }
+      } else if (
+        refClose !== null &&
+        typeof cur.q.pb === 'number' &&
+        Number.isFinite(cur.q.pb) &&
+        cur.q.pb > 0
+      ) {
+        effBvps = refClose / cur.q.pb
+      }
+      const staticPb = typeof cur.q.pb === 'number' && Number.isFinite(cur.q.pb) ? cur.q.pb : undefined
+      if (effBvps !== undefined || staticPb !== undefined) {
+        entries.push({ ts: cur.ts, effectiveBvps: effBvps, staticVal: staticPb })
+      }
+    } else if (metric === 'roe') {
+      if (typeof cur.q.roe === 'number' && Number.isFinite(cur.q.roe)) {
+        entries.push({ ts: cur.ts, staticVal: cur.q.roe })
+      }
+    } else if (metric === 'epsYoy') {
       const curEps = cur.q.eps
       if (typeof curEps === 'number' && Number.isFinite(curEps)) {
         const targetPrevTs = cur.ts - 365 * 86_400_000
@@ -115,25 +203,37 @@ export function buildQuarterlyStepSeries(
           }
         }
         if (bestPrev) {
-          val = ((curEps - bestPrev.eps) / Math.abs(bestPrev.eps)) * 100
+          const val = ((curEps - bestPrev.eps) / Math.abs(bestPrev.eps)) * 100
+          if (Number.isFinite(val)) {
+            entries.push({ ts: cur.ts, staticVal: val })
+          }
         }
       }
     }
-    if (typeof val === 'number' && Number.isFinite(val)) {
-      points.push({ ts: cur.ts, val })
-    }
   }
 
-  if (points.length === 0) return bars.map(() => undefined)
+  if (entries.length === 0) return bars.map(() => undefined)
 
   const out: Array<number | undefined> = new Array(bars.length)
   let ptr = -1
   for (let i = 0; i < bars.length; i++) {
     const bTs = bars[i].timestamp
-    while (ptr + 1 < points.length && points[ptr + 1].ts <= bTs) {
+    while (ptr + 1 < entries.length && entries[ptr + 1].ts <= bTs) {
       ptr += 1
     }
-    out[i] = ptr >= 0 ? points[ptr].val : undefined
+    if (ptr < 0) {
+      out[i] = undefined
+      continue
+    }
+    const active = entries[ptr]
+    const barClose = bars[i].close
+    if (metric === 'pe' && active.effectiveEps && typeof barClose === 'number' && Number.isFinite(barClose) && barClose > 0) {
+      out[i] = barClose / active.effectiveEps
+    } else if (metric === 'pb' && active.effectiveBvps && typeof barClose === 'number' && Number.isFinite(barClose) && barClose > 0) {
+      out[i] = barClose / active.effectiveBvps
+    } else {
+      out[i] = active.staticVal
+    }
   }
   return out
 }
@@ -195,29 +295,16 @@ function createFundamentalIndicator(opts: {
     calc: (dataList: KLineData[], indicator) => {
       const symHint = (indicator.extendData as { ticker?: string } | undefined)?.ticker ?? ''
       const cached = symHint ? getFundamentalsCache(symHint) : undefined
-      if (!cached) return dataList.map(() => ({ hasData: 0 }))
-
-      if (cached.quarterlyValuations.length > 0) {
-        const series = buildQuarterlyStepSeries(dataList, cached.quarterlyValuations, opts.metric)
-        const anyVal = series.some((v) => v !== undefined)
-        if (anyVal) {
-          return series.map((val) => ({ val, hasData: 1 }))
-        }
+      if (!cached || cached.quarterlyValuations.length === 0) {
+        // Strict Point-in-Time discipline (`W6-06`): NEVER draw a lookahead horizontal line
+        // across past years using today's scalar P/E or P/B when quarterly history is unavailable!
+        return dataList.map(() => ({ hasData: 0 }))
       }
 
-      // Fallback to scalar latest value if quarterly history is absent (e.g. TradingView SymbolInfo P/E)
-      const scalar =
-        opts.metric === 'pe'
-          ? cached.pe
-          : opts.metric === 'pb'
-            ? cached.pb
-            : opts.metric === 'roe'
-              ? cached.roe
-              : null
-      if (typeof scalar === 'number' && Number.isFinite(scalar)) {
-        return dataList.map(() => ({ val: scalar, hasData: 1 }))
-      }
-      return dataList.map(() => ({ hasData: 0 }))
+      const series = buildQuarterlyStepSeries(dataList, cached.quarterlyValuations, opts.metric)
+      const anyVal = series.some((v) => v !== undefined)
+      if (!anyVal) return dataList.map(() => ({ hasData: 0 }))
+      return series.map((val) => ({ val, hasData: val !== undefined ? 1 : 0 }))
     },
     createTooltipDataSource: ({ indicator, crosshair }) => {
       const idx = crosshair.dataIndex
@@ -228,18 +315,26 @@ function createFundamentalIndicator(opts: {
           : '—'
       const legends: TooltipLegend[] = [{ title: `${opts.title}: `, value: formatted }]
       return {
-        name: `${opts.shortName} (DN01)`,
+        name: `${opts.shortName} (PIT)`,
         calcParamsText: '',
         legends,
         features: [],
       }
     },
     draw: ({ ctx, bounding, indicator }) => {
+      const symHint = (indicator.extendData as { ticker?: string } | undefined)?.ticker ?? ''
+      const cached = symHint ? getFundamentalsCache(symHint) : undefined
       const hasData = indicator.result.some((r) => r.hasData === 1 && r.val !== undefined)
+      const srcLabel =
+        cached?.source === 'yumeko_dn01'
+          ? 'Yumeko DN01'
+          : cached?.source === 'tradingview_fundamental'
+            ? 'TradingView Quý'
+            : 'BCTC Quý'
       drawFundaBadge(
         ctx,
         bounding.width,
-        hasData ? `✓ ${opts.shortName} · Yumeko DN01` : `Chưa có BCTC DN01 (${opts.shortName})`,
+        hasData ? `✓ ${opts.shortName} · ${srcLabel} (PIT)` : `Chưa có BCTC Quý (${opts.shortName})`,
         hasData,
       )
       return false

@@ -55,14 +55,20 @@ try {
     Pop-Location
 }
 
-Write-Host "==> [2/4] Building Rust release binary (sumi-desktop)..." -ForegroundColor Cyan
+Write-Host "==> [2/4] Building Rust release binary (sumi-desktop with custom-protocol + sumi-cli)..." -ForegroundColor Cyan
 Push-Location $RepoRoot
 try {
-    cargo build --release --package sumi-desktop
-    if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
+    cargo build --release --package sumi-desktop --features custom-protocol
+    if ($LASTEXITCODE -ne 0) { throw "cargo build sumi-desktop failed" }
     if (Test-Path (Join-Path $RepoRoot "crates\sumi-cli\Cargo.toml")) {
         cargo build --release --package sumi-cli
         if ($LASTEXITCODE -ne 0) { throw "cargo build sumi-cli failed" }
+    }
+    $CargoMetaJson = cargo metadata --format-version=1 --no-deps
+    $TargetDir = if ($LASTEXITCODE -eq 0 -and $CargoMetaJson) {
+        ($CargoMetaJson | ConvertFrom-Json).target_directory
+    } else {
+        Join-Path $RepoRoot "target"
     }
 } finally {
     Pop-Location
@@ -72,11 +78,11 @@ Write-Host "==> [3/4] Staging portable package in $StageDir..." -ForegroundColor
 if (Test-Path $StageDir) { Remove-Item $StageDir -Recurse -Force }
 New-Item -ItemType Directory -Path $StageDir -Force | Out-Null
 
-$DesktopExe = Join-Path $RepoRoot "target\release\sumi-desktop.exe"
+$DesktopExe = Join-Path $TargetDir "release\sumi-desktop.exe"
 if (-not (Test-Path $DesktopExe)) { throw "Missing release executable: $DesktopExe" }
 Copy-Item $DesktopExe (Join-Path $StageDir "Sumi Supercharts.exe")
 
-$CliExe = Join-Path $RepoRoot "target\release\sumi.exe"
+$CliExe = Join-Path $TargetDir "release\sumi.exe"
 if (Test-Path $CliExe) {
     Copy-Item $CliExe (Join-Path $StageDir "sumi.exe")
 }
@@ -92,7 +98,7 @@ $ReadmeWin = @"
 Sumi Supercharts v$Version (Windows x64 Portable)
 =================================================
 - Double-click "Sumi Supercharts.exe" (or run sumi.cmd).
-- Local data directory: %LOCALAPPDATA%\sumi\data
+- Local data directory: %LOCALAPPDATA%\sumi
 - Local config directory: %APPDATA%\sumi
 - Cross-device sync: Open Database icon -> "Đồng Bộ Đa Máy" -> select OneDrive/iCloud/Syncthing folder or import/export .sumi.json.
 "@

@@ -2,3 +2,4 @@
 
 pub mod engine;
 pub mod mcp;
+pub mod sync_cmd;

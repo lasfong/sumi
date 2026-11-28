@@ -55,10 +55,14 @@ echo "==> [1/4] Building React UI bundle..."
 npm --prefix "${REPO_ROOT}/ui" ci --no-audit --no-fund >/dev/null 2>&1 || npm --prefix "${REPO_ROOT}/ui" install --no-audit --no-fund
 npm --prefix "${REPO_ROOT}/ui" run build
 
-echo "==> [2/4] Building Rust Tauri v2 desktop binary (release)..."
-(cd "${REPO_ROOT}" && cargo build --release --package sumi-desktop)
+echo "==> [2/4] Building Rust Tauri v2 desktop binary (custom-protocol) & sumi CLI (release)..."
+(cd "${REPO_ROOT}" && cargo build --release --package sumi-desktop --features custom-protocol)
+(cd "${REPO_ROOT}" && cargo build --release --package sumi-cli)
 
-BIN_PATH="${REPO_ROOT}/target/release/sumi-desktop"
+TARGET_DIR="$(cd "${REPO_ROOT}" && cargo metadata --format-version=1 --no-deps | node -e "const fs = require('fs'); process.stdout.write(JSON.parse(fs.readFileSync(0,'utf8')).target_directory || '');" 2>/dev/null || true)"
+TARGET_DIR="${TARGET_DIR:-${CARGO_TARGET_DIR:-${REPO_ROOT}/target}}"
+
+BIN_PATH="${TARGET_DIR}/release/sumi-desktop"
 if [[ ! -x "${BIN_PATH}" ]]; then
   echo "ERROR: Expected release binary at ${BIN_PATH}" >&2
   exit 1
@@ -73,11 +77,14 @@ mkdir -p "${STAGE_APP}/Contents/MacOS" "${STAGE_APP}/Contents/Resources"
 cp "${BIN_PATH}" "${STAGE_APP}/Contents/MacOS/sumi-desktop"
 chmod +x "${STAGE_APP}/Contents/MacOS/sumi-desktop"
 
-# Also copy `sumi` CLI binary if built in this workspace (Wave 2+)
-if [[ -x "${REPO_ROOT}/target/release/sumi" ]]; then
-  cp "${REPO_ROOT}/target/release/sumi" "${STAGE_APP}/Contents/MacOS/sumi"
-  chmod +x "${STAGE_APP}/Contents/MacOS/sumi"
+# Always include `sumi` CLI binary alongside desktop app
+CLI_BIN_PATH="${TARGET_DIR}/release/sumi"
+if [[ ! -x "${CLI_BIN_PATH}" ]]; then
+  echo "ERROR: Expected release CLI binary at ${CLI_BIN_PATH}" >&2
+  exit 1
 fi
+cp "${CLI_BIN_PATH}" "${STAGE_APP}/Contents/MacOS/sumi"
+chmod +x "${STAGE_APP}/Contents/MacOS/sumi"
 
 # Copy app icon if present
 ICON_SRC="${REPO_ROOT}/crates/sumi-desktop/icons/icon.icns"

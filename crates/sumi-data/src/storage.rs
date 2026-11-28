@@ -33,6 +33,23 @@ pub struct FundamentalSnapshot {
     pub updated_at_ms: i64,
 }
 
+/// Point-in-Time quarterly fundamental row cached in `symbol_quarterly_fundamentals` (`W6-06`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuarterlyFundamentalRow {
+    pub symbol: String,
+    pub period_end_ms: i64,
+    pub period_label: String,
+    pub eps_ttm: Option<f64>,
+    pub bvps: Option<f64>,
+    pub pe: Option<f64>,
+    pub pb: Option<f64>,
+    pub roe_pct: Option<f64>,
+    pub net_income_yoy_pct: Option<f64>,
+    pub source: String,
+    pub updated_at_ms: i64,
+}
+
 /// Summary statistics for a single cached `(exchange, symbol, interval, adjustment)` series.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeriesMeta {
@@ -238,6 +255,23 @@ impl SqliteMarketStore {
                 updated_at_ms            INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (exchange, symbol)
             ) WITHOUT ROWID;
+
+            CREATE TABLE IF NOT EXISTS symbol_quarterly_fundamentals (
+                symbol             TEXT    NOT NULL,
+                period_end_ms      INTEGER NOT NULL,
+                period_label       TEXT    NOT NULL,
+                eps_ttm            REAL,
+                bvps               REAL,
+                pe                 REAL,
+                pb                 REAL,
+                roe_pct            REAL,
+                net_income_yoy_pct REAL,
+                source             TEXT    NOT NULL DEFAULT 'tradingview_fundamental',
+                updated_at_ms      INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (symbol, period_label)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_quarterly_funda_sym_ts
+                ON symbol_quarterly_fundamentals (symbol, period_end_ms DESC);
             "#,
         )?;
 
@@ -1004,6 +1038,122 @@ impl SqliteMarketStore {
             map.insert(snap.symbol.to_ascii_uppercase(), snap);
         }
         Ok(map)
+    }
+
+    /// Upserts Point-in-Time quarterly fundamental rows into `symbol_quarterly_fundamentals` (`W6-06`).
+    pub fn upsert_quarterly_fundamentals(&self, rows: &[QuarterlyFundamentalRow]) -> Result<usize> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| DataError::Storage("SQLite mutex poisoned".to_owned()))?;
+        let tx = conn.transaction()?;
+        let mut count = 0_usize;
+        {
+            let mut stmt = tx.prepare(
+                r#"
+                INSERT INTO symbol_quarterly_fundamentals (
+                    symbol, period_end_ms, period_label, eps_ttm, bvps, pe, pb,
+                    roe_pct, net_income_yoy_pct, source, updated_at_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                ON CONFLICT(symbol, period_label) DO UPDATE SET
+                    period_end_ms      = excluded.period_end_ms,
+                    eps_ttm            = COALESCE(excluded.eps_ttm, symbol_quarterly_fundamentals.eps_ttm),
+                    bvps               = COALESCE(excluded.bvps, symbol_quarterly_fundamentals.bvps),
+                    pe                 = COALESCE(excluded.pe, symbol_quarterly_fundamentals.pe),
+                    pb                 = COALESCE(excluded.pb, symbol_quarterly_fundamentals.pb),
+                    roe_pct            = COALESCE(excluded.roe_pct, symbol_quarterly_fundamentals.roe_pct),
+                    net_income_yoy_pct = COALESCE(excluded.net_income_yoy_pct, symbol_quarterly_fundamentals.net_income_yoy_pct),
+                    source             = excluded.source,
+                    updated_at_ms      = excluded.updated_at_ms
+                "#,
+            )?;
+            for r in rows {
+                let sym = r.symbol.trim().to_ascii_uppercase();
+                let lbl = r.period_label.trim();
+                if sym.is_empty() || lbl.is_empty() {
+                    continue;
+                }
+                stmt.execute(params![
+                    sym,
+                    r.period_end_ms,
+                    lbl,
+                    r.eps_ttm,
+                    r.bvps,
+                    r.pe,
+                    r.pb,
+                    r.roe_pct,
+                    r.net_income_yoy_pct,
+                    &r.source,
+                    r.updated_at_ms,
+                ])?;
+                count += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(count)
+    }
+
+    /// Reads cached quarterly fundamentals for `symbol` ordered newest-first, strictly enforcing
+    /// `period_end_ms <= as_of_cutoff_ms` when a Point-in-Time cutoff is supplied (`W6-06`).
+    pub fn list_quarterly_fundamentals(
+        &self,
+        symbol: &str,
+        as_of_cutoff_ms: Option<i64>,
+    ) -> Result<Vec<QuarterlyFundamentalRow>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DataError::Storage("SQLite mutex poisoned".to_owned()))?;
+        let sym = symbol.trim().to_ascii_uppercase();
+        let cutoff = as_of_cutoff_ms.unwrap_or(i64::MAX);
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT symbol, period_end_ms, period_label, eps_ttm, bvps, pe, pb,
+                   roe_pct, net_income_yoy_pct, source, updated_at_ms
+            FROM symbol_quarterly_fundamentals
+            WHERE symbol = ?1 AND period_end_ms <= ?2
+            ORDER BY period_end_ms DESC
+            "#,
+        )?;
+        let rows = stmt
+            .query_map(params![sym, cutoff], |r| {
+                Ok(QuarterlyFundamentalRow {
+                    symbol: r.get(0)?,
+                    period_end_ms: r.get(1)?,
+                    period_label: r.get(2)?,
+                    eps_ttm: r.get(3)?,
+                    bvps: r.get(4)?,
+                    pe: r.get(5)?,
+                    pb: r.get(6)?,
+                    roe_pct: r.get(7)?,
+                    net_income_yoy_pct: r.get(8)?,
+                    source: r.get(9)?,
+                    updated_at_ms: r.get(10)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Returns the most recent `updated_at_ms` cached in `symbol_quarterly_fundamentals` for `symbol`.
+    pub fn latest_quarterly_fundamental_updated_ms(&self, symbol: &str) -> Result<Option<i64>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DataError::Storage("SQLite mutex poisoned".to_owned()))?;
+        let sym = symbol.trim().to_ascii_uppercase();
+        let val: Option<i64> = conn
+            .query_row(
+                "SELECT MAX(updated_at_ms) FROM symbol_quarterly_fundamentals WHERE symbol = ?1",
+                params![sym],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(val)
     }
 
     /// Looks up cached [`ResolvedSymbol`] plus its last-updated Unix millisecond timestamp.

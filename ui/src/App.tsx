@@ -100,6 +100,15 @@ export const App: React.FC = () => {
           for (const fn of fns) fn()
         } else {
           unlisteners.push(...fns)
+          // Drain any cold-start `sumi://` deep-link queued before React mounted (`W6-01`)
+          void api
+            .takePendingDeepLink()
+            .then((pending) => {
+              if (!disposed && pending?.ticker) {
+                useWorkspaceStore.getState().applyDeepLink(pending)
+              }
+            })
+            .catch(() => {})
         }
       })
       .catch(() => {
@@ -112,10 +121,12 @@ export const App: React.FC = () => {
     }
   }, [])
 
-  // 2. Live Quote streaming for active watchlist symbols via Tauri Channel
+  // 2. Live Quote streaming for active watchlist symbols via Tauri Channel (exclude ###SECTION headers, `W6-02`)
   const activeWatchlistTickersKey = useMemo(() => {
     const activeWl = watchlists.find((w) => w.id === activeWatchlistId) ?? watchlists[0]
-    return (activeWl?.tickers ?? []).join(',')
+    return (activeWl?.tickers ?? [])
+      .filter((t) => Boolean(t) && !t.trim().startsWith('###'))
+      .join(',')
   }, [watchlists, activeWatchlistId])
 
   useEffect(() => {

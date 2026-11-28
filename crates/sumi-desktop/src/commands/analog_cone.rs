@@ -346,17 +346,52 @@ pub(crate) async fn compute_analog_cone_inner(
     use_market_context: Option<bool>,
     as_of_timestamp_ms: Option<i64>,
 ) -> DesktopResult<AnalogConeResponseDto> {
-    let sym = SymbolKey::parse(ticker)?;
     let iv: Interval = interval.parse()?;
     let hz = horizon.unwrap_or(DEFAULT_ANALOG_HORIZON).clamp(1, MAX_ANALOG_HORIZON);
     let k = top_k.unwrap_or(DEFAULT_ANALOG_TOP_K).clamp(10, 250);
     let want_mkt = use_market_context.unwrap_or(true);
-    let venue = map_exchange_to_venue(&sym.exchange, &sym.symbol, &state.market_store);
     let requested_profile = if want_mkt {
         AnalogWeightProfile::MarketAware
     } else {
         AnalogWeightProfile::EndogenousOnly
     };
+
+    // 0. Guard active unrevealed True Blind Drill BEFORE `SymbolKey::parse` (`W6-03`) so AFC
+    // never errors on `"MÃ ẨN #XXXX"` and never leaks top historical analog ticker names!
+    {
+        let rg = state.replay.lock().await;
+        if let Some(rt) = rg.as_ref()
+            && rt.controller.is_active()
+            && let Some(ref bd) = rt.blind_drill
+            && bd.enabled
+            && !bd.revealed
+            && (bd.alias_code == ticker || rt.ticker.eq_ignore_ascii_case(ticker))
+        {
+            return Ok(AnalogConeResponseDto {
+                ticker: bd.alias_code.clone(),
+                exchange: "BLIND".to_owned(),
+                symbol: bd.alias_code.clone(),
+                venue: "BLIND".to_owned(),
+                interval: iv.as_str().to_owned(),
+                supported_interval: false,
+                replay_locked: true,
+                as_of_timestamp_ms: None,
+                as_of_date: None,
+                anchor_close: None,
+                horizon: hz,
+                top_k: k,
+                weight_profile: requested_profile.as_str().to_owned(),
+                query_latency_us: 0,
+                status_message: Some(
+                    "AFC tạm khóa trong chế độ Luyện Mù để chống lộ mã tương tự".to_owned(),
+                ),
+                forecast: None,
+            });
+        }
+    }
+
+    let sym = SymbolKey::parse(ticker)?;
+    let venue = map_exchange_to_venue(&sym.exchange, &sym.symbol, &state.market_store);
 
     // 1. Timeframe applicability guard (`AFC` is empirically calibrated strictly on `1D` sessions).
     if iv != Interval::D1 {
@@ -643,6 +678,7 @@ mod tests {
                 tracked_intervals: vec![Interval::D1],
                 base_bars: fpt_bars,
                 base_candles: fpt_candles,
+                raw_base_bars: None,
                 controller: ctrl,
                 speed_multiplier: 1.0,
                 blind_drill: None,

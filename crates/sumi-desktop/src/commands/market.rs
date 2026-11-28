@@ -403,7 +403,7 @@ pub(crate) fn synthesize_expression_symbol(parsed: &ParsedExpression) -> Resolve
     }
 }
 
-async fn load_expression_bars(
+pub(crate) async fn load_expression_bars(
     state: &AppState,
     parsed: &ParsedExpression,
     iv: Interval,
@@ -571,7 +571,8 @@ pub async fn resolve_symbol(
             && rt.controller.is_active()
             && let Some(ref bd) = rt.blind_drill
             && bd.enabled
-            && (bd.alias_code == ticker || (!bd.revealed && rt.ticker.eq_ignore_ascii_case(&ticker)))
+            && !bd.revealed
+            && (bd.alias_code == ticker || rt.ticker.eq_ignore_ascii_case(&ticker))
         {
             let idx = rt
                 .controller
@@ -726,13 +727,15 @@ pub async fn get_bars(
         .unwrap_or(Adjustment::Splits);
     let page_limit = limit.unwrap_or(300).clamp(1, 5_000);
 
-    // Wave 5: True Blind Replay Drill bar serving BEFORE `SymbolKey::parse` (handles `"MÃ ẨN #XXXX"`!)
+    // Wave 5/6: True Blind Replay Drill bar serving BEFORE `SymbolKey::parse` (only while unrevealed!).
+    // Once revealed, `rt.base_bars` holds real VND bars so normal symbol resolution + VN bands apply cleanly.
     {
         let mut replay_guard = state.replay.lock().await;
         if let Some(rt) = replay_guard.as_mut()
             && rt.controller.is_active()
             && let Some(ref bd) = rt.blind_drill
             && bd.enabled
+            && !bd.revealed
             && (bd.alias_code == ticker || rt.ticker.eq_ignore_ascii_case(&ticker))
         {
             let visible =
@@ -1865,93 +1868,217 @@ pub async fn get_symbol_fundamentals(
     }
     let sym = SymbolKey::parse(&ticker)?;
     let store = state.market_store.clone();
-    tokio::task::spawn_blocking(move || {
-        let local_snap = store.get_fundamental_snapshot(&sym).ok().flatten();
-        let sym_cached = store.get_symbol(&sym).ok().flatten().map(|(s, _)| s);
-        let qmv_prof = sumi_core::scanner::lookup_qmv_profile(&sym.symbol);
+    let cutoff_ms = as_of
+        .as_deref()
+        .and_then(sumi_yumeko_bridge::vn_as_of_end_of_day_ms);
 
+    // 1. Check Priority 1 (Yumeko Read-Only DN01 CSTC) and local SQLite cache first
+    let sym_for_blocking = sym.clone();
+    let as_of_for_blocking = as_of.clone();
+    let store_for_blocking = store.clone();
+    let (
+        local_snap,
+        sym_cached,
+        qmv_prof,
+        mut valuations,
+        cached_quarterly_rows,
+        cached_quarterly_updated_ms,
+    ) = tokio::task::spawn_blocking(move || {
+        let local_snap = store_for_blocking
+            .get_fundamental_snapshot(&sym_for_blocking)
+            .ok()
+            .flatten();
+        let sym_cached = store_for_blocking
+            .get_symbol(&sym_for_blocking)
+            .ok()
+            .flatten()
+            .map(|(s, _)| s);
+        let qmv_prof = sumi_core::scanner::lookup_qmv_profile(&sym_for_blocking.symbol);
         let bridge = YumekoReadOnlyBridge::discover_default();
-        let ctx_opt = bridge.load_topdown_context(&sym.ticker(), as_of.as_deref()).ok();
+        let ctx_opt = bridge
+            .load_topdown_context(&sym_for_blocking.ticker(), as_of_for_blocking.as_deref())
+            .ok();
         let valuations = ctx_opt
             .as_ref()
             .map(|c| c.dn01_valuations.clone())
             .unwrap_or_default();
-        let latest_q = valuations.first();
-
-        let source = if latest_q.is_some() {
-            "yumeko_dn01".to_owned()
-        } else if local_snap.is_some() {
-            "tradingview_cache".to_owned()
-        } else {
-            "none".to_owned()
-        };
-
-        let sector = local_snap
-            .as_ref()
-            .and_then(|s| s.sector.clone())
-            .or_else(|| sym_cached.as_ref().and_then(|s| s.sector.clone()))
-            .or_else(|| qmv_prof.map(|p| p.sector.label_vi().to_owned()));
-        let industry = local_snap
-            .as_ref()
-            .and_then(|s| s.industry.clone())
-            .or_else(|| sym_cached.as_ref().and_then(|s| s.industry.clone()));
-        let market_cap_basic = local_snap
-            .as_ref()
-            .and_then(|s| s.market_cap_basic)
-            .or_else(|| sym_cached.as_ref().and_then(|s| s.market_cap_basic));
-        let pe = latest_q
-            .and_then(|q| q.pe)
-            .or_else(|| local_snap.as_ref().and_then(|s| s.pe_ttm))
-            .or_else(|| sym_cached.as_ref().and_then(|s| s.price_earnings_ttm));
-        let pb = latest_q
-            .and_then(|q| q.pb)
-            .or_else(|| local_snap.as_ref().and_then(|s| s.pb));
-        let roe = latest_q
-            .and_then(|q| q.roe)
-            .or_else(|| local_snap.as_ref().and_then(|s| s.roe));
-        let eps = latest_q
-            .and_then(|q| q.eps)
-            .or_else(|| local_snap.as_ref().and_then(|s| s.eps))
-            .or_else(|| sym_cached.as_ref().and_then(|s| s.last_annual_eps));
-
-        Ok(SymbolFundamentalsResponse {
-            ticker: sym.ticker(),
-            symbol: sym.symbol.clone(),
-            exchange: sym.exchange.clone(),
-            source,
-            sector,
-            industry,
-            market_cap_basic,
-            pe,
-            pb,
-            ps: latest_q.and_then(|q| q.ps),
-            ev_ebitda: latest_q.and_then(|q| q.ev_ebitda),
-            roe,
-            roa: latest_q.and_then(|q| q.roa),
-            eps,
-            bvps: latest_q.and_then(|q| q.bvps),
-            debt_to_equity: latest_q.and_then(|q| q.debt_to_equity),
-            total_revenue: local_snap
-                .as_ref()
-                .and_then(|s| s.total_revenue)
-                .or_else(|| sym_cached.as_ref().and_then(|s| s.total_revenue)),
-            total_shares_outstanding: local_snap
-                .as_ref()
-                .and_then(|s| s.total_shares_outstanding)
-                .or_else(|| sym_cached.as_ref().and_then(|s| s.total_shares_outstanding)),
-            earnings_release_date: local_snap
-                .as_ref()
-                .and_then(|s| s.earnings_release_date)
-                .or_else(|| sym_cached.as_ref().and_then(|s| s.earnings_release_date)),
-            business_description: local_snap
-                .as_ref()
-                .and_then(|s| s.business_description.clone())
-                .or_else(|| sym_cached.as_ref().and_then(|s| s.business_description.clone())),
-            quarterly_valuations: valuations,
-        })
+        let cached_q = store_for_blocking
+            .list_quarterly_fundamentals(&sym_for_blocking.ticker(), cutoff_ms)
+            .unwrap_or_default();
+        let latest_q_upd = store_for_blocking
+            .latest_quarterly_fundamental_updated_ms(&sym_for_blocking.ticker())
+            .ok()
+            .flatten();
+        (
+            local_snap,
+            sym_cached,
+            qmv_prof,
+            valuations,
+            cached_q,
+            latest_q_upd,
+        )
     })
     .await
-    .map_err(|e| DesktopError::Internal(e.to_string()))?
+    .map_err(|e| DesktopError::Internal(e.to_string()))?;
+
+    // 2. Priority 2 (`W6-06`): When Yumeko DN01 has no quarterly history for this symbol
+    //    (e.g. >1,500 VN stocks outside 54 Yumeko CSTC tickers, US stocks, or Clean-Slate machines),
+    //    serve from `symbol_quarterly_fundamentals` cache, refreshing via `tradingview-rs::fundamental`
+    //    when empty or older than 7 days while online!
+    let mut used_tv_quarterly = false;
+    if valuations.is_empty() {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let seven_days_ms = 7 * 86_400_000_i64;
+        let cache_stale = cached_quarterly_rows.is_empty()
+            || cached_quarterly_updated_ms
+                .is_none_or(|ts| now_ms.saturating_sub(ts) > seven_days_ms);
+
+        let effective_rows = if cache_stale && !state.is_offline() {
+            let feed = state.market_service.provider().clone();
+            let fetched = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                feed.fetch_quarterly_fundamentals(&sym),
+            )
+            .await;
+            if let Ok(Ok(fresh_rows)) = fetched
+                && !fresh_rows.is_empty()
+            {
+                let st = store.clone();
+                let sym_t = sym.ticker();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _ = st.upsert_quarterly_fundamentals(&fresh_rows);
+                    st.list_quarterly_fundamentals(&sym_t, cutoff_ms)
+                        .unwrap_or_default()
+                })
+                .await
+                .map(|filtered| {
+                    if !filtered.is_empty() {
+                        used_tv_quarterly = true;
+                        valuations = filtered
+                            .into_iter()
+                            .map(|r| sumi_yumeko_bridge::ValuationQuarterDto {
+                                period: r.period_label,
+                                content_date: Some(sumi_data::format_ymd_utc(r.period_end_ms)),
+                                source_family: r.source,
+                                pe: r.pe,
+                                pb: r.pb,
+                                ps: None,
+                                ev_ebitda: None,
+                                eps: r.eps_ttm,
+                                bvps: r.bvps,
+                                roe: r.roe_pct,
+                                roa: None,
+                                debt_to_equity: None,
+                            })
+                            .collect();
+                    }
+                });
+            }
+            if valuations.is_empty() {
+                cached_quarterly_rows
+            } else {
+                Vec::new()
+            }
+        } else {
+            cached_quarterly_rows
+        };
+
+        if valuations.is_empty() && !effective_rows.is_empty() {
+            used_tv_quarterly = true;
+            valuations = effective_rows
+                .into_iter()
+                .map(|r| sumi_yumeko_bridge::ValuationQuarterDto {
+                    period: r.period_label,
+                    content_date: Some(sumi_data::format_ymd_utc(r.period_end_ms)),
+                    source_family: r.source,
+                    pe: r.pe,
+                    pb: r.pb,
+                    ps: None,
+                    ev_ebitda: None,
+                    eps: r.eps_ttm,
+                    bvps: r.bvps,
+                    roe: r.roe_pct,
+                    roa: None,
+                    debt_to_equity: None,
+                })
+                .collect();
+        }
+    }
+
+    let latest_q = valuations.first();
+    let source = if latest_q.is_some() && !used_tv_quarterly {
+        "yumeko_dn01".to_owned()
+    } else if used_tv_quarterly {
+        "tradingview_fundamental".to_owned()
+    } else if local_snap.is_some() {
+        "tradingview_cache".to_owned()
+    } else {
+        "none".to_owned()
+    };
+
+    let sector = local_snap
+        .as_ref()
+        .and_then(|s| s.sector.clone())
+        .or_else(|| sym_cached.as_ref().and_then(|s| s.sector.clone()))
+        .or_else(|| qmv_prof.map(|p| p.sector.label_vi().to_owned()));
+    let industry = local_snap
+        .as_ref()
+        .and_then(|s| s.industry.clone())
+        .or_else(|| sym_cached.as_ref().and_then(|s| s.industry.clone()));
+    let market_cap_basic = local_snap
+        .as_ref()
+        .and_then(|s| s.market_cap_basic)
+        .or_else(|| sym_cached.as_ref().and_then(|s| s.market_cap_basic));
+    let pe = latest_q
+        .and_then(|q| q.pe)
+        .or_else(|| local_snap.as_ref().and_then(|s| s.pe_ttm))
+        .or_else(|| sym_cached.as_ref().and_then(|s| s.price_earnings_ttm));
+    let pb = latest_q
+        .and_then(|q| q.pb)
+        .or_else(|| local_snap.as_ref().and_then(|s| s.pb));
+    let roe = latest_q
+        .and_then(|q| q.roe)
+        .or_else(|| local_snap.as_ref().and_then(|s| s.roe));
+    let eps = latest_q
+        .and_then(|q| q.eps)
+        .or_else(|| local_snap.as_ref().and_then(|s| s.eps))
+        .or_else(|| sym_cached.as_ref().and_then(|s| s.last_annual_eps));
+
+    Ok(SymbolFundamentalsResponse {
+        ticker: sym.ticker(),
+        symbol: sym.symbol.clone(),
+        exchange: sym.exchange.clone(),
+        source,
+        sector,
+        industry,
+        market_cap_basic,
+        pe,
+        pb,
+        ps: latest_q.and_then(|q| q.ps),
+        ev_ebitda: latest_q.and_then(|q| q.ev_ebitda),
+        roe,
+        roa: latest_q.and_then(|q| q.roa),
+        eps,
+        bvps: latest_q.and_then(|q| q.bvps),
+        debt_to_equity: latest_q.and_then(|q| q.debt_to_equity),
+        total_revenue: local_snap
+            .as_ref()
+            .and_then(|s| s.total_revenue)
+            .or_else(|| sym_cached.as_ref().and_then(|s| s.total_revenue)),
+        total_shares_outstanding: local_snap
+            .as_ref()
+            .and_then(|s| s.total_shares_outstanding)
+            .or_else(|| sym_cached.as_ref().and_then(|s| s.total_shares_outstanding)),
+        earnings_release_date: local_snap
+            .as_ref()
+            .and_then(|s| s.earnings_release_date)
+            .or_else(|| sym_cached.as_ref().and_then(|s| s.earnings_release_date)),
+        business_description: local_snap
+            .as_ref()
+            .and_then(|s| s.business_description.clone())
+            .or_else(|| sym_cached.as_ref().and_then(|s| s.business_description.clone())),
+        quarterly_valuations: valuations,
+    })
 }
 
 /// Computes strictly causal `0.00%`-rebased multi-symbol comparison curves aligned to `base_ticker`

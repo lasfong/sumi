@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use chrono::{NaiveDate, TimeZone, Utc};
+use chrono::{FixedOffset, NaiveDate, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sumi_core::data::{Timeframe, aggregate_ohlcv};
@@ -56,6 +56,20 @@ pub struct ExportedVerdictListItem {
     pub generated_at_utc: String,
 }
 
+/// Converts a `YYYY-MM-DD` `as_of` date to Vietnam (`UTC+7`) end-of-day cutoff in epoch milliseconds
+/// (`23:59:59.999+07:00` = `16:59:59.999Z`), cleanly including all `1D` (`00:00Z`) and `1H` VN intraday
+/// sessions on `as_of` while excluding every bar of `as_of + 1` (`W6-04`).
+#[must_use]
+pub fn vn_as_of_end_of_day_ms(as_of: &str) -> Option<i64> {
+    let d = NaiveDate::parse_from_str(as_of.trim(), "%Y-%m-%d").ok()?;
+    let vn_tz = FixedOffset::east_opt(7 * 3_600)?;
+    let local_end = d.and_hms_milli_opt(23, 59, 59, 999)?;
+    vn_tz
+        .from_local_datetime(&local_end)
+        .single()
+        .map(|dt| dt.timestamp_millis())
+}
+
 /// Evaluates the deterministic `KT01` confirmation gate from `1D` OHLCV bars (plus optional `1H`
 /// bars, optional AFC summary, and upstream Yumeko Top-Down context).
 pub fn evaluate_kt01_gate(
@@ -79,11 +93,8 @@ pub fn evaluate_kt01_gate(
         .map_or("HOSE", |(ex, _)| ex)
         .to_ascii_uppercase();
 
-    // Filter daily bars strictly <= as_of if requested (Point-in-Time guard!)
-    let cutoff_ms = as_of_override
-        .and_then(|s| NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok())
-        .and_then(|d| d.and_hms_opt(23, 59, 59))
-        .map(|dt| dt.and_utc().timestamp_millis());
+    // Filter daily & hourly bars strictly <= end-of-day Vietnam (UTC+7) `as_of` (Point-in-Time guard, `W6-04`)!
+    let cutoff_ms = as_of_override.and_then(vn_as_of_end_of_day_ms);
     let pit_daily: Vec<OhlcvBar> = match cutoff_ms {
         Some(cut) => daily_bars
             .iter()
@@ -171,8 +182,16 @@ pub fn evaluate_kt01_gate(
         })
         .unwrap_or_else(|| "Chưa đủ dữ liệu 1W".to_owned());
 
-    // 3. Hourly Timing (optional 1H bars)
-    let hourly_timing = hourly_bars.and_then(|h_bars| {
+    // 3. Hourly Timing (optional 1H bars — strictly filtered <= VN `as_of` cutoff, `W6-04`)
+    let hourly_timing = hourly_bars.and_then(|raw_h| {
+        let h_bars: Vec<OhlcvBar> = match cutoff_ms {
+            Some(cut) => raw_h
+                .iter()
+                .copied()
+                .filter(|b| b.timestamp <= cut)
+                .collect(),
+            None => raw_h.to_vec(),
+        };
         if h_bars.len() < 20 {
             return None;
         }
@@ -744,5 +763,96 @@ mod tests {
         let listed = list_exported_verdicts(Some(tmp.path()), 10).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].symbol, "FPT");
+    }
+
+    #[test]
+    fn wave6_kt01_verdict_filters_future_1h_bars_strictly_at_vn_as_of_cutoff() {
+        let base_ms = NaiveDate::from_ymd_opt(2026, 5, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis();
+        let daily: Vec<OhlcvBar> = (0..60_i64)
+            .map(|i| {
+                let p = 110_000.0 + (i as f64) * 200.0;
+                OhlcvBar::new(base_ms + i * 86_400_000, p, p + 500.0, p - 500.0, p, 1_000_000.0)
+            })
+            .collect();
+        // Put 25 hourly bars strictly AFTER `as_of = 2026-06-01` (future!) and only 5 BEFORE -> must return `None`!
+        let cutoff_ms = vn_as_of_end_of_day_ms("2026-06-01").unwrap();
+        let mut hourly = Vec::new();
+        for i in 0..5_i64 {
+            hourly.push(OhlcvBar::new(
+                cutoff_ms - (5 - i) * 3_600_000,
+                115_000.0,
+                116_000.0,
+                114_000.0,
+                115_500.0,
+                100_000.0,
+            ));
+        }
+        for i in 1..=25_i64 {
+            hourly.push(OhlcvBar::new(
+                cutoff_ms + i * 3_600_000,
+                140_000.0,
+                145_000.0,
+                139_000.0,
+                144_000.0,
+                200_000.0,
+            ));
+        }
+
+        let verdict = evaluate_kt01_gate(
+            "HOSE:FPT",
+            &daily,
+            Some(&hourly),
+            None,
+            None,
+            Some("2026-06-01"),
+        )
+        .unwrap();
+        assert!(
+            verdict.mtf_alignment.hourly_timing.is_none(),
+            "Future 1H bars after as_of MUST be stripped so <20 pre-cutoff bars yield None!"
+        );
+
+        // Now supply 22 pre-cutoff 1H bars (bearish) + 25 future 1H bars (bullish spike) -> verdict MUST reflect bearish pre-cutoff!
+        let mut hourly_bear_pre = Vec::new();
+        for i in 0..22_i64 {
+            let p = 120_000.0 - (i as f64) * 500.0;
+            hourly_bear_pre.push(OhlcvBar::new(
+                cutoff_ms - (22 - i) * 3_600_000,
+                p,
+                p + 200.0,
+                p - 200.0,
+                p,
+                100_000.0,
+            ));
+        }
+        for i in 1..=25_i64 {
+            hourly_bear_pre.push(OhlcvBar::new(
+                cutoff_ms + i * 3_600_000,
+                180_000.0,
+                185_000.0,
+                179_000.0,
+                184_000.0,
+                300_000.0,
+            ));
+        }
+        let v2 = evaluate_kt01_gate(
+            "HOSE:FPT",
+            &daily,
+            Some(&hourly_bear_pre),
+            None,
+            None,
+            Some("2026-06-01"),
+        )
+        .unwrap();
+        assert_eq!(
+            v2.mtf_alignment.hourly_timing.as_deref(),
+            Some("1H đang điều chỉnh (< MA20H)"),
+            "1H timing must evaluate strictly on <= as_of bars and ignore future bullish spike!"
+        );
     }
 }

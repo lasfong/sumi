@@ -611,9 +611,10 @@ export const andrewsPitchfork: OverlayTemplate = {
     const upperRay = getRayLine([p1, { x: p1.x + dx, y: p1.y + dy }], bounding)
     const lowerRay = getRayLine([p2, { x: p2.x + dx, y: p2.y + dy }], bounding)
 
-    const medianEnd = Array.isArray(medianRay) && medianRay.length === 2 ? medianRay[1] : mid
-    const upperEnd = Array.isArray(upperRay) && upperRay.length === 2 ? upperRay[1] : p1
-    const lowerEnd = Array.isArray(lowerRay) && lowerRay.length === 2 ? lowerRay[1] : p2
+    // `getRayLine` returns `LineAttrs[]` of length 1: `[{ coordinates: [start, projectedEdge] }]` (`W6-08`)
+    const medianEnd = medianRay[0]?.coordinates?.[1] ?? mid
+    const upperEnd = upperRay[0]?.coordinates?.[1] ?? { x: p1.x + dx, y: p1.y + dy }
+    const lowerEnd = lowerRay[0]?.coordinates?.[1] ?? { x: p2.x + dx, y: p2.y + dy }
 
     return [
       {

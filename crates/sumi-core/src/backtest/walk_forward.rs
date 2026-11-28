@@ -10,8 +10,8 @@ use crate::scanner::{SessionDate, UniverseDefinition, UniverseMode, UniverseReso
 use super::engine::{
     BacktestRunOptions, PrecomputedFeatures, SimulationCarryState, compare_tearsheets_desc,
     is_bucket_incomplete_at_close_for_symbol, normalize_config_for_universe_feed,
-    run_backtest_with_options, run_pit_episodes_backtest, simulate_window_with_carry,
-    simulate_window_with_features, slice_causal_series_for_symbol_and_options,
+    run_backtest_with_options, run_pit_episodes_backtest,
+    simulate_window_with_carry_and_magnifier, slice_causal_series_for_symbol_and_options,
     venue_allows_short_for_symbol,
 };
 use super::metrics::{BacktestEquityPoint, BacktestTearsheet, BacktestTrade, compute_tearsheet};
@@ -143,6 +143,28 @@ pub fn run_walk_forward_validation(
     wf_config: WalkForwardConfig,
     options: BacktestRunOptions,
 ) -> WalkForwardReport {
+    run_walk_forward_validation_with_magnifier(
+        symbol,
+        timeframe,
+        candles,
+        base_config,
+        wf_config,
+        options,
+        None,
+    )
+}
+
+/// Runs Walk-Forward Optimization & stitched OOS validation with optional intrabar `Bar Magnifier`
+/// sub-bars (`W6-07`) so `use_bar_magnifier` stays consistent across Backtest, Monte Carlo, HTML, and WFO.
+pub fn run_walk_forward_validation_with_magnifier(
+    symbol: impl Into<String>,
+    timeframe: Timeframe,
+    candles: &[Candle],
+    base_config: &BacktestConfig,
+    wf_config: WalkForwardConfig,
+    options: BacktestRunOptions,
+    intrabar_candles: Option<&[Candle]>,
+) -> WalkForwardReport {
     let symbol = symbol.into();
     let mut clean_base = base_config.clone();
     clean_base.sanitize();
@@ -242,7 +264,7 @@ pub fn run_walk_forward_validation(
         let mut best_is_sheet: Option<BacktestTearsheet> = None;
 
         for (v_idx, (lbl, cfg, feats)) in grid_with_features.iter().enumerate() {
-            let sim = simulate_window_with_features(
+            let (sim, _) = simulate_window_with_carry_and_magnifier(
                 causal_candles,
                 is_start,
                 is_end,
@@ -250,7 +272,11 @@ pub fn run_walk_forward_validation(
                 cfg,
                 feats,
                 false,
+                None,
+                false,
+                false,
                 venue_allows_short_for_symbol(&symbol),
+                intrabar_candles,
             );
             let open_fee = sim.open_position.as_ref().map_or(0.0, |p| p.entry_fee);
             let sheet = compute_tearsheet(
@@ -330,7 +356,7 @@ pub fn run_walk_forward_validation(
             }
             compute_tearsheet(0.0, 0.0, timeframe, &[], &[], 0.0)
         } else {
-            let (oos_sim, next_carry) = simulate_window_with_carry(
+            let (oos_sim, next_carry) = simulate_window_with_carry_and_magnifier(
                 causal_candles,
                 oos_start,
                 oos_end,
@@ -342,6 +368,7 @@ pub fn run_walk_forward_validation(
                 !is_final_fold,
                 true,
                 venue_allows_short_for_symbol(&symbol),
+                intrabar_candles,
             );
             carry = next_carry;
 

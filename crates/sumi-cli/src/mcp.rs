@@ -158,13 +158,19 @@ pub fn mcp_tool_definitions() -> Value {
         },
         {
             "name": "sumi_mtf_screen",
-            "description": "Quét đa khung thời gian (1W + 1D) trên bộ 123 tín hiệu kỹ thuật QMV từ kho SQLite cục bộ.",
+            "description": "Quét đa khung thời gian (1W + 1D) trên bộ 123 tín hiệu kỹ thuật QMV kết hợp Hộp đen QMV thật (`qmv_real`) & định giá DN01 (`P/E`, `ROE`) theo mốc `as_of`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "scope": { "type": "string", "description": "ALL_VN | QMV60 | QMV30 | HOSE | HNX | UPCOM", "default": "QMV60" },
                     "signal_ids": { "type": "array", "items": { "type": "string" } },
                     "min_health_score": { "type": "number" },
+                    "as_of": { "type": "string", "description": "Ngày chốt Point-in-Time tùy chọn (YYYY-MM-DD)" },
+                    "weekly_regime": { "type": "string", "description": "uptrend | downtrend" },
+                    "only_money_in": { "type": "boolean", "default": false, "description": "Chỉ lọc mã có Dòng tiền Vào hôm nay trên Hộp đen QMV thật" },
+                    "min_tmc": { "type": "number", "description": "Ngưỡng tối thiểu TMC từ Hộp đen QMV thật" },
+                    "max_pe": { "type": "number", "description": "Trần P/E tối đa (DN01 / cache)" },
+                    "min_roe": { "type": "number", "description": "Sàn ROE % tối thiểu (DN01 / cache)" },
                     "limit": { "type": "integer", "default": 25 }
                 }
             }
@@ -244,6 +250,21 @@ fn dispatch_tool(
                 })
                 .unwrap_or_default();
             let min_health_score = args.get("min_health_score").and_then(Value::as_f64);
+            let as_of = args
+                .get("as_of")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            let weekly_regime = args
+                .get("weekly_regime")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            let only_money_in = args
+                .get("only_money_in")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let min_tmc = args.get("min_tmc").and_then(Value::as_f64);
+            let max_pe = args.get("max_pe").and_then(Value::as_f64);
+            let min_roe = args.get("min_roe").and_then(Value::as_f64);
             let limit = args
                 .get("limit")
                 .and_then(Value::as_u64)
@@ -253,6 +274,12 @@ fn dispatch_tool(
                     scope,
                     signal_ids,
                     min_health_score,
+                    as_of,
+                    weekly_regime,
+                    only_money_in,
+                    min_tmc,
+                    max_pe,
+                    min_roe,
                     limit,
                 },
                 market_db_override,

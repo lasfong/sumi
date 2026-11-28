@@ -634,7 +634,8 @@ export const KLineViewport: React.FC<KLineViewportProps> = ({
           if (rep?.active && rep.blindDrill?.enabled && !rep.blindDrill.revealed) {
             const list = chartRef.current?.getDataList() ?? []
             const idx = list.findIndex((b) => b.timestamp === timestamp)
-            return idx >= 0 ? `#${idx + 1}` : 'ẨN'
+            if (idx < 0) return 'ẨN'
+            return type === 'xAxis' ? `#${idx + 1}` : `Phiên #${idx + 1}`
           }
           const isDailyOrCoarser = ['1D', '1W', '1M'].includes(paneRef.current.interval)
           const parts = dateTimeFormat.formatToParts(new Date(timestamp))

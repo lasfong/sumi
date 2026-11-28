@@ -20,6 +20,7 @@ import {
 } from 'lucide-react'
 import * as api from '../api/tauri'
 import { drawingSyncBus } from '../chart/drawingSyncBus'
+import { setOsNotificationEnabled } from '../utils/alertSound'
 import { useWorkspaceStore } from '../store/workspaceStore'
 import type {
   AlertDeliveryConfig,
@@ -415,7 +416,13 @@ export const RightWidgetBar: React.FC = () => {
       void api.listAlertLogs(100).then(setAlertLogs).catch(() => {})
     }
     if (alertSubTab === 'delivery') {
-      void api.getAlertDeliveryConfig().then(setDeliveryCfg).catch(() => {})
+      void api
+        .getAlertDeliveryConfig()
+        .then((cfg) => {
+          setDeliveryCfg(cfg)
+          setOsNotificationEnabled(cfg.osNotificationEnabled)
+        })
+        .catch(() => {})
     }
   }, [rightTab, alertSubTab, signalCatalog.length])
 
@@ -1217,7 +1224,11 @@ export const RightWidgetBar: React.FC = () => {
                   onClick={() => {
                     void api
                       .saveAlertDeliveryConfig(deliveryCfg)
-                      .then(() => pushToast('success', 'Đã lưu cấu hình kênh báo riêng tư (0600)'))
+                      .then((saved) => {
+                        setDeliveryCfg(saved)
+                        setOsNotificationEnabled(saved.osNotificationEnabled)
+                        pushToast('success', 'Đã lưu cấu hình kênh báo riêng tư (0600)')
+                      })
                       .catch((err) => pushToast('error', String(err)))
                   }}
                 >

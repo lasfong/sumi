@@ -349,7 +349,7 @@ export const cvdIndicator: IndicatorTemplate<CvdPoint> = {
   name: 'CVD',
   shortName: 'CVD [Proxy]',
   series: 'normal',
-  calcParams: [],
+  calcParams: [1],
   precision: 0,
   figures: [
     {
@@ -364,9 +364,14 @@ export const cvdIndicator: IndicatorTemplate<CvdPoint> = {
     },
     { key: 'cvd', title: 'CVD: ', type: 'line', styles: () => ({ color: '#00BCD4', size: 1.7 }) },
   ],
-  calc: (dataList) => {
+  calc: (dataList, indicator) => {
+    // `calcParams[0]`: `1` = continuous cumulative CVD (default), `0` = daily ICT session reset, `> 1` = rolling N-bar window (`W6-08`)
+    const modeOrWindow = Math.max(0, Math.round(Number(indicator.calcParams[0] ?? 1)))
     let cum = 0
-    return dataList.map((b) => {
+    let prevDayBucket = -1
+    const deltas: number[] = []
+    let rollingSum = 0
+    return dataList.map((b, idx) => {
       const vol = Math.max(0, b.volume ?? 0)
       const rng = b.high - b.low
       const pressure =
@@ -378,6 +383,24 @@ export const cvdIndicator: IndicatorTemplate<CvdPoint> = {
               ? -1
               : 0
       const delta = vol * pressure
+      deltas.push(delta)
+
+      if (modeOrWindow === 0) {
+        const dayBucket = Math.floor((b.timestamp + 7 * 3_600_000) / 86_400_000)
+        if (dayBucket !== prevDayBucket) {
+          cum = 0
+          prevDayBucket = dayBucket
+        }
+        cum += delta
+        return { delta, cvd: cum }
+      }
+      if (modeOrWindow > 1) {
+        rollingSum += delta
+        if (idx >= modeOrWindow) {
+          rollingSum -= deltas[idx - modeOrWindow]
+        }
+        return { delta, cvd: rollingSum }
+      }
       cum += delta
       return { delta, cvd: cum }
     })
@@ -555,12 +578,13 @@ export const candlePatternsIndicator: IndicatorTemplate<CandlePatternPoint> = {
   name: 'CANDLE_PATTERNS',
   shortName: 'Mô Hình Nến (12)',
   series: 'price',
-  calcParams: [],
+  calcParams: [14],
   shouldOhlc: true,
   figures: [],
-  calc: (dataList) => {
+  calc: (dataList, indicator) => {
     const n = dataList.length
-    const atr = wilderAtr(dataList, 14)
+    const atrPeriod = Math.max(2, Math.min(100, Math.round(Number(indicator.calcParams[0] ?? 14))))
+    const atr = wilderAtr(dataList, atrPeriod)
     const out: CandlePatternPoint[] = new Array(n).fill(null).map(() => ({}))
 
     for (let i = 0; i < n; i++) {

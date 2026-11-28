@@ -18,6 +18,8 @@ export const TradePlannerModal: React.FC = () => {
   const panes = useWorkspaceStore((s) => s.panes)
   const activeSlotId = useWorkspaceStore((s) => s.activeSlotId)
   const broker = useWorkspaceStore((s) => s.broker)
+  const replay = useWorkspaceStore((s) => s.replay)
+  const yumekoAsOf = useWorkspaceStore((s) => s.yumekoAsOf)
   const setBrokerSnapshot = useWorkspaceStore((s) => s.setBrokerSnapshot)
   const pushToast = useWorkspaceStore((s) => s.pushToast)
 
@@ -79,6 +81,15 @@ export const TradePlannerModal: React.FC = () => {
       setPlan(null)
       return
     }
+    const effectiveEntryTimestampMs =
+      replay?.active && replay.cutoffTimestampMs
+        ? replay.blindDrill?.enabled && !replay.blindDrill.revealed
+          ? null
+          : replay.cutoffTimestampMs
+        : yumekoAsOf
+          ? Date.parse(`${yumekoAsOf}T07:00:00Z`)
+          : null
+
     let cancelled = false
     const timer = window.setTimeout(() => {
       void api
@@ -93,6 +104,10 @@ export const TradePlannerModal: React.FC = () => {
           stopLoss: sl,
           targetPrice: tp,
           referencePrice: broker?.vnBand?.reference ?? null,
+          entryTimestampMs:
+            effectiveEntryTimestampMs !== null && Number.isFinite(effectiveEntryTimestampMs)
+              ? effectiveEntryTimestampMs
+              : null,
         })
         .then((res) => {
           if (!cancelled) {
@@ -111,7 +126,24 @@ export const TradePlannerModal: React.FC = () => {
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [open, ticker, side, equity, availableCash, riskPct, maxPosPct, entryPrice, stopLoss, targetPrice, broker?.vnBand?.reference])
+  }, [
+    open,
+    ticker,
+    side,
+    equity,
+    availableCash,
+    riskPct,
+    maxPosPct,
+    entryPrice,
+    stopLoss,
+    targetPrice,
+    broker?.vnBand?.reference,
+    replay?.active,
+    replay?.cutoffTimestampMs,
+    replay?.blindDrill?.enabled,
+    replay?.blindDrill?.revealed,
+    yumekoAsOf,
+  ])
 
   const isVnd = ['HOSE', 'HNX', 'UPCOM', 'VN30F'].includes((plan?.venue ?? '').toUpperCase()) ||
     ticker.startsWith('HOSE:') || ticker.startsWith('HNX:') || ticker.startsWith('UPCOM:')

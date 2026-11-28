@@ -16,6 +16,7 @@ pub use contract::{
 pub use evidence::{
     ExportedVerdictListItem, ExportedVerdictReceipt, evaluate_kt01_gate,
     export_kt01_verdict_to_disk, list_exported_verdicts, render_kt01_markdown,
+    vn_as_of_end_of_day_ms,
 };
 pub use reader::{
     Dm01HoldingDto, Dm01WatchlistEntryDto, DnseLoadedSeries, EpisodicThesisDto,

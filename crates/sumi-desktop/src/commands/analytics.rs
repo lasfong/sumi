@@ -27,7 +27,7 @@ use sumi_core::trading::{
     DomLadderConfig, DomLadderSnapshot, OrderStatus, PositionSide, PracticeDecisionLog,
     SessionDebriefReport, compute_causal_dom_ladder,
 };
-use sumi_data::{Adjustment, BarQueryMode, Interval, SeriesKey, SymbolKey};
+use sumi_data::{Adjustment, BarQueryMode, Interval, OhlcvBar, SeriesKey, SymbolKey};
 use tauri::State;
 
 use crate::commands::broker::{ensure_broker_synced, infer_venue_for_ticker};
@@ -408,6 +408,167 @@ pub struct VolumeStructureResponse {
     pub pattern_hits: Vec<PatternHitDto>,
 }
 
+/// Pure computation helper for Volume Profile (`VRVP`/`FRVP`), Session TPO, Anchored VWAP,
+/// and 12 Japanese Candlestick Patterns — shared across live tickers, Blind Drill (`"MÃ ẨN #XXXX"`),
+/// and synthetic ratio/spread expressions (`W6-03` & `W6-05`).
+pub(crate) fn compute_volume_structure_from_bars(
+    norm_ticker: String,
+    iv: Interval,
+    bars: &[OhlcvBar],
+    row_count: usize,
+    start_timestamp_ms: Option<i64>,
+    end_timestamp_ms: Option<i64>,
+    anchor_timestamp_ms: Option<i64>,
+) -> VolumeStructureResponse {
+    let tf = iv.to_core_timeframe().unwrap_or(Timeframe::D1);
+    let iv_str = iv.as_str().to_owned();
+    let candles: Vec<Candle> = bars.iter().map(|b| b.to_core_candle(iv)).collect();
+    if candles.is_empty() {
+        return VolumeStructureResponse {
+            ticker: norm_ticker,
+            interval: iv_str,
+            volume_profile: None,
+            tpo_sessions: Vec::new(),
+            avwap: Vec::new(),
+            pattern_hits: Vec::new(),
+        };
+    }
+
+    let vp_slice: Vec<Candle> = candles
+        .iter()
+        .filter(|c| {
+            let ts_ms = c.timestamp * 1_000;
+            start_timestamp_ms.is_none_or(|s| ts_ms >= s)
+                && end_timestamp_ms.is_none_or(|e| ts_ms <= e)
+        })
+        .cloned()
+        .collect();
+    let vp_input = if vp_slice.is_empty() {
+        &candles[..]
+    } else {
+        &vp_slice[..]
+    };
+
+    let volume_profile = compute_volume_profile(
+        vp_input,
+        VolumeProfileConfig {
+            row_count,
+            value_area_pct: 0.70,
+        },
+    )
+    .map(|vp| VolumeProfileDto {
+        range_low: vp.range_low,
+        range_high: vp.range_high,
+        poc_price: vp.poc_price,
+        vah_price: vp.vah_price,
+        val_price: vp.val_price,
+        total_volume: vp.total_volume,
+        total_buy_volume: vp.total_buy_volume,
+        total_sell_volume: vp.total_sell_volume,
+        net_delta: vp.net_delta,
+        uses_tpo_fallback: vp.uses_tpo_fallback,
+        bins: vp
+            .bins
+            .into_iter()
+            .map(|b| VolumeProfileBinDto {
+                price_low: b.price_low,
+                price_high: b.price_high,
+                price_mid: b.price_mid,
+                buy_volume: b.buy_volume,
+                sell_volume: b.sell_volume,
+                total_volume: b.total_volume,
+                in_value_area: b.in_value_area,
+                is_poc: b.is_poc,
+                is_hvn: b.is_hvn,
+                is_lvn: b.is_lvn,
+            })
+            .collect(),
+    });
+
+    let tpo_cfg = MarketProfileConfig {
+        utc_offset_seconds: 7 * 3_600,
+        num_bins: 24,
+        max_sessions: 12,
+        ..MarketProfileConfig::default()
+    };
+    let tpo_out = compute_session_market_profiles(&candles, tf, tpo_cfg);
+    let tpo_sessions: Vec<TpoSessionDto> = tpo_out
+        .profiles
+        .into_iter()
+        .map(|p| TpoSessionDto {
+            start_timestamp_ms: candles[p.start_index.min(candles.len() - 1)].timestamp * 1_000,
+            end_timestamp_ms: candles[p.end_index.min(candles.len() - 1)].timestamp * 1_000,
+            poc_price: p.poc_price,
+            vah_price: p.vah_price,
+            val_price: p.val_price,
+            ib_high: p.ib_high,
+            ib_low: p.ib_low,
+            is_naked_poc: p.naked_poc_mitigated_index.is_none(),
+            naked_poc_end_timestamp_ms: candles[p.naked_poc_end_index.min(candles.len() - 1)]
+                .timestamp
+                * 1_000,
+        })
+        .collect();
+
+    let mut avwap = Vec::new();
+    if let Some(anchor_ms) = anchor_timestamp_ms {
+        let anchor_sec = anchor_ms / 1_000;
+        let anchor_idx = candles
+            .iter()
+            .position(|c| c.timestamp >= anchor_sec)
+            .unwrap_or(candles.len().saturating_sub(1));
+        let bands = compute_anchored_vwap(&candles, anchor_idx, 1.0, 2.0);
+        for (i, bar) in candles.iter().enumerate().skip(anchor_idx) {
+            if let Some(v) = bands.vwap[i] {
+                avwap.push(AvwapPointDto {
+                    timestamp_ms: bar.timestamp * 1_000,
+                    vwap: v,
+                    upper1: bands.upper_1[i].unwrap_or(v),
+                    lower1: bands.lower_1[i].unwrap_or(v),
+                    upper2: bands.upper_2[i].unwrap_or(v),
+                    lower2: bands.lower_2[i].unwrap_or(v),
+                });
+            }
+        }
+    }
+
+    let atr_14 = compute_atr(&candles, 14);
+    let (_geoms, pat_bars) = compute_candlestick_patterns_and_scores(&candles, &atr_14);
+    let start_p = candles.len().saturating_sub(120);
+    let mut pattern_hits = Vec::new();
+    for i in start_p..candles.len() {
+        let mask = pat_bars[i].active_mask;
+        if mask == 0 {
+            continue;
+        }
+        for kind in CandlestickPatternKind::ALL {
+            if (mask & kind.bit()) != 0 {
+                pattern_hits.push(PatternHitDto {
+                    timestamp_ms: candles[i].timestamp * 1_000,
+                    price: if kind.is_bullish() {
+                        candles[i].low
+                    } else {
+                        candles[i].high
+                    },
+                    badge: kind.short_badge().to_owned(),
+                    name: kind.short_snake_name().to_owned(),
+                    is_bullish: kind.is_bullish(),
+                    candle_score: pat_bars[i].candle_score,
+                });
+            }
+        }
+    }
+
+    VolumeStructureResponse {
+        ticker: norm_ticker,
+        interval: iv_str,
+        volume_profile,
+        tpo_sessions,
+        avwap,
+        pattern_hits,
+    }
+}
+
 /// Computes `sumi-core` Volume Profile (`VRVP`/`FRVP`), Session TPO Market Profile,
 /// Anchored VWAP (`±1σ/2σ`), and 12 Japanese Candlestick Patterns causally.
 #[tauri::command]
@@ -421,192 +582,101 @@ pub async fn compute_volume_structure(
     end_timestamp_ms: Option<i64>,
     anchor_timestamp_ms: Option<i64>,
 ) -> DesktopResult<VolumeStructureResponse> {
-    let sym = SymbolKey::parse(&ticker)?;
     let iv: Interval = interval.parse()?;
-    let tf = iv.to_core_timeframe().unwrap_or(Timeframe::D1);
     let row_count = rows.unwrap_or(32).clamp(8, 120);
 
-    // Causal Replay check
-    let replay_bars = {
-        let mut rg = state.replay.lock().await;
-        rg.as_mut().and_then(|rt| {
-            if rt.controller.is_active() && rt.ticker.eq_ignore_ascii_case(&sym.ticker()) {
-                Some(crate::commands::replay::materialize_replay_bars(
-                    rt,
-                    iv,
-                    &state.market_store,
-                ))
-            } else {
-                None
+    // 1. Check active Bar Replay (including unrevealed True Blind Drill `"MÃ ẨN #XXXX"`, `W6-03`) BEFORE `SymbolKey::parse`!
+    let blind_or_replay: Option<(String, Vec<OhlcvBar>)> = {
+        let rg = state.replay.lock().await;
+        rg.as_ref().and_then(|rt| {
+            if !rt.controller.is_active() {
+                return None;
             }
+            if let Some(ref bd) = rt.blind_drill
+                && bd.enabled
+                && !bd.revealed
+                && (bd.alias_code == ticker || rt.ticker.eq_ignore_ascii_case(&ticker))
+            {
+                let bars =
+                    crate::commands::replay::materialize_replay_bars(rt, iv, &state.market_store);
+                return Some((bd.alias_code.clone(), bars));
+            }
+            if rt.ticker.eq_ignore_ascii_case(ticker.trim()) {
+                let bars =
+                    crate::commands::replay::materialize_replay_bars(rt, iv, &state.market_store);
+                return Some((rt.ticker.clone(), bars));
+            }
+            None
         })
     };
 
+    if let Some((norm_ticker, bars)) = blind_or_replay {
+        return tokio::task::spawn_blocking(move || {
+            Ok(compute_volume_structure_from_bars(
+                norm_ticker,
+                iv,
+                &bars,
+                row_count,
+                start_timestamp_ms,
+                end_timestamp_ms,
+                anchor_timestamp_ms,
+            ))
+        })
+        .await
+        .map_err(|e| DesktopError::Internal(e.to_string()))?;
+    }
+
+    // 2. Support synthetic ratio/spread expressions (`HOSE:SSI / HOSE:VNINDEX`, `(HOSE:FPT + HOSE:MWG) / 2`, `W6-05`)
+    if sumi_data::is_synthetic_expression(&ticker) {
+        let parsed = sumi_data::parse_expression(&ticker)?;
+        let norm_ticker = parsed.canonical.clone();
+        let bars = crate::commands::market::load_expression_bars(
+            &state,
+            &parsed,
+            iv,
+            Adjustment::Splits,
+            600,
+            None,
+        )
+        .await?;
+        return tokio::task::spawn_blocking(move || {
+            Ok(compute_volume_structure_from_bars(
+                norm_ticker,
+                iv,
+                &bars,
+                row_count,
+                start_timestamp_ms,
+                end_timestamp_ms,
+                anchor_timestamp_ms,
+            ))
+        })
+        .await
+        .map_err(|e| DesktopError::Internal(e.to_string()))?;
+    }
+
+    // 3. Standard cached symbol path
+    let sym = SymbolKey::parse(&ticker)?;
     let store = state.market_store.clone();
     let norm_ticker = sym.ticker();
-    let iv_str = iv.as_str().to_owned();
 
     tokio::task::spawn_blocking(move || {
-        let bars = match replay_bars {
-            Some(b) => b,
-            None => store
-                .query_bars(
-                    &SeriesKey::new(&sym, iv, Adjustment::Splits),
-                    BarQueryMode::Init,
-                    600,
-                )
-                .map(|p| p.bars)
-                .unwrap_or_default(),
-        };
-        let candles: Vec<Candle> = bars.iter().map(|b| b.to_core_candle(iv)).collect();
-        if candles.is_empty() {
-            return Ok(VolumeStructureResponse {
-                ticker: norm_ticker,
-                interval: iv_str,
-                volume_profile: None,
-                tpo_sessions: Vec::new(),
-                avwap: Vec::new(),
-                pattern_hits: Vec::new(),
-            });
-        }
-
-        // Fixed or visible range slice for Volume Profile
-        let vp_slice: Vec<Candle> = candles
-            .iter()
-            .filter(|c| {
-                let ts_ms = c.timestamp * 1_000;
-                start_timestamp_ms.is_none_or(|s| ts_ms >= s)
-                    && end_timestamp_ms.is_none_or(|e| ts_ms <= e)
-            })
-            .cloned()
-            .collect();
-        let vp_input = if vp_slice.is_empty() {
-            &candles[..]
-        } else {
-            &vp_slice[..]
-        };
-
-        let volume_profile = compute_volume_profile(
-            vp_input,
-            VolumeProfileConfig {
-                row_count,
-                value_area_pct: 0.70,
-            },
-        )
-        .map(|vp| VolumeProfileDto {
-            range_low: vp.range_low,
-            range_high: vp.range_high,
-            poc_price: vp.poc_price,
-            vah_price: vp.vah_price,
-            val_price: vp.val_price,
-            total_volume: vp.total_volume,
-            total_buy_volume: vp.total_buy_volume,
-            total_sell_volume: vp.total_sell_volume,
-            net_delta: vp.net_delta,
-            uses_tpo_fallback: vp.uses_tpo_fallback,
-            bins: vp
-                .bins
-                .into_iter()
-                .map(|b| VolumeProfileBinDto {
-                    price_low: b.price_low,
-                    price_high: b.price_high,
-                    price_mid: b.price_mid,
-                    buy_volume: b.buy_volume,
-                    sell_volume: b.sell_volume,
-                    total_volume: b.total_volume,
-                    in_value_area: b.in_value_area,
-                    is_poc: b.is_poc,
-                    is_hvn: b.is_hvn,
-                    is_lvn: b.is_lvn,
-                })
-                .collect(),
-        });
-
-        // Session TPO Market Profile
-        let tpo_cfg = MarketProfileConfig {
-            utc_offset_seconds: 7 * 3_600,
-            num_bins: 24,
-            max_sessions: 12,
-            ..MarketProfileConfig::default()
-        };
-        let tpo_out = compute_session_market_profiles(&candles, tf, tpo_cfg);
-        let tpo_sessions: Vec<TpoSessionDto> = tpo_out
-            .profiles
-            .into_iter()
-            .map(|p| TpoSessionDto {
-                start_timestamp_ms: candles[p.start_index.min(candles.len() - 1)].timestamp * 1_000,
-                end_timestamp_ms: candles[p.end_index.min(candles.len() - 1)].timestamp * 1_000,
-                poc_price: p.poc_price,
-                vah_price: p.vah_price,
-                val_price: p.val_price,
-                ib_high: p.ib_high,
-                ib_low: p.ib_low,
-                is_naked_poc: p.naked_poc_mitigated_index.is_none(),
-                naked_poc_end_timestamp_ms: candles[p.naked_poc_end_index.min(candles.len() - 1)]
-                    .timestamp
-                    * 1_000,
-            })
-            .collect();
-
-        // Optional Anchored VWAP (±1σ / ±2σ)
-        let mut avwap = Vec::new();
-        if let Some(anchor_ms) = anchor_timestamp_ms {
-            let anchor_sec = anchor_ms / 1_000;
-            let anchor_idx = candles
-                .iter()
-                .position(|c| c.timestamp >= anchor_sec)
-                .unwrap_or(candles.len().saturating_sub(1));
-            let bands = compute_anchored_vwap(&candles, anchor_idx, 1.0, 2.0);
-            for (i, bar) in candles.iter().enumerate().skip(anchor_idx) {
-                if let Some(v) = bands.vwap[i] {
-                    avwap.push(AvwapPointDto {
-                        timestamp_ms: bar.timestamp * 1_000,
-                        vwap: v,
-                        upper1: bands.upper_1[i].unwrap_or(v),
-                        lower1: bands.lower_1[i].unwrap_or(v),
-                        upper2: bands.upper_2[i].unwrap_or(v),
-                        lower2: bands.lower_2[i].unwrap_or(v),
-                    });
-                }
-            }
-        }
-
-        // 12 Japanese Candlestick Patterns on recent 120 bars
-        let atr_14 = compute_atr(&candles, 14);
-        let (_geoms, pat_bars) = compute_candlestick_patterns_and_scores(&candles, &atr_14);
-        let start_p = candles.len().saturating_sub(120);
-        let mut pattern_hits = Vec::new();
-        for i in start_p..candles.len() {
-            let mask = pat_bars[i].active_mask;
-            if mask == 0 {
-                continue;
-            }
-            for kind in CandlestickPatternKind::ALL {
-                if (mask & kind.bit()) != 0 {
-                    pattern_hits.push(PatternHitDto {
-                        timestamp_ms: candles[i].timestamp * 1_000,
-                        price: if kind.is_bullish() {
-                            candles[i].low
-                        } else {
-                            candles[i].high
-                        },
-                        badge: kind.short_badge().to_owned(),
-                        name: kind.short_snake_name().to_owned(),
-                        is_bullish: kind.is_bullish(),
-                        candle_score: pat_bars[i].candle_score,
-                    });
-                }
-            }
-        }
-
-        Ok(VolumeStructureResponse {
-            ticker: norm_ticker,
-            interval: iv_str,
-            volume_profile,
-            tpo_sessions,
-            avwap,
-            pattern_hits,
-        })
+        let bars = store
+            .query_bars(
+                &SeriesKey::new(&sym, iv, Adjustment::Splits),
+                BarQueryMode::Init,
+                600,
+            )
+            .map(|p| p.bars)
+            .unwrap_or_default();
+        Ok(compute_volume_structure_from_bars(
+            norm_ticker,
+            iv,
+            &bars,
+            row_count,
+            start_timestamp_ms,
+            end_timestamp_ms,
+            anchor_timestamp_ms,
+        ))
     })
     .await
     .map_err(|e| DesktopError::Internal(e.to_string()))?
@@ -632,6 +702,9 @@ pub struct TradePlanRequestDto {
     pub commission_bps: Option<f64>,
     pub tax_sell_bps: Option<f64>,
     pub slippage_bps: Option<f64>,
+    /// Optional explicit entry timestamp (ms) for accurate historical T+2/T+3 settlement (`W6-04`).
+    #[serde(default)]
+    pub entry_timestamp_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -660,9 +733,9 @@ pub struct TradePlanResponseDto {
     pub warnings: Vec<String>,
 }
 
-#[tauri::command]
-pub async fn compute_trade_plan_cmd(
+pub(crate) fn compute_trade_plan_inner(
     input: TradePlanRequestDto,
+    replay_cutoff_secs: Option<i64>,
 ) -> DesktopResult<TradePlanResponseDto> {
     let venue = infer_venue_for_ticker(&input.ticker);
     let side = if input.side.trim().eq_ignore_ascii_case("short")
@@ -680,6 +753,12 @@ pub async fn compute_trade_plan_cmd(
     } else {
         VnPriceUnit::Auto
     };
+
+    let effective_entry_secs = input
+        .entry_timestamp_ms
+        .map(|ms| ms.div_euclid(1_000))
+        .or(replay_cutoff_secs)
+        .unwrap_or_else(|| chrono::Utc::now().timestamp());
 
     let core_in = TradePlanInput {
         venue,
@@ -704,7 +783,7 @@ pub async fn compute_trade_plan_cmd(
             .unwrap_or_else(|| venue.default_tax_sell_bps()),
         slippage_bps: input.slippage_bps.unwrap_or(2.0),
         snap_to_ticks: true,
-        entry_timestamp: Some(chrono::Utc::now().timestamp()),
+        entry_timestamp: Some(effective_entry_secs),
     };
 
     let plan =
@@ -736,6 +815,34 @@ pub async fn compute_trade_plan_cmd(
         affordable: plan.affordable,
         warnings: plan.warnings.into_iter().map(|w| w.description()).collect(),
     })
+}
+
+#[tauri::command]
+pub async fn compute_trade_plan_cmd(
+    state: State<'_, AppState>,
+    input: TradePlanRequestDto,
+) -> DesktopResult<TradePlanResponseDto> {
+    let replay_cutoff_secs = {
+        let rg = state.replay.lock().await;
+        rg.as_ref().and_then(|rt| {
+            if !rt.controller.is_active() {
+                return None;
+            }
+            let idx = rt
+                .controller
+                .base_cursor_index
+                .min(rt.base_bars.len().saturating_sub(1));
+            // Prefer real historical timestamp if available so T+2/T+3 matches actual calendar
+            let ts_ms = rt
+                .raw_base_bars
+                .as_ref()
+                .and_then(|raw| raw.get(idx))
+                .or_else(|| rt.base_bars.get(idx))
+                .map(|b| b.timestamp)?;
+            Some(ts_ms.div_euclid(1_000))
+        })
+    };
+    compute_trade_plan_inner(input, replay_cutoff_secs)
 }
 
 // ============================================================================
@@ -993,24 +1100,29 @@ pub async fn compute_replay_debrief_cmd(
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn trade_plan_computes_hose_board_lot_and_net_rr() {
-        let res = compute_trade_plan_cmd(TradePlanRequestDto {
-            ticker: "HOSE:FPT".to_owned(),
-            side: "LONG".to_owned(),
-            account_equity: 500_000_000.0,
-            available_cash: 500_000_000.0,
-            risk_pct: 1.0,
-            max_position_pct: Some(50.0),
-            entry_price: 130_000.0,
-            stop_loss: 124_000.0,
-            target_price: 145_000.0,
-            reference_price: Some(129_500.0),
-            commission_bps: None,
-            tax_sell_bps: None,
-            slippage_bps: Some(2.0),
-        })
-        .await
+    #[test]
+    fn trade_plan_computes_hose_board_lot_and_net_rr() {
+        // Use a historical Replay date (2024-03-15) to verify settlement_timestamp_ms tracks entry_timestamp_ms
+        let hist_ms = 1_710_460_800_000_i64; // 2024-03-15T00:00:00Z
+        let res = compute_trade_plan_inner(
+            TradePlanRequestDto {
+                ticker: "HOSE:FPT".to_owned(),
+                side: "LONG".to_owned(),
+                account_equity: 500_000_000.0,
+                available_cash: 500_000_000.0,
+                risk_pct: 1.0,
+                max_position_pct: Some(50.0),
+                entry_price: 130_000.0,
+                stop_loss: 124_000.0,
+                target_price: 145_000.0,
+                reference_price: Some(129_500.0),
+                commission_bps: None,
+                tax_sell_bps: None,
+                slippage_bps: Some(2.0),
+                entry_timestamp_ms: Some(hist_ms),
+            },
+            None,
+        )
         .unwrap();
 
         assert_eq!(res.venue, "HOSE");
@@ -1018,5 +1130,35 @@ mod tests {
         assert_eq!((res.planned_quantity as i64) % 100, 0);
         assert!(res.net_r_multiple > 1.8 && res.net_r_multiple < 2.6);
         assert!(res.planned_risk_amount <= 5_000_000.0 + 1.0);
+        if let Some(settle_ms) = res.settlement_timestamp_ms {
+            assert!(
+                settle_ms >= hist_ms && settle_ms <= hist_ms + 7 * 86_400_000,
+                "Settlement must align with historical entry date, got {settle_ms}"
+            );
+        }
+    }
+
+    #[test]
+    fn wave6_volume_structure_runs_on_blind_alias_and_synthetic_bars() {
+        let base_ms = 946_857_600_000_i64;
+        let bars: Vec<OhlcvBar> = (0..40_i64)
+            .map(|i| {
+                let p = 98.0 + (i as f64) * 0.15;
+                OhlcvBar::new(base_ms + i * 86_400_000, p - 0.5, p + 1.0, p - 1.0, p, 250_000.0)
+            })
+            .collect();
+        let res = compute_volume_structure_from_bars(
+            "MÃ ẨN #4242".to_owned(),
+            Interval::D1,
+            &bars,
+            24,
+            None,
+            None,
+            Some(bars[5].timestamp),
+        );
+        assert_eq!(res.ticker, "MÃ ẨN #4242");
+        let vp = res.volume_profile.expect("volume profile computed on Blind Drill alias");
+        assert!(vp.poc_price > 95.0 && vp.poc_price < 110.0);
+        assert!(!res.avwap.is_empty(), "AVWAP computed cleanly on Blind Drill alias");
     }
 }

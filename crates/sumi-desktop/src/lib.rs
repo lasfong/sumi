@@ -7,7 +7,7 @@ pub mod state;
 pub mod sync;
 pub mod workspace_db;
 
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 
 use crate::state::{AppState, resolve_database_paths};
 
@@ -28,26 +28,32 @@ pub fn run() {
 
     sumi_data::init_tracing("info");
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .setup(move |app| {
             let app_data_dir = app.path().app_data_dir().ok();
             let (market_db, workspace_db) = resolve_database_paths(app_data_dir);
             let app_state = AppState::initialize(market_db, workspace_db)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+            // Execute bidirectional Cloud Folder sync on launch when enabled (`W6-02`).
+            sync::maybe_run_auto_sync_on_launch(
+                &app_state.workspace,
+                &app_state.data_dir,
+                &app_state.config_dir,
+            );
+
+            // Queue CLI cold-start deep-link deterministically (drained via `take_pending_deeplink`, `W6-01`).
+            if let Some(ref raw_url) = initial_deeplink
+                && let Some(payload) = deeplink::parse_sumi_deeplink(raw_url)
+                && let Ok(mut pending) = app_state.pending_deeplink.lock()
+            {
+                *pending = Some(payload);
+            }
+
             let data_dir_for_ipc = app_state.data_dir.clone();
             app.manage(app_state);
 
             deeplink::start_single_instance_ipc_listener(app.handle().clone(), data_dir_for_ipc);
-
-            if let Some(ref raw_url) = initial_deeplink
-                && let Some(payload) = deeplink::parse_sumi_deeplink(raw_url)
-            {
-                let handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(900)).await;
-                    let _ = handle.emit(deeplink::DEEPLINK_EVENT_NAME, &payload);
-                });
-            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -115,6 +121,7 @@ pub fn run() {
             commands::workspace::delete_indicator_template,
             commands::workspace::open_detached_window,
             commands::workspace::broadcast_sync_event,
+            commands::workspace::take_pending_deeplink,
             // Causal Bar Replay (+ Save/Resume Sessions v2.2 + True Blind Drill Wave 5)
             commands::replay::replay_start,
             commands::replay::replay_start_random_blind_drill,
@@ -168,8 +175,21 @@ pub fn run() {
             commands::yumeko::yumeko_list_exported_verdicts,
             commands::yumeko::yumeko_verify_research_export,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Sumi Supercharts Tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building Sumi Supercharts Tauri application");
+
+    app.run(|app_handle, event| {
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        if let tauri::RunEvent::Opened { urls } = event {
+            for url in urls {
+                if let Some(payload) = deeplink::parse_sumi_deeplink(url.as_str()) {
+                    deeplink::dispatch_deeplink_payload(app_handle, payload);
+                }
+            }
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+        let _ = (app_handle, event);
+    });
 }
 
 #[cfg(test)]

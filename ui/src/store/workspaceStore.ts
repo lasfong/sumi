@@ -34,7 +34,7 @@ import type {
 import * as api from '../api/tauri'
 import { setFundamentalsCache } from '../chart/indicators/fundamentalIndicators'
 import { setQmvRealSeriesCache } from '../chart/indicators/qmvRealIndicators'
-import { notifyAlertTriggered } from '../utils/alertSound'
+import { notifyAlertTriggered, setOsNotificationEnabled } from '../utils/alertSound'
 import { snapPriceToVenueTick } from '../utils/vnMarket'
 
 const SETTINGS_SCHEMA_VERSION = 2
@@ -485,6 +485,7 @@ function schedulePersistSettings(state: WorkspaceState): void {
 
 let inFlightBrokerKey: string | null = null
 let inFlightBrokerPromise: Promise<void> | null = null
+let yumekoRequestSeq = 0
 
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   initialized: false,
@@ -691,6 +692,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         get().refreshYumekoStatus(),
         get().loadYumekoForActiveTicker(),
         get().refreshExportedVerdicts(),
+        api
+          .getAlertDeliveryConfig()
+          .then((cfg) => setOsNotificationEnabled(Boolean(cfg.osNotificationEnabled)))
+          .catch(() => {}),
       ])
     } catch (err) {
       set({ initialized: true })
@@ -1132,12 +1137,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     if (!activePane) return
     const ticker = activePane.ticker
     const asOf = state.yumekoAsOf
+    const reqSeq = ++yumekoRequestSeq
     set({ yumekoLoading: true })
     try {
       const [ctx, series] = await Promise.all([
         api.yumekoGetTopdownContext(ticker, asOf),
         api.yumekoGetQmvSeries(ticker, asOf),
       ])
+      if (reqSeq !== yumekoRequestSeq) return
       setQmvRealSeriesCache(ticker, series)
       set((s) => ({
         yumekoContext: ctx,
@@ -1146,7 +1153,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         yumekoLoading: false,
       }))
     } catch {
-      set({ yumekoLoading: false })
+      if (reqSeq === yumekoRequestSeq) {
+        set({ yumekoLoading: false })
+      }
     }
   },
 
@@ -1193,12 +1202,17 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   applyDeepLink: (payload) => {
     if (!payload?.ticker) return
     const curSlot = get().activeSlotId
+    const prevPane = get().panes.find((p) => p.slotId === curSlot)
+    const tickerUnchanged = prevPane?.ticker.toUpperCase() === payload.ticker.trim().toUpperCase()
+    // Set `yumekoAsOf` BEFORE `setActiveTicker` / `setActiveInterval` to eliminate PIT race condition (`W6-04`)
+    if (payload.asOf !== undefined) {
+      set({ yumekoAsOf: payload.asOf ?? null })
+    }
     get().setActiveTicker(payload.ticker, curSlot)
     if (payload.interval) {
       get().setActiveInterval(payload.interval, curSlot)
     }
-    if (payload.asOf !== undefined) {
-      set({ yumekoAsOf: payload.asOf })
+    if (tickerUnchanged && payload.asOf !== undefined) {
       void get().loadYumekoForActiveTicker()
     }
     if (payload.tab === 'yumeko' || payload.tab === 'kt01') {
@@ -1254,7 +1268,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         ...state.watchlists.flatMap((w) => w.tickers),
         ...state.panes.map((p) => p.ticker),
       ]),
-    )
+    ).filter((t) => Boolean(t) && !t.trim().startsWith('###'))
     if (allTickers.length === 0) return
     try {
       const snaps = await api.getWatchlistSnapshots(allTickers)
@@ -1574,6 +1588,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         get().refreshYumekoStatus(),
         get().loadYumekoForActiveTicker(),
         get().refreshExportedVerdicts(),
+        api
+          .getAlertDeliveryConfig()
+          .then((cfg) => setOsNotificationEnabled(Boolean(cfg.osNotificationEnabled)))
+          .catch(() => {}),
       ])
       get().pushToast(
         'success',
@@ -1644,6 +1662,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         get().refreshYumekoStatus(),
         get().loadYumekoForActiveTicker(),
         get().refreshExportedVerdicts(),
+        api
+          .getAlertDeliveryConfig()
+          .then((cfg) => setOsNotificationEnabled(Boolean(cfg.osNotificationEnabled)))
+          .catch(() => {}),
       ])
       const stale = status.freshness?.stale_series ?? 0
       get().pushToast(
@@ -1736,13 +1758,20 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const snap = await api.replayRevealBlindDrill()
       const bd = snap.blindDrill
       const slot = get().activeSlotId
+      const isVn = Boolean(
+        bd?.realTicker &&
+          (bd.realTicker.startsWith('HOSE:') ||
+            bd.realTicker.startsWith('HNX:') ||
+            bd.realTicker.startsWith('UPCOM:')),
+      )
       set((s) => ({
         replay: snap,
         replayPlaying: false,
         replayBlindMode: false,
         debriefModalOpen: true,
+        broker: snap.broker ?? s.broker,
         panes: bd?.realTicker
-          ? s.panes.map((p) => (p.slotId === slot ? { ...p, ticker: bd.realTicker } : p))
+          ? s.panes.map((p) => (p.slotId === slot ? { ...p, ticker: bd.realTicker, showVnBands: isVn } : p))
           : s.panes,
         replayResetNonce: s.replayResetNonce + 1,
       }))

@@ -344,7 +344,7 @@ export const ReplayControlBar: React.FC = () => {
           </>
         )}
 
-        {renderSavedSessionsPopover(true)}
+        {renderSavedSessionsPopover(!isBlindDrillUnrevealed)}
 
         <div className="tv-divider-v" />
         <button

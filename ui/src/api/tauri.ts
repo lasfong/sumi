@@ -12,6 +12,7 @@ import type {
   CompareSeriesResponse,
   CorporateEventMarker,
   DataStatusResponse,
+  DeepLinkPayload,
   DomLadderSnapshot,
   DoraemiTransportStatusDto,
   ExportBacktestHtmlResponse,
@@ -305,13 +306,21 @@ export async function syncImportBundle(bundlePath: string): Promise<WorkspaceMer
   return invoke<WorkspaceMergeReport>('sync_import_bundle', { bundlePath })
 }
 
-export async function syncConfigureFolder(folderPath: string | null): Promise<SyncStatusDto> {
+export async function syncConfigureFolder(
+  folderPath: string | null,
+  autoSyncOnLaunch?: boolean | null,
+): Promise<SyncStatusDto> {
   if (!isTauriRuntime()) return webFallbackApi.syncGetStatus()
   return invoke<SyncStatusDto>('sync_configure_folder', {
     folderPath: folderPath ?? '',
     deviceId: null,
-    autoSyncOnLaunch: null,
+    autoSyncOnLaunch: autoSyncOnLaunch ?? null,
   })
+}
+
+export async function takePendingDeepLink(): Promise<DeepLinkPayload | null> {
+  if (!isTauriRuntime()) return null
+  return invoke<DeepLinkPayload | null>('take_pending_deeplink')
 }
 
 export async function syncFolderNow(folderPath?: string | null): Promise<BidirectionalFolderSyncResult> {
