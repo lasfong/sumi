@@ -693,12 +693,21 @@ fn merge_bundle_into_conn(
                     params![key, del_ts],
                 )
                 .unwrap_or(0),
-            "watchlist" => tx
-                .execute(
-                    "DELETE FROM watchlists WHERE id = ?1 AND updated_at_ms <= ?2",
-                    params![key, del_ts],
-                )
-                .unwrap_or(0),
+            "watchlist" => {
+                let n = tx
+                    .execute(
+                        "DELETE FROM watchlists WHERE id = ?1 AND updated_at_ms <= ?2",
+                        params![key, del_ts],
+                    )
+                    .unwrap_or(0);
+                if n > 0 {
+                    let _ = tx.execute(
+                        "DELETE FROM watchlist_items WHERE watchlist_id = ?1",
+                        params![key],
+                    );
+                }
+                n
+            }
             "alert" => tx
                 .execute(
                     "DELETE FROM price_alerts WHERE id = ?1 AND COALESCE(triggered_at_ms, created_at_ms) <= ?2",

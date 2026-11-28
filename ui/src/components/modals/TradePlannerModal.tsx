@@ -51,9 +51,10 @@ export const TradePlannerModal: React.FC = () => {
       setEquity(String(Math.round(baseEq)))
       setAvailableCash(String(Math.round(baseCash)))
       const ent = draft?.entryPrice ?? mark
+      const fmtDefaultLevel = (v: number) => (ent < 1_000 ? Number(v.toFixed(2)) : Math.round(v))
       setEntryPrice(String(ent))
-      setStopLoss(String(draft?.stopLoss ?? Math.round(ent * (draft?.side === 'SHORT' ? 1.05 : 0.94))))
-      setTargetPrice(String(draft?.targetPrice ?? Math.round(ent * (draft?.side === 'SHORT' ? 0.90 : 1.15))))
+      setStopLoss(String(draft?.stopLoss ?? fmtDefaultLevel(ent * (draft?.side === 'SHORT' ? 1.05 : 0.94))))
+      setTargetPrice(String(draft?.targetPrice ?? fmtDefaultLevel(ent * (draft?.side === 'SHORT' ? 0.90 : 1.15))))
     } else if (dlg.open) {
       dlg.close()
     }

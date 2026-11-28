@@ -621,7 +621,8 @@ impl WorkspaceStore {
             .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
         record.ticker = record.ticker.trim().to_ascii_uppercase();
         if record.updated_at_ms <= 0 {
-            record.updated_at_ms = chrono::Utc::now().timestamp_millis();
+            let tomb_key = format!("{}::{}", record.ticker, record.id);
+            record.updated_at_ms = Self::next_causal_ts_locked(&conn, "drawing", &tomb_key);
         }
         let points_json = serde_json::to_string(&record.points)?;
         let styles_json = record
@@ -807,7 +808,7 @@ impl WorkspaceStore {
             .conn
             .lock()
             .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
-        let now_ms = chrono::Utc::now().timestamp_millis();
+        let now_ms = Self::next_causal_ts_locked(&conn, "layout", id);
         let raw = serde_json::to_string(layout_json)?;
         conn.execute(
             r#"
@@ -886,7 +887,7 @@ impl WorkspaceStore {
             .conn
             .lock()
             .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
-        let now_ms = chrono::Utc::now().timestamp_millis();
+        let now_ms = Self::next_causal_ts_locked(&conn, "watchlist", id);
         let next_order: i32 = conn.query_row(
             "SELECT COALESCE(MAX(sort_order) + 1, 0) FROM watchlists",
             [],
@@ -1047,10 +1048,17 @@ impl WorkspaceStore {
                 "Mã chứng khoán và màu cờ đánh dấu không được để trống".to_owned(),
             ));
         }
+        let updated_at_ms = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+            Self::next_causal_ts_locked(&conn, "symbol_flag", &norm_ticker)
+        };
         let rec = SymbolFlagRecord {
             ticker: norm_ticker,
             color: norm_color,
-            updated_at_ms: chrono::Utc::now().timestamp_millis(),
+            updated_at_ms,
         };
         self.set_symbol_flag_with_ts(&rec)?;
         Ok(rec)
@@ -1096,6 +1104,86 @@ impl WorkspaceStore {
             params![&norm_ticker, now_ms],
         )?;
         Ok(())
+    }
+
+    fn next_causal_ts_locked(conn: &Connection, entity_kind: &str, entity_key: &str) -> i64 {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let tomb_ms: Option<i64> = conn
+            .query_row(
+                "SELECT deleted_at_ms FROM sync_tombstones WHERE entity_kind = ?1 AND entity_key = ?2",
+                params![entity_kind, entity_key],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        match tomb_ms {
+            Some(del_ms) if now_ms <= del_ms => del_ms + 1,
+            _ => now_ms,
+        }
+    }
+
+    /// Deletes a stale local entity when `updated_at_ms <= deleted_at_ms` during bidirectional sync
+    /// WITHOUT re-stamping `sync_tombstones.deleted_at_ms = now_ms` (`M-02`), so `Delete -> Recreate`
+    /// sequences on the same key never get clobbered on subsequent peer syncs.
+    pub fn apply_sync_tombstone_delete(
+        &self,
+        entity_kind: &str,
+        entity_key: &str,
+        deleted_at_ms: i64,
+    ) -> DesktopResult<usize> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+        let deleted = match entity_kind {
+            "drawing" => match entity_key.split_once("::") {
+                Some((ticker, id)) => conn.execute(
+                    "DELETE FROM drawings WHERE ticker = ?1 AND id = ?2 AND updated_at_ms <= ?3",
+                    params![ticker.trim().to_ascii_uppercase(), id, deleted_at_ms],
+                )?,
+                None => 0,
+            },
+            "layout" => conn.execute(
+                "DELETE FROM chart_layouts WHERE id = ?1 AND updated_at_ms <= ?2",
+                params![entity_key, deleted_at_ms],
+            )?,
+            "watchlist" => {
+                let n = conn.execute(
+                    "DELETE FROM watchlists WHERE id = ?1 AND updated_at_ms <= ?2",
+                    params![entity_key, deleted_at_ms],
+                )?;
+                if n > 0 {
+                    let _ = conn.execute(
+                        "DELETE FROM watchlist_items WHERE watchlist_id = ?1",
+                        params![entity_key],
+                    );
+                }
+                n
+            }
+            "alert" => conn.execute(
+                "DELETE FROM price_alerts WHERE id = ?1 AND COALESCE(triggered_at_ms, created_at_ms) <= ?2",
+                params![entity_key, deleted_at_ms],
+            )?,
+            "indicator_template" => conn.execute(
+                "DELETE FROM indicator_templates WHERE id = ?1 AND updated_at_ms <= ?2",
+                params![entity_key, deleted_at_ms],
+            )?,
+            "replay_session" => conn.execute(
+                "DELETE FROM replay_sessions WHERE id = ?1 AND updated_at_ms <= ?2",
+                params![entity_key, deleted_at_ms],
+            )?,
+            "saved_screen" => conn.execute(
+                "DELETE FROM saved_screens WHERE id = ?1 AND updated_at_ms <= ?2",
+                params![entity_key, deleted_at_ms],
+            )?,
+            "symbol_flag" => conn.execute(
+                "DELETE FROM symbol_flags WHERE ticker = ?1 AND updated_at_ms <= ?2",
+                params![entity_key.trim().to_ascii_uppercase(), deleted_at_ms],
+            )?,
+            _ => 0,
+        };
+        Ok(deleted)
     }
 
     // ─── Price / Drawing / Indicator Alerts ──────────────────────────────────
@@ -1772,7 +1860,7 @@ impl WorkspaceStore {
             .conn
             .lock()
             .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
-        let now_ms = chrono::Utc::now().timestamp_millis();
+        let now_ms = Self::next_causal_ts_locked(&conn, "indicator_template", &tpl.id);
         let json_str = serde_json::to_string(&tpl.indicators)?;
         conn.execute(
             r#"
@@ -1899,7 +1987,7 @@ impl WorkspaceStore {
             .conn
             .lock()
             .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
-        let now_ms = chrono::Utc::now().timestamp_millis();
+        let now_ms = Self::next_causal_ts_locked(&conn, "replay_session", &session.id);
         let ivs_json = serde_json::to_string(&session.tracked_intervals)?;
         let broker_str = session
             .broker_snapshot_json
@@ -2383,9 +2471,16 @@ impl WorkspaceStore {
         name: &str,
         filter_json: &Value,
     ) -> DesktopResult<SavedScreenRecord> {
-        let now_ms = chrono::Utc::now().timestamp_millis();
+        let clean_id = id.trim().to_owned();
+        let now_ms = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| DesktopError::Internal("workspace sqlite mutex poisoned".to_owned()))?;
+            Self::next_causal_ts_locked(&conn, "saved_screen", &clean_id)
+        };
         let rec = SavedScreenRecord {
-            id: id.trim().to_owned(),
+            id: clean_id,
             name: name.trim().to_owned(),
             filter_json: filter_json.clone(),
             updated_at_ms: now_ms,

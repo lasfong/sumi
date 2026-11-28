@@ -320,81 +320,23 @@ pub fn merge_bundle_into_store(
             .is_some_and(|&del_ts| del_ts >= record_ts)
     };
 
-    // Apply incoming tombstones to delete stale local records cleanly
+    // Apply incoming tombstones to delete stale local records cleanly WITHOUT re-stamping
+    // `sync_tombstones.deleted_at_ms = now_ms` (`M-02`), so `Delete -> Recreate` sequences
+    // on the same key preserve their original tombstone timestamp and never clobber newer recreations.
     for ((kind, key), del_ts) in &tomb_map {
-        match kind.as_str() {
-            "drawing" => {
-                if let Some((ticker, id)) = key.split_once("::") {
-                    let local = workspace.list_drawings(ticker)?;
-                    if local.iter().any(|d| d.id == id && d.updated_at_ms <= *del_ts) {
-                        workspace.delete_drawing(ticker, id)?;
-                        report.applied_tombstones += 1;
-                    }
-                }
+        if kind == "watchlist" {
+            let recreated_newer_in_bundle = bundle
+                .payload
+                .watchlists
+                .iter()
+                .any(|w| w.id == *key && w.updated_at_ms > *del_ts);
+            if recreated_newer_in_bundle {
+                continue;
             }
-            "layout" => {
-                let local = workspace.list_layouts()?;
-                if local.iter().any(|l| l.id == *key && l.updated_at_ms <= *del_ts) {
-                    workspace.delete_layout(key)?;
-                    report.applied_tombstones += 1;
-                }
-            }
-            "watchlist" => {
-                let local = workspace.list_watchlists()?;
-                let recreated_newer_in_bundle = bundle
-                    .payload
-                    .watchlists
-                    .iter()
-                    .any(|w| w.id == *key && w.updated_at_ms > *del_ts);
-                if !recreated_newer_in_bundle
-                    && local
-                        .iter()
-                        .any(|w| w.id == *key && w.updated_at_ms <= *del_ts)
-                {
-                    workspace.delete_watchlist(key)?;
-                    report.applied_tombstones += 1;
-                }
-            }
-            "alert" => {
-                let local = workspace.list_alerts()?;
-                if local.iter().any(|a| a.id == *key && a.created_at_ms <= *del_ts) {
-                    workspace.delete_alert(key)?;
-                    report.applied_tombstones += 1;
-                }
-            }
-            "indicator_template" => {
-                let local = workspace.list_indicator_templates()?;
-                if local.iter().any(|t| t.id == *key && t.updated_at_ms <= *del_ts) {
-                    workspace.delete_indicator_template(key)?;
-                    report.applied_tombstones += 1;
-                }
-            }
-            "replay_session" => {
-                if let Some(local) = workspace.get_replay_session(key)?
-                    && local.updated_at_ms <= *del_ts
-                {
-                    workspace.delete_replay_session(key)?;
-                    report.applied_tombstones += 1;
-                }
-            }
-            "saved_screen" => {
-                let local = workspace.list_saved_screens()?;
-                if local.iter().any(|s| s.id == *key && s.updated_at_ms <= *del_ts) {
-                    workspace.delete_screen(key)?;
-                    report.applied_tombstones += 1;
-                }
-            }
-            "symbol_flag" => {
-                let local = workspace.list_symbol_flags()?;
-                if local
-                    .iter()
-                    .any(|f| f.ticker == *key && f.updated_at_ms <= *del_ts)
-                {
-                    workspace.clear_symbol_flag(key)?;
-                    report.applied_tombstones += 1;
-                }
-            }
-            _ => {}
+        }
+        let deleted = workspace.apply_sync_tombstone_delete(kind, key, *del_ts)?;
+        if deleted > 0 {
+            report.applied_tombstones += deleted;
         }
     }
 
@@ -519,6 +461,10 @@ pub fn merge_bundle_into_store(
         }
         workspace.set_symbol_flag_with_ts(fl)?;
         report.merged_symbol_flags += 1;
+    }
+
+    if workspace.list_watchlists()?.is_empty() {
+        let _ = workspace.create_watchlist("wl_default", "Danh mục mặc định");
     }
 
     Ok(report)
@@ -1227,5 +1173,117 @@ mod tests {
                 .iter()
                 .any(|kv| kv.key == "oauth_session_cookie")
         );
+    }
+
+    #[test]
+    fn wave6_1_delete_then_recreate_same_key_never_restamps_tombstone_on_peer_sync() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sync_dir = tmp.path().join("cloud_sync");
+        let mac_dir = tmp.path().join("mac_data");
+        let mac_cfg = tmp.path().join("mac_cfg");
+        let win_dir = tmp.path().join("win_data");
+        let win_cfg = tmp.path().join("win_cfg");
+        fs::create_dir_all(&mac_dir).unwrap();
+        fs::create_dir_all(&mac_cfg).unwrap();
+        fs::create_dir_all(&win_dir).unwrap();
+        fs::create_dir_all(&win_cfg).unwrap();
+
+        let mac_ws = WorkspaceStore::open(mac_dir.join("sumi_workspace.db")).unwrap();
+        let win_ws = WorkspaceStore::open(win_dir.join("sumi_workspace.db")).unwrap();
+
+        // T1: Machine A creates a symbol flag + drawing on HOSE:FPT and syncs with Machine B
+        mac_ws.set_symbol_flag("HOSE:FPT", "red").unwrap();
+        mac_ws
+            .upsert_drawing(SavedDrawingRecord {
+                id: "drw_recreate".to_owned(),
+                ticker: "HOSE:FPT".to_owned(),
+                name: "horizontalRayLine".to_owned(),
+                pane_id: "candle_pane".to_owned(),
+                group_id: "user_drawings".to_owned(),
+                points: json!([{"timestamp": 1700000000000_i64, "value": 120.0}]),
+                styles: None,
+                extend_data: None,
+                lock: false,
+                visible: true,
+                mode: "normal".to_owned(),
+                updated_at_ms: 0,
+            })
+            .unwrap();
+
+        sync_bidirectional_folder(&mac_ws, &mac_dir, &mac_cfg, &sync_dir).unwrap();
+        sync_bidirectional_folder(&win_ws, &win_dir, &win_cfg, &sync_dir).unwrap();
+
+        assert_eq!(
+            win_ws
+                .list_symbol_flags()
+                .unwrap()
+                .iter()
+                .find(|f| f.ticker == "HOSE:FPT")
+                .map(|f| f.color.as_str()),
+                Some("red")
+        );
+        assert_eq!(win_ws.list_drawings("HOSE:FPT").unwrap().len(), 1);
+
+        // T2 -> T3: Machine A deletes BOTH keys and immediately recreates the exact same keys
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        mac_ws.clear_symbol_flag("HOSE:FPT").unwrap();
+        mac_ws.delete_drawing("HOSE:FPT", "drw_recreate").unwrap();
+
+        // Recreate immediately (even within the same millisecond!)
+        mac_ws.set_symbol_flag("HOSE:FPT", "emerald").unwrap();
+        mac_ws
+            .upsert_drawing(SavedDrawingRecord {
+                id: "drw_recreate".to_owned(),
+                ticker: "HOSE:FPT".to_owned(),
+                name: "horizontalRayLine".to_owned(),
+                pane_id: "candle_pane".to_owned(),
+                group_id: "user_drawings".to_owned(),
+                points: json!([{"timestamp": 1700000000000_i64, "value": 135.5}]),
+                styles: None,
+                extend_data: None,
+                lock: false,
+                visible: true,
+                mode: "normal".to_owned(),
+                updated_at_ms: 0,
+            })
+            .unwrap();
+
+        sync_bidirectional_folder(&mac_ws, &mac_dir, &mac_cfg, &sync_dir).unwrap();
+
+        // T4 > T3: Machine B syncs later — must NOT bump tombstone to T4 and clobber T3!
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        sync_bidirectional_folder(&win_ws, &win_dir, &win_cfg, &sync_dir).unwrap();
+
+        assert_eq!(
+            win_ws
+                .list_symbol_flags()
+                .unwrap()
+                .iter()
+                .find(|f| f.ticker == "HOSE:FPT")
+                .map(|f| f.color.as_str()),
+            Some("emerald"),
+            "Machine B must adopt recreated emerald flag instead of self-tombstoning it"
+        );
+        let win_drws = win_ws.list_drawings("HOSE:FPT").unwrap();
+        assert_eq!(win_drws.len(), 1);
+        assert_eq!(win_drws[0].points[0]["value"], json!(135.5));
+
+        // T5 > T4: Machine A syncs back with Machine B's re-exported bundle — recreated items MUST survive!
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        sync_bidirectional_folder(&mac_ws, &mac_dir, &mac_cfg, &sync_dir).unwrap();
+
+        assert_eq!(
+            mac_ws
+                .list_symbol_flags()
+                .unwrap()
+                .iter()
+                .find(|f| f.ticker == "HOSE:FPT")
+                .map(|f| f.color.as_str()),
+            Some("emerald"),
+            "Machine A recreated flag must NOT be wiped out by re-stamped peer tombstone"
+        );
+        let mac_drws = mac_ws.list_drawings("HOSE:FPT").unwrap();
+        assert_eq!(mac_drws.len(), 1);
+        assert_eq!(mac_drws[0].points[0]["value"], json!(135.5));
     }
 }

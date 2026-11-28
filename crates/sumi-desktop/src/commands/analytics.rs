@@ -736,8 +736,16 @@ pub struct TradePlanResponseDto {
 pub(crate) fn compute_trade_plan_inner(
     input: TradePlanRequestDto,
     replay_cutoff_secs: Option<i64>,
+    is_blind_drill_masked: bool,
 ) -> DesktopResult<TradePlanResponseDto> {
-    let venue = infer_venue_for_ticker(&input.ticker);
+    let trimmed_ticker = input.ticker.trim();
+    let is_masked_blind = is_blind_drill_masked || trimmed_ticker.starts_with("MÃ ẨN");
+    let venue = if is_masked_blind {
+        // Match `reset_replay_broker_for_blind_drill` (`0.01` decimal tick, `1` share lot on 100.00-normalized scale)
+        sumi_core::journal::ExchangeVenue::UsEquities
+    } else {
+        infer_venue_for_ticker(trimmed_ticker)
+    };
     let side = if input.side.trim().eq_ignore_ascii_case("short")
         || input.side.trim().eq_ignore_ascii_case("sell")
     {
@@ -746,7 +754,9 @@ pub(crate) fn compute_trade_plan_inner(
         PositionSide::Long
     };
     let is_vn30f = venue == sumi_core::journal::ExchangeVenue::Vn30Futures;
-    let price_unit = if is_vn30f {
+    let price_unit = if is_masked_blind {
+        VnPriceUnit::Auto
+    } else if is_vn30f {
         VnPriceUnit::ThousandVnd
     } else if venue.is_vn_cash_equity() {
         VnPriceUnit::RawVnd
@@ -754,11 +764,29 @@ pub(crate) fn compute_trade_plan_inner(
         VnPriceUnit::Auto
     };
 
-    let effective_entry_secs = input
-        .entry_timestamp_ms
-        .map(|ms| ms.div_euclid(1_000))
-        .or(replay_cutoff_secs)
-        .unwrap_or_else(|| chrono::Utc::now().timestamp());
+    // Never leak real historical dates via `settlement_timestamp_ms` while Blind Drill is unrevealed (`M-01`)!
+    let effective_entry_secs = if is_masked_blind {
+        None
+    } else {
+        Some(
+            input
+                .entry_timestamp_ms
+                .map(|ms| ms.div_euclid(1_000))
+                .or(replay_cutoff_secs)
+                .unwrap_or_else(|| chrono::Utc::now().timestamp()),
+        )
+    };
+
+    let default_comm_bps = if is_masked_blind {
+        15.0
+    } else {
+        venue.default_commission_bps()
+    };
+    let default_tax_bps = if is_masked_blind {
+        10.0
+    } else {
+        venue.default_tax_sell_bps()
+    };
 
     let core_in = TradePlanInput {
         venue,
@@ -774,24 +802,32 @@ pub(crate) fn compute_trade_plan_inner(
         entry_price: input.entry_price,
         stop_loss: input.stop_loss,
         target_price: input.target_price,
-        reference_price: input.reference_price,
-        commission_bps: input
-            .commission_bps
-            .unwrap_or_else(|| venue.default_commission_bps()),
-        tax_sell_bps: input
-            .tax_sell_bps
-            .unwrap_or_else(|| venue.default_tax_sell_bps()),
+        reference_price: if is_masked_blind {
+            None
+        } else {
+            input.reference_price
+        },
+        commission_bps: input.commission_bps.unwrap_or(default_comm_bps),
+        tax_sell_bps: input.tax_sell_bps.unwrap_or(default_tax_bps),
         slippage_bps: input.slippage_bps.unwrap_or(2.0),
         snap_to_ticks: true,
-        entry_timestamp: Some(effective_entry_secs),
+        entry_timestamp: effective_entry_secs,
     };
 
     let plan =
         compute_trade_plan(&core_in).map_err(|e| DesktopError::Validation(e.message().to_owned()))?;
 
     Ok(TradePlanResponseDto {
-        ticker: input.ticker.to_ascii_uppercase(),
-        venue: venue.short_label().to_owned(),
+        ticker: if is_masked_blind {
+            trimmed_ticker.to_owned()
+        } else {
+            trimmed_ticker.to_ascii_uppercase()
+        },
+        venue: if is_masked_blind {
+            "BLIND".to_owned()
+        } else {
+            venue.short_label().to_owned()
+        },
         side: match plan.side {
             PositionSide::Long => "LONG".to_owned(),
             PositionSide::Short => "SHORT".to_owned(),
@@ -811,7 +847,11 @@ pub(crate) fn compute_trade_plan_inner(
         gross_r_multiple: plan.gross_r_multiple,
         net_r_multiple: plan.net_r_multiple,
         required_win_rate_pct: plan.required_win_rate_pct,
-        settlement_timestamp_ms: plan.settlement_timestamp.map(|s| s * 1_000),
+        settlement_timestamp_ms: if is_masked_blind {
+            None
+        } else {
+            plan.settlement_timestamp.map(|s| s * 1_000)
+        },
         affordable: plan.affordable,
         warnings: plan.warnings.into_iter().map(|w| w.description()).collect(),
     })
@@ -822,27 +862,37 @@ pub async fn compute_trade_plan_cmd(
     state: State<'_, AppState>,
     input: TradePlanRequestDto,
 ) -> DesktopResult<TradePlanResponseDto> {
-    let replay_cutoff_secs = {
+    let req_ticker = input.ticker.trim().to_owned();
+    let (replay_cutoff_secs, is_blind_masked) = {
         let rg = state.replay.lock().await;
-        rg.as_ref().and_then(|rt| {
-            if !rt.controller.is_active() {
-                return None;
+        match rg.as_ref() {
+            Some(rt) if rt.controller.is_active() => {
+                let masked = rt.blind_drill.as_ref().is_some_and(|b| {
+                    b.enabled
+                        && !b.revealed
+                        && (b.alias_code == req_ticker
+                            || rt.ticker.eq_ignore_ascii_case(&req_ticker))
+                });
+                if masked {
+                    (None, true)
+                } else {
+                    let idx = rt
+                        .controller
+                        .base_cursor_index
+                        .min(rt.base_bars.len().saturating_sub(1));
+                    let ts_ms = rt
+                        .raw_base_bars
+                        .as_ref()
+                        .and_then(|raw| raw.get(idx))
+                        .or_else(|| rt.base_bars.get(idx))
+                        .map(|b| b.timestamp);
+                    (ts_ms.map(|ms| ms.div_euclid(1_000)), false)
+                }
             }
-            let idx = rt
-                .controller
-                .base_cursor_index
-                .min(rt.base_bars.len().saturating_sub(1));
-            // Prefer real historical timestamp if available so T+2/T+3 matches actual calendar
-            let ts_ms = rt
-                .raw_base_bars
-                .as_ref()
-                .and_then(|raw| raw.get(idx))
-                .or_else(|| rt.base_bars.get(idx))
-                .map(|b| b.timestamp)?;
-            Some(ts_ms.div_euclid(1_000))
-        })
+            _ => (None, false),
+        }
     };
-    compute_trade_plan_inner(input, replay_cutoff_secs)
+    compute_trade_plan_inner(input, replay_cutoff_secs, is_blind_masked)
 }
 
 // ============================================================================
@@ -1122,6 +1172,7 @@ mod tests {
                 entry_timestamp_ms: Some(hist_ms),
             },
             None,
+            false,
         )
         .unwrap();
 
@@ -1160,5 +1211,53 @@ mod tests {
         let vp = res.volume_profile.expect("volume profile computed on Blind Drill alias");
         assert!(vp.poc_price > 95.0 && vp.poc_price < 110.0);
         assert!(!res.avwap.is_empty(), "AVWAP computed cleanly on Blind Drill alias");
+    }
+
+    #[test]
+    fn wave6_1_trade_plan_blind_drill_preserves_decimal_ticks_and_hides_settlement_date() {
+        let leaked_hist_secs = 1_668_556_800_i64; // 2022-11-16T00:00:00Z
+        let res = compute_trade_plan_inner(
+            TradePlanRequestDto {
+                ticker: "MÃ ẨN #4242".to_owned(),
+                side: "LONG".to_owned(),
+                account_equity: 100_000.0,
+                available_cash: 100_000.0,
+                risk_pct: 1.0,
+                max_position_pct: Some(50.0),
+                entry_price: 100.25,
+                stop_loss: 97.53,
+                target_price: 106.80,
+                reference_price: Some(100.00),
+                commission_bps: None,
+                tax_sell_bps: None,
+                slippage_bps: Some(2.0),
+                entry_timestamp_ms: None,
+            },
+            Some(leaked_hist_secs),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(res.venue, "BLIND");
+        assert_eq!(res.ticker, "MÃ ẨN #4242");
+        assert!(
+            (res.snapped_entry - 100.25).abs() < 1e-6,
+            "Blind drill must preserve 0.01 decimal tick instead of snapping to 10 VND: got {}",
+            res.snapped_entry
+        );
+        assert!(
+            (res.snapped_stop - 97.53).abs() < 1e-6,
+            "Blind drill stop must preserve 0.01 decimal tick: got {}",
+            res.snapped_stop
+        );
+        assert!(
+            res.planned_quantity > 100.0 && (res.planned_quantity % 100.0).abs() > 0.5,
+            "Blind drill must size to 1-share increments instead of 100-share HOSE board lot: got {}",
+            res.planned_quantity
+        );
+        assert!(
+            res.settlement_timestamp_ms.is_none(),
+            "Blind drill must never leak historical settlement_timestamp_ms while unrevealed"
+        );
     }
 }
